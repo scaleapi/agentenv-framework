@@ -12,7 +12,8 @@ import click
 
 from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun,
                               dry_run_bundle, run_bundle)
-from agent_env.bundle.installed import InstalledBundle, checked, find_bundle, installed_bundles, run_name
+from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
+                                        path_like, run_name)
 from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
@@ -77,7 +78,7 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                                    "and --dry-run need a BUNDLE to run")
         _list_installed()
         return
-    root, id_root = _locate(bundle)
+    root, id_root = locate_bundle(bundle, _installed)
     verbose = ctx.find_root().params.get("verbose")
     try:
         if dry_run:
@@ -105,24 +106,10 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
         raise SystemExit(1)
 
 
-def _path_like(text: str) -> bool:
-    """Text that names a folder even when there is none there."""
-    return text.startswith((".", "/", "~"))
-
-
-def _locate(text: str) -> tuple[Path, str | None]:
-    """The folder ``text`` names, and the id root of an installed bundle's. An existing folder wins, and text
-    that starts like a path is always one; anything else names an installed bundle."""
-    if _path_like(text) or os.path.isdir(text):
-        return Path(text), None
-    found = find_bundle(text, _installed())
-    return found.root, found.id_root
-
-
 def _note_an_installed_namesake(error: BundleError, text: str, root: Path, id_root: str | None) -> None:
     """A folder that isn't a bundle can hide the installed bundle the user meant. The note names it by its
     qualified name, which only helps when that isn't what was typed and isn't a folder too."""
-    if id_root is not None or _path_like(text) or _has_kind_folder(root):
+    if id_root is not None or path_like(text) or _has_kind_folder(root):
         return
     try:
         found = find_bundle(text)

@@ -26,12 +26,11 @@ class Refuse(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Refuse())
 """
 
-# Not core: the explorer, Sail and Smol providers need their optional extras, and the gateway runs
-# only in its container image, and the code runner is a script that reads its arguments on import.
+# Not core: the Sail and Smol providers and the OpenEnv server need their optional extras, and the gateway runs only
+# in its container image, and the code runner is a script that reads its arguments on import.
 _NOT_CORE = (
-    "agent_env.explorer", "agent_env.providers.sandbox_providers.sail_vm",
-    "agent_env.providers.sandbox_providers.smol_vm", "agent_env.env.gateway",
-    "agent_env.task_step.task_steps.run_code_runner",
+    "agent_env.providers.sandbox_providers.sail_vm", "agent_env.providers.sandbox_providers.smol_vm",
+    "agent_env.openenv", "agent_env.env.gateway", "agent_env.task_step.task_steps.run_code_runner",
 )
 
 _IMPORT_CORE = _BLOCKING + """
@@ -48,7 +47,10 @@ def imports_blocked(name):
         for alias in node.names
     )
 bad = []
-for module in pkgutil.walk_packages(agent_env.__path__, "agent_env.", onerror=bad.append):
+def unwalkable(name):
+    if not name.startswith(not_core):
+        bad.append(name)
+for module in pkgutil.walk_packages(agent_env.__path__, "agent_env.", onerror=unwalkable):
     if module.name.startswith(not_core):
         continue
     try:
@@ -66,6 +68,13 @@ module, _, name = sys.argv[2].partition(":")
 try:
     load_impl(sys.argv[1], getattr(importlib.import_module(module), name))
 except ConfigError as e:
+    print(e)
+"""
+
+_IMPORT = _BLOCKING + """
+try:
+    importlib.import_module(sys.argv[1])
+except ImportError as e:
     print(e)
 """
 
@@ -240,6 +249,15 @@ def test_the_sail_vm_provider_without_the_extra_names_the_extra_to_install():
     impl = "agent_env.providers.sandbox_providers.sail_vm.provider:SailVmSandboxProvider"
     message = _run(_LOAD_IMPL, _only_in("sail"), impl, "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider")
     assert "pip install 'agentenv-framework[sail]'" in message, message
+
+
+def test_the_explorer_imports_without_any_extra():
+    assert _run(_IMPORT, _not_in_core(), "agent_env.explorer.app") == ""
+
+
+def test_the_openenv_server_without_the_extra_names_the_extra_to_install():
+    message = _run(_IMPORT, _only_in("openenv"), "agent_env.openenv")
+    assert message.endswith("pip install 'agentenv-framework[openenv]'"), message
 
 
 @pytest.mark.parametrize("package", _STORE_PACKAGES)

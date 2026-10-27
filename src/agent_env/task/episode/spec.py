@@ -9,7 +9,7 @@ from agent_env.task.episode.rules import DEPLOYS, problems, works_in_sandbox
 from agent_env.task.episode.run import Episode, EpisodeError
 from agent_env.task.episode.steps import _EpisodeAgentStep
 from agent_env.task.task import Task, substitute_seed_in_steps
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
@@ -40,13 +40,32 @@ class EpisodeSpec:
         steps = [_in_episode(step, as_run, sandboxed, turn_timeout) for step, as_run in zip(task.steps, seeded)]
         return cls(copy=Task(id=task.id, version=task.version, steps=steps), trainer_agents=tuple(outside), seed=seed)
 
-    async def start(self) -> Episode:
+    @property
+    def prompts(self) -> tuple[tuple[str, str | None], ...]:
+        """Each outside turn's prompt and system prompt as the run hands them over, in step order: what a dataset
+        row can carry before anything is deployed. A prompt that sets no system prompt keeps the one its agent last
+        had, from its deploy or an earlier prompt."""
+        seeded = substitute_seed_in_steps(self._copy.steps, self._seed or {})
+        system_prompts: dict[str, str | None] = {}
+        prompts = []
+        for step in seeded:
+            if isinstance(step, _EpisodeAgentStep):
+                system_prompts[step.step.agent_name] = getattr(step.step, "system_prompt", None)
+            elif step.type == "prompt_agent" and step.agent_name in self.trainer_agents:
+                system_prompts[step.agent_name] = step.system_prompt or system_prompts.get(step.agent_name)
+                prompts.append((step.prompt, system_prompts[step.agent_name]))
+        return tuple(prompts)
+
+    async def start(self, *, sandbox: str | None = None) -> Episode:
         """Start one run of the task, a new episode each call. It returns once the run's record exists, before
-        anything is deployed; ``next_turn()`` is where the deploys and setup are waited for."""
+        anything is deployed; ``next_turn()`` is where the deploys and setup are waited for. ``sandbox`` is the
+        provider its envs, agents, sandboxes and judge deploy on, as ``agent-env run --sandbox`` sets it."""
         episode_id = uuid.uuid4().hex
         metadata: dict[str, Any] = {"episode": {"id": episode_id, "trainer_agents": list(self.trainer_agents)}}
         if self._seed:
             metadata["seed"] = dict(self._seed)
+        if sandbox:
+            metadata["user_overrides"] = sandbox_overrides(sandbox)
         episode = Episode(episode_id, self._copy, TaskStepContext(metadata=metadata))
         await episode._launch()
         return episode

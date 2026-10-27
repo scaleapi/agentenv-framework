@@ -1,6 +1,8 @@
 """Open data-plane protocol and server SDK for agent environments."""
 
 from . import client
+from .client import ExtensionCallError
+from .errors import Applied, AgentEnvError
 from .preflight import intake_fit_check
 from .tool_client import ToolResult, ToolSession, ToolSessionError
 from .agent_env_environment import (
@@ -144,6 +146,9 @@ __all__ = [
     "AddDataResponse",
     "GetDataResponse",
     "error_body",
+    "AgentEnvError",
+    "Applied",
+    "ExtensionCallError",
     "PROTOCOL_VERSION",
     "RPC_PATH",
     "WELL_KNOWN_PATH",

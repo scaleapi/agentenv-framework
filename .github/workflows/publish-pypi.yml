@@ -8,10 +8,11 @@ name: Publish to PyPI
 # requests merged since the previous release. Files already on PyPI and a release that already exists are skipped, so a
 # rerun is safe.
 #
-# It also publishes the images agent-env ships (agent_env.env.published_images), its infra images and its agents',
+# It also publishes the images agent-env ships (agent_env.env.published_images), its infra images and its bundles'
+# (its agents' and the mail example's env),
 # whose tags the registry lacks, and records their digests in the wheel and the release notes, once the repository
 # variable PUBLISH_INFRA_IMAGES is "true". The infra images are published before agentenv-framework-protocol. The
-# agents' images keep a protocol floor, so each is built only when its folder changes, once the protocol is on PyPI,
+# bundles' images keep a protocol floor, so each is built only when its folder changes, once the protocol is on PyPI,
 # as a raised floor may name the protocol this release ships. agentenv-framework waits for every image. Every job that
 # reads the shipped bundles' folders first pins the protocol in their envs and artifacts as the wheel does
 # (.github/scripts/shipped_bundles.py pin), so an image's tag, its build and the wheel all see the same sources. Run
@@ -233,9 +234,9 @@ jobs:
       - name: Publish agentenv-framework-protocol
         run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
 
-  # The agents' images, built, checked and pushed as infra-build does the infra images, once the
-  # agentenv-framework-protocol they install is on PyPI: an agent's floor may name the one this release ships. An image
-  # whose folder hasn't changed keeps its tag, which is published already, so no job here runs for it.
+  # The bundles' images (the agents' and the mail example's env), built, checked and pushed as infra-build does the
+  # infra images, once the agentenv-framework-protocol they install is on PyPI: a floor may name the one this release
+  # ships. An image whose folder hasn't changed keeps its tag, which is published already, so no job here runs for it.
   agent-build:
     needs: [main-ci, infra-plan, protocol]
     # On a release, once the protocol is on PyPI; run by hand, once main's CI has passed, as no protocol is published.

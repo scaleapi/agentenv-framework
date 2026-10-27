@@ -301,6 +301,28 @@ async def test_partial_data_ops_construct_and_unregistered_op_answers_method_not
 
 
 @pytest.mark.asyncio
+async def test_served_operations_chooses_the_data_plane_methods_served():
+    class _ReadOnlyItems(_ItemsHandler):
+        def served_operations(self, operations: list[str]) -> list[str]:
+            return [op for op in operations if op != "data/add"]
+
+    async with _client(_ReadOnlyItems) as client:
+        added = await client.post("/agentenv", json=_rpc("data/add", {"parts": [{"kind": "data", "data": {"items": ["a"]}}]}))
+        card = (await client.get("/.well-known/agent-env.json")).json()
+    assert added.json()["error"]["code"] == -32601
+    assert card["capabilities"]["operations"] == ["data/reset", "data/get"]
+
+
+def test_served_operations_naming_an_unmarked_method_is_refused():
+    class _Bad(_ItemsHandler):
+        def served_operations(self, operations: list[str]) -> list[str]:
+            return [*operations, "data/snapshot"]
+
+    with pytest.raises(ValueError, match=r"no handler: \['data/snapshot'\]"):
+        AgentEnvFastMCPApplication(environment_card=EnvironmentCard(name="x"), handler=_Bad())
+
+
+@pytest.mark.asyncio
 async def test_tools_only_env_serves_card_and_tools_without_data_plane():
     class _ToolsOnly:
         @tool(name="ping")

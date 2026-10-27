@@ -1,6 +1,7 @@
 """The files ``.github/workflows/publish-pypi.yml`` rewrites to pin agentenv-framework-protocol on a release, the
 pyproject with its sed and the shipped bundles' env and artifact requirements files with ``shipped_bundles.py pin``: each
-must hold exactly one protocol requirement, or the release ships an unpinned one. An agent's keeps its floor."""
+must hold exactly one protocol requirement, or the release ships an unpinned one. An agent's, and an env's whose image a
+release publishes, keep their floor."""
 
 from __future__ import annotations
 
@@ -9,6 +10,8 @@ import re
 from pathlib import Path
 
 import pytest
+
+from agent_env.env.published_images import EXAMPLE_IMAGES
 
 REPO = Path(__file__).resolve().parents[2]
 WORKFLOW = (REPO / ".github" / "workflows" / "publish-pypi.yml").read_text()
@@ -88,17 +91,19 @@ def test_each_shipped_requirements_file_the_release_pins_holds_one_protocol_line
               for path in shipped_bundles.requirements_files()}
 
     assert "src/agent_env/examples/echo-mcp/envs/echo/requirements.txt" in pinned
-    assert "src/agent_env/examples/mail-mcp/envs/mail/requirements.txt" in pinned
+    assert "src/agent_env/examples/mail-mcp/envs/mail/requirements.txt" not in pinned
     assert all(len(lines) == 1 for lines in pinned.values()), pinned
 
 
-def test_each_shipped_agent_requires_the_protocol_by_a_floor():
-    """Nothing pins an agent's at release, so an exact version there would hold its image to that protocol."""
-    agents = [path for root in shipped_bundles.bundle_roots().values() for path in root.glob("agents/*/requirements.txt")]
+def test_each_shipped_agent_and_published_env_requires_the_protocol_by_a_floor():
+    """Nothing pins theirs at release, so an exact version there would hold the image to that protocol."""
+    files = [path for root in shipped_bundles.bundle_roots().values()
+             for path in root.glob("agents/*/requirements.txt")]
+    files += [REPO / folder / "requirements.txt" for folder in shipped_bundles.PUBLISHED_ENVS]
     lines = {path.parent.name: [line for line in path.read_text().splitlines()
-                                if line.startswith("agentenv-framework-protocol")] for path in agents}
+                                if line.startswith("agentenv-framework-protocol")] for path in files}
 
-    assert {"claude-code", "pi"} <= set(lines)
+    assert {"claude-code", "pi", "mail"} <= set(lines)
     assert all(len(found) == 1 and ">=" in found[0] and "==" not in found[0] for found in lines.values()), lines
 
 
@@ -113,3 +118,20 @@ def test_an_env_added_to_a_shipped_bundle_is_pinned_with_the_rest_and_an_agent_i
         "src/agent_env/examples/hello/envs/another/requirements.txt",
         "src/agent_env/examples/hello/envs/echo/requirements.txt",
     ]
+
+
+def test_the_envs_whose_images_a_release_publishes_are_the_published_example_images():
+    """The pin script can't import agent-env, so it names them itself."""
+    assert {REPO / folder for folder in shipped_bundles.PUBLISHED_ENVS} == {
+        image.dockerfile.parent for image in EXAMPLE_IMAGES}
+
+
+def test_an_env_whose_image_a_release_publishes_keeps_its_floor(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n\n[project.entry-points."agent_env.bundles"]\n'
+                                             '"mail-mcp" = "agent_env.examples"\n')
+    for folder in ("examples/mail-mcp/envs/mail", "examples/mail-mcp/envs/other"):
+        (tmp_path / "src/agent_env" / folder).mkdir(parents=True)
+        (tmp_path / "src/agent_env" / folder / "requirements.txt").write_text("agentenv-framework-protocol>=0.1.372\n")
+
+    assert [path.relative_to(tmp_path).as_posix() for path in shipped_bundles.requirements_files(tmp_path)] == [
+        "src/agent_env/examples/mail-mcp/envs/other/requirements.txt"]

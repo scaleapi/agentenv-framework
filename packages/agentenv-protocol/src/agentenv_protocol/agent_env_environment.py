@@ -15,12 +15,15 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Union, get_args, get_origin, get_type_hints
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from .errors import AgentEnvError
+from .tool_access import DISABLE as TOOL_DISABLE, ENABLE as TOOL_ENABLE, PATHS as TOOL_ACCESS_PATHS, ToolAccess, caller_role
+from .tool_access import extensions as tool_access_extensions
 from .tool_context import EMPTY, ToolContext, bound, context_from_http, context_from_mcp
 from .transfers import WriteNamespaceGrant
 from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
@@ -30,8 +33,10 @@ logger = logging.getLogger(__name__)
 _OP_ATTR = "_aee_op"
 _EXT_ATTR = "_aee_ext"
 _EXT_ROUTE_ATTR = "_aee_ext_route"
+_EXT_OP_ATTR = "_aee_ext_op"
 _TOOL_ATTR = "_aee_tool"
 _HIDDEN_BY_DEFAULT_ATTR = "_aee_hidden_by_default"
+_TOOL_OPTIONS_ATTR = "_aee_tool_options"
 _CARD_CONFIG_ATTR = "_aee_card_config"
 #: Set on the tool dispatch installed by ``_bind_tool_calls``; a guard downstream checks it at boot.
 _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
@@ -68,7 +73,7 @@ def get_data(fn: Callable) -> Callable:
     return fn
 
 
-def extension(uri: str, *, description: str | None = None, params: dict | None = None,
+def extension(uri: str, *, op: str | None = None, description: str | None = None, params: dict | None = None,
               required: bool | None = None, method: str = "POST", path: str | None = None) -> Callable:
     """Mark a handler method as the invocation handler for a card extension.
 
@@ -86,7 +91,15 @@ def extension(uri: str, *, description: str | None = None, params: dict | None =
 
     where the request JSON-Schema is derived from the signature. Pass an explicit ``params`` to
     override the advertisement. A handler that wants the raw params dict can declare ``**params``.
+
+    With ``op``, the handler is one method of an extension that has several: handlers sharing the URI
+    merge into one card entry, each method under ``methods.<op>`` with its own verb and ``endpoint``,
+    by default ``<RPC_PATH>/ext/<extension>/<op>`` where ``<extension>`` is the URN's name without
+    ``urn:agentenv:`` and the version. Extension-level params come from the environment's
+    ``extension_params(uri)``, merged beside ``methods``, so ``params`` is refused with ``op``.
     """
+    if op is not None and params is not None:
+        raise TypeError("an extension method's advertisement comes from extension_params(uri), not params=")
     # Normalize the HTTP verb once, here, so the advertised card method, the
     # route registration, and the handler's request-binding (which checks for
     # the exact string "GET") all agree. Without this, ``@extension(method="get")``
@@ -95,20 +108,35 @@ def extension(uri: str, *, description: str | None = None, params: dict | None =
     http_method = method.upper()
 
     def deco(fn: Callable) -> Callable:
-        op = fn.__name__ or "invoke"
-        route_path = path or f"{RPC_PATH}/ext/{op}"
-        advertised = params if params is not None else {
-            "endpoint": route_path,
-            "methods": {op: {"method": http_method, "request": _schema_from_signature(fn)}},
-        }
+        if op is None:
+            name = fn.__name__ or "invoke"
+            route_path = path or f"{RPC_PATH}/ext/{name}"
+            advertised = params if params is not None else {
+                "endpoint": route_path,
+                "methods": {name: {"method": http_method, "request": _schema_from_signature(fn)}},
+            }
+        else:
+            route_path = path or f"{RPC_PATH}/ext/{_extension_slug(uri)}/{op}"
+            advertised = {"methods": {op: {"method": http_method, "endpoint": route_path, "request": _schema_from_signature(fn)}}}
         setattr(fn, _EXT_ATTR, EnvironmentExtension(uri=uri, description=description, params=advertised, required=required))
         setattr(fn, _EXT_ROUTE_ATTR, (route_path, http_method))
+        setattr(fn, _EXT_OP_ATTR, op)
         return fn
 
     return deco
 
 
-def tool(name: str | None = None, *, description: str | None = None, hidden_by_default: bool = False) -> Callable:
+def _extension_slug(uri: str) -> str:
+    """``urn:agentenv:computer-display/v1`` -> ``computer-display``; another namespace keeps its name as a path."""
+    name = uri.removeprefix("urn:").removeprefix("agentenv:")
+    head, _, version = name.rpartition("/")
+    if head and version[:1] == "v" and version[1:].isdigit():
+        name = head
+    return name.replace(":", "/")
+
+
+def tool(name: str | None = None, *, description: str | None = None, hidden_by_default: bool = False,
+         annotations: dict | None = None, structured_output: bool | None = None, meta: dict | None = None) -> Callable:
     """Mark a handler method as an MCP tool.
 
     At mount the bound method is registered as a real MCP tool on the server app and advertised
@@ -131,6 +159,12 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
     ``{HIDDEN_BY_DEFAULT_META_KEY: true}``, and a gateway hides it from every role until a tool-access
     step names it. Steps for every tool (``tools="*"``) never show it, though they still clear earlier
     named steps as they do for any tool.
+
+    ``annotations`` (MCP ``ToolAnnotations`` fields, such as ``{"readOnlyHint": True}``) and ``meta`` are listed with
+    the tool. ``structured_output`` follows mcp's FastMCP: None derives an output schema from the return annotation
+    where it can, True requires one, False lists none; on a fastmcp app it is fastmcp's own inference, off with
+    False. A tool returning ``Annotated[CallToolResult, Model]`` sends its result as is on either, listed with
+    ``Model``'s schema.
     """
     if callable(name):
         raise TypeError("use @tool(...) with parentheses, not bare @tool")
@@ -143,9 +177,16 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
         ))
         if hidden_by_default:
             setattr(fn, _HIDDEN_BY_DEFAULT_ATTR, True)
+        setattr(fn, _TOOL_OPTIONS_ATTR, _ToolOptions(annotations, structured_output, meta))
         return fn
 
     return deco
+
+
+class _ToolOptions(NamedTuple):
+    annotations: dict | None
+    structured_output: bool | None
+    meta: dict | None
 
 
 def environment_card(_cls: type | None = None, **config: Any) -> Callable:
@@ -176,18 +217,28 @@ class AgentEnvApplication(ABC):
 
     def __init__(self, environment_card: EnvironmentCard, handler: Any) -> None:
         self.handler = handler
-        ext_handlers = _discover_extensions(handler)
-        environment_card = _merge_extensions(environment_card, ext_handlers)
-        tool_handlers = _discover_tools(handler, environment_card.name)
+        self._app: Any = None
+        ext_handlers = _served_extensions(handler, _discover_extensions(handler))
+        environment_card = _merge_extensions(environment_card, ext_handlers + _declared_extensions(handler, ext_handlers))
+        tool_handlers = _served_tools(handler, _discover_tools(handler, environment_card.name))
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
         environment_card = _merge_tools(environment_card, tool_handlers)
-        methods = _discover_methods(handler)
+        self._tool_access = (
+            ToolAccess(descriptor.name for descriptor, fn in tool_handlers if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False))
+            if self.supports_tools and getattr(handler, "tool_access", False) else None
+        )
+        if self._tool_access is not None:
+            environment_card = _merge_extensions(environment_card, [(e,) for e in tool_access_extensions()])
+        methods = _served_operations(handler, _discover_methods(handler))
         environment_card = _merge_operations(environment_card, methods)
         environment_card = _merge_data_objects(environment_card, methods)
         self.environment_card = environment_card
         self._dispatch = _jsonrpc_handler(methods)
         self._ext_routes = [(path, method, _extension_handler(fn, method)) for _descriptor, fn, path, method in ext_handlers]
+        if self._tool_access is not None:
+            self._ext_routes += [(TOOL_ACCESS_PATHS[action], "POST", _tool_access_handler(self._tool_access, action))
+                                 for action in (TOOL_DISABLE, TOOL_ENABLE)]
         # Register with the advertised descriptor (card-declared wins in _merge_tools) so
         # tools/list cannot drift from the card; falls back to the discovered descriptor.
         caps_tools = (environment_card.capabilities.tools if environment_card.capabilities else None) or []
@@ -196,9 +247,12 @@ class AgentEnvApplication(ABC):
 
     def add_routes_to_app(self, app: Any, *, rpc_url: str = RPC_PATH, card_url: str = WELL_KNOWN_PATH) -> None:
         self._check_tool_binding(app)
+        self._app = app
+        if isinstance(self.handler, AgentEnvEnvironment):
+            self.handler._application = self
         self.environment_card = self._card_for(app)
         self._add_route(app, rpc_url, ["POST"], self._dispatch)
-        self._add_route(app, card_url, ["GET"], _card_handler(self.environment_card))
+        self._add_route(app, card_url, ["GET"], self._serve_card)
         for path, method, handler in self._ext_routes:
             self._add_route(app, path, [method], handler)
         for descriptor, fn in self._tools:
@@ -225,6 +279,24 @@ class AgentEnvApplication(ABC):
     def _card_for(self, app: Any) -> EnvironmentCard:
         return self.environment_card
 
+    async def _serve_card(self, request: Request) -> Response:
+        return _json_response(self.environment_card.model_dump())
+
+    async def update_tool(self, name: str, *, description: str) -> None:
+        """Change a served tool's description after the mount: on the card and in tools/list alike."""
+        if all(descriptor.name != name for descriptor, _fn in self._tools):
+            raise ValueError(f"no served tool is named {name!r}")
+        self._tools = [(d.model_copy(update={"description": description}) if d.name == name else d, fn)
+                       for d, fn in self._tools]
+        caps = self.environment_card.capabilities
+        tools = [t.model_copy(update={"description": description}) if t.name == name else t for t in caps.tools or []]
+        self.environment_card = self.environment_card.model_copy(
+            update={"capabilities": caps.model_copy(update={"tools": tools})})
+        await self._describe_registered_tool(name, description)
+
+    async def _describe_registered_tool(self, name: str, description: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not serve MCP tools")
+
 
 class AgentEnvFastMCPApplication(AgentEnvApplication):
     supports_tools: ClassVar[bool] = True
@@ -238,9 +310,24 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         app.custom_route(path, methods=methods)(handler)
 
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
-        # passed only when set, so a FastMCP-shaped target without the parameter still mounts unflagged tools
-        extra = {"meta": {HIDDEN_BY_DEFAULT_META_KEY: True}} if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False) else {}
-        app.tool(name=descriptor.name, description=descriptor.description, **extra)(injecting(fn))
+        # passed only when set, so a FastMCP-shaped target without the parameters still mounts plain tools
+        options = getattr(fn, _TOOL_OPTIONS_ATTR, None) or _ToolOptions(None, None, None)
+        fastmcp = self._binding == "middleware"
+        extra: dict = {}
+        meta = {**(options.meta or {}), **({HIDDEN_BY_DEFAULT_META_KEY: True} if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False) else {})}
+        if meta:
+            extra["meta"] = meta
+        if options.annotations is not None:
+            extra["annotations"] = options.annotations if fastmcp else _mcp_tool_annotations(options.annotations)
+        if options.structured_output is not None and not fastmcp:
+            extra["structured_output"] = options.structured_output
+        elif options.structured_output is False:
+            extra["output_schema"] = None
+        registered = injecting(fn)
+        if fastmcp and _returns_call_tool_result(fn):
+            registered, schema = _fastmcp_returning(registered)
+            extra["output_schema"] = None if options.structured_output is False else schema
+        app.tool(name=descriptor.name, description=descriptor.description, **extra)(registered)
 
     def _check_tool_binding(self, app: Any) -> None:
         """Decide, before any route or tool is added, how every tools/call on ``app`` gets its ToolContext, and
@@ -258,7 +345,7 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         if isinstance(middleware, list) and callable(getattr(app, "add_middleware", None)):
             if any(getattr(entry, _TOOL_CONTEXT_BOUND_ATTR, False) for entry in middleware):
                 raise RuntimeError("this fastmcp app already carries an AgentEnv tool-context middleware; mount one handler per app")
-            self._middleware = _tool_context_middleware(self._hook)
+            self._middleware = _tool_context_middleware(self._hook, self._tool_access)
             self._binding = "middleware"
             return
         manager = getattr(app, "_tool_manager", None)
@@ -268,10 +355,12 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             self._binding = "dispatch"
             return
         readers = [descriptor.name for descriptor, fn in self._tools if _tool_context_slot(fn)]
-        if readers or self._hook is not None:
+        readers += ["on_tool_call"] if self._hook is not None else []
+        readers += ["tool_access"] if self._tool_access is not None else []
+        if readers:
             raise RuntimeError(
                 "this app has no tool dispatch to bind a ToolContext around (mcp>=1.25,<2 keeps one at "
-                f"FastMCP._tool_manager; fastmcp exposes a middleware list), and {', '.join(readers) or 'on_tool_call'} "
+                f"FastMCP._tool_manager; fastmcp exposes a middleware list), and {', '.join(readers)} "
                 "would read an empty caller"
             )
         self._binding = None
@@ -302,22 +391,58 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         manager = app._tool_manager
         inner = manager.call_tool
         hook = self._hook
+        access = self._tool_access
 
         async def call_tool(name: str, arguments: dict, *args: Any, **kwargs: Any) -> Any:
             if manager.get_tool(name) is None:
                 return await inner(name, arguments, *args, **kwargs)
             context = kwargs.get("context", args[0] if args else None)
             with bound(context_from_mcp(context, name, arguments)) as tool_context:
-                if hook is not None:
-                    answer = await _maybe_await(hook(tool_context))
-                    if answer is not None:
-                        _check_call_tool_result(answer)
-                        return answer
-                return await inner(name, arguments, *args, **kwargs)
+                try:
+                    if access is not None:
+                        access.check_call(tool_context)
+                    if hook is not None:
+                        answer = await _maybe_await(hook(tool_context))
+                        if answer is not None:
+                            _check_call_tool_result(answer)
+                            return answer
+                    return await inner(name, arguments, *args, **kwargs)
+                except Exception as e:
+                    error = _agentenv_error(e)
+                    if error is None:
+                        raise
+                    return _error_result(error)
 
         functools.update_wrapper(call_tool, inner)
         setattr(call_tool, _TOOL_CONTEXT_BOUND_ATTR, True)
         manager.call_tool = call_tool
+        if access is not None:
+            self._filter_tool_list(app, manager, access)
+
+    @staticmethod
+    def _filter_tool_list(app: Any, manager: Any, access: ToolAccess) -> None:
+        """tools/list under the live request's caller, read through ``FastMCP.get_context``, as tools/call reads it."""
+        inner = manager.list_tools
+
+        def list_tools(*args: Any, **kwargs: Any) -> Any:
+            role = caller_role(context_from_mcp(app.get_context(), "", {}))
+            return [t for t in inner(*args, **kwargs) if not access.is_disabled(role, t.name)]
+
+        functools.update_wrapper(list_tools, inner)
+        manager.list_tools = list_tools
+
+    async def _describe_registered_tool(self, name: str, description: str) -> None:
+        """fastmcp replaces a tool through its public provider; mcp's FastMCP lists the tool its manager holds."""
+        app = self._app
+        if self._binding == "middleware":
+            registered = await app.get_tool(name)
+            app.local_provider.remove_tool(name)
+            app.local_provider.add_tool(registered.model_copy(update={"description": description}))
+            return
+        manager = getattr(app, "_tool_manager", None)
+        registered = manager.get_tool(name) if manager is not None else None
+        if registered is not None:
+            registered.description = description
 
     def _card_for(self, app: Any) -> EnvironmentCard:
         """Declare the MCP endpoint only when the app says where it serves it; FastMCP-shaped targets may not."""
@@ -352,7 +477,12 @@ class AgentEnvEnvironment:
     """
 
     mcp: Any = None
+    #: Filter tools/list and refuse tools/call per caller role, and serve disable-tool/v1 and enable-tool/v1 at the
+    #: gateway's paths and with its rules, for an env agents reach with no gateway in front.
+    tool_access: ClassVar[bool] = False
     _mounted: bool = False
+    #: The application mounted with this environment, which ``update_tool`` changes.
+    _application: Any = None
 
     def _build_card(self) -> EnvironmentCard:
         config = dict(getattr(self, _CARD_CONFIG_ATTR, None) or {})
@@ -374,12 +504,46 @@ class AgentEnvEnvironment:
         self._mounted = True
         return app
 
+    def mounted_card(self) -> EnvironmentCard:
+        """The card the mounted application serves: what ``served_*`` kept, as ``update_tool`` left it."""
+        return self._mounted_application().environment_card
+
+    async def update_tool(self, name: str, *, description: str) -> None:
+        """Change a served tool's description after the mount: on the card and in tools/list alike."""
+        await self._mounted_application().update_tool(name, description=description)
+
+    def _mounted_application(self) -> Any:
+        if self._application is None:
+            raise RuntimeError(f"{type(self).__name__} is not mounted")
+        return self._application
+
     def serve(self, transport: str = "streamable-http") -> None:
         if self.mcp is None:
             self.create_app()
         elif not self._mounted:
             self.mount(self.mcp)
         self.mcp.run(transport=transport)
+
+    def extension_params(self, uri: str) -> dict:
+        """Extension-level params (features, limits) advertised beside the methods of an extension served with ``op``."""
+        return {}
+
+    def declared_extensions(self) -> list[EnvironmentExtension]:
+        """Declaration-only extensions to advertise, like ``intake/v1``: a promise with params and no handler."""
+        return []
+
+    def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
+        """The ``@extension`` handlers' extensions to serve, chosen at mount: one left out is not served, and of one served
+        with ``op``, only the methods its returned descriptor still lists."""
+        return extensions
+
+    def served_operations(self, operations: list[str]) -> list[str]:
+        """The data-plane methods to serve (``data/add`` and the others the handler marks), chosen at mount."""
+        return operations
+
+    def served_tools(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
+        """The ``@tool`` methods to serve, chosen at mount; a returned descriptor's description replaces the marked one."""
+        return tools
 
     def on_tool_call(self, context: ToolContext) -> Any:
         """Runs before every tools/call on this environment's app, under the bound ``context``.
@@ -605,27 +769,43 @@ def _check_call_tool_result(value: Any) -> None:
         raise TypeError(f"on_tool_call must return None or mcp.types.CallToolResult, got {type(value).__name__}")
 
 
-def _tool_context_middleware(hook: Callable | None) -> Any:
+def _tool_context_middleware(hook: Callable | None, access: ToolAccess | None = None) -> Any:
     """A fastmcp ``Middleware`` that runs every tools/call under its ToolContext, the handler's ``on_tool_call``
-    first. A ``Middleware`` subclass rather than a bare ``(context, call_next)`` callable because fastmcp runs the
-    typed ``on_call_tool`` exactly once per call, where a bare callable runs once per dispatch phase. fastmcp is
-    not a dependency of this package: it is imported here, where an app built with it has just been handed over."""
+    first, and with ``access`` filters tools/list and refuses tools/call per caller role. A ``Middleware`` subclass
+    rather than a bare ``(context, call_next)`` callable because fastmcp runs the typed hooks exactly once per call,
+    where a bare callable runs once per dispatch phase. fastmcp is not a dependency of this package: it is imported
+    here, where an app built with it has just been handed over."""
     try:
         from fastmcp.server.middleware import Middleware
     except ImportError as e:
         raise RuntimeError("this app carries a fastmcp middleware list but fastmcp cannot be imported") from e
 
     class ToolContextMiddleware(Middleware):
+        async def on_list_tools(self, context: Any, call_next: Callable) -> Any:
+            tools = await call_next(context)
+            if access is None:
+                return tools
+            role = caller_role(context_from_mcp(context.fastmcp_context, "", {}))
+            return [t for t in tools if not access.is_disabled(role, t.name)]
+
         async def on_call_tool(self, context: Any, call_next: Callable) -> Any:
             message = context.message
             arguments = dict(getattr(message, "arguments", None) or {})
             with bound(context_from_mcp(context.fastmcp_context, message.name, arguments)) as tool_context:
-                if hook is not None:
-                    answer = await _maybe_await(hook(tool_context))
-                    if answer is not None:
-                        _check_call_tool_result(answer)
-                        return _fastmcp_tool_result(answer)
-                return await call_next(context)
+                try:
+                    if access is not None:
+                        access.check_call(tool_context)
+                    if hook is not None:
+                        answer = await _maybe_await(hook(tool_context))
+                        if answer is not None:
+                            _check_call_tool_result(answer)
+                            return _fastmcp_tool_result(answer)
+                    return await call_next(context)
+                except Exception as e:
+                    error = _agentenv_error(e)
+                    if error is None:
+                        raise
+                    return _fastmcp_tool_result(_error_result(error))
 
     middleware = ToolContextMiddleware()
     setattr(middleware, _TOOL_CONTEXT_BOUND_ATTR, True)
@@ -644,6 +824,57 @@ def _fastmcp_tool_result(answer: Any) -> Any:
     if is_error is None:
         is_error = getattr(answer, "isError", False)
     return ToolResult(content=list(answer.content), structured_content=structured, is_error=bool(is_error))
+
+
+def _mcp_tool_annotations(annotations: Any) -> Any:
+    from mcp.types import ToolAnnotations
+    return ToolAnnotations.model_validate(annotations)
+
+
+def _returns_call_tool_result(fn: Callable) -> bool:
+    returns = _resolved_hints(fn).get("return")
+    if get_origin(returns) is Annotated:
+        returns = get_args(returns)[0]
+    result_type = getattr(sys.modules.get("mcp.types"), "CallToolResult", None)
+    return result_type is not None and isinstance(returns, type) and issubclass(returns, result_type)
+
+
+def _fastmcp_returning(fn: Callable) -> tuple:
+    """A tool returning ``CallToolResult`` as fastmcp sends it as is: a twin returning fastmcp's ``ToolResult``, and the
+    output schema of ``Annotated[CallToolResult, Model]``'s model (None for a bare ``CallToolResult``)."""
+    from fastmcp.tools import ToolResult
+    signature, annotations = _reduced_signature(fn, "")
+    returns = annotations.get("return")
+    schema = TypeAdapter(get_args(returns)[1]).json_schema() if get_origin(returns) is Annotated else None
+
+    if inspect.iscoroutinefunction(fn):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            return _fastmcp_tool_result(await fn(*args, **kwargs))
+    else:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            return _fastmcp_tool_result(fn(*args, **kwargs))
+    functools.update_wrapper(wrapper, fn)
+    wrapper.__signature__ = signature.replace(return_annotation=ToolResult)
+    wrapper.__annotations__ = {**annotations, "return": ToolResult}
+    return wrapper, schema
+
+
+def _agentenv_error(exc: BaseException) -> AgentEnvError | None:
+    """The AgentEnvError a tool raised, found under the ToolError both FastMCPs wrap it in."""
+    while exc is not None:
+        if isinstance(exc, AgentEnvError):
+            return exc
+        exc = exc.__cause__
+    return None
+
+
+def _error_result(error: AgentEnvError) -> Any:
+    from mcp.types import CallToolResult, TextContent
+    return CallToolResult(
+        isError=True,
+        content=[TextContent(type="text", text=f"{error.code}: {error.message}")],
+        structuredContent=error.fields(),
+    )
 
 
 def _schema_from_signature(fn: Callable) -> dict:
@@ -697,20 +928,59 @@ def _discover_methods(handler: Any) -> dict:
 
 
 def _discover_extensions(handler: Any) -> list:
-    """Collect (descriptor, bound_method, route_path, http_method) for every @extension method."""
-    seen_uris: set = set()
+    """Collect (descriptor, bound_method, route_path, http_method) for every @extension method. The methods of an
+    extension served with ``op`` share one descriptor: their ``methods`` merged beside ``extension_params(uri)``."""
+    ops_by_uri: dict = {}
     seen_paths: set = set()
     ordered: list = []
     for attr, descriptor in _marked_members(handler, _EXT_ATTR):
         route_path, http_method = getattr(attr, _EXT_ROUTE_ATTR)
-        if descriptor.uri in seen_uris:
+        op = getattr(attr, _EXT_OP_ATTR, None)
+        ops = ops_by_uri.setdefault(descriptor.uri, set())
+        if None in ops or (op is None and ops):
             raise ValueError(f"Multiple handlers for extension {descriptor.uri}")
+        if op in ops:
+            raise ValueError(f"Multiple handlers for extension {descriptor.uri} method {op}")
         if route_path in seen_paths:
             raise ValueError(f"Multiple handlers for extension path {route_path}")
-        seen_uris.add(descriptor.uri)
+        ops.add(op)
         seen_paths.add(route_path)
         ordered.append((descriptor, attr, route_path, http_method))
-    return ordered
+    merged = {
+        uri: _merged_extension(handler, [d for d, *_ in ordered if d.uri == uri])
+        for uri, ops in ops_by_uri.items() if None not in ops
+    }
+    return [(merged.get(d.uri, d), attr, path, method) for d, attr, path, method in ordered]
+
+
+def _merged_extension(handler: Any, descriptors: list) -> EnvironmentExtension:
+    uri = descriptors[0].uri
+    methods = {name: entry for d in descriptors for name, entry in d.params["methods"].items()}
+    hook = getattr(handler, "extension_params", None)
+    params = {**(hook(uri) if hook is not None else {}), "methods": methods}
+    return EnvironmentExtension(
+        uri=uri,
+        description=_one_value(uri, "description", [d.description for d in descriptors]),
+        params=params,
+        required=_one_value(uri, "required", [d.required for d in descriptors]),
+    )
+
+
+def _one_value(uri: str, field: str, values: list) -> Any:
+    given = {v for v in values if v is not None}
+    if len(given) > 1:
+        raise ValueError(f"the methods of extension {uri} declare different {field} values: {sorted(map(str, given))}")
+    return given.pop() if given else None
+
+
+def _declared_extensions(handler: Any, ext_handlers: list) -> list:
+    hook = getattr(handler, "declared_extensions", None)
+    declared = list(hook()) if hook is not None else []
+    served = {descriptor.uri for descriptor, *_ in ext_handlers}
+    clash = sorted(d.uri for d in declared if d.uri in served)
+    if clash:
+        raise ValueError(f"extensions both declared and served by a handler: {clash}")
+    return [(d,) for d in declared]
 
 
 def _merge_extensions(card: EnvironmentCard, ext_handlers: list) -> EnvironmentCard:
@@ -749,6 +1019,62 @@ def _discover_tools(handler: Any, environment_name: str) -> list:
         seen.add(descriptor.name)
         ordered.append((descriptor, attr))
     return ordered
+
+
+def _served_extensions(handler: Any, ext_handlers: list) -> list:
+    """The extension handlers the handler's ``served_extensions`` keeps, with its descriptors."""
+    hook = getattr(handler, "served_extensions", None)
+    if hook is None:
+        return ext_handlers
+    offered = {descriptor.uri: descriptor for descriptor, *_ in ext_handlers}
+    chosen = {descriptor.uri: descriptor for descriptor in hook(list(offered.values()))}
+    unknown = sorted(set(chosen) - set(offered))
+    if unknown:
+        raise ValueError(f"served_extensions returned extensions with no @extension handler: {unknown}")
+    ops = {}
+    for descriptor, fn, *_ in ext_handlers:
+        ops.setdefault(descriptor.uri, set()).add(getattr(fn, _EXT_OP_ATTR, None))
+    for uri, served in chosen.items():
+        if None not in ops[uri]:
+            added = sorted(set((served.params or {}).get("methods") or {}) - ops[uri])
+            if added:
+                raise ValueError(f"served_extensions lists methods of {uri} with no @extension handler: {added}")
+    kept = []
+    for descriptor, fn, path, method in ext_handlers:
+        served = chosen.get(descriptor.uri)
+        op = getattr(fn, _EXT_OP_ATTR, None)
+        if served is None or (op is not None and op not in (served.params or {}).get("methods", {})):
+            continue
+        kept.append((served, fn, path, method))
+    return kept
+
+
+def _served_operations(handler: Any, methods: dict) -> dict:
+    """The data-plane methods the handler's ``served_operations`` keeps."""
+    hook = getattr(handler, "served_operations", None)
+    if hook is None:
+        return methods
+    chosen = set(hook(list(methods)))
+    unknown = sorted(chosen - set(methods))
+    if unknown:
+        raise ValueError(f"served_operations returned operations with no handler: {unknown}")
+    return {name: entry for name, entry in methods.items() if name in chosen}
+
+
+def _served_tools(handler: Any, tool_handlers: list) -> list:
+    """The tools the handler's ``served_tools`` keeps, in its order and with its descriptors; all of them without one."""
+    hook = getattr(handler, "served_tools", None)
+    if hook is None:
+        return tool_handlers
+    chosen = list(hook([descriptor for descriptor, _fn in tool_handlers]))
+    by_name = {descriptor.name: fn for descriptor, fn in tool_handlers}
+    names = [descriptor.name for descriptor in chosen]
+    unknown = sorted(set(names) - set(by_name))
+    if unknown:
+        raise ValueError(f"served_tools returned tools with no @tool method: {unknown}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"served_tools returned a tool twice: {sorted({n for n in names if names.count(n) > 1})}")
+    return [(descriptor, by_name[descriptor.name]) for descriptor in chosen]
 
 
 def _merge_tools(card: EnvironmentCard, tool_handlers: list) -> EnvironmentCard:
@@ -961,19 +1287,39 @@ def _extension_handler(fn: Callable, http_method: str) -> Callable:
                     raise ValueError("request body must be a JSON object")
                 params = _coerce_params(fn, params)
         except Exception as e:
-            return _json_response(error_body("invalid_params", str(e)), 400)
+            return _error_response(AgentEnvError("invalid_params", str(e)))
         try:
             signature.bind(**params)
         except TypeError as e:
-            return _json_response(error_body("invalid_params", str(e)), 400)
+            return _error_response(AgentEnvError("invalid_params", str(e)))
         with bound(context_from_http(request, op, params)) as tool_context:
             call_kwargs = {**params, slot: tool_context} if slot else params
             try:
                 result = await _maybe_await(fn(**call_kwargs))
+            except AgentEnvError as e:
+                return _error_response(e)
             except Exception as e:
                 logger.exception("extension invocation failed")
-                return _json_response(error_body("extension_failed", str(e)), 500)
+                return _error_response(AgentEnvError("extension_failed", str(e), applied="unknown", status=500))
         return _json_response(result if result is not None else {})
+    return handler
+
+
+def _error_response(error: AgentEnvError) -> Response:
+    return _json_response(error_body(**error.fields()), error.status)
+
+
+def _tool_access_handler(access: ToolAccess, action: str) -> Callable:
+    async def handler(request: Request) -> Response:
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw else None
+        except ValueError:
+            return _error_response(AgentEnvError("invalid_params", "request body must be JSON"))
+        try:
+            return _json_response(access.change(action, body))
+        except AgentEnvError as e:
+            return _error_response(e)
     return handler
 
 
@@ -1012,12 +1358,6 @@ def _jsonrpc_handler(methods: dict) -> Callable:
         except _OperationError as e:
             return _rpc_error(rid, RPC_ERROR_CODE_SERVER_ERROR, e.message, {"code": e.code})
         return _json_response({"jsonrpc": "2.0", "id": rid, "result": result})
-    return handler
-
-
-def _card_handler(card: EnvironmentCard) -> Callable:
-    async def handler(request: Request) -> Response:
-        return _json_response(card.model_dump())
     return handler
 
 

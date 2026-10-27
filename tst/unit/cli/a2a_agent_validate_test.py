@@ -1,7 +1,10 @@
 """The A2A agent validator deploys the mail-mcp example's env by its alias, `mail`, writing it first when the store has
 no env of that id, with namespace routing on throughout so the alias's @local env resolves, in the CLI or a service."""
 
+import asyncio
+import contextvars
 import importlib
+import threading
 
 import pytest
 from click.testing import CliRunner
@@ -71,6 +74,28 @@ async def test_validation_writes_the_env_then_runs_with_namespace_routing_on_thr
 
     assert await validator_module.A2AAgentValidator.validate(object()) == {"done": True}
     assert seen == [("write", True), ("run", True)] and not namespace_routing_enabled()
+
+
+@pytest.mark.asyncio
+async def test_the_writers_progress_reaches_the_callback_on_the_event_loop_in_the_callers_context(monkeypatch):
+    """A service's callback can need both, as a Temporal activity's heartbeat does."""
+    caller = contextvars.ContextVar("caller")
+    caller.set("activity")
+    loop_thread, lines = threading.get_ident(), []
+    monkeypatch.setattr(validator_module, "write_validation_env", lambda on_progress: on_progress("writing it"))
+
+    async def run(agent, on_progress, litellm_api_key):
+        return {}
+
+    monkeypatch.setattr(validator_module.A2AAgentValidator, "_run", staticmethod(run))
+
+    def on_progress(line):
+        asyncio.get_running_loop()
+        lines.append((line, threading.get_ident() == loop_thread, caller.get(None)))
+
+    await validator_module.A2AAgentValidator.validate(object(), on_progress=on_progress)
+
+    assert lines == [("writing it", True, "activity")]
 
 
 def test_the_cli_says_why_the_env_couldnt_be_written(monkeypatch, local_stores, cli_routing):

@@ -14,7 +14,7 @@ from agent_env.providers.sandbox_providers import host_images
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import get_artifact_store
-from agent_env.bundle import BundleError, Outcome, TaskRun, dry_run_bundle, parse_bundle, run_bundle
+from agent_env.bundle import BundleError, Outcome, TaskRun, dry_run_bundle, parse_bundle, prepare_bundle, run_bundle
 from agent_env.bundle.preflight import Preflight
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
@@ -250,6 +250,31 @@ def test_the_model_and_sandbox_reach_each_run_and_one_invocation_shares_a_run_gr
     assert "user_overrides" not in _Scored.seen[2].metadata
 
 
+PLAYED = [
+    {"id": "agent", "type": "deploy_agent", "agent_name": "policy", "a2a_agent_id": "nobody"},
+    {"id": "play", "type": "prompt_agent", "agent_name": "policy", "prompt_id": "play", "prompt": "Add a crate."},
+    {"id": "check", "type": "scored_run_test", "verifier_id": "v", "score": 1.0},
+]
+
+
+def test_preparing_for_a_caller_that_plays_the_agent_needs_only_that_agent_to_exist_no_more(bundle_dir):
+    layout(bundle_dir, {"tasks/play.json": json.dumps(PLAYED)})
+    helper = {"id": "helper", "type": "deploy_agent", "agent_name": "helper", "a2a_agent_id": "nobody-else"}
+
+    with namespace_routing():
+        with pytest.raises(BundleError, match="'nobody'"):
+            prepare_bundle(bundle_dir, tasks=["play"])
+        prepared = prepare_bundle(bundle_dir, tasks=["play"], played=True)
+        layout(bundle_dir, {"tasks/play.json": json.dumps([*PLAYED, helper])})
+        with pytest.raises(BundleError) as refused:
+            prepare_bundle(bundle_dir, tasks=["play"], played=True)
+
+    [(entry, task)] = prepared.tasks
+    assert (entry.name, [step.type for step in task.steps]) == (
+        "play", ["deploy_agent", "prompt_agent", "scored_run_test"])
+    assert "'nobody-else'" in str(refused.value) and "'nobody'" not in str(refused.value)
+
+
 def test_the_user_and_judge_models_reach_each_run_as_overrides_beside_the_sandbox(bundle_dir):
     run_bundle(bundle_dir, tasks=["a"], user_model="u", judge_model="j")
     run_bundle(bundle_dir, tasks=["a"], user_model="u", sandbox="local")
@@ -324,7 +349,8 @@ def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its
                                                                                       monkeypatch):
     """As it does for an image a deploy on this machine runs, which preflight names."""
     monkeypatch.setattr(run_module, "preflight_run",
-                        lambda plan, tasks, sandbox: Preflight(frozenset(), (), frozenset({f"{ROOT}/solver__agent_image"})))
+                        lambda plan, tasks, sandbox, played: Preflight(frozenset(), (),
+                                                                       frozenset({f"{ROOT}/solver__agent_image"})))
     layout(bundle_dir, BUILT_AGENT)
     lines = []
 
