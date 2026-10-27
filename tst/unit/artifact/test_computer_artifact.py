@@ -8,6 +8,7 @@ from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts import computer as computer_module
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import get_artifact_store
 from tst.util.oci_registry import MANIFEST, UBUNTU, UBUNTU_LAYER, Registry, layer
 
@@ -24,13 +25,15 @@ def _image(name: str) -> DockerImageArtifact:
 
 
 def _put(image: DockerImageArtifact, **changes) -> ComputerArtifact:
-    fields = {"id": "desktop", "description": "a desktop", "arch": ["amd64", "arm64"],
-              "os": {"type": "linux", "distribution": "ubuntu", "version": "24.04", "display": "x11"},
-              "session": {"user": "user"},
-              "forms": {"container": {"image": {"id": image.id, "version": image.version}, "init": "supervisord",
-                                      "input_channel": "env"}},
-              "config": {"resolution": {"default": "1280x800", "phase": "deploy"}}}
-    return ComputerArtifact.put(**{**fields, **changes})
+    forms = {"container": {"image": {"id": image.id, "version": image.version}, "init": "supervisord",
+                           "input_channel": "env"}}
+    return ComputerArtifact.put(**{**_fields(), "forms": forms, **changes})
+
+
+def _fields() -> dict:
+    return {"id": "desktop", "description": "a desktop", "arch": ["amd64", "arm64"],
+            "os": {"type": "linux", "distribution": "ubuntu", "version": "24.04", "display": "x11"},
+            "session": {"user": "user"}, "config": {"resolution": {"default": "1280x800", "phase": "deploy"}}}
 
 
 def test_a_computer_whose_image_is_what_it_declares_is_written_with_what_was_read(registry):
@@ -91,6 +94,25 @@ def test_an_image_no_registry_serves_yet_or_a_skipped_inspection_is_written_unin
     assert "only its build context is stored" in from_context.metadata["validated_images"]["container"]["amd64"]["reason"]
     assert skipped.metadata["validated_images"]["container"]["amd64"]["reason"] == "inspection was skipped"
     assert registry.fetched == []
+
+
+@pytest.mark.parametrize("inspect", [True, False], ids=["inspected", "uninspected"])
+@pytest.mark.parametrize("image_id, version, problem", [
+    ("nothing", 1, "Artifact nothing version=1 not found"),
+    ("desktop-image", 2, "Artifact desktop-image version=2 not found"),
+    ("notes", 1, "artifact 'notes' is a 'file' artifact, not a DockerImageArtifact"),
+], ids=["missing", "missing-version", "not-an-image"])
+def test_an_image_the_store_has_no_image_artifact_for_refuses_the_put_inspected_or_not(
+        registry, inspect, image_id, version, problem):
+    _image(f"ghcr.io/acme/desktop:1@{registry.index(amd64=registry.image(UBUNTU_LAYER))}")
+    get_artifact_store().put_document(FileArtifact(id="notes", description="", filename="a", content_type="text/plain",
+                                                   object_url="mem://b/a"))
+    with pytest.raises(ValueError, match="computer 'desktop'") as refused:
+        ComputerArtifact.put(inspect=inspect, **{**_fields(), "forms": {"container": {
+            "image": {"id": image_id, "version": version}, "init": "supervisord", "input_channel": "env"}}})
+
+    assert str(refused.value) == f"computer 'desktop': forms.container.image: {problem}"
+    assert get_artifact_store().next_version("desktop") == 1 and registry.fetched == []
 
 
 @pytest.mark.parametrize("changes, message", [

@@ -20,6 +20,7 @@ from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.entity.refs import EntityRef
+from agent_env.store.base import NotFoundError
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import read_blob, read_manifest
@@ -144,11 +145,14 @@ class ComputerArtifact(Artifact):
     @classmethod
     def put(cls, *, inspect: bool = True, **fields: Any) -> Self:
         """Write a computer, reading each form's image first unless ``inspect`` is False. Refused, naming every
-        problem by form and architecture, when an image isn't what the computer declares."""
+        problem by form and architecture, when an image isn't what the computer declares, and inspected or not, when
+        it isn't a stored docker_image artifact."""
         from agent_env.artifact.store import get_artifact_store
 
         computer = cls(**fields)
-        found = computer.inspect() if inspect else {"container": _unread(computer.arch, "inspection was skipped")}
+        image = computer.image()
+        found = {"container": _inspect_container(image, computer.arch, computer.os) if inspect
+                 else _unread(computer.arch, "inspection was skipped")}
         problems = [f"forms.{form} ({arch}): {result['problem']}"
                     for form, by_arch in found.items() for arch, result in by_arch.items() if result["status"] == "failed"]
         if problems:
@@ -184,11 +188,14 @@ class ComputerArtifact(Artifact):
         except ValueError as e:
             ctx.refuse([str(e)])
 
-    def inspect(self) -> dict[str, dict[str, dict[str, Any]]]:
-        """What each form's image holds for each architecture, read from its registry: ``passed``, ``failed`` with the
-        problem, or ``uninspected`` with why, for an image no registry serves yet."""
-        image = DockerImageArtifact.get(self.forms.container.image.id, self.forms.container.image.version)
-        return {"container": _inspect_container(image, self.arch, self.os)}
+    def image(self) -> DockerImageArtifact:
+        """The container form's image artifact, refused when the store has no docker_image artifact of that id and
+        version."""
+        ref = self.forms.container.image
+        try:
+            return DockerImageArtifact.get(ref.id, ref.version)
+        except (NotFoundError, TypeError) as e:
+            raise ValueError(f"computer {self.id!r}: forms.container.image: {e}") from e
 
 
 def _folder_image(image_id: str, folder: Path, key: Any) -> dict[str, Any]:
