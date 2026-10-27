@@ -1,7 +1,7 @@
 """Record a computer env's display. ``start_computer_recording`` starts a recording on a deployed env whose card
 declares computer-recording/v1, with a grant to upload its segments under a namespace of its own;
 ``end_computer_recording`` ends it and registers its segments and manifest as one FileArtifactUniverse. Teardown
-and ``reset_env`` end whatever a run left open (``end_open_recordings``)."""
+ends whatever a run left open (``end_open_recordings``)."""
 from __future__ import annotations
 
 import json
@@ -130,12 +130,13 @@ class EndComputerRecordingTaskStep(TaskStep):
         return context
 
 
-async def end_open_recordings(context: TaskStepContext, reason: str, env_ids: Optional[list[str]] = None) -> None:
-    """End and register every recording still open in ``context`` (of ``env_ids`` only, when given)."""
+async def end_open_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
+    """End and register every recording still open in ``context`` (of ``env_ids`` only, when given), before its
+    computer is torn down."""
     for name, entry in list((context.metadata.get(RECORDINGS_KEY) or {}).items()):
         if entry.get("state") == "open" and (env_ids is None or entry["env_id"] in env_ids):
             try:
-                await end_recording(context, name, reason)
+                await end_recording(context, name, "teardown")
             except Exception as e:  # what tears the computer down goes on regardless
                 entry["state"], entry["error"] = "failed", f"{type(e).__name__}: {e}"[:500]
                 logger.warning("ending recording %s: %s", name, e)

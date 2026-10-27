@@ -11,7 +11,6 @@ import logging
 from typing import Optional
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.computer_recording import end_open_recordings
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep
 
@@ -58,7 +57,6 @@ class ResetEnvTaskStep(TaskStep):
         if deployed is None:
             logger.warning("reset_env: no deployed env '%s' in context; skipping", self.env_id)
             return context
-        await end_open_recordings(context, "reset", env_ids=[self.env_id])
         try:
             env = Env.get(deployed.env_id, deployed.env_version)
             await env.reset(deployed)
