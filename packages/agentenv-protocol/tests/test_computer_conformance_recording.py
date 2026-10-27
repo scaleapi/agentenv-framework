@@ -152,18 +152,25 @@ async def test_each_way_a_recording_can_fall_short_fails_its_check(home, monkeyp
     monkeypatch.setattr(checks, "RECORD_S", 0.8)
     real_end = recording_module.Recordings.end
 
-    async def miscounted(self, recording_id, upload, reason):
-        manifest = await real_end(self, recording_id, upload, reason)
-        manifest["segments"][0]["frames"] += 1
-        return manifest
+    async def altered(change):
+        async def end(self, recording_id, upload, reason):
+            manifest = await real_end(self, recording_id, upload, reason)
+            change(manifest)
+            return manifest
 
-    monkeypatch.setattr(recording_module.Recordings, "end", miscounted)
-    miscount = await _recording_checks(Recorder())
+        monkeypatch.setattr(recording_module.Recordings, "end", end)
+        return await _recording_checks(Recorder())
+
+    miscount = await altered(lambda m: m["segments"][0].update(frames=m["segments"][0]["frames"] + 1))
+    unmeasured = await altered(lambda m: m["segments"][0].pop("sha256"))
+    malformed = await altered(lambda m: m.pop("ended_by"))
     assert "s between segments 0 and 1" in gap[NAMES[0]][1]
     assert "it ended by 'limit'" in limited[NAMES[0]][1]
     assert "couldn't be read back" in unreadable[NAMES[0]][1]
     assert "stopped reading back at byte 0" in truncated[NAMES[0]][1]
     assert "the manifest says 1280x800" in miscount[NAMES[0]][1]
+    assert "segments [0] lack their times" in unmeasured[NAMES[0]][1]
+    assert "isn't a computer-recording/v1 manifest" in malformed[NAMES[0]][1]
 
 
 @pytest.mark.asyncio

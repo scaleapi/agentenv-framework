@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
@@ -24,6 +25,7 @@ from agentenv_protocol.computer import (  # noqa: E402
     RecordedFrame,
     RecordedSegment,
     Recording,
+    frames_in_thread,
     record,
 )
 from agentenv_protocol.computer import recording as recording_module  # noqa: E402
@@ -216,7 +218,7 @@ async def test_a_stream_that_keeps_failing_ends_the_recording_with_its_error(hom
 
     _, manifest = await _record(Broken(), 2.5)
     assert manifest["ended_by"] == "error" and manifest["error"] == "RuntimeError: no display"
-    assert manifest["segments"] == [] and manifest["started_at"] is None
+    assert manifest["segments"] == [] and "started_at" not in manifest
 
 
 @pytest.mark.asyncio
@@ -362,6 +364,7 @@ async def test_an_encoder_that_fails_on_its_first_frame_leaves_no_empty_segment(
 @pytest.mark.asyncio
 async def test_only_the_latest_starts_and_ends_are_kept_for_retries(home, monkeypatch):
     monkeypatch.setattr(recording_module, "KEEP_ENDED", 1)
+    monkeypatch.setattr(recording_module, "KEEP_STARTED", 4)
     driver = Recorded()
     async with http_client(driver) as http:
         for name in "abcde":
@@ -438,3 +441,41 @@ async def test_recordings_that_stop_themselves_release_their_thread_and_only_the
         assert len(running) == 2 and sum(not r.done for r in running.values()) == 1
         for recording_id in list(running):
             await http.post(END, json={"recording_id": recording_id})
+
+
+def _counted(n: int, closed: threading.Event, fail: Exception | None = None):
+    """A blocking source of ``n`` frames numbered from 0, a millisecond apart, that may fail after them."""
+    def frames():
+        try:
+            for i in range(n):
+                yield RecordedFrame(i, datetime.now(timezone.utc))
+                time.sleep(0.001)
+            if fail is not None:
+                raise fail
+        finally:
+            closed.set()
+    return frames
+
+
+@pytest.mark.asyncio
+async def test_frames_in_thread_hands_over_a_blocking_sources_frames_and_what_it_raises():
+    closed = threading.Event()
+    with pytest.raises(RuntimeError, match="the X server went away"):
+        got = [f.image async for f in frames_in_thread(_counted(5, closed, RuntimeError("the X server went away")))]
+    got = [f.image async for f in frames_in_thread(_counted(5, closed))]
+    assert got == [0, 1, 2, 3, 4] and closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_frames_in_thread_keeps_the_latest_frames_for_a_slow_reader_and_closes_its_source_when_stopped():
+    done, stopped = threading.Event(), threading.Event()
+    stream = frames_in_thread(_counted(30, done), keep=4)
+    first = (await anext(stream)).image
+    await asyncio.to_thread(done.wait, 5)
+    await asyncio.sleep(0.05)
+    rest = [f.image async for f in stream]
+    endless = frames_in_thread(_counted(1_000_000, stopped))
+    await anext(endless)
+    await endless.aclose()
+    assert first == 0 and len(rest) < 4 and rest[-1] == 29
+    assert await asyncio.to_thread(stopped.wait, 5)

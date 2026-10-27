@@ -52,8 +52,9 @@ from .operations import (
     type_text,
     write_files,
 )
+from .manifest import ManifestSegment, RecordingManifest
 from .platform import Platform
-from .recording import RecordedFrame, RecordedSegment, RecordHints, Recording
+from .recording import RecordedFrame, RecordedSegment, RecordHints, Recording, frames_in_thread
 from .settings import SETTINGS_ENV, ComputerSettings
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "display", "set_display", "capture", "click", "drag", "scroll", "type_text", "press",
     "pointer_move", "pointer_down", "pointer_up", "pointer_position", "key_down", "key_up",
     "run_in_session", "write_files", "record", "Recording", "RecordHints", "RecordedFrame", "RecordedSegment",
+    "frames_in_thread", "RecordingManifest", "ManifestSegment",
     "ComputerError", "InvalidArgument", "OutOfBounds", "StaleFrame", "InputBusy", "PermissionDenied", "Unsupported",
     "BackgroundUnavailable", "TargetUnavailable", "DeviceUnavailable", "LimitExceeded", "Timeout", "DeliveryFailed",
     "Internal",

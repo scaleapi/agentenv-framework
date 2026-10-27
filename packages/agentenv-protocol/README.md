@@ -449,9 +449,11 @@ class MyDriver(ComputerDriverEnvironment):
 - **The stream.** `@record` yields `RecordedFrame`s from a stream the OS pushes, which the base class
   scales, encodes and splits into segments, each frame timed by its `captured_at`; or
   `RecordedSegment`s, files a native recorder finished under `hints.directory`, which it only hashes,
-  uploads and lists. The base class closes the stream at `end`. A driver without `@record` records by
-  the base class polling `@capture`, with a pointer drawn at `@pointer_position`: the slow path, at
-  most 15 fps.
+  uploads and lists. The base class closes the stream at `end`. A source that blocks, as most OS
+  capture APIs do, goes through `frames_in_thread(frames)`: the generator `frames()` runs in a thread
+  of its own, the latest 8 frames wait for the encoder, and it is closed when the recording stops. A
+  driver without `@record` records by the base class polling `@capture`, with a pointer drawn at
+  `@pointer_position`: the slow path, at most 15 fps.
 - **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?}` returns
   `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
   and returns the manifest. A repeated `request_id`, or a repeated `end`, answers the same. A start
@@ -461,9 +463,10 @@ class MyDriver(ComputerDriverEnvironment):
   stream. Each uploads as it closes under `start`'s `write_namespace` grant, at
   `<recording_id>/<index>.mp4`, and is then deleted; `end`'s own grant uploads any that missed. With no
   grant they stay under `~/.agentenv-recordings/`.
-- **The manifest.** Its `segments` carry each one's path, `started_at` and `ended_at` (its first and
-  last frames' capture times), size, frame count, byte size, SHA-256 and whether it uploaded, and
-  `ended_by` says why the recording ended: `end`, `reset`, `teardown`, `limit` or `error`.
+- **The manifest** (`RecordingManifest`). Its `segments` (`ManifestSegment`) carry each one's path,
+  `started_at` and `ended_at` (its first and last frames' capture times), size, frame count, byte size,
+  SHA-256 and whether it uploaded, and `ended_by` says why the recording ended: `end`, `reset`,
+  `teardown`, `limit` or `error`. A field it doesn't know is left out.
 
 ### Checking a driver: the conformance probe
 

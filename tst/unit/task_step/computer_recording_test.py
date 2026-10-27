@@ -29,11 +29,12 @@ _CARD = {"name": "desktop", "capabilities": {"extensions": [{"uri": COMPUTER_REC
 
 class _Computer:
     """A deployed env whose driver records: each end uploads one segment per started recording under its grant,
-    or leaves the last one out when ``drop_last``."""
+    or leaves the last one out when ``drop_last``; it ``forgets`` the recording, or ``garbles`` its manifest."""
 
-    def __init__(self, store, env_id: str = "desktop", forgets: bool = False, drop_last: bool = False) -> None:
+    def __init__(self, store, env_id: str = "desktop", forgets: bool = False, garbles: bool = False,
+                 drop_last: bool = False) -> None:
         self.env_id, self.environment_card, self.sandbox_type = env_id, _CARD, "local"
-        self.store, self.forgets, self.drop_last = store, forgets, drop_last
+        self.store, self.forgets, self.garbles, self.drop_last = store, forgets, garbles, drop_last
         self.calls: list[tuple[str, dict]] = []
         self.started: set[str] = set()
 
@@ -47,6 +48,8 @@ class _Computer:
             return {"recording_id": "rec-1", "started_at": "2026-10-27T10:00:00.000Z", "format": "video/mp4"}
         if self.forgets:
             raise RuntimeError("400 invalid_argument: there is no recording 'rec-1' on this computer")
+        if self.garbles:
+            return {"recording_id": "rec-1", "segments": "all of them"}
         segments = [{"index": 0, "path": "rec-1/0000.mp4", "uploaded": True},
                     {"index": 1, "path": "rec-1/0001.mp4", "uploaded": not self.drop_last}]
         if not self.drop_last:
@@ -103,10 +106,11 @@ async def test_a_segment_the_driver_couldnt_upload_is_left_out_and_counted(store
 
 
 @pytest.mark.asyncio
-async def test_a_recording_the_driver_forgot_is_registered_from_its_namespace(store):
-    context = await _start().execute(_context(_Computer(store, forgets=True)))
+@pytest.mark.parametrize("fault, error", [("forgets", "no recording 'rec-1'"), ("garbles", "ValidationError")])
+async def test_a_recording_the_driver_forgot_or_garbled_is_registered_from_its_namespace(store, fault, error):
+    context = await _start().execute(_context(_Computer(store, **{fault: True})))
     entry = (await _end().execute(context)).metadata[RECORDINGS_KEY]["desk"]
-    assert entry["state"] == "ended" and entry["ended_by"] == "error" and "no recording 'rec-1'" in entry["error"]
+    assert entry["state"] == "ended" and entry["ended_by"] == "error" and error in entry["error"]
     assert sorted(Artifact.get(entry["artifact"]["id"]).file_artifact_ids) == ["manifest.json", "rec-1-0000.mp4"]
 
 

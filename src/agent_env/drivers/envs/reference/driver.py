@@ -12,7 +12,7 @@ import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Iterator
 
 import av
 import mss
@@ -37,6 +37,7 @@ from agentenv_protocol.computer import (
     computer_driver,
     display,
     drag,
+    frames_in_thread,
     key_down,
     key_up,
     pointer_down,
@@ -65,8 +66,6 @@ CLICK_GAP_S = 0.04
 #: How far apart a drag's pointer moves are, in pixels.
 DRAG_STEP_PX = 20
 DROPPED = (ConnectionClosedError, DisplayConnectionError, OSError)
-#: How many recorded frames wait for the encoder before the oldest is dropped.
-RECORD_QUEUE = 8
 
 
 @computer_driver(name="reference",
@@ -97,42 +96,19 @@ class ReferenceDriver(ComputerDriverEnvironment):
 
     @record
     async def stream(self, hints: RecordHints) -> AsyncIterator[RecordedFrame]:
-        """The display through FFmpeg's ``x11grab``, read in a thread of its own. Its frames carry the wall clock,
-        so each one's time is when it was captured."""
+        """The display through FFmpeg's ``x11grab``. Its frames carry the wall clock, so each one's time is when it
+        was captured."""
         size = await self.screen()
-        loop, frames, stop = asyncio.get_running_loop(), asyncio.Queue(), threading.Event()
+        options = {"framerate": str(hints.fps), "video_size": f"{size.width}x{size.height}",
+                   "draw_mouse": "1" if hints.cursor else "0"}
 
-        def offer(item: Any) -> None:
-            if frames.qsize() >= RECORD_QUEUE:
-                frames.get_nowait()
-            frames.put_nowait(item)
+        def frames() -> Iterator[RecordedFrame]:
+            with av.open(os.environ.get("DISPLAY", ":0"), format="x11grab", options=options) as source:
+                for frame in source.decode(video=0):
+                    yield RecordedFrame(frame, datetime.fromtimestamp(frame.time, timezone.utc))
 
-        def post(item: Any) -> None:
-            with contextlib.suppress(RuntimeError):  # the loop has closed: nobody is reading
-                loop.call_soon_threadsafe(offer, item)
-
-        def pump() -> None:
-            options = {"framerate": str(hints.fps), "video_size": f"{size.width}x{size.height}",
-                       "draw_mouse": "1" if hints.cursor else "0"}
-            try:
-                with av.open(os.environ.get("DISPLAY", ":0"), format="x11grab", options=options) as source:
-                    for frame in source.decode(video=0):
-                        if stop.is_set():
-                            return
-                        post(RecordedFrame(frame, datetime.fromtimestamp(frame.time, timezone.utc)))
-            except Exception as e:
-                post(e)
-            finally:
-                post(None)
-
-        threading.Thread(target=pump, name="reference-record", daemon=True).start()
-        try:
-            while (item := await frames.get()) is not None:
-                if isinstance(item, Exception):
-                    raise item
-                yield item
-        finally:
-            stop.set()
+        async for frame in frames_in_thread(frames):
+            yield frame
 
     async def ready_checks(self) -> list[ReadyCheck]:
         try:

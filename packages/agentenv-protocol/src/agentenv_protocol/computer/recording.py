@@ -9,10 +9,11 @@ import contextlib
 import dataclasses
 import hashlib
 import shutil
+import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from pydantic import ValidationError
 from ..transfers import NamespaceUploader, WriteNamespaceGrant
 from .errors import InvalidArgument, LimitExceeded, Unsupported
 from .frames import to_pil
+from .manifest import ManifestSegment, RecordingManifest
 
 try:
     import av
@@ -55,6 +57,13 @@ RETRY_S = 1.0
 #: How often free disk is checked while frames arrive.
 DISK_CHECK_S = 5.0
 KEEP_ENDED = 64
+KEEP_STARTED = 4 * KEEP_ENDED
+MIN_EDGE, MAX_EDGE = 64, 8192
+#: libx264 tuned for live capture: quick to encode, at a quality screen text survives.
+H264_OPTIONS = {"preset": "ultrafast", "tune": "zerolatency", "crf": "28"}
+KEYFRAME_S = 2
+#: The frames ``frames_in_thread`` holds for an encoder that falls behind; past it the oldest is dropped.
+THREAD_QUEUE = 8
 
 
 @dataclass(frozen=True)
@@ -157,7 +166,7 @@ class Recordings:
             recording.timer = asyncio.get_running_loop().call_later(features.max_duration_s, recording.expire)
             answer = {"recording_id": recording_id, "started_at": _iso(recording.requested_at), "format": MP4}
             self.started[request_id] = answer
-            while len(self.started) > 4 * KEEP_ENDED:
+            while len(self.started) > KEEP_STARTED:
                 self.started.popitem(last=False)
             return answer
 
@@ -187,8 +196,8 @@ class Recordings:
         fps = params["fps"]["default"] if fps is None else fps
         if not (isinstance(fps, int) and 1 <= fps <= params["fps"]["max"]):
             raise InvalidArgument(f"fps is an integer from 1 to {params['fps']['max']}, got {fps!r}")
-        if max_edge is not None and not (isinstance(max_edge, int) and 64 <= max_edge <= 8192):
-            raise InvalidArgument(f"max_edge is an integer from 64 to 8192, got {max_edge!r}")
+        if max_edge is not None and not (isinstance(max_edge, int) and MIN_EDGE <= max_edge <= MAX_EDGE):
+            raise InvalidArgument(f"max_edge is an integer from {MIN_EDGE} to {MAX_EDGE}, got {max_edge!r}")
         grant = _grant(upload) if upload is not None else None
         return RecordHints(scope, fps, max_edge, bool(cursor), features.max_segment_s, Path()), grant
 
@@ -205,7 +214,7 @@ class _Recording:
         self.requested_at = datetime.now(timezone.utc)
         self.streams = runtime.has("record")
         self.cursor = hints.cursor if self.streams else hints.cursor and runtime.has("pointer")
-        self.segments: list[dict] = []
+        self.segments: list[_Segment] = []
         self.encoder: Optional[_Encoder] = None
         self.ended_by: Optional[str] = None
         self.error: Optional[str] = None
@@ -280,19 +289,16 @@ class _Recording:
         uploader = NamespaceUploader(grant) if grant is not None else self.uploader
         if uploader is not None:
             for segment in self.segments:
-                if not segment["uploaded"]:
+                if not segment.entry.uploaded:
                     await self._upload(uploader, segment)
         with contextlib.suppress(OSError):
             self.hints.directory.rmdir()
-        first, last = (self.segments[0], self.segments[-1]) if self.segments else ({}, {})
-        manifest = {"recording_id": self.id, "scope": self.hints.scope, "format": MP4, "fps": self.hints.fps,
-                    "cursor": self.cursor, "source": "stream" if self.streams else "capture",
-                    "started_at": first.get("started_at"), "ended_at": last.get("ended_at"),
-                    "ended_by": self.ended_by, "segments": [{k: v for k, v in s.items() if k != "file"}
-                                                            for s in self.segments]}
-        if self.error and self.ended_by == "error":
-            manifest["error"] = self.error
-        return manifest
+        entries = [s.entry for s in self.segments]
+        return RecordingManifest(
+            recording_id=self.id, scope=self.hints.scope, format=MP4, fps=self.hints.fps, cursor=self.cursor,
+            source="stream" if self.streams else "capture", started_at=entries[0].started_at if entries else None,
+            ended_at=entries[-1].ended_at if entries else None, ended_by=self.ended_by, segments=entries,
+            error=self.error if self.ended_by == "error" else None).wire()
 
     async def _add_frame(self, item: RecordedFrame) -> None:
         frame = await self._in_thread(_video_frame, item.image, self.hints.max_edge)
@@ -342,27 +348,34 @@ class _Recording:
     async def _finish(self, path: Path, started_at: datetime, ended_at: datetime, width: int, height: int,
                       frames: int) -> None:
         size, digest = await asyncio.to_thread(_digest, path)
-        segment = {"index": len(self.segments), "path": f"{self.id}/{path.name}", "started_at": _iso(started_at),
-                   "ended_at": _iso(ended_at), "width": width, "height": height, "frames": frames, "bytes": size,
-                   "sha256": digest, "uploaded": False, "file": path}
+        segment = _Segment(ManifestSegment(
+            index=len(self.segments), path=f"{self.id}/{path.name}", started_at=_iso(started_at),
+            ended_at=_iso(ended_at), width=width, height=height, frames=frames, bytes=size, sha256=digest,
+            uploaded=False), path)
         self.segments.append(segment)
         if self.uploader is not None:
             task = asyncio.create_task(self._upload(self.uploader, segment))
             self.uploads.add(task)
             task.add_done_callback(self.uploads.discard)
 
-    async def _upload(self, uploader: NamespaceUploader, segment: dict) -> None:
+    async def _upload(self, uploader: NamespaceUploader, segment: _Segment) -> None:
         try:
-            await uploader.upload(segment["path"], segment["file"])
+            await uploader.upload(segment.entry.path, segment.file)
         except Exception as e:
-            segment["upload_error"] = f"{getattr(e, 'code', type(e).__name__)}: {e}"
+            segment.entry.upload_error = f"{getattr(e, 'code', type(e).__name__)}: {e}"
             return
-        segment["uploaded"] = True
-        segment.pop("upload_error", None)
-        segment["file"].unlink(missing_ok=True)
+        segment.entry.uploaded, segment.entry.upload_error = True, None
+        segment.file.unlink(missing_ok=True)
 
     async def _in_thread(self, fn, *args):
         return await asyncio.get_running_loop().run_in_executor(self.executor, fn, *args)
+
+
+@dataclass
+class _Segment:
+    """A closed segment: its manifest entry, and its file until it uploads."""
+    entry: ManifestSegment
+    file: Path
 
 
 class _Encoder:
@@ -376,8 +389,8 @@ class _Encoder:
         self.frames = 0
         self._last_pts = -1
         self.container = av.open(str(path), "w", format="mp4", options={"movflags": "+faststart"})
-        self.stream = self.container.add_stream(
-            "libx264", rate=fps, options={"preset": "ultrafast", "tune": "zerolatency", "crf": "28", "g": str(2 * fps)})
+        self.stream = self.container.add_stream("libx264", rate=fps,
+                                                options={**H264_OPTIONS, "g": str(KEYFRAME_S * fps)})
         self.stream.width, self.stream.height, self.stream.pix_fmt = width, height, "yuv420p"
         self.stream.codec_context.time_base = Fraction(1, 1000)
 
@@ -394,6 +407,44 @@ class _Encoder:
         for packet in self.stream.encode():
             self.container.mux(packet)
         self.container.close()
+
+
+async def frames_in_thread(frames: Callable[[], Iterator[RecordedFrame]],
+                           keep: int = THREAD_QUEUE) -> AsyncIterator[RecordedFrame]:
+    """A ``@record`` stream from a blocking source: the generator ``frames()`` runs in a thread of its own, the
+    latest ``keep`` of its frames wait for the encoder, what it raises is raised here, and it is closed when the
+    recording stops."""
+    loop, queue, stop = asyncio.get_running_loop(), asyncio.Queue(), threading.Event()
+
+    def offer(item: Any) -> None:
+        if queue.qsize() >= keep:
+            queue.get_nowait()
+        queue.put_nowait(item)
+
+    def post(item: Any) -> None:
+        with contextlib.suppress(RuntimeError):  # the loop has closed: nobody is reading
+            loop.call_soon_threadsafe(offer, item)
+
+    def pump() -> None:
+        try:
+            with contextlib.closing(frames()) as source:
+                for item in source:
+                    if stop.is_set():
+                        return
+                    post(item)
+        except Exception as e:
+            post(e)
+        finally:
+            post(None)
+
+    threading.Thread(target=pump, name="computer-record", daemon=True).start()
+    try:
+        while (item := await queue.get()) is not None:
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        stop.set()
 
 
 async def _poll(runtime: ComputerRuntime, hints: RecordHints, cursor: bool) -> AsyncIterator[RecordedFrame]:

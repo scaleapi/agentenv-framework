@@ -10,6 +10,7 @@ import uuid
 from typing import ClassVar, Optional
 
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
+from agentenv_protocol.computer.manifest import ManifestSegment, RecordingManifest
 from agentenv_protocol.client import find_extension
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
@@ -148,8 +149,8 @@ async def end_recording(context: TaskStepContext, name: str, reason: str) -> Non
         return
     try:
         deployed = _deployed(context, entry["env_id"])
-        manifest = await deployed.invoke(COMPUTER_RECORDING, "end", {
-            "recording_id": entry["recording_id"], "upload": _grant(deployed, entry["namespace"]), "reason": reason})
+        manifest = RecordingManifest.model_validate(await deployed.invoke(COMPUTER_RECORDING, "end", {
+            "recording_id": entry["recording_id"], "upload": _grant(deployed, entry["namespace"]), "reason": reason}))
     except Exception as e:
         logger.warning("end_computer_recording %s: %s; registering what its namespace holds", name, e)
         entry["error"] = f"{type(e).__name__}: {e}"[:500]
@@ -165,10 +166,10 @@ async def end_recording(context: TaskStepContext, name: str, reason: str) -> Non
         logger.warning("end_computer_recording %s: registering it failed: %s", name, e)
         entry["state"], entry["error"] = "failed", f"{type(e).__name__}: {e}"[:500]
         return
-    uploaded = [s for s in manifest["segments"] if s.get("uploaded")]
-    entry.update(state="ended", ended_by=manifest["ended_by"], segments=len(uploaded),
-                 missing_segments=len(manifest["segments"]) - len(uploaded))
-    logger.info("end_computer_recording %s: %d segments, ended by %s", name, len(uploaded), manifest["ended_by"])
+    uploaded = [s for s in manifest.segments if s.uploaded]
+    entry.update(state="ended", ended_by=manifest.ended_by, segments=len(uploaded),
+                 missing_segments=len(manifest.segments) - len(uploaded))
+    logger.info("end_computer_recording %s: %d segments, ended by %s", name, len(uploaded), manifest.ended_by)
 
 
 def _deployed(context: TaskStepContext, env_id: str):
@@ -194,7 +195,7 @@ def _grant(deployed, namespace: str) -> dict:
     if not issues_grants_to(store, sandbox_type):
         raise RuntimeError(f"the object store issues no upload grant that reaches env {deployed.env_id}'s sandbox "
                            f"({sandbox_type or 'unknown'}), so its recording couldn't upload")
-    duration = params.get("max_duration_s", 3600)
+    duration = params["max_duration_s"]
     cap = min(store.max_single_upload_bytes or _MAX_SEGMENT_BYTES, _MAX_SEGMENT_BYTES)
     limits = ObjectLimits(max_objects=MAX_SEGMENTS, max_object_bytes=cap, max_total_bytes=MAX_RECORDING_BYTES)
     try:
@@ -204,16 +205,17 @@ def _grant(deployed, namespace: str) -> dict:
     return grant.model_dump(mode="json")
 
 
-def _from_namespace(entry: dict) -> dict:
+def _from_namespace(entry: dict) -> RecordingManifest:
     """A manifest of what the recording's namespace holds, for a recording its driver can't end."""
     store = get_config().get_object_store()
     root = entry["namespace"].rstrip("/") + "/"
     paths = sorted(url[len(root):] for url in store.list_at(root) if url.endswith(".mp4"))
-    return {"recording_id": entry.get("recording_id"), "ended_by": "error", "error": entry.get("error"),
-            "segments": [{"index": i, "path": path, "uploaded": True} for i, path in enumerate(paths)]}
+    return RecordingManifest(recording_id=entry.get("recording_id"), ended_by="error", error=entry.get("error"),
+                             segments=[ManifestSegment(index=i, path=path, uploaded=True)
+                                       for i, path in enumerate(paths)])
 
 
-def _register(context: TaskStepContext, name: str, namespace: str, manifest: dict) -> dict:
+def _register(context: TaskStepContext, name: str, namespace: str, manifest: RecordingManifest) -> dict:
     """The uploaded segments and the manifest as FileArtifacts, pointing at the objects, in one universe."""
     universe_id = derive_id(context.instance_id or "run", f"recording-{name}")
     if is_local_id(universe_id):
@@ -221,12 +223,12 @@ def _register(context: TaskStepContext, name: str, namespace: str, manifest: dic
     objects, documents = get_config().get_object_store(), get_artifact_store()
     root = namespace.rstrip("/")
     manifest_url = objects.put(objects.get_object_key(f"{root}/manifest.json"),
-                               json.dumps(manifest, indent=1).encode(), content_type="application/json",
+                               json.dumps(manifest.wire(), indent=1).encode(), content_type="application/json",
                                allow_overwrite=True)
     files = {"manifest.json": (manifest_url, "application/json")}
-    for segment in manifest["segments"]:
-        if segment.get("uploaded"):
-            files[segment["path"].replace("/", "-")] = (f"{root}/{segment['path']}", "video/mp4")
+    for segment in manifest.segments:
+        if segment.uploaded:
+            files[segment.path.replace("/", "-")] = (f"{root}/{segment.path}", "video/mp4")
     stored = {filename: documents.put_document(FileArtifact(
         id=derive_id(universe_id, filename), filename=filename, content_type=content_type, object_url=url,
         description=f"Recording {name!r} of task instance {context.instance_id}"))

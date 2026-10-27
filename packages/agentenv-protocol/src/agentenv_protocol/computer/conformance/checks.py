@@ -16,6 +16,7 @@ from importlib import resources
 
 from mcp import ClientSession
 from mcp.types import CallToolResult
+from pydantic import ValidationError
 
 from ... import client as protocol
 from ...client import ExtensionCallError
@@ -33,6 +34,7 @@ from ..card import (
     GROUP_TOOLS,
     POINT_TOOLS,
 )
+from ..manifest import RecordingManifest
 from ..recording import RECORDINGS_DIR
 from .client import Driver, image
 from .mp4 import read_mp4
@@ -786,42 +788,48 @@ class Probe:
                 await self.driver.run("rm", "-rf", f"{RECORDINGS_DIR}/{recording_id}")
             await self.driver.run("sh", "-c", f"rmdir {RECORDINGS_DIR} 2>/dev/null || true")
 
-    async def _segments_match(self, manifest: dict, fps: int) -> str | None:
+    async def _segments_match(self, wire: dict, fps: int) -> str | None:
         """What is wrong with a recording without a grant, read back from the computer, or None."""
-        segments = manifest.get("segments") or []
-        if manifest.get("ended_by") != "end" or not segments:
-            return f"it ended by {manifest.get('ended_by')!r} with {len(segments)} segments"
-        span = (_when(segments[-1]["ended_at"]) - _when(segments[0]["started_at"])).total_seconds()
-        frames = sum(s["frames"] for s in segments)
+        try:
+            manifest = RecordingManifest.model_validate(wire)
+        except ValidationError as e:
+            return f"its manifest isn't a computer-recording/v1 manifest: {e}"
+        segments = manifest.segments
+        if manifest.ended_by != "end" or not segments:
+            return f"it ended by {manifest.ended_by!r} with {len(segments)} segments"
+        if unmeasured := [s.index for s in segments if not s.measured]:
+            return f"segments {unmeasured} lack their times, size, frame count or digest"
+        span = (_when(segments[-1].ended_at) - _when(segments[0].started_at)).total_seconds()
+        frames = sum(s.frames for s in segments)
         if span < RECORD_S - 2 / fps or frames < fps * RECORD_S / 2:
             return f"{frames} frames over {span:.2f} s of a {RECORD_S:g} s recording at {fps} fps"
         for before, after in zip(segments, segments[1:]):
-            gap = (_when(after["started_at"]) - _when(before["ended_at"])).total_seconds()
+            gap = (_when(after.started_at) - _when(before.ended_at)).total_seconds()
             if gap > 2 / fps:
-                return f"{gap:.2f} s between segments {before['index']} and {after['index']}"
+                return f"{gap:.2f} s between segments {before.index} and {after.index}"
         for segment in segments:
-            path = f"{RECORDINGS_DIR}/{segment['path']}"
+            path = f"{RECORDINGS_DIR}/{segment.path}"
             out = await self.driver.run("python3", "-c", READ_DIGEST, path)
             if out.get("exit_code") != 0:
-                return f"segment {segment['index']} couldn't be read back: {out.get('stderr', '')[-200:]}"
+                return f"segment {segment.index} couldn't be read back: {out.get('stderr', '')[-200:]}"
             file = json.loads(out["stdout"])
-            if (file["size"], file["sha256"]) != (segment["bytes"], segment["sha256"]):
-                return f"segment {segment['index']}'s file is {file['size']} bytes, sha256 {file['sha256'][:12]}; " \
-                       f"the manifest says {segment['bytes']}, {segment['sha256'][:12]}"
+            if (file["size"], file["sha256"]) != (segment.bytes, segment.sha256):
+                return f"segment {segment.index}'s file is {file['size']} bytes, sha256 {file['sha256'][:12]}; " \
+                       f"the manifest says {segment.bytes}, {segment.sha256[:12]}"
             data = b""
             while len(data) < file["size"]:
                 chunk = await self.driver.run("python3", "-c", READ_CHUNK, path, str(len(data)), str(CHUNK_BYTES))
                 read = base64.b64decode(chunk["stdout"]) if chunk.get("exit_code") == 0 else b""
                 if not read:
-                    return f"segment {segment['index']} stopped reading back at byte {len(data)} of {file['size']}: " \
+                    return f"segment {segment.index} stopped reading back at byte {len(data)} of {file['size']}: " \
                            f"{chunk.get('stderr', '')[-200:]}"
                 data += read
             mp4 = read_mp4(data)
-            span = (_when(segment["ended_at"]) - _when(segment["started_at"])).total_seconds()
-            if ((mp4["width"], mp4["height"], mp4["frames"]) != (segment["width"], segment["height"], segment["frames"])
+            span = (_when(segment.ended_at) - _when(segment.started_at)).total_seconds()
+            if ((mp4["width"], mp4["height"], mp4["frames"]) != (segment.width, segment.height, segment.frames)
                     or abs(mp4["duration_s"] - span) > 2 / fps):
-                return f"segment {segment['index']}'s MP4 is {mp4}; the manifest says {segment['width']}x" \
-                       f"{segment['height']}, {segment['frames']} frames over {span:.2f} s"
+                return f"segment {segment.index}'s MP4 is {mp4}; the manifest says {segment.width}x" \
+                       f"{segment.height}, {segment.frames} frames over {span:.2f} s"
         return None
 
 
