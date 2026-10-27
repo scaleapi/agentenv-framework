@@ -34,10 +34,11 @@ from agent_env.config import get_config
 from agent_env.entity.refs import EntityKind, RefRole, default_agent_refs, ref_sites
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
+from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.env.published_images import published_agent_image
+from agent_env.env.published_images import published_bundle_image
 from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION, get_env_store
 from agent_env.plugins._bundles import ENV_ALIASES, InstalledAliases, installed_aliases
@@ -94,7 +95,9 @@ _ENVIRONMENT = EnvironmentArtifact.model_fields["type"].default
 _FOLDER_HOOKS = {"written_besides": Artifact, "seeded_environments": SeedsEnvironments}
 # The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
 # its env.toml and the ledger can list what it's made from.
-_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv)
+_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv, ComputerDriverEnv)
+# The env types whose from_toml also reads every file in the env's folder, which the ledger hashes as an artifact's.
+_ENV_FROM_FOLDERS = (ComputerDriverEnv,)
 
 _NOTHING_TO_RUN = "this bundle has no tasks or evals to run"
 
@@ -528,9 +531,12 @@ class _Planner:
                     dict(self.origins), self._published(writes), aliases, override, dict(self.env_alias_uses))
 
     def check(self) -> None:
+        """The checks a run makes before it reads a store. A bundle with nothing to run passes only when its
+        aliases.toml gives what it holds aliases: other bundles pull from it, as from a library."""
         self._check_writers()
         self._check_loops()
-        if not any(entry.entry.kind in (BundleKind.TASK, BundleKind.EVAL) for entry in self.entries):
+        runs = any(entry.entry.kind in (BundleKind.TASK, BundleKind.EVAL) for entry in self.entries)
+        if not runs and not any(self.resolved.bundle.aliases.values()):
             self.problems.append(_NOTHING_TO_RUN)
         everything = set(self.nodes)
         self._check_store_refs(everything, stores=False)
@@ -1039,19 +1045,19 @@ class _Planner:
         return tuple(writes)
 
     def _published(self, writes: Sequence[Write]) -> dict[str, Publication]:
-        """The published image of each agent image in ``writes`` built from a shipped agent's sources, by id. Only an
-        agent's are looked up, as agent-env publishes no other kind of bundle image."""
+        """The published image of each image in ``writes`` built from the sources of a shipped bundle image, an agent's
+        or an example env's, by id."""
         published = {}
         for write in writes:
             image = write.source
-            if not (isinstance(image, BuiltImage) and image.entry.kind is BundleKind.AGENT):
+            if not isinstance(image, BuiltImage):
                 continue
             with staged_build_context(self._bundle_of(image.entry), image.entry, image.dockerfile) as staged:
                 try:
                     sources, _ = staged.identity(write.id)
                 except ValueError:  # a context its write refuses, which says why
                     continue
-            if (found := published_agent_image(sources)) is not None:
+            if (found := published_bundle_image(sources)) is not None:
                 published[write.id] = Publication(*found, sources)
         return published
 
@@ -1086,6 +1092,11 @@ def env_writer(cls: type | None) -> bool:
     """Whether an env of type ``cls`` is written from its env.toml, by a ``from_toml`` that reads only the toml and
     what it names: its own, or one it inherits from a core env type."""
     return cls is not None and next(c for c in cls.__mro__ if "from_toml" in vars(c)) in _ENV_FROM_TOMLS
+
+
+def env_folder_writer(cls: type | None) -> bool:
+    """Whether an env of type ``cls`` is written from every file in its folder, as well as its env.toml."""
+    return cls is not None and next(c for c in cls.__mro__ if "from_toml" in vars(c)) in _ENV_FROM_FOLDERS
 
 
 def artifact_writer(cls: type | None) -> bool:

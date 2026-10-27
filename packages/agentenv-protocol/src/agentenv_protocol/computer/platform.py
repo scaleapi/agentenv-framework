@@ -46,6 +46,22 @@ def detect(environ: dict | None = None, os_release: Path = Path("/etc/os-release
                     arch=_ARCH.get(machine, machine or None), display=display)
 
 
+def supported(entry: dict) -> list[Platform]:
+    """The platforms a ``supports`` entry names: its ``os`` type, with each of its displays and arches, and its
+    distribution and version when it names one. ``{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}``
+    names one platform."""
+    os_ = entry.get("os") or {}
+    if not isinstance(os_, dict) or not isinstance(os_.get("type"), str):
+        raise ValueError(f"a supports entry names its os as {{'type': ...}}, got {entry!r}")
+    return [Platform(os=os_["type"], distribution=distribution, version=version, arch=arch, display=display)
+            for distribution in _values(os_.get("distribution")) for version in _values(os_.get("version"))
+            for display in _values(os_.get("display")) for arch in _values(entry.get("arch"))]
+
+
+def _values(value) -> list:
+    return [None] if value is None else [value] if isinstance(value, str) else list(value)
+
+
 def _os_release(path: Path) -> dict:
     try:
         text = path.read_text()

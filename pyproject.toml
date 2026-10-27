@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1361"
+version = "0.9.1363"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -29,7 +29,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "agentenv-framework-protocol>=0.1.0",
+    "agentenv-framework-protocol[computer]>=0.1.0",  # a computer_driver env's put reads the driver class with it
     "certifi>=2024.2.2",  # the public roots the local transfer CA's trust bundle carries
     "click>=8.0.0",
     "cryptography>=42",  # the local transfer CA
@@ -117,6 +117,7 @@ agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
 agents = "agent_env"
+drivers = "agent_env"
 hello = "agent_env.examples"
 echo-mcp = "agent_env.examples"
 mail-mcp = "agent_env.examples"

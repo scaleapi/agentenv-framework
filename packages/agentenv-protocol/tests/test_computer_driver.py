@@ -40,7 +40,7 @@ from agentenv_protocol.computer import (  # noqa: E402
 )
 from agentenv_protocol.computer.keys import canonical  # noqa: E402
 from agentenv_protocol.computer.operations import declared, resolve  # noqa: E402
-from agentenv_protocol.computer.platform import detect, normalize  # noqa: E402
+from agentenv_protocol.computer.platform import detect, normalize, supported  # noqa: E402
 from agentenv_protocol.computer.settings import load_settings  # noqa: E402
 from agentenv_protocol.computer.tools import _modifiers  # noqa: E402
 
@@ -384,3 +384,32 @@ def test_a_drivers_own_private_helpers_and_the_hooks_are_its_own():
     Driver = _define({"_button": lambda self, d, b, down: None, "_move": lambda self: None,
                       "caller_identity": lambda self, context: "x", "buttons": ("left", "right")})
     assert Driver().caller_identity(None) == "x"
+
+
+def test_a_driver_class_declares_what_it_serves_on_each_platform(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT_NAME", "deployed-name")
+
+    @computer_driver(name="declared")
+    class Declared(FakeDriver):
+        def __init__(self):
+            raise AssertionError("declaration builds the card without the subclass's __init__")
+
+    linux = Declared.declaration(LINUX)
+    elsewhere = MinimalDriver.declaration(Platform(os="macos"))
+    uris = lambda card: {e.uri for e in card.capabilities.extensions}  # noqa: E731
+    assert linux.name == "declared" and len(linux.capabilities.tools) == 14
+    assert {"urn:agentenv:computer-pointer/v1", "urn:agentenv:computer-exec/v1"} <= uris(linux)
+    assert elsewhere.name == "MinimalDriver" and len(elsewhere.capabilities.tools) == 7
+    assert "urn:agentenv:computer-exec/v1" not in uris(elsewhere)
+    computer = next(e for e in elsewhere.capabilities.extensions if e.uri == "urn:agentenv:computer/v1")
+    assert computer.params["platform"] == {"os": "macos"}
+
+
+def test_a_supports_entry_names_each_platform_it_covers():
+    entry = {"os": {"type": "linux", "distribution": "ubuntu", "version": ["22.04", "24.04"], "display": "x11"},
+             "arch": ["amd64", "arm64"]}
+    assert [(p.version, p.arch) for p in supported(entry)] == [("22.04", "amd64"), ("22.04", "arm64"),
+                                                               ("24.04", "amd64"), ("24.04", "arm64")]
+    assert supported({"os": {"type": "macos"}}) == [Platform(os="macos")]
+    with pytest.raises(ValueError, match="names its os as"):
+        supported({"os": "linux"})

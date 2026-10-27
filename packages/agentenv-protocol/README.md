@@ -319,8 +319,8 @@ one as a `ComputerDriverEnvironment` subclass from `agentenv_protocol.computer`,
 `computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn and Pillow).
 The driver marks the methods that capture the screen and send input; the base class serves the
 computer contract from them, so the tools, results and errors can't drift from it. A complete
-driver for an X11 desktop, with an image to run it in, is in
-[`examples/computer_x11/`](https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol/examples/computer_x11).
+driver for an X11 desktop is agent-env's reference driver, in its
+[`drivers` bundle](https://github.com/scaleapi/agentenv-framework/tree/main/src/agent_env/drivers).
 
 ```python
 from agentenv_protocol.computer import (
@@ -421,6 +421,42 @@ and `exec_timeout_s`. A driver reads them as `self.settings`, for example its ta
 
 Every caller is `default` until agents carry an identity of their own; `caller_identity(context)`
 names the caller whose latest frame and others' input a call uses.
+
+`MyDriver.declaration(platform)` returns the card the class serves on a `Platform`, built without
+running the driver, its operations or its dependencies.
+
+### Checking a driver: the conformance probe
+
+The probe checks a running driver against the contract through its card, tools and extensions. It
+reports each check, and gives each extension the card declares a verdict: verified, unverified or
+failed.
+
+```bash
+python -m agentenv_protocol.computer.conformance http://localhost:18765 [--level basic|full] [--json report.json]
+```
+
+```python
+from agentenv_protocol.computer.conformance import run_probe
+
+report = await run_probe("http://localhost:18765", "full")   # a ProbeReport
+failed = [c for c in report.checks if c.status == "failed"]
+```
+
+The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach the driver.
+
+| Level | Checks | Needs on the computer |
+|---|---|---|
+| `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add` | Linux, `python3` with Tk, a 1280x800 screen or larger, `computer-exec` and `data/add` |
+
+At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
+`~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
+window's widgets report, reads back what reached them, and then removes the fixture. When the
+fixture can't be staged, the `full` checks are unverified rather than failed. The probe leaves out
+the checks for an extension the card doesn't declare. P8 is not applicable to a driver without
+leasing, and unverified for one with it until the probe has lease checks. The probe calls as the
+default role; the tool-access check hides a tool from a role of its own, `agentenv-probe-<random>`,
+and gives it back.
 
 ## A2A agent framework
 

@@ -21,12 +21,14 @@ import sys
 from pathlib import Path
 
 from agent_env.env.bootstrap import PUBLISHED_IMAGES
-from agent_env.env.published_images import AGENT_IMAGES, REGISTRY, PublishedImage, write_release_digests
+from agent_env.env.published_images import BUNDLE_IMAGES, REGISTRY, PublishedImage, write_release_digests
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest
 
 REPO = Path(__file__).resolve().parents[2]
-_GROUPS = {"infra": tuple(image for image in PUBLISHED_IMAGES if image not in AGENT_IMAGES), "agents": AGENT_IMAGES}
+# "agents" is the shipped bundles' images, the agents' and an example env's, which install the protocol a release
+# publishes.
+_GROUPS = {"infra": tuple(image for image in PUBLISHED_IMAGES if image not in BUNDLE_IMAGES), "agents": BUNDLE_IMAGES}
 
 
 def main() -> int:

@@ -26,7 +26,7 @@ SHIPPED = sorted(_shipped())
 
 
 def test_agentenv_framework_ships_its_bundles():
-    assert SHIPPED == ["agents", "echo-mcp", "hello", "mail-mcp"]
+    assert SHIPPED == ["agents", "drivers", "echo-mcp", "hello", "mail-mcp"]
 
 
 @pytest.mark.parametrize("name", SHIPPED)
@@ -50,12 +50,12 @@ def test_the_shipped_aliases_are_agent_envs_alone_and_claude_code_names_the_defa
 
 
 
-def test_the_shipped_env_alias_names_the_mail_mcp_examples_env_which_the_validator_deploys():
+def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_and_the_reference_driver():
     table = installed_aliases(tuple(_shipped().values()), ENV_ALIASES)
 
     assert table.refused == {} and table.refused_claims == {}
     assert {alias: named.target_id for alias, named in table.aliases.items()} == {
-        "mail": "@local/agentenv-framework/mail-mcp/mail"}
+        "mail": "@local/agentenv-framework/mail-mcp/mail", "reference": "@local/agentenv-framework/drivers/reference"}
     assert A2AAgent.VALIDATION_ENV_ID == "mail"
 
 def test_a_task_naming_no_agent_plans_with_the_shipped_default(tmp_path, monkeypatch, local_stores, cli_routing):

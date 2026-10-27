@@ -2,11 +2,11 @@
 folder ``src/<package as a path>/<name>/``.
 
 ``pin`` pins agentenv-framework-protocol, keeping its extras, in each shipped env's and artifact's requirements.txt to
-the version ``packages/agentenv-protocol`` is at, which a release ships them with. An agent's keeps its floor: a pin is
-one of its image's sources, so pinning it would build and publish a new image every release, and with the floor its
-image is built only when its folder changes. Every release job that reads those folders runs it first, so an image's
-tag, its build and the wheel all see the same sources. It uses only the standard library, so the jobs that push images
-can run it.
+the version ``packages/agentenv-protocol`` is at, which a release ships them with. An agent's, and an env's whose image
+a release publishes (``PUBLISHED_ENVS``), keep their floor: a pin is one of an image's sources, so pinning it would
+build and publish a new image every release, and with the floor the image is built only when its folder changes. Every
+release job that reads those folders runs it first, so an image's tag, its build and the wheel all see the same sources.
+It uses only the standard library, so the jobs that push images can run it.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ REPO = Path(__file__).resolve().parents[2]
 BUNDLES = "agent_env.bundles"
 PROTOCOL = "agentenv-framework-protocol"
 _PINNED_KINDS = ("envs", "artifacts")
+# The shipped env folders whose images a release publishes, as agent_env.env.published_images.EXAMPLE_IMAGES lists them.
+PUBLISHED_ENVS = ("src/agent_env/examples/mail-mcp/envs/mail",)
 # A requirement on the protocol, with its extras, and not on a package whose name starts with the protocol's.
 _PROTOCOL_REQUIREMENT = re.compile(rf"^{PROTOCOL}(\[[^\]]*\])?(?![\w.-])")
 
@@ -33,9 +35,11 @@ def bundle_roots(repo: Path = REPO) -> dict[str, Path]:
 
 
 def requirements_files(repo: Path = REPO) -> list[Path]:
-    """Every ``<bundle>/<envs|artifacts>/<name>/requirements.txt`` a shipped bundle holds: those a release pins."""
+    """Every ``<bundle>/<envs|artifacts>/<name>/requirements.txt`` a shipped bundle holds but a ``PUBLISHED_ENVS``
+    folder's: those a release pins."""
+    published = {repo / folder for folder in PUBLISHED_ENVS}
     return sorted(path for root in bundle_roots(repo).values() for kind in _PINNED_KINDS
-                  for path in root.glob(f"{kind}/*/requirements.txt"))
+                  for path in root.glob(f"{kind}/*/requirements.txt") if path.parent not in published)
 
 
 def protocol_version(repo: Path = REPO) -> str:

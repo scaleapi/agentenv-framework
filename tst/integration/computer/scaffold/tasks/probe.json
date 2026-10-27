@@ -1,0 +1,5 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop", "sandbox_type": "local"},
+  {"id": "probe", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_probe",
+   "verifier_id": "probe", "depends_on": ["env"]}
+]

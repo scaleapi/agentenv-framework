@@ -44,11 +44,11 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1361"
+version = "0.9.1363"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
-    { name = "agentenv-framework-protocol" },
+    { name = "agentenv-framework-protocol", extra = ["computer"] },
     { name = "certifi" },
     { name = "click" },
     { name = "cryptography" },
@@ -141,7 +141,7 @@ vercel = [
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
     { name = "agentenv-framework", extras = ["aws", "boxd", "daytona", "gcp", "openenv", "sail", "tensorlake", "tenki", "vercel"], marker = "extra == 'dev'" },
-    { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
+    { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
     { name = "anyio", marker = "extra == 'vercel'", specifier = ">=4,<5" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },
@@ -193,7 +193,7 @@ provides-extras = ["openenv", "aws", "gcp", "sail", "vercel", "tensorlake", "ten
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.376"
+version = "0.1.378"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },
