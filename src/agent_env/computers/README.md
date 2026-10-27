@@ -19,5 +19,9 @@ its services as supervisord programs in `/etc/supervisor/conf.d/`; they inherit 
 session bus and the time zone. A program that needs X runs as `start-desktop with-x <command>`, which waits for X, and
 with `startsecs=0`, so X dying however often never leaves it `FATAL`, as the XFCE session does.
 
+A computer env composes a driver onto it at put: an `envs/<name>/env.toml` of `type = "computer"` names
+`computer = "ubuntu-24.04"` and `driver = "reference"`, and its put builds an image of the two for each arch this
+machine's Docker can build.
+
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

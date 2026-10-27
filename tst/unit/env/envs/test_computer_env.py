@@ -3,8 +3,12 @@ anything is stored; the composer builds each form and arch on this machine's Doc
 whichever env built it, records each result as it finishes, and writes the arches built as the env's computer. Docker
 and the registry are faked."""
 
+import io
 import json
 import logging
+import subprocess
+import tarfile
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -346,3 +350,49 @@ def test_a_base_and_driver_with_no_arch_in_common_and_an_image_that_cant_be_got_
             in str(refused.value))
     assert ("computer: @local/~/kit/ubuntu-24.04's container image 'local/base:1' is in no registry and has no build "
             "context to build it from" in str(refused.value))
+
+
+def test_the_platforms_this_machine_builds_are_read_from_its_builder(monkeypatch):
+    inspected = ("Name:          desktop-linux\nDriver:        docker\nNodes:\nName:             desktop-linux\n"
+                 "Platforms:        linux/arm64, linux/amd64, linux/amd64/v2, linux/riscv64*\nLabels:\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=inspected, returncode=0))
+
+    assert composer._emulated_platforms() == {"linux/arm64", "linux/amd64", "linux/amd64/v2", "linux/riscv64"}
+
+
+@pytest.mark.parametrize("direct_url, expected", [
+    ('{{"url": "file://{folder}", "dir_info": {{"editable": true}}}}', "folder"),
+    (None, None),
+    ('{{"url": "https://files.pythonhosted.org/agentenv_framework_protocol-0.1.381.whl"}}', None),
+], ids=["source", "index", "url"])
+def test_the_protocol_is_composed_from_its_source_only_when_installed_from_one(tmp_path, monkeypatch, direct_url,
+                                                                                expected):
+    (tmp_path / "pyproject.toml").write_text("")
+    text = direct_url.format(folder=tmp_path) if direct_url else None
+    monkeypatch.setattr(composer.importlib.metadata, "distribution",
+                        lambda name: SimpleNamespace(read_text=lambda file: text))
+
+    assert composer._protocol_source() == (tmp_path if expected else None)
+
+
+def test_the_packages_a_build_installed_are_read_from_its_image_without_running_it(monkeypatch):
+    listed = json.dumps([{"name": "mss", "version": "10.2.0"},
+                         {"name": "agentenv-framework-protocol", "version": "0.1.382"}]).encode()
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        info = tarfile.TarInfo("installed.json")
+        info.size = len(listed)
+        tar.addfile(info, io.BytesIO(listed))
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv[:2])
+        if argv[1] == "create":
+            return SimpleNamespace(stdout="c0ffee\n", returncode=0)
+        return SimpleNamespace(stdout=archive.getvalue(), returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert composer._installed("agentenv-computer:abc-arm64", "reference") == {
+        "mss": "10.2.0", "agentenv-framework-protocol": "0.1.382"}
+    assert calls == [["docker", "create"], ["docker", "cp"], ["docker", "rm"]]
