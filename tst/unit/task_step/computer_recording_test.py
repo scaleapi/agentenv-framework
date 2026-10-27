@@ -35,13 +35,15 @@ class _Computer:
         self.env_id, self.environment_card, self.sandbox_type = env_id, _CARD, "local"
         self.store, self.forgets, self.drop_last = store, forgets, drop_last
         self.calls: list[tuple[str, dict]] = []
+        self.started: set[str] = set()
 
     async def invoke(self, uri, method, params=None, **_):
         assert uri == COMPUTER_RECORDING
         self.calls.append((method, params))
         if method == "start":
-            root = params["upload"]["root_path"]
-            self.store.put(f"{root}/rec-1/0000.mp4", b"mp4-0", content_type="video/mp4")
+            if params["request_id"] not in self.started:  # a repeated request_id joins the first recording
+                self.started.add(params["request_id"])
+                self.store.put(f"{params['upload']['root_path']}/rec-1/0000.mp4", b"mp4-0", content_type="video/mp4")
             return {"recording_id": "rec-1", "started_at": "2026-10-27T10:00:00.000Z", "format": "video/mp4"}
         if self.forgets:
             raise RuntimeError("400 invalid_argument: there is no recording 'rec-1' on this computer")
@@ -200,3 +202,57 @@ async def test_a_store_that_cant_sign_for_the_whole_recording_grants_what_it_can
 async def test_recording_an_env_this_run_didnt_deploy_fails_the_start(store):
     context = await _start(env_id="elsewhere").execute(_context(_Computer(store)))
     assert "env 'elsewhere' isn't deployed in this run" in context.metadata[RECORDINGS_KEY]["desk"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_retried_start_joins_the_first_attempts_namespace_and_the_grant_budgets_early_rollovers(store):
+    computer = _Computer(store)
+    context = await _start().execute(_context(computer))
+    first = context.metadata[RECORDINGS_KEY].pop("desk")
+    context = await _start().execute(context)
+    (_, one), (_, two) = computer.calls
+    assert one["request_id"] == two["request_id"] and one["upload"]["root_path"] == two["upload"]["root_path"]
+    assert context.metadata[RECORDINGS_KEY]["desk"]["namespace"] == first["namespace"]
+    assert one["upload"]["max_objects"] == recording_steps.MAX_SEGMENTS
+
+
+@pytest.mark.asyncio
+async def test_a_start_reusing_an_open_recordings_name_is_refused_and_leaves_it_alone(store):
+    computer = _Computer(store)
+    context = await _start().execute(_context(computer))
+    opened = dict(context.metadata[RECORDINGS_KEY]["desk"])
+    context = await _start(env_id="desktop").execute(context)
+    assert context.metadata[RECORDINGS_KEY]["desk"] == opened and len(computer.calls) == 1
+    with pytest.raises(RuntimeError, match="a recording named 'desk' is already open"):
+        await _start(fail_task_on_error=True).execute(context)
+
+
+@pytest.mark.asyncio
+async def test_teardown_goes_on_when_a_forgotten_recordings_namespace_cant_be_listed(store, monkeypatch):
+    context = await _start().execute(_context(_Computer(store, forgets=True)))
+
+    def unlisted(prefix):
+        raise ConnectionError("the object store is down")
+
+    monkeypatch.setattr(store, "list_at", unlisted)
+    await teardown_run(context)
+    entry = context.metadata[RECORDINGS_KEY]["desk"]
+    assert entry["state"] == "failed" and "then ConnectionError: the object store is down" in entry["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_recording_that_cant_be_ended_at_all_is_marked_and_the_rest_still_end(store, monkeypatch):
+    context = _context(_Computer(store), _Computer(store, env_id="other"))
+    context = await _start("a").execute(context)
+    context = await _start("b", env_id="other").execute(context)
+    real = recording_steps.end_recording
+
+    async def broken(context, name, reason):
+        if name == "a":
+            raise RuntimeError("unexpected")
+        await real(context, name, reason)
+
+    monkeypatch.setattr(recording_steps, "end_recording", broken)
+    await recording_steps.end_open_recordings(context, "teardown")
+    recordings = context.metadata[RECORDINGS_KEY]
+    assert (recordings["a"]["state"], recordings["b"]["state"]) == ("failed", "ended")
