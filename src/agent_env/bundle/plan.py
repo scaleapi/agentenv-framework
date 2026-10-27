@@ -1056,8 +1056,8 @@ class _Planner:
         return tuple(writes)
 
     def _published(self, writes: Sequence[Write]) -> dict[str, Publication]:
-        """The published image of each image in ``writes`` built from the sources of a shipped bundle image, an agent's
-        or an example env's, by id."""
+        """The published image of each image in ``writes`` built from the sources of a shipped bundle image, an agent's,
+        an example env's or a base computer's, by id."""
         published = {}
         for write in writes:
             image = write.source

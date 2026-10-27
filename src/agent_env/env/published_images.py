@@ -71,7 +71,8 @@ def published_digest(image: PublishedImage) -> str | None:
 
 
 def published_bundle_image(sources: str) -> tuple[str, str] | None:
-    """The ref and digest of the image published for a shipped bundle's image (an agent's or an example env's) whose
+    """The ref and digest of the image published for a shipped bundle's image (an agent's, an example env's or a base
+    computer's) whose
     installed build context has the source digest ``sources`` (``BuildContext.source_digest(None)``), or None when no
     shipped image has those sources or the registry doesn't serve it anonymously, as a sandbox pulls it: a new package
     stays private until a package admin makes it public, and a sandbox running an image by name can't build it
