@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from agent_env.config.describe import is_secret_key
-from agent_env.config.loader import SECRET_REF_PREFIX
+from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
 
 # The fields that map environment variable names to values, where a credential is most often set.
 _ENV_VAR_MAPS = ("env_vars", "default_env_vars")
@@ -62,23 +62,29 @@ def _masked(text: str) -> tuple[str, list[str]]:
 
 
 def credentials_in(value: Any, path: str = "") -> list[tuple[str, str]]:
-    """Each credential ``value`` holds written out, by its path, and what it is: an env var whose name looks like a
-    secret's, set to anything but a ``secret:`` reference, and any value holding a credential ``scrub`` masks."""
+    """Each secret ``value`` holds that a store would keep as written, by its path, and why: an env var whose name looks
+    like a secret's set to anything, any value holding a credential ``scrub`` masks, and an env var set to an ``env:``
+    or ``secret:`` reference, which nothing resolves in a step's env vars, so the run would get the reference itself."""
     found = []
     items = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
     for key, item in items:
         at = f"{path}.{key}" if path and isinstance(key, str) else f"{path}[{key}]" if isinstance(key, int) else key
         if isinstance(value, dict) and key in _ENV_VAR_MAPS and isinstance(item, dict):
             for name, setting in item.items():
-                if not isinstance(setting, str) or not setting or setting.startswith(SECRET_REF_PREFIX):
+                if not isinstance(setting, str) or not setting:
                     continue
-                if is_secret_key(name):
-                    found.append((f"{at}.{name}", "its name looks like a secret's, and it's set"))
+                if setting.startswith((ENV_REF_PREFIX, SECRET_REF_PREFIX)):
+                    found.append((f"{at}.{name}", "it's a reference, and nothing resolves one in a step's env vars, so "
+                                                  "the run would get the reference itself"))
+                elif is_secret_key(name):
+                    found.append((f"{at}.{name}", "its name looks like a secret's and it's set, which a shared store "
+                                                  "shows to anyone who reads it"))
                 elif kinds := _masked(setting)[1]:
-                    found.append((f"{at}.{name}", f"it holds {kinds[0]}"))
+                    found.append((f"{at}.{name}", f"it holds {kinds[0]}, which a shared store shows to anyone who "
+                                                  "reads it"))
         elif isinstance(item, str):
             if kinds := _masked(item)[1]:
-                found.append((at, f"it holds {', '.join(kinds)}"))
+                found.append((at, f"it holds {', '.join(kinds)}, which a shared store shows to anyone who reads it"))
         else:
             found += credentials_in(item, at)
     return found
