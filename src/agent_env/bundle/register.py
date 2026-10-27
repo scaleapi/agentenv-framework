@@ -292,20 +292,28 @@ class RegistrationLedger(Ledger):
 
     def unowned(self, write: Write, stored: int | None) -> str | None:
         """Why this bundle may not write ``write``'s id, which the store holds at ``stored``, or None when it may: the
-        store doesn't hold it, ``adopt`` names it, this bundle registered its latest version, or an interrupted
-        registration of this bundle wrote it."""
+        store doesn't hold it, ``adopt`` names it, an interrupted registration of this bundle wrote its latest version,
+        or that's the version this bundle last registered. One the store has written anew since is refused, so no one
+        else's version is written over unseen."""
         if stored is None or write.id in self.adopted_ids:
-            return None
-        row = self._latest(write.kind.store, write.id)
-        if row is not None and row.get("bundle") == self._bundle(write):
             return None
         pending = self._find(self.collection, Filter.of(store=write.kind.store, id=write.id, bundle=self._bundle(write),
                                                         status="pending"))
         if pending is not None and pending.get("version") == stored:
             return None
+        where = self._plan.path(write.source.entry)
+        row = self._latest(write.kind.store, write.id)
+        if row is not None and row.get("bundle") == self._bundle(write):
+            return None if row.get("version") == stored else self._moved(where, write.id, stored, row["version"],
+                                                                        "this bundle last registered")
         by = f"registered from {row['bundle']}" if row is not None else "not registered from a bundle"
-        return (f"{self._plan.path(write.source.entry)}: {write.id!r} is in the store already, at v{stored}, {by}; pass "
-                f"--adopt {write.id} to write a new version of it, or --prefix to register this bundle under other ids")
+        return (f"{where}: {write.id!r} is in the store already, at v{stored}, {by}; pass --adopt {write.id} to write a "
+                "new version of it, or --prefix to register this bundle under other ids")
+
+    @staticmethod
+    def _moved(where: str, entity_id: str, stored: int, own: int, whose: str) -> str:
+        return (f"{where}: {entity_id!r} is at v{stored} in the store, newer than the v{own} {whose}; pass --adopt "
+                f"{entity_id} to write over it")
 
     def stored_version(self, write: Write) -> int | None:
         return self._stored_version(write)
