@@ -1,15 +1,15 @@
 """Wire types for the v1 data-plane protocol."""
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from .transfers import RelativePath
 
 
-def error_body(code: str, message: str) -> dict:
-    return {"ok": False, "error": {"code": code, "message": message}}
+def error_body(code: str, message: str, **fields: Any) -> dict:
+    return {"ok": False, "error": {"code": code, "message": message, **fields}}
 
 
 PROTOCOL_VERSION = "1.0"

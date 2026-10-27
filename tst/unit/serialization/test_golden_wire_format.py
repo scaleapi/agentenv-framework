@@ -37,6 +37,7 @@ from agent_env.artifact.artifacts.environment_universe import EnvironmentUnivers
 from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.registry import get_artifact_registry
+from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.envs.gateway_server import GatewayEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
@@ -142,6 +143,18 @@ ARTIFACT_FIXTURES = {
 }
 
 ENV_FIXTURES = {
+    "computer_driver": lambda: ComputerDriverEnv(
+        id="reference-driver",
+        version=4,
+        module="driver.py:ReferenceDriver",
+        files=ARTIFACT_FIXTURES["file_artifact_universe"](),
+        declaration={"name": "reference", "supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}],
+                     "platforms": [{"platform": {"os": "linux", "arch": "amd64", "display": "x11"},
+                                    "provides": ["urn:agentenv:computer/v1", "urn:agentenv:computer-ready/v1"],
+                                    "tools": ["computer_screenshot", "computer_click"],
+                                    "features": {"buttons": ["left"], "max_click_count": 1}}]},
+        metadata={"owner": "example-team"},
+    ),
     "gateway_server": lambda: GatewayEnv(
         id="gateway-env",
         version=11,

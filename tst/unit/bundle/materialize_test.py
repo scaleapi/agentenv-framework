@@ -37,7 +37,7 @@ from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker.context import BuildContext
-from agent_env.env.published_images import AGENT_IMAGES
+from agent_env.env.published_images import AGENT_IMAGES, EXAMPLE_IMAGES
 from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_builds, local_store, plan_of, shipped_agent
 
 ROOT = "@local/~/triage"
@@ -489,6 +489,24 @@ def test_an_agent_image_from_a_shipped_agents_sources_is_registered_as_its_publi
     assert written.buildable and not written.context_only and written.tar_gz_object_url is None
     assert builds == []
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.image_digest == DIGEST
+
+
+def test_an_env_image_from_the_mail_examples_sources_is_registered_as_its_published_image_and_not_built(
+        bundle_dir, builds, monkeypatch):
+    """The env `a2a-agent validate` deploys: a remote sandbox pulls it rather than building it."""
+    mail = EXAMPLE_IMAGES[0]
+    shutil.copytree(mail.dockerfile.parent, bundle_dir / "envs" / "inbox", ignore=shutil.ignore_patterns("__pycache__"))
+    _steps(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "inbox"}])
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest",
+                        lambda asked: DIGEST if asked == mail.ref() else None)
+    plan = plan_of(bundle_dir)
+
+    materialize(plan, build_here=local_builds(plan))
+
+    written = DockerImageArtifact.get(f"{ROOT}/inbox__env_image", 1)
+    assert [(found.ref, found.digest) for found in plan.published.values()] == [(mail.ref(), DIGEST)]
+    assert (written.image_name, written.image_digest) == (mail.ref(), DIGEST) and not written.context_only
+    assert builds == []
 
 
 def test_an_agent_image_whose_sources_change_after_planning_isnt_registered_as_the_published_one(

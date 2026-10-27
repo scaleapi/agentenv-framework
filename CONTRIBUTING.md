@@ -100,8 +100,9 @@ version (an upgrade, such as postgres 16 to 18, is made by hand), so a base's fi
 image: a bump changes the sources, and the next release builds it again.
 Installs pull them instead of building the infra images: a run on local stores registers a kind's images when GHCR has
 every one for the sources installed, by the digest the wheel records or, with no record, the one GHCR serves, and
-builds them otherwise; a sandbox that can't pull one builds it from its build context. A run that deploys the Claude
-Code agent registers its published image the same way, in place of its folder's build context. The wheel and the release notes
+builds them otherwise; a sandbox that can't pull one builds it from its build context. A run that deploys a shipped
+agent, or the `mail-mcp` example's env, registers its published image the same way, in place of its folder's build
+context. The wheel and the release notes
 record each image's digest. A failed image job keeps `agentenv-framework` off PyPI. Maintainers can publish the images
 alone by running the workflow by hand on `main`. GHCR keeps a new package private until a package admin makes it
 public, and the workflow warns about each one until then.

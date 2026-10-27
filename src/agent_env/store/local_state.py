@@ -13,8 +13,11 @@ from agent_env.config.paths import state_root
 
 try:
     import fcntl
+    import resource
 except ImportError:  # Windows: writers of one id aren't serialized
-    fcntl = None
+    fcntl = resource = None
+
+_OTHER_FILES = 256
 
 
 def ensure_state_dir(path: Path) -> None:
@@ -46,9 +49,11 @@ def holding_locks(ids: Iterable[str], on_wait: Callable[[], None] | None = None)
         yield
         return
     ensure_state_dir(state_root() / "locks")
+    paths = sorted({_lock_path(id) for id in ids})
+    _allow_open(len(paths))
     fds, waited = [], False
     try:
-        for path in sorted({_lock_path(id) for id in ids}):
+        for path in paths:
             fds.append(os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600))
             try:
                 fcntl.flock(fds[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -61,6 +66,16 @@ def holding_locks(ids: Iterable[str], on_wait: Callable[[], None] | None = None)
     finally:
         for fd in fds:
             os.close(fd)
+
+
+def _allow_open(locks: int) -> None:
+    """Each lock holds a file open, so more locks than the soft limit on open files allows (1024 on Linux, 256 on
+    macOS) raise it toward the hard limit, as Go's runtime does, leaving room for the process's other files."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = locks + _OTHER_FILES
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        raised = wanted if hard == resource.RLIM_INFINITY else min(wanted, hard)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (raised, hard))
 
 
 def _lock_path(id: str) -> Path:

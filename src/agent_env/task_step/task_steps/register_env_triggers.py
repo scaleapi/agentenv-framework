@@ -17,6 +17,7 @@ from agent_env.env.gateway.constants import (
     TRIGGER_EXECUTOR_HOURS,
     TRIGGER_EXECUTOR_HOURS_TIME_ZONE,
     TRIGGER_NAMED_EXECUTORS,
+    TRIGGER_NOTIFY_AGENT,
     TRIGGER_PROVOKING_ROLES,
     TRIGGER_UNLESS,
     TRIGGER_WEBSITE,
@@ -151,7 +152,9 @@ class RegisterEnvTriggersStep(TaskStep):
                 TRIGGER_UNLESS: _when_has(self.triggers, "unless"),
                 TRIGGER_WEBSITE: any(isinstance(t.get("when"), dict) and t["when"].get("type") == "website"
                                      for t in self.triggers),
-                TRIGGER_EXECUTOR_HOURS_TIME_ZONE: _hours_in_a_time_zone(self.executor_hours)}
+                TRIGGER_EXECUTOR_HOURS_TIME_ZONE: _hours_in_a_time_zone(self.executor_hours),
+                TRIGGER_NOTIFY_AGENT: any(a.get("type") == "notify_agent" for t in self.triggers
+                                          for a in t.get("actions") or [] if isinstance(a, dict))}
         missing = [feature for feature, needed in used.items() if needed and feature not in _trigger_features(deployed)]
         if missing:
             raise RuntimeError(

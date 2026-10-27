@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from agent_env.env import bootstrap
-from agent_env.env.published_images import AGENT_IMAGES, release_digests
+from agent_env.env.published_images import BUNDLE_IMAGES, release_digests
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError
 from tst.util.scripts import load_script
 
@@ -51,18 +51,19 @@ def test_plan_lists_every_image_with_its_checkout_paths_and_tag(script, monkeypa
 
 
 def test_plan_only_lists_the_infra_images_or_the_agents_images(script, monkeypatch, capsys):
-    """The release builds the infra images before it publishes the protocol, and the agents', which install it, after."""
+    """The release builds the infra images before it publishes the protocol, and the bundles', which install it,
+    after."""
     planned = {}
     for only in ("infra", "agents"):
         assert _run(script, monkeypatch, "plan", "--only", only) == 0
         planned[only] = [entry["name"] for entry in json.loads(capsys.readouterr().out)]
 
-    agents = [image.name for image in AGENT_IMAGES]
-    assert planned == {"infra": [image.name for image in bootstrap.PUBLISHED_IMAGES if image.name not in agents],
-                       "agents": agents}
-    assert "agentenv-gateway" in planned["infra"] and agents == [
+    bundles = [image.name for image in BUNDLE_IMAGES]
+    assert planned == {"infra": [image.name for image in bootstrap.PUBLISHED_IMAGES if image.name not in bundles],
+                       "agents": bundles}
+    assert "agentenv-gateway" in planned["infra"] and bundles == [
         "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-opencode", "agentenv-openhands",
-        "agentenv-pi", "agentenv-proxy"]
+        "agentenv-pi", "agentenv-proxy", "agentenv-mail-mcp"]
 
 
 def test_plan_missing_lists_the_images_the_registry_lacks_or_refuses_to_show(script, monkeypatch, capsys):

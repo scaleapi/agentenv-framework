@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from agent_env.env import bootstrap
-from agent_env.env.published_images import AGENT_IMAGES, RELEASE_FILE
+from agent_env.env.published_images import BUNDLE_IMAGES, RELEASE_FILE
 from tst.util.scripts import load_script
 
 REPO = Path(__file__).resolve().parents[2]
@@ -135,7 +135,7 @@ def test_the_pin_changes_no_published_images_sources():
     assert pinned
     assert not [(image.name, path) for image in bootstrap.PUBLISHED_IMAGES for path in pinned
                 if path.is_relative_to(image.dockerfile.parent)]
-    assert AGENT_IMAGES and all(image in bootstrap.PUBLISHED_IMAGES for image in AGENT_IMAGES)
+    assert BUNDLE_IMAGES and all(image in bootstrap.PUBLISHED_IMAGES for image in BUNDLE_IMAGES)
 
 
 def test_the_github_release_is_created_whenever_the_framework_is_published():

@@ -56,6 +56,14 @@ def test_an_agent_named_by_the_seed_is_the_one_played_from_outside():
         "deploy_env", "load_artifact", "episode_agent", "prompt_agent", "env_outcome_verifier"]
 
 
+def test_each_turns_prompt_is_read_seeded_before_anything_runs():
+    again = {**PLAY, "id": "replan", "prompt_id": "replan", "prompt": "Replan <port>.", "system_prompt": "Berths only.",
+             "depends_on": ["play"]}
+
+    assert EpisodeSpec.from_task(_portsim(again), seed=SEED).prompts == (
+        ("Plan week 3.", "You plan Valencia."), ("Replan Valencia.", "Berths only."))
+
+
 def test_a_task_prompting_several_agents_needs_the_ones_to_play_named():
     task = _portsim(BOB, ASK_BOB)
 

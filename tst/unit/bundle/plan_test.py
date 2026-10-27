@@ -194,6 +194,19 @@ def test_a_bundle_with_nothing_to_run_is_refused(make):
     assert caught.value.problems == ("this bundle has no tasks or evals to run",)
 
 
+def test_a_bundle_that_gives_aliases_and_has_nothing_to_run_passes_the_checks_as_a_library(tmp_path):
+    root = tmp_path / "library"
+    (root / "envs/mail").mkdir(parents=True)
+    (root / "envs/mail/Dockerfile").write_text("FROM scratch\n")
+    (root / "envs/mail/server.py").write_text('from agentenv_protocol import environment_card\n\n\n'
+                                              '@environment_card(name="mail")\nclass Server:\n    pass\n')
+    (root / "aliases.toml").write_text('[envs]\nmail = ["mail"]\n')
+    resolved = resolve_bundle(parse_bundle(root))
+
+    check_bundle(resolved)
+    assert problems(resolved) == ("this bundle has no tasks or evals to run",)
+
+
 # Order
 
 

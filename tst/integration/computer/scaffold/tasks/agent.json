@@ -1,0 +1,8 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop", "sandbox_type": "local"},
+  {"id": "agent", "type": "deploy_agent", "a2a_agent_id": "claude-code", "env_ids": ["desktop"], "sandbox_type": "local"},
+  {"id": "task", "type": "prompt_agent", "prompt_id": "task", "depends_on": ["env", "agent"],
+   "prompt": "You have a computer with a graphical desktop, which you use through the computer_* tools: take a screenshot to see it, then click, type, scroll and press keys. A window called Fixture Desk is open. In it: type the name Ada Lovelace into the Name field, tick the Subscribe checkbox, select Item 37 in the list on the left (scroll the list to find it), click the cell in the fourth row and fifth column of the white grid of squares, and finally click Save. Take a screenshot after each step to check it worked. Use only the computer_* tools, and reply DONE when everything is in place."},
+  {"id": "check", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_desk",
+   "verifier_id": "desk", "depends_on": ["task"]}
+]

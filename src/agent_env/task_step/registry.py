@@ -42,6 +42,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
     from agent_env.task_step.task_steps.register_agent_triggers import RegisterAgentTriggersStep
     from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
+    from agent_env.task_step.task_steps.configure_wakeups import ConfigureWakeupsTaskStep
     from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
     from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
     from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
@@ -94,6 +95,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(RegisterEnvTriggersStep): RegisterEnvTriggersStep,
         _get_type(RegisterAgentTriggersStep): RegisterAgentTriggersStep,
         _get_type(SyncEnvClockTaskStep): SyncEnvClockTaskStep,
+        _get_type(ConfigureWakeupsTaskStep): ConfigureWakeupsTaskStep,
         _get_type(InstallAgentTaskStep): InstallAgentTaskStep,
         _get_type(RubricsVerifierTaskStep): RubricsVerifierTaskStep,
         _get_type(RunContainerUnitTestsVerifierTaskStep): RunContainerUnitTestsVerifierTaskStep,
