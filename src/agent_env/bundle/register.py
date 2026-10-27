@@ -40,7 +40,7 @@ from agent_env.store.routing import configured_store, namespace_routing
 from agent_env.task_step.registry import get_task_step_registry
 
 from ._import_report import written_files
-from ._imported import Imported, as_imported, grafted, read_imported, source_of
+from ._imported import Imported, as_imported, grafted, read_imported, source_of, where
 from ._secrets import credentials_in
 from .installed import installed_bundles
 from .ledger import Check, Ledger
@@ -97,14 +97,15 @@ def register_bundle(
         bundle, grafts = grafted(bundle, imported) if imported is not None else (bundle, {})
         resolved = resolve_bundle(bundle)
         plan = _plan(resolved, tasks, evals)
-        ids, problems = registry_ids(plan, _prefix(bundle, prefix), imported)
+        held = _held_as_imported(plan, imported)
+        ids, problems = registry_ids(plan, _prefix(bundle, prefix), imported, held)
         if problems:
             raise BundleError(problems)
         registered = translated(plan, ids)
         target = configured_store(get_config().get_document_store())
         shared = shared_store(target)
         identity, commit, dirty = bundle_identity(bundle.root)
-        sources, kept = _sources(plan, ids, imported)
+        sources, kept = _sources(plan, ids, imported, held)
         ledger = RegistrationLedger(target, registered, identity, commit, dirty, frozenset(adopt), sources, kept)
         problems = [*_unowned(registered, ledger), *_unregistrable(registered, shared, grafts)]
         if problems:
@@ -152,7 +153,8 @@ def _prefix(bundle: Bundle, prefix: str | None) -> str:
     return f"{name}-"
 
 
-def registry_ids(plan: Plan, prefix: str, imported: Imported | None = None) -> tuple[dict[str, str], list[str]]:
+def registry_ids(plan: Plan, prefix: str, imported: Imported | None = None,
+                 held: frozenset[str] = frozenset()) -> tuple[dict[str, str], list[str]]:
     """The registry id each ``@local`` id the plan writes takes, and each problem giving them.
 
     What ``imported`` records the folder was imported from takes the id it had there, and an imported task's outputs
@@ -167,7 +169,10 @@ def registry_ids(plan: Plan, prefix: str, imported: Imported | None = None) -> t
     for write in plan.writes:
         entry = write.source.entry
         if imported is not None and (source := source_of(imported, plan, write)) is not None:
-            ids[write.id] = source[0]
+            if ids.setdefault(write.id, source[0]) != source[0]:
+                problems.append(f"{plan.path(entry)}: shares its name with what's registered as {ids[write.id]!r}, "
+                                f"so it can't keep the id it was imported as, {source[0]!r}; rename one")
+                continue
             imported_tasks.update([entry.id] if write.kind is BundleKind.TASK else [])
             continue
         if entry.id in ids or (isinstance(write.source, BundleImage) and write.id != entry.id):
@@ -206,9 +211,17 @@ def registry_ids(plan: Plan, prefix: str, imported: Imported | None = None) -> t
             by_target.setdefault((store, registry_id), []).append(local)
         if registry_id not in kept and not _REGISTRY_ID.fullmatch(registry_id.replace("__", "_")):
             problems.append(f"{registry_id!r}: isn't an id a registry takes; rename what it's made from")
+    copies = {write.id: (write, source_of(imported, plan, write)) for write in plan.writes} if imported else {}
     for (_, registry_id), locals_ in by_target.items():
-        if len(locals_) > 1:
+        if len(locals_) < 2:
+            continue
+        found = [copies.get(local, (None, None)) for local in locals_]
+        if None in {source for _, source in found} or len({source for _, source in found}) > 1:
             problems.append(f"{', '.join(sorted(locals_))} would all be registered as {registry_id!r}; rename one")
+        elif edited := sorted(plan.path(write.source.entry) for write, _ in found if write.id not in held):
+            problems.append(f"{', '.join(sorted(plan.path(write.source.entry) for write, _ in found))} hold copies of "
+                            f"{registry_id!r} as imported, and {', '.join(edited)} changed it; a registration writes "
+                            "each id once, so undo the change")
     return ids, problems
 
 
@@ -216,25 +229,34 @@ def _given(ids: Mapping[str, str], imported_tasks: set[str], plan: Plan, importe
     """The ``@local`` ids in ``ids`` whose registry ids the rules made, not ``imported``'s record: what isn't an
     imported write, an imported task's output, or derived from either."""
     taken = {write.id for write in plan.writes if source_of(imported, plan, write) is not None}
-    taken |= {local for local in ids if local.rpartition("/")[0] in imported_tasks}
+    taken |= {local for local in ids if any(local.startswith(f"{task}/") for task in imported_tasks)}
     return {local for local in ids
             if local not in taken and not any(local.startswith(f"{base}__") for base in taken)}
 
 
-def _sources(plan: Plan, ids: Mapping[str, str],
-             imported: Imported | None) -> tuple[dict[tuple[str, str], int], set[tuple[str, str]]]:
+def _held_as_imported(plan: Plan, imported: Imported | None) -> frozenset[str]:
+    """The ``@local`` id of each write of ``plan`` that the folder holds as ``imported`` records the import wrote it."""
+    if imported is None:
+        return frozenset()
+    writes = [write for write in plan.writes if source_of(imported, plan, write) is not None]
+    root = plan.bundle.bundle.root
+    now = written_files(root, {where(root, write.source.entry) for write in writes})
+    return frozenset(write.id for write in writes if as_imported(imported, plan, write, now))
+
+
+def _sources(plan: Plan, ids: Mapping[str, str], imported: Imported | None,
+             held: frozenset[str]) -> tuple[dict[tuple[str, str], int], set[tuple[str, str]]]:
     """For each write of ``plan``, under its ``@local`` ids, that the folder was imported from, by (store, registry id),
-    the version it was imported at; and which of them the folder still holds as the import wrote it."""
+    the version it was imported at; and which of them the folder still holds as the import wrote it (``held``)."""
     if imported is None:
         return {}, set()
-    now = written_files(plan.bundle.bundle.root)
     sources, kept = {}, set()
     for write in plan.writes:
         if (source := source_of(imported, plan, write)) is None:
             continue
         key = (write.kind.store, ids.get(write.id, write.id))
         sources[key] = source[1]
-        if as_imported(imported, plan, write, now):
+        if write.id in held:
             kept.add(key)
     return sources, kept
 

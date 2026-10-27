@@ -7,13 +7,16 @@ import hashlib
 import json
 import posixpath
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version as package_version
 from pathlib import Path
 
 from agent_env.bundle._fs import file_sha256
+from agent_env.bundle._secrets import scrub
 from agent_env.config import get_config
+from agent_env.config.loader import SECRET_REF_PREFIX, interpolate
 from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL
 from agent_env.entity.refs import EntityKind
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
@@ -185,18 +188,21 @@ def provenance(source: dict, imported: BundleImport, root: Path) -> str:
 
 
 def store_fingerprint() -> str:
-    """A hash of the configured document store's section, which tells one store from another without naming where
-    either is."""
-    section = get_config().trace_section("document").value
+    """A hash of the configured document store's section, with its ``env:`` references resolved and any credential
+    in it masked, which tells one store from another without naming where either is."""
+    section = interpolate(get_config().trace_section("document").value,
+                          secret_resolver=lambda key: SECRET_REF_PREFIX + key)
+    scrub(section)
     text = json.dumps(section, sort_keys=True, separators=(",", ":"), default=str)
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
 
-def written_files(root: Path) -> dict[str, str]:
-    """Each file under ``root`` but its README and provenance, by its path in NFC, as its content hash, ``+x`` after it
-    when it's executable."""
+def written_files(root: Path, within: Iterable[str] | None = None) -> dict[str, str]:
+    """Each file under ``root``, or under its paths ``within``, but its README and provenance, by its path in NFC, as its
+    content hash, ``+x`` after it when it's executable."""
+    tops = [root] if within is None else [root / part for part in within]
     files = {}
-    for path in sorted(root.rglob("*")):
+    for path in sorted({path for top in tops for path in ([top] if top.is_file() else top.rglob("*"))}):
         relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
         if path.is_file() and relative not in ("README.md", PROVENANCE):
             files[relative] = file_sha256(path) + ("+x" if path.stat().st_mode & 0o111 else "")

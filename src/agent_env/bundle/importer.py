@@ -163,6 +163,7 @@ class _Importer:
         self.progress = progress or (lambda message: None)
         self.files: dict[str, str] = {}
         self.taken: dict[str, set[str]] = {kind.value: set() for kind in BundleKind}  # folded names, per folder
+        self.named: dict[str, str] = {}  # each folded name, and the id it was taken for
         self.tasks: list[ImportedTask] = []
         self.eval: ImportedEval | None = None
         self.written: list[Written] = []
@@ -417,6 +418,7 @@ class _Importer:
                 raise Unwritable(f"a skill's folder takes its skill's name, {name!r}, which another artifact in the "
                                  "folder already has")
             self.taken[BundleKind.ARTIFACT.value].add(fold(name))
+            self.named.setdefault(fold(name), entity.id)
             return BundleKind.SKILL, name
         bundle_kind = _FOLDERS[kind]
         return bundle_kind, self._name(bundle_kind.value, entity.id)
@@ -500,14 +502,17 @@ class _Importer:
                                           "default"))
 
     def _name(self, kind: str, entity_id: str) -> str:
-        """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly."""
+        """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly, or when
+        another kind's folder holds it for another id, since entries of every kind that share a name share a local id,
+        and registering the folder gives each the id it was imported from."""
         names = _names_of(BundleKind(kind))
         base = _valid_name(entity_id.rsplit("/", 1)[-1]) or kind.removesuffix("s")
         name, n = base, 1
-        while fold(name) in self.taken[names]:
+        while fold(name) in self.taken[names] or self.named.get(fold(name), entity_id) != entity_id:
             n += 1
             name = f"{base}-{n}"
         self.taken[names].add(fold(name))
+        self.named[fold(name)] = entity_id
         return name
 
 

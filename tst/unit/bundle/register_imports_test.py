@@ -9,17 +9,23 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.bundle import BundleError
+from agent_env.bundle import _import_report as import_report_module
 from agent_env.bundle import _imported as imported_module
 from agent_env.bundle import materialize as materialize_module
 from agent_env.bundle import register as register_module
+from agent_env.bundle._imported import Imported, source_of
 from agent_env.bundle.importer import import_task
+from agent_env.bundle.installed import InstalledBundle
+from agent_env.bundle.parse import parse_bundle
+from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.register import REGISTRATIONS, register_bundle
-from agent_env.bundle.resolve import build_step
+from agent_env.bundle.resolve import build_step, resolve_bundle
 from agent_env.config import get_config
+from agent_env.entity.scopes import FieldScope
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.store import Filter
 from agent_env.task import Task
-from tst.unit.bundle._support import DIGEST, context_image
+from tst.unit.bundle._support import DIGEST, context_image, layout
 
 STEPS = [
     {"id": "env", "type": "deploy_env", "env_id": "crm-env"},
@@ -157,3 +163,155 @@ def test_an_imported_task_with_an_output_keeps_the_output_s_name(local_stores, t
 
     assert Task.get("cli", 2).to_dict()["steps"][1]["cli_artifact_id"] == "crm-cli"
     assert _written(registered)["cli"] == (2, False)
+
+
+def _pushed(monkeypatch):
+    monkeypatch.setattr(materialize_module, "push_context_image",
+                        lambda entity_id, context, dockerfile, before=None: (f"registry.example.com/{entity_id}:x",
+                                                                             DIGEST))
+
+
+@pytest.fixture
+def imported_with_user(local_stores, tmp_path, monkeypatch):
+    """The store's task triage imported with its user-scoped fields: the agent solver written into the folder and named
+    there, and the secret env var dropped."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=context_image(tmp_path, "crm-image"), environment_name="crm")
+    A2AAgent.put(id="solver", docker_image_artifact=context_image(tmp_path, "solver-image"))
+    (tmp_path / "crm.json").write_text("{}")
+    FileArtifact.put("crm-data", description="crm seed", file_path=str(tmp_path / "crm.json"))
+    Task.put(id="triage", steps=[build_step(dict(step)) for step in STEPS])
+    return import_task("triage", tmp_path / "triage", include_scopes={FieldScope.USER}).root
+
+
+def test_a_folder_imported_with_its_user_fields_registers_as_imported(imported_with_user):
+    step = json.loads((imported_with_user / "tasks/triage.json").read_text())[2]
+    assert (step["a2a_agent_id"], step.get("a2a_agent_version"), step["env_vars"]) == ("solver", None, {"MODE": "fast"})
+
+    registered = register_bundle(imported_with_user)
+
+    assert all(reused for _, reused in _written(registered).values())
+
+
+def test_an_edit_keeps_the_env_vars_the_import_dropped_and_they_are_no_credential_written_out(imported_with_user,
+                                                                                            monkeypatch):
+    monkeypatch.setattr(register_module, "shared_store", lambda store: True)
+    (imported_with_user / "artifacts/crm-data/crm.json").write_text('{"edited": true}')
+
+    registered = register_bundle(imported_with_user)
+
+    assert _written(registered)["triage"] == (2, False)
+    assert Task.get("triage", 2).to_dict()["steps"][2]["env_vars"] == {"API_KEY": "abc", "MODE": "fast"}
+
+
+def test_an_imported_skill_takes_back_the_source_the_import_left_out(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    notes = {"name": "notes", "description": "how notes are kept", "object_url": "s3://their-bucket/skills/notes/"}
+    Task.put(id="skilled", steps=[build_step({"id": "skills", "type": "add_skills", "agent_name": "default-agent",
+                                              "skills": [notes]})])
+    folder = import_task("skilled", tmp_path / "skilled").root
+    task_file = folder / "tasks/skilled.json"
+    task_file.write_text(task_file.read_text().replace("how notes are kept", "how notes are filed"))
+
+    registered = register_bundle(folder)
+
+    assert _written(registered)["skilled"] == (2, False)
+    skill = Task.get("skilled", 2).to_dict()["steps"][0]["skills"][0]
+    assert (skill["description"], skill["object_url"]) == ("how notes are filed", notes["object_url"])
+
+
+def test_envs_sharing_one_stored_image_register_as_imported_and_an_edit_to_one_copy_is_refused(local_stores, tmp_path,
+                                                                                              monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    image = context_image(tmp_path, "shared-image")
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=image, environment_name="crm")
+    MCPServerEnv.put(id="mail-env", docker_image_artifact=image, environment_name="mail")
+    Task.put(id="pair", steps=[build_step({"id": "crm", "type": "deploy_env", "env_id": "crm-env"}),
+                               build_step({"id": "mail", "type": "deploy_env", "env_id": "mail-env"})])
+    folder = import_task("pair", tmp_path / "pair").root
+
+    kept = register_bundle(folder)
+    dockerfile = folder / "envs/mail-env/Dockerfile"
+    dockerfile.write_text(dockerfile.read_text() + "ENV EDITED=1\n")
+    with pytest.raises(BundleError) as refused:
+        register_bundle(folder)
+
+    assert all(reused for _, reused in _written(kept).values())
+    assert refused.value.problems == ("envs/crm-env, envs/mail-env hold copies of 'shared-image' as imported, and "
+                                      "envs/mail-env changed it; a registration writes each id once, so undo the change",)
+
+
+def test_an_image_whose_toml_names_another_dockerfile_is_pushed(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _pushed(monkeypatch)
+    files = {"Dockerfile": "FROM python:3.12-slim\nCOPY . /app\n", "app.py": "print(1)\n",
+             "Dockerfile.slim": "FROM python:3.12-alpine\nCOPY . /app\n"}
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=context_image(tmp_path, "crm-image", files),
+                     environment_name="crm")
+    Task.put(id="one", steps=[build_step({"id": "env", "type": "deploy_env", "env_id": "crm-env"})])
+    folder = import_task("one", tmp_path / "one").root
+    toml = folder / "envs/crm-env/env.toml"
+    assert 'dockerfile = "Dockerfile"' in toml.read_text()
+    toml.write_text(toml.read_text().replace('dockerfile = "Dockerfile"', 'dockerfile = "Dockerfile.slim"'))
+
+    registered = register_bundle(folder)
+
+    assert _written(registered)["crm-image"] == (2, False)
+
+
+def test_an_imported_task_and_an_env_of_one_name_but_two_ids_keep_their_own(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    MCPServerEnv.put(id="crm", docker_image_artifact=context_image(tmp_path, "crm-image"), environment_name="crm")
+    Task.put(id="ops/crm", steps=[build_step({"id": "env", "type": "deploy_env", "env_id": "crm"})])
+    folder = import_task("ops/crm", tmp_path / "ops").root
+
+    registered = register_bundle(folder)
+    (folder / "envs/crm-2").rename(folder / "envs/crm")
+    task_file = folder / "tasks/crm.json"
+    task_file.write_text(task_file.read_text().replace('"crm-2"', '"crm"'))
+    with pytest.raises(BundleError) as refused:
+        register_bundle(folder)
+
+    assert _written(registered) == {"crm-image": (1, True), "crm": (1, True), "ops/crm": (1, True)}
+    assert refused.value.problems == ("tasks/crm.json: shares its name with what's registered as 'ops-crm', so it "
+                                      "can't keep the id it was imported as, 'ops/crm'; rename one",)
+
+
+def test_an_imported_task_s_output_under_a_folder_keeps_its_name(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=context_image(tmp_path, "crm-image"), environment_name="crm")
+    Task.put(id="cli", steps=[build_step({"id": "env", "type": "deploy_env", "env_id": "crm-env"}),
+                              build_step({"id": "cli", "type": "build_mcp_cli", "env_id": "crm-env",
+                                          "command_name": "crm", "cli_artifact_id": "tools/crm-cli"})])
+    folder = import_task("cli", tmp_path / "cli").root
+    (folder / "tasks/cli.json").write_text((folder / "tasks/cli.json").read_text().replace('"crm"', '"crm2"'))
+
+    registered = register_bundle(folder)
+
+    assert Task.get("cli", 2).to_dict()["steps"][1]["cli_artifact_id"] == "tools/crm-cli"
+    assert _written(registered)["cli"] == (2, False)
+
+
+def test_registering_reads_only_the_files_of_what_the_import_wrote(imported, monkeypatch):
+    read = []
+    hash_file = import_report_module.file_sha256
+    monkeypatch.setattr(import_report_module, "file_sha256", lambda path: read.append(path) or hash_file(path))
+    layout(imported, {".venv/lib/big.py": "x = 1\n", "notes/todo.md": "later\n"})
+
+    register_bundle(imported)
+
+    assert read and not [path for path in read if ".venv" in path.parts or "notes" in path.parts]
+
+
+def test_an_installed_bundle_s_agent_takes_no_source_from_the_folder_s_record(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    kit_root = layout(tmp_path / "site" / "kit", {"agents/solver/Dockerfile": "FROM scratch\n"})
+    kit = InstalledBundle("kit", "demo-dist", "1.0", "demo", kit_root, None, None)
+    folder = layout(tmp_path / "triage", {"tasks/t.json": json.dumps([
+        {"id": "agent", "type": "deploy_agent", "a2a_agent_id": "@local/demo-dist/kit/solver"}])})
+    plan = plan_bundle(resolve_bundle(parse_bundle(folder)), installed=lambda: (kit,))
+    record = Imported({"agents/solver": ("solver", 3)}, {("agents/solver", "image"): ("solver-image", 3)}, {}, {})
+
+    installed = [write for write in plan.writes if write.source.entry in plan.origins]
+
+    assert installed and [source_of(record, plan, write) for write in installed] == [None] * len(installed)

@@ -25,7 +25,7 @@ from agent_env.bundle.importer import import_task
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import get_config
-from agent_env.config.runtime import Config
+from agent_env.config.runtime import Config, reset_config
 from agent_env.entity.scopes import FieldScope
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -311,6 +311,26 @@ def test_the_store_fingerprint_tells_one_configured_document_store_from_another(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "elsewhere"))
 
     assert store_fingerprint() != here and store_fingerprint() == store_fingerprint()
+
+
+def test_the_store_fingerprint_resolves_env_references_and_ignores_credentials(tmp_path, monkeypatch):
+    config = tmp_path / "fingerprint.toml"
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(config))
+    monkeypatch.delenv("AGENT_ENV_DOCUMENT_STORE", raising=False)
+
+    def fingerprint(path, uri):
+        config.write_text(f'[stores.document]\nimpl = "pkg:Store"\n[stores.document.config]\npath = "{path}"\n'
+                          f'uri = "{uri}"\n')
+        reset_config()
+        return store_fingerprint()
+
+    monkeypatch.setenv("DOCUMENT_PATH", "/data/one.db")
+    one = fingerprint("env:DOCUMENT_PATH", "mongodb://reader:" + "pw-one@db.example.com/agent_env")
+    monkeypatch.setenv("DOCUMENT_PATH", "/data/two.db")
+    two = fingerprint("env:DOCUMENT_PATH", "mongodb://reader:" + "pw-one@db.example.com/agent_env")
+    other_password = fingerprint("env:DOCUMENT_PATH", "mongodb://reader:" + "pw-two@db.example.com/agent_env")
+
+    assert one != two and two == other_password
 
 
 def _saved_image(path, url, files):
