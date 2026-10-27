@@ -6,18 +6,20 @@ import logging
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar
 
 from agent_env.config import get_config
 from agent_env.plugins import _registration
 
 logger = logging.getLogger(__name__)
 from agent_env.artifact.registry import canonical_type, equivalent_types, get_artifact_registry
-from agent_env.store.base import NotFoundError
+from agent_env.store.base import ConcurrentModificationError, NotFoundError
 from agent_env.store.document_store import (
+    AbsentOrNull,
     DuplicateKeyError,
     Filter,
     In,
+    LteOrAbsent,
     UnknownDocumentTypeError,
     UpdateSpec,
     VersionedEntityStore,
@@ -253,6 +255,25 @@ class ArtifactStore:
             Filter.of(id=id, version=version, type=artifact_type),
             UpdateSpec(set={field: value}),
         )
+
+    def update_metadata(self, id: str, version: int, old_metadata: dict[str, Any],
+                        new_metadata: dict[str, Any]) -> dict[str, Any]:
+        """Replace an artifact version's metadata, by compare-and-swap on ``metadata.updated_at``: it goes through when
+        the stored metadata is no newer than ``old_metadata``. Raises NotFoundError for no such version and
+        ConcurrentModificationError when another writer got there first."""
+        new_metadata = {**new_metadata, "updated_at": datetime.now(timezone.utc).isoformat()}
+        old_ts = old_metadata.get("updated_at")
+        matched = self._doc_store.update(
+            ARTIFACTS_COLLECTION,
+            Filter.of(id=id, version=version).where(
+                "metadata.updated_at", LteOrAbsent(old_ts) if old_ts is not None else AbsentOrNull()),
+            UpdateSpec(set={"metadata": new_metadata}),
+        )
+        if matched == 0:
+            if self._doc_store.find_one(ARTIFACTS_COLLECTION, Filter.of(id=id, version=version)) is None:
+                raise NotFoundError(f"Artifact {id} version={version} not found")
+            raise ConcurrentModificationError(f"Artifact {id} version={version} metadata was modified concurrently")
+        return new_metadata
 
     def _deserialize(self, doc: dict) -> "Artifact":
         # Remove MongoDB-specific fields not in Pydantic model

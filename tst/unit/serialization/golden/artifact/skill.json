@@ -5,6 +5,7 @@
   "description": "Fill PDF forms",
   "id": "pdf-filler",
   "license": "MIT",
+  "metadata": {},
   "skill_files_id": "pdf-filler-files",
   "skill_metadata": {
     "category": "documents"

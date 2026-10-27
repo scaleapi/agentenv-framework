@@ -7,6 +7,7 @@
   "env_id": "slack-env",
   "env_version": 2,
   "id": "slack-cli",
+  "metadata": {},
   "type": "cli",
   "version": 3
 }
