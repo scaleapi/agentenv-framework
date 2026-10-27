@@ -14,6 +14,12 @@ from agent_env.store.image_store.registry_api import pin_digest, read_blob, read
 _INDEX_TYPES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
 # os-release(5): /etc/os-release first, else /usr/lib/os-release; on Ubuntu the first links to the second.
 _OS_RELEASE = ("etc/os-release", "usr/lib/os-release")
+# tarfile reads zstd from Python 3.14.
+_READS_ZSTD = "zst" in tarfile.TarFile.OPEN_METH
+
+
+class UnreadableLayerError(ValueError):
+    """A layer compressed in a way this Python can't read."""
 
 
 def platform_manifests(ref: str, auth: RegistryAuth | None) -> tuple[str, dict[str, str]]:
@@ -37,11 +43,14 @@ def platform_manifests(ref: str, auth: RegistryAuth | None) -> tuple[str, dict[s
 def os_release(ref: str, digest: str, auth: RegistryAuth | None) -> dict[str, str]:
     """The os-release fields of the image manifest ``digest`` in ``ref``'s repository, from the lowest layer that holds
     the file, normally the OS's own, so only that layer is fetched. Raises ValueError when no layer holds it or one
-    can't be read."""
+    can't be read, UnreadableLayerError when this Python can't decompress one it reaches."""
     manifest = read_manifest(f"{ref.partition('@')[0]}@{digest}", auth)
     found: dict[str, bytes | str] = {}
     with tempfile.TemporaryDirectory() as tmp:
         for layer in manifest.get("layers") or ():
+            if layer.get("mediaType", "").endswith("+zstd") and not _READS_ZSTD:
+                raise UnreadableLayerError(f"its layer {layer['digest']} is zstd-compressed, which Python reads from "
+                                           "3.14 on")
             path = Path(tmp) / layer["digest"].replace(":", "-")
             try:
                 read_blob(ref, layer["digest"], auth, path)

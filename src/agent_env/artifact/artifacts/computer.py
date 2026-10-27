@@ -17,7 +17,7 @@ from agent_env.artifact.ref import ArtifactRef
 from agent_env.entity.refs import EntityRef
 from agent_env.store.base import NotFoundError
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.store.image_store.image_contents import os_release, platform_manifests
+from agent_env.store.image_store.image_contents import UnreadableLayerError, os_release, platform_manifests
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -87,7 +87,7 @@ class Forms(BaseModel):
 
 class ImageCheck(BaseModel):
     """What reading a form's image for one architecture found, as ``metadata.validated_images`` records it: ``passed``,
-    ``failed`` with the problem, or ``uninspected`` with the reason no registry was read."""
+    ``failed`` with the problem, or ``uninspected`` with the reason it wasn't read."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -214,6 +214,10 @@ def _inspect_container(image: DockerImageArtifact, arches: list[str], os: LinuxO
             continue
         try:
             release = os_release(ref, digest, auth)
+        except UnreadableLayerError as e:
+            checks[arch] = ImageCheck(status="uninspected", image=ref, manifest=digest,
+                                      reason=f"{e}, so its first boot checks it")
+            continue
         except ValueError as e:
             checks[arch] = ImageCheck(status="failed", image=ref, manifest=digest,
                                       problem=f"its os-release couldn't be read: {e}")

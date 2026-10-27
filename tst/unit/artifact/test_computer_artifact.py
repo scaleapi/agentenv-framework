@@ -1,6 +1,7 @@
 """The computer artifact: what it declares is checked, each form's image is read from its registry before it's written
 (its architectures, and the OS its lowest os-release layer names), and a mismatch refuses the put naming its form and
-architecture. An image no registry serves yet is written uninspected."""
+architecture. An image no registry serves yet, or one with a layer this Python can't decompress, is written
+uninspected."""
 
 import pytest
 
@@ -91,17 +92,27 @@ def test_os_release_comes_from_the_lowest_layer_holding_it_and_a_single_image_is
     assert manifest["layers"][1]["digest"] not in registry.fetched
 
 
-def test_an_image_no_registry_serves_yet_or_a_skipped_inspection_is_written_uninspected(registry):
+def test_an_image_no_registry_serves_yet_a_skipped_inspection_or_a_layer_python_cant_read_is_written_uninspected(
+        registry, monkeypatch):
     built_here = get_artifact_store().put_document(DockerImageArtifact(
         id="desktop-image", description="", image_name="local/desktop-1234:abcd",
         build_context_object_url="file:///context.tar.gz", dockerfile_path="container/Dockerfile"))
+    monkeypatch.setattr(image_contents, "_READS_ZSTD", False)
+    zstd = registry._manifest({"mediaType": MANIFEST, "config": {"digest": registry.blob(b'{"os": "linux"}')}, "layers": [
+        {"mediaType": "application/vnd.oci.image.layer.v1.tar+zstd", "digest": registry.blob(b"zstd frames")}]})
 
     from_context = _put(built_here, arch=["amd64"])
     skipped = ComputerArtifact.put(inspect=False, **{**from_context.model_dump(exclude={"version", "metadata"})})
+    compressed = _put(_image(f"ghcr.io/acme/desktop:1@{registry.index(amd64=zstd)}"), arch=["amd64"])
 
     assert from_context.metadata["validated_images"]["container"]["amd64"]["status"] == "uninspected"
     assert "only its build context is stored" in from_context.metadata["validated_images"]["container"]["amd64"]["reason"]
     assert skipped.metadata["validated_images"]["container"]["amd64"]["reason"] == "inspection was skipped"
+    assert compressed.metadata["validated_images"]["container"]["amd64"] == {
+        "status": "uninspected", "image": compressed.image().image_name, "manifest": zstd,
+        "reason": f"its layer {registry.manifests[zstd]['layers'][0]['digest']} is zstd-compressed, which Python reads "
+                  "from 3.14 on, so its first boot checks it",
+        "checked_at": compressed.metadata["validated_images"]["container"]["amd64"]["checked_at"]}
     assert registry.fetched == []
 
 
