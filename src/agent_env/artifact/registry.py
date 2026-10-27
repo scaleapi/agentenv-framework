@@ -12,6 +12,7 @@ from pydantic import TypeAdapter, ValidationError
 from agent_env.plugins import _registration, _report
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.cli import CliArtifact
+from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -31,6 +32,7 @@ def _get_type(cls: type[Artifact]) -> Any:
 
 ARTIFACT_REGISTRY: dict[str, type[Artifact]] = {
     _get_type(CliArtifact): CliArtifact,
+    _get_type(ComputerArtifact): ComputerArtifact,
     _get_type(FileArtifact): FileArtifact,
     _get_type(FileArtifactUniverse): FileArtifactUniverse,
     _get_type(DockerImageArtifact): DockerImageArtifact,

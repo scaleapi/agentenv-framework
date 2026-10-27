@@ -293,13 +293,19 @@ class _Resolver:
         return cls
 
     def _image(self, entry: BundleEntry, config: dict, ref: EntityRef, references: list[Reference]) -> bool:
-        """Record the image an image key has the bundle write: the folder's Dockerfile when ``image`` is left out,
-        ``{ dockerfile = "<path>" }``, or a registry image, ``{ ref = "<image>" }``. False when the key names an image
-        artifact instead."""
-        if ref.artifact_type != "docker_image" or ref.path != ref.field:
+        """Record the image an image key has the bundle write: the folder's Dockerfile when a top-level ``image`` is
+        left out, ``{ dockerfile = "<path>" }``, or a registry image, ``{ ref = "<image>" }``. A key in a table, such as
+        a computer's ``forms.container.image``, says which. False when the key names an image artifact instead."""
+        if ref.artifact_type != "docker_image" or "[]" in ref.path:
             return False
-        value = config.get(ref.path)
-        role = f"{entry.kind.store}_image" if ref.path == "image" else ref.path
+        *tables, key = ref.path.split(".")
+        owner = config
+        for table in tables:
+            owner = owner.get(table) if isinstance(owner, dict) else None
+        if not isinstance(owner, dict) or (tables and key not in owner):
+            return False
+        value = owner.get(key)
+        role = f"{entry.kind.store}_image" if ref.path == "image" else ref.path.replace(".", "_")
         if isinstance(value, dict) and "ref" in value:
             name = value["ref"]
             if value.keys() != {"ref"}:
@@ -308,7 +314,7 @@ class _Resolver:
             elif problem := _registry_problem(ref.path, name):
                 self._problem(entry, problem)
             else:
-                self._implied(ReferencedImage(derive_id(entry.id, role), entry, name), config, ref, references)
+                self._implied(ReferencedImage(derive_id(entry.id, role), entry, name), owner, key, ref, references)
             return True
         if value is None:
             dockerfile = default_dockerfile(ref.path)
@@ -325,11 +331,11 @@ class _Resolver:
         if not (inside and path.is_file()):
             self._problem(entry, f"{ref.path}: there is no {dockerfile!r} in this folder to build")
             return True
-        self._implied(BuiltImage(derive_id(entry.id, role), entry, dockerfile), config, ref, references)
+        self._implied(BuiltImage(derive_id(entry.id, role), entry, dockerfile), owner, key, ref, references)
         return True
 
-    def _implied(self, image: BundleImage, config: dict, ref: EntityRef, references: list[Reference]) -> None:
-        config[ref.path] = image.id
+    def _implied(self, image: BundleImage, owner: dict, key: str, ref: EntityRef, references: list[Reference]) -> None:
+        owner[key] = image.id
         self.images.append(image)
         references.append(Reference(EntityKind.ARTIFACT, image.id, None, image, ref.path, ref.artifact_type))
 
