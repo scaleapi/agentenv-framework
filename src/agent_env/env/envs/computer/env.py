@@ -60,20 +60,21 @@ class ComputerEnv(Env):
         """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it unless ``compose`` is
         False. Refused, naming every mismatch, before anything is stored."""
         forms = list(forms) if forms is not None else [form for form in FORMS if getattr(computer.forms, form, None)]
+        data_paths = list(data_paths)
         tools = tools if tools is not None else {}
         problems = [] if isinstance(tools, dict) and tools.keys() <= {"hide"} else [
             f"tools is {{ hide = [<pattern>, ...] }}, not {tools!r}"]
         hidden = list(tools.get("hide", [])) if isinstance(tools, dict) else []
         by_layer, mismatched = gate.check(computer, driver, forms=forms, apps=list(apps), display=display,
                                           network=network, hidden_tools=hidden, settings=settings or {},
-                                          data_paths=list(data_paths))
+                                          data_paths=data_paths)
         if problems := problems + mismatched:
             raise ValueError(f"computer env {id!r}: " + "; ".join(problems))
         env = get_env_store().put_document(cls(
             id=id, version=None, environment_name=environment_name,
             computer={"id": computer.id, "version": computer.version}, driver={"id": driver.id, "version": driver.version},
             forms=forms, display=display, network=network, hidden_tools=hidden, settings=by_layer,
-            data_paths=list(data_paths)))
+            data_paths=data_paths))
         if compose:
             composer.compose(env, computer, driver)
         return env

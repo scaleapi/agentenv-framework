@@ -28,9 +28,11 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, docker_login, push_local_image
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.config import get_config
+from agent_env.env.env import Env
 from agent_env.env.envs.computer import gate
 from agent_env.env.envs.computer.install import Install
 from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
+from agent_env.store.base import ConcurrentModificationError
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
@@ -54,6 +56,9 @@ INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulat
 # store keeps no file modes.
 _RUN_ONLY = (b"#!", b"\x7fELF")
 _EXECUTABLE = 0o755
+# A pair's statuses once its image is in the store.
+_BUILT = ("unverified", "ready")
+_WRITE_TRIES = 4
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
@@ -72,9 +77,9 @@ def compose(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv,
             form, arch = futures[future]
             result = future.result()
             if result["status"] == "failed":
-                logger.warning(f"{env.id}: {form}/{arch} failed at {result['stage']}: {result['reason']}")
+                logger.warning(f"{env.stored_id}: {form}/{arch} failed at {result['stage']}: {result['reason']}")
             else:
-                logger.info(f"{env.id}: {form}/{arch} {'reused' if result['reused'] else 'built'}: {result['image']}")
+                logger.info(f"{env.stored_id}: {form}/{arch} {'reused' if result['reused'] else 'built'}: {result['image']}")
             record.finished(form, arch, result)
     record.computer(_computer(env, base, record.built()))
 
@@ -89,7 +94,7 @@ def pending(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv)
     """The forms and arches of ``env`` not yet built: never started, failed, or left building by a put that stopped."""
     composed = env.metadata.get("composed", {})
     return [(form, arch) for form in env.forms for arch in gate.arches(base, driver)
-            if composed.get(form, {}).get(arch, {}).get("status") not in ("unverified", "ready")]
+            if composed.get(form, {}).get(arch, {}).get("status") not in _BUILT]
 
 
 def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str) -> dict:
@@ -106,7 +111,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 "base": base_identity, "dockerfile": dockerfile, "context": _digest(context), "form": form,
                 "arch": arch, "composer": _composer_digest(),
             }, sort_keys=True).encode()).hexdigest()
-            store = get_config().get_image_store_for(env.id)
+            store = get_config().get_image_store_for(env.stored_id)
             store.ensure_repository(REPOSITORY)
             ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
             if (pinned := _served(ref, store)) is not None:
@@ -292,8 +297,8 @@ def _failed(env: ComputerEnv, form: str, arch: str, stage: str, key: str | None,
     if key is not None:
         result["key"] = key
     if log is not None:
-        stored = FileArtifact.put_bytes(derive_id(env.id, f"build_log_{form}_{arch}"), description=(
-            f"the {form}/{arch} build of {env.id} v{env.version}, which failed"), filename="build.log",
+        stored = FileArtifact.put_bytes(derive_id(env.stored_id, f"build_log_{form}_{arch}"), description=(
+            f"the {form}/{arch} build of {env.stored_id} v{env.version}, which failed"), filename="build.log",
             content=log.encode(), content_type="text/plain")
         result["log"] = {"id": stored.id, "version": stored.version}
         result["reason"] = f"{reason}: {log.strip().splitlines()[-1] if log.strip() else 'no output'}"
@@ -307,20 +312,20 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
     if not built:
         return None
     arches = [arch for arch in base.arch if arch in built]
-    store = get_config().get_image_store_for(env.id)
+    store = get_config().get_image_store_for(env.stored_id)
     index = store.image_ref(REPOSITORY, "index-" + hashlib.sha256(
         ",".join(built[arch] for arch in arches).encode()).hexdigest())
     docker_login(store.auth(index))
     _joined(index, [built[arch] for arch in arches])
-    image = DockerImageArtifact.put_ref(derive_id(env.id, "computer_image"), description=(
-        f"{env.id}'s composed computer"), image_name=index)
+    image = DockerImageArtifact.put_ref(derive_id(env.stored_id, "computer_image"), description=(
+        f"{env.stored_id}'s composed computer"), image_name=index)
     config = {name: setting.model_dump() for name, setting in base.config.items()}
     for name, value in env.settings.get(base.id, {}).items():
         config[name]["default"] = value
     if env.display is not None:
         config["resolution"]["default"] = f"{env.display['width']}x{env.display['height']}"
     computer = ComputerArtifact.put(
-        id=derive_id(env.id, "computer"), description=f"{base.id} composed with {env.driver['id']} for {env.id}",
+        id=derive_id(env.stored_id, "computer"), description=f"{base.id} composed with {env.driver['id']} for {env.stored_id}",
         arch=arches, os=base.os.model_dump(), session=base.session.model_dump(), config=config,
         forms={"container": {"image": {"id": image.id, "version": image.version}, "init": base.forms.container.init,
                              "input_channel": base.forms.container.input_channel}})
@@ -352,32 +357,43 @@ def _now() -> str:
 
 
 class _Record:
-    """The env's ``composed`` metadata, by form and arch, written by compare-and-swap as each pair starts and finishes,
-    one write at a time."""
+    """The env's ``composed`` metadata, by form and arch. Each result is merged into the stored table pair by pair, the
+    table read again when another build wrote it first, so builds of one env at once keep each other's pairs, and a pair
+    built stays built whatever another build of it records."""
 
     def __init__(self, env: ComputerEnv):
         self.env, self.lock = env, threading.Lock()
-        self.composed = copy.deepcopy(env.metadata.get("composed", {}))
 
     def started(self, pairs: list[tuple[str, str]]) -> None:
-        with self.lock:
-            for form, arch in pairs:
-                self.composed.setdefault(form, {})[arch] = {"status": "building", "started_at": _now()}
-            self.env.merge_metadata({"composed": copy.deepcopy(self.composed)})
+        now = _now()
+        self._merge({pair: {"status": "building", "started_at": now} for pair in pairs})
 
     def finished(self, form: str, arch: str, result: dict) -> None:
-        with self.lock:
-            started = self.composed.get(form, {}).get(arch, {}).get("started_at")
-            self.composed.setdefault(form, {})[arch] = {**result, "started_at": started}
-            self.env.merge_metadata({"composed": copy.deepcopy(self.composed)})
+        self._merge({(form, arch): result})
 
     def built(self) -> dict[str, str]:
         """Each arch's image of the container form, of the pairs built or reused."""
-        return {arch: result["image"] for arch, result in self.composed.get("container", {}).items()
-                if result.get("status") in ("unverified", "ready")}
+        return {arch: result["image"] for arch, result in self.env.metadata.get("composed", {}).get("container", {}).items()
+                if result.get("status") in _BUILT}
 
     def computer(self, ref: dict | None) -> None:
         """Record the env's computer, with the images it was written over."""
         if ref is not None:
             with self.lock:
                 self.env.merge_metadata({"computer": {**ref, "images": self.built()}})
+
+    def _merge(self, results: dict[tuple[str, str], dict]) -> None:
+        with self.lock:
+            for attempt in range(_WRITE_TRIES):
+                composed = copy.deepcopy(self.env.metadata.get("composed", {}))
+                for (form, arch), result in results.items():
+                    stored = composed.setdefault(form, {}).get(arch, {})
+                    if stored.get("status") not in _BUILT or result["status"] in _BUILT:
+                        composed[form][arch] = {"started_at": stored.get("started_at"), **result}
+                try:
+                    self.env.update_metadata({**self.env.metadata, "composed": composed})
+                    return
+                except ConcurrentModificationError:
+                    if attempt == _WRITE_TRIES - 1:
+                        raise
+                    self.env.metadata = Env.get(self.env.stored_id, self.env.version).metadata

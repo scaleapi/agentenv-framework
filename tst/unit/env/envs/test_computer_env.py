@@ -21,10 +21,12 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
 from agent_env.env import Env
+from agent_env.env import env as env_module
 from agent_env.env.envs.computer import composer
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
+from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
 from agent_env.store.base import NotFoundError
 from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
@@ -135,7 +137,7 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
                                                                                                 local_stores):
     local_stores.set_image_store(OciRegistryImageStore("registry.example"))
     env = _put(base, driver, settings={"ubuntu-24.04": {"timezone": "Europe/Paris", "theme": "dark"}},
-               display={"width": 1600, "height": 900})
+               display={"width": 1600, "height": 900}, data_paths=(path for path in ["Documents", "Music"]))
 
     stored = Env.get(env.id)
     composed = stored.metadata["composed"]["container"]
@@ -150,6 +152,7 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
         "amd64": "passed", "arm64": "passed"}
     assert (computer.config["resolution"].default, computer.config["timezone"].default) == ("1600x900", "Europe/Paris")
     assert stored.settings == {base.id: {"timezone": "Europe/Paris", "theme": "dark"}}
+    assert stored.data_paths == ["Documents", "Music"]
     arm64 = next(build for build in docker.builds if build["platform"] == "linux/arm64")
     assert arm64["dockerfile"].splitlines() == [
         f"FROM {base.image().image_name}", "USER root", "COPY driver/ /opt/agentenv/drivers/desk/",
@@ -471,3 +474,40 @@ def test_env_build_writes_the_computer_again_when_it_isnt_over_every_pair_built(
 
     assert rebuilt.exit_code == 0 and composer.current(Env.get(stored.id)) and len(docker.builds) == 2
     assert Env.get(stored.id).metadata["computer"]["version"] == stale["version"] + 1
+
+
+def test_env_build_by_an_installed_alias_composes_under_the_id_of_the_env_it_names(base, driver, docker, local_stores,
+                                                                                       tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.ERROR, logger=composer.__name__)
+    (tmp_path / "kit").mkdir()
+    (tmp_path / "kit" / ALIASES_FILE).write_text('[envs]\ndesktop = ["office"]\n')
+    kit = InstalledBundle("kit", "acme-kit", "1.0", "acme_kit", tmp_path / "kit", None, None)
+    monkeypatch.setattr(env_module, "installed_aliases", lambda table: installed_aliases((kit,), table))
+    env = _put(base, driver, id="@local/acme-kit/kit/desktop", compose=False)
+    local_stores.set_image_store(OciRegistryImageStore("registry.example"))
+
+    built = CliRunner().invoke(cli, ["env", "build", "--id", "office"])
+
+    stored = Env.get(env.id)
+    assert built.exit_code == 0 and stored.metadata["computer"]["id"] == "@local/acme-kit/kit/desktop__computer"
+    images = [r["image"] for r in stored.metadata["composed"]["container"].values()]
+    assert all(ref.startswith("localhost:5000/") for ref in [*images, ComputerArtifact.get(
+        "@local/acme-kit/kit/desktop__computer").image().image_name])
+
+
+def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_replace_a_built_one(base, driver,
+                                                                                                    docker,
+                                                                                                    monkeypatch):
+    env = _put(base, driver, compose=False)
+    first, second, third = (Env.get(env.id) for _ in range(3))
+
+    composer.compose(first, base, driver, [("container", "amd64")])
+    composer.compose(second, base, driver, [("container", "arm64")])
+    monkeypatch.setattr(composer, "_served", lambda ref, store: None)
+    docker.fail["linux/arm64"] = "boom"
+    composer.compose(third, base, driver, [("container", "arm64")])
+
+    stored = Env.get(env.id)
+    composed = stored.metadata["composed"]["container"]
+    assert {arch: r["status"] for arch, r in composed.items()} == {"amd64": "unverified", "arm64": "unverified"}
+    assert stored.metadata["computer"]["images"] == {arch: r["image"] for arch, r in composed.items()}
