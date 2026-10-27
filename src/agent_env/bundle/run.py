@@ -408,7 +408,7 @@ def refuse_store_tasks(plan: Plan) -> None:
 
 def _say_agents(plan: Plan, say: Callable[[str], None]) -> None:
     """Say what each agent, env and artifact alias names, and what the solver deploys in place of the tasks' agents."""
-    for use in (*plan.aliases.values(), *plan.env_aliases.values(), *plan.artifact_aliases.values()):
+    for use in (use for uses in plan.alias_uses.values() for use in uses.values()):
         say(_aliased(use))
     if plan.agent is not None:
         runs = _to_run(plan)

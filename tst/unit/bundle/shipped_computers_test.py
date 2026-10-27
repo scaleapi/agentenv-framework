@@ -41,7 +41,7 @@ def test_a_task_naming_ubuntu_24_04_writes_the_shipped_base_over_its_folders_ima
 
     computer = ComputerArtifact.get(UBUNTU, done.version_of("artifact", UBUNTU))
     image = DockerImageArtifact.get(computer.forms.container.image.id, computer.forms.container.image.version)
-    assert plan.artifact_aliases["ubuntu-24.04"] == AliasUse(
+    assert plan.alias_uses[EntityKind.ARTIFACT]["ubuntu-24.04"] == AliasUse(
         "ubuntu-24.04", UBUNTU, "agentenv-framework's computers bundle", kind=EntityKind.ARTIFACT)
     assert (computer.arch, computer.os.version, computer.session.user) == (["amd64", "arm64"], "24.04", "user")
     assert image.id == f"{UBUNTU}__forms_container_image" and image.dockerfile_path == "Dockerfile"
