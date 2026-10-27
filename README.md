@@ -50,7 +50,7 @@ A package of your own can add env types, providers, task steps and stores to age
 
 ## OpenEnv
 
-Every task in a bundle is an [OpenEnv](https://github.com/huggingface/OpenEnv) env. `agent_env.openenv.build_app(bundle)` returns the OpenEnv server for a bundle, a folder or an installed bundle's name, or for a mapping of split names to bundles. Any OpenEnv client resets it to a task, which deploys the task's envs and opens its agent's turn, acts through the envs' tools and an added `end_turn` tool, and gets the task's verifier score as its reward.
+Every task in a bundle is an [OpenEnv](https://github.com/openenv/OpenEnv) env, with the `openenv` extra installed (`pip install 'agentenv-framework[openenv]'`). `agent_env.openenv.build_app(bundle)` returns the OpenEnv server for a bundle, a folder or an installed bundle's name, or for a mapping of split names to bundles. Any OpenEnv client resets it to a task, which deploys the task's envs and opens its agent's turn, acts through the envs' tools and an added `end_turn` tool, and gets the task's verifier score as its reward.
 
 ## Time zones
 

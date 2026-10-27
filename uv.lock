@@ -57,7 +57,6 @@ dependencies = [
     { name = "litellm" },
     { name = "mcp" },
     { name = "modal" },
-    { name = "openenv" },
     { name = "packaging" },
     { name = "pydantic" },
     { name = "pymongo" },
@@ -84,6 +83,7 @@ dev = [
     { name = "botocore" },
     { name = "boxd" },
     { name = "daytona" },
+    { name = "fastapi" },
     { name = "fastmcp" },
     { name = "google-api-core" },
     { name = "google-auth" },
@@ -92,6 +92,7 @@ dev = [
     { name = "griffelib" },
     { name = "httpx2" },
     { name = "moto" },
+    { name = "openenv" },
     { name = "pillow" },
     { name = "psycopg2-binary" },
     { name = "pytest" },
@@ -115,6 +116,10 @@ gcp = [
     { name = "google-cloud-storage" },
     { name = "requests" },
 ]
+openenv = [
+    { name = "fastapi" },
+    { name = "openenv" },
+]
 sail = [
     { name = "sail" },
 ]
@@ -136,7 +141,7 @@ vercel = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "boxd", "daytona", "gcp", "sail", "tensorlake", "tenki", "vercel"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "boxd", "daytona", "gcp", "openenv", "sail", "tensorlake", "tenki", "vercel"], marker = "extra == 'dev'" },
     { name = "agentenv-framework-protocol", editable = "packages/agentenv-protocol" },
     { name = "anyio", marker = "extra == 'vercel'", specifier = ">=4,<5" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
@@ -147,6 +152,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = "~=0.224.0" },
     { name = "e2b", specifier = "~=2.46.4" },
+    { name = "fastapi", marker = "extra == 'openenv'", specifier = ">=0.116" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=3.4,<4" },
     { name = "google-api-core", marker = "extra == 'gcp'", specifier = ">=2.24" },
     { name = "google-auth", marker = "extra == 'gcp'", specifier = ">=2.40" },
@@ -159,7 +165,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.25,<2" },
     { name = "modal", specifier = ">=1.5.2.dev22" },
     { name = "moto", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "openenv", specifier = ">=0.9,<0.11" },
+    { name = "openenv", marker = "extra == 'openenv'", specifier = ">=0.9" },
     { name = "packaging", specifier = ">=22" },
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.4" },
     { name = "psycopg2-binary", marker = "extra == 'dev'", specifier = ">=2.9.0" },
@@ -184,7 +190,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "dev", "smol"]
+provides-extras = ["openenv", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
