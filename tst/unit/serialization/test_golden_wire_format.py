@@ -38,6 +38,7 @@ from agent_env.artifact.artifacts.environment_universe import EnvironmentUnivers
 from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.registry import get_artifact_registry
+from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.envs.gateway_server import GatewayEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
@@ -166,6 +167,9 @@ ENV_FIXTURES = {
                                     "provides": ["urn:agentenv:computer/v1", "urn:agentenv:computer-ready/v1"],
                                     "tools": ["computer_screenshot", "computer_click"],
                                     "features": {"buttons": ["left"], "max_click_count": 1}}]},
+        install={"linux": Install(python="requirements.txt", services=[Service(
+            name="driver", command="venv/bin/python -m agentenv_protocol.computer.serve driver.py:ReferenceDriver")])},
+        port=18765,
         metadata={"owner": "example-team"},
     ),
     "gateway_server": lambda: GatewayEnv(

@@ -1,6 +1,7 @@
 """Computer driver envs written from a bundle's env folders: the driver's files stored with each version, its class read
-where its own dependencies aren't installed, what it declares for each platform it supports, a new version when a file
-changes, refusals before any write, and a deploy that waits for a computer."""
+where its own dependencies aren't installed, what it declares for each platform it supports, how a computer installs it
+and reaches it, a new version when a file changes, refusals before any write, and a deploy that waits for a
+computer."""
 
 import json
 
@@ -56,6 +57,8 @@ class Desk(ComputerDriverEnvironment):
 '''
 LINUX = [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}]
 TOML = 'type = "computer_driver"\nmodule = "driver.py:Desk"\n'
+SERVE = 'services = [{ name = "driver", command = "venv/bin/python -m agentenv_protocol.computer.serve driver.py:Desk" }]'
+INSTALLED = f'{TOML}port = 19000\n\n[install.linux]\nfiles = "linux"\npython = "requirements.txt"\n{SERVE}\n'
 
 
 @pytest.fixture
@@ -99,6 +102,19 @@ def test_a_driver_folder_is_written_with_its_files_and_what_its_class_declares(b
     assert ComputerDriverEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()
 
 
+def test_a_driver_is_written_with_how_a_computer_installs_it_and_the_port_it_serves_on(bundle_dir):
+    _bundle(bundle_dir, toml=INSTALLED, **{"envs/desk/linux/requirements.txt": "mss>=9,<11\n"})
+
+    _run(bundle_dir)
+    env = Env.get(f"{ROOT}/desk")
+
+    install = env.install["linux"]
+    assert (env.port, install.files, install.python) == (19000, "linux", "requirements.txt")
+    assert [(service.name, service.scope) for service in install.services] == [("driver", "session")]
+    assert sorted(env.files.file_artifact_ids) == ["driver.py", "linux/requirements.txt"]
+    assert ComputerDriverEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()
+
+
 def test_a_driver_is_written_again_only_when_one_of_its_files_changes(bundle_dir):
     _bundle(bundle_dir)
     _run(bundle_dir)
@@ -120,7 +136,22 @@ def test_a_driver_is_written_again_only_when_one_of_its_files_changes(bundle_dir
     (TOML, LINUX, ("thumb",), "buttons include left"),
     (TOML, [], ("left",), "Desk declares no platform: name them with @computer_driver(supports=[...])"),
     ('type = "computer_driver"\nmodule = "driver.py:Desk"\nimage = "x"\n', LINUX, ("left",), "unknown key 'image'"),
-])
+    (f"{TOML}port = 0\n", LINUX, ("left",), "port must be 1 to 65535, not 0"),
+    (f'{TOML}[install.windows]\n{SERVE}\n', LINUX, ("left",),
+     "install.windows: an install is for an OS type agent-env composes: linux"),
+    (f'{TOML}[install.linux]\npython = "requirements.txt"\n{SERVE}\n', LINUX, ("left",),
+     "install.linux.python: 'requirements.txt' isn't in this folder"),
+    (f'{TOML}[install.linux]\nfiles = "linux"\n{SERVE}\n', LINUX, ("left",),
+     "install.linux.files: this folder has no 'linux' folder"),
+    (f'{TOML}[install.linux]\nfiles = "../elsewhere"\n{SERVE}\n', LINUX, ("left",),
+     "install.linux.files: Value error, '../elsewhere' must be a path inside the layer's folder"),
+    (f'{TOML}[install.linux]\nservices = []\n', LINUX, ("left",), "install.linux.services: List should have at least 1"),
+    (f'{TOML}[install.linux]\nservices = [{{ name = "d", command = "x" }}, {{ name = "d", command = "y" }}]\n', LINUX,
+     ("left",), "install.linux.services: Value error, names a service twice: ['d', 'd']"),
+    (f'{TOML}[install.linux]\nservices = [{{ name = "d", command = "x", scope = "root" }}]\n', LINUX, ("left",),
+     "install.linux.services.0.scope: Input should be 'session' or 'system'"),
+], ids=["no-module", "module-file", "module-class", "button", "no-platform", "unknown-key", "port", "install-os",
+        "install-python", "install-files", "install-escape", "no-service", "service-twice", "service-scope"])
 def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle_dir, toml, supports, buttons,
                                                                           problem):
     _bundle(bundle_dir, toml=toml, supports=supports, buttons=buttons)
@@ -168,3 +199,5 @@ def test_a_run_naming_the_reference_driver_writes_the_shipped_one(tmp_path, monk
     assert env.declaration["name"] == "reference" and len(env.declaration["platforms"]) == 2
     assert {"urn:agentenv:computer-pointer/v1", "urn:agentenv:computer-keyboard/v1",
             "urn:agentenv:computer-exec/v1"} <= set(env.declaration["platforms"][0]["provides"])
+    assert (env.port, env.install["linux"].python) == (18765, "requirements.txt")
+    assert env.install["linux"].services[0].command.endswith("agentenv_protocol.computer.serve driver.py:ReferenceDriver")
