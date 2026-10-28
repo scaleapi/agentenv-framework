@@ -9,12 +9,11 @@ changes meaning. Each image the bundle builds is built here for linux/amd64 and 
 under a tag of its sources, with its build context beside it; one published for its sources is registered as published.
 
 Nothing is written when any problem is found before the first write: an id the rules can't give, two writes to one store
-given one id, an id the store holds that this bundle didn't register (unless adopted), an ``@local`` id left in what
-would be written, a store reference the store doesn't hold, or, for a store that isn't this machine's, a credential
-written out or a URL that only reaches this machine. A dry run checks the same and writes, builds and pushes nothing.
-Each write goes through a ledger kept in the target store, so registering again writes only what changed. Two
-registrations racing for one id can't both write a version of it: the loser fails, and running it again reuses what the
-winner wrote.
+given one id, an ``@local`` id left in what would be written, a store reference the store doesn't hold, or, for a store
+that isn't this machine's, a credential written out or a URL that only reaches this machine. A dry run checks the same
+and writes, builds and pushes nothing. Each write goes through a ledger kept in the target store, so registering again
+writes only what changed. Two registrations racing for one id can't both write a version of it: the loser fails, and
+running it again reuses what the winner wrote.
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ from urllib.parse import urlsplit
 
 from agent_env.config import get_config
 from agent_env.entity.refs import RefRole, ref_sites
-from agent_env.store import Filter
 from agent_env.plugins._bundles import AGENT_ALIASES
 from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
@@ -41,7 +39,7 @@ from agent_env.task_step.registry import get_task_step_registry
 
 from ._secrets import credentials_in
 from .installed import installed_bundles
-from .ledger import Check, Ledger
+from .ledger import Ledger
 from .materialize import Materialization, Materialized, materialize
 from .parse import Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle, plan_entities
@@ -74,15 +72,13 @@ def register_bundle(
     tasks: Sequence[str] = (),
     evals: Sequence[str] = (),
     prefix: str | None = None,
-    adopt: Sequence[str] = (),
     dry_run: bool = False,
     on_progress: Callable[[str], None] | None = None,
 ) -> Registration:
     """Register the bundle at ``root``: ``tasks`` and ``evals`` by name, or with neither every task and eval it has,
     or every entity when it has none, with what they reference. ``prefix`` opens each entry's registry id, the folder's
-    name and a dash unless given. ``adopt`` names ids the store holds that this bundle may write new versions of though
-    it didn't register them. ``on_progress`` is given a line for each write, as it's checked or written, and before
-    each image is built.
+    name and a dash unless given. An id the store holds already takes a new version, whoever wrote it. ``on_progress``
+    is given a line for each write, as it's checked or written, and before each image is built.
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
     written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse."""
@@ -97,8 +93,8 @@ def register_bundle(
         target = configured_store(get_config().get_document_store())
         shared = shared_store(target)
         identity, commit, dirty = bundle_identity(bundle.root)
-        ledger = RegistrationLedger(target, registered, identity, commit, dirty, frozenset(adopt))
-        problems = [*_unowned(registered, ledger), *_unregistrable(registered, shared)]
+        ledger = RegistrationLedger(target, registered, identity, commit, dirty)
+        problems = list(_unregistrable(registered, shared))
         if problems:
             raise BundleError(problems)
         say = on_progress or (lambda line: None)
@@ -297,46 +293,9 @@ class RegistrationLedger(Ledger):
     strict = True
     pushes_images = True
 
-    def __init__(self, store: DocumentStore, plan: Plan, identity: str, commit: str | None, dirty: bool | None,
-                 adopt: frozenset[str] = frozenset()):
+    def __init__(self, store: DocumentStore, plan: Plan, identity: str, commit: str | None, dirty: bool | None):
         super().__init__(store, plan)
-        self.identity, self.commit, self.dirty, self.adopted_ids = identity, commit, dirty, adopt
-
-    def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
-        """``Ledger.check``, refusing a write whose id the store holds that this bundle didn't register, checked again
-        as it's about to be written, since another bundle can write the id after the check before any write."""
-        check = super().check(write, needs)
-        if (problem := self.unowned(write, check.stored)) is not None:
-            raise BundleError([problem])
-        return check
-
-    def unowned(self, write: Write, stored: int | None) -> str | None:
-        """Why this bundle may not write ``write``'s id, which the store holds at ``stored``, or None when it may: the
-        store doesn't hold it, ``adopt`` names it, an interrupted registration of this bundle wrote its latest version,
-        or that's the version this bundle last registered. One the store has written anew since is refused, so no one
-        else's version is written over unseen."""
-        if stored is None or write.id in self.adopted_ids:
-            return None
-        pending = self._find(self.collection, Filter.of(store=write.kind.store, id=write.id, bundle=self._bundle(write),
-                                                        status="pending"))
-        if pending is not None and pending.get("version") == stored:
-            return None
-        where = self._plan.path(write.source.entry)
-        row = self._latest(write.kind.store, write.id)
-        if row is not None and row.get("bundle") == self._bundle(write):
-            return None if row.get("version") == stored else self._moved(where, write.id, stored, row["version"],
-                                                                        "this bundle last registered")
-        by = f"registered from {row['bundle']}" if row is not None else "not registered from a bundle"
-        return (f"{where}: {write.id!r} is in the store already, at v{stored}, {by}; pass --adopt {write.id} to write a "
-                "new version of it, or --prefix to register this bundle under other ids")
-
-    @staticmethod
-    def _moved(where: str, entity_id: str, stored: int, own: int, whose: str) -> str:
-        return (f"{where}: {entity_id!r} is at v{stored} in the store, newer than the v{own} {whose}; pass --adopt "
-                f"{entity_id} to write over it")
-
-    def stored_version(self, write: Write) -> int | None:
-        return self._stored_version(write)
+        self.identity, self.commit, self.dirty = identity, commit, dirty
 
     def _bundle(self, write: Write) -> str:
         """The bundle's identity, or for an entity an installed bundle comes with, that bundle's, which every bundle
@@ -378,14 +337,6 @@ def _remote_name(remote: str) -> str:
     else:  # scp-like, user@host:path
         host, _, path = remote.rpartition("@")[2].partition(":")
     return f"{host}/{path.strip('/').removesuffix('.git')}"
-
-
-def _unowned(plan: Plan, ledger: RegistrationLedger) -> Iterator[str]:
-    """A problem for each write this bundle may not make (``RegistrationLedger.unowned``), every one found before any
-    write."""
-    for write in plan.writes:
-        if (problem := ledger.unowned(write, ledger.stored_version(write))) is not None:
-            yield problem
 
 
 def _unregistrable(plan: Plan, shared: bool) -> Iterator[str]:

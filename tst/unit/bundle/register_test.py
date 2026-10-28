@@ -163,29 +163,20 @@ def test_a_remote_is_named_by_its_host_and_path_alone(remote, name):
     assert _remote_name(remote) == name
 
 
-def test_an_id_the_store_holds_that_the_bundle_didnt_register_is_refused_unless_adopted(home):
+def test_an_id_the_store_holds_takes_the_bundle_s_next_version_whoever_wrote_it(home):
     (home / "seed.txt").write_text("seed")
     FileArtifact.put("triage-docs", description="someone else's", file_path=str(home / "seed.txt"))
     root = layout(home / "triage", TRIAGE)
 
-    with pytest.raises(BundleError) as refused:
-        register_bundle(root)
-    adopted = register_bundle(root, adopt=["triage-docs"])
+    first = register_bundle(root)
+    FileArtifact.put("triage-docs", description="someone else's again", file_path=str(home / "seed.txt"))
+    (root / "artifacts/docs/a.md").write_text("changed\n")
+    second = register_bundle(root)
+    elsewhere = register_bundle(layout(home / "b" / "triage", TRIAGE))
 
-    assert refused.value.problems == (
-        "artifacts/docs: 'triage-docs' is in the store already, at v1, not registered from a bundle; pass --adopt "
-        "triage-docs to write a new version of it, or --prefix to register this bundle under other ids",)
-    assert {done.write.id: done.version for done in adopted.materialization.writes}["triage-docs"] == 2
-
-
-def test_another_folder_of_the_same_name_is_refused_the_ids_this_one_registered(home):
-    register_bundle(layout(home / "a" / "triage", TRIAGE))
-
-    with pytest.raises(BundleError) as refused:
-        register_bundle(layout(home / "b" / "triage", TRIAGE))
-
-    assert len(refused.value.problems) == 3
-    assert all(f"registered from folder:{home / 'a' / 'triage'}" in problem for problem in refused.value.problems)
+    assert {done.write.id: done.version for done in first.materialization.writes}["triage-docs"] == 2
+    assert {done.write.id: done.version for done in second.materialization.writes}["triage-docs"] == 4
+    assert {done.write.id: done.version for done in elsewhere.materialization.writes}["triage-docs"] == 5
 
 
 def test_a_prefix_registers_under_other_ids(home):
@@ -524,42 +515,3 @@ def test_a_registration_killed_after_a_write_and_before_its_row_is_done_resumes(
 
     assert {done.write.id: (done.version, done.reused) for done in resumed.materialization.writes} == {
         "triage-docs": (1, True), "triage-greeting": (1, False), "triage-t": (1, False)}
-
-
-def test_an_id_another_bundle_registers_after_the_check_is_refused_before_it_is_written(home, monkeypatch):
-    root = layout(home / "triage", TRIAGE)
-    unowned = register_module._unowned
-
-    def then_another_bundle_writes(plan, ledger):
-        problems = list(unowned(plan, ledger))
-        (home / "theirs.txt").write_text("theirs")
-        FileArtifact.put("triage-docs", description="theirs", file_path=str(home / "theirs.txt"))
-        get_config().get_document_store().insert(REGISTRATIONS, {
-            "store": "artifact", "id": "triage-docs", "bundle": "folder:/elsewhere/triage", "status": "done",
-            "version": 1, "scheme": 2, "digest": None, "inputs": None})
-        return iter(problems)
-
-    monkeypatch.setattr(register_module, "_unowned", then_another_bundle_writes)
-
-    with pytest.raises(BundleError) as refused:
-        register_bundle(root)
-
-    assert "'triage-docs' is in the store already, at v1, registered from folder:/elsewhere/triage" in \
-        refused.value.problems[0]
-    assert Artifact.get("triage-docs").description == "theirs"
-
-
-def test_a_version_someone_else_wrote_since_is_not_written_over_unless_adopted(home):
-    root = layout(home / "triage", TRIAGE)
-    register_bundle(root)
-    (home / "seed.txt").write_text("seed")
-    FileArtifact.put("triage-docs", description="someone else's", file_path=str(home / "seed.txt"))
-    (root / "artifacts/docs/a.md").write_text("changed\n")
-
-    with pytest.raises(BundleError) as refused:
-        register_bundle(root)
-    adopted = register_bundle(root, adopt=["triage-docs"])
-
-    assert refused.value.problems == ("artifacts/docs: 'triage-docs' is at v2 in the store, newer than the v1 this "
-                                      "bundle last registered; pass --adopt triage-docs to write over it",)
-    assert {done.write.id: done.version for done in adopted.materialization.writes}["triage-docs"] == 3
