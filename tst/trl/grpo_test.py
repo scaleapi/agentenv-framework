@@ -32,7 +32,8 @@ def test_grpotrainer_trains_a_step_on_a_served_bundle_and_scores_every_rollout(s
 
     trainer = trl.GRPOTrainer(model=MODEL, train_dataset=env.dataset, environment_factory=Recorded, args=trl.GRPOConfig(
         output_dir=str(tmp_path), learning_rate=0.1, per_device_train_batch_size=4, num_generations=2, max_steps=1,
-        max_tool_calling_iterations=4, shuffle_dataset=False, logging_steps=1, report_to="none"))
+        max_tool_calling_iterations=4, shuffle_dataset=False, logging_steps=1, report_to="none", bf16=False,
+        use_cpu=True))
     before = {name: param.clone() for name, param in trainer.model.named_parameters()}
 
     with patch.object(trainer.model, "generate", side_effect=_Policy(trainer.processing_class)):
