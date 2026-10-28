@@ -14,6 +14,8 @@ from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcom
                               dry_run_bundle, run_bundle)
 from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
                                         path_like, run_name)
+from agent_env.bundle.requires import UnmetRequirements
+from agent_env.cli._install_prompt import offer_to_install
 from agent_env.plugins._bundles import ALIAS_TABLES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
@@ -55,6 +57,10 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     BUNDLE is a folder, or the name of a bundle an installed package provides (PACKAGE/NAME when several
     packages provide that name). Without BUNDLE, it lists the installed bundles.
 
+    A bundle's bundle.toml names the plugin packages it requires, and a run refuses to start without them; in a
+    terminal it offers to install them with agent-env plugin add. A folder with no bundle.toml that uses plugin
+    packages is given one, which a dry run only says it would write.
+
     With no --task or --eval, it runs every eval or, in a bundle without evals, every task. Each task runs
     once, at most four at a time, and the run exits 1 if any of them failed. With --verbose, a run that
     raised prints its traceback. --model, --user-model and --judge-model choose the models for this run only,
@@ -91,6 +97,8 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                             id_root=id_root, keep=keep)
     except BundleError as e:
         _note_an_installed_namesake(e, bundle, root, id_root)
+        if isinstance(e, UnmetRequirements) and not dry_run:
+            offer_to_install(e)
         raise
     except RunInterrupted as stop:
         with Interrupts():

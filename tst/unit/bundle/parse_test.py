@@ -222,10 +222,46 @@ class TestFolderRules:
         (problem,) = problems(root)
         assert "not a bundle" in problem
 
-    @pytest.mark.parametrize("name", ["bundle.toml", "Bundle.TOML"])
-    def test_bundle_toml_is_reserved(self, tmp_path, name):
-        root = build(tmp_path / "b", {name: "", "tasks/t.json": "[]"})
-        assert problems(root)[0].startswith(f"{name}: reserved")
+    def test_no_bundle_toml_requires_nothing_it_knows_of(self, tmp_path):
+        assert parse_bundle(build(tmp_path / "b", {"tasks/t.json": "[]"})).requires is None
+
+    @pytest.mark.parametrize("text, requires", [
+        ("", ()),
+        ("requires = []\n", ()),
+        ('requires = ["agentenv-acme>=1.2", "agentenv-win; sys_platform == \'win32\'"]\n',
+         ("agentenv-acme>=1.2", "agentenv-win; sys_platform == 'win32'")),
+    ])
+    def test_bundle_toml_lists_what_it_requires(self, tmp_path, text, requires):
+        root = build(tmp_path / "b", {"bundle.toml": text, "tasks/t.json": "[]"})
+        assert parse_bundle(root).requires == requires
+
+    @pytest.mark.parametrize("text, expected", [
+        ("requires = [", "bundle.toml: isn't valid TOML: "),
+        ('requires = "agentenv-acme"\n', 'bundle.toml: requires must be a list of pip requirements, such as '
+                                          '["agentenv-browser>=1.2"]'),
+        ("requires = [1]\n", "bundle.toml: requires must be a list of pip requirements"),
+        ('requires = []\nplugins = []\n', "bundle.toml: 'plugins' isn't a key it takes; it takes requires"),
+        ('requires = ["agentenv acme"]\n', "bundle.toml: requires: 'agentenv acme' isn't a pip requirement: "),
+        ('requires = ["acme @ https://example.com/acme.whl"]\n',
+         "bundle.toml: requires: 'acme @ https://example.com/acme.whl' names a URL; name the package and the "
+         "versions it needs"),
+    ])
+    def test_a_bundle_toml_it_cant_use_is_a_problem(self, tmp_path, text, expected):
+        root = build(tmp_path / "b", {"bundle.toml": text, "tasks/t.json": "[]"})
+        assert problems(root)[0].startswith(expected), problems(root)
+
+    def test_bundle_toml_that_isnt_utf8_is_a_problem(self, tmp_path):
+        root = build(tmp_path / "b", {"bundle.toml": b"requires = ['\xff']\n", "tasks/t.json": "[]"})
+        assert problems(root)[0].startswith("bundle.toml: isn't valid TOML: ")
+
+    def test_bundle_toml_must_be_a_file(self, tmp_path):
+        root = build(tmp_path / "b", {"bundle.toml/": None, "tasks/t.json": "[]"})
+        assert problems(root) == ("bundle.toml: must be a file, not a folder",)
+
+    def test_bundle_toml_near_miss(self, tmp_path):
+        root = build(tmp_path / "b", {"Bundle.TOML": "", "tasks/t.json": "[]"})
+        assert problems(root) == ("Bundle.TOML: spell it bundle.toml, the file a bundle declares the plugins it needs "
+                                  "in",)
 
     def test_kind_directory_near_miss(self, tmp_path):
         root = build(tmp_path / "b", {"Envs/tickets/Dockerfile": "FROM x"})

@@ -15,6 +15,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import FileArtifact
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle import importer as importer_module
+from agent_env.bundle import requires as requires_module
 from agent_env.bundle.importer import ImportedEval, import_eval, import_task
 from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.materialize import materialize
@@ -622,8 +623,9 @@ def test_what_only_a_plugin_or_a_config_file_registers_is_named_as_a_need_by_wha
     monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
     acme = Distribution("agentenv-acme", "1.0", (
         Contribution(TASK_STEPS, _Undeclared.type, f"{_Undeclared.__module__}:{_Undeclared.__qualname__}", "active"),))
-    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+    monkeypatch.setattr(requires_module, "inventory", lambda load: Inventory(
         distributions=(acme,), group_errors={}, discovery_errors={}, config_path=None, config_error=None, loaded=load))
+    monkeypatch.setattr(requires_module, "installed", lambda name: "1.0" if name == "agentenv-acme" else None)
     (store / "acme.json").write_text("{}")
     _AcmeFile.put("acme-data", description="acme rows", file_path=str(store / "acme.json"))
     _task("acme", [{"id": "env", "type": "deploy_env", "env_id": "crm-env"},
@@ -641,6 +643,7 @@ def test_what_only_a_plugin_or_a_config_file_registers_is_named_as_a_need_by_wha
         "configuration: acme_file_import_test (artifact type), at tasks/acme.json: step 'load': artifacts[0].id",
     ])
     assert "## Needs beyond core" in (imported.root / "README.md").read_text()
+    assert parse_bundle(imported.root).requires == ("agentenv-acme>=1.0",)
 
 
 def test_a_plugins_type_a_config_file_replaces_is_credited_to_configuration(store, monkeypatch):
@@ -648,7 +651,7 @@ def test_a_plugins_type_a_config_file_replaces_is_credited_to_configuration(stor
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
     replaced = Distribution("agentenv-acme", "1.0", (
         Contribution(TASK_STEPS, _Undeclared.type, f"{_AcmeFile.__module__}:{_AcmeFile.__qualname__}", "replaced"),))
-    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+    monkeypatch.setattr(requires_module, "inventory", lambda load: Inventory(
         distributions=(replaced,), group_errors={}, discovery_errors={}, config_path=None, config_error=None,
         loaded=load))
     _task("acme", [{"id": "p", "type": _Undeclared.type}])
@@ -666,10 +669,10 @@ def test_a_skipped_plugins_type_a_config_file_supplies_is_credited_to_configurat
     monkeypatch.syspath_prepend(str(site))
     broken = Distribution("agentenv-acme", "1.0", (
         Contribution(TASK_STEPS, _Undeclared.type, "acme_broken_import_test:Step", "unloaded"),))
-    monkeypatch.setattr(importer_module, "inventory", lambda load: Inventory(
+    monkeypatch.setattr(requires_module, "inventory", lambda load: Inventory(
         distributions=(broken,), group_errors={}, discovery_errors={}, config_path=None, config_error=None,
         loaded=load))
-    monkeypatch.setattr(importer_module, "load_failures", lambda: {TASK_STEPS: {_Undeclared.type: "failed to load"}})
+    monkeypatch.setattr(requires_module, "load_failures", lambda: {TASK_STEPS: {_Undeclared.type: "failed to load"}})
     _task("acme", [{"id": "p", "type": _Undeclared.type}])
 
     assert [need.by for need in import_task("acme", store / "acme").needs] == ["configuration"]

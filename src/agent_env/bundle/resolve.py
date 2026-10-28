@@ -33,6 +33,7 @@ from agent_env.task_step.task_step import TaskStep, attach_retry_config, depende
 from ._fs import fold, relative, show
 from .authoring import AuthoringContext, default_dockerfile
 from .parse import DOCKERFILE, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
+from .requires import UnmetRequirements, unmet_problems
 
 # Step keys that hold step ids, never entity ids.
 _STEP_ID_KEYS = ("id", "type", "depends_on")
@@ -107,7 +108,8 @@ class ResolvedBundle:
 
 
 def resolve_bundle(bundle: Bundle) -> ResolvedBundle:
-    """Resolve every entry's references. Raises BundleError listing every problem found."""
+    """Resolve every entry's references. Raises BundleError listing every problem found, UnmetRequirements when the
+    bundle.toml requires a package that isn't installed or not at a version it allows."""
     return _Resolver(bundle).resolve()
 
 
@@ -169,6 +171,8 @@ class _Resolver:
                         self.ignored[kind, fold(name)] = path
 
     def resolve(self) -> ResolvedBundle:
+        problems, unmet = unmet_problems(self.bundle.requires or ())
+        self.problems.extend(problems)
         resolved = []
         for entry in self.bundle.entries:
             if self._image_folder(entry):
@@ -178,7 +182,7 @@ class _Resolver:
             except _Skip:
                 pass
         if self.problems:
-            raise BundleError(self.problems)
+            raise UnmetRequirements(self.problems, unmet) if unmet else BundleError(self.problems)
         return ResolvedBundle(self.bundle, tuple(resolved), tuple(self.images))
 
     # One method per kind of config

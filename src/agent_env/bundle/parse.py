@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, NoReturn
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 from agent_env.bundle._fs import Unreadable, fold, home, on_disk, read_regular, show, with_article
 from agent_env.entity.refs import EntityKind
 from agent_env.plugins._bundles import AGENT_ALIASES, ALIASES_FILE, ARTIFACT_ALIASES, ENV_ALIASES, read_aliases
@@ -87,6 +89,8 @@ class Bundle:
     # The aliases its aliases.toml gives its agents and envs, by table and then folder name, which a reference names
     # one by once the bundle is installed.
     aliases: Mapping[str, Mapping[str, tuple[str, ...]]] = field(default_factory=dict)
+    # The plugin packages its bundle.toml requires, each a pip requirement; None when it has no bundle.toml.
+    requires: tuple[str, ...] | None = None
 
 
 class BundleError(ValueError):
@@ -127,6 +131,7 @@ class _Parser:
         self.problems: list[str] = []
         self.ignored: list[Path] = []
         self.aliases_file: Path | None = None
+        self.bundle_toml: Path | None = None
         self.entry_point = id_root is not None
         self.root_ok = True
         if id_root is None:
@@ -145,6 +150,7 @@ class _Parser:
         entries = [entry for kind, path in kinds.items() for entry in self._scan_kind(kind, path)]
         self._check_unique(entries)
         aliases = self._aliases(entries)
+        requires = self._requires()
         if self.problems:
             raise BundleError(self.problems)
         entries.sort(key=lambda entry: (_ORDER[entry.kind], entry.name))
@@ -156,6 +162,7 @@ class _Parser:
             entries=tuple(entries),
             ignored=tuple(sorted(self.ignored)),
             aliases=aliases,
+            requires=requires,
         )
 
     def _aliases(self, entries: list[BundleEntry]) -> dict[str, dict[str, tuple[str, ...]]]:
@@ -187,6 +194,37 @@ class _Parser:
                                       f"{table}.{name}: {alias!r} is the {noun} {other.name!r}'s {what}")
         return declared
 
+    def _requires(self) -> tuple[str, ...] | None:
+        """The plugin packages the bundle's bundle.toml requires, each a pip requirement naming a package by name and
+        version, not by URL; None when it has no bundle.toml."""
+        if self.bundle_toml is None:
+            return None
+        try:
+            data = tomllib.loads(self.bundle_toml.read_text(encoding="utf-8"))
+        except OSError as e:
+            self._problem(self.bundle_toml, f"can't be read: {os_reason(e)}")
+            return ()
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            self._problem(self.bundle_toml, f"isn't valid TOML: {e}")
+            return ()
+        for key in sorted(data.keys() - {"requires"}):
+            self._problem(self.bundle_toml, f"{key!r} isn't a key it takes; it takes requires")
+        requires = data.get("requires", [])
+        if not isinstance(requires, list) or not all(isinstance(line, str) for line in requires):
+            self._problem(self.bundle_toml, 'requires must be a list of pip requirements, such as '
+                          '["agentenv-browser>=1.2"]')
+            return ()
+        for line in requires:
+            try:
+                requirement = Requirement(line)
+            except InvalidRequirement as e:
+                self._problem(self.bundle_toml, f"requires: {line!r} isn't a pip requirement: {e}")
+                continue
+            if requirement.url:
+                self._problem(self.bundle_toml, f"requires: {line!r} names a URL; name the package and the versions "
+                              "it needs, which install from wherever whoever runs the bundle installs from")
+        return tuple(requires)
+
     def _derive_id_root(self) -> str:
         id_root, problems = _id_root(self.root)
         for path, message in problems:
@@ -212,9 +250,14 @@ class _Parser:
         for entry in listing:
             if entry.name in misspelled:
                 continue
-            if fold(entry.name) == fold(BUNDLE_TOML):
-                self._problem(entry.path, "reserved: a bundle takes its name from the folder and its "
-                              "description from README.md")
+            if entry.name == BUNDLE_TOML:
+                node = self._node(Path(entry.path), entry)
+                if node == _FILE:
+                    self.bundle_toml = Path(entry.path)
+                elif node == _DIR:
+                    self._problem(entry.path, "must be a file, not a folder")
+            elif fold(entry.name) == fold(BUNDLE_TOML):
+                self._problem(entry.path, f"spell it {BUNDLE_TOML}, the file a bundle declares the plugins it needs in")
             elif entry.name == ALIASES_FILE:
                 node = self._node(Path(entry.path), entry)
                 if node == _FILE:

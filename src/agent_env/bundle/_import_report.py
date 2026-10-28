@@ -58,6 +58,7 @@ class Need:
     what: str  # step type, env type or artifact type
     name: str
     by: str  # the installed distribution that registers it, or "configuration" for a config file's impls
+    version: str | None = None  # the distribution's, installed here
 
 
 @dataclass(frozen=True)
