@@ -272,6 +272,16 @@ def test_a_put_that_names_a_version_writes_only_that_next_one(local_stores, kind
     assert Env.get("x").version == 2
 
 
+@_INFRA_PUTS
+@pytest.mark.parametrize("version", [0, -1])
+def test_a_put_refuses_a_version_below_1_before_writing_anything(local_stores, monkeypatch, kind, put, version):
+    """The store would read 0 as "the next free version", and write one the caller didn't name."""
+    monkeypatch.setattr(bootstrap, "_image", lambda *args, **kwargs: pytest.fail("wrote an image"))
+
+    with pytest.raises(ValueError, match=f"can't be stored as version {version}"):
+        put("x", platform=None, published={}, version=version)
+
+
 def test_a_put_keeps_metadata_that_isnt_a_string(local_stores):
     """Such as the record a promotion keeps on the version it wrote."""
     stamp = {"stage": "dev", "passed": True, "previous": 1}

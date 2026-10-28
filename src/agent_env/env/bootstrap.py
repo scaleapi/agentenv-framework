@@ -61,6 +61,7 @@ def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str,
     """Write the gateway env ``env_id``, its image registered from ``published``, each Dockerfile's published digest,
     when given, else built for ``platform`` (this host's when None). It's stored as ``version`` when given, which must
     be the env's next: ConcurrentModificationError otherwise."""
+    _check_version(version)
     artifact = _image("gateway", derive_id(env_id, "env_image"), "Created from agent-env CLI", GATEWAY_DOCKERFILE,
                       GATEWAY_IMAGE_TAG, platform=platform, say=say, published=published)
     say("Creating GatewayEnv...")
@@ -76,6 +77,7 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
     """Write the service-db env ``env_id``, its service-db, db-web and db-mcp images registered from ``published``, each
     Dockerfile's published digest, when given, else built for ``platform`` (this host's when None). It's stored as
     ``version`` when given, which must be the env's next: ConcurrentModificationError otherwise."""
+    _check_version(version)
     db = _image("ServiceDB", derive_id(env_id, "db_image"), f"ServiceDB PostgreSQL image for {env_id}",
                 SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, platform=platform, say=say, published=published)
     db_web = _image("db-web", derive_id(env_id, "db_web_image"), "db-web lightweight web UI for database inspection",
@@ -96,6 +98,7 @@ def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapp
     """Write the website browser as the MCP server env ``env_id``, its image registered from ``published``, each
     Dockerfile's published digest, when given, else built for ``platform`` (this host's when None). It's stored as
     ``version`` when given, which must be the env's next: ConcurrentModificationError otherwise."""
+    _check_version(version)
     artifact = _image("website browser", derive_id(env_id, "env_image"), "Website browser MCP server",
                       WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_IMAGE_TAG, platform=platform, say=say,
                       published=published)
@@ -104,6 +107,12 @@ def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapp
                            metadata=_metadata(WEBSITE_BROWSER, metadata), version=version)
     say(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name}")
     return env
+
+
+def _check_version(version: int | None) -> None:
+    """Refuse a version below 1 before anything is written: the store reads 0 as "the next free version"."""
+    if version is not None and version < 1:
+        raise ValueError(f"an env's versions start at 1, so it can't be stored as version {version}")
 
 
 def _image(label: str, artifact_id: str, description: str, dockerfile: Path, image_name: str, *, platform: str | None,
