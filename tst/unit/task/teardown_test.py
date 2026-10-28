@@ -171,18 +171,18 @@ class _Shop:
 
 @pytest.mark.parametrize("close, logged", [
     ("closes", None),
-    ("raises", "env shop wasn't closed (RuntimeError: its recording didn't end); its sandboxes are terminated by id"),
+    ("raises", "env shop wasn't closed (RuntimeError: its driver is gone); its sandboxes are terminated by id"),
     ("hangs", "env shop wasn't closed (timed out after 0.05s)"),
     ("can't", None),
 ])
-def test_each_env_still_up_is_closed_with_the_runs_context_first_and_its_sandboxes_still_go_by_id(
+def test_each_env_still_up_closes_then_the_runs_open_recordings_register_then_its_sandboxes_go_by_id(
         terminated, monkeypatch, caplog, close, logged):
-    closed = []
+    steps = []
 
-    async def close_deployed(deployed, env_class, context):
-        closed.append((deployed.env_id, env_class, context, list(terminated)))
+    async def close_deployed(deployed, env_class):
+        steps.append(("close", deployed.env_id, env_class, list(terminated)))
         if close == "raises":
-            raise RuntimeError("its recording didn't end")
+            raise RuntimeError("its driver is gone")
         if close == "hangs":
             await asyncio.Event().wait()
         if close == "can't":
@@ -190,11 +190,13 @@ def test_each_env_still_up_is_closed_with_the_runs_context_first_and_its_sandbox
 
     monkeypatch.setattr(teardown, "close_deployed", close_deployed)
     monkeypatch.setattr(teardown.Env, "get", lambda env_id, version: _Shop())
+    monkeypatch.setattr(teardown, "register_open_recordings",
+                        lambda context, env_ids: steps.append(("register", env_ids, list(terminated))))
     context = _context()
 
     report = _run(context, timeout=0.05)
 
-    assert closed == [("shop", _Shop, context, [])]
+    assert steps == [("close", "shop", _Shop, []), ("register", ["shop", "hosted"], [])]
     assert {sandbox.sandbox_id for sandbox in report.terminated} == {"sb-box", "sb-db", "sb-gw", "sb-solver", "sb-vm"}
     assert (logged in caplog.text) if logged else "wasn't closed" not in caplog.text
 

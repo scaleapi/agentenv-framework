@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv, LoadFileArtifactUniverseResult
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
-    from agent_env.task_step.context import TaskStepContext
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +132,7 @@ class MCPServerEnv(Env):
         env._deployed = deployed
         return env
 
-    async def close(self, context: Optional[TaskStepContext] = None) -> None:
+    async def close(self) -> None:
         await close_replaced(self)
         if self._env_provider is not None:
             try:

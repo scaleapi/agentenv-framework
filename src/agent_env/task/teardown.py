@@ -2,11 +2,12 @@
 
 ``teardown_run`` takes down everything a run's context records: its bare sandboxes, its envs and its agents. It
 removes compute only; the instance, its outputs and the artifacts it collected stay. What has to reach the stores goes
-first: the changelogs staged on its agents (``before_teardown``), then whatever each env saves as it closes
-(``Env.close`` with the run's context: a computer env ends its open recordings). Then every sandbox is terminated by
-id, and a local one's work folder goes once it's down. ``agent-env run`` and ``agent-env eval run`` call it after each
-run, and the ``teardown_sandboxes`` step takes down part of a run the same way (``tear_down``). ``Task.run`` never
-does, so a caller that keeps a run's environment up, as the hub and the worker do, owns its teardown.
+first: the changelogs staged on its agents (``before_teardown``), then what each env saves as it closes (``Env.close``:
+a computer env ends its recordings, uploading what's left), and the recordings the run left open are registered. Then
+every sandbox is terminated by id, and a local one's work folder goes once it's down. ``agent-env run`` and
+``agent-env eval run`` call it after each run, and the ``teardown_sandboxes`` step takes down part of a run the same
+way (``tear_down``). ``Task.run`` never does, so a caller that keeps a run's environment up, as the hub and the worker
+do, owns its teardown.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.task.interrupts import tearing_down
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.computer_recording import register_open_recordings
 
 logger = logging.getLogger(__name__)
 
@@ -114,15 +116,16 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
 
 async def tear_down(context: TaskStepContext, sandboxes: Sequence[RecordedSandbox], envs: Sequence[DeployedEnv], *,
                     timeout: float) -> TeardownReport:
-    """Close each of ``envs`` that's still up, with the run's context, then terminate each of ``sandboxes`` by id, all
-    at once and each within ``timeout`` seconds, and remove a local one's work folder once it's down. A close that
-    fails is logged: its env's sandboxes are terminated by id regardless, which leaves one the close took down as it
-    is. Cancelling it returns what it reached, with the rest in ``left``."""
+    """Close each of ``envs`` that's still up, register the recordings the run left open on them, then terminate each
+    of ``sandboxes`` by id, all at once and each within ``timeout`` seconds, and remove a local one's work folder once
+    it's down. A close that fails is logged: its env's sandboxes are terminated by id regardless, which leaves one the
+    close took down as it is. Cancelling it returns what it reached, with the rest in ``left``."""
     pending = _pending(context, sandboxes)
     up = {sandbox.sandbox_id for sandbox in pending}
     try:
-        await asyncio.gather(*(_close(context, env, timeout) for env in envs
+        await asyncio.gather(*(_close(env, timeout) for env in envs
                                if any(sandbox_id in up for sandbox_id, _ in env_sandbox_ids(env))))
+        await asyncio.to_thread(register_open_recordings, context, [env.env_id for env in envs])
     except asyncio.CancelledError:
         return TeardownReport(left=pending)
     terminated, failed = [], []
@@ -196,12 +199,12 @@ def kind(sandbox: RecordedSandbox) -> str:
     return sandbox.sandbox_type or f"the configured {sandbox.slot} provider"
 
 
-async def _close(context: TaskStepContext, deployed: DeployedEnv, timeout: float) -> None:
-    """Close one env a run deployed through its type, with the run's context, so it saves what it must before its
-    sandboxes go. A type that can't close a deployment leaves them to be terminated by id."""
+async def _close(deployed: DeployedEnv, timeout: float) -> None:
+    """Close one env a run deployed through its type, so it ends what it runs before its sandboxes go (a computer env,
+    its recordings). A type that can't close a deployment leaves them to be terminated by id."""
     try:
         async with asyncio.timeout(timeout):
-            await close_deployed(deployed, type(Env.get(deployed.env_id, deployed.env_version)), context)
+            await close_deployed(deployed, type(Env.get(deployed.env_id, deployed.env_version)))
     except NotImplementedError:
         return
     except Exception as e:

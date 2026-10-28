@@ -25,13 +25,12 @@ from agent_env.env.envs.computer import params as computer_params
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import get_env_store
-from agent_env.task_step.task_steps.computer_recording import end_open_recordings
+from agent_env.providers.env_providers.env_computer_provider import end_recordings
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.env.env import DeployedEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
-    from agent_env.task_step.context import TaskStepContext
 
 logger = logging.getLogger(__name__)
 
@@ -169,18 +168,15 @@ class ComputerEnv(Env):
         env._deployed = deployed
         return env
 
-    async def reset(self, deployed: DeployedEnv, context: Optional[TaskStepContext] = None) -> None:
-        """Return the computer to boot state: end the env's recordings still open in ``context``, then replace its
-        container with a fresh one of the same image, on the same sandbox and port."""
-        if context is not None:
-            await end_open_recordings(context, [self.id])
+    async def reset(self, deployed: DeployedEnv) -> None:
+        """Return the computer to boot state: its recordings ended, its container replaced with a fresh one of the same
+        image, on the same sandbox and port."""
         await as_builtin(self._env_provider).reboot(self, deployed)
 
-    async def close(self, context: Optional[TaskStepContext] = None) -> None:
-        """End the env's recordings still open in the run's ``context``, so their segments reach the store, then tear
-        the computer down."""
-        if context is not None:
-            await end_open_recordings(context, [self.id])
+    async def close(self) -> None:
+        """End the computer's recordings, so what they recorded reaches the store, then tear it down."""
+        if self._deployed is not None and self._sandbox is not None and self._deployed.sandbox_id == self._sandbox.sandbox_id:
+            await end_recordings(self._deployed, "teardown")
         await close_replaced(self)
         if self._env_provider is not None:
             try:

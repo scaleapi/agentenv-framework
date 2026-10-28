@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from agentenv_protocol.computer import COMPUTER_DISPLAY
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
@@ -27,7 +27,6 @@ from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env import env as env_module
 from agent_env.env.envs.computer import boot, composer
-from agent_env.env.envs.computer import env as computer_env_module
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
@@ -610,7 +609,8 @@ def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_r
 
 DRIVER_CARD = {"name": "desktop", "capabilities": {"extensions": [
     {"uri": COMPUTER_DISPLAY, "params": {"endpoint": "/computer/display", "methods": {"get": {"method": "GET"}}}},
-    {"uri": DISABLE_TOOL_EXTENSION_URI, "params": {"endpoint": "/tools/disable", "methods": {"disable": {}}}}]}}
+    {"uri": DISABLE_TOOL_EXTENSION_URI, "params": {"endpoint": "/tools/disable", "methods": {"disable": {}}}},
+    {"uri": COMPUTER_RECORDING, "params": {"endpoint": "/computer/recording", "methods": {"end_all": {}}}}]}}
 
 
 @pytest.fixture
@@ -674,15 +674,12 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     env = _put(base, driver, display={"width": 1600, "height": 900}, tools={"hide": ["computer_pointer_*"]})
     deployed = await Env.get(env.id).deploy(env_params={"settings": {"ubuntu-24.04": {"timezone": "Asia/Tokyo"}}})
     (sandbox,) = boots.sandboxes
-    steps = []
-
-    async def end_open_recordings(context, env_ids):
-        steps.append(("recordings", env_ids))
+    recreated = []
 
     async def recreate_container(self, sandbox, **kwargs):
-        steps.append(("recreate", sandbox, kwargs))
+        recreated.append((sandbox, kwargs))
+        boots.calls.append("recreate")
 
-    monkeypatch.setattr(computer_env_module, "end_open_recordings", end_open_recordings)
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "recreate_container", recreate_container)
     monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
@@ -691,34 +688,35 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
         TaskStepContext(deployed_envs=[deployed]))
 
-    (_, ended), (_, recreated, kwargs) = steps
-    assert ended == [env.id] and recreated is sandbox and not sandbox.terminated
+    ((replaced, kwargs),) = recreated
+    assert replaced is sandbox and not sandbox.terminated
     assert (kwargs["image_name"], kwargs["port"]) == (deployed.metadata["computer"]["image"], 18765)
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S)
-    assert boots.calls == [(COMPUTER_DISPLAY, "get", None),
+    assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "recreate", (COMPUTER_DISPLAY, "get", None),
                            (DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "*", "tools": ["computer_pointer_list"]})]
 
 
 @pytest.mark.asyncio
-async def test_teardown_closes_a_computer_env_ending_its_open_recordings_before_its_computer_goes(
+async def test_teardown_closes_a_computer_env_ending_its_recordings_before_its_computer_goes(
         base, driver, docker, boots, monkeypatch):
     env = _put(base, driver, display={"width": 1600, "height": 900})
     deployed = await Env.get(env.id).deploy()
     (sandbox,) = boots.sandboxes
-    ended = []
+    terminate = sandbox.terminate
 
-    async def end_open_recordings(context, env_ids):
-        ended.append((context, env_ids, sandbox.terminated))
+    async def terminating():
+        boots.calls.append("terminate")
+        await terminate()
 
-    monkeypatch.setattr(computer_env_module, "end_open_recordings", end_open_recordings)
+    sandbox.terminate = terminating
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
     monkeypatch.setattr(teardown, "terminate", AsyncMock(return_value=False))
-    context = TaskStepContext(deployed_envs=[deployed])
+    boots.calls.clear()
 
-    report = await teardown.teardown_run(context)
+    report = await teardown.teardown_run(TaskStepContext(deployed_envs=[deployed]))
 
-    assert ended == [(context, [env.id], False)] and sandbox.terminated
+    assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "teardown"}), "terminate"]
     assert [s.sandbox_id for s in report.terminated] == ["local-1"] and not report.failed
 
 

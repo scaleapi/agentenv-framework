@@ -1,8 +1,9 @@
 """Record a computer env's display. ``start_computer_recording`` starts a recording on a deployed env whose card, or
 whose child env's card (``environment_name``), declares computer-recording/v1, with a grant to upload its segments
 under a namespace of its own;
-``end_computer_recording`` ends it and registers its segments and manifest as one FileArtifactUniverse. Teardown
-ends whatever a run left open (``end_open_recordings``)."""
+``end_computer_recording`` ends it and registers its segments and manifest as one FileArtifactUniverse. A computer env
+ends its own recordings as it closes or resets, and teardown then registers what a run left open from each one's
+namespace (``register_open_recordings``)."""
 from __future__ import annotations
 
 import json
@@ -12,6 +13,7 @@ from typing import ClassVar, Optional
 
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.computer.manifest import ManifestSegment, RecordingManifest
+from agentenv_protocol.computer.recording import MANIFEST
 from agentenv_protocol.client import find_extension
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
@@ -141,21 +143,25 @@ class EndComputerRecordingTaskStep(TaskStep):
         return context
 
 
-async def end_open_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
-    """End and register every recording still open in ``context`` (of ``env_ids`` only, when given), before its
-    computer is torn down."""
+def register_open_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
+    """Register every recording still open in ``context`` (of ``env_ids`` only, when given) from what its namespace
+    holds: the manifest its driver uploaded when its env ended it, or else the segments alone. Teardown calls it once
+    the envs have closed. Never raises: each entry says what happened."""
     for name, entry in list((context.metadata.get(RECORDINGS_KEY) or {}).items()):
         if entry.get("state") == "open" and (env_ids is None or entry["env_id"] in env_ids):
             try:
-                await end_recording(context, name, "teardown")
-            except Exception as e:  # what tears the computer down goes on regardless
+                manifest = _from_namespace(entry)
+            except Exception as e:
+                logger.warning("recording %s: listing its namespace failed: %s", name, e)
                 entry["state"], entry["error"] = "failed", f"{type(e).__name__}: {e}"[:500]
-                logger.warning("ending recording %s: %s", name, e)
+                continue
+            _registered(context, name, entry, manifest)
 
 
 async def end_recording(context: TaskStepContext, name: str, reason: str) -> None:
-    """End the open recording ``name`` with a fresh grant and register it. When the driver no longer knows it, as
-    after a restart, what its namespace holds is registered instead. Never raises: the entry says what happened."""
+    """End the open recording ``name`` with a fresh grant and register it. When the driver no longer knows it, as after
+    a restart or once its env ended it, what its namespace holds is registered instead. Never raises: the entry says
+    what happened."""
     entry = context.metadata[RECORDINGS_KEY][name]
     if entry.get("state") != "open":
         return
@@ -173,16 +179,21 @@ async def end_recording(context: TaskStepContext, name: str, reason: str) -> Non
             logger.warning("end_computer_recording %s: listing its namespace failed: %s", name, listing)
             entry["state"], entry["error"] = "failed", f"{entry['error']}; then {type(listing).__name__}: {listing}"[:500]
             return
+    _registered(context, name, entry, manifest)
+
+
+def _registered(context: TaskStepContext, name: str, entry: dict, manifest: RecordingManifest) -> None:
+    """Register the recording ``name`` as ``manifest`` says it went, and its entry as ended, or as failed."""
     try:
         entry["artifact"] = _register(context, name, entry["namespace"], manifest)
     except Exception as e:
-        logger.warning("end_computer_recording %s: registering it failed: %s", name, e)
+        logger.warning("recording %s: registering it failed: %s", name, e)
         entry["state"], entry["error"] = "failed", f"{type(e).__name__}: {e}"[:500]
         return
     uploaded = [s for s in manifest.segments if s.uploaded]
     entry.update(state="ended", ended_by=manifest.ended_by, segments=len(uploaded),
                  missing_segments=len(manifest.segments) - len(uploaded))
-    logger.info("end_computer_recording %s: %d segments, ended by %s", name, len(uploaded), manifest.ended_by)
+    logger.info("recording %s: %d segments, ended by %s", name, len(uploaded), manifest.ended_by)
 
 
 def _deployed(context: TaskStepContext, env_id: str):
@@ -219,7 +230,7 @@ def _grant(deployed, namespace: str, environment_name: Optional[str] = None) -> 
                            f"({sandbox_type or 'unknown'}), so its recording couldn't upload")
     duration = params["max_duration_s"]
     cap = min(store.max_single_upload_bytes or _MAX_SEGMENT_BYTES, _MAX_SEGMENT_BYTES)
-    limits = ObjectLimits(max_objects=MAX_SEGMENTS, max_object_bytes=cap, max_total_bytes=MAX_RECORDING_BYTES)
+    limits = ObjectLimits(max_objects=MAX_SEGMENTS + 1, max_object_bytes=cap, max_total_bytes=MAX_RECORDING_BYTES)
     try:
         grant = namespace_grant(store, namespace, limits=limits, expires_in=duration + GRANT_MARGIN_S)
     except GrantUnavailableError:
@@ -228,10 +239,14 @@ def _grant(deployed, namespace: str, environment_name: Optional[str] = None) -> 
 
 
 def _from_namespace(entry: dict) -> RecordingManifest:
-    """A manifest of what the recording's namespace holds, for a recording its driver can't end."""
+    """What the recording's namespace holds, for a recording its driver didn't end for the run: the manifest the driver
+    uploaded beside the segments when it ended it, or else one of the segments there."""
     store = get_config().get_object_store()
     root = entry["namespace"].rstrip("/") + "/"
-    paths = sorted(url[len(root):] for url in store.list_at(root) if url.endswith(".mp4"))
+    urls = store.list_at(root)
+    if (uploaded := f"{root}{entry.get('recording_id')}/{MANIFEST}") in urls:
+        return RecordingManifest.model_validate(json.loads(store.get(uploaded)))
+    paths = sorted(url[len(root):] for url in urls if url.endswith(".mp4"))
     return RecordingManifest(recording_id=entry.get("recording_id"), ended_by="error", error=entry.get("error"),
                              segments=[ManifestSegment(index=i, path=path, uploaded=True)
                                        for i, path in enumerate(paths)])

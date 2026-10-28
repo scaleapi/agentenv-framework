@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from agent_env.env.envs.mcp_server import MCPServerEnv
     from agent_env.env.envs.website import WebsiteEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider, _SandboxEnvironmentProvider
-    from agent_env.task_step.context import TaskStepContext
 
 logger = logging.getLogger(__name__)
 
@@ -134,14 +133,13 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, file_artifact: File
     })], timeout=timeout)
 
 
-async def close_deployed(deployed: DeployedEnv, env_class: type[Env], context: Optional[TaskStepContext] = None) -> None:
-    """Close what a task deployed of an env_class env: a built-in's through its env, given the run's ``context``, a plugin's by
-    terminating the sandboxes its record names."""
+async def close_deployed(deployed: DeployedEnv, env_class: type[Env]) -> None:
+    """Close what a task deployed of an env_class env: a built-in's through its env, a plugin's by terminating the sandboxes its record names."""
     from agent_env.task.teardown import RecordedSandbox, env_sandbox_ids, terminate
 
     env = await env_class.from_deployed_env(deployed)
     if as_builtin(env._env_provider):
-        await env.close(context)
+        await env.close()
         return
     sandboxes = env_sandbox_ids(deployed)
     if not sandboxes:

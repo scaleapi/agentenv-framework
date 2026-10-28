@@ -4,17 +4,18 @@ on a sandbox provider that runs its arch natively; the driver's card is the env 
 from __future__ import annotations
 
 import functools
+import logging
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 import anyio
-from agentenv_protocol.computer import COMPUTER_DISPLAY
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agentenv_protocol.tool_access import DISABLE, DISABLE_TOOL_EXTENSION_URI, WILDCARD
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
-from agent_env.env.env import DeployedSandboxEnv
+from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer import params as computer_params
 from agent_env.env.envs.computer.boot import READY_TIMEOUT_S, boot, ready, recorded_settings, settings_environment
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
@@ -27,7 +28,11 @@ if TYPE_CHECKING:
     from agent_env.env.envs.computer.env import ComputerEnv
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
+logger = logging.getLogger(__name__)
+
 _TOOLS_TIMEOUT_S = 60.0
+#: How long a driver may take to end its recordings, uploading the segments still to go.
+_END_RECORDINGS_TIMEOUT_S = 300
 
 
 class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
@@ -106,13 +111,14 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         return record
 
     async def reboot(self, env: ComputerEnv, deployed: DeployedSandboxEnv) -> None:
-        """Replace the computer ``deployed`` records with a fresh container of the image it booted, its settings applied
-        as that deploy applied them (a generated one minted afresh), on the same sandbox and port, readied as a deploy
-        readies it."""
+        """Replace the computer ``deployed`` records with a fresh container of the image it booted, once its recordings
+        ended, its settings applied as that deploy applied them (a generated one minted afresh), on the same sandbox and
+        port, readied as a deploy readies it."""
         record = deployed.metadata["computer"]
         params, settings, _ = computer_params.checked(env, record["env_params"])
         computer = ComputerArtifact.get(record["computer"]["id"], record["computer"]["version"])
         values = _values(env, computer, settings)
+        await end_recordings(deployed, "reset")
         sandbox_provider = build_sandbox_provider(deployed.sandbox_type)
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
         await sandbox_provider.recreate_container(sandbox, image_name=record["image"], port=env.driver.port,
@@ -120,6 +126,17 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         _require_name(env, await ready(deployed.environment_url, READY_TIMEOUT_S))
         await _require_display(deployed, values.get("resolution"))
         await _hide_tools(deployed, env.hidden_tools)
+
+
+async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
+    """Have the computer's driver end every recording not yet ended, each uploading what's left and its manifest under
+    the grant it was started with, before the computer goes; a driver that doesn't record has none."""
+    try:
+        await record.invoke(COMPUTER_RECORDING, "end_all", {"reason": reason}, timeout=_END_RECORDINGS_TIMEOUT_S)
+    except EnvCapabilityUnsupported:
+        return
+    except Exception as e:
+        logger.warning(f"'{record.env_id}': its recordings weren't ended before its computer went: {e}")
 
 
 def _values(env: ComputerEnv, computer: ComputerArtifact, settings: dict[str, dict]) -> dict:

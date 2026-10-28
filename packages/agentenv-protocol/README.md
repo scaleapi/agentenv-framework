@@ -470,13 +470,16 @@ class MyDriver(ComputerDriverEnvironment):
   `@pointer_position`: the slow path, at most 15 fps.
 - **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?}` returns
   `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
-  and returns the manifest. A repeated `request_id`, or a repeated `end`, answers the same. A start
-  past `max_concurrent` is refused `limit_exceeded`; `max_duration_s`, free disk under 512 MB or a stream
+  and returns the manifest; `end_all {reason?}` ends every recording not yet ended, each under the
+  grant it started with, and returns `{manifests}`, as the framework does before it resets or tears a
+  computer down. A repeated `request_id`, or a repeated `end`, answers the same. A start past
+  `max_concurrent` is refused `limit_exceeded`; `max_duration_s`, free disk under 512 MB or a stream
   failing for 60 s end a recording by itself.
 - **Segments.** A segment closes at `max_segment_s`, when the frame size changes or after a gap in the
   stream. Each uploads as it closes under `start`'s `write_namespace` grant, at
   `<recording_id>/<index>.mp4`, and is then deleted; `end`'s own grant uploads any that missed. With no
-  grant they stay under `~/.agentenv-recordings/`.
+  grant they stay under `~/.agentenv-recordings/`. An ended recording's manifest uploads beside its
+  segments, at `<recording_id>/manifest.json`, so a reader that didn't end it finds it there.
 - **The manifest** (`RecordingManifest`). Its `segments` (`ManifestSegment`) carry each one's path,
   `started_at` and `ended_at` (its first and last frames' capture times), size, frame count, byte size,
   SHA-256 and whether it uploaded, and `ended_by` says why the recording ended: `end`, `reset`,
