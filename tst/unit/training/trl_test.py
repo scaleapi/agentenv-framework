@@ -7,6 +7,8 @@ import asyncio
 import inspect
 import json
 import logging
+import multiprocessing
+import pickle
 
 import pytest
 from agentenv_protocol import EnvironmentTool, ToolResult
@@ -83,6 +85,27 @@ def test_a_rollout_plays_its_rows_task_and_an_environment_plays_one_after_anothe
     assert environment.get_reward() == 0.0
     assert environment.get_reward() is None
     assert len(teardowns.finished) == 3
+
+
+def test_the_factory_pickles_and_plays_in_a_spawned_process_as_asyncgrpos_rollout_process_does(served):
+    env = served({"a": PLAYED})
+
+    with multiprocessing.get_context("spawn").Pool(1) as pool:
+        assert pool.apply(_play, (env.factory, env.dataset[0])) == 1.0
+    rebuilt = pickle.loads(pickle.dumps(env.factory))()
+    rebuilt.reset(**env.dataset[0])
+    assert (_tools(type(rebuilt)), rebuilt.add_item(item="crate")) == (_tools(env.factory), "add_item {'item': 'crate'}")
+    env.close()
+    assert rebuilt._client is None
+    with pytest.raises(pickle.PicklingError, match="recorded"):
+        pickle.dumps(type("recorded", (env.factory,), {"get_reward": lambda self: 0.5}))
+
+
+def _play(factory, row):
+    environment = factory()
+    environment.reset(**row)
+    environment.end_turn(response="Added a crate.")
+    return environment.get_reward()
 
 
 def test_end_turn_answers_with_the_next_turns_prompt_and_a_turn_left_open_ends_empty(served):
@@ -280,7 +303,7 @@ def test_tasks_whose_agent_gets_other_tools_take_trls_multi_environment_mode(ser
         "items": ["add_item", "end_turn", "get_reward", "reset"],
         "pantry": ["end_turn", "get_reward", "reset", "take_item"]}
     assert [(row["environment"], row["index"]) for row in env.dataset] == [("items", 0), ("pantry", 1)]
-    pantry = env.factory["pantry"]()
+    pantry = pickle.loads(pickle.dumps(env.factory))["pantry"]()
     pantry.reset(**{key: value for key, value in env.dataset[1].items() if key != "environment"})
     assert pantry.take_item() == f"take_item on {PANTRY_MCP}"
     pantry.end_turn(response="Took one.")
