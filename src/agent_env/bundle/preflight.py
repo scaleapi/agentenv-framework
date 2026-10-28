@@ -498,7 +498,8 @@ class _Walk:
     def _default_agent_id(self) -> str:
         """The agent a step naming none deploys: the configured default, or the agent it names when it's an alias."""
         default = get_config().get_default_a2a_agent_id()
-        return self.plan.aliases[default].agent_id if default in self.plan.aliases else default
+        agents = self.plan.alias_uses.get(EntityKind.AGENT, {})
+        return agents[default].agent_id if default in agents else default
 
     def _default_agent(self) -> None:
         if not self.default_agent_users:

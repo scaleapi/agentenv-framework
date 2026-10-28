@@ -305,12 +305,14 @@ def _restored_transcripts() -> list[Path]:
 
 def _upstream_headers(headers: dict[str, str], project_id: str | None, task_id: str | None) -> dict[str, str]:
     """``headers``, then the endpoint's [model.headers], then the run's attribution, each replacing a header of the
-    same name in any case."""
+    same name in any case, except that the run's x-litellm-tags join the ones [model.headers] name."""
     attribution = build_attribution_headers(project_id, task_id)
     if attribution:
         record_attribution(project_id, task_id)
-    layers = (headers, model_headers(os.environ.get(MODEL_HEADERS_ENV)), attribution)
-    return {name.lower(): value for layer in layers for name, value in layer.items()}
+    configured = {name.lower(): value for name, value in model_headers(os.environ.get(MODEL_HEADERS_ENV)).items()}
+    if configured.get(_TAGS_HEADER) and _TAGS_HEADER in attribution:
+        attribution = {**attribution, _TAGS_HEADER: _join_tags(configured[_TAGS_HEADER], attribution[_TAGS_HEADER])}
+    return {name.lower(): value for layer in (headers, configured, attribution) for name, value in layer.items()}
 
 
 def _answer(uploaded: Uploaded) -> dict[str, Any]:
@@ -817,6 +819,16 @@ class GeminiChangelogAgent(GeminiAgent):
         logger.info(f"agent-changelog resume: bound context {new_context_id} -> session {new_session_id} "
                     f"(from {source.name})")
         return new_context_id
+
+
+_TAGS_HEADER = "x-litellm-tags"
+
+
+def _join_tags(configured: str, run: str) -> str:
+    """x-litellm-tags as configured, then each of the run's tags whose key (the part before ``:``) they don't name."""
+    tags = [tag.strip() for tag in configured.split(",") if tag.strip()]
+    keys = {tag.partition(":")[0] for tag in tags}
+    return ",".join([*tags, *(tag for tag in run.split(",") if tag and tag.partition(":")[0] not in keys)])
 
 
 def agent_for_this_host() -> GeminiAgent:

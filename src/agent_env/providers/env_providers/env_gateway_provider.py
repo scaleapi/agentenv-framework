@@ -34,6 +34,7 @@ from agent_env.env.envs.service_db import (
     DB_WEB_PORT,
     PGWEB_SERVICE_NAME,
 )
+from agent_env.env.envs.website_browser import WEBSITE_BROWSER_RECORDER_PORT
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
@@ -88,6 +89,7 @@ class MCPServerConfig:
     image: str
     environment_name: str
     extra_env_vars: dict[str, str] | None = None
+    card_port: int | None = None  # where its env card is served, when not on the MCP port (the website browser's recorder)
 
 
 @dataclass
@@ -452,7 +454,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         rest_proxy_urls = []
         for server in mcp_servers:
             rest_proxy_urls.append(
-                f"mcp-{server.environment_name}=http://{server.environment_name}:{gateway_port}"
+                f"mcp-{server.environment_name}=http://{server.environment_name}:{server.card_port or gateway_port}"
             )
         if website_configs:
             website_urls = ",".join(
@@ -728,6 +730,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             browser_server = MCPServerConfig(
                 image=website_browser_env.docker_image_artifact.image_name,
                 environment_name=website_browser_env.environment_name,
+                card_port=WEBSITE_BROWSER_RECORDER_PORT,
             )
             mcp_servers = list(mcp_servers) + [browser_server]
             mcp_server_images = list(mcp_server_images) + [website_browser_env.docker_image_artifact]

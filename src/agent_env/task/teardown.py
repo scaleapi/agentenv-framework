@@ -2,9 +2,10 @@
 
 ``teardown_run`` terminates every sandbox a run's context records: its bare sandboxes', its envs' and its
 agents'. It removes compute only; the instance, its outputs and the artifacts it collected stay. A local
-sandbox's work folder goes too, once the sandbox is down. ``agent-env run`` and ``agent-env eval run`` call
-it after each run. ``Task.run`` never does, so a caller that keeps a run's environment up, as the hub and
-the worker do, owns its teardown.
+sandbox's work folder goes too, once the sandbox is down. Before any goes, what has to reach the stores does
+(``before_teardown``): the changelogs staged on its agents and the recordings open on its envs. ``agent-env run``
+and ``agent-env eval run`` call it after each run. ``Task.run`` never does, so a caller that keeps a run's
+environment up, as the hub and the worker do, owns its teardown.
 """
 
 from __future__ import annotations
@@ -14,14 +15,13 @@ import logging
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
-from agent_env.a2a_agent.staging import drain_all, staged_changelogs
 from agent_env.env.env import DeployedEnv
 from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from agent_env.task.interrupts import tearing_down
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import (
-    _DEFAULT_PROVIDERS, TORN_DOWN_KEY, _env_sandbox_ids, _sandbox_ids_of,
+    _DEFAULT_PROVIDERS, TORN_DOWN_KEY, _env_sandbox_ids, _sandbox_ids_of, before_teardown,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,11 +97,8 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
     tearing_down()
     pending = _pending(context)
     terminated, failed = [], []
-    try:  # a changelog staged on an agent goes into the store before the agent does
-        async with asyncio.timeout(timeout):
-            await drain_all(staged_changelogs(context.metadata))
-    except TimeoutError:
-        logger.warning("teardown: staged changelog increments were not all drained within %gs", timeout)
+    try:
+        await before_teardown(context, timeout)
     except asyncio.CancelledError:
         return TeardownReport(left=pending)
 

@@ -41,7 +41,8 @@ from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.published_images import published_bundle_image
 from agent_env.env.registry import get_env_registry
 from agent_env.env.store import ENVS_COLLECTION, get_env_store
-from agent_env.plugins._bundles import ENV_ALIASES, InstalledAliases, installed_aliases
+from agent_env.plugins._bundles import (AGENT_ALIASES, ARTIFACT_ALIASES, ENV_ALIASES, InstalledAliases,
+                                        installed_aliases)
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
     AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
@@ -122,13 +123,16 @@ class Publication:
                                    source_digest=self.sources)
 
 
+# The aliases.toml table of each kind a task's reference may name by an alias.
+_ALIAS_TABLES = {EntityKind.AGENT: AGENT_ALIASES, EntityKind.ENV: ENV_ALIASES, EntityKind.ARTIFACT: ARTIFACT_ALIASES}
+
 @dataclass(frozen=True)
 class AliasUse:
-    """An agent or env alias the run names, and what it names: the one an installed bundle gives the alias or, when
-    the store has one of that id, that one, which shadows it."""
+    """An agent, env or artifact alias the run names, and what it names: the one an installed bundle gives the alias
+    or, when the store has one of that id, that one, which shadows it."""
 
     alias: str
-    target_id: str  # the agent or env the installed bundle gives the alias
+    target_id: str  # the agent, env or artifact the installed bundle gives the alias
     declared_by: str  # "<dist>'s <name> bundle"
     store_version: int | None = None  # the store's of the alias's id, when it shadows the alias
     kind: EntityKind = EntityKind.AGENT
@@ -172,9 +176,9 @@ class Plan:
     # Each agent image the bundle builds from a shipped agent's sources, by id: the image published for them, which the
     # run registers in place of its build context alone.
     published: Mapping[str, Publication] = field(default_factory=dict)
-    aliases: Mapping[str, AliasUse] = field(default_factory=dict)  # each agent alias the run names, by alias
+    # Each alias the run names, by the kind it names and then by alias.
+    alias_uses: Mapping[EntityKind, Mapping[str, AliasUse]] = field(default_factory=dict)
     agent: AgentOverride | None = None  # the agent --agent names for the solver
-    env_aliases: Mapping[str, AliasUse] = field(default_factory=dict)  # each env alias the run names, by alias
 
     def bundle_of(self, entry: BundleEntry) -> Bundle:
         """The bundle ``entry`` comes from: the installed one for an entry pulled in from one, else the run's."""
@@ -240,12 +244,11 @@ class _Planner:
         self.others: tuple[InstalledBundle, ...] | None = None  # the installed bundles but this one, once listed
         self.pullable: dict[str, _Pullable | str] = {}  # each installed bundle read, by id root, or why it can't be
         self.unpulled: dict[tuple[EntityKind, str, int | None], str] = {}  # why an installed bundle's id isn't pulled
-        self.alias_table: InstalledAliases | None = None  # the installed agent aliases, once a plan reads them
-        self.alias_uses: dict[str, AliasUse] = {}  # each agent alias the plan names, by alias
-        self.alias_stored: dict[str, int | None] = {}  # the store's latest version of each alias's id, as read
-        self.env_alias_table: InstalledAliases | None = None
-        self.env_alias_uses: dict[str, AliasUse] = {}
-        self.env_alias_stored: dict[str, int | None] = {}
+        # By kind: its installed aliases, once a plan reads them; each of them the plan names, by alias; and the store's
+        # latest version of each alias's id, as read.
+        self.alias_tables: dict[EntityKind, InstalledAliases] = {}
+        self.alias_uses: dict[EntityKind, dict[str, AliasUse]] = {kind: {} for kind in _ALIAS_TABLES}
+        self.alias_stored: dict[EntityKind, dict[str, int | None]] = {kind: {} for kind in _ALIAS_TABLES}
         self.pulling: set[_Key] = set()
         self.own = _by_id(resolved.bundle)  # what a pulled entity's id names in this bundle
         images: dict[BundleEntry, list[BundleImage]] = {}
@@ -298,19 +301,16 @@ class _Planner:
 
     # Agents named by an installed bundle's alias
 
-    def _resolve_aliases(self) -> dict[str, AliasUse]:
-        """Point each task's reference to an agent or env by an alias an installed bundle gives it, and the configured
-        default agent when it's one, at what it names, pulled into the plan, unless the store has one of the alias's
-        id, which the reference keeps naming. A field naming the alias is rewritten to the id. A reference that can't be
-        pointed at the alias's entity is left with the problem the store ref check reports. Returns the agent aliases
-        the plan names; ``env_alias_uses`` holds the env aliases."""
+    def _resolve_aliases(self) -> None:
+        """Point each task's reference to an agent, env or artifact by an alias an installed bundle gives it, and the
+        configured default agent when it's one, at what it names, pulled into the plan, unless the store has one of the
+        alias's id, which the reference keeps naming. A field naming the alias is rewritten to the id. A reference that
+        can't be pointed at the alias's entity is left with the problem the store ref check reports; ``alias_uses``
+        holds the aliases the plan names."""
         if self.installed is None:
-            return {}
+            return
         installed = self.installed()
-        self.alias_table, self.env_alias_table = installed_aliases(installed), installed_aliases(installed, ENV_ALIASES)
-        tables = {EntityKind.AGENT: self.alias_table, EntityKind.ENV: self.env_alias_table}
-        uses = {EntityKind.AGENT: self.alias_uses, EntityKind.ENV: self.env_alias_uses}
-        stored = {EntityKind.AGENT: self.alias_stored, EntityKind.ENV: self.env_alias_stored}
+        self.alias_tables = {kind: installed_aliases(installed, table) for kind, table in _ALIAS_TABLES.items()}
         default = _UNREAD
         for index, entry in enumerate(self.entries):
             if entry.entry.kind is not BundleKind.TASK:
@@ -318,9 +318,8 @@ class _Planner:
             references, aliased = [], {}
             for ref in entry.references:
                 use = None
-                if ref.kind in tables and ref.local is None:
-                    use = self._alias_use(tables[ref.kind], ref.kind, ref.id, ref.version, uses[ref.kind],
-                                          stored[ref.kind])
+                if ref.kind in self.alias_tables and ref.local is None:
+                    use = self._alias_use(ref.kind, ref.id, ref.version)
                 if isinstance(use, str):
                     self.unpulled[ref.kind, ref.id, ref.version] = use
                 elif use is not None and use.store_version is None:
@@ -329,16 +328,13 @@ class _Planner:
                 references.append(ref)
             if self.default_agents and _leaves_an_agent_unset(entry):
                 if default is _UNREAD:
-                    default = self._alias_use(self.alias_table, EntityKind.AGENT,
-                                              get_config().get_default_a2a_agent_id(), None, self.alias_uses,
-                                              self.alias_stored)
+                    default = self._alias_use(EntityKind.AGENT, get_config().get_default_a2a_agent_id(), None)
                     if isinstance(default, str):
                         self.problems.append(f"[agents] default_a2a_agent_id: {default}")
                 if isinstance(default, AliasUse) and default.store_version is None:
                     references += self._default_agents(entry, default.target_id)
             if references != list(entry.references):
                 self._replace(index, replace(entry, config=_renamed(entry.config, aliased), references=tuple(references)))
-        return self.alias_uses
 
     def _agent_override(self, name: str) -> AgentOverride | None:
         """The agent ``name`` names, as a task's reference to it would: this bundle's agent, an installed bundle's
@@ -356,8 +352,7 @@ class _Planner:
             ref = Reference(EntityKind.AGENT, own.id, None, own, where, None)
         else:
             ref = Reference(EntityKind.AGENT, name, None, None, where, None)
-            use = None if self.alias_table is None else self._alias_use(
-                self.alias_table, EntityKind.AGENT, name, None, self.alias_uses, self.alias_stored)
+            use = self._alias_use(EntityKind.AGENT, name, None) if EntityKind.AGENT in self.alias_tables else None
             if isinstance(use, str):
                 self.problems.append(f"{where}: {use}")
                 return None
@@ -382,19 +377,20 @@ class _Planner:
         try:
             STORE_GETTERS[EntityKind.AGENT](ref.id, None)
         except NotFoundError:
-            hint = self.alias_table.hint(ref.id) if self.alias_table is not None else ""
+            hint = table.hint(ref.id) if (table := self.alias_tables.get(EntityKind.AGENT)) is not None else ""
             return f"there is no agent {ref.id!r} in this bundle, an installed bundle or the store{hint}"
         except (ValueError, KeyError, TypeError) as e:
             return f"agent {ref.id!r} can't be read ({type(e).__name__}: {e})"
         return None
 
-    def _alias_use(self, table: InstalledAliases, kind: EntityKind, id: str, version: int | None,
-                   uses: dict[str, AliasUse], stored: dict[str, int | None]) -> AliasUse | str | None:
+    def _alias_use(self, kind: EntityKind, id: str, version: int | None) -> AliasUse | str | None:
         """What ``id``, naming one of ``kind``, names when it's an installed alias, the store's of that id read first
-        (its latest version, or None, cached in ``stored``), recorded in ``uses``; why it can't be named so; or None
-        when it's no alias, or names the store's as any store reference does: pinned, or with the alias refused."""
+        (its latest version, or None, cached in ``alias_stored``), recorded in ``alias_uses``; why it can't be named
+        so; or None when it's no alias, or names the store's as any store reference does: pinned, or with the alias
+        refused."""
         if id.startswith(LOCAL_PREFIX):
             return None
+        table, uses, stored = self.alias_tables[kind], self.alias_uses[kind], self.alias_stored[kind]
         refusal, named = table.refusal(id), table.target(id)
         if refusal is None and named is None:
             return None
@@ -500,21 +496,20 @@ class _Planner:
         self._add(key, source, _needs(source))
 
     def plan(self, tasks: Sequence[str], evals: Sequence[str], agent: str | None = None) -> Plan:
-        aliases = self._resolve_aliases()
+        self._resolve_aliases()
         override = self._agent_override(agent) if agent is not None else None
         self._check_writers()
         self._check_loops()
         selected_tasks, selected_evals = self._selection(tasks, evals)
-        return self._planned(selected_tasks + selected_evals, selected_tasks, selected_evals, aliases, override)
+        return self._planned(selected_tasks + selected_evals, selected_tasks, selected_evals, override)
 
     def plan_entities(self, ids: Sequence[str]) -> Plan:
         self._check_writers()
         self._check_loops()
-        return self._planned(self._select_entities(ids), [], [], {}, None)
+        return self._planned(self._select_entities(ids), [], [], None)
 
     def _planned(self, roots: list[ResolvedEntry], selected_tasks: list[ResolvedEntry],
-                 selected_evals: list[ResolvedEntry], aliases: dict[str, AliasUse],
-                 override: AgentOverride | None) -> Plan:
+                 selected_evals: list[ResolvedEntry], override: AgentOverride | None) -> Plan:
         closure = self._closure(roots)
         store_refs, store_latest = self._check_store_refs(closure)
         if override is not None:
@@ -530,7 +525,8 @@ class _Planner:
             raise BundleError(self.problems)
         writes = self._ordered(closure)
         return Plan(self.resolved, writes, tuple(selected_tasks), tuple(selected_evals), store_refs, store_latest,
-                    dict(self.origins), self._published(writes), aliases, override, dict(self.env_alias_uses))
+                    dict(self.origins), self._published(writes),
+                    {kind: dict(uses) for kind, uses in self.alias_uses.items()}, override)
 
     def check(self) -> None:
         """The checks a run makes before it reads a store. A bundle with nothing to run passes only when its
@@ -733,14 +729,15 @@ class _Planner:
         if found is None:
             at = f" version {ref.version}" if ref.version is not None else ""
             other = self.named.get(fold(ref.id))
-            aliased = self.env_alias_table.target(ref.id) if ref.kind is EntityKind.ENV and self.env_alias_table else None
+            table = self.alias_tables.get(ref.kind)
+            aliased = table.target(ref.id) if table is not None and ref.kind is not EntityKind.AGENT else None
             if other is not None:
                 hint = f"; this bundle's {other.kind.store} {other.name!r} has that name"
             elif aliased is not None:  # a task's reference to it is pulled in; another entry's isn't, as aliases go
                 return (f"{ref.id!r} is an alias of {aliased.target_id}, which comes with {aliased.declared_by}, and an "
-                        "env alias names an env only in a task's steps; name the env by its id")
+                        f"{ref.kind.value} alias names an {ref.kind.value} only in a task's steps; name the "
+                        f"{ref.kind.value} by its id")
             else:
-                table = {EntityKind.AGENT: self.alias_table, EntityKind.ENV: self.env_alias_table}.get(ref.kind)
                 hint = table.hint(ref.id) if table is not None else ""
             return f"there is no {kind} {ref.id!r}{at} in the store{hint}"
         if isinstance(found, str):
@@ -1047,8 +1044,8 @@ class _Planner:
         return tuple(writes)
 
     def _published(self, writes: Sequence[Write]) -> dict[str, Publication]:
-        """The published image of each image in ``writes`` built from the sources of a shipped bundle image, an agent's
-        or an example env's, by id."""
+        """The published image of each image in ``writes`` built from the sources of a shipped bundle image, an agent's,
+        an example env's or a base computer's, by id."""
         published = {}
         for write in writes:
             image = write.source

@@ -1,0 +1,20 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "inbox", "sandbox_type": "local"},
+  {"id": "clock", "type": "sync_env_clock", "env_id": "inbox", "virtual_time": "2026-03-02T08:00:00Z",
+   "virtual_seconds_per_real_second": 0},
+  {"id": "mail", "type": "register_env_triggers", "env_id": "inbox", "watch_roles": ["default"], "triggers": [
+    {"id": "school-pickup", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
+     "actions": [{"type": "tool", "tool": "deliver_email", "args": {"sender": "office@school.example",
+       "subject": "Thursday pick-up", "body": "Pick-up moves to 15:00 on Thursday. Please reply to confirm."}}]},
+    {"id": "school-thanks", "when": {"type": "action", "tool": "send_email", "where": {"to": {"regex": "school"}}},
+     "actions": [{"type": "tool", "tool": "deliver_email", "delay": "PT2H", "args": {
+       "sender": "office@school.example", "subject": "Re: Thursday pick-up", "body": "Thanks, noted."}}]},
+    {"id": "dentist", "when": {"type": "time", "at": "P3DT6H"},
+     "actions": [{"type": "tool", "tool": "deliver_email", "args": {"sender": "desk@dentist.example",
+       "subject": "Your appointment", "body": "Your check-up is moved to Friday at 10:00. Reply if that doesn't work."}}]}
+  ]},
+  {"id": "agent", "type": "deploy_agent", "env_ids": ["inbox"]},
+  {"id": "week", "type": "prompt_agent", "max_conversation_turns": 8,
+   "prompt": "You look after my inbox this week. Each time you're woken, read the inbox and handle anything new: answer what needs an answer, and tell me in one line what you did.",
+   "post_turn_hooks": [{"file_artifact_id": "next-env-event", "params": {"end_time": "P5D"}}]}
+]

@@ -479,7 +479,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 await asyncio.to_thread(shutil.copyfile, _CHANGELOG_SNAR, pending_snar)
                 await asyncio.to_thread(
                     subprocess.run,
-                    ["tar", f"--listed-incremental={pending_snar}",
+                    ["tar", "--ignore-failed-read", f"--listed-incremental={pending_snar}",
                      *_changelog_backup_exclusions(),
                      f"--exclude={_CHANGELOG_DIR}", "-czf", str(archive), *roots, str(record)],
                     check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -605,7 +605,7 @@ def _baseline_changelog(roots: list[str]) -> None:
     _CHANGELOG_SNAR.unlink(missing_ok=True)
     present = [root for root in roots if Path(root).exists()]
     subprocess.run(
-        ["tar", f"--listed-incremental={_CHANGELOG_SNAR}",
+        ["tar", "--ignore-failed-read", f"--listed-incremental={_CHANGELOG_SNAR}",
          *_changelog_backup_exclusions(),
          "-cf", "/dev/null", *present],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,

@@ -1,6 +1,6 @@
 """A bundle task as an OpenEnv env, on the Episode API's fake steps: the Task API, an episode reset, stepped and scored,
-its tool errors, every way it ends in an error observation, calls that overlap, and how a session's episode is torn
-down."""
+its tool errors, every way it ends in an error observation, a step before any reset, calls that overlap, and how a
+session's episode is torn down."""
 
 import asyncio
 import threading
@@ -13,8 +13,8 @@ from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction, T
 
 import agent_env.task.episode.run as episode_run
 from agent_env.openenv.app import _score_at
-from agent_env.openenv.environment import ENDED, AgentEnvEnvironment, Served, ServedTask
-from agent_env.task import EpisodeSpec, Task
+from agent_env.openenv.environment import ENDED, NOT_RESET, AgentEnvEnvironment, Served, ServedTask
+from agent_env.task import EpisodeError, EpisodeSpec, Task
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN, _gate, _until
 
 AGAIN = {**TURN, "id": "again", "prompt_id": "again", "prompt": "Add another.", "depends_on": ["turn"]}
@@ -133,7 +133,8 @@ async def test_an_episode_resets_to_its_turn_steps_through_the_envs_tools_and_is
 @pytest.mark.asyncio
 async def test_a_step_from_a_worker_thread_runs_on_the_episodes_loop_as_openenvs_playground_steps(teardowns, tools):
     env = _env(ITEMS, ALICE, TURN, REPLIES)
-    assert (await asyncio.to_thread(env.step, ListToolsAction())).metadata["error"] == ENDED
+    with pytest.raises(RuntimeError, match=NOT_RESET):
+        await asyncio.to_thread(env.step, ListToolsAction())
     await env.reset_async()
 
     listed = await asyncio.to_thread(env.step, ListToolsAction())
@@ -141,6 +142,19 @@ async def test_a_step_from_a_worker_thread_runs_on_the_episodes_loop_as_openenvs
 
     assert [tool.name for tool in listed.tools] == ["add_item", "end_turn"]
     assert (ended.done, ended.reward) == (True, 1.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", [ListToolsAction(), CallToolAction(tool_name="add_item", arguments={})])
+async def test_a_step_before_the_first_reset_raises_and_starts_no_episode(teardowns, tools, action):
+    env = _env(ITEMS, ALICE, TURN, REPLIES)
+
+    with pytest.raises(RuntimeError, match=NOT_RESET):
+        await env.step_async(action)
+
+    assert (teardowns.started, env._served.live, env.state.episode_id) == ([], set(), None)
+    await env.reset_async(split="all", index=1)
+    assert (await env.step_async(action)).metadata["error"] == ENDED
 
 
 @pytest.mark.asyncio
@@ -205,6 +219,40 @@ async def test_a_run_that_fails_mid_turn_ends_the_episode_at_the_next_step(teard
     assert step.metadata["error"].startswith("TimeoutError: A2A task ")
     assert step.metadata["error"].endswith(" did not complete within 1s")
     assert (await _call(env, "add_item")).metadata["error"] == ENDED
+
+
+@pytest.mark.asyncio
+async def test_an_end_turn_the_proxy_refuses_ends_the_episode_in_an_error_observation(teardowns, tools, monkeypatch):
+    env = _env(ITEMS, ALICE, TURN, REPLIES)
+    await env.reset_async()
+
+    async def over(response=None):
+        raise EpisodeError("turn 'turn' of agent 'alice' is over")
+
+    monkeypatch.setattr(env._turn, "end", over)
+    ended = await _call(env, "end_turn", response="Added a crate.")
+
+    assert (ended.done, ended.reward, ended.metadata["status"], ended.metadata["error"]) == (
+        True, None, "error", "EpisodeError: turn 'turn' of agent 'alice' is over")
+    assert (Task.get_instance(env.state.episode_id).status, teardowns.finished) == ("cancelled", [env.state.episode_id])
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_that_fails_ends_the_episode_in_an_error_observation_and_frees_the_session(
+        teardowns, tools, monkeypatch):
+    async def failing(context, **_):
+        raise RuntimeError("the sandbox didn't stop")
+
+    monkeypatch.setattr(episode_run, "teardown_run", failing)
+    env = _env(ITEMS, ALICE, TURN, REPLIES)
+    await env.reset_async()
+    ended = await _call(env, "end_turn", response="Added a crate.")
+    await env.reset_async()
+    await asyncio.to_thread(env.close)
+
+    assert (ended.done, ended.reward, ended.metadata["status"]) == (True, None, "error")
+    assert ended.metadata["error"] == "RuntimeError: the sandbox didn't stop"
+    assert (env._served.live, list(episode_run._live)) == (set(), [])
 
 
 @pytest.mark.asyncio

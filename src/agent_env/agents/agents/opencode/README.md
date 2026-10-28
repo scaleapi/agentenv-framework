@@ -15,7 +15,8 @@ Each run's settings reach the CLI as `OPENCODE_CONFIG_CONTENT`, so nothing is wr
 
 - the model endpoint, `$LITELLM_BASE_URL/v1`, as an OpenAI-compatible provider with its key from `LITELLM_API_KEY`,
   `[model.headers]` (`LITELLM_EXTRA_HEADERS`) and the run's `project_id` and `task_id` as `x-litellm-customer-id` and
-  `x-litellm-tags` on every model call. Each call asks LiteLLM to drop `tool_choice`, which some providers refuse.
+  `x-litellm-tags` on every model call. The run's tags join an `x-litellm-tags` that `[model.headers]` names, whose
+  own keys, such as `taskId`, win. Each call asks LiteLLM to drop `tool_choice`, which some providers refuse.
 - the model: the task's, else `OPENCODE_MODEL`, else `anthropic/claude-sonnet-4-6`;
 - every registered MCP server, the task's `peer_agents` tools included, as a remote server. Its `AgentEnv-Role` header
   is the role its registration names, unless the task has a role of its own;

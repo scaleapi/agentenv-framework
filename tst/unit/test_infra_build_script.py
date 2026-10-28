@@ -279,6 +279,16 @@ def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_a_build_installs(
             in capsys.readouterr().out)
 
 
+def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_floor_a_build_names(script, monkeypatch, capsys):
+    """The website browser's recorder names a protocol floor, which its release may be the first to publish."""
+    missing = "ERROR: No matching distribution found for agentenv-framework-protocol[computer]>=0.1.382\n"
+    runs, waits = _attempts(script, monkeypatch, [(missing, 1), ("#13 DONE 4.1s\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 0
+
+    assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
+
+
 def test_retry_doesnt_try_again_a_build_missing_another_package(script, monkeypatch, capsys):
     runs, waits = _attempts(script, monkeypatch, [("ERROR: No matching distribution found for nonexistent-pkg==1.0\n", 1)])
 

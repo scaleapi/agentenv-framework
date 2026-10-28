@@ -1,0 +1,4 @@
+# The recorder installs the newest agentenv-framework-protocol at or above this floor, the first with computer-recording/v1;
+# raise it when the recorder needs a newer protocol.
+agentenv-framework-protocol[computer]>=0.1.382
+websockets==15.0.1

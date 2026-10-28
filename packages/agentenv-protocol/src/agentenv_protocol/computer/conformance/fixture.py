@@ -27,6 +27,7 @@ def main(state_dir: Path) -> None:
     root.title("Fixture Desk")
     width, height = root.winfo_screenwidth(), root.winfo_screenheight()
     root.geometry(f"{width}x{height}+0+0")
+    root.attributes("-fullscreen", True)
     root.configure(bg="#f0f0f0")
     state: dict = {"name": "", "notes": "", "keys": [], "saved_count": 0, "subscribed": False, "selected": None,
                    "scroll_top": 0.0, "cells": {}, "right_clicks": 0, "double_clicks": 0, "drags": [],

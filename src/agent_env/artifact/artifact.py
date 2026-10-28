@@ -36,6 +36,9 @@ class Artifact(BaseModel):
     id: str = Field(description="Unique artifact identifier")
     version: int = Field(default=0, description="Artifact version: 0 takes the next free one on put; another must be the next")
     type: str = Field(description="The type of Artifact")
+    metadata: dict[str, Any] = Field(default_factory=dict, description=(
+        "What is learned about this version after it's written, such as a computer's inspected images; outside the "
+        "versioned fields, and changed only by compare-and-swap (merge_metadata)"))
 
     toml_refs: ClassVar[tuple[EntityRef, ...]] = ()
     toml_keys: ClassVar[dict[str, type]] = {}  # what an artifact.toml may set, for a type without an accept_toml
@@ -75,6 +78,24 @@ class Artifact(BaseModel):
 
         instance = cls(**kwargs)
         return get_artifact_store().put_document(instance)
+
+    def merge_metadata(self, updates: dict[str, Any], retries: int = 3) -> None:
+        """Merge ``updates`` into this version's stored metadata, re-reading and trying again when another writer
+        changed it meanwhile."""
+        from agent_env.artifact.store import get_artifact_store
+        from agent_env.store.base import ConcurrentModificationError
+
+        if self.version < 1:
+            raise ValueError(f"artifact {self.id!r} isn't stored yet, so it has no metadata to update")
+        store, metadata = get_artifact_store(), self.metadata
+        for attempt in range(retries + 1):
+            try:
+                self.metadata = store.update_metadata(self.id, self.version, metadata, {**metadata, **updates})
+                return
+            except ConcurrentModificationError:
+                if attempt == retries:
+                    raise
+                metadata = store.get(self.id, self.version).metadata
 
     @classmethod
     def from_toml(cls, data: dict[str, Any], ctx: AuthoringContext) -> Self:

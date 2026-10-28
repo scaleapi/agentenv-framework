@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .recording import recording_params
 from ..types import METHOD_ADD, EnvironmentExtension, EnvironmentTool, IntakeDeclaration, IntakeFormat, intake_extension
 
 if TYPE_CHECKING:
@@ -17,6 +18,7 @@ COMPUTER_SPACES = "urn:agentenv:computer-spaces/v1"
 COMPUTER_POINTER = "urn:agentenv:computer-pointer/v1"
 COMPUTER_KEYBOARD = "urn:agentenv:computer-keyboard/v1"
 COMPUTER_EXEC = "urn:agentenv:computer-exec/v1"
+COMPUTER_RECORDING = "urn:agentenv:computer-recording/v1"
 
 MAX_EXEC_TIMEOUT_S = 3600
 KEYBOARD_RANGES = {"tap_hold_ms": (0, 1000), "type_delay_ms": (0, 1000), "max_hold_ms": (0, 600_000)}
@@ -48,6 +50,8 @@ def served_extensions(driver: ComputerDriverEnvironment,
         need = _EXTENSION_NEEDS.get(extension.uri)
         if need is not None and not driver.has(need):
             continue
+        if extension.uri == COMPUTER_RECORDING and driver.recording is None:
+            continue
         dropped = {op for (uri, op), need in _METHOD_NEEDS.items() if uri == extension.uri and not driver.has(need)}
         if dropped:
             methods = {op: entry for op, entry in extension.params["methods"].items() if op not in dropped}
@@ -70,6 +74,8 @@ def extension_params(driver: ComputerDriverEnvironment, uri: str) -> dict:
                 "layouts": list(driver.layouts)}
     if uri == COMPUTER_EXEC:
         return {"max_output_bytes": driver.settings.exec_output_bytes, "max_timeout_s": MAX_EXEC_TIMEOUT_S}
+    if uri == COMPUTER_RECORDING and driver.recording is not None:
+        return recording_params(driver.recording, driver.has("record"))
     return {}
 
 

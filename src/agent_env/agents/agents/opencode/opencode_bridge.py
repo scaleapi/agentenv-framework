@@ -180,9 +180,11 @@ def model_headers(raw: str | None) -> dict[str, str]:
 
 def provider_headers(environ: Mapping[str, str], attribution: Mapping[str, str]) -> dict[str, str]:
     """The endpoint's [model.headers], then the run's attribution, each replacing a header of the same name in any
-    case."""
-    return {name.lower(): value for layer in (model_headers(environ.get(MODEL_HEADERS_ENV)), attribution)
-            for name, value in layer.items()}
+    case, except that the run's x-litellm-tags join the ones [model.headers] name."""
+    configured = {name.lower(): value for name, value in model_headers(environ.get(MODEL_HEADERS_ENV)).items()}
+    if configured.get(_TAGS_HEADER) and _TAGS_HEADER in attribution:
+        attribution = {**attribution, _TAGS_HEADER: _join_tags(configured[_TAGS_HEADER], attribution[_TAGS_HEADER])}
+    return {name.lower(): value for layer in (configured, attribution) for name, value in layer.items()}
 
 
 def _mcp_headers(headers: Mapping[str, str] | None, role: str | None) -> dict[str, str]:
@@ -616,3 +618,13 @@ class _EventParser:
             error=err,
             error_code=self.error_code if err else None,
         )
+
+
+_TAGS_HEADER = "x-litellm-tags"
+
+
+def _join_tags(configured: str, run: str) -> str:
+    """x-litellm-tags as configured, then each of the run's tags whose key (the part before ``:``) they don't name."""
+    tags = [tag.strip() for tag in configured.split(",") if tag.strip()]
+    keys = {tag.partition(":")[0] for tag in tags}
+    return ",".join([*tags, *(tag for tag in run.split(",") if tag and tag.partition(":")[0] not in keys)])

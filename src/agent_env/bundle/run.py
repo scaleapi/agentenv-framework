@@ -407,8 +407,8 @@ def refuse_store_tasks(plan: Plan) -> None:
 
 
 def _say_agents(plan: Plan, say: Callable[[str], None]) -> None:
-    """Say what each agent and env alias names, and what the solver deploys in place of the tasks' agents."""
-    for use in (*plan.aliases.values(), *plan.env_aliases.values()):
+    """Say what each agent, env and artifact alias names, and what the solver deploys in place of the tasks' agents."""
+    for use in (use for uses in plan.alias_uses.values() for use in uses.values()):
         say(_aliased(use))
     if plan.agent is not None:
         runs = _to_run(plan)
@@ -544,7 +544,8 @@ def _task_run_command(ref: Reference) -> str:
 
 
 def _aliased(use: AliasUse) -> str:
-    """Which agent or env an alias the run names is: the one an installed bundle gives it, or the store's of its id."""
+    """Which agent, env or artifact an alias the run names is: the one an installed bundle gives it, or the store's of
+    its id."""
     if use.store_version is None:
         return f"{use.alias} → {use.target_id} (the alias {use.declared_by} gives it)"
     return (f"{use.alias} → the store's {use.kind.value} {use.alias!r} v{use.store_version}, which shadows the alias "

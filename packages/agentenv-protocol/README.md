@@ -316,7 +316,7 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
 
 A computer driver is what runs inside a computer an agent uses through screenshots and input. Write
 one as a `ComputerDriverEnvironment` subclass from `agentenv_protocol.computer`, which needs the
-`computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn and Pillow).
+`computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn, Pillow and PyAV).
 The driver marks the methods that capture the screen and send input; the base class serves the
 computer contract from them, so the tools, results and errors can't drift from it. A complete
 driver for an X11 desktop is agent-env's reference driver, in its
@@ -367,6 +367,7 @@ pixels), at the display's size times its scale. Input operations may return an `
 | `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
 | `@run_in_session` | no; a Linux default | `computer-exec/v1` |
 | `@write_files` | no; a Linux default | `data/add` |
+| `@record` | no | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
 
 The class is checked when it is defined: a missing required operation, half a group, two methods
 for one operation that some platform could both match, or features that don't match the
@@ -398,8 +399,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
   capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
   pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
-  descriptions), `computer-keyboard/v1` and `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
-  request_id}`: output capped per stream, a repeated `request_id` answered with the first result).
+  descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
+  request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
+  with `recording`, `computer-recording/v1` (below).
 - **The data plane.** `data/add` takes file parts that name their path, relative to the session
   user's home, under the `data-objects/v1` marker (`{"path": ...}`), as inline bytes, an https URL,
   or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
@@ -425,6 +427,47 @@ names the caller whose latest frame and others' input a call uses.
 `MyDriver.declaration(platform)` returns the card the class serves on a `Platform`, built without
 running the driver, its operations or its dependencies.
 
+### Recording the display
+
+Every driver serves `computer-recording/v1`: video of the display, as MP4 (H.264) segments, for the
+framework to start and end around the work it wants on record. `recording = Recording(...)` sets its
+limits, and `recording = None` turns it off.
+
+```python
+from agentenv_protocol.computer import RecordedFrame, Recording, record
+
+
+class MyDriver(ComputerDriverEnvironment):
+    recording = Recording(max_fps=30)      # max_concurrent=2, max_duration_s=86400, max_segment_s=15
+
+    @record
+    async def stream(self, hints):         # hints.scope, fps, max_edge, cursor, max_segment_s, directory
+        async for image, captured_at in my_screen_stream(hints.fps):
+            yield RecordedFrame(image, captured_at)   # a Pillow image or a PyAV VideoFrame
+```
+
+- **The stream.** `@record` yields `RecordedFrame`s from a stream the OS pushes, which the base class
+  scales, encodes and splits into segments, each frame timed by its `captured_at`; or
+  `RecordedSegment`s, files a native recorder finished under `hints.directory`, which it only hashes,
+  uploads and lists. The base class closes the stream at `end`. A source that blocks, as most OS
+  capture APIs do, goes through `frames_in_thread(frames)`: the generator `frames()` runs in a thread
+  of its own, the latest 8 frames wait for the encoder, and it is closed when the recording stops. A
+  driver without `@record` records by the base class polling `@capture`, with a pointer drawn at
+  `@pointer_position`: the slow path, at most 15 fps.
+- **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?}` returns
+  `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
+  and returns the manifest. A repeated `request_id`, or a repeated `end`, answers the same. A start
+  past `max_concurrent` is refused `limit_exceeded`; `max_duration_s`, free disk under 512 MB or a stream
+  failing for 60 s end a recording by itself.
+- **Segments.** A segment closes at `max_segment_s`, when the frame size changes or after a gap in the
+  stream. Each uploads as it closes under `start`'s `write_namespace` grant, at
+  `<recording_id>/<index>.mp4`, and is then deleted; `end`'s own grant uploads any that missed. With no
+  grant they stay under `~/.agentenv-recordings/`.
+- **The manifest** (`RecordingManifest`). Its `segments` (`ManifestSegment`) carry each one's path,
+  `started_at` and `ended_at` (its first and last frames' capture times), size, frame count, byte size,
+  SHA-256 and whether it uploaded, and `ended_by` says why the recording ended: `end`, `reset`,
+  `teardown`, `limit` or `error`. A field it doesn't know is left out.
+
 ### Checking a driver: the conformance probe
 
 The probe checks a running driver against the contract through its card, tools and extensions. It
@@ -447,7 +490,7 @@ The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach t
 | Level | Checks | Needs on the computer |
 |---|---|---|
 | `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
-| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add` | Linux, `python3` with Tk, a 1280x800 screen or larger, `computer-exec` and `data/add` |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held | Linux, `python3` with Tk, a 1280x800 screen or larger, `computer-exec` and `data/add` |
 
 At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
 `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the

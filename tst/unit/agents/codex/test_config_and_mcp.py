@@ -75,7 +75,7 @@ def test_an_unsupported_or_mistyped_field_is_refused(codex):
 
 def test_the_server_start_writes_the_model_endpoint_into_config_toml(codex, monkeypatch):
     monkeypatch.setenv("LITELLM_BASE_URL", "https://llm.example.com/")
-    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps({"X-Gateway": "g"}))
+    monkeypatch.setenv("LITELLM_EXTRA_HEADERS", json.dumps({"X-Gateway": "g", "X-LiteLLM-Tags": "useCase:evals"}))
 
     async def exercise():
         async with codex.app.router.lifespan_context(codex.app):

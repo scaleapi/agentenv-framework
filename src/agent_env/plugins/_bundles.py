@@ -4,8 +4,8 @@ A distribution registers ``<name> = "<package>"`` and ships the bundle folder at
 found without importing any package code: only the top-level package is located, and the rest of the path is walked
 as folders. An installed bundle's ids are rooted at its distribution, ``@local/<dist>/<name>``.
 
-A bundle can give its agents and envs short aliases in an ``aliases.toml`` at its root, which a reference names one by
-when no agent or env of that id is in the store (``installed_aliases``).
+A bundle can give its agents, envs and artifacts short aliases in an ``aliases.toml`` at its root, which a reference
+names one by when the store has none of that id (``installed_aliases``).
 
 It imports nothing from ``agent_env.bundle``, so a task step can read what's installed without importing the bundle
 machinery, whose run imports the task steps.
@@ -36,11 +36,13 @@ BUNDLES = "agent_env.bundles"
 CORE = "agentenv-framework"
 ALIASES_FILE = "aliases.toml"
 # The tables an aliases.toml takes, each giving aliases to one kind of the bundle's entities, by folder name.
-AGENT_ALIASES, ENV_ALIASES = "agents", "envs"
-_NOUNS = {AGENT_ALIASES: "agent", ENV_ALIASES: "env"}
+AGENT_ALIASES, ENV_ALIASES, ARTIFACT_ALIASES = "agents", "envs", "artifacts"
+_NOUNS = {AGENT_ALIASES: "agent", ENV_ALIASES: "env", ARTIFACT_ALIASES: "artifact"}
+ALIAS_TABLES = tuple(_NOUNS)
 # A plain id, never a bundle's namespaced one, which holds '@' and '/'.
-_ALIAS = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
-_ALIAS_RULE = "lowercase letters, digits and '-', at most 64 characters, starting and ending with a letter or digit"
+_ALIAS = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?")
+_ALIAS_RULE = ("lowercase letters, digits, '.' and '-', at most 64 characters, starting and ending with a letter or "
+               "digit")
 
 
 @dataclass(frozen=True)
@@ -189,8 +191,8 @@ class InstalledAliases:
 
 
 def read_aliases(path: Path) -> tuple[dict[str, dict[str, tuple[str, ...]]], list[str]]:
-    """The aliases a bundle's ``aliases.toml`` at ``path`` gives its agents and envs, by table and then folder name, and
-    its problems; none of either when there's no such file, and no aliases when it has a problem."""
+    """The aliases a bundle's ``aliases.toml`` at ``path`` gives its agents, envs and artifacts, by table and then folder
+    name, and its problems; none of either when there's no such file, and no aliases when it has a problem."""
     if not os.path.lexists(path):
         return {}, []
     if not path.is_file():
@@ -201,7 +203,8 @@ def read_aliases(path: Path) -> tuple[dict[str, dict[str, tuple[str, ...]]], lis
         return {}, [f"can't be read: {os_reason(e)}"]
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         return {}, [f"isn't valid TOML: {e}"]
-    problems = [f"[{key}] isn't a table it takes; it takes [agents] and [envs]" for key in data if key not in _NOUNS]
+    takes = ", ".join(f"[{table}]" for table in ALIAS_TABLES[:-1]) + f" and [{ALIAS_TABLES[-1]}]"
+    problems = [f"[{key}] isn't a table it takes; it takes {takes}" for key in data if key not in _NOUNS]
     found: dict[str, dict[str, tuple[str, ...]]] = {}
     for table, noun in _NOUNS.items():
         entries = data.get(table, {})

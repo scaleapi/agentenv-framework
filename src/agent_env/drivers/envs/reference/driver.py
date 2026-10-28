@@ -1,17 +1,20 @@
 """The reference computer driver, for an X11 desktop: mss captures the screen and XTEST, through python-xlib, sends the
 input. X calls run off the event loop, one at a time, on a connection checked before each call and reopened when it
-drops, so the driver outlives a restarted X server. It needs ``agentenv-framework-protocol[computer]``, ``mss`` and
-``python-xlib`` where it runs."""
+drops, so the driver outlives a restarted X server. It records the display through FFmpeg's ``x11grab``, by PyAV. It
+needs ``agentenv-framework-protocol[computer]``, ``mss`` and ``python-xlib`` where it runs."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import math
+import os
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable
+from datetime import datetime, timezone
+from typing import Any, AsyncIterator, Callable, Iterator
 
+import av
 import mss
 from Xlib import X, XK
 from Xlib import display as xdisplay
@@ -25,12 +28,16 @@ from agentenv_protocol.computer import (
     Display,
     Image,
     ReadyCheck,
+    RecordedFrame,
+    RecordHints,
+    Recording,
     Unsupported,
     capture,
     click,
     computer_driver,
     display,
     drag,
+    frames_in_thread,
     key_down,
     key_up,
     pointer_down,
@@ -38,6 +45,7 @@ from agentenv_protocol.computer import (
     pointer_position,
     pointer_up,
     press,
+    record,
     scroll,
     type_text,
 )
@@ -66,6 +74,7 @@ class ReferenceDriver(ComputerDriverEnvironment):
     buttons = ("left", "right", "middle", "back", "forward")
     max_click_count = 3
     max_drag_points = 50
+    recording = Recording(max_fps=30)
 
     def __init__(self) -> None:
         super().__init__()
@@ -84,6 +93,22 @@ class ReferenceDriver(ComputerDriverEnvironment):
     @capture
     async def grab(self) -> Image:
         return await asyncio.to_thread(_grab)
+
+    @record
+    async def stream(self, hints: RecordHints) -> AsyncIterator[RecordedFrame]:
+        """The display through FFmpeg's ``x11grab``. Its frames carry the wall clock, so each one's time is when it
+        was captured."""
+        size = await self.screen()
+        options = {"framerate": str(hints.fps), "video_size": f"{size.width}x{size.height}",
+                   "draw_mouse": "1" if hints.cursor else "0"}
+
+        def frames() -> Iterator[RecordedFrame]:
+            with av.open(os.environ.get("DISPLAY", ":0"), format="x11grab", options=options) as source:
+                for frame in source.decode(video=0):
+                    yield RecordedFrame(frame, datetime.fromtimestamp(frame.time, timezone.utc))
+
+        async for frame in frames_in_thread(frames):
+            yield frame
 
     async def ready_checks(self) -> list[ReadyCheck]:
         try:
