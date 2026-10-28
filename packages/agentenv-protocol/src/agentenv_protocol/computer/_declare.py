@@ -77,7 +77,8 @@ def declare(folder: Path, file: str, name: str) -> dict:
     return {"name": cards[0][1].name, "supports": list(cls.supports), "platforms": [
         {"platform": platform.as_dict(), "provides": [e.uri for e in card.capabilities.extensions],
          "tools": [t.name for t in card.capabilities.tools],
-         "features": next(e.params for e in card.capabilities.extensions if e.uri == COMPUTER)}
+         "features": next({k: v for k, v in e.params.items() if k not in ("endpoint", "methods")}
+                          for e in card.capabilities.extensions if e.uri == COMPUTER)}
         for platform, card in cards]}
 
 

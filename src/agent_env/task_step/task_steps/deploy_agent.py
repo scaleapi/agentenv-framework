@@ -505,6 +505,7 @@ class DeployAgentTaskStep(TaskStep):
             instance_id=deployed.instance_id,
             role=self.role,
             network_policy=deployed.network_policy,
+            env_ids=list(self.env_ids),
         ))
         return context
 

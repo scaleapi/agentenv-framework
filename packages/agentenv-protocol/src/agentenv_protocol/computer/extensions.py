@@ -1,5 +1,5 @@
-"""The framework extensions agentenv calls, never agents: readiness, display, coordinate spaces, keyboard settings,
-commands in the session and recordings."""
+"""The framework extensions agentenv calls, never agents: the computer skill, readiness, display, coordinate spaces,
+keyboard settings, commands in the session and recordings."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable, Optional
@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 from ..agent_env_environment import extension
 from . import card
 from .card import (
+    COMPUTER,
     COMPUTER_DISPLAY,
     COMPUTER_EXEC,
     COMPUTER_KEYBOARD,
@@ -18,6 +19,7 @@ from .card import (
 )
 from .errors import Internal, InvalidArgument, Unsupported
 from .operations import Display, ExecResult
+from .skill import skill
 from .spaces import check_space
 
 if TYPE_CHECKING:
@@ -35,6 +37,12 @@ class Extensions:
     display_modes: tuple
     layouts: tuple[str, ...]
     mounted_card: Callable[[], EnvironmentCard]
+
+    @extension(COMPUTER, op="skill", method="GET",
+               description="The seven computer_* tools: screenshot, click, drag, scroll, type, key, wait. skill returns "
+                           "a SKILL.md for agents under the name it's given, written from this computer as it booted.")
+    async def _computer_skill(self, name: str = "computer") -> dict:
+        return await skill(self, name)
 
     @extension(COMPUTER_READY, op="status", method="GET",
                description="Whether the computer is usable now, by real checks; never sends input.")
