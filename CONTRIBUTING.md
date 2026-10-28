@@ -43,6 +43,7 @@ reinstalling.
 | `make int-test-slow` | tests that build images or deploy sandboxes, minutes each | Docker, and a sandbox backend for some |
 | `make clean-install-test` | both distributions built as the release builds them, installed into a fresh venv from public PyPI, and `agent-env run hello` run twice by name | Python 3.11, uv and git |
 | `make installer-test` | `plugin add` and `remove` through the real pip, uv and pipx, offline against wheels built from the checkout, and the new-user journey in containers with no network | uv, pipx and Docker; the first run downloads the dependencies once |
+| `make trl-test` | one TRL `GRPOTrainer` step on CPU through the training helper, with a tiny model | trl and CPU torch installed, and the Hugging Face Hub |
 
 CI runs the same tiers as the `unit`, `integration-local`, `integration-local-slow` and
 `integration-local-gateway` jobs (the last runs the slow tier's gateway tests beside the rest);

@@ -44,6 +44,7 @@ or one of them only where it is used.
 | `make int-test-fast` | `tst/integration` minus `int_test_slow`, in parallel; needs Docker and a local OCI registry (`docker run -d -p 5000:5000 public.ecr.aws/docker/library/registry:2`) |
 | `make int-test-slow` | the `int_test_slow` tests, serially (they build the same Docker tags from module fixtures and race under xdist) |
 | `make installer-test` | `tst/installer`: `plugin add` / `remove` through the real pip, uv and pipx, offline against wheels built from the checkout, and the container user journey (`python:3.12-slim`, `--network none`) with the PEP 668 refusal; needs uv, pipx and Docker |
+| `make trl-test` | `tst/trl`: one `GRPOTrainer` step on CPU through `agent_env.training.trl`, with a tiny model from the Hub; needs trl and CPU torch, which the `dev` extra leaves out |
 | `make clean-install-test` | the `clean-install` CI gate: both distributions built as the release builds them, installed into a fresh venv from public PyPI with an allowlisted environment, and `agent-env run hello` run twice by name and checked through the local store; needs Python 3.11, uv and git |
 | `npm ci && npm run typecheck && npm run lint && npm run test:smoke` | in `src/agent_env/explorer/ui`: the explorer UI checks the `ui` job runs (it also runs `npm run build:static`); needs Node 22 |
 | `pytest tst/unit/env/store_test.py -v` | one file; add `--log-cli-level=DEBUG` for debug logs |
@@ -266,7 +267,7 @@ orchestrators call it the same way. What callers rely on:
 - Skips are declared capability gaps, decided at collection time: the gates in
   `tst/util/capabilities.py` produce `skipif` marks with the reason
   `agentenv-capability-missing: <name>` (`model_endpoint_configured`, `remote_sandbox`,
-  `default_a2a_agent`, `mcp_server_sources`, `gnu_stat`). CI rejects any other skip reason; a broken configuration must fail loudly, not skip.
+  `default_a2a_agent`, `mcp_server_sources`, `gnu_stat`, `trl_installed`). CI rejects any other skip reason; a broken configuration must fail loudly, not skip.
 - The suite is backend-agnostic: a test about one particular backend lives with that backend, not
   here. A custom store must pass `tst/store/{conformance,object_conformance,image_conformance,secret_conformance}.py`,
   the same kits the built-ins pass, and a custom `[runner]` must pass `tst/runner/conformance.py`, which
@@ -300,6 +301,9 @@ skips for the allowed capabilities pass, and the fast job allows no skips under
 touches the plugin CLI, `agent_env/plugins` or `agent_env/config`, the protocol package, the tier
 itself, `pyproject.toml`, `uv.lock`, the `Makefile` or the CI that runs the tier, and allows no
 skips; a `changes` job decides, and a skipped `installer` counts as passed.
+`.github/workflows/trl.yml` runs `tst/trl` against TRL 1.16 (1.15 can't train on CPU) and the latest, on pull
+requests that touch `agent_env/training`, `agent_env/openenv` or the tier, weekly, and on demand; it allows no skips
+and isn't a required check.
 `.github/workflows/plugin-api.yml` runs the `plugin-api` job on every pull
 request, title edits included, and on `main`: `.github/scripts/check_plugin_api.py` compares the
 plugin surface (its `BASES` and `USED`) between `HEAD^1` and `HEAD` with griffe, pinned in the `dev` extra, and fails on a break the

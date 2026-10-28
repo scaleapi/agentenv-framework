@@ -16,7 +16,7 @@ from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 from agent_env.config.runtime import Config
 from agent_env.openenv.app import _app, _score_at
-from agent_env.openenv.environment import Served, ServedTask
+from agent_env.openenv.environment import AgentEnvEnvironment, Served, ServedTask
 from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.training import trl
@@ -266,16 +266,32 @@ class _Slow(TaskStep):
         return context
 
 
-def test_end_turn_waits_for_the_episodes_score_past_a_tools_deadline(served, monkeypatch):
+def test_a_reset_and_an_end_turn_carry_the_resets_deadline_so_end_turn_waits_for_the_score_past_a_tools(
+        served, monkeypatch):
     registry = Config().task_step_registry()
     monkeypatch.setattr(Config, "task_step_registry", lambda self: {**registry, _Slow.type: _Slow})
-    env = served({"a": [ITEMS, ALICE, TURN, {"id": "slow", "type": _Slow.type}, REPLIES]}, tool_timeout=0.2)
+    deadlines = []
+    reset_async, end_turn = AgentEnvEnvironment.reset_async, AgentEnvEnvironment._end_turn
+
+    async def reset(self, *args, timeout_s=None, **kwargs):
+        deadlines.append(("reset", timeout_s))
+        return await reset_async(self, *args, timeout_s=timeout_s, **kwargs)
+
+    async def end(self, name, response, timeout_s):
+        deadlines.append((name, timeout_s))
+        return await end_turn(self, name, response, timeout_s)
+
+    monkeypatch.setattr(AgentEnvEnvironment, "reset_async", reset)
+    monkeypatch.setattr(AgentEnvEnvironment, "_end_turn", end)
+    env = served({"a": [ITEMS, ALICE, TURN, {"id": "slow", "type": _Slow.type}, REPLIES]}, tool_timeout=0.2,
+                 reset_timeout=30)
     environment = env.factory()
 
     environment.reset(**env.dataset[0])
 
     assert environment.end_turn(response="Added a crate.") == ENDED
     assert environment.get_reward() == 1.0
+    assert deadlines == [("reset", 30), ("reset", 30), ("end_turn", 30)]
 
 
 def test_a_server_at_capacity_refuses_the_reset_and_says_how_to_serve_more(served):

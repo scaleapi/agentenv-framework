@@ -33,6 +33,10 @@ DEFAULT_A2A_AGENT = "default_a2a_agent"
 #: found through ``AGENT_ENV_TEST_MCP_SERVERS_DIR`` (one ``<server>/Dockerfile`` per server).
 MCP_SERVER_SOURCES = "mcp_server_sources"
 
+#: The TRL contract tier (``tst/trl``) trains with TRL on CPU; trl and torch aren't in the dev extra, and only that
+#: tier's CI job installs them.
+TRL = "trl_installed"
+
 #: ``collect_artifacts`` sizes a file with ``stat -c %s``, which only GNU stat takes (macOS ships BSD stat),
 #: so collecting off a local sandbox needs GNU stat first on PATH.
 GNU_STAT = "gnu_stat"

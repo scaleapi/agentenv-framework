@@ -36,8 +36,9 @@ END_TURN = Tool(
     input_schema={"type": "object", "properties": {"response": {"type": "string", "description": "Your reply."}}},
 )
 ENDED = "the episode has ended; call reset"
-#: The key of a tool call's deadline in seconds in its action's metadata. A call that runs past it ends the episode, since
-#: cancelling the call doesn't stop what it does, and the session goes on.
+#: The key of a call's deadline in seconds in its action's metadata, ``end_turn``'s included; ``reset_async`` takes one as
+#: ``timeout_s``. A call that runs past it ends the episode, since cancelling the call doesn't stop what it does, and the
+#: session goes on; so no call holds a session longer than its client waits.
 TIMEOUT_METADATA = "timeout_s"
 NOT_RESET = "no episode has started; call reset before stepping"
 
@@ -137,13 +138,13 @@ class AgentEnvEnvironment(Environment):
     # The episode
 
     async def reset_async(self, seed: int | None = None, episode_id: str | None = None, *, split: str | None = None,
-                          index: int | None = None, **kwargs: Any) -> Observation:
+                          index: int | None = None, timeout_s: float | None = None, **kwargs: Any) -> Observation:
         """Plays task ``index`` of ``split``, or without either the first task served, as OpenEnv's ORS and verifiers
-        importers do."""
+        importers do, and ends the episode if its first turn hasn't opened ``timeout_s`` seconds in."""
         async with self._lock:
-            return await self._reset(split, index)
+            return await self._reset(split, index, timeout_s)
 
-    async def _reset(self, split: str | None, index: int | None) -> Observation:
+    async def _reset(self, split: str | None, index: int | None, timeout_s: float | None) -> Observation:
         await self._abandon("reset")
         self._loop = asyncio.get_running_loop()
         self._served_task, self._state = None, State(episode_id=None, step_count=0, done=False)
@@ -158,14 +159,19 @@ class AgentEnvEnvironment(Environment):
         self._state = State(episode_id=None, step_count=0, task_id=self._served_task.task.id,
                             task_name=self._served_task.name, split=split, index=index, turn=None, done=False)
         self._served.live.add(self)
+        deadline = asyncio.timeout(timeout_s)
         try:
-            self._episode = await self._served_task.spec.start(sandbox=self._served.sandbox)
-            self._state.episode_id = self._episode.id
-            turn = await self._episode.next_turn()
-            if turn is None:
-                raise EpisodeError("the run ended before the agent's first turn")
-            await self._open(turn)
+            async with deadline:
+                self._episode = await self._served_task.spec.start(sandbox=self._served.sandbox)
+                self._state.episode_id = self._episode.id
+                turn = await self._episode.next_turn()
+                if turn is None:
+                    raise EpisodeError("the run ended before the agent's first turn")
+                await self._open(turn)
         except Exception as e:
+            if deadline.expired():
+                return await self._end_with_error(f"the episode didn't open its first turn within {timeout_s:g}s",
+                                                  wait=False)
             return await self._end_with_error(e)
         return Observation(done=False, reward=None, metadata={
             "prompt": turn.prompt, "system_prompt": turn.system_prompt, "task": self._task_metadata()})
@@ -189,9 +195,11 @@ class AgentEnvEnvironment(Environment):
         if (stopped := await self._why_stopped()) is not None:
             return CallToolObservation(tool_name=action.tool_name, done=True, reward=None, metadata=stopped)
         self._state.step_count += 1
+        if timeout_s is None:
+            timeout_s = _deadline_of(action)
         if action.tool_name == END_TURN.name:
-            return await self._end_turn(action.tool_name, action.arguments.get("response") or "")
-        return await self._call(action, timeout_s if timeout_s is not None else _deadline_of(action))
+            return await self._end_turn(action.tool_name, action.arguments.get("response") or "", timeout_s)
+        return await self._call(action, timeout_s)
 
     def step(self, action: Any, timeout_s: float | None = None, **kwargs: Any) -> Observation:
         """OpenEnv's web playground steps from a worker thread; the episode lives on the loop its reset ran on."""
@@ -225,7 +233,7 @@ class AgentEnvEnvironment(Environment):
             return _tool_error(name, ToolErrorType.TOOL_NOT_FOUND, e)
         except TimeoutError:
             ended = await self._end_with_error(f"{name} didn't answer within {timeout_s:g}s, and the episode ended, "
-                                               "since what the call does may still be under way")
+                                               "since what the call does may still be under way", wait=False)
             return CallToolObservation(tool_name=name, done=True, reward=None, metadata=ended.metadata)
         except httpx.HTTPError as e:
             return _tool_error(name, ToolErrorType.TRANSPORT_ERROR, e)
@@ -234,18 +242,24 @@ class AgentEnvEnvironment(Environment):
         return CallToolObservation(tool_name=name, result={
             "content": result.content, "structured_content": None, "meta": None, "data": result.text, "is_error": False})
 
-    async def _end_turn(self, name: str, response: str) -> CallToolObservation:
+    async def _end_turn(self, name: str, response: str, timeout_s: float | None) -> CallToolObservation:
+        deadline = asyncio.timeout(timeout_s)
         try:
-            await self._turn.end(response)
-            await self._close_tools()
-            turn = await self._episode.next_turn()
-            if turn is not None:
-                await self._open(turn)
-                return CallToolObservation(tool_name=name, done=False, reward=None, result={
-                    "prompt": turn.prompt, "system_prompt": turn.system_prompt})
-            scores = await self._episode.result()
+            async with deadline:
+                await self._turn.end(response)
+                await self._close_tools()
+                turn = await self._episode.next_turn()
+                if turn is not None:
+                    await self._open(turn)
+                    return CallToolObservation(tool_name=name, done=False, reward=None, result={
+                        "prompt": turn.prompt, "system_prompt": turn.system_prompt})
+                scores = await self._episode.result()
         except Exception as e:
-            observation = await self._end_with_error(e)
+            if deadline.expired():
+                observation = await self._end_with_error(f"{name} didn't finish within {timeout_s:g}s, and the episode "
+                                                         "ended", wait=False)
+            else:
+                observation = await self._end_with_error(e)
             return CallToolObservation(tool_name=name, done=True, reward=None, metadata=observation.metadata)
         await self._abandon("the episode ended")
         return CallToolObservation(tool_name=name, done=True, **self._scored(scores))
@@ -282,9 +296,9 @@ class AgentEnvEnvironment(Environment):
             error = _described(e)
         return (await self._end_with_error(error)).metadata
 
-    async def _end_with_error(self, error: Exception | str) -> Observation:
+    async def _end_with_error(self, error: Exception | str, *, wait: bool = True) -> Observation:
         message = error if isinstance(error, str) else _described(error)
-        await self._abandon(message)
+        await self._abandon(message, wait=wait)
         return self._error_observation(message)
 
     def _error_observation(self, error: str) -> Observation:
@@ -296,17 +310,18 @@ class AgentEnvEnvironment(Environment):
         async with self._lock:
             await self._abandon(reason)
 
-    async def _abandon(self, reason: str) -> None:
-        """Abandon the episode and close the turn's tools, waiting for the teardown; the caller holds the lock. The
-        abandon is tracked before anything is awaited, so a server shutting down meanwhile waits for it too, and a
-        caller cancelled while it waits leaves it running for the next reset to wait for."""
+    async def _abandon(self, reason: str, *, wait: bool = True) -> None:
+        """Abandon the episode and close the turn's tools, waiting for the teardown unless ``wait`` is false, as a call
+        past its deadline answers at once; the caller holds the lock. The abandon is tracked before anything is
+        awaited, so a server shutting down meanwhile waits for it too, and one not waited for, or whose caller is
+        cancelled while it waits, is left running for the next reset or close to wait for."""
         episode, self._episode = self._episode, None
         if episode is not None:
             self._ending = self._served.end_later(episode.abandon(reason))
         self._served.live.discard(self)
         await self._close_tools()
         self._turn = None
-        if (ending := self._ending) is not None:
+        if wait and (ending := self._ending) is not None:
             try:
                 await asyncio.shield(ending)
             finally:

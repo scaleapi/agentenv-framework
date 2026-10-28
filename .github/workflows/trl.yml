@@ -1,0 +1,56 @@
+name: TRL contract
+
+# One GRPOTrainer step on CPU through agent_env.training.trl (tst/trl), against TRL 1.16 and the latest. TRL marks
+# environment_factory experimental, so a release can break the helper with nothing else in CI noticing. TRL 1.15 can't
+# train on CPU (its log-prob path is a Triton GPU kernel), so 1.16 is the oldest this job can run. It runs on pull requests that touch the helper, the OpenEnv server it trains against or the tier, weekly,
+# and on demand; it isn't a required check.
+
+on:
+  pull_request:
+    paths:
+      - "src/agent_env/training/**"
+      - "src/agent_env/openenv/**"
+      - "tst/trl/**"
+      - "tst/unit/training/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/trl.yml"
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trl-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  grpo:
+    name: grpo (${{ matrix.trl }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        trl: ["trl==1.16.*", "trl"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install from uv.lock, then TRL and CPU torch
+        run: |
+          python -m pip install --quiet -r .github/ci-requirements.txt
+          uv sync --locked --extra dev --python "$(command -v python)"
+          uv pip install --python .venv/bin/python --torch-backend cpu torch "${{ matrix.trl }}"
+          .venv/bin/python -c "import torch, transformers, trl; print('trl', trl.__version__, 'transformers', transformers.__version__, 'torch', torch.__version__)"
+      - name: TRL contract tier
+        run: .venv/bin/python -m pytest tst/trl -rA --timeout=900 --junitxml=junit-trl.xml
+      - name: No skips
+        if: always()
+        run: .venv/bin/python .github/scripts/check_skip_policy.py junit-trl.xml
