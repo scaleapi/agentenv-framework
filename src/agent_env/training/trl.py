@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copyreg
 import json
 import logging
 import re
@@ -186,14 +187,10 @@ class AgentEnv:
         if first is None:
             raise RuntimeError(f"task {index} of split {split!r} ended before its tools could be listed: "
                                f"{_error_of(turn.observation)}")
-        methods = {name: tool_method(tool) for name, tool in tools.items()}
         shared = _Shared(url=self.url, offered=first, tool_timeout=self._tool_timeout,
                          reset_timeout=self._reset_timeout)
         self._shared.append(shared)
-        environment = type(toolset.name, (_Environment,), {**methods, "_shared": shared})
-        for method in methods.values():
-            method.__qualname__ = f"{toolset.name}.{method.__name__}"
-        return environment
+        return _environment_class(toolset.name, tuple(tools.values()), shared)
 
     def _split(self, split: str) -> list[dict[str, Any]]:
         if split not in self._tasks:
@@ -251,6 +248,7 @@ class _Environment:
     turn, as AsyncGRPO can call two tools of a completion at once."""
 
     _shared: ClassVar[_Shared]
+    _tools: ClassVar[tuple[dict[str, Any], ...]]
 
     def __init__(self) -> None:
         self._client: GenericEnvClient | None = None
@@ -398,6 +396,25 @@ class _Environment:
         if client is not None:
             with contextlib.suppress(Exception):
                 await client.close()
+
+
+class _EnvironmentClass(type):
+    """The type of ``AgentEnv.factory``'s classes, which pickle as the toolset and server they're built from, since
+    AsyncGRPO builds its environments in a process of its own."""
+
+
+def _environment_class(name: str, tools: tuple[dict[str, Any], ...], shared: _Shared) -> type[_Environment]:
+    methods = {tool["name"]: tool_method(tool) for tool in tools}
+    for method in methods.values():
+        method.__qualname__ = f"{name}.{method.__name__}"
+    return _EnvironmentClass(name, (_Environment,), {**methods, "_shared": shared, "_tools": tools})
+
+
+def _reduce_environment_class(environment: _EnvironmentClass) -> tuple[Any, ...]:
+    return _environment_class, (environment.__name__, environment._tools, environment._shared)
+
+
+copyreg.pickle(_EnvironmentClass, _reduce_environment_class)
 
 
 class _Server:
