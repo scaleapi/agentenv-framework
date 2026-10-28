@@ -43,6 +43,7 @@ updates:
       - "/src/agent_env/agents/agents/claude-code"
       - "/src/agent_env/agents/agents/codex"
       - "/src/agent_env/agents/agents/gemini"
+      - "/src/agent_env/agents/agents/letta-code"
       - "/src/agent_env/agents/agents/opencode"
       - "/src/agent_env/agents/agents/openhands"
       - "/src/agent_env/agents/agents/pi"

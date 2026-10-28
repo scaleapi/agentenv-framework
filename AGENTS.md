@@ -283,7 +283,7 @@ pass, but a failing one does not block the merge.
 `.github/workflows/local-backends.yml` runs `unit`, `ui`, `integration-local`, `integration-local-slow`,
 `integration-local-gateway` (the slow tier's `gateway_test.py`, run beside the rest of it) and
 `installer`. The slow tier runs on eight runners (`integration-local-slow (1/8)` to `(8/8)`) and the
-gateway tests on two, and `integration-local-slow` and `integration-local-gateway` each pass when all
+gateway tests on three, and `integration-local-slow` and `integration-local-gateway` each pass when all
 of their shards do. The Python jobs install from `uv.lock` (public PyPI only), with the uv that
 `.github/ci-requirements.txt` pins, and use no secrets and no external services (a `registry:2`
 container for the integration jobs). The `unit` job also fails if `uv.lock` resolves anything from a

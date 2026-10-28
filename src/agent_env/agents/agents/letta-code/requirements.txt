@@ -1,0 +1,6 @@
+# The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
+# image is built again only when this folder changes. The floor is the first that serves peer-agents/v1's tools, which
+# the agent advertises without handlers of its own; raise it when the agent needs a newer protocol.
+agentenv-framework-protocol[agent]>=0.1.351
+jsonschema>=4.18,<5
+aiohttp>=3.9,<4

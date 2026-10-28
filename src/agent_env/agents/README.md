@@ -63,6 +63,14 @@ OpenAI-compatible one, `<base>/v1/chat/completions`, and takes its model from th
 `anthropic/claude-sonnet-4-6`. It declares `install/v1` too, into a container or onto a `vm` sandbox's Linux host,
 with glibc. Its folder's `README.md` covers the extensions it implements.
 
+`agents/letta-code/` runs [Letta Code](https://github.com/letta-ai/letta-code) behind the protocol's A2A agent
+framework: each turn is one `letta --backend local -p --output-format stream-json` run, resumed in the context's
+conversation, with a separate local agent and memory per context. Name it as `letta-code`, its alias, or by its id,
+`@local/agentenv-framework/agents/letta-code`. It calls the `[model]` endpoint as an OpenAI-compatible one through
+a relay that adds task attribution, and takes its model from the prompt, else `openai/gpt-4.1-mini`. It declares
+`install/v1` too, into a container or onto a Linux host with glibc. Its folder's `README.md` covers the extensions
+it implements. Run its smoke task with `agent-env run agents --task letta-code-smoke`.
+
 `agents/openhands/` runs the [OpenHands](https://github.com/OpenHands/software-agent-sdk) agent behind the
 protocol's A2A agent framework, driving the OpenHands SDK in process rather than a CLI: each turn is one run of a
 persisted SDK conversation, the task env's MCP servers go to its `mcp_config`, and its SDK events are the turn's
