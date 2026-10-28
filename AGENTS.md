@@ -301,7 +301,7 @@ skips for the allowed capabilities pass, and the fast job allows no skips under
 touches the plugin CLI, `agent_env/plugins` or `agent_env/config`, the protocol package, the tier
 itself, `pyproject.toml`, `uv.lock`, the `Makefile` or the CI that runs the tier, and allows no
 skips; a `changes` job decides, and a skipped `installer` counts as passed.
-`.github/workflows/trl.yml` runs `tst/trl` against the oldest TRL the training helper supports and the latest, on pull
+`.github/workflows/trl.yml` runs `tst/trl` against TRL 1.16 (1.15 can't train on CPU) and the latest, on pull
 requests that touch `agent_env/training`, `agent_env/openenv` or the tier, weekly, and on demand; it allows no skips
 and isn't a required check.
 `.github/workflows/plugin-api.yml` runs the `plugin-api` job on every pull

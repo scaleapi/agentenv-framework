@@ -1,8 +1,8 @@
 name: TRL contract
 
-# One GRPOTrainer step on CPU through agent_env.training.trl (tst/trl), against the oldest TRL the helper supports and
-# the latest. TRL marks environment_factory experimental, so a release can break the helper with nothing else in CI
-# noticing. It runs on pull requests that touch the helper, the OpenEnv server it trains against or the tier, weekly,
+# One GRPOTrainer step on CPU through agent_env.training.trl (tst/trl), against TRL 1.16 and the latest. TRL marks
+# environment_factory experimental, so a release can break the helper with nothing else in CI noticing. TRL 1.15 can't
+# train on CPU (its log-prob path is a Triton GPU kernel), so 1.16 is the oldest this job can run. It runs on pull requests that touch the helper, the OpenEnv server it trains against or the tier, weekly,
 # and on demand; it isn't a required check.
 
 on:
@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        trl: ["trl==1.15.*", "trl"]
+        trl: ["trl==1.16.*", "trl"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0

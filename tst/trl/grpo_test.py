@@ -1,8 +1,8 @@
 """TRL's GRPOTrainer trains a step through ``agent_env.training.trl`` on CPU, against the OpenEnv server ``build_app``
 makes over the Episode API's fake steps. TRL marks ``environment_factory`` experimental, so this pins what the helper
 relies on: TRL resets an environment with its row, calls its tools, reads ``get_reward``, and trains on the rewards.
-As in TRL's own environment tests, a tiny model's ``generate`` is stood in for. CI runs it against the oldest TRL the
-helper supports and the latest; AsyncGRPO needs a vLLM server, so it isn't covered here."""
+As in TRL's own environment tests, a tiny model's ``generate`` is stood in for. CI runs it against TRL 1.16, the oldest
+that trains on CPU, and the latest; AsyncGRPO needs a vLLM server, so it isn't covered here."""
 
 from unittest.mock import patch
 
