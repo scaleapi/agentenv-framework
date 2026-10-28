@@ -27,7 +27,7 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.envs.computer import boot, composer
+from agent_env.env.envs.computer import boot, composer, gate
 from agent_env.env.envs.computer.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
@@ -803,7 +803,8 @@ async def test_a_boot_that_never_gets_ready_takes_its_sandbox_and_work_folder_do
     assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None
 
 
-def test_a_boot_mints_a_generated_setting_resolves_a_secret_and_its_record_withholds_both(base, monkeypatch):
+def test_a_boot_mints_a_generated_setting_resolves_a_secret_its_record_withholds_both_and_a_secret_is_a_reference(
+        base, monkeypatch):
     monkeypatch.setenv("DESK_KEY", "s3cret")
     computer = base.model_copy(update={"config": {
         **base.config, "token": base.config["timezone"].model_copy(update={"default": "", "generate": True}),
@@ -815,6 +816,12 @@ def test_a_boot_mints_a_generated_setting_resolves_a_secret_and_its_record_withh
     assert first["AGENTENV_SETTING_TOKEN"] != second["AGENTENV_SETTING_TOKEN"]
     assert boot.recorded_settings(computer, {}) == {"resolution": "1280x800", "timezone": "UTC", "token": boot.WITHHELD,
                                                     "api_key": boot.WITHHELD}
+    for reference in ("env:DESK_KEY", "secret:desk/key"):
+        assert gate.check_computer_settings(computer, {"api_key": reference}) == ({"api_key": reference}, [])
+    for value in ("s3cret", "env:DESK_KEY?s3cret", "env:", 3):
+        assert gate.check_computer_settings(computer, {"api_key": value}) == ({}, [
+            "computer_settings.api_key is a secret, so it takes a secret:KEY or env:NAME reference with no ?default, "
+            "not its value"])
 
 
 @pytest.mark.parametrize("change, problem", [
