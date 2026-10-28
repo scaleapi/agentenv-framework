@@ -10,7 +10,7 @@ import pytest
 from agentenv_protocol.a2a_agent import Uploaded
 
 from tst.unit.agents.opencode.agent import a2a_server, opencode_kit
-from tst.unit.agents.opencode.conftest import result
+from tst.unit.agents.opencode.conftest import Harness, result
 
 
 class Turns:
@@ -127,6 +127,41 @@ async def test_a_turn_resumes_the_session_a_snapshot_load_bound_while_it_waited(
 
     assert loaded.status_code == 200, loaded.text
     assert [call["session_id"] for call in turns.calls] == [None, "ses_imported"]
+
+
+@pytest.mark.asyncio
+async def test_turns_past_the_cap_wait_for_one_to_finish(monkeypatch, turns):
+    """Each `opencode run` peaks near 900 MB, and a VM that ran every concurrent turn at once had its kernel kill one."""
+    monkeypatch.setenv("OPENCODE_MAX_CONCURRENT_TURNS", "2")
+    oc = Harness(a2a_server.OpenCodeChangelogAgent())
+    turns.release = asyncio.Event()
+    async with oc.client() as client:
+        sent = [asyncio.create_task(oc.send(client, "go", f"ctx-{n}")) for n in range(3)]
+        await _until(lambda: len(turns.calls) == 2)
+        await asyncio.sleep(0.1)
+        assert len(turns.calls) == 2
+        turns.release.set()
+        tasks = await asyncio.gather(*sent)
+
+    assert [task["status"]["state"] for task in tasks] == ["completed"] * 3
+
+
+def test_the_cap_is_what_memory_fits_past_what_the_server_needs(monkeypatch):
+    monkeypatch.setattr(a2a_server, "memory_mb", lambda: 8192)
+    assert a2a_server.max_concurrent_turns({}) == 7
+    monkeypatch.setattr(a2a_server, "memory_mb", lambda: 1500)
+    assert a2a_server.max_concurrent_turns({}) == 1
+    assert a2a_server.max_concurrent_turns({"OPENCODE_MAX_CONCURRENT_TURNS": "3"}) == 3
+    assert a2a_server.max_concurrent_turns({"OPENCODE_MAX_CONCURRENT_TURNS": "0"}) == 1
+
+
+def test_a_cgroup_limit_below_the_machines_memory_is_the_memory(tmp_path):
+    machine = a2a_server.memory_mb(tmp_path / "no-cgroup")
+    limit = tmp_path / "memory.max"
+    limit.write_text("max\n")
+    assert a2a_server.memory_mb(limit) == machine
+    limit.write_text(f"{512 * 2**20}\n")
+    assert a2a_server.memory_mb(limit) == min(512, machine)
 
 
 @pytest.mark.asyncio
