@@ -38,7 +38,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY, TeardownSandboxesTaskStep
 from tst.util.a2a_test_agent import put_test_agent
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 _REPO = Path(__file__).resolve().parents[4]
 

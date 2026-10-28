@@ -40,6 +40,7 @@
   "tst/integration/env/env_test.py": 15.4,
   "tst/integration/env/envs/build_context_local_test.py": 216.8,
   "tst/integration/env/envs/multi_env_local_test.py": 99.5,
+  "tst/integration/env/envs/server_env_local_test.py": 258.2,
   "tst/integration/env/envs/server_env_modal_test.py": 0.0,
   "tst/integration/env/gateway/gateway_test.py::test_airtable_clock_consumer[boxd]": 0.0,
   "tst/integration/env/gateway/gateway_test.py::test_airtable_clock_consumer[daytona]": 0.0,
@@ -661,7 +662,7 @@
   "tst/integration/env/gateway/gateway_test.py::test_zillow_clock_consumer[tensorlake]": 0.0,
   "tst/integration/env/task_step/task_steps_test.py": 167.8,
   "tst/integration/eval/eval_test.py": 1.4,
-  "tst/integration/openenv/build_app_test.py": 22.6,
+  "tst/integration/openenv/build_app_test.py": 282.6,
   "tst/integration/providers/sandbox_providers/boxd_sandbox_smoke_test.py": 0.0,
   "tst/integration/providers/sandbox_providers/daytona_sandbox_smoke_test.py": 0.0,
   "tst/integration/providers/sandbox_providers/e2b_sandbox_smoke_test.py": 0.0,
@@ -675,7 +676,7 @@
   "tst/integration/task_step/test_enable_docker_e2e.py": 0.0,
   "tst/integration/task_step/test_multiturn_verifier_delivery.py": 0.0,
   "tst/integration/task_step/test_next_env_event_hook_local.py": 108.1,
-  "tst/integration/task_step/test_register_env_triggers_local.py": 273.2,
+  "tst/integration/task_step/test_register_env_triggers_local.py": 90.0,
   "tst/integration/utils/docker/prune_test.py": 8.2
  }
 }
