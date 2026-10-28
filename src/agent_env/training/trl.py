@@ -47,7 +47,7 @@ ENDED = "The episode has ended."
 END_TURN = END_TURN_TOOL.name
 CONNECT_SECONDS = 60.0
 CLOSE_SECONDS = 300.0
-#: How much longer than a tool's deadline the client waits for the server to end the call, before dropping the session.
+#: How much longer than a call's deadline the client waits for the server to end the call, before dropping the session.
 GRACE_SECONDS = 30.0
 #: How long a server ``AgentEnv.local`` started is given to stop, at ``close`` and at exit: its episodes' teardowns run
 #: at once, and each saves the agents' changelogs, ends open recordings and terminates the sandboxes, every part within
@@ -83,7 +83,7 @@ class AgentEnv:
         tool_timeout: One tool call's deadline in seconds. The server ends a call that misses it, and the episode with
             it, since what the call does may still be under way: the rollout is left unscored, and the session kept.
         reset_timeout: How long an episode may take to deploy and open its first turn, and each turn to be ended,
-            in seconds.
+            in seconds. The server ends an episode that misses it, so the rollout is left unscored.
 
     Example:
 
@@ -167,7 +167,7 @@ class AgentEnv:
         client = await _opened(self.url, self._reset_timeout)
         first, tools = None, {}
         try:
-            turn = await client.reset(split=split, index=index)
+            turn = await client.reset(split=split, index=index, timeout_s=self._reset_timeout)
             for number in range(turns):
                 if turn.done:
                     break
@@ -178,7 +178,7 @@ class AgentEnv:
                 first = first or frozenset(tool["name"] for tool in listed.observation["tools"])
                 tools |= {tool["name"]: tool for tool in listed.observation["tools"] if tool["name"] not in tools}
                 if number + 1 < turns:
-                    turn = await _end_turn(client, "")
+                    turn = await _end_turn(client, "", self._reset_timeout)
                     if error := turn.observation.get("error"):
                         raise RuntimeError(f"task {index} of split {split!r} refused an empty {END_TURN}: "
                                            f"{error.get('message')}")
@@ -286,8 +286,11 @@ class _Environment:
         return rollout.reward
 
     def _call(self, name: str, arguments: dict[str, Any]) -> str:
-        return _on_loop(self._step(name, arguments),
-                        self._shared.reset_timeout + self._shared.tool_timeout + GRACE_SECONDS + CLOSE_SECONDS)
+        """Waits at most for the deploy and the call, each to its deadline and a grace after, then the session's close:
+        the first call of a rollout waits for its deploy."""
+        shared = self._shared
+        return _on_loop(self._step(name, arguments), shared.reset_timeout + max(shared.reset_timeout, shared.tool_timeout)
+                        + 2 * GRACE_SECONDS + CLOSE_SECONDS)
 
     async def _reset(self, split: str, index: int, expected: str | None) -> None:
         async with self._lock:
@@ -304,7 +307,7 @@ class _Environment:
     async def _begin(self, rollout: _Rollout, split: str, index: int, expected: str | None) -> None:
         if self._client is None:
             self._client = await _reopened(self._shared.url, self._shared.reset_timeout)
-        reset = await self._client.reset(split=split, index=index)
+        reset = await self._client.reset(split=split, index=index, timeout_s=self._shared.reset_timeout)
         if reset.done:
             raise _Failed(_error_of(reset.observation))
         metadata = reset.observation.get("metadata") or {}
@@ -327,16 +330,16 @@ class _Environment:
                 return ENDED
             try:
                 await rollout.started
-                deadline = None if name == END_TURN else self._shared.tool_timeout
+                deadline = self._shared.reset_timeout if name == END_TURN else self._shared.tool_timeout
                 result = await asyncio.wait_for(_call_tool(self._client, name, arguments, deadline),
-                                                None if deadline is None else deadline + GRACE_SECONDS)
+                                                deadline + GRACE_SECONDS)
             except _Failed as e:
                 rollout.misgrouped = isinstance(e, _Misgrouped)
                 await self._fail(rollout, str(e))
                 return FAILED
             except TimeoutError:
-                await self._fail(rollout, f"{name} didn't answer within {self._shared.tool_timeout:g}s, and the "
-                                          f"server didn't end the call in the {GRACE_SECONDS:g}s after")
+                await self._fail(rollout, f"{name} didn't answer within {deadline:g}s, and the server didn't end "
+                                          f"the call in the {GRACE_SECONDS:g}s after")
                 return FAILED
             except Exception as e:
                 await self._fail(rollout, f"{name}: {_why(e)}")
@@ -351,7 +354,7 @@ class _Environment:
             try:
                 await rollout.started
                 while not (rollout.done or rollout.failure):
-                    result = await _end_turn(self._client, "")
+                    result = await _end_turn(self._client, "", self._shared.reset_timeout)
                     if error := result.observation.get("error"):
                         rollout.failure = f"{END_TURN}: {error.get('message')}"
                     self._answer(rollout, END_TURN, result)
@@ -487,8 +490,8 @@ threading._register_atexit(_close_all)
 
 async def _opened(url: str, timeout: float) -> GenericEnvClient:
     """A session on the server, opened now rather than at the first reset, so a server at capacity refuses it while
-    the trainer sets up."""
-    client = GenericEnvClient(base_url=url, message_timeout_s=timeout)
+    the trainer sets up; each message waits ``GRACE_SECONDS`` longer than the ``timeout`` the server ends a call at."""
+    client = GenericEnvClient(base_url=url, message_timeout_s=timeout + GRACE_SECONDS)
     try:
         await client.state()
     except Exception as e:
@@ -526,8 +529,8 @@ async def _call_tool(client: GenericEnvClient, name: str, arguments: dict[str, A
                               **({"metadata": {TIMEOUT_METADATA: deadline}} if deadline is not None else {})})
 
 
-async def _end_turn(client: GenericEnvClient, response: str) -> Any:
-    return await _call_tool(client, END_TURN, {"response": response})
+async def _end_turn(client: GenericEnvClient, response: str, deadline: float) -> Any:
+    return await _call_tool(client, END_TURN, {"response": response}, deadline)
 
 
 def _read_tasks(url: str) -> tuple[str, dict[str, list[dict[str, Any]]]]:

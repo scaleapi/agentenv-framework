@@ -1,4 +1,4 @@
-.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -63,6 +63,11 @@ int-test-slow: ## Run only the @int_test_slow integration tests (serial to avoid
 # and installs offline; only the first run for a uv.lock downloads the dependencies, into .cache/.
 installer-test: ## Run plugin add/remove through the real pip, uv and pipx, and the container journey (needs uv, pipx, Docker)
 	$(PYTHON) -m pytest tst/installer -n auto --timeout=900 $(PYTEST_ARGS)
+
+# The TRL contract tier trains one GRPOTrainer step on CPU through agent_env.training.trl, with a tiny model from the
+# Hub. trl and torch aren't in the dev extra: install them first, as .github/workflows/trl.yml does.
+trl-test: ## Run one GRPOTrainer step on CPU through the TRL helper (needs trl and CPU torch, and the Hub)
+	$(PYTHON) -m pytest tst/trl --timeout=900 $(PYTEST_ARGS)
 
 # The clean-install gate CI runs, on the same Python. The script gives every step an allowlisted
 # environment, so nothing in this shell reaches the install it checks. A failed run keeps its folder.

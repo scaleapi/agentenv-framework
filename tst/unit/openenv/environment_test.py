@@ -13,7 +13,7 @@ from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction, T
 
 import agent_env.task.episode.run as episode_run
 from agent_env.openenv.app import _score_at
-from agent_env.openenv.environment import ENDED, NOT_RESET, AgentEnvEnvironment, Served, ServedTask
+from agent_env.openenv.environment import ENDED, NOT_RESET, TIMEOUT_METADATA, AgentEnvEnvironment, Served, ServedTask
 from agent_env.task import EpisodeError, EpisodeSpec, Task
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN, _gate, _until
 
@@ -227,6 +227,22 @@ async def test_a_run_that_fails_mid_turn_ends_the_episode_at_the_next_step(teard
     assert step.metadata["error"].startswith("TimeoutError: A2A task ")
     assert step.metadata["error"].endswith(" did not complete within 1s")
     assert (await _call(env, "add_item")).metadata["error"] == ENDED
+
+
+@pytest.mark.asyncio
+async def test_a_reset_or_an_end_turn_past_its_deadline_ends_the_episode_in_an_error_observation(teardowns, tools):
+    held = {"id": "held", "type": "episode_test_gate"}
+    deploying, turning = _env(ITEMS, held, ALICE, TURN, REPLIES), _env(ITEMS, ALICE, TURN, held, REPLIES)
+    reset = await deploying.reset_async(timeout_s=0.5)
+    await turning.reset_async()
+
+    ended = await turning.step_async(CallToolAction(tool_name="end_turn", arguments={"response": "Added a crate."},
+                                                    metadata={TIMEOUT_METADATA: 0.5}))
+
+    assert (reset.done, reset.metadata["error"]) == (True, "the episode didn't open its first turn within 0.5s")
+    assert (ended.done, ended.reward, ended.metadata["error"]) == (
+        True, None, "end_turn didn't finish within 0.5s, and the episode ended")
+    assert len(teardowns.finished) == 2
 
 
 @pytest.mark.asyncio
