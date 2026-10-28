@@ -56,6 +56,26 @@ def test_a_file_named_in_split_by_test_is_split_by_test():
     assert [len(group) for group in groups] == [2, 2]
 
 
+def test_tests_a_dependency_links_stay_on_one_shard_and_weigh_their_sum():
+    nodeids = [f"{SPLIT}::test_{name}" for name in ("save", "load", "a", "b")]
+    table = _table({f"{SPLIT}::test_save": 50, f"{SPLIT}::test_load": 50, f"{SPLIT}::test_a": 60, f"{SPLIT}::test_b": 40})
+    linked = [(f"{SPLIT}::test_save", "save", []), (f"{SPLIT}::test_load", "test_load", ["save"])]
+    together = shards.dependency_groups(linked, table)
+    assert together == {f"{SPLIT}::test_save": f"{SPLIT}::test_load", f"{SPLIT}::test_load": f"{SPLIT}::test_load"}
+    groups = [shards.select(nodeids, index, 2, table, together) for index in (1, 2)]
+    # save+load (100) on one shard, a (60) and b (40) on the other
+    assert sorted(groups, key=len) == [[f"{SPLIT}::test_save", f"{SPLIT}::test_load"],
+                                       [f"{SPLIT}::test_a", f"{SPLIT}::test_b"]]
+
+
+def test_a_dependency_outside_a_split_file_or_on_an_unknown_name_links_nothing():
+    table = _table({})
+    linked = [("tst/integration/whole_test.py::test_load", "test_load", ["save"]),
+              ("tst/integration/whole_test.py::test_save", "save", []),
+              (f"{SPLIT}::test_load", "test_load", ["missing"])]
+    assert shards.dependency_groups(linked, table) == {}
+
+
 def test_a_unit_the_table_does_not_know_weighs_the_median_of_the_known_ones():
     seconds = {"tst/integration/a_test.py": 10, "tst/integration/b_test.py": 20, "tst/integration/c_test.py": 900,
                "tst/integration/skipped_test.py": 0}

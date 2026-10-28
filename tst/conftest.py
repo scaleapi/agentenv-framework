@@ -53,7 +53,12 @@ def pytest_collection_modifyitems(config, items):
         index, count = shards.parse(value)
     except ValueError as e:
         raise pytest.UsageError(str(e)) from None
-    keep = set(shards.select([item.nodeid for item in items], index, count, shards.load_table()))
+    table = shards.load_table()
+    marked = [(item, item.get_closest_marker("dependency")) for item in items]
+    linked = [(item.nodeid, mark.kwargs.get("name") or item.name, list(mark.kwargs.get("depends") or []))
+              for item, mark in marked if mark is not None]
+    together = shards.dependency_groups(linked, table)
+    keep = set(shards.select([item.nodeid for item in items], index, count, table, together))
     deselected = [item for item in items if item.nodeid not in keep]
     if deselected:
         config.hook.pytest_deselected(items=deselected)
