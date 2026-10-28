@@ -72,6 +72,7 @@ from letta_code_bridge import (
     export_session,
     get_last_attribution_snapshot,
     kill_running_clis,
+    shielded,
     shielded_thread,
     stage_session,
     run_letta_code,
@@ -422,7 +423,7 @@ class LettaCodeAgent(DurableSessionRefs, AgentEnvAgent):
                     raise HTTPException(status_code=404, detail="No active session for context_id")
                 session_json = await export_session(request.context_id, session_id)
                 if request.objects.workspace is not None:
-                    await asyncio.to_thread(
+                    await shielded_thread(
                         subprocess.run,
                         ["tar", *_backup_exclusions(), "-czf", str(workspace),
                          "-C", str(WORKSPACE_DIR), "."],
@@ -445,14 +446,15 @@ class LettaCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 staged = Path(directory) / "workspace"
                 staged.mkdir()
                 await download(request.objects.workspace, archive)
-                await asyncio.to_thread(
+                await shielded_thread(
                     subprocess.run, ["tar", "-xzf", str(archive), "-C", str(staged)],
                     check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
             async with self._workspace.exclusive(), self._turn_lock(target_context_id):
                 # Stage the conversation first, so a bad snapshot changes nothing. The workspace swap and the
-                # conversation swap then run in one thread that cancellation can't abandon: a failed conversation
-                # swap puts /app back, and the context's previous conversation stays in place until both succeed.
+                # conversation swap then run in one thread, and the context is bound to the restored conversation,
+                # in one step that cancellation can't abandon: a failed conversation swap puts /app back, and the
+                # context's previous conversation stays in place until both succeed.
                 session_dir = Path(directory) / "session"
                 session_dir.mkdir()
                 imported_session_id, staged_session = await shielded_thread(
@@ -463,11 +465,14 @@ class LettaCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 def commit_session() -> None:
                     commit_staged_session(target_context_id, staged_session)
 
-                if staged is not None:
-                    await shielded_thread(_replace_workspace, staged, commit_session)
-                else:
-                    await shielded_thread(commit_session)
-                self.set_session_ref_for_context(target_context_id, imported_session_id)
+                async def swap() -> None:
+                    if staged is not None:
+                        await asyncio.to_thread(_replace_workspace, staged, commit_session)
+                    else:
+                        await asyncio.to_thread(commit_session)
+                    self.set_session_ref_for_context(target_context_id, imported_session_id)
+
+                await shielded(swap())
         return {"context_id": target_context_id}
 
     async def _capture_changelog(self) -> None:
@@ -488,11 +493,11 @@ class LettaCodeAgent(DurableSessionRefs, AgentEnvAgent):
             pending_snar = _CHANGELOG_DIR / "pending.snar"
             record = _CHANGELOG_META_DIR / f"{sequence:06d}"
             try:
-                await asyncio.to_thread(shutil.rmtree, record, True)
+                await shielded_thread(shutil.rmtree, record, True)
                 record.mkdir(parents=True)
                 (record / _META_NAME).write_text(json.dumps({"sequence": sequence, "removed": removed}))
-                await asyncio.to_thread(shutil.copyfile, _CHANGELOG_SNAR, pending_snar)
-                await asyncio.to_thread(
+                await shielded_thread(shutil.copyfile, _CHANGELOG_SNAR, pending_snar)
+                await shielded_thread(
                     subprocess.run,
                     ["tar", f"--listed-incremental={pending_snar}",
                      *_changelog_backup_exclusions(),
@@ -508,7 +513,7 @@ class LettaCodeAgent(DurableSessionRefs, AgentEnvAgent):
             finally:
                 archive.unlink(missing_ok=True)
                 pending_snar.unlink(missing_ok=True)
-                await asyncio.to_thread(shutil.rmtree, record, True)
+                await shielded_thread(shutil.rmtree, record, True)
 
 
 class LettaCodeChangelogAgent(LettaCodeAgent):
@@ -520,7 +525,7 @@ class LettaCodeChangelogAgent(LettaCodeAgent):
     async def enable_changelog(self, request: NamespaceChangelogEnableRequest) -> dict[str, Any]:
         roots = request.roots or [str(WORKSPACE_DIR)]
         async with self._workspace.exclusive(), self._changelog_lock:
-            await asyncio.to_thread(_baseline_changelog, roots)
+            await shielded_thread(_baseline_changelog, roots)
             self._changelog = {"roots": roots, "sequence": 0, "present": [root for root in roots if Path(root).exists()],
                                "uploader": NamespaceUploader(request.write_namespace)}
         return {"roots": roots}
@@ -532,7 +537,7 @@ class LettaCodeChangelogAgent(LettaCodeAgent):
                 for increment in request.increments:
                     archive = Path(directory) / f"{increment.sequence:06d}.tgz"
                     await download(increment.object, archive)
-                    await asyncio.to_thread(_apply_increment, archive, increment.sequence)
+                    await shielded_thread(_apply_increment, archive, increment.sequence)
         return {"count": len(request.increments), "context_id": request.target_context_id}
 
 

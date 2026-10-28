@@ -93,15 +93,20 @@ async def export_session(context_id: str, session_id: str) -> bytes:
     return await shielded_thread(_archive_session, context_id, session_id)
 
 
-async def shielded_thread(func, *args):
-    """Run blocking file work in a thread that cancellation can't abandon: a cancelled caller still waits for it."""
-    task = asyncio.ensure_future(asyncio.to_thread(func, *args))
+async def shielded(work):
+    """Await work that cancellation can't abandon: a cancelled caller still waits for it to finish."""
+    task = asyncio.ensure_future(work)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
         with contextlib.suppress(BaseException):
             await task
         raise
+
+
+async def shielded_thread(func, *args, **kwargs):
+    """Run blocking file work in a thread that cancellation can't abandon: a cancelled caller still waits for it."""
+    return await shielded(asyncio.to_thread(func, *args, **kwargs))
 
 
 def stage_session(context_id: str, json_path: str, directory: str) -> tuple[str, Path]:

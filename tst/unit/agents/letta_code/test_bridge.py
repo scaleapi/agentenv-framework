@@ -1,8 +1,11 @@
 """Exercise state restore, system instructions, event parsing and cancellation without model calls."""
 import asyncio
 import json
+import shutil
 import subprocess
+import threading
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -249,3 +252,66 @@ def test_cleanup_failure_after_a_successful_swap_keeps_the_new_conversation(monk
     monkeypatch.setattr(bridge.shutil, "rmtree", rmtree)
     bridge.commit_staged_session("target", staged)
     assert (target / "conversation.json").read_text() == "restored"
+
+
+@pytest.mark.asyncio
+async def test_a_load_cancelled_during_its_swap_still_binds_the_restored_conversation(monkeypatch, tmp_path):
+    monkeypatch.setattr(bridge, "SESSIONS_ROOT", str(tmp_path / "sessions"))
+    source = bridge.context_data_dir("source")
+    source.mkdir(parents=True)
+    (source / "context.json").write_text(json.dumps({"home": str(source)}))
+    snapshot = tmp_path / "state.tgz"
+    snapshot.write_bytes(await bridge.export_session("source", "local-conv-7"))
+
+    async def download(_object, target):
+        shutil.copyfile(snapshot, target)
+
+    swapping, release = threading.Event(), threading.Event()
+    real_commit = a2a_server.commit_staged_session
+
+    def commit(context_id, staged):
+        swapping.set()
+        release.wait(5)
+        real_commit(context_id, staged)
+
+    monkeypatch.setattr(a2a_server, "download", download)
+    monkeypatch.setattr(a2a_server, "commit_staged_session", commit)
+    agent = a2a_server.LettaCodeAgent()
+    a2a_server.build_app(agent)
+    request = SimpleNamespace(target_context_id="target", objects=SimpleNamespace(trajectory=None, workspace=None))
+    load = asyncio.create_task(agent.load_snapshot(request))
+    assert await asyncio.to_thread(swapping.wait, 5)
+    load.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await load
+    # The swap finished, so the context resumes the conversation it restored, not the one it had before.
+    assert agent.session_ref_for_context("target") == "local-conv-7"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_changelog_apply_holds_the_workspace_until_its_extract_ends(monkeypatch):
+    applying, release = threading.Event(), threading.Event()
+
+    def apply(_archive, _sequence):
+        applying.set()
+        release.wait(5)
+
+    async def download(_object, target):
+        target.write_bytes(b"")
+
+    monkeypatch.setattr(a2a_server, "_apply_increment", apply)
+    monkeypatch.setattr(a2a_server, "download", download)
+    agent = a2a_server.LettaCodeChangelogAgent()
+    a2a_server.build_app(agent)
+    request = SimpleNamespace(target_context_id="ctx", increments=[SimpleNamespace(sequence=0, object=None)])
+    task = asyncio.create_task(agent.apply_changelog(request))
+    assert await asyncio.to_thread(applying.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    # No turn may start in the workspace while the extract still writes to it.
+    assert not task.done() and agent._workspace._writer
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not agent._workspace._writer
