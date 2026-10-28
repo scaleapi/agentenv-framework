@@ -304,12 +304,13 @@ class _Planner:
 
     # Agents named by an installed bundle's alias
 
-    def _resolve_aliases(self) -> None:
+    def _resolve_aliases(self, *, runs: bool = True) -> None:
         """Point each entry's reference to an agent, env or artifact by an alias an installed bundle gives it, and each
         task's to the configured default agent when it's one, at what it names, pulled into the plan, unless the store
         has one of the alias's id, which the reference keeps naming. A field naming the alias is rewritten to the id. A
         reference that can't be pointed at the alias's entity is left with the problem the store ref check reports;
-        ``alias_uses`` holds the aliases the plan names."""
+        ``alias_uses`` holds the aliases the plan names. Without ``runs``, as when entities are written alone, tasks
+        and evals are left as they are, since none of them runs."""
         if self.installed is None:
             return
         installed = self.installed()
@@ -320,6 +321,8 @@ class _Planner:
                 self.nodes[key], self.edges[key] = pointed, _needs(pointed)
         default = _UNREAD
         for index, entry in enumerate(self.entries):
+            if not runs and entry.entry.kind in (BundleKind.TASK, BundleKind.EVAL):
+                continue
             pointed = self._pointed(entry)
             references = list(pointed.references)
             if entry.entry.kind is BundleKind.TASK and self.default_agents and _leaves_an_agent_unset(entry):
@@ -524,7 +527,7 @@ class _Planner:
         return self._planned(selected_tasks + selected_evals, selected_tasks, selected_evals, override)
 
     def plan_entities(self, ids: Sequence[str]) -> Plan:
-        self._resolve_aliases()
+        self._resolve_aliases(runs=False)
         self._check_writers()
         self._check_loops()
         return self._planned(self._select_entities(ids), [], [], None)
