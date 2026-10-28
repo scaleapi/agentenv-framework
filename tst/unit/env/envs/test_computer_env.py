@@ -616,7 +616,7 @@ DRIVER_CARD = {"name": "desktop", "capabilities": {"extensions": [
 @pytest.fixture
 def boots(monkeypatch):
     """The boots a deploy asks for, each a sandbox serving the desktop driver's card at 127.0.0.1:20001; the driver
-    shows a 1600x900 screen, lists the desk's tools, and each extension call it gets is recorded."""
+    shows a 1600x900 screen, and each extension call it gets is recorded."""
     made = SimpleNamespace(boots=[], calls=[], sandboxes=[], display=(1600, 900))
 
     async def fake_boot(sandbox_provider, **kwargs):
@@ -637,14 +637,13 @@ def boots(monkeypatch):
 
     monkeypatch.setattr(env_computer_provider, "boot", fake_boot)
     monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
-    monkeypatch.setattr(env_computer_provider, "_tool_names", AsyncMock(return_value=TOOLS))
     return made
 
 
 @pytest.mark.asyncio
-async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_settings_display_and_hidden_tools(
+async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_settings_and_display(
         base, driver, docker, boots):
-    env = _put(base, driver, display={"width": 1600, "height": 900}, tools={"hide": ["computer_pointer_*"]})
+    env = _put(base, driver, display={"width": 1600, "height": 900})
 
     deployed = await Env.get(env.id).deploy(attribution={"run": "r1"}, env_params={
         "computer_settings": {"timezone": "Asia/Tokyo"}, "driver_settings": {"default_space": "norm"}})
@@ -657,8 +656,7 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
     assert (environment["AGENTENV_SETTING_RESOLUTION"], environment["AGENTENV_SETTING_TIMEZONE"]) == ("1600x900", "Asia/Tokyo")
     assert json.loads(environment["AGENTENV_COMPUTER_SETTINGS"]) == {"default_space": "norm"}
     assert environment["ENVIRONMENT_NAME"] == "desktop" and "AGENTENV_SETTING_THEME" not in environment
-    assert boots.calls == [(COMPUTER_DISPLAY, "get", None),
-                           (DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "*", "tools": ["computer_pointer_list"]})]
+    assert boots.calls == [(COMPUTER_DISPLAY, "get", None)]
     assert (deployed.env_provider_type, deployed.sandbox_ids) == ("computer", {"computer": {"desktop": "local-1"}})
     assert deployed.environment_card == DRIVER_CARD and deployed.mcp_url == "http://127.0.0.1:20001/mcp"
     record = deployed.metadata["computer"]
@@ -672,7 +670,7 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
 @pytest.mark.asyncio
 async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_where_the_last_one_ran(
         base, driver, docker, boots, monkeypatch):
-    env = _put(base, driver, display={"width": 1600, "height": 900}, tools={"hide": ["computer_pointer_*"]})
+    env = _put(base, driver, display={"width": 1600, "height": 900})
     deployed = await Env.get(env.id).deploy(env_params={"computer_settings": {"timezone": "Asia/Tokyo"}})
     (sandbox,) = boots.sandboxes
     recreated = []
@@ -694,8 +692,7 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     assert (kwargs["image_name"], kwargs["port"]) == (deployed.metadata["computer"]["image"], 18765)
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S)
-    assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "recreate", (COMPUTER_DISPLAY, "get", None),
-                           (DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "*", "tools": ["computer_pointer_list"]})]
+    assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "recreate", (COMPUTER_DISPLAY, "get", None)]
 
 
 @pytest.mark.asyncio

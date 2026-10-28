@@ -6,12 +6,9 @@ from __future__ import annotations
 import functools
 import logging
 from datetime import datetime, timezone
-from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, ClassVar, Optional
 
-import anyio
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
-from agentenv_protocol.tool_access import DISABLE, DISABLE_TOOL_EXTENSION_URI, WILDCARD
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
@@ -19,7 +16,7 @@ from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer import params as computer_params
 from agent_env.env.envs.computer.boot import READY_TIMEOUT_S, boot, ready, recorded_settings, settings_environment
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
-from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider, _tool_names
+from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 
@@ -30,7 +27,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TOOLS_TIMEOUT_S = 60.0
 #: How long a driver may take to end its recordings, uploading the segments still to go.
 _END_RECORDINGS_TIMEOUT_S = 300
 
@@ -54,7 +50,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         env_params: Optional[dict] = None,
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
-        provider runs natively, booted; returns the record once the driver is ready with the env's display and tools."""
+        provider runs natively, booted; returns the record once the driver is ready with the env's display."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
         if not isinstance(env, ComputerEnv):
@@ -108,7 +104,6 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                 "env_params": params.model_dump(exclude_defaults=True)}},
         )
         await _require_display(record, values.get("resolution"))
-        await _hide_tools(record, env.hidden_tools)
         return record
 
     async def reboot(self, env: ComputerEnv, deployed: DeployedSandboxEnv) -> None:
@@ -126,7 +121,6 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                                   env=_environment(env, computer, values, params))
         _require_name(env, await ready(deployed.environment_url, READY_TIMEOUT_S))
         await _require_display(deployed, values.get("resolution"))
-        await _hide_tools(deployed, env.hidden_tools)
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
@@ -166,14 +160,3 @@ async def _require_display(record: DeployedSandboxEnv, resolution: Optional[str]
     if f"{display['width']}x{display['height']}" != resolution:
         raise RuntimeError(f"'{record.env_id}' booted at {display['width']}x{display['height']}, not the {resolution} "
                            "its display sets")
-
-
-async def _hide_tools(record: DeployedSandboxEnv, patterns: list[str]) -> None:
-    """Disable, for every role, each tool the driver lists that one of ``patterns`` matches."""
-    if not patterns:
-        return
-    with anyio.fail_after(_TOOLS_TIMEOUT_S):
-        tools = await _tool_names(record.mcp_url)
-    hidden = sorted({tool for tool in tools if any(fnmatchcase(tool, pattern) for pattern in patterns)})
-    if hidden:
-        await record.invoke(DISABLE_TOOL_EXTENSION_URI, DISABLE, {"role": WILDCARD, "tools": hidden})
