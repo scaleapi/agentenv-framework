@@ -107,14 +107,15 @@ def as_imported(imported: Imported, plan: Plan, write: Write, now: Mapping[str, 
     return then == current
 
 
-def grafted(bundle: Bundle, imported: Imported) -> tuple[Bundle, dict[Path, set[str]]]:
+def grafted(bundle: Bundle, imported: Imported) -> tuple[Bundle, dict[Path, set[str]], list[str]]:
     """``bundle`` with each imported task's steps given back, from the stored version each was imported from, matched
     by step id and type, what the import left out where the folder doesn't set it: each user-scoped field, but a
     reference's pin where the folder names something else; each list item's, from the stored item it was written from;
     and each env var and credential the import's scrub took, where the folder holds what the scrub left. And, for each
-    task's file, the paths in its steps that took one."""
+    task's file, the paths in its steps that took one; and a problem for each field still holding what the scrub left,
+    which the folder changed too much to give back."""
     registry = get_task_step_registry()
-    entries, taken = [], {}
+    entries, taken, problems = [], {}, []
     for entry in bundle.entries:
         source = imported.entities.get(where(bundle.root, entry)) if entry.kind is BundleKind.TASK else None
         try:
@@ -131,14 +132,18 @@ def grafted(bundle: Bundle, imported: Imported) -> tuple[Bundle, dict[Path, set[
             cls = registry.get(step.get("type"))
             if origin is None or cls is None or origin.get("type") != step.get("type"):
                 continue
-            for path in _given_back(step, origin, cls):
+            given, left = _given_back(step, origin, cls)
+            for path in given:
                 taken.setdefault(entry.path, set()).add(f"[{index}].{path}")
+            problems += [f"{where(bundle.root, entry)}: step {step.get('id')!r}: {path} still holds what the import "
+                         "masked, and the folder changed what it was masked from; set its real value" for path in left]
         entries.append(replace(entry, config=steps))
-    return replace(bundle, entries=tuple(entries)), taken
+    return replace(bundle, entries=tuple(entries)), taken, problems
 
 
-def _given_back(step: dict, origin: dict, cls: type) -> list[str]:
-    """Give ``step`` back what the import left out of ``origin``, in place; the path of each field it took."""
+def _given_back(step: dict, origin: dict, cls: type) -> tuple[list[str], list[str]]:
+    """Give ``step`` back what the import left out of ``origin``, in place; the path of each field it took, and of each
+    still holding what the scrub left."""
     user = [path for path, scope in cls.field_scopes.items() if scope is FieldScope.USER]
     repinned = _repinned(step, origin, cls)
     given, lists = [], {}
@@ -157,7 +162,9 @@ def _given_back(step: dict, origin: dict, cls: type) -> list[str]:
         given += _given_back_items(step, origin, at, fields)
     scrubbed = copy.deepcopy(origin)
     scrub(scrubbed)
-    return given + _unscrubbed(step, origin, scrubbed)
+    given += _unscrubbed(step, origin, scrubbed)
+    masked = {text for _, text in _masks(origin, scrubbed)}
+    return given, [path for path, text in _texts(step) if text in masked]
 
 
 def _repinned(step: dict, origin: dict, cls: type) -> set[str]:
@@ -236,7 +243,7 @@ def _unscrubbed(value: object, stored: object, scrubbed: object, path: str = "")
             len(stored) == len(scrubbed)):
         unchanged = value == scrubbed
         for index, item in enumerate(value):
-            if (source := _counterpart(value, index, scrubbed, unchanged)) is None:
+            if (source := _counterpart(item, index, stored, scrubbed, unchanged)) is None:
                 continue
             at = f"{path}[{index}]"
             if isinstance(stored[source], str):
@@ -248,13 +255,51 @@ def _unscrubbed(value: object, stored: object, scrubbed: object, path: str = "")
     return given
 
 
-def _counterpart(value: list, index: int, scrubbed: list, unchanged: bool) -> int | None:
-    """The index of the stored item ``value[index]`` was scrubbed from: its own while the list is as scrubbed, else
-    the one scrubbed item it equals, when only one does, so a reordered list restores each item from its own."""
+def _counterpart(item: object, index: int, stored: list, scrubbed: list, unchanged: bool) -> int | None:
+    """The index of the stored item ``item``, at ``index``, was scrubbed from: its own while the list is as scrubbed;
+    else the one scrubbed item it equals, or failing that the one whose masked values it holds, when only one does, so
+    a reordered or edited list restores each item from its own."""
     if unchanged:
         return index
-    same = [other for other, item in enumerate(scrubbed) if item == value[index]]
+    same = [other for other, one in enumerate(scrubbed) if one == item]
+    if not same:
+        same = [other for other, one in enumerate(scrubbed) if (masks := _masks(stored[other], one))
+                and all(_at_keys(item, keys) == text for keys, text in masks)]
     return same[0] if len(same) == 1 else None
+
+
+def _masks(stored: object, scrubbed: object, keys: tuple = ()) -> list[tuple[tuple, str]]:
+    """Each string scrubbing ``stored`` masked: the keys to it, and the text the scrub left."""
+    if isinstance(stored, str):
+        return [(keys, scrubbed)] if isinstance(scrubbed, str) and scrubbed != stored else []
+    if isinstance(stored, dict) and isinstance(scrubbed, dict):
+        return [mask for key in stored if key in scrubbed for mask in _masks(stored[key], scrubbed[key], (*keys, key))]
+    if isinstance(stored, list) and isinstance(scrubbed, list) and len(stored) == len(scrubbed):
+        return [mask for index, (one, other) in enumerate(zip(stored, scrubbed))
+                for mask in _masks(one, other, (*keys, index))]
+    return []
+
+
+def _at_keys(value: object, keys: tuple) -> object:
+    for key in keys:
+        if isinstance(value, dict) and isinstance(key, str):
+            value = value.get(key)
+        elif isinstance(value, list) and isinstance(key, int) and key < len(value):
+            value = value[key]
+        else:
+            return None
+    return value
+
+
+def _texts(value: object, path: str = "") -> list[tuple[str, str]]:
+    """Each string in ``value``, with its path."""
+    if isinstance(value, str):
+        return [(path, value)]
+    if isinstance(value, dict):
+        return [text for key, item in value.items() for text in _texts(item, f"{path}.{key}" if path else str(key))]
+    if isinstance(value, list):
+        return [text for index, item in enumerate(value) for text in _texts(item, f"{path}[{index}]")]
+    return []
 
 
 def _graft(step: dict, keys: list[str], value: object) -> bool:

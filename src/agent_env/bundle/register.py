@@ -95,7 +95,9 @@ def register_bundle(
         imported, why = read_imported(bundle.root)
         if why is not None:
             say(f"  {why}")
-        bundle, grafts = grafted(bundle, imported) if imported is not None else (bundle, {})
+        bundle, grafts, unrestored = grafted(bundle, imported) if imported is not None else (bundle, {}, [])
+        if unrestored:
+            raise BundleError(unrestored)
         resolved = resolve_bundle(bundle)
         plan = _plan(resolved, tasks, evals)
         held = _held_as_imported(plan, imported)

@@ -370,22 +370,55 @@ def test_a_link_into_an_imported_image_s_folder_is_an_edit_to_its_image(local_st
     assert _written(registered)["crm-image"] == (2, False)
 
 
-def test_reordered_downloads_each_take_back_their_own_credentials(local_stores, tmp_path, monkeypatch):
+def _downloads(tmp_path, monkeypatch, names):
+    """The stored task fetch, downloading one file for each of ``names`` from that user's URL, which the import masks
+    to the same text, imported with its user-scoped fields; the folder, and the urls the task stores."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    # Not credentials: two users' URLs for one file, which the import masks to the same text, joined in at run time.
-    first, second = ("https://" + user + ":" + "not-a-token@data.example.com/rows.csv" for user in ("ann", "bob"))
-    urls = [{"url": first, "filename": "ann.csv"}, {"url": second, "filename": "bob.csv"}]
+    # Not credentials: users' URLs for one file, joined in at run time.
+    urls = [{"url": "https://" + name + ":" + "not-a-token@data.example.com/rows.csv", "filename": f"{name}.csv"}
+            for name in names]
     Task.put(id="fetch", steps=[build_step({"id": "box", "type": "deploy_sandbox", "sandbox_name": "box",
                                             "sandbox_mode": "vm"}),
                                 build_step({"id": "fetch", "type": "load_artifact", "sandbox_name": "box",
                                             "urls": urls, "destination_path": "/data"})])
-    folder = import_task("fetch", tmp_path / "fetch", include_scopes={FieldScope.USER}).root
+    return import_task("fetch", tmp_path / "fetch", include_scopes={FieldScope.USER}).root, urls
+
+
+def _edit_urls(folder, edit):
     task_file = folder / "tasks/fetch.json"
     steps = json.loads(task_file.read_text())
-    assert steps[1]["urls"][0]["url"] == steps[1]["urls"][1]["url"] != first
-    steps[1]["urls"].reverse()
+    edit(steps[1]["urls"])
     task_file.write_text(json.dumps(steps))
+
+
+def test_reordered_downloads_each_take_back_their_own_credentials(local_stores, tmp_path, monkeypatch):
+    folder, urls = _downloads(tmp_path, monkeypatch, ["ann", "bob"])
+    _edit_urls(folder, list.reverse)
 
     register_bundle(folder)
 
     assert Task.get("fetch", 2).to_dict()["steps"][1]["urls"] == list(reversed(urls))
+
+
+def test_a_renamed_download_takes_back_its_credentials(local_stores, tmp_path, monkeypatch):
+    folder, urls = _downloads(tmp_path, monkeypatch, ["ann"])
+    _edit_urls(folder, lambda entries: entries[0].update(filename="rows.csv"))
+
+    register_bundle(folder)
+
+    assert Task.get("fetch", 2).to_dict()["steps"][1]["urls"] == [{"url": urls[0]["url"], "filename": "rows.csv"}]
+
+
+def test_a_masked_value_that_cant_be_told_from_another_is_refused_rather_than_written(local_stores, tmp_path,
+                                                                                      monkeypatch):
+    folder, _ = _downloads(tmp_path, monkeypatch, ["ann", "bob"])
+    _edit_urls(folder, lambda entries: [entry.update(filename=f"renamed-{index}.csv")
+                                        for index, entry in enumerate(entries)])
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(folder)
+
+    assert refused.value.problems == tuple(
+        f"tasks/fetch.json: step 'fetch': urls[{index}].url still holds what the import masked, and the folder "
+        "changed what it was masked from; set its real value" for index in (0, 1))
+    assert Task.get("fetch").version == 1
