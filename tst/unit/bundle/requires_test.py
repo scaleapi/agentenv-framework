@@ -7,6 +7,8 @@ import os
 import sys
 import threading
 import tomllib
+from pathlib import PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -89,6 +91,7 @@ def acme(monkeypatch):
         config_path=None, config_error=None, loaded=load))
     monkeypatch.setattr(requires_module, "load_failures", dict)
     monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0"}.get)
+    monkeypatch.setattr(requires_module, "packages_distributions", dict)
 
 
 def _bundle(root, *types, toml=None):
@@ -123,6 +126,21 @@ class TestProviders:
     def test_a_type_configuration_registers_is_provided_by_configuration(self, cls):
         assert Providers().of(TASK_STEPS, cls.type, cls) == Provider(None, None)
         assert Provider(None, None).requirement() is None
+
+    def test_configuration_names_the_installed_package_its_class_comes_from(self, monkeypatch):
+        monkeypatch.setattr(requires_module, "packages_distributions", lambda: {"tst": ["agentenv-shipper"]})
+        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-shipper": "2.0"}.get)
+
+        assert Providers().of(TASK_STEPS, _Configured.type, _Configured) == Provider(None, None, "agentenv-shipper 2.0")
+
+    def test_of_a_namespace_packages_distributions_the_one_holding_the_module_ships_it(self, monkeypatch):
+        files = {"shipper-a": ["tst/other.py"], "shipper-b": [f"{__name__.replace('.', '/')}.py"]}
+        monkeypatch.setattr(requires_module, "packages_distributions", lambda: {"tst": ["shipper-a", "shipper-b"]})
+        monkeypatch.setattr(requires_module, "distribution",
+                            lambda name: SimpleNamespace(files=[PurePosixPath(f) for f in files[name]]))
+        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "shipper-b": "3.1"}.get)
+
+        assert Providers().of(TASK_STEPS, _Configured.type, _Configured).shipped_by == "shipper-b 3.1"
 
     def test_a_plugin_that_failed_to_load_provides_nothing(self, monkeypatch):
         monkeypatch.setattr(requires_module, "load_failures", lambda: {TASK_STEPS: {_Acme.type: "failed to load"}})
@@ -166,6 +184,25 @@ class TestUnmet:
 
     def test_one_unmet_requirement_names_the_command_that_installs_it(self):
         assert unmet_problems(["agentenv-missing>=1", "agentenv-acme"]) == ([MISSING], ["agentenv-missing>=1"])
+
+    def test_agent_env_itself_is_upgraded_not_added(self, monkeypatch):
+        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-framework": "0.9.1375"}.get)
+
+        assert unmet_problems(["agentenv-framework>=0.9.1400", "agentenv-missing>=1"]) == ([
+            "bundle.toml: requires 'agentenv-framework>=0.9.1400', and agentenv-framework 0.9.1375 is installed; "
+            "upgrade agent-env with the installer that installed it",
+            MISSING,
+        ], ["agentenv-missing>=1"])
+
+    def test_a_bundle_needing_a_newer_agent_env_is_refused_without_an_install_to_offer(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-framework": "0.9.1375"}.get)
+        root = _bundle(tmp_path / "b", _Acme.type, toml='requires = ["agentenv-framework>=0.9.1400"]\n')
+
+        with pytest.raises(BundleError) as caught:
+            resolve_bundle(parse_bundle(root))
+
+        assert not isinstance(caught.value, UnmetRequirements)
+        assert caught.value.problems[0].endswith("upgrade agent-env with the installer that installed it")
 
     def test_several_name_one_command_that_installs_them_all(self):
         assert unmet_problems(["agentenv-missing>=1", "agentenv-acme>=2"]) == ([
@@ -255,6 +292,17 @@ class TestDeclare:
         assert _declared(root)[0] == ("this bundle uses agentenv-acme 1.2.0 (tasks/t.json: step 's0'), which bundle.toml "
                                       "doesn't require")
         assert sorted(os.listdir(root)) == ["tasks"]
+
+    def test_a_type_configuration_registers_from_an_installed_package_names_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(requires_module, "packages_distributions", lambda: {"tst": ["agentenv-shipper"]})
+        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-shipper": "2.0"}.get)
+        root = _bundle(tmp_path / "b", _Configured.type, _Replaced.type)
+
+        assert _declared(root) == [
+            "this bundle uses the step type 'configured_requires_test' and the step type 'replaced_requires_test' "
+            "(tasks/t.json: step 's0', and 1 more), which this machine's configuration registers, from "
+            "agentenv-shipper 2.0; whoever runs it needs that package and its configuration"]
+        assert not (root / "bundle.toml").exists()
 
     def test_a_bundle_toml_that_appears_meanwhile_is_kept_and_told_what_to_declare(self, tmp_path, monkeypatch):
         root = _bundle(tmp_path / "b", _Acme.type)
@@ -490,6 +538,17 @@ class TestInstallPrompt:
 
         assert result.exit_code == 2
         assert calls["exec"] == []
+
+    def test_a_refusal_for_agent_env_itself_never_asks(self, terminal, monkeypatch):
+        root, calls = terminal
+        (root / "bundle.toml").write_text('requires = ["agentenv-framework>=0.9.1400"]\n')
+        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-framework": "0.9.1375"}.get)
+
+        result = CliRunner().invoke(cli, ["run", str(root)], input="y\n")
+
+        assert result.exit_code == 1
+        assert "upgrade agent-env with the installer that installed it" in result.output
+        assert "Install" not in result.output and calls["added"] == []
 
     def test_a_registration_refused_for_it_asks_too(self, terminal):
         root, calls = terminal

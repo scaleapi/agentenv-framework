@@ -9,9 +9,9 @@ import json
 import os
 import shlex
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, distribution
+from importlib.metadata import PackageNotFoundError, distribution, packages_distributions
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,7 +23,7 @@ from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_a
 from agent_env.env import registry as env_registry
 from agent_env.env.registry import get_env_registry
 from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, inventory, load_failures
-from agent_env.plugins._requirements import installed
+from agent_env.plugins._requirements import CORE, installed
 from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
 
@@ -51,10 +51,11 @@ class UnmetRequirements(BundleError):
 @dataclass(frozen=True)
 class Provider:
     """What registers a type core doesn't ship: an installed distribution, at its version, or, with neither, the
-    configuration's impls."""
+    configuration's impls, then with the installed package its class's module comes from, when one ships it."""
 
     distribution: str | None
     version: str | None
+    shipped_by: str | None = None  # "<package> <version>"
 
     def requirement(self) -> str | None:
         """The pip requirement for it, at least the version installed here without a local label, which a bound can't
@@ -82,6 +83,7 @@ class Providers:
 
     def __init__(self) -> None:
         self._origins: dict[tuple[str, str], tuple[str, str, str]] | None = None
+        self._packages: Mapping[str, list[str]] | None = None
 
     def of(self, group: str, name: str, cls: type | None) -> Provider | None:
         """What provides ``name`` of the plugin ``group``, which resolves here to ``cls``: the distribution whose entry
@@ -96,7 +98,26 @@ class Providers:
                              for contribution in distribution.contributions}
         distribution, version, value = self._origins.get((group, name), (None, None, None))
         registered = value is not None and cls is not None and name not in load_failures().get(group, {})
-        return Provider(distribution, version) if registered and _names(value, cls) else Provider(None, None)
+        if registered and _names(value, cls):
+            return Provider(distribution, version)
+        return Provider(None, None, self._shipping(cls))
+
+    def _shipping(self, cls: type | None) -> str | None:
+        """The installed package whose files hold ``cls``'s module, at its version; None when no one package does, as
+        for a module on the path or an editable install."""
+        if cls is None:
+            return None
+        if self._packages is None:
+            self._packages = packages_distributions()
+        module = cls.__module__
+        names = list(dict.fromkeys(self._packages.get(module.partition(".")[0], ())))
+        if len(names) > 1:  # a namespace package: the one whose files hold the module
+            files = {f"{module.replace('.', '/')}.py", f"{module.replace('.', '/')}/__init__.py"}
+            names = [name for name in names if files & {str(file) for file in distribution(name).files or ()}]
+        if len(names) != 1:
+            return None
+        version = installed(canonicalize_name(names[0]))
+        return f"{names[0]} {version}" if version else names[0]
 
 
 def unmet(requires: Iterable[str]) -> list[tuple[str, str]]:
@@ -156,18 +177,22 @@ def _missing_for_extras(requirement: Requirement, seen: set[tuple[str, str]]) ->
 
 
 def unmet_problems(requires: Iterable[str]) -> tuple[list[str], list[str]]:
-    """The problems ``bundle.toml``'s unmet ``requires`` raise, naming the one command that installs them all, and the
-    unmet requirements."""
+    """The problems ``bundle.toml``'s unmet ``requires`` raise, naming the one command that installs every plugin
+    package among them, and those requirements. One on agent-env itself, which ``plugin add`` doesn't change, says to
+    upgrade it instead."""
     found = unmet(requires)
-    if not found:
-        return [], []
-    lines = [line for line, _ in found]
-    command = install_command(lines)
-    if len(found) == 1:
-        line, why = found[0]
-        return [f"{BUNDLE_TOML}: requires {line!r}, {why}; install it with: {command}"], lines
-    return ([f"{BUNDLE_TOML}: requires {line!r}, {why}" for line, why in found]
-            + [f"{BUNDLE_TOML}: install what it requires with: {command}"]), lines
+    core = [(line, why) for line, why in found if canonicalize_name(Requirement(line).name) in CORE]
+    plugins = [(line, why) for line, why in found if (line, why) not in core]
+    problems = [f"{BUNDLE_TOML}: requires {line!r}, {why}; upgrade agent-env with the installer that installed it"
+                for line, why in core]
+    lines = [line for line, _ in plugins]
+    if len(plugins) == 1:
+        (line, why), = plugins
+        problems.append(f"{BUNDLE_TOML}: requires {line!r}, {why}; install it with: {install_command(lines)}")
+    elif plugins:
+        problems += [f"{BUNDLE_TOML}: requires {line!r}, {why}" for line, why in plugins]
+        problems.append(f"{BUNDLE_TOML}: install what it requires with: {install_command(lines)}")
+    return problems, lines
 
 
 def install_command(requirements: Sequence[str]) -> str:
@@ -214,9 +239,7 @@ def declare(resolved: ResolvedBundle, *, own: bool, dry_run: bool) -> list[str]:
     declared = {canonicalize_name(Requirement(line).name) for line in resolved.bundle.requires or ()}
     undeclared = [use for use in found if use.provider.distribution is not None
                   and canonicalize_name(use.provider.distribution) not in declared]
-    configured = [use for use in found if use.provider.distribution is None]
-    lines = [f"this bundle uses {_listing(configured)} ({_wheres(configured)}), which this machine's configuration "
-             "registers; whoever runs it needs that configuration too"] if configured else []
+    lines = _configured([use for use in found if use.provider.distribution is None])
     if not undeclared:
         return lines
     requires = detected(undeclared)
@@ -261,6 +284,21 @@ def _create(path: Path, text: str) -> bool:
         return False
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _configured(found: Sequence[Use]) -> list[str]:
+    """A line for the types ``found`` that only this machine's configuration registers: one per installed package
+    their classes come from, then one for those no package ships."""
+    by_package: dict[str | None, list[Use]] = {}
+    for use in found:
+        by_package.setdefault(use.provider.shipped_by, []).append(use)
+    lines = [f"this bundle uses {_listing(uses_of)} ({_wheres(uses_of)}), which this machine's configuration registers, "
+             f"from {package}; whoever runs it needs that package and its configuration"
+             for package, uses_of in sorted(by_package.items(), key=lambda item: item[0] or "") if package]
+    if None in by_package:
+        lines.append(f"this bundle uses {_listing(by_package[None])} ({_wheres(by_package[None])}), which this "
+                     "machine's configuration registers; whoever runs it needs that configuration too")
+    return lines
 
 
 def _listing(found: Sequence[Use]) -> str:
