@@ -241,9 +241,14 @@ def _protocol_source() -> Path | None:
 
 
 def _build_settings(env: ComputerEnv, base: ComputerArtifact) -> dict[str, Any]:
-    """The env's values of the base's build-phase settings, which the composed image fixes."""
-    values = env.computer_settings
+    """The env's values of the base's build-phase settings, which the composed image fixes: its display is the
+    resolution's, for a base that reads that at build."""
+    values = {**env.computer_settings, **({"resolution": _resolution(env.display)} if env.display else {})}
     return {name: values[name] for name, setting in base.config.items() if setting.phase == "build" and name in values}
+
+
+def _resolution(display: dict) -> str:
+    return f"{display['width']}x{display['height']}"
 
 
 def _dockerfile(source: str, layer: str, install: Install, base: ComputerArtifact, build_settings: dict,
@@ -342,7 +347,7 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
     for name, value in env.computer_settings.items():
         config[name]["default"] = value
     if env.display is not None:
-        config["resolution"]["default"] = f"{env.display['width']}x{env.display['height']}"
+        config["resolution"]["default"] = _resolution(env.display)
     computer = ComputerArtifact.put(
         id=derive_id(env.stored_id, "computer"), description=f"{base.id} composed with {env.driver.id} for {env.stored_id}",
         arch=arches, os=base.os.model_dump(), session=base.session.model_dump(), config=config,

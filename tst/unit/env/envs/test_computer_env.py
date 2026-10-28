@@ -192,18 +192,24 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     assert docker_calls == [("login", auth), ("join", index)]
 
 
-@pytest.mark.parametrize("change", ["requirements", "build-setting", "service"])
+@pytest.mark.parametrize("change", ["requirements", "build-setting", "service", "display-read-at-build"])
 def test_what_changes_the_image_changes_its_key_and_builds_it_again(base, driver, docker, tmp_path, change):
+    if change == "display-read-at-build":
+        base = _base(base.image(), config={**CONFIG, "resolution": {"default": "1280x800", "phase": "build"}})
     first = Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]["key"]
     if change == "requirements":
         driver = _driver(tmp_path / "changed", requirements="mss>=10,<11\n")
     elif change == "service":
         driver = _driver(tmp_path / "changed", services=[Service(name="driver", command=f"{SERVE} --verbose")])
     settings = {"theme": "dark"} if change == "build-setting" else {}
+    display = {"width": 1600, "height": 900} if change == "display-read-at-build" else None
 
-    again = Env.get(_put(base, driver, computer_settings=settings).id).metadata["composed"]["container"]["arm64"]
+    again = Env.get(_put(base, driver, computer_settings=settings, display=display).id).metadata["composed"][
+        "container"]["arm64"]
 
     assert again["key"] != first and again["reused"] is False and len(docker.builds) == 4
+    if display:
+        assert 'ENV AGENTENV_SETTING_RESOLUTION="1600x900"' in docker.builds[-1]["dockerfile"]
 
 
 def test_a_pair_that_fails_is_recorded_with_its_log_and_the_rest_are_built_and_written(base, driver, docker):
