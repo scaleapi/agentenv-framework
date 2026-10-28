@@ -524,6 +524,7 @@ class _Planner:
         return self._planned(selected_tasks + selected_evals, selected_tasks, selected_evals, override)
 
     def plan_entities(self, ids: Sequence[str]) -> Plan:
+        self._resolve_aliases()
         self._check_writers()
         self._check_loops()
         return self._planned(self._select_entities(ids), [], [], None)

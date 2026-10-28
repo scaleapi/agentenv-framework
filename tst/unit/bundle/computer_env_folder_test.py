@@ -9,7 +9,7 @@ import pytest
 from agent_env.bundle import BundleError, parse_bundle
 from agent_env.bundle.installed import installed_bundles
 from agent_env.bundle.materialize import materialize
-from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.plan import plan_bundle, plan_entities
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.env import Env
 from agent_env.env.envs.computer import composer
@@ -47,8 +47,15 @@ def _plan(root):
     return plan_bundle(resolve_bundle(parse_bundle(root)), installed=installed_bundles)
 
 
-def test_a_computer_env_naming_shipped_aliases_is_written_over_them_and_composed(tmp_path, composed):
-    plan = _plan(_bundle(tmp_path / "desk"))
+def _plan_env(root):
+    """The env alone, as ``write_installed`` writes an installed bundle's env another bundle names."""
+    resolved = resolve_bundle(parse_bundle(root))
+    return plan_entities(resolved, [f"{resolved.bundle.id_root}/desktop"], installed=installed_bundles)
+
+
+@pytest.mark.parametrize("planned", [_plan, _plan_env], ids=["a-run", "the-env-alone"])
+def test_a_computer_env_naming_shipped_aliases_is_written_over_them_and_composed(tmp_path, composed, planned):
+    plan = planned(_bundle(tmp_path / "desk"))
     building = []
 
     done = materialize(plan, build_here=local_builds(plan), on_build=lambda write: building.append(write.id))
