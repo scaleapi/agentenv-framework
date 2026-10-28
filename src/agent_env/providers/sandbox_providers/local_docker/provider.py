@@ -723,6 +723,8 @@ class LocalSandboxProvider(SandboxProvider):
                         "be running and holding its host port — remove it manually.",
                         sandbox.container_name, exc_info=True,
                     )
+                if sandbox.closed_network is not None:
+                    await sandbox._remove_labeled()
                 raise
         return sandbox
 

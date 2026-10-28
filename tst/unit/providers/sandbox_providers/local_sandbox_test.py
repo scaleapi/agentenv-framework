@@ -637,6 +637,44 @@ async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_
 
 
 @pytest.mark.asyncio
+async def test_a_container_with_no_network_whose_marker_cant_be_written_takes_its_relay_and_network_down(
+        tmp_path: Path, monkeypatch):
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+    monkeypatch.setattr(ls, "_free_host_port", lambda: 41337)
+    monkeypatch.setattr(ls, "relay_image", _relay_image)
+    (tmp_path / ls._CONTAINER_MODE_MARKER).mkdir()
+    made: list[LocalSandbox] = []
+
+    class _RecordingProvider(LocalSandboxProvider):
+        async def create_vm(self, **kwargs):
+            sandbox = await LocalSandboxProvider.create_vm(self, **kwargs)
+            sandbox._work_dir = tmp_path
+            sandbox.scripts = []
+
+            async def _record(script, *, max_retries=0):
+                sandbox.scripts.append(script)
+                return "172.30.0.2\n" if script.startswith("docker inspect") else ""
+
+            async def _listed(*args):
+                sandbox.scripts.append(" ".join(args))
+                return 0, "r1\n", ""
+
+            sandbox.exec_script, sandbox.exec_with_output = _record, _listed
+            made.append(sandbox)
+            return sandbox
+
+    with pytest.raises(IsADirectoryError):
+        await _RecordingProvider().create_container(image_name="img:v1", port=8000, env={},
+                                                    network_policy=NetworkPolicy(mode="allowlist"))
+
+    sandbox_id, scripts = made[0].sandbox_id, made[0].scripts
+    assert f"docker rm -f agent-{sandbox_id}" in scripts and "docker rm -f r1 >/dev/null" in scripts
+    assert any(f"docker network ls -q --filter label=agentenv.sandbox={sandbox_id}" in s for s in scripts)
+
+
+@pytest.mark.asyncio
 async def test_a_container_with_no_network_whose_setup_fails_goes_with_its_work_folder(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
     monkeypatch.setattr(ls, "relay_image", _relay_image)
