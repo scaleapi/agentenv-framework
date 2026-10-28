@@ -2,8 +2,9 @@
 builds an image for each arch this machine's Docker can build, pushed to the local registry and written as the env's
 computer, and gate 3 makes the image of this machine's arch ready; that image boots with everything running as the
 session user and passes the conformance probe at full three times in a row; another env that changes only what doesn't
-change the image reuses it; and one with no network, deployed, is reached but reaches nothing, comes back from a reset
-fresh, and leaves nothing once torn down. Needs Docker and the local registry on localhost:5000."""
+change the image reuses it; one with no network, deployed, is reached but reaches nothing, comes back from a reset
+fresh, and leaves nothing once torn down; and a recording open when the computer resets or is torn down is ended by
+the computer and registered whole. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import platform
@@ -22,8 +23,14 @@ from agent_env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.store.routing import namespace_routing
+from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.computer_recording import (
+    RECORDINGS_KEY,
+    EndComputerRecordingTaskStep,
+    StartComputerRecordingTaskStep,
+)
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.computer.conftest import docker
 
@@ -109,6 +116,35 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
                     ["network", "ls", "-q", "--filter", f"label=agentenv.sandbox={sandbox}"]):
         assert not docker(*listing).stdout.strip(), listing
     assert LocalSandbox.find_work_dir(sandbox) is None
+
+
+@pytest.mark.asyncio
+async def test_a_recording_open_at_a_reset_or_at_teardown_is_ended_by_its_computer_and_registered_whole(desktop):
+    with namespace_routing():
+        deployed = await Env.get(desktop.id).deploy()
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await _record("before-reset", desktop.id).execute(context)
+            await asyncio.sleep(3)
+            await ResetEnvTaskStep(id="reset", version=None, env_id=desktop.id, fail_task_on_error=True).execute(context)
+            context = await EndComputerRecordingTaskStep(id="end", version=None, name="before-reset").execute(context)
+            context = await _record("left-open", desktop.id).execute(context)
+            await asyncio.sleep(3)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        recordings = context.metadata[RECORDINGS_KEY]
+
+    assert not report.failed
+    for name, ended_by in (("before-reset", "reset"), ("left-open", "teardown")):
+        entry = recordings[name]
+        assert (entry["state"], entry["ended_by"], entry["missing_segments"]) == ("ended", ended_by, 0), entry
+        assert entry["segments"] >= 1
+
+
+def _record(name: str, env_id: str) -> StartComputerRecordingTaskStep:
+    return StartComputerRecordingTaskStep(id=f"start-{name}", version=None, env_id=env_id, name=name,
+                                          fail_task_on_error=True)
 
 
 async def _ready(name: str) -> str:
