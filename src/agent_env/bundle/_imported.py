@@ -199,14 +199,10 @@ def _given_back_items(step: dict, origin: dict, at: str, fields: list[str]) -> l
 
 
 def _source_item(item: dict, stored: list, left_out: set[str]) -> dict | None:
-    """The stored item ``item`` was written from: the one it equals but for the ``left_out`` fields, else the one alone
-    in sharing its name, when ``item`` sets nothing that one doesn't."""
-    candidates = [one for one in stored if isinstance(one, dict)]
+    """The stored item ``item`` was written from: the one it equals but for the ``left_out`` fields, when only one
+    does. An edited item matches none, so it takes back nothing."""
     bare = _bare(item, left_out)
-    same = [one for one in candidates if _bare(one, left_out) == bare]
-    if not same and item.get("name") is not None:
-        same = [one for one in candidates
-                if one.get("name") == item["name"] and bare.keys() <= _bare(one, left_out).keys()]
+    same = [one for one in stored if isinstance(one, dict) and _bare(one, left_out) == bare]
     return same[0] if len(same) == 1 else None
 
 

@@ -11,11 +11,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version as package_version
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 
 from agent_env.bundle._fs import file_sha256
-from agent_env.bundle._secrets import scrub
 from agent_env.config import get_config
-from agent_env.config.loader import SECRET_REF_PREFIX, interpolate
+from agent_env.config.describe import is_secret_key
 from agent_env.config.model import ENV_API_KEY, ENV_BASE_URL
 from agent_env.entity.refs import EntityKind
 from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
@@ -191,13 +192,29 @@ def provenance(source: dict, imported: BundleImport, root: Path) -> str:
 
 
 def store_fingerprint() -> str:
-    """A hash of the configured document store's section, with its ``env:`` references resolved and any credential
-    in it masked, which tells one store from another without naming where either is."""
-    section = interpolate(get_config().trace_section("document").value,
-                          secret_resolver=lambda key: SECRET_REF_PREFIX + key)
-    scrub(section)
-    text = json.dumps(section, sort_keys=True, separators=(",", ":"), default=str)
+    """A hash of where the configured document store is: its section's ``impl``, and the strings its ``config`` holds,
+    ``env:`` and ``secret:`` references resolved, a URL as its scheme, host and path alone, and nothing a secret-named
+    key holds. Credentials and tuning options don't tell one store from another, so neither changes it, and the hash
+    names neither where the store is nor how to reach it."""
+    config = get_config()
+    section = config.trace_section("document").value
+    located = {"impl": str(section.get("impl")), "config": _location(config.resolve_reference(section.get("config", {})))}
+    text = json.dumps(located, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def _location(value: Any) -> Any:
+    """What in ``value`` says where a store is: each string, a URL as its scheme, host and path, through dicts but the
+    items of secret-named keys, and lists; None for anything else."""
+    if isinstance(value, dict):
+        return {key: located for key, item in value.items()
+                if not is_secret_key(str(key)) and (located := _location(item)) is not None}
+    if isinstance(value, list):
+        return [located for item in value if (located := _location(item)) is not None]
+    if isinstance(value, str):
+        parts = urlsplit(value)
+        return f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}{parts.path}" if parts.scheme and parts.netloc else value
+    return None
 
 
 def written_files(root: Path) -> dict[str, str]:

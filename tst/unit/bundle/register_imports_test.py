@@ -205,20 +205,25 @@ def test_an_edit_keeps_the_env_vars_the_import_dropped_and_they_are_no_credentia
     assert Task.get("triage", 2).to_dict()["steps"][2]["env_vars"] == {"API_KEY": "abc", "MODE": "fast"}
 
 
-def test_an_imported_skill_takes_back_the_source_the_import_left_out(local_stores, tmp_path, monkeypatch):
+def test_an_imported_skill_takes_back_the_source_the_import_left_out_unless_it_was_edited(local_stores, tmp_path,
+                                                                                         monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     notes = {"name": "notes", "description": "how notes are kept", "object_url": "s3://their-bucket/skills/notes/"}
     Task.put(id="skilled", steps=[build_step({"id": "skills", "type": "add_skills", "agent_name": "default-agent",
                                               "skills": [notes]})])
     folder = import_task("skilled", tmp_path / "skilled").root
     task_file = folder / "tasks/skilled.json"
-    task_file.write_text(task_file.read_text().replace("how notes are kept", "how notes are filed"))
+    task_file.write_text(task_file.read_text().replace('"default-agent"', '"helper"'))
 
     registered = register_bundle(folder)
+    task_file.write_text(task_file.read_text().replace("how notes are kept", "how notes are filed"))
+    with pytest.raises(BundleError) as refused:
+        register_bundle(folder)
 
     assert _written(registered)["skilled"] == (2, False)
     skill = Task.get("skilled", 2).to_dict()["steps"][0]["skills"][0]
-    assert (skill["description"], skill["object_url"]) == ("how notes are filed", notes["object_url"])
+    assert (skill["description"], skill["object_url"]) == ("how notes are kept", notes["object_url"])
+    assert "skill 'notes' names no source" in refused.value.problems[0]
 
 
 def test_envs_sharing_one_stored_image_register_as_imported_and_an_edit_to_one_copy_is_refused(local_stores, tmp_path,

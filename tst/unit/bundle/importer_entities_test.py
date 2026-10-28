@@ -313,24 +313,38 @@ def test_the_store_fingerprint_tells_one_configured_document_store_from_another(
     assert store_fingerprint() != here and store_fingerprint() == store_fingerprint()
 
 
-def test_the_store_fingerprint_resolves_env_references_and_ignores_credentials(tmp_path, monkeypatch):
+def test_the_store_fingerprint_is_where_the_store_is_whatever_its_credentials_and_tuning(tmp_path, monkeypatch):
+    """Two stages' configs can hold the same text and reach different stores through what their secrets resolve to."""
     config = tmp_path / "fingerprint.toml"
     monkeypatch.setenv("AGENT_ENV_CONFIG", str(config))
     monkeypatch.delenv("AGENT_ENV_DOCUMENT_STORE", raising=False)
+    monkeypatch.delenv("AGENT_ENV_SECRET_STORE", raising=False)
 
-    def fingerprint(path, uri):
-        config.write_text(f'[stores.document]\nimpl = "pkg:Store"\n[stores.document.config]\npath = "{path}"\n'
-                          f'uri = "{uri}"\n')
+    def fingerprint(database, password, extra=""):
+        # Not a credential: the password a URL's user info holds in this test, joined in at run time.
+        uri = "mongodb://reader:" + password + "@db.example.com:27017/?retryWrites=true"
+        config.write_text(f'''[stores.document]
+impl = "pkg:Store"
+[stores.document.config]
+uri = "secret:mongodb_uri"
+database = "secret:mongodb_name"
+{extra}
+[stores.secret]
+impl = "agent_env.store.secret_store:LocalSecretStore"
+[stores.secret.config]
+use_env = false
+values = {{ mongodb_uri = "{uri}", mongodb_name = "{database}" }}
+''')
         reset_config()
         return store_fingerprint()
 
-    monkeypatch.setenv("DOCUMENT_PATH", "/data/one.db")
-    one = fingerprint("env:DOCUMENT_PATH", "mongodb://reader:" + "pw-one@db.example.com/agent_env")
-    monkeypatch.setenv("DOCUMENT_PATH", "/data/two.db")
-    two = fingerprint("env:DOCUMENT_PATH", "mongodb://reader:" + "pw-one@db.example.com/agent_env")
-    other_password = fingerprint("env:DOCUMENT_PATH", "mongodb://reader:" + "pw-two@db.example.com/agent_env")
+    prod = fingerprint("agent_env", "pw-one")
+    dev = fingerprint("agent_env_dev", "pw-one")
+    other_password = fingerprint("agent_env", "pw-two")
+    tuned = fingerprint("agent_env", "pw-one", "connect_timeout_ms = 9000\npassword = \"not-a-password\"")
 
-    assert one != two and two == other_password
+    assert prod != dev
+    assert prod == other_password == tuned
 
 
 def _saved_image(path, url, files):
