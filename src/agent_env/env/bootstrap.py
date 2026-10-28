@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from agent_env.artifact import DockerImageArtifact
 from agent_env.config import get_config
@@ -54,7 +55,7 @@ def _quiet(line: str) -> None:
     pass
 
 
-def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
+def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str, Any] | None = None,
                     say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
                     version: int | None = None) -> GatewayEnv:
     """Write the gateway env ``env_id``, its image registered from ``published``, each Dockerfile's published digest,
@@ -69,7 +70,7 @@ def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str,
     return env
 
 
-def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
+def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[str, Any] | None = None,
                        say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
                        version: int | None = None) -> ServiceDBEnv:
     """Write the service-db env ``env_id``, its service-db, db-web and db-mcp images registered from ``published``, each
@@ -89,7 +90,7 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
     return env
 
 
-def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
+def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapping[str, Any] | None = None,
                             say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
                             version: int | None = None) -> MCPServerEnv:
     """Write the website browser as the MCP server env ``env_id``, its image registered from ``published``, each
@@ -131,7 +132,7 @@ def _build_and_put(label: str, artifact_id: str, description: str, dockerfile: P
     return artifact
 
 
-def _metadata(kind: str, extra: Mapping[str, str] | None) -> dict[str, str]:
+def _metadata(kind: str, extra: Mapping[str, Any] | None) -> dict[str, Any]:
     dockerfile = _DOCKERFILES[kind][0]
     return {**detect_env_metadata(dockerfile, dockerfile.parent), **(extra or {}),
             BUILD_INPUTS_KEY: build_inputs_digest(kind)}

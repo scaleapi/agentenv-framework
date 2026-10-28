@@ -272,6 +272,16 @@ def test_a_put_that_names_a_version_writes_only_that_next_one(local_stores, kind
     assert Env.get("x").version == 2
 
 
+def test_a_put_keeps_metadata_that_isnt_a_string(local_stores):
+    """Such as the record a promotion keeps on the version it wrote."""
+    stamp = {"stage": "dev", "passed": True, "previous": 1}
+
+    env = bootstrap.put_gateway_env("default", platform=None, published={bootstrap.GATEWAY_DOCKERFILE: _DIGEST},
+                                    metadata={"promotion": stamp})
+
+    assert Env.get("default", env.version).metadata["promotion"] == stamp
+
+
 def test_a_published_image_is_registered_from_its_own_dockerfile_whatever_folder_the_run_is_in(local_stores, tmp_path,
                                                                                                monkeypatch):
     """A run started from a folder holding a Dockerfile of its own registers the gateway's, with its sources."""
