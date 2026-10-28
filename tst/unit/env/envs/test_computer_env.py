@@ -136,7 +136,7 @@ def _put(base, driver, compose=True, **changes):
 def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_its_images_make(base, driver, docker,
                                                                                                 local_stores):
     local_stores.set_image_store(OciRegistryImageStore("registry.example"))
-    env = _put(base, driver, settings={"ubuntu-24.04": {"timezone": "Europe/Paris", "theme": "dark"}},
+    env = _put(base, driver, computer_settings={"timezone": "Europe/Paris", "theme": "dark"},
                display={"width": 1600, "height": 900})
 
     stored = Env.get(env.id)
@@ -151,7 +151,7 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert {arch: r["status"] for arch, r in computer.metadata["validated_images"]["container"].items()} == {
         "amd64": "passed", "arm64": "passed"}
     assert (computer.config["resolution"].default, computer.config["timezone"].default) == ("1600x900", "Europe/Paris")
-    assert stored.settings == {base.id: {"timezone": "Europe/Paris", "theme": "dark"}}
+    assert stored.computer_settings == {"timezone": "Europe/Paris", "theme": "dark"}
     arm64 = next(build for build in docker.builds if build["platform"] == "linux/arm64")
     assert arm64["dockerfile"].splitlines() == [
         f"FROM {base.image().image_name}", "USER root", "COPY driver/ /opt/agentenv/drivers/desk/",
@@ -198,9 +198,9 @@ def test_what_changes_the_image_changes_its_key_and_builds_it_again(base, driver
         driver = _driver(tmp_path / "changed", requirements="mss>=10,<11\n")
     elif change == "service":
         driver = _driver(tmp_path / "changed", services=[Service(name="driver", command=f"{SERVE} --verbose")])
-    settings = {"ubuntu-24.04": {"theme": "dark"}} if change == "build-setting" else {}
+    settings = {"theme": "dark"} if change == "build-setting" else {}
 
-    again = Env.get(_put(base, driver, settings=settings).id).metadata["composed"]["container"]["arm64"]
+    again = Env.get(_put(base, driver, computer_settings=settings).id).metadata["composed"]["container"]["arm64"]
 
     assert again["key"] != first and again["reused"] is False and len(docker.builds) == 4
 
@@ -325,7 +325,7 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
     ({"apps": [{"env": "mail"}]}, "apps: computer app envs aren't supported yet"),
     ({"display": {"width": 0, "height": 800}}, "display is { width = <n>, height = <n> }, each 1 to 32767 pixels"),
     ({"display": {"width": 1280}}, "display is { width = <n>, height = <n> }"),
-    ({"display": {"width": 1280, "height": 800}, "settings": {"ubuntu-24.04": {"resolution": "800x600"}}},
+    ({"display": {"width": 1280, "height": 800}, "computer_settings": {"resolution": "800x600"}},
      "display and the base's resolution setting both set the screen's size; set display alone"),
     ({"network": {"mode": "allow_all", "allow_hosts": ["x.org"]}},
      "network: allow_all permits everything; entries would be silently ignored"),
@@ -334,16 +334,12 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
     ({"tools": {"hide": ["computer_c*"]}}, "tools.hide: 'computer_c*' hides computer_click, of the seven tools every "
                                            "computer offers"),
     ({"tools": {"show": ["x"]}}, "tools is { hide = [<pattern>, ...] }"),
-    ({"settings": {"mail": {"x": 1}}}, "settings.mail: names neither the computer, @local/~/kit/ubuntu-24.04, nor the "
-                                      "driver, @local/~/kit/desk"),
-    ({"settings": {"ubuntu-24.04": {"wallpaper": "x"}}},
-     "settings.ubuntu-24.04.wallpaper: @local/~/kit/ubuntu-24.04 declares no setting 'wallpaper'"),
-    ({"settings": {"ubuntu-24.04": {"timezone": 3}}},
-     "settings.ubuntu-24.04.timezone must be a str, like its default 'UTC', not 3"),
-    ({"settings": {"desk": {"log_level": "debug"}}}, "settings.desk.log_level: @local/~/kit/desk declares no setting"),
+    ({"computer_settings": {"wallpaper": "x"}},
+     "computer_settings.wallpaper: @local/~/kit/ubuntu-24.04 declares no setting 'wallpaper'"),
+    ({"computer_settings": {"timezone": 3}}, "computer_settings.timezone must be a str, like its default 'UTC', not 3"),
+    ({"computer_settings": ["timezone"]}, "computer_settings must be a table of the computer's setting values"),
 ], ids=["apps", "display-zero", "display-side", "display-and-resolution", "network", "network-key",
-        "tools-hide", "tools-minimum", "tools-key", "settings-layer", "settings-name", "settings-type",
-        "settings-driver"])
+        "tools-hide", "tools-minimum", "tools-key", "settings-name", "settings-type", "settings-table"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
         _put(base, driver, **changes)

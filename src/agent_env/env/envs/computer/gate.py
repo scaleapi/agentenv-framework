@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from agentenv_protocol.computer.conformance.checks import MINIMUM_TOOLS
 from agentenv_protocol.computer.platform import Platform, supported
 
-from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact
+from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 
@@ -21,18 +21,19 @@ MAX_SIDE = 32767
 
 
 def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, display: Any, network: Any,
-          hidden_tools: list[str], settings: Any) -> tuple[dict, list[str]]:
-    """The env's settings by layer id, and every way ``base``, ``driver`` and what the env declares don't compose."""
+          hidden_tools: list[str], computer_settings: Any) -> tuple[dict[str, SettingValue], list[str]]:
+    """The env's values of the base's settings, and every way ``base``, ``driver`` and what the env declares don't
+    compose."""
     problems = []
     if apps:
         problems.append("apps: computer app envs aren't supported yet")
     problems += _platform(base, driver)
     problems += _image(base)
-    problems += _display(base, display, settings)
+    problems += _display(base, display, computer_settings)
     problems += _network(network)
     problems += _tools(driver, hidden_tools)
-    by_layer, invalid = layered(base, driver, settings)
-    return by_layer, problems + invalid
+    values, invalid = _computer_settings(base, computer_settings)
+    return values, problems + invalid
 
 
 def forms(base: ComputerArtifact) -> list[str]:
@@ -47,30 +48,21 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     return [arch for arch in base.arch if arch in matching]
 
 
-def layered(base: ComputerArtifact, driver: ComputerDriverEnv, settings: Any) -> tuple[dict, list[str]]:
-    """``settings``, a table of setting values by layer, keyed by the layer's id instead, and the problems with it: a
-    layer is named by its id or its name, the last part of its id, and only the base declares settings."""
-    if not isinstance(settings, dict):
-        return {}, [f"settings must be a table of values by layer, not {settings!r}"]
-    names = {key: layer for layer in (base.id, driver.id) for key in (layer, layer.rsplit("/", 1)[-1])}
-    declared = {base.id: base.config, driver.id: {}}
-    by_layer, problems = {}, []
-    for key, values in settings.items():
-        if (layer := names.get(key)) is None:
-            problems.append(f"settings.{key}: names neither the computer, {base.id}, nor the driver, {driver.id}")
-            continue
-        if not isinstance(values, dict):
-            problems.append(f"settings.{key} must be a table of setting values, not {values!r}")
-            continue
-        for name, value in values.items():
-            if (setting := declared[layer].get(name)) is None:
-                problems.append(f"settings.{key}.{name}: {layer} declares no setting {name!r}")
-            elif type(value) is not type(setting.default):
-                problems.append(f"settings.{key}.{name} must be a {type(setting.default).__name__}, like its default "
-                                f"{setting.default!r}, not {value!r}")
-            else:
-                by_layer.setdefault(layer, {})[name] = value
-    return by_layer, problems
+def _computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
+    """``values``, of the base's settings by name, and the problems with them: a setting the base doesn't declare, or a
+    value of another type than its default's."""
+    if not isinstance(values, dict):
+        return {}, [f"computer_settings must be a table of the computer's setting values, not {values!r}"]
+    checked, problems = {}, []
+    for name, value in values.items():
+        if (setting := base.config.get(name)) is None:
+            problems.append(f"computer_settings.{name}: {base.id} declares no setting {name!r}")
+        elif type(value) is not type(setting.default):
+            problems.append(f"computer_settings.{name} must be a {type(setting.default).__name__}, like its default "
+                            f"{setting.default!r}, not {value!r}")
+        else:
+            checked[name] = value
+    return checked, problems
 
 
 def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
@@ -112,7 +104,7 @@ def _image(base: ComputerArtifact) -> list[str]:
             "to build it from"]
 
 
-def _display(base: ComputerArtifact, display: Any, settings: Any) -> list[str]:
+def _display(base: ComputerArtifact, display: Any, computer_settings: Any) -> list[str]:
     if display is None:
         return []
     if not isinstance(display, dict) or display.keys() != {"width", "height"} or not all(
@@ -120,9 +112,7 @@ def _display(base: ComputerArtifact, display: Any, settings: Any) -> list[str]:
         return [f"display is {{ width = <n>, height = <n> }}, each 1 to {MAX_SIDE} pixels, not {display!r}"]
     if "resolution" not in base.config:
         return [f"display: {base.id} declares no resolution setting for it to set"]
-    names = {base.id, base.id.rsplit("/", 1)[-1]}
-    if isinstance(settings, dict) and any(isinstance(values, dict) and "resolution" in values
-                                          for key, values in settings.items() if key in names):
+    if isinstance(computer_settings, dict) and "resolution" in computer_settings:
         return ["display and the base's resolution setting both set the screen's size; set display alone"]
     return []
 

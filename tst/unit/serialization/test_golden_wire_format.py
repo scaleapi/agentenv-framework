@@ -167,7 +167,7 @@ ENV_FIXTURES = {
         display={"width": 1280, "height": 800},
         network={"mode": "allow_all"},
         hidden_tools=["computer_keyboard_*"],
-        settings={"ubuntu-24.04": {"timezone": "Europe/Paris"}},
+        computer_settings={"timezone": "Europe/Paris"},
         metadata={"composed": {"container": {"amd64": {
             "status": "unverified", "key": "sha256:" + "a" * 64, "reused": False, "emulated": False,
             "image": "localhost:5000/agentenv-computers:" + "a" * 64 + "@sha256:" + "b" * 64,

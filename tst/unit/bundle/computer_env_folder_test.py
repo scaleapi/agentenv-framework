@@ -1,6 +1,6 @@
 """Computer env folders: an ``envs/<name>/env.toml`` of type computer names its base and driver as another bundle's
 aliases, ``ubuntu-24.04`` and ``reference``, which the run pulls in and writes first; the env is written over their ids,
-its settings keyed by the base's, and the run says it builds with docker. The composer is replaced by a recorder."""
+its computer_settings the base's by name, and the run says it builds with docker. The composer is replaced by a recorder."""
 
 import json
 
@@ -23,7 +23,7 @@ computer = "ubuntu-24.04"
 driver = "reference"
 display = { width = 1600, height = 900 }
 
-[settings."ubuntu-24.04"]
+[computer_settings]
 timezone = "Europe/Paris"
 '''
 
@@ -64,7 +64,7 @@ def test_a_computer_env_naming_shipped_aliases_is_written_over_them_and_composed
     written = {item.write.id for item in done.writes}
     assert isinstance(env, ComputerEnv) and {UBUNTU, REFERENCE} <= written
     assert (env.computer.id, env.driver.id, env.environment_name) == (UBUNTU, REFERENCE, "desktop")
-    assert env.settings == {UBUNTU: {"timezone": "Europe/Paris"}} and env.display == {"width": 1600, "height": 900}
+    assert env.computer_settings == {"timezone": "Europe/Paris"} and env.display == {"width": 1600, "height": 900}
     assert composed == [(env.id, UBUNTU, REFERENCE)] and env.id in building
 
 
@@ -72,10 +72,8 @@ def test_a_computer_env_naming_shipped_aliases_is_written_over_them_and_composed
     ('type = "computer"\ndriver = "reference"\n', 'computer is required: the base computer, such as "ubuntu-24.04"'),
     ('type = "computer"\ncomputer = "ubuntu-24.04"\n', 'driver is required: the driver, such as "reference"'),
     (DESKTOP.replace("display =", "ports = [80]\ndisplay ="), "unknown key 'ports'"),
-    (DESKTOP.replace("display =", 'data_paths = ["Documents"]\ndisplay ='), "unknown key 'data_paths'"),
-    (DESKTOP.replace("display =", 'forms = ["container"]\ndisplay ='), "unknown key 'forms'"),
     (DESKTOP.replace("1600", "0"), "display is { width = <n>, height = <n> }, each 1 to 32767 pixels"),
-], ids=["no-computer", "no-driver", "unknown-key", "data-paths", "forms", "display"])
+], ids=["no-computer", "no-driver", "unknown-key", "display"])
 def test_a_computer_env_folder_that_declares_what_cant_compose_is_refused_naming_the_folder(tmp_path, composed, toml,
                                                                                             problem):
     plan = _plan(_bundle(tmp_path / "desk", toml))

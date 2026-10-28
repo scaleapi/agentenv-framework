@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 OS_TYPES = ("linux",)
 FORMS = ("container",)
+#: What a setting holds: its default's type, which a value an env or a deploy gives must share.
+SettingValue = str | int | float | bool
 
 
 class LinuxOS(BaseModel):
@@ -53,7 +55,7 @@ class Setting(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    default: str | int | float | bool
+    default: SettingValue
     phase: Literal["build", "deploy"]
     scope: Literal["task", "user"] = "task"
     secret: bool = False

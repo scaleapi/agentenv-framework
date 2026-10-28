@@ -3,6 +3,9 @@
     "id": "ubuntu-24.04",
     "version": 1
   },
+  "computer_settings": {
+    "timezone": "Europe/Paris"
+  },
   "display": {
     "height": 800,
     "width": 1280
@@ -41,11 +44,6 @@
     "mode": "allow_all"
   },
   "service_name": "desktop",
-  "settings": {
-    "ubuntu-24.04": {
-      "timezone": "Europe/Paris"
-    }
-  },
   "type": "computer",
   "version": 2
 }

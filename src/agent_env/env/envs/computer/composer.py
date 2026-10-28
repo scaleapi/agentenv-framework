@@ -223,7 +223,7 @@ def _protocol_source() -> Path | None:
 
 def _build_settings(env: ComputerEnv, base: ComputerArtifact) -> dict[str, Any]:
     """The env's values of the base's build-phase settings, which the composed image fixes."""
-    values = env.settings.get(base.id, {})
+    values = env.computer_settings
     return {name: values[name] for name, setting in base.config.items() if setting.phase == "build" and name in values}
 
 
@@ -320,7 +320,7 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
     image = DockerImageArtifact.put_ref(derive_id(env.stored_id, "computer_image"), description=(
         f"{env.stored_id}'s composed computer"), image_name=index)
     config = {name: setting.model_dump() for name, setting in base.config.items()}
-    for name, value in env.settings.get(base.id, {}).items():
+    for name, value in env.computer_settings.items():
         config[name]["default"] = value
     if env.display is not None:
         config["resolution"]["default"] = f"{env.display['width']}x{env.display['height']}"
