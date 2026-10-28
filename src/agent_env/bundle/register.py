@@ -37,14 +37,13 @@ from agent_env.store.image_store.oci_registry_credentials import is_loopback_hos
 from agent_env.store.routing import configured_store, namespace_routing
 from agent_env.task_step.registry import get_task_step_registry
 
-from ._import_report import file_digest
-from ._imported import Imported, as_imported, grafted, read_imported, source_of, where
+from ._imported import ImportedWrites, read_imported, restore
 from ._secrets import credentials_in
-from .authoring import entry_files
+from ._values import strings
 from .installed import installed_bundles
 from .ledger import Check, Ledger
 from .materialize import Materialization, Materialized, materialize
-from .parse import CONFIG_FILES, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
+from .parse import Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle, plan_entities
 from .run import _label
 from .resolve import BundleImage, Reference, ResolvedBundle, ResolvedEntry, resolve_bundle
@@ -91,23 +90,21 @@ def register_bundle(
         imported, why = read_imported(bundle.root)
         if why is not None:
             say(f"  {why}")
-        bundle, grafts, unrestored = grafted(bundle, imported) if imported is not None else (bundle, {}, {})
-        resolved = resolve_bundle(bundle)
-        plan = _plan(resolved, tasks, evals)
-        if problems := [problem for write in plan.writes if write.kind is BundleKind.TASK
-                        for problem in unrestored.get(write.source.entry.path, ())]:
-            raise BundleError(problems)
-        held = _held_as_imported(plan, imported)
-        ids, problems = registry_ids(plan, _prefix(bundle, prefix), imported, held)
+        restored = restore(bundle, imported)
+        plan = _plan(resolve_bundle(restored.bundle), tasks, evals)
+        imports = ImportedWrites(imported, plan, restored)
+        if imports.problems:
+            raise BundleError(imports.problems)
+        ids, problems = registry_ids(plan, _prefix(bundle, prefix), imports)
         if problems:
             raise BundleError(problems)
         registered = translated(plan, ids)
         target = configured_store(get_config().get_document_store())
         shared = shared_store(target)
         identity, commit, dirty = bundle_identity(bundle.root)
-        sources, kept = _sources(plan, ids, imported, held)
-        ledger = RegistrationLedger(target, registered, identity, commit, dirty, sources, kept)
-        problems = list(_unregistrable(registered, shared, grafts))
+        versions, held = imports.versions(ids)
+        ledger = RegistrationLedger(target, registered, identity, commit, dirty, versions, held)
+        problems = list(_unregistrable(registered, shared, imports.given))
         if problems:
             raise BundleError(problems)
         materialization = materialize(
@@ -153,27 +150,25 @@ def _prefix(bundle: Bundle, prefix: str | None) -> str:
     return f"{name}-"
 
 
-def registry_ids(plan: Plan, prefix: str, imported: Imported | None = None,
-                 held: frozenset[str] = frozenset()) -> tuple[dict[str, str], list[str]]:
+def registry_ids(plan: Plan, prefix: str,
+                 imported: ImportedWrites | None = None) -> tuple[dict[str, str], list[str]]:
     """The registry id each ``@local`` id the plan writes takes, and each problem giving them.
 
-    What ``imported`` records the folder was imported from takes the id it had there, and an imported task's outputs
-    the names its file gives them, as the stored task did. Any other entry of the bundle's own is ``<prefix><name>``, its name lowercased with each run of what an id can't hold made
-    ``-``. An installed bundle's agent pulled in by a reference takes the first alias its bundle gives it, which the
-    reference named it by; any other entity of an installed bundle has no registry id, and an env's alias can't be
-    one, since no store env may start on an installed env alias's id. An id derived from another (``<id>__env_image``) keeps its suffix after the
-    other's registry id, and a task's output is ``<task id>-<name>``."""
+    What ``imported`` records the folder was imported from takes the id it had there, and an imported task's outputs the
+    names its file gives them, as the stored task did. Any other entry of the bundle's own is ``<prefix><name>``, its
+    name lowercased with each run of what an id can't hold made ``-``. An installed bundle's agent pulled in by a
+    reference takes the first alias its bundle gives it, which the reference named it by; any other entity of an
+    installed bundle has no registry id, and an env's alias can't be one, since no store env may start on an installed
+    env alias's id. An id derived from another (``<id>__env_image``) keeps its suffix after the other's registry id, and
+    a task's output is ``<task id>-<name>``."""
     ids: dict[str, str] = {}
     problems: list[str] = []
-    imported_tasks = set()
     for write in plan.writes:
         entry = write.source.entry
-        if imported is not None and (source := source_of(imported, plan, write)) is not None:
-            if ids.setdefault(write.id, source[0]) != source[0]:
+        if imported is not None and (source := imported.source(write)) is not None:
+            if ids.setdefault(write.id, source.id) != source.id:
                 problems.append(f"{plan.path(entry)}: shares its name with what's registered as {ids[write.id]!r}, "
-                                f"so it can't keep the id it was imported as, {source[0]!r}; rename one")
-                continue
-            imported_tasks.update([entry.id] if write.kind is BundleKind.TASK else [])
+                                f"so it can't keep the id it was imported as, {source.id!r}; rename one")
             continue
         if entry.id in ids or (isinstance(write.source, BundleImage) and write.id != entry.id):
             continue
@@ -195,7 +190,7 @@ def registry_ids(plan: Plan, prefix: str, imported: Imported | None = None,
         if isinstance(source, ResolvedEntry) and source.entry.id in ids:
             for output in source.outputs:
                 written = output.id.removeprefix(f"{source.entry.id}/")
-                ids[output.id] = (written if source.entry.id in imported_tasks
+                ids[output.id] = (written if imported is not None and source.entry.id in imported.tasks
                                   else f"{ids[source.entry.id]}-{_slug(written.rsplit('/', 1)[-1])}")
     stores: dict[str, set[str]] = {}
     for write in plan.writes:
@@ -204,74 +199,20 @@ def registry_ids(plan: Plan, prefix: str, imported: Imported | None = None,
             for output in write.source.outputs:
                 stores.setdefault(output.id, set()).add(BundleKind.ARTIFACT.store)
     by_target: dict[tuple[str, str], list[str]] = {}
-    kept = {registry_id for local, registry_id in ids.items()
-            if imported is not None and local not in _given(ids, imported_tasks, plan, imported)}
+    recorded = imported.recorded(ids) if imported is not None else set()
     for local, registry_id in ids.items():
         for store in stores.get(local, ()):
             by_target.setdefault((store, registry_id), []).append(local)
-        if registry_id not in kept and not _REGISTRY_ID.fullmatch(registry_id):
+        if registry_id not in recorded and not _REGISTRY_ID.fullmatch(registry_id):
             problems.append(f"{registry_id!r}: isn't an id a registry takes; rename what it's made from")
-    copies = {write.id: (write, source_of(imported, plan, write)) for write in plan.writes} if imported else {}
-    for (_, registry_id), locals_ in by_target.items():
+    for (store, registry_id), locals_ in by_target.items():
         if len(locals_) < 2:
             continue
-        found = [copies.get(local, (None, None)) for local in locals_]
-        if None in {source for _, source in found} or len({source for _, source in found}) > 1:
+        if imported is not None and (copies := imported.copies(store, locals_, registry_id)) is not None:
+            problems += copies
+        else:
             problems.append(f"{', '.join(sorted(locals_))} would all be registered as {registry_id!r}; rename one")
-        elif edited := sorted(plan.path(write.source.entry) for write, _ in found if write.id not in held):
-            problems.append(f"{', '.join(sorted(plan.path(write.source.entry) for write, _ in found))} hold copies of "
-                            f"{registry_id!r} as imported, and {', '.join(edited)} changed it; a registration writes "
-                            "each id once, so undo the change")
     return ids, problems
-
-
-def _given(ids: Mapping[str, str], imported_tasks: set[str], plan: Plan, imported: Imported) -> set[str]:
-    """The ``@local`` ids in ``ids`` whose registry ids the rules made, not ``imported``'s record: what isn't an
-    imported write, an imported task's output, or derived from either."""
-    taken = {write.id for write in plan.writes if source_of(imported, plan, write) is not None}
-    taken |= {local for local in ids if any(local.startswith(f"{task}/") for task in imported_tasks)}
-    return {local for local in ids
-            if local not in taken and not any(local.startswith(f"{base}__") for base in taken)}
-
-
-def _held_as_imported(plan: Plan, imported: Imported | None) -> frozenset[str]:
-    """The ``@local`` id of each write of ``plan`` that the folder holds as ``imported`` records the import wrote it."""
-    if imported is None:
-        return frozenset()
-    writes = [write for write in plan.writes if source_of(imported, plan, write) is not None]
-    now = {}
-    for entry in {write.source.entry for write in writes}:
-        now |= _files_of(plan.bundle.bundle, entry)
-    return frozenset(write.id for write in writes if as_imported(imported, plan, write, now))
-
-
-def _files_of(bundle: Bundle, entry: BundleEntry) -> dict[str, str]:
-    """The files a write of ``entry`` reads, as its writer walks them, by their paths in the bundle, as their
-    ``file_digest``: a task's or eval's file, or every file of its folder and its toml."""
-    folder = where(bundle.root, entry)
-    if entry.kind in (BundleKind.TASK, BundleKind.EVAL):
-        return {folder: file_digest(entry.path)}
-    files = entry_files(bundle, entry, empty_ok=True)
-    if entry.kind in CONFIG_FILES and (toml := entry.path / CONFIG_FILES[entry.kind]).is_file():
-        files[toml.name] = toml
-    return {f"{folder}/{key}": file_digest(path) for key, path in files.items()}
-
-
-def _sources(plan: Plan, ids: Mapping[str, str], imported: Imported | None,
-             held: frozenset[str]) -> tuple[dict[tuple[str, str], int], set[tuple[str, str]]]:
-    """For each write of ``plan``, under its ``@local`` ids, that the folder was imported from, by (store, registry id),
-    the version it was imported at; and which of them the folder still holds as the import wrote it (``held``)."""
-    if imported is None:
-        return {}, set()
-    sources, kept = {}, set()
-    for write in plan.writes:
-        if (source := source_of(imported, plan, write)) is None:
-            continue
-        key = (write.kind.store, ids.get(write.id, write.id))
-        sources[key] = source[1]
-        if write.id in held:
-            kept.add(key)
-    return sources, kept
 
 
 def _alias(bundle: Bundle, entry: BundleEntry) -> str | None:
@@ -457,7 +398,7 @@ def _unregistrable(plan: Plan, shared: bool, grafts: Mapping[Path, set[str]]) ->
         def stored(path: str) -> bool:
             return any(path == field or path.startswith((f"{field}.", f"{field}[")) for field in taken)
 
-        for path, text in _strings(write.source.config):
+        for path, text in strings(write.source.config):
             if is_local_id(text):
                 yield f"{where}: {path or 'its value'} names {text!r}, which only this machine's stores hold"
             elif shared and not stored(path) and (url := _local_url(text)) is not None:
@@ -466,17 +407,6 @@ def _unregistrable(plan: Plan, shared: bool, grafts: Mapping[Path, set[str]]) ->
             for path, why in credentials_in(write.source.config):
                 if not stored(path):
                     yield f"{where}: {path}: {why}; leave it out, for whatever runs the task to give it"
-
-
-def _strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
-    if isinstance(value, str):
-        yield path, value
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            yield from _strings(item, f"{path}.{key}" if path else str(key))
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            yield from _strings(item, f"{path}[{index}]")
 
 
 def _local_url(text: str) -> str | None:

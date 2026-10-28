@@ -15,7 +15,7 @@ from agent_env.bundle import _import_report as import_report_module
 from agent_env.bundle import _imported as imported_module
 from agent_env.bundle import materialize as materialize_module
 from agent_env.bundle import register as register_module
-from agent_env.bundle._imported import Imported, source_of
+from agent_env.bundle._imported import Imported, ImportedImage, Source, source_of
 from agent_env.bundle.importer import import_task
 from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.parse import parse_bundle
@@ -316,7 +316,8 @@ def test_an_installed_bundle_s_agent_takes_no_source_from_the_folder_s_record(lo
     folder = layout(tmp_path / "triage", {"tasks/t.json": json.dumps([
         {"id": "agent", "type": "deploy_agent", "a2a_agent_id": "@local/demo-dist/kit/solver"}])})
     plan = plan_bundle(resolve_bundle(parse_bundle(folder)), installed=lambda: (kit,))
-    record = Imported({"agents/solver": ("solver", 3)}, {("agents/solver", "image"): ("solver-image", 3)}, {}, {})
+    record = Imported({"agents/solver": Source("solver", 3)},
+                      {("agents/solver", "image"): ImportedImage(Source("solver-image", 3))}, {})
 
     installed = [write for write in plan.writes if write.source.entry in plan.origins]
 

@@ -7,9 +7,10 @@ from __future__ import annotations
 import copy
 import json
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_env.entity.paths import field_sites
 from agent_env.entity.refs import ref_sites
@@ -19,23 +20,38 @@ from agent_env.store.base import NotFoundError
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 
-from ._import_report import PROVENANCE, PROVENANCE_SCHEMA, store_fingerprint
+from ._import_report import PROVENANCE, PROVENANCE_SCHEMA, file_digest, store_fingerprint
 from ._secrets import scrub
+from ._values import strings, value_at
+from .authoring import entry_files
 from .parse import CONFIG_FILES, Bundle, BundleEntry, BundleKind
 from .plan import Plan, Write, env_folder_writer
 from .resolve import BuiltImage, BundleImage
 
 
+class Source(NamedTuple):
+    """The store id and version a write was imported from."""
+
+    id: str
+    version: int
+
+
+@dataclass(frozen=True)
+class ImportedImage:
+    """An image the import wrote into a folder, under a toml key: built from the Dockerfile it names, or pulled."""
+
+    source: Source
+    dockerfile: str | None = None
+
+
 @dataclass(frozen=True)
 class Imported:
-    """What an import recorded: each entity folder, task file and eval file's store id and version, each image's by its
-    folder and toml key, built or pulled, with the Dockerfile a built one is built from, and each file as it wrote
-    it."""
+    """What an import recorded: the stored id and version of each entity folder, task file and eval file, and of each
+    image a folder names, by its folder and toml key; and each file as it wrote it."""
 
-    entities: Mapping[str, tuple[str, int]]
-    images: Mapping[tuple[str, str], tuple[str, int]]
+    entities: Mapping[str, Source]
+    images: Mapping[tuple[str, str], ImportedImage]
     files: Mapping[str, str]
-    dockerfiles: Mapping[tuple[str, str], str]
 
 
 def read_imported(root: Path) -> tuple[Imported | None, str | None]:
@@ -52,14 +68,15 @@ def read_imported(root: Path) -> tuple[Imported | None, str | None]:
         return None, f"{PROVENANCE} is from an older agent-env, so the folder registers as a new bundle"
     if record.get("store") != store_fingerprint():
         return None, "it was imported from another store, so its entries take new ids"
-    entities = {item["folder"]: (item["id"], item["version"]) for item in record.get("written", [])}
-    entities |= {item["file"]: (item["id"], item["version"]) for item in record.get("tasks", [])}
+    entities = {item["folder"]: Source(item["id"], item["version"]) for item in record.get("written", [])}
+    entities |= {item["file"]: Source(item["id"], item["version"]) for item in record.get("tasks", [])}
     if (stored_eval := record.get("eval")) is not None:
-        entities[stored_eval["file"]] = (stored_eval["id"], stored_eval["version"])
-    images = {(item["folder"], item["key"]): (item["id"], item["version"])
-              for item in [*record.get("images", []), *record.get("pulled", [])]}
-    dockerfiles = {(item["folder"], item["key"]): item.get("dockerfile") for item in record.get("images", [])}
-    return Imported(entities, images, record.get("files", {}), dockerfiles), None
+        entities[stored_eval["file"]] = Source(stored_eval["id"], stored_eval["version"])
+    images = {(item["folder"], item["key"]): ImportedImage(Source(item["id"], item["version"]), item.get("dockerfile"))
+              for item in record.get("images", [])}
+    images |= {(item["folder"], item["key"]): ImportedImage(Source(item["id"], item["version"]))
+               for item in record.get("pulled", [])}
+    return Imported(entities, images, record.get("files", {})), None
 
 
 def where(root: Path, entry: BundleEntry) -> str:
@@ -67,7 +84,7 @@ def where(root: Path, entry: BundleEntry) -> str:
     return unicodedata.normalize("NFC", entry.path.relative_to(root).as_posix())
 
 
-def source_of(imported: Imported, plan: Plan, write: Write) -> tuple[str, int] | None:
+def source_of(imported: Imported, plan: Plan, write: Write) -> Source | None:
     """The store id and version ``write`` was imported from, or None when the import didn't write it, as for what an
     installed bundle holds."""
     entry = write.source.entry
@@ -75,7 +92,8 @@ def source_of(imported: Imported, plan: Plan, write: Write) -> tuple[str, int] |
         return None
     folder = where(plan.bundle.bundle.root, entry)
     if isinstance(write.source, BundleImage) and write.source.id != entry.id:
-        return imported.images.get((folder, image_key(write.source)))
+        image = imported.images.get((folder, image_key(write.source)))
+        return image.source if image is not None else None
     return imported.entities.get(folder)
 
 
@@ -96,7 +114,8 @@ def as_imported(imported: Imported, plan: Plan, write: Write, now: Mapping[str, 
     toml = f"{folder}/{CONFIG_FILES[entry.kind]}" if entry.kind in CONFIG_FILES else None
     then, current = _within(imported.files, folder), _within(now, folder)
     if isinstance(write.source, BuiltImage) and write.source.id != entry.id:
-        if imported.dockerfiles.get((folder, image_key(write.source))) != write.source.dockerfile:
+        image = imported.images.get((folder, image_key(write.source)))
+        if image is None or image.dockerfile != write.source.dockerfile:
             return False
         then.pop(toml, None)
         current.pop(toml, None)
@@ -107,13 +126,101 @@ def as_imported(imported: Imported, plan: Plan, write: Write, now: Mapping[str, 
     return then == current
 
 
-def grafted(bundle: Bundle, imported: Imported) -> tuple[Bundle, dict[Path, set[str]], dict[Path, list[str]]]:
+class ImportedWrites:
+    """What ``imported`` records of each write of ``plan``: the stored id and version it was imported from, and whether
+    the folder holds it as the import wrote it; and what of the record's tasks ``restored`` couldn't give back. Writes
+    are told apart by store as well as ``@local`` id, since a task and an env of one name share one."""
+
+    def __init__(self, imported: Imported | None, plan: Plan, restored: Restored):
+        self.plan = plan
+        self.given = restored.given
+        self._writes = {_key(write): write for write in plan.writes}
+        self._sources = {_key(write): source for write in plan.writes
+                         if imported is not None and (source := source_of(imported, plan, write)) is not None}
+        self.tasks = {write.source.entry.id for write in plan.writes
+                      if write.kind is BundleKind.TASK and _key(write) in self._sources}
+        self.held = _held(imported, plan, [self._writes[key] for key in self._sources]) if imported else frozenset()
+        self.problems = [problem for write in plan.writes if write.kind is BundleKind.TASK
+                         for problem in restored.unrestored.get(write.source.entry.path, ())]
+
+    def source(self, write: Write) -> Source | None:
+        return self._sources.get(_key(write))
+
+    def recorded(self, ids: Mapping[str, str]) -> set[str]:
+        """The registry ids in ``ids`` the record gives rather than the rules: each imported write's, each imported
+        task's output's, and each derived from either."""
+        taken = {local for _, local in self._sources}
+        taken |= {local for local in ids if any(local.startswith(f"{task}/") for task in self.tasks)}
+        return {ids[local] for local in ids if local in taken or any(local.startswith(f"{base}__") for base in taken)}
+
+    def copies(self, store: str, locals_: Sequence[str], registry_id: str) -> list[str] | None:
+        """When ``locals_``, which take one registry id in ``store``, were imported from one stored entity: a problem
+        naming those the folder changed, since a registration writes each id once, or none; else None."""
+        keys = [(store, local) for local in locals_]
+        if None in (sources := {self._sources.get(key) for key in keys}) or len(sources) > 1:
+            return None
+        paths = sorted(self.plan.path(self._writes[key].source.entry) for key in keys)
+        if not (edited := sorted(self.plan.path(self._writes[key].source.entry) for key in keys
+                                 if key not in self.held)):
+            return []
+        return [f"{', '.join(paths)} hold copies of {registry_id!r} as imported, and {', '.join(edited)} changed it; "
+                "a registration writes each id once, so undo the change"]
+
+    def versions(self, ids: Mapping[str, str]) -> tuple[dict[tuple[str, str], int], set[tuple[str, str]]]:
+        """By (store, registry id), the version each imported write was imported at, and which of them the folder holds
+        as the import wrote it."""
+        versions, held = {}, set()
+        for (store, local), source in self._sources.items():
+            key = (store, ids.get(local, local))
+            versions[key] = source.version
+            if (store, local) in self.held:
+                held.add(key)
+        return versions, held
+
+
+def _key(write: Write) -> tuple[str, str]:
+    return (write.kind.store, write.id)
+
+
+def _held(imported: Imported, plan: Plan, writes: list[Write]) -> frozenset[str]:
+    """The (store, ``@local`` id) of each of ``writes`` the folder holds as ``imported`` records the import wrote it."""
+    now = {}
+    for entry in {write.source.entry for write in writes}:
+        now |= _files_of(plan.bundle.bundle, entry)
+    return frozenset(_key(write) for write in writes if as_imported(imported, plan, write, now))
+
+
+def _files_of(bundle: Bundle, entry: BundleEntry) -> dict[str, str]:
+    """The files a write of ``entry`` reads, as its writer walks them, by their paths in the bundle, as their
+    ``file_digest``: a task's or eval's file, or every file of its folder and its toml."""
+    folder = where(bundle.root, entry)
+    if entry.kind in (BundleKind.TASK, BundleKind.EVAL):
+        return {folder: file_digest(entry.path)}
+    files = entry_files(bundle, entry, empty_ok=True)
+    if entry.kind in CONFIG_FILES and (toml := entry.path / CONFIG_FILES[entry.kind]).is_file():
+        files[toml.name] = toml
+    return {f"{folder}/{key}": file_digest(path) for key, path in files.items()}
+
+
+@dataclass(frozen=True)
+class Restored:
+    """A bundle given back what its import left out (``restore``): the paths in each task file's steps that took a
+    stored value, and a problem for each field still holding what the import masked."""
+
+    bundle: Bundle
+    given: Mapping[Path, set[str]]
+    unrestored: Mapping[Path, list[str]]
+
+
+def restore(bundle: Bundle, imported: Imported | None) -> Restored:
     """``bundle`` with each imported task's steps given back, from the stored version each was imported from, matched
     by step id and type, what the import left out where the folder doesn't set it: each user-scoped field, but a
     reference's pin where the folder names something else; each list item's, from the stored item it was written from;
     and each env var and credential the import's scrub took, where the folder holds what the scrub left. And, for each
     task's file, the paths in its steps that took one, and a problem for each field still holding what the scrub left,
-    which the folder changed too much to give back."""
+    which the folder changed too much to give back. A bundle with no record is as it is."""
+    if imported is None:
+        return Restored(bundle, {}, {})
     registry = get_task_step_registry()
     entries, taken, problems = [], {}, {}
     for entry in bundle.entries:
@@ -139,7 +246,7 @@ def grafted(bundle: Bundle, imported: Imported) -> tuple[Bundle, dict[Path, set[
                 f"{where(bundle.root, entry)}: step {step.get('id')!r}: {path} still holds what the import masked, and "
                 "the folder changed what it was masked from; set its real value" for path in left)
         entries.append(replace(entry, config=steps))
-    return replace(bundle, entries=tuple(entries)), taken, problems
+    return Restored(replace(bundle, entries=tuple(entries)), taken, problems)
 
 
 def _given_back(step: dict, origin: dict, cls: type) -> tuple[list[str], list[str]]:
@@ -165,7 +272,7 @@ def _given_back(step: dict, origin: dict, cls: type) -> tuple[list[str], list[st
     scrub(scrubbed)
     given += _unscrubbed(step, origin, scrubbed)
     masked = {text for _, text in _masks(origin, scrubbed)}
-    return given, [path for path, text in _texts(step) if text in masked]
+    return given, [path for path, text in strings(step) if text in masked]
 
 
 def _repinned(step: dict, origin: dict, cls: type) -> set[str]:
@@ -181,13 +288,13 @@ def _given_back_items(step: dict, origin: dict, at: str, fields: list[str]) -> l
     """Give each item of the list ``at`` the ``fields`` the import left out of it, from the stored item it was written
     from (``_source_item``): all of them, or none when the item sets one, since together they can be one choice, such as
     a source under either of its names."""
-    items, stored = _at(step, at), _at(origin, at)
+    items, stored = value_at(step, at.split(".")), value_at(origin, at.split("."))
     if not isinstance(items, list) or not isinstance(stored, list):
         return []
     left_out = {field.split(".")[0] for field in fields}
     given = []
     for index, item in enumerate(items):
-        if not isinstance(item, dict) or any(_at(item, field) is not None for field in fields):
+        if not isinstance(item, dict) or any(value_at(item, field.split(".")) is not None for field in fields):
             continue
         if (source := _source_item(item, stored, left_out)) is None:
             continue
@@ -208,13 +315,6 @@ def _source_item(item: dict, stored: list, left_out: set[str]) -> dict | None:
 
 def _bare(item: dict, left_out: set[str]) -> dict:
     return {key: value for key, value in item.items() if key not in left_out and value is not None}
-
-
-def _at(step: dict, path: str) -> object:
-    value = step
-    for key in path.split("."):
-        value = value.get(key) if isinstance(value, dict) else None
-    return value
 
 
 def _unscrubbed(value: object, stored: object, scrubbed: object, path: str = "") -> list[str]:
@@ -261,7 +361,7 @@ def _counterpart(item: object, index: int, stored: list, scrubbed: list, unchang
     same = [other for other, one in enumerate(scrubbed) if one == item]
     if not same:
         same = [other for other, one in enumerate(scrubbed) if (masks := _masks(stored[other], one))
-                and all(_at_keys(item, keys) == text for keys, text in masks)]
+                and all(value_at(item, keys) == text for keys, text in masks)]
     return same[0] if len(same) == 1 else None
 
 
@@ -274,28 +374,6 @@ def _masks(stored: object, scrubbed: object, keys: tuple = ()) -> list[tuple[tup
     if isinstance(stored, list) and isinstance(scrubbed, list) and len(stored) == len(scrubbed):
         return [mask for index, (one, other) in enumerate(zip(stored, scrubbed))
                 for mask in _masks(one, other, (*keys, index))]
-    return []
-
-
-def _at_keys(value: object, keys: tuple) -> object:
-    for key in keys:
-        if isinstance(value, dict) and isinstance(key, str):
-            value = value.get(key)
-        elif isinstance(value, list) and isinstance(key, int) and key < len(value):
-            value = value[key]
-        else:
-            return None
-    return value
-
-
-def _texts(value: object, path: str = "") -> list[tuple[str, str]]:
-    """Each string in ``value``, with its path."""
-    if isinstance(value, str):
-        return [(path, value)]
-    if isinstance(value, dict):
-        return [text for key, item in value.items() for text in _texts(item, f"{path}.{key}" if path else str(key))]
-    if isinstance(value, list):
-        return [text for index, item in enumerate(value) for text in _texts(item, f"{path}[{index}]")]
     return []
 
 
