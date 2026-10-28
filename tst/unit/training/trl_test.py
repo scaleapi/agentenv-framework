@@ -11,7 +11,7 @@ import logging
 from typing import Any, Literal
 
 import pytest
-from agentenv_protocol import EnvironmentTool
+from agentenv_protocol import EnvironmentTool, ToolResult
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 from agent_env.config.runtime import Config
@@ -118,6 +118,48 @@ def test_an_episode_that_fails_or_isnt_its_rows_is_left_unscored_and_the_environ
     assert [record.getMessage() for record in caplog.records if record.name == trl.__name__] == [
         "rollout left unscored: RuntimeError: the env didn't come up",
         "rollout left unscored: the turn's prompt differs from the dataset row's"]
+
+
+class _SecondTurnTools:
+    """Stands in for the proxy's ``ToolSession``: a turn opens one session, and every second one opened also offers
+    ``take_item``, so an episode's second turn offers a tool its first doesn't."""
+
+    def __init__(self):
+        self.opened = 0
+
+    def __call__(self, *, mcp_url, headers=None, timeout):
+        self.opened += 1
+        offered = ["add_item", *(["take_item"] if self.opened % 2 == 0 else [])]
+
+        class _Session:
+            async def open(self):
+                return self
+
+            async def list_tools(self):
+                return [EnvironmentTool(name=name, inputSchema={"type": "object"}) for name in offered]
+
+            async def call_tool(self, name, arguments=None):
+                return ToolResult(content=[{"type": "text", "text": f"{name} done"}])
+
+            async def close(self):
+                pass
+
+        return _Session()
+
+
+def test_a_tool_a_later_turn_offers_is_a_method_and_its_new_instructions_reach_the_model(served, monkeypatch):
+    monkeypatch.setattr(proxy_module, "ToolSession", _SecondTurnTools())
+    again = {**AGAIN, "system_prompt": "Now keep the barrels."}
+    env = served({"a": [ITEMS, ALICE, TURN, again, REPLIES]})
+    environment = env.factory()
+
+    assert _tools(env.factory) == ["add_item", "end_turn", "get_reward", "reset", "take_item"]
+    environment.reset(**env.dataset[0])
+    assert "offers no tool 'take_item'" in environment.take_item()
+    assert environment.end_turn(response="Added a crate.") == "Now keep the barrels.\n\nAdd another."
+    assert environment.take_item() == "take_item done"
+    environment.end_turn(response="Took one.")
+    assert environment.get_reward() == 1.0
 
 
 class _Hanging:

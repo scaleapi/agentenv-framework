@@ -18,7 +18,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Coroutine, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property, reduce
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -125,8 +125,9 @@ class AgentEnv:
     @cached_property
     def factory(self) -> type[_Environment] | dict[str, type[_Environment]]:
         """TRL's ``environment_factory``: an environment class per toolset of the server's tasks, or the one class when
-        every task has the same. Building it plays one task of each toolset in turn to list its tools, since TRL reads
-        them from the class."""
+        every task has the same. Building it plays one task of each toolset through, in turn, ending each of its turns
+        empty, since TRL reads the tools from the class: its methods are every tool a turn offers, and one a turn
+        doesn't offer answers so."""
         classes = on_loop(self._environments(), len(self._toolsets) * (self._reset_timeout + CLOSE_SECONDS))
         return classes[0] if len(classes) == 1 else {each.__name__: each for each in classes}
 
@@ -146,17 +147,28 @@ class AgentEnv:
     async def _environment(self, toolset: _Toolset) -> type[_Environment]:
         split, index = toolset.first
         client = await _opened(self.url, self._reset_timeout)
+        first, tools = None, {}
         try:
-            reset = await client.reset(split=split, index=index)
-            listed = reset if reset.done else await client.step({"type": "list_tools"})
+            turn = await client.reset(split=split, index=index)
+            while not turn.done:
+                listed = await client.step({"type": "list_tools"})
+                if listed.done:
+                    turn = listed
+                    break
+                first = first or frozenset(tool["name"] for tool in listed.observation["tools"])
+                tools |= {tool["name"]: tool for tool in listed.observation["tools"] if tool["name"] not in tools}
+                turn = await client.step({"type": "call_tool", "tool_name": END_TURN, "arguments": {"response": ""}})
+                if error := turn.observation.get("error"):
+                    raise RuntimeError(f"task {index} of split {split!r} refused an empty {END_TURN}: "
+                                       f"{error.get('message')}")
         finally:
             with contextlib.suppress(Exception):
                 await client.close()
-        if listed.done:
+        if first is None:
             raise RuntimeError(f"task {index} of split {split!r} ended before its tools could be listed: "
-                               f"{_error_of(listed.observation)}")
-        methods = {tool["name"]: tool_method(tool) for tool in listed.observation["tools"]}
-        shared = _Shared(url=self.url, offered=frozenset(methods), tool_timeout=self._tool_timeout,
+                               f"{_error_of(turn.observation)}")
+        methods = {name: tool_method(tool) for name, tool in tools.items()}
+        shared = _Shared(url=self.url, offered=first, tool_timeout=self._tool_timeout,
                          reset_timeout=self._reset_timeout)
         self._shared.append(shared)
         environment = type(toolset.name, (_Environment,), {**methods, "_shared": shared})
@@ -178,8 +190,8 @@ class _Toolset:
 
 @dataclass(frozen=True, eq=False)
 class _Shared:
-    """What an environment class's instances share: the server, the tools every episode must offer, and the
-    deadlines."""
+    """What an environment class's instances share: the server, the tools every episode's first turn must offer, and
+    the deadlines."""
 
     url: str
     offered: frozenset[str]
@@ -193,7 +205,8 @@ class _Failed(Exception):
 
 @dataclass
 class _Rollout:
-    started: asyncio.Task[None]
+    started: asyncio.Task[None] = field(init=False)
+    system: str | None = None
     done: bool = False
     reward: float | None = None
     failure: str | None = None
@@ -243,14 +256,18 @@ class _Environment:
             self._rollout = None
             if self._client is None:
                 self._client = await _opened(self._shared.url, self._shared.reset_timeout)
-            self._rollout = _Rollout(asyncio.ensure_future(self._begin(split, index, expected)))
+            rollout = _Rollout()
+            rollout.started = asyncio.ensure_future(self._begin(rollout, split, index, expected))
+            self._rollout = rollout
 
-    async def _begin(self, split: str, index: int, expected: tuple[str | None, str] | None) -> None:
+    async def _begin(self, rollout: _Rollout, split: str, index: int,
+                     expected: tuple[str | None, str] | None) -> None:
         reset = await self._client.reset(split=split, index=index)
         if reset.done:
             raise _Failed(_error_of(reset.observation))
         metadata = reset.observation.get("metadata") or {}
-        if expected is not None and (metadata.get("system_prompt") or None, metadata.get("prompt")) != expected:
+        rollout.system = metadata.get("system_prompt") or None
+        if expected is not None and (rollout.system, metadata.get("prompt")) != expected:
             raise _Failed("the turn's prompt differs from the dataset row's")
         listed = await self._client.step({"type": "list_tools"})
         if listed.done:
@@ -301,8 +318,9 @@ class _Environment:
                 await self._fail(rollout, str(e) if isinstance(e, _Failed) else _why(e))
 
     def _answer(self, rollout: _Rollout, name: str, result: Any) -> str:
-        """What the model sees of a tool call: the tool's text or error, the next turn's prompt for ``end_turn``,
-        or that the episode ended, which records its reward or why it has none."""
+        """What the model sees of a tool call: the tool's text or error, the next turn's prompt for ``end_turn``, after
+        its system prompt when that changed, since TRL can't change the conversation's own; or that the episode ended,
+        which records its reward or why it has none."""
         observation = result.observation
         if error := observation.get("error"):
             return error.get("message") or json.dumps(error)
@@ -315,7 +333,11 @@ class _Environment:
             return ENDED
         answer = observation.get("result") or {}
         if name == END_TURN:
-            return answer.get("prompt") or ""
+            prompt, system = answer.get("prompt") or "", answer.get("system_prompt") or None
+            if system is None or system == rollout.system:
+                return prompt
+            rollout.system = system
+            return f"{system}\n\n{prompt}"
         return answer["data"] if isinstance(answer.get("data"), str) else json.dumps(answer)
 
     async def _fail(self, rollout: _Rollout, why: str) -> None:
