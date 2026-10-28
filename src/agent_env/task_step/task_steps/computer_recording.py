@@ -8,10 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
-from agentenv_protocol.computer.card import COMPUTER_RECORDING
-from agentenv_protocol.computer.manifest import ManifestSegment, RecordingManifest
 from agentenv_protocol.client import find_extension
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
@@ -25,6 +23,11 @@ from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.store.object_store.object_store import issues_grants_to
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+
+# The protocol's computer package needs its `computer` extra (PyAV), so a recording imports it when it runs and
+# loading this module, which every task does through the step registry, doesn't.
+if TYPE_CHECKING:
+    from agentenv_protocol.computer.manifest import RecordingManifest
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,8 @@ class StartComputerRecordingTaskStep(TaskStep):
         # A retried step joins its first attempt's recording, so it keeps that attempt's namespace too.
         request_id = f"{context.instance_id}:{self.id}" if context.instance_id else uuid.uuid4().hex
         try:
+            from agentenv_protocol.computer.card import COMPUTER_RECORDING
+
             deployed = _deployed(context, self.env_id)
             namespace = _namespace(request_id)
             grant = _grant(deployed, namespace, self.environment_name)
@@ -158,6 +163,9 @@ async def end_recording(context: TaskStepContext, name: str, reason: str) -> Non
     if entry.get("state") != "open":
         return
     try:
+        from agentenv_protocol.computer.card import COMPUTER_RECORDING
+        from agentenv_protocol.computer.manifest import RecordingManifest
+
         deployed, environment_name = _deployed(context, entry["env_id"]), entry.get("environment_name")
         manifest = RecordingManifest.model_validate(await deployed.invoke(COMPUTER_RECORDING, "end", {
             "recording_id": entry["recording_id"], "upload": _grant(deployed, entry["namespace"], environment_name),
@@ -200,6 +208,8 @@ def _namespace(request_id: str) -> str:
 def _grant(deployed, namespace: str, environment_name: Optional[str] = None) -> dict:
     """A grant that uploads under ``namespace``, lasting the recorded env's ``max_duration_s`` and a margin, or the
     longest the store issues."""
+    from agentenv_protocol.computer.card import COMPUTER_RECORDING
+
     card = deployed.environment_card if environment_name is None else deployed.get_child_env_card(environment_name)
     params = (find_extension(card or {}, COMPUTER_RECORDING) or {}).get("params") or {}
     store = get_config().get_object_store()
@@ -219,6 +229,8 @@ def _grant(deployed, namespace: str, environment_name: Optional[str] = None) -> 
 
 def _from_namespace(entry: dict) -> RecordingManifest:
     """A manifest of what the recording's namespace holds, for a recording its driver can't end."""
+    from agentenv_protocol.computer.manifest import ManifestSegment, RecordingManifest
+
     store = get_config().get_object_store()
     root = entry["namespace"].rstrip("/") + "/"
     paths = sorted(url[len(root):] for url in store.list_at(root) if url.endswith(".mp4"))
