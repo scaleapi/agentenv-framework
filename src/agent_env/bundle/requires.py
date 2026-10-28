@@ -11,11 +11,13 @@ import shlex
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from packaging.requirements import Requirement
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_artifact_registry
 from agent_env.env import registry as env_registry
@@ -55,8 +57,14 @@ class Provider:
     version: str | None
 
     def requirement(self) -> str | None:
-        """The pip requirement for it, at least the version installed here; None for configuration."""
-        return f"{self.distribution}>={self.version}" if self.distribution else None
+        """The pip requirement for it, at least the version installed here without a local label, which a bound can't
+        carry, or any version when that isn't one pip compares; None for configuration."""
+        if not self.distribution:
+            return None
+        try:
+            return f"{self.distribution}>={Version(self.version).public}"
+        except (InvalidVersion, TypeError):
+            return self.distribution
 
 
 @dataclass(frozen=True)
@@ -92,8 +100,8 @@ class Providers:
 
 
 def unmet(requires: Iterable[str]) -> list[tuple[str, str]]:
-    """Each of ``requires`` that isn't met here, with why: its package isn't installed, or is at a version it excludes.
-    One whose marker is false here doesn't apply."""
+    """Each of ``requires`` that isn't met here, with why: its package isn't installed, is at a version it excludes, or
+    is without what the extras it names need. One whose marker is false here doesn't apply."""
     found = []
     for line in requires:
         requirement = Requirement(line)
@@ -102,9 +110,49 @@ def unmet(requires: Iterable[str]) -> list[tuple[str, str]]:
         have = installed(canonicalize_name(requirement.name))
         if have is None:
             found.append((line, "which isn't installed"))
-        elif not requirement.specifier.contains(have, prereleases=True):
+        elif not _allows(requirement, have):
             found.append((line, f"and {requirement.name} {have} is installed"))
+        elif missing := _missing_for_extras(requirement, set()):
+            found.append((line, f"and {requirement.name} {have} is installed without {', '.join(missing)}, which its "
+                                f"extras need"))
     return found
+
+
+def _allows(requirement: Requirement, version: str) -> bool:
+    """Whether ``requirement`` admits ``version``; one pip can't compare it admits only when it names no versions."""
+    try:
+        return requirement.specifier.contains(version, prereleases=True)
+    except InvalidVersion:
+        return not requirement.specifier
+
+
+def _missing_for_extras(requirement: Requirement, seen: set[tuple[str, str]]) -> list[str]:
+    """What the extras ``requirement`` names need of its installed package that isn't installed, or not at a version
+    it allows, following an extra that names another of the package's own."""
+    name = canonicalize_name(requirement.name)
+    missing = []
+    for extra in sorted(requirement.extras):
+        if (name, extra) in seen:
+            continue
+        seen.add((name, extra))
+        try:
+            lines = distribution(name).requires or ()
+        except PackageNotFoundError:
+            return []
+        for line in lines:
+            try:
+                needed = Requirement(line)
+            except InvalidRequirement:
+                continue
+            if needed.marker is None or not needed.marker.evaluate({"extra": extra}) \
+                    or needed.marker.evaluate({"extra": ""}):
+                continue
+            have = installed(canonicalize_name(needed.name))
+            if have is None or not _allows(needed, have):
+                missing.append(f"{needed.name}{needed.specifier}")
+            else:
+                missing.extend(_missing_for_extras(needed, seen))
+    return list(dict.fromkeys(missing))
 
 
 def unmet_problems(requires: Iterable[str]) -> tuple[list[str], list[str]]:
@@ -197,35 +245,22 @@ def writable(root: Path) -> bool:
 
 def _create(path: Path, text: str) -> bool:
     """Write ``text`` to ``path`` whole, unless something is there by then; whether it was written. It's staged beside
-    it under a name of its own, as the umask leaves new files, and linked into place, which fails if ``path`` exists."""
+    it under a name of its own, as the umask leaves new files, and linked into place, which fails if ``path`` exists;
+    on a filesystem without links, or a full one, nothing is written."""
     staged = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        if not _write_new(staged, text):
-            return False
-        os.link(staged, path)
-        return True
-    except FileExistsError:
-        return False
-    except OSError:  # a filesystem without links: create it in place, still never over another's
-        return _write_new(path, text)
-    finally:
-        staged.unlink(missing_ok=True)
-
-
-def _write_new(path: Path, text: str) -> bool:
-    """Create ``path`` holding ``text``, unless it exists; whether it was written. One that can't be written whole, as
-    on a full disk, is removed again, so no part of it is left to read."""
-    try:
-        file = open(path, "x", encoding="utf-8")
+        file = open(staged, "x", encoding="utf-8")
     except OSError:
         return False
     try:
         with file:
             file.write(text)
+        os.link(staged, path)
         return True
     except OSError:
-        path.unlink(missing_ok=True)
         return False
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def _listing(found: Sequence[Use]) -> str:

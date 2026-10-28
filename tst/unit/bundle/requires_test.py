@@ -10,6 +10,7 @@ import tomllib
 
 import pytest
 from click.testing import CliRunner
+from packaging.requirements import Requirement
 
 from agent_env.bundle import BundleError, dry_run_bundle, parse_bundle, prepare_bundle, run_bundle
 from agent_env.bundle import register as register_module
@@ -48,6 +49,13 @@ class _Acme(TaskStep):
         return context
 
 
+class _AcmeMetadata:
+    """agentenv-acme's installed requirements: a base one, an extra each, and an extra naming another of its own."""
+
+    requires = ["packaging", "playwright>=1.40; extra == 'browser'", "torch; extra == 'gpu'",
+                "agentenv-acme[gpu]; extra == 'all'"]
+
+
 class _Configured(_Acme):
     """A step type only this machine's configuration registers."""
 
@@ -58,6 +66,10 @@ class _Replaced(_Acme):
     """A step type a config file registers over the one agentenv-acme ships under the same name."""
 
     type = "replaced_requires_test"
+
+
+def _no_links(src, dst):
+    raise PermissionError("links aren't supported here")
 
 
 def _value(cls):
@@ -98,6 +110,15 @@ class TestProviders:
         assert Providers().of(TASK_STEPS, _Acme.type, _Acme) == Provider(ACME, "1.2.0")
         assert Provider(ACME, "1.2.0").requirement() == "agentenv-acme>=1.2.0"
 
+    @pytest.mark.parametrize("version, requirement", [
+        ("1.2.0+acme.1", "agentenv-acme>=1.2.0"),
+        ("1!2.0.post1", "agentenv-acme>=1!2.0.post1"),
+        ("not a version", "agentenv-acme"),
+    ], ids=["local-label", "epoch-post", "legacy"])
+    def test_a_requirement_is_one_pip_takes_whatever_the_installed_version(self, version, requirement):
+        assert Provider(ACME, version).requirement() == requirement
+        assert str(Requirement(requirement)) == requirement
+
     @pytest.mark.parametrize("cls", [_Configured, _Replaced])
     def test_a_type_configuration_registers_is_provided_by_configuration(self, cls):
         assert Providers().of(TASK_STEPS, cls.type, cls) == Provider(None, None)
@@ -117,6 +138,31 @@ class TestUnmet:
     def test_a_package_not_installed_or_at_a_version_it_excludes_is_unmet(self):
         assert unmet(["agentenv-missing", "agentenv-acme>=2"]) == [
             ("agentenv-missing", "which isn't installed"), ("agentenv-acme>=2", "and agentenv-acme 1.2.0 is installed")]
+
+    def test_a_version_pip_cant_compare_meets_only_a_requirement_naming_no_versions(self, monkeypatch):
+        monkeypatch.setattr(requires_module, "installed", {ACME: "not a version"}.get)
+
+        assert unmet(["agentenv-acme", "agentenv-acme>=1"]) == [
+            ("agentenv-acme>=1", "and agentenv-acme not a version is installed")]
+
+    @pytest.mark.parametrize("line, missing", [
+        ("agentenv-acme[browser]>=1", "playwright>=1.40"),
+        ("agentenv-acme[all]", "torch"),
+        ("agentenv-acme[browser,all]", "torch, playwright>=1.40"),
+    ])
+    def test_an_extra_is_unmet_without_what_it_needs(self, monkeypatch, line, missing):
+        monkeypatch.setattr(requires_module, "distribution", lambda name: _AcmeMetadata)
+
+        assert unmet([line]) == [(line, f"and agentenv-acme 1.2.0 is installed without {missing}, which its extras "
+                                        f"need")]
+
+    @pytest.mark.parametrize("line", ["agentenv-acme[browser]", "agentenv-acme[gpu]", "agentenv-acme[undeclared]"])
+    def test_an_extra_whose_needs_are_installed_or_that_needs_nothing_is_met(self, monkeypatch, line):
+        monkeypatch.setattr(requires_module, "distribution", lambda name: _AcmeMetadata)
+        monkeypatch.setattr(requires_module, "installed",
+                            {ACME: "1.2.0", "playwright": "1.41", "torch": "2.5"}.get)
+
+        assert unmet([line]) == []
 
     def test_one_unmet_requirement_names_the_command_that_installs_it(self):
         assert unmet_problems(["agentenv-missing>=1", "agentenv-acme"]) == ([MISSING], ["agentenv-missing>=1"])
@@ -202,6 +248,14 @@ class TestDeclare:
             "needs that configuration too"]
         assert parse_bundle(root).requires == ("agentenv-acme>=1.2.0",)
 
+    def test_a_folder_on_a_filesystem_without_links_is_told_what_to_declare(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(requires_module.os, "link", _no_links)
+        root = _bundle(tmp_path / "b", _Acme.type)
+
+        assert _declared(root)[0] == ("this bundle uses agentenv-acme 1.2.0 (tasks/t.json: step 's0'), which bundle.toml "
+                                      "doesn't require")
+        assert sorted(os.listdir(root)) == ["tasks"]
+
     def test_a_bundle_toml_that_appears_meanwhile_is_kept_and_told_what_to_declare(self, tmp_path, monkeypatch):
         root = _bundle(tmp_path / "b", _Acme.type)
         resolved = resolve_bundle(parse_bundle(root))
@@ -240,20 +294,13 @@ class TestCreate:
         assert path.read_text() in texts
         assert os.listdir(tmp_path) == ["bundle.toml"]
 
-    def test_without_links_it_creates_it_in_place_still_never_over_another(self, tmp_path, monkeypatch):
-        def no_links(src, dst):
-            raise PermissionError("links aren't supported here")
+    def test_a_filesystem_without_links_gets_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(requires_module.os, "link", _no_links)
 
-        monkeypatch.setattr(requires_module.os, "link", no_links)
-        path = tmp_path / "bundle.toml"
+        assert _create(tmp_path / "bundle.toml", "requires = []\n") is False
+        assert os.listdir(tmp_path) == []
 
-        assert _create(path, "first\n") is True
-        assert _create(path, "second\n") is False
-        assert path.read_text() == "first\n"
-        assert os.listdir(tmp_path) == ["bundle.toml"]
-
-    @pytest.mark.parametrize("links", [True, False], ids=["staged", "in-place"])
-    def test_a_file_it_cant_write_whole_is_never_left_behind(self, tmp_path, monkeypatch, links):
+    def test_a_file_it_cant_write_whole_is_never_left_behind(self, tmp_path, monkeypatch):
         real_open = open
 
         def full(path, mode="r", **kwargs):
@@ -262,8 +309,6 @@ class TestCreate:
             return file
 
         monkeypatch.setattr(requires_module, "open", full, raising=False)
-        if not links:
-            monkeypatch.setattr(requires_module.os, "link", lambda src, dst: (_ for _ in ()).throw(PermissionError()))
 
         assert _create(tmp_path / "bundle.toml", "requires = []\n") is False
         assert os.listdir(tmp_path) == []
