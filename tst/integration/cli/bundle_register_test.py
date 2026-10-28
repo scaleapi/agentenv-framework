@@ -37,9 +37,9 @@ registry_host = "127.0.0.1:9"
 
 @pytest.fixture
 def bundle(monkeypatch, tmp_path):
-    """A copy of the echo-mcp example, with the local stores under this test's folder, and a prefix of its own, so
-    the registry, which outlives the test, holds nothing under its ids. Whatever ran, no sandbox work folder may be
-    left behind."""
+    """A copy of the echo-mcp example, with the local stores under this test's folder and the local registry, whatever
+    the config names, and a prefix of its own, so the registry, which outlives the test, holds nothing under its ids.
+    Whatever ran, no sandbox work folder may be left behind."""
     sandboxes = tmp_path / "sandboxes"
     # HOME stays: docker's credential helper (the macOS keychain, for one) can hang a build's base-image lookup
     # when HOME moves.
@@ -47,6 +47,7 @@ def bundle(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("AGENT_ENV_DOCUMENT_STORE", "local")
     monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "local")
+    monkeypatch.setenv("AGENT_ENV_IMAGE_STORE", "local")
     monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(sandboxes))
     configure()
     reset_artifact_store()
@@ -97,9 +98,9 @@ def test_a_registry_it_cant_reach_fails_it_before_the_image_is_named_and_a_rerun
     root, prefix = bundle
     config = tmp_path / "unreachable.toml"
     config.write_text(UNREACHABLE)
-    monkeypatch.delenv("AGENT_ENV_IMAGE_STORE", raising=False)
     with monkeypatch.context() as unreachable:
         unreachable.setenv("AGENT_ENV_CONFIG", str(config))
+        unreachable.delenv("AGENT_ENV_IMAGE_STORE")
         reset_config()
 
         failed = _register(root, prefix)
