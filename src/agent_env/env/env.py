@@ -356,6 +356,12 @@ class Env(ABC):
     async def deploy(self, **kwargs) -> DeployedEnv:
         raise NotImplementedError(f"{type(self).__name__} must implement deploy()")
 
+    def deploy_refusal(self, *, sandbox_type: Optional[str] = None, env_params: Optional[dict] = None,
+                       **options) -> Optional[str]:
+        """Why deploy() would refuse these options before building anything, or None. A type that checks its options
+        overrides this; one that doesn't takes no ``env_params``."""
+        return f"{self.type} envs take no env_params" if env_params else None
+
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> Self:
         """The env a running deployment serves, for its caller to drive. A type that can be

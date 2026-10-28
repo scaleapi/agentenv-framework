@@ -213,10 +213,11 @@ async def _tool_names(mcp_url: str) -> list[str]:
 
 def _builtin_env_providers() -> dict[str, type[_SandboxEnvironmentProvider]]:
     """The built-in providers, by type."""
+    from agent_env.providers.env_providers.env_computer_provider import EnvironmentComputerProvider
     from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
     from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 
-    return {p.type: p for p in (EnvironmentGatewayProvider, EnvironmentServerProvider)}
+    return {p.type: p for p in (EnvironmentGatewayProvider, EnvironmentServerProvider, EnvironmentComputerProvider)}
 
 
 def _build_registry(source: Config | None = None) -> dict[str, type[EnvironmentProvider]]:

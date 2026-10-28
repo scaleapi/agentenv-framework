@@ -46,6 +46,7 @@ class DeployEnvTaskStep(TaskStep):
         metadata: Optional[dict] = None,
         artifact_id: Optional[str] = None,
         artifact_version: Optional[int] = None,
+        env_params: Optional[dict] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
@@ -62,6 +63,8 @@ class DeployEnvTaskStep(TaskStep):
         # Existing env state instance to attach to; the provider interprets it.
         self.env_state_instance_id = env_state_instance_id
         self.metadata = metadata or {}
+        # The env type's own deploy options, which this step passes to its deploy() without reading them.
+        self.env_params = env_params
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -78,6 +81,7 @@ class DeployEnvTaskStep(TaskStep):
         base["env_state_type"] = self.env_state_type
         base["env_state_instance_id"] = self.env_state_instance_id
         base["metadata"] = self.metadata
+        base["env_params"] = self.env_params
         return base
 
     @classmethod
@@ -97,14 +101,12 @@ class DeployEnvTaskStep(TaskStep):
             env_state_type=data.get("env_state_type"),
             env_state_instance_id=data.get("env_state_instance_id"),
             metadata=dict(data.get("metadata") or {}),
+            env_params=data.get("env_params"),
         )
 
     def preflight(self) -> list[str]:
         """An invalid gateway_mode, an env this step can't load, or an option it would refuse at deploy, reported at save instead."""
         from agent_env.env.env import Env
-        from agent_env.env.envs.mcp_server import MCPServerEnv
-        from agent_env.env.envs.multi_env import MultiEnv
-        from agent_env.env.envs.website import WebsiteEnv
         from agent_env.store.base import NotFoundError
 
         try:
@@ -113,16 +115,18 @@ class DeployEnvTaskStep(TaskStep):
             return [f"deploy_env '{self.id}': {e}"]  # the words execute() would raise
         try:
             env = Env.get(self.env_id, self.env_version)
-            if not isinstance(env, (MCPServerEnv, WebsiteEnv, MultiEnv)):
-                return []
-            # As stored: run-time overrides aren't known at save, and deploy() consumes sandbox_type itself. Every run passes an
-            # attribution, so the check does too, whatever it will hold.
+            # As stored: run-time overrides aren't known at save. Every run passes an attribution, so the check does too, whatever it
+            # will hold.
             refusal = env.deploy_refusal(ttl_seconds=self.ttl_seconds, disk_size_gb=self.disk_size_gb, gateway_mode=self.gateway_mode, cpu=self.cpu,
                                          memory_mb=self.memory_mb, env_state_type=self.env_state_type,
-                                         env_state_instance_id=self.env_state_instance_id, attribution={})
+                                         env_state_instance_id=self.env_state_instance_id, attribution={},
+                                         sandbox_type=self.sandbox_type, **self._env_params_option())
         except (NotFoundError, ValueError) as e:  # missing, or a type or env_provider_type this process can't load
             return [f"deploy_env '{self.id}': env '{self.env_id}' can't be loaded: {e}"]
         return [f"deploy_env '{self.id}': {refusal}"] if refusal else []
+
+    def _env_params_option(self) -> dict:
+        return {"env_params": self.env_params} if self.env_params else {}
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.env.env import Env
@@ -176,6 +180,10 @@ class DeployEnvTaskStep(TaskStep):
             deploy_kwargs["artifact_id"] = self.artifact_id
         if self.artifact_version is not None and ("artifact_version" in params or accepts_kwargs):
             deploy_kwargs["artifact_version"] = self.artifact_version
+        if self.env_params:
+            if "env_params" not in params and not accepts_kwargs:
+                raise ValueError(f"deploy_env '{self.id}': {env.type} envs take no env_params")
+            deploy_kwargs["env_params"] = self.env_params
         deployed_env = await env.deploy(**deploy_kwargs)
         # create_instance runs inside env.deploy(), so an annotation set after it
         # returns has to be persisted explicitly to reach the instance record.

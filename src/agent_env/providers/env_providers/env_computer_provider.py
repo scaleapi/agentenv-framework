@@ -1,0 +1,128 @@
+"""The computer environment provider: a computer env's computer, one ready build of it, booted with no gateway in front
+on a sandbox provider that runs its arch natively; the driver's card is the env card."""
+
+from __future__ import annotations
+
+import functools
+from datetime import datetime, timezone
+from fnmatch import fnmatchcase
+from typing import TYPE_CHECKING, ClassVar, Optional
+
+import anyio
+from agentenv_protocol.computer import COMPUTER_DISPLAY
+from agentenv_protocol.tool_access import DISABLE, DISABLE_TOOL_EXTENSION_URI, WILDCARD
+
+from agent_env.attribution import Attribution
+from agent_env.env.env import DeployedSandboxEnv
+from agent_env.env.envs.computer import params as computer_params
+from agent_env.env.envs.computer.boot import boot, recorded_settings, settings_environment
+from agent_env.env.gateway.constants import WELL_KNOWN_PATH
+from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider, _tool_names
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
+
+if TYPE_CHECKING:
+    from agent_env.env.env import Env
+    from agent_env.env.envs.computer.env import ComputerEnv
+    from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+
+_TOOLS_TIMEOUT_S = 60.0
+
+
+class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
+    """Deploys a computer env with no gateway in front; the driver's own card is the env card."""
+
+    type: ClassVar[str] = "computer"
+    record_class = DeployedSandboxEnv
+
+    async def deploy(
+        self,
+        env: Env,
+        sandbox_provider: SandboxProvider,
+        *,
+        ttl_seconds: int = 10800,
+        disk_size_gb: float = 10,
+        cpu: float | None = None,
+        memory_mb: int | None = None,
+        attribution: Optional[Attribution] = None,
+        env_params: Optional[dict] = None,
+    ) -> DeployedSandboxEnv:
+        """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
+        provider runs natively, booted; returns the record once the driver is ready with the env's display and tools."""
+        from agent_env.env.envs.computer.env import ComputerEnv
+
+        if not isinstance(env, ComputerEnv):
+            raise TypeError(f"env_provider_type '{self.type}' deploys a computer env, not a {env.type} env")
+        params, settings, problems = computer_params.checked(env, env_params)
+        if problems:
+            raise DeployRefused(f"{env.id}: " + "; ".join(problems))
+        if not (builds := env.ready_builds(params.form)):
+            raise DeployRefused(f"{env.id} has no ready build to deploy; its builds are {env.build_statuses() or 'none yet'}")
+        attempt = functools.partial(self._boot, env, builds, params, settings, ttl_seconds=ttl_seconds,
+                                    disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution)
+        return await self._run(sandbox_provider, env.id, attempt)
+
+    async def install_changelog_triggers(self, environment_name: str) -> None:
+        """No state store, so no changelog to install."""
+
+    async def _boot(self, env: ComputerEnv, builds: list[tuple[str, str, dict]], params: computer_params.ComputerParams,
+                    settings: dict[str, dict], sandbox_provider: SandboxProvider, *, ttl_seconds: int,
+                    disk_size_gb: float, cpu: float | None, memory_mb: int | None,
+                    attribution: Optional[Attribution]) -> DeployedSandboxEnv:
+        """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
+        from agent_env.env.envs.computer.env import ComputerEnv
+
+        native = [(form, arch, build) for form, arch, build in builds
+                  if f"linux/{arch}" in sandbox_provider.native_platforms()]
+        if not native:
+            raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
+                             f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
+        form, arch, build = native[0]
+        computer, driver, name = env.computer_artifact(), env.driver, env.environment_name
+        values = {**{key: setting.default for key, setting in computer.config.items()}, **settings.get(env.computer.id, {})}
+        policy = NetworkPolicy.from_dict(env.network) if env.network else None
+        booted = await boot(
+            sandbox_provider, image=build["image"], arch=arch, port=driver.port, network_policy=policy,
+            environment=settings_environment(computer, values, environment_name=name,
+                                             spaces=params.spaces.model_dump() if params.spaces else None),
+            timeout=ttl_seconds, attribution=attribution, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb)
+        self._container_sandboxes.append(booted.sandbox)
+        self._environment_sandboxes[name] = booted.sandbox
+        if booted.card.get("name") != name:
+            raise RuntimeError(f"'{name}' serves a card named '{booted.card.get('name')}'; a computer env's driver must "
+                               "serve its card under the env's environment_name")
+        record = DeployedSandboxEnv(
+            env_id=env.id, env_version=env.version, env_provider_type=self.type,
+            environment_card_url=f"{booted.url}{WELL_KNOWN_PATH}", environment_card=booted.card,
+            environment_card_read_at_utc=datetime.now(timezone.utc).isoformat(),
+            sandbox_id=booted.sandbox.sandbox_id, sandbox_type=booted.sandbox.type,
+            sandbox_ids={ComputerEnv.type: {name: booted.sandbox.sandbox_id}},
+            metadata={"computer": {
+                "form": form, "arch": arch, "provider": type(sandbox_provider).__name__, "image": build["image"],
+                "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
+                "display": values.get("resolution"), "network": env.network,
+                "settings": recorded_settings(computer, values), "env_params": params.model_dump(exclude_none=True)}},
+        )
+        await _require_display(record, values.get("resolution"))
+        await _hide_tools(record, env.hidden_tools)
+        return record
+
+
+async def _require_display(record: DeployedSandboxEnv, resolution: Optional[str]) -> None:
+    """Fail unless the driver reports the screen size the boot set, as ``WIDTHxHEIGHT``."""
+    if resolution is None:
+        return
+    display = await record.invoke(COMPUTER_DISPLAY, "get")
+    if f"{display['width']}x{display['height']}" != resolution:
+        raise RuntimeError(f"'{record.env_id}' booted at {display['width']}x{display['height']}, not the {resolution} "
+                           "its display sets")
+
+
+async def _hide_tools(record: DeployedSandboxEnv, patterns: list[str]) -> None:
+    """Disable, for every role, each tool the driver lists that one of ``patterns`` matches."""
+    if not patterns:
+        return
+    with anyio.fail_after(_TOOLS_TIMEOUT_S):
+        tools = await _tool_names(record.mcp_url)
+    hidden = sorted({tool for tool in tools if any(fnmatchcase(tool, pattern) for pattern in patterns)})
+    if hidden:
+        await record.invoke(DISABLE_TOOL_EXTENSION_URI, DISABLE, {"role": WILDCARD, "tools": hidden})

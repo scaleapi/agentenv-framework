@@ -132,8 +132,9 @@ class WebsiteEnv(Env):
             artifact_id=artifact_id, artifact_version=artifact_version,
         )
 
-    def deploy_refusal(self, **options) -> str | None:
-        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find."""
+    def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
+        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
+        ``sandbox_type`` is deploy()'s own, which no provider takes."""
         return deploy_refusal(self, provider_or_class(self), options)
 
     @classmethod

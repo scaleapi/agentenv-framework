@@ -182,7 +182,7 @@ def test_build_env_provider_builds_a_new_provider_of_the_declared_type(name, cls
 
 
 def test_build_env_provider_rejects_an_unknown_type():
-    with pytest.raises(ValueError, match=r"Unknown env_provider_type: 'vm' \(expected one of \['gateway', 'server'\]\)"):
+    with pytest.raises(ValueError, match=r"Unknown env_provider_type: 'vm' \(expected one of \['computer', 'gateway', 'server'\]\)"):
         build_env_provider("vm")
 
 

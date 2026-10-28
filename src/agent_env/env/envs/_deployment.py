@@ -280,13 +280,15 @@ def provider_refusal(provider_class: type[EnvironmentProvider], env_class: type[
 
 
 def option_refusal(env: Env, provider: EnvironmentProvider | type[EnvironmentProvider], options: dict) -> str | None:
-    """Why provider, or a provider of that class, wouldn't take options: one its deploy() doesn't name, set away from the env's deploy() default."""
+    """Why provider, or a provider of that class, wouldn't take options: one its deploy() doesn't name, set away from the env's deploy() default,
+    or one the env's deploy() doesn't name either."""
     from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider
     taken = inspect.signature(provider.deploy).parameters
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in taken.values()):
         return None
     defaults = inspect.signature(type(env).deploy).parameters
-    refused = [name for name, value in options.items() if name not in taken and value != defaults[name].default]
+    refused = [name for name, value in options.items()
+               if name not in taken and (name not in defaults or value != defaults[name].default)]
     if not refused:
         return None
     builtin = issubclass(provider if isinstance(provider, type) else type(provider), _SandboxEnvironmentProvider)

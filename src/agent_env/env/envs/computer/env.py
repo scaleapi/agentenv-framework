@@ -4,24 +4,41 @@ metadata as it builds (``composed``), and the arches built written as its comput
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
+from agent_env.attribution import Attribution
 from agent_env.entity.refs import EntityRef
-from agent_env.env.env import Env
+from agent_env.env.env import Env, gateway_url_of
+from agent_env.env.envs._deployment import (
+    as_builtin,
+    builtin_provider_for,
+    close_replaced,
+    deploy_refusal,
+    deploy_through_provider,
+    provider_or_class,
+)
 from agent_env.env.envs.computer import composer, gate
+from agent_env.env.envs.computer import params as computer_params
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
+from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import get_env_store
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.env.env import DeployedEnv
+    from agent_env.providers.env_providers.env_provider import EnvironmentProvider
+    from agent_env.task_step.context import TaskStepContext
+
+logger = logging.getLogger(__name__)
 
 
 class ComputerEnv(Env):
     type: ClassVar[str] = "computer"
     description = "A computer: a base computer and a driver, composed at put into an image for each form and arch"
+    env_provider_type: ClassVar[str] = "computer"
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("computer", artifact_type="computer"),
                                                   EntityRef.env("driver", env_type=ComputerDriverEnv.type))
 
@@ -33,6 +50,11 @@ class ComputerEnv(Env):
         self.computer, self.driver = computer, driver
         self.display, self.network = display, network
         self.computer_settings = computer_settings or {}
+        self._sandbox = None
+        self._env_provider: Optional[EnvironmentProvider] = builtin_provider_for(self.env_provider_type)
+        self._gateway_url = None
+        self._deployed: Optional[DeployedEnv] = None
+        self._replaced: list[tuple] = []  # the provider and sandbox of each deployment a later deploy replaced, for close()
 
     def to_dict(self) -> dict:
         return {**super().to_dict(), "service_name": self.environment_name,
@@ -88,8 +110,74 @@ class ComputerEnv(Env):
         except ValueError as e:
             ctx.refuse([str(e)])
 
-    async def deploy(self, **kwargs) -> DeployedEnv:
-        statuses = {f"{form}/{arch}": result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()
-                    for arch, result in by_arch.items()}
-        raise NotImplementedError(f"{self.id} is a computer env, which agent-env can't boot yet; its builds are "
-                                  f"{statuses or 'none yet'}")
+    def computer_artifact(self) -> ComputerArtifact:
+        """The env's computer: its base composed with its driver, over the images built."""
+        return ComputerArtifact.get(self.metadata["computer"]["id"], self.metadata["computer"]["version"])
+
+    def ready_builds(self, form: Optional[str] = None) -> list[tuple[str, str, dict]]:
+        """Each ready build, as (form, arch, record), in the base's order of forms and of arches; only
+        ``form``'s when it's given."""
+        composed, arches = self.metadata.get("composed", {}), self.computer.arch
+        return [(name, arch, composed[name][arch]) for name in gate.forms(self.computer) if form in (None, name)
+                for arch in arches if composed.get(name, {}).get(arch, {}).get("status") == "ready"]
+
+    def build_statuses(self) -> dict[str, str]:
+        return {f"{form}/{arch}": result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()
+                for arch, result in by_arch.items()}
+
+    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10,
+                     gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None,
+                     memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
+                     env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
+                     env_params: Optional[dict] = None) -> DeployedEnv:
+        return await deploy_through_provider(
+            self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
+            disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
+            env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
+            env_params=env_params)
+
+    def deploy_refusal(self, *, sandbox_type: str | None = None, env_params: Optional[dict] = None,
+                       **options) -> str | None:
+        """Why deploy() would refuse before booting anything, or None: an option the computer provider doesn't take, a
+        problem with ``env_params``, or a sandbox provider that runs none of the env's arches natively or can't enforce
+        its network."""
+        from agent_env.providers import build_sandbox_provider, get_env_sandbox_provider
+        from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
+
+        if refusal := deploy_refusal(self, provider_or_class(self), {**options, "env_params": env_params}):
+            return refusal
+        _, _, problems = computer_params.checked(self, env_params)
+        sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
+        links, arches = sandbox_provider.links, gate.arches(self.computer, self.driver)
+        if not any(f"linux/{arch}" in link.native_platforms() for link in links for arch in arches):
+            problems.append(f"{', '.join(type(link).__name__ for link in links)} runs none of its arches "
+                            f"({', '.join(arches)}) natively")
+        policy = NetworkPolicy.from_dict(self.network) if self.network else None
+        if policy is not None and not any(link.supports_network_policy(policy) for link in links):
+            problems.append(f"{', '.join(type(link).__name__ for link in links)} can't enforce its network")
+        return f"computer env {self.id!r}: " + "; ".join(problems) if problems else None
+
+    @classmethod
+    async def from_deployed_env(cls, deployed: DeployedEnv) -> ComputerEnv:
+        env = Env.get(deployed.env_id, deployed.env_version)
+        if not isinstance(env, ComputerEnv):
+            raise TypeError(f"Expected ComputerEnv, got {type(env).__name__}")
+        env._sandbox = await as_builtin(env._env_provider)._reattach(env, deployed)
+        env._gateway_url = gateway_url_of(deployed)
+        env._instance_id = deployed.instance_id
+        env._deployed = deployed
+        return env
+
+    async def close(self, context: Optional[TaskStepContext] = None) -> None:
+        await close_replaced(self)
+        if self._env_provider is not None:
+            try:
+                await self._env_provider.close()
+            except Exception as e:
+                logger.warning(f"Failed to close env provider: {e}")
+        if self._sandbox is not None:
+            try:
+                await self._sandbox.terminate()
+            except Exception as e:  # a cancellation propagates, and keeps the sandbox for the next close()
+                logger.warning(f"Failed to terminate sandbox {self._sandbox.sandbox_id}: {e}")
+            self._sandbox = None

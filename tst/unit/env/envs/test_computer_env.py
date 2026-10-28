@@ -9,8 +9,12 @@ import logging
 import subprocess
 import tarfile
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from agentenv_protocol.computer import COMPUTER_DISPLAY
+from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
+from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
 
 from agent_env.artifact.artifacts import docker_image
@@ -22,11 +26,15 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.envs.computer import composer
+from agent_env.env.envs.computer import boot, composer
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
+from agent_env.providers.env_providers import env_computer_provider
+from agent_env.providers.env_providers.env_provider import DeployRefused
+from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from agent_env.providers.sandbox_providers import local_sandbox
 from agent_env.store.base import NotFoundError
 from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
@@ -38,15 +46,27 @@ OS = {"type": "linux", "distribution": "ubuntu", "version": "24.04", "display": 
 CONFIG = {"resolution": {"default": "1280x800", "phase": "deploy"}, "timezone": {"default": "UTC", "phase": "deploy"},
           "theme": {"default": "light", "phase": "build"}}
 SERVE = "venv/bin/python -m agentenv_protocol.computer.serve driver.py:Desk"
+CARD_EXTENSION = "urn:agentenv:computer/v1"
+CARD = {"name": "desktop", "capabilities": {"extensions": [{"uri": CARD_EXTENSION}]}}
 TOOLS = ["computer_screenshot", "computer_click", "computer_type", "computer_pointer_list"]
 
 
 class FakeDocker:
     """This machine's Docker for the composer, on arm64 emulating amd64: each build recorded with its Dockerfile, its
-    context's files and its programs, each push landing in the fake registry as an image of its arch."""
+    context's files and its programs, each push landing in the fake registry as an image of its arch, and each probe
+    recorded by the arch and image it booted."""
 
     def __init__(self, registry: Registry):
         self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
+        self.probed, self.probe_fails = [], {}
+
+    async def probe(self, links, env, driver, arch, image):
+        self.probed.append((arch, image))
+        if arch in self.probe_fails:
+            checks = [CheckResult(check="P4", name="clicks show their effect", status="failed", detail=self.probe_fails[arch])]
+        else:
+            checks = [CheckResult(check="P0", name="the card", status="passed", extensions=[CARD_EXTENSION])]
+        return ProbeReport.of("full", "desk", checks, [CARD_EXTENSION]), CARD, "LocalSandboxProvider"
 
     def build_image(self, dockerfile, context, tag, *, platform, labels=None, build_args=None):
         if platform in self.fail:
@@ -84,6 +104,8 @@ def docker(local_stores, cli_routing, monkeypatch):
     monkeypatch.setattr(composer, "pin_digest", registry.pin_digest)
     monkeypatch.setattr(docker_image, "pin_digest", registry.pin_digest)
     monkeypatch.setattr(composer, "host_platform", lambda: "linux/arm64")
+    monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/arm64")
+    monkeypatch.setattr(composer, "_probe", fake.probe)
     monkeypatch.setattr(composer, "_emulated_platforms", lambda: {"linux/arm64", *fake.emulates})
     monkeypatch.setattr(composer, "_installed", lambda local, layer: {"mss": "10.1.0"})
     monkeypatch.setattr(composer, "_protocol_source", lambda: None)
@@ -144,7 +166,13 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     stored = Env.get(env.id)
     composed = stored.metadata["composed"]["container"]
     assert {arch: (r["status"], r["reused"], r["emulated"]) for arch, r in composed.items()} == {
-        "amd64": ("unverified", False, True), "arm64": ("unverified", False, False)}
+        "amd64": ("unverified", False, True), "arm64": ("ready", False, False)}
+    assert composed["amd64"]["reason"] == "no configured sandbox provider runs linux/amd64 natively to probe it"
+    assert docker.probed == [("arm64", composed["arm64"]["image"])] and composed["arm64"]["card"] == CARD
+    probe = composed["arm64"]["probe"]
+    assert (probe["level"], probe["passed"], probe["provider"], probe["extensions"]) == (
+        "full", True, "LocalSandboxProvider", {CARD_EXTENSION: "verified"})
+    assert b'"passed": true' in FileArtifact.get(probe["report"]["id"], probe["report"]["version"]).load()
     assert composed["arm64"]["installed"] == {"mss": "10.1.0"} and composed["arm64"]["key"] != composed["amd64"]["key"]
     assert composed["arm64"]["image"].startswith("localhost:5000/agentenv-computers:")
     computer = ComputerArtifact.get(stored.metadata["computer"]["id"], stored.metadata["computer"]["version"])
@@ -152,6 +180,7 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert computer.image().image_name.startswith("localhost:5000/agentenv-computers:index-")
     assert {arch: r["status"] for arch, r in computer.metadata["validated_images"]["container"].items()} == {
         "amd64": "passed", "arm64": "passed"}
+    assert computer.metadata["validated_boot"] == {"container": {"arm64": probe}}
     assert (computer.config["resolution"].default, computer.config["timezone"].default) == ("1600x900", "Europe/Paris")
     assert stored.computer_settings == {"timezone": "Europe/Paris", "theme": "dark"}
     arm64 = next(build for build in docker.builds if build["platform"] == "linux/arm64")
@@ -224,7 +253,7 @@ def test_a_pair_that_fails_is_recorded_with_its_log_and_the_rest_are_built_and_w
     assert amd64["reason"] == 'the build failed: #7 ERROR: process "/bin/sh -c pip install" did not complete successfully'
     log = FileArtifact.get(amd64["log"]["id"], amd64["log"]["version"])
     assert b"did not complete successfully" in log.load()
-    assert env.metadata["composed"]["container"]["arm64"]["status"] == "unverified"
+    assert env.metadata["composed"]["container"]["arm64"]["status"] == "ready"
     assert ComputerArtifact.get(env.metadata["computer"]["id"]).arch == ["arm64"]
 
 
@@ -248,7 +277,7 @@ def test_a_machine_that_cant_emulate_the_other_arch_fails_that_arch_alone(base, 
 
     amd64 = env.metadata["composed"]["container"]["amd64"]
     assert amd64["reason"] == "this machine can't build linux/amd64: its Docker has no emulation for it"
-    assert env.metadata["composed"]["container"]["arm64"]["status"] == "unverified"
+    assert env.metadata["composed"]["container"]["arm64"]["status"] == "ready"
     assert [build["platform"] for build in docker.builds] == ["linux/arm64"]
 
 
@@ -277,7 +306,8 @@ def test_a_base_built_from_its_context_is_built_here_for_each_arch_and_keyed_by_
     assert {r["reused"] for r in again.metadata["composed"]["container"].values()} == {True}
     assert {build["dockerfile"].splitlines()[0] for build in docker.builds} == {
         "FROM local/base-1234:abcd-amd64", "FROM local/base-1234:abcd-arm64"}
-    assert {r["status"] for r in env.metadata["composed"]["container"].values()} == {"unverified"}
+    assert {arch: r["status"] for arch, r in env.metadata["composed"]["container"].items()} == {
+        "amd64": "unverified", "arm64": "ready"}
 
 
 def test_a_checkout_composes_its_own_protocol_into_the_drivers_venv(base, driver, docker, tmp_path, monkeypatch):
@@ -295,19 +325,66 @@ def test_a_checkout_composes_its_own_protocol_into_the_drivers_venv(base, driver
     assert "protocol/pyproject.toml" in docker.builds[0]["files"]
 
 
-def test_the_pairs_left_to_build_are_those_failed_or_interrupted(base, driver, docker):
+@pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
+                         ids=["interrupted", "unprobed"])
+def test_the_pairs_left_to_compose_are_those_failed_interrupted_or_unprobed_on_a_native_arch(base, driver, docker,
+                                                                                             left):
     docker.fail["linux/amd64"] = "boom"
     env = Env.get(_put(base, driver).id)
     composed = env.metadata["composed"]
-    composed["container"]["arm64"] = {"status": "building"}
+    composed["container"]["arm64"] = left
     env.metadata = {**env.metadata, "composed": composed}
 
     assert composer.pending(env) == [("container", "amd64"), ("container", "arm64")]
     docker.fail.clear()
     composer.compose(env, composer.pending(env))
 
-    assert {r["status"] for r in Env.get(env.id).metadata["composed"]["container"].values()} == {"unverified"}
+    assert {arch: r["status"] for arch, r in Env.get(env.id).metadata["composed"]["container"].items()} == {
+        "amd64": "unverified", "arm64": "ready"}
     assert composer.pending(Env.get(env.id)) == []
+
+
+def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_and_isnt_deployed(base, driver, docker,
+                                                                                                monkeypatch):
+    docker.probe_fails["arm64"] = "the click never landed"
+    failed = Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]
+
+    async def never_ready(*args):
+        raise RuntimeError("LocalSandboxProvider: the computer at http://127.0.0.1:1 wasn't ready within 180 s "
+                           "(not ready: display: no X)")
+
+    async def overran(*args):
+        raise TimeoutError
+
+    monkeypatch.setattr(composer, "_probe", never_ready)
+    unbooted = Env.get(_put(base, driver, id="@local/~/kit/other", environment_name="other").id).metadata[
+        "composed"]["container"]["arm64"]
+    monkeypatch.setattr(composer, "_probe", overran)
+    stuck = Env.get(_put(base, driver, id="@local/~/kit/stuck", environment_name="stuck").id).metadata[
+        "composed"]["container"]["arm64"]
+
+    assert (failed["status"], failed["stage"], failed["reason"]) == (
+        "failed", "probe", "the probe failed: P4 clicks show their effect: the click never landed")
+    assert not failed["probe"]["passed"] and failed["image"]
+    assert (unbooted["status"], unbooted["stage"]) == ("failed", "probe")
+    assert unbooted["reason"].startswith("it didn't boot: LocalSandboxProvider: the computer at http://127.0.0.1:1 "
+                                         "wasn't ready within 180 s")
+    assert (stuck["status"], stuck["stage"], stuck["reason"]) == (
+        "failed", "probe", f"the probe didn't finish within {composer._PROBE_TIMEOUT_S} s")
+
+
+@pytest.mark.parametrize("result, stored, replaces", [
+    ({"status": "unverified"}, {"status": "ready"}, False),
+    ({"status": "failed", "stage": "build"}, {"status": "unverified"}, False),
+    ({"status": "building"}, {"status": "unverified"}, False),
+    ({"status": "failed", "stage": "probe"}, {"status": "unverified"}, True),
+    ({"status": "failed", "stage": "probe"}, {"status": "ready"}, False),
+    ({"status": "ready"}, {"status": "failed", "stage": "probe"}, True),
+    ({"status": "building"}, {"status": "failed", "stage": "build"}, True),
+], ids=["unprobed-over-ready", "build-failure-over-built", "building-over-built", "probe-failure-over-unprobed",
+        "probe-failure-over-ready", "ready-over-probe-failure", "building-over-build-failure"])
+def test_a_result_takes_a_pairs_place_only_when_it_got_at_least_as_far(result, stored, replaces):
+    assert (composer._rank(result) >= composer._rank(stored)) is replaces
 
 
 def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, docker, caplog):
@@ -322,8 +399,9 @@ def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, doc
     again = runner.invoke(cli, ["env", "build", "--id", env.id])
 
     assert failed.exit_code == 1 and "container/amd64: failed (the build failed: boom)" in failed.output
-    assert built.exit_code == 0 and "container/amd64: unverified (localhost:5000/agentenv-computers:" in built.output
-    assert "container/arm64: unverified (localhost:5000" in built.output and len(docker.builds) == 2
+    assert built.exit_code == 0 and ("container/amd64: unverified (no configured sandbox provider runs linux/amd64 "
+                                     "natively to probe it)") in built.output
+    assert "container/arm64: ready (localhost:5000" in built.output and len(docker.builds) == 2
     assert again.exit_code == 0 and len(docker.builds) == 2
     assert ComputerArtifact.get(Env.get(env.id).metadata["computer"]["id"]).arch == ["amd64", "arm64"]
 
@@ -335,11 +413,12 @@ def test_env_build_refuses_an_env_that_isnt_a_computer_env(base, driver, docker)
 
 
 @pytest.mark.asyncio
-async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, driver, docker):
+async def test_a_computer_env_with_no_ready_build_is_refused_at_deploy_naming_its_builds(base, driver, docker):
+    docker.probe_fails["arm64"] = "the click never landed"
     env = _put(base, driver)
 
-    with pytest.raises(NotImplementedError, match=r"agent-env can't boot yet; its builds are \{'container/amd64': "
-                                                  r"'unverified', 'container/arm64': 'unverified'\}"):
+    with pytest.raises(DeployRefused, match=r"has no ready build to deploy; its builds are \{'container/amd64': "
+                                            r"'unverified', 'container/arm64': 'failed'\}"):
         await Env.get(env.id).deploy()
 
 
@@ -521,5 +600,126 @@ def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_r
 
     stored = Env.get(env.id)
     composed = stored.metadata["composed"]["container"]
-    assert {arch: r["status"] for arch, r in composed.items()} == {"amd64": "unverified", "arm64": "unverified"}
+    assert {arch: r["status"] for arch, r in composed.items()} == {"amd64": "unverified", "arm64": "ready"}
     assert stored.metadata["computer"]["images"] == {arch: r["image"] for arch, r in composed.items()}
+
+
+DRIVER_CARD = {"name": "desktop", "capabilities": {"extensions": [
+    {"uri": COMPUTER_DISPLAY, "params": {"endpoint": "/computer/display", "methods": {"get": {"method": "GET"}}}},
+    {"uri": DISABLE_TOOL_EXTENSION_URI, "params": {"endpoint": "/tools/disable", "methods": {"disable": {}}}}]}}
+
+
+@pytest.fixture
+def boots(monkeypatch):
+    """The boots a deploy asks for, each a sandbox serving the desktop driver's card at 127.0.0.1:20001; the driver
+    shows a 1600x900 screen, lists the desk's tools, and each extension call it gets is recorded."""
+    made = SimpleNamespace(boots=[], calls=[], sandboxes=[], display=(1600, 900))
+
+    async def fake_boot(sandbox_provider, **kwargs):
+        made.boots.append({**kwargs, "provider": type(sandbox_provider).__name__})
+        sandbox = SimpleNamespace(sandbox_id=f"local-{len(made.boots)}", type="local", terminated=False)
+
+        async def terminate():
+            sandbox.terminated = True
+
+        sandbox.terminate = terminate
+        made.sandboxes.append(sandbox)
+        return boot.Booted(sandbox, "http://127.0.0.1:20001", DRIVER_CARD)
+
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+        made.calls.append((uri, method, params))
+        width, height = made.display
+        return {"width": width, "height": height, "scale": 1, "modes": []} if uri == COMPUTER_DISPLAY else {}
+
+    monkeypatch.setattr(env_computer_provider, "boot", fake_boot)
+    monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
+    monkeypatch.setattr(env_computer_provider, "_tool_names", AsyncMock(return_value=TOOLS))
+    return made
+
+
+@pytest.mark.asyncio
+async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_settings_display_and_hidden_tools(
+        base, driver, docker, boots):
+    env = _put(base, driver, display={"width": 1600, "height": 900}, tools={"hide": ["computer_pointer_*"]})
+
+    deployed = await Env.get(env.id).deploy(attribution={"run": "r1"}, env_params={
+        "settings": {"ubuntu-24.04": {"timezone": "Asia/Tokyo"}}, "spaces": {"default_space": "norm"}})
+
+    (booted,) = boots.boots
+    composed = Env.get(env.id).metadata["composed"]["container"]
+    assert (booted["arch"], booted["image"], booted["port"], booted["provider"]) == (
+        "arm64", composed["arm64"]["image"], 18765, "LocalSandboxProvider")
+    environment = booted["environment"]
+    assert (environment["AGENTENV_SETTING_RESOLUTION"], environment["AGENTENV_SETTING_TIMEZONE"]) == ("1600x900", "Asia/Tokyo")
+    assert json.loads(environment["AGENTENV_COMPUTER_SETTINGS"]) == {"default_space": "norm", "default_norm_scale": 1000}
+    assert environment["ENVIRONMENT_NAME"] == "desktop" and "AGENTENV_SETTING_THEME" not in environment
+    assert boots.calls == [(COMPUTER_DISPLAY, "get", None),
+                           (DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "*", "tools": ["computer_pointer_list"]})]
+    assert (deployed.env_provider_type, deployed.sandbox_ids) == ("computer", {"computer": {"desktop": "local-1"}})
+    assert deployed.environment_card == DRIVER_CARD and deployed.mcp_url == "http://127.0.0.1:20001/mcp"
+    record = deployed.metadata["computer"]
+    assert {key: record[key] for key in ("form", "arch", "provider", "display", "settings")} == {
+        "form": "container", "arch": "arm64", "provider": "LocalSandboxProvider", "display": "1600x900",
+        "settings": {"resolution": "1600x900", "timezone": "Asia/Tokyo"}}
+    assert record["computer"]["id"] == f"{env.id}__computer" and record["env_params"]["spaces"]["default_space"] == "norm"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_params, problem", [
+    ({"form": "disk"}, "env_params.form: 'disk' isn't one of"),
+    ({"settings": {"ubuntu-24.04": {"theme": "dark"}}}, "env_params.settings: theme is a build-phase setting"),
+    ({"settings": {"ubuntu-24.04": {"resolution": "800x600"}}}, "the env's display sets the screen's size"),
+    ({"settings": {"ubuntu-24.04": {"timezone": 3}}}, "env_params.settings.ubuntu-24.04.timezone must be a str"),
+    ({"spaces": {"default_space": "polar"}}, "env_params.spaces.default_space"),
+    ({"colour": "blue"}, "env_params.colour"),
+], ids=["form", "build-setting", "resolution-over-display", "setting-type", "space", "unknown"])
+async def test_env_params_a_computer_env_cant_take_are_refused_at_save_and_at_deploy(base, driver, docker, boots,
+                                                                                     env_params, problem):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+
+    saved = DeployEnvTaskStep(id="d", version=None, env_id=env.id, env_params=env_params).preflight()
+    with pytest.raises(DeployRefused, match=problem.replace(".", "[.]")):
+        await Env.get(env.id).deploy(env_params=env_params)
+
+    assert len(saved) == 1 and problem in saved[0] and boots.boots == []
+
+
+@pytest.mark.asyncio
+async def test_a_computer_that_boots_at_another_size_than_its_display_fails_the_deploy_and_is_torn_down(
+        base, driver, docker, boots):
+    boots.display = (1280, 800)
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+
+    with pytest.raises(RuntimeError, match="booted at 1280x800, not the 1600x900 its display sets"):
+        await Env.get(env.id).deploy()
+
+    assert [sandbox.terminated for sandbox in boots.sandboxes] == [True]
+
+
+def test_a_boot_mints_a_generated_setting_resolves_a_secret_and_its_record_withholds_both(base, monkeypatch):
+    monkeypatch.setenv("DESK_KEY", "s3cret")
+    computer = base.model_copy(update={"config": {
+        **base.config, "token": base.config["timezone"].model_copy(update={"default": "", "generate": True}),
+        "api_key": base.config["timezone"].model_copy(update={"default": "env:DESK_KEY", "secret": True})}})
+
+    first, second = (boot.settings_environment(computer, {}, environment_name="desktop") for _ in range(2))
+
+    assert first["AGENTENV_SETTING_API_KEY"] == "s3cret" and first["AGENTENV_SETTING_TOKEN"]
+    assert first["AGENTENV_SETTING_TOKEN"] != second["AGENTENV_SETTING_TOKEN"]
+    assert boot.recorded_settings(computer, {}) == {"resolution": "1280x800", "timezone": "UTC", "token": boot.WITHHELD,
+                                                    "api_key": boot.WITHHELD}
+
+
+@pytest.mark.parametrize("change, problem", [
+    ("riscv64", "LocalSandboxProvider runs none of its arches (amd64, arm64) natively"),
+    ("network", "LocalSandboxProvider can't enforce its network"),
+])
+def test_a_deploy_its_sandbox_provider_cant_carry_out_is_refused_at_save(base, driver, docker, monkeypatch, change,
+                                                                       problem):
+    env = _put(base, driver, network={"mode": "allowlist", "allow_hosts": ["example.com"]} if change == "network" else None)
+    if change == "riscv64":
+        monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/riscv64")
+
+    (refusal,) = DeployEnvTaskStep(id="d", version=None, env_id=env.id).preflight()
+
+    assert problem in refusal
