@@ -107,15 +107,15 @@ def as_imported(imported: Imported, plan: Plan, write: Write, now: Mapping[str, 
     return then == current
 
 
-def grafted(bundle: Bundle, imported: Imported) -> tuple[Bundle, dict[Path, set[str]], list[str]]:
+def grafted(bundle: Bundle, imported: Imported) -> tuple[Bundle, dict[Path, set[str]], dict[Path, list[str]]]:
     """``bundle`` with each imported task's steps given back, from the stored version each was imported from, matched
     by step id and type, what the import left out where the folder doesn't set it: each user-scoped field, but a
     reference's pin where the folder names something else; each list item's, from the stored item it was written from;
     and each env var and credential the import's scrub took, where the folder holds what the scrub left. And, for each
-    task's file, the paths in its steps that took one; and a problem for each field still holding what the scrub left,
+    task's file, the paths in its steps that took one, and a problem for each field still holding what the scrub left,
     which the folder changed too much to give back."""
     registry = get_task_step_registry()
-    entries, taken, problems = [], {}, []
+    entries, taken, problems = [], {}, {}
     for entry in bundle.entries:
         source = imported.entities.get(where(bundle.root, entry)) if entry.kind is BundleKind.TASK else None
         try:
@@ -135,8 +135,9 @@ def grafted(bundle: Bundle, imported: Imported) -> tuple[Bundle, dict[Path, set[
             given, left = _given_back(step, origin, cls)
             for path in given:
                 taken.setdefault(entry.path, set()).add(f"[{index}].{path}")
-            problems += [f"{where(bundle.root, entry)}: step {step.get('id')!r}: {path} still holds what the import "
-                         "masked, and the folder changed what it was masked from; set its real value" for path in left]
+            problems.setdefault(entry.path, []).extend(
+                f"{where(bundle.root, entry)}: step {step.get('id')!r}: {path} still holds what the import masked, and "
+                "the folder changed what it was masked from; set its real value" for path in left)
         entries.append(replace(entry, config=steps))
     return replace(bundle, entries=tuple(entries)), taken, problems
 

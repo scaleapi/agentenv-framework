@@ -422,3 +422,15 @@ def test_a_masked_value_that_cant_be_told_from_another_is_refused_rather_than_wr
         f"tasks/fetch.json: step 'fetch': urls[{index}].url still holds what the import masked, and the folder "
         "changed what it was masked from; set its real value" for index in (0, 1))
     assert Task.get("fetch").version == 1
+
+
+def test_a_masked_value_in_a_task_not_registered_refuses_nothing(local_stores, tmp_path, monkeypatch):
+    folder, _ = _downloads(tmp_path, monkeypatch, ["ann", "bob"])
+    _edit_urls(folder, lambda entries: [entry.update(filename=f"renamed-{index}.csv")
+                                        for index, entry in enumerate(entries)])
+    (folder / "tasks/box.json").write_text(json.dumps([{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box",
+                                                        "sandbox_mode": "vm"}]))
+
+    registered = register_bundle(folder, tasks=["box"])
+
+    assert _written(registered) == {"fetch-box": (1, False)}

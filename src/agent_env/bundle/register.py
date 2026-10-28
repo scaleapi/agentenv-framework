@@ -95,11 +95,12 @@ def register_bundle(
         imported, why = read_imported(bundle.root)
         if why is not None:
             say(f"  {why}")
-        bundle, grafts, unrestored = grafted(bundle, imported) if imported is not None else (bundle, {}, [])
-        if unrestored:
-            raise BundleError(unrestored)
+        bundle, grafts, unrestored = grafted(bundle, imported) if imported is not None else (bundle, {}, {})
         resolved = resolve_bundle(bundle)
         plan = _plan(resolved, tasks, evals)
+        if problems := [problem for write in plan.writes if write.kind is BundleKind.TASK
+                        for problem in unrestored.get(write.source.entry.path, ())]:
+            raise BundleError(problems)
         held = _held_as_imported(plan, imported)
         ids, problems = registry_ids(plan, _prefix(bundle, prefix), imported, held)
         if problems:
