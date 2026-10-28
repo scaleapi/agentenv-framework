@@ -180,7 +180,7 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     first = _put(base, driver)
     docker_calls.clear()
     second = _put(base, driver, id="@local/~/kit/other", environment_name="other", display={"width": 640, "height": 480},
-                  network={"mode": "allowlist"}, tools={"hide": ["computer_pointer_list"]})
+                  network={"mode": "allowlist"})
 
     built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
     assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
@@ -330,16 +330,12 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
     ({"network": {"mode": "allow_all", "allow_hosts": ["x.org"]}},
      "network: allow_all permits everything; entries would be silently ignored"),
     ({"network": {"mode": "allowlist", "ports": [80]}}, "network is { mode, allow_hosts, allow_cidrs }"),
-    ({"tools": {"hide": ["computer_drag*"]}}, "tools.hide: 'computer_drag*' matches none of @local/~/kit/desk's tools"),
-    ({"tools": {"hide": ["computer_c*"]}}, "tools.hide: 'computer_c*' hides computer_click, of the seven tools every "
-                                           "computer offers"),
-    ({"tools": {"show": ["x"]}}, "tools is { hide = [<pattern>, ...] }"),
     ({"computer_settings": {"wallpaper": "x"}},
      "computer_settings.wallpaper: @local/~/kit/ubuntu-24.04 declares no setting 'wallpaper'"),
     ({"computer_settings": {"timezone": 3}}, "computer_settings.timezone must be a str, like its default 'UTC', not 3"),
     ({"computer_settings": ["timezone"]}, "computer_settings must be a table of the computer's setting values"),
 ], ids=["apps", "display-zero", "display-side", "display-and-resolution", "network", "network-key",
-        "tools-hide", "tools-minimum", "tools-key", "settings-name", "settings-type", "settings-table"])
+        "settings-name", "settings-type", "settings-table"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
         _put(base, driver, **changes)

@@ -15,9 +15,6 @@
     "version": 4
   },
   "environment_name": "desktop",
-  "hidden_tools": [
-    "computer_keyboard_*"
-  ],
   "id": "desktop",
   "metadata": {
     "composed": {

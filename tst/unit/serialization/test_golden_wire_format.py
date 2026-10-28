@@ -166,7 +166,6 @@ ENV_FIXTURES = {
         driver=ENV_FIXTURES["computer_driver"](),
         display={"width": 1280, "height": 800},
         network={"mode": "allow_all"},
-        hidden_tools=["computer_keyboard_*"],
         computer_settings={"timezone": "Europe/Paris"},
         metadata={"composed": {"container": {"amd64": {
             "status": "unverified", "key": "sha256:" + "a" * 64, "reused": False, "emulated": False,

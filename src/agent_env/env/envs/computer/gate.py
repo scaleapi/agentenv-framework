@@ -3,10 +3,8 @@ other and against what the env declares, and every mismatch is named."""
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
-from agentenv_protocol.computer.conformance.checks import MINIMUM_TOOLS
 from agentenv_protocol.computer.platform import Platform, supported
 
 from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
@@ -21,7 +19,7 @@ MAX_SIDE = 32767
 
 
 def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, display: Any, network: Any,
-          hidden_tools: list[str], computer_settings: Any) -> tuple[dict[str, SettingValue], list[str]]:
+          computer_settings: Any) -> tuple[dict[str, SettingValue], list[str]]:
     """The env's values of the base's settings, and every way ``base``, ``driver`` and what the env declares don't
     compose."""
     problems = []
@@ -31,7 +29,6 @@ def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, disp
     problems += _image(base)
     problems += _display(base, display, computer_settings)
     problems += _network(network)
-    problems += _tools(driver, hidden_tools)
     values, invalid = _computer_settings(base, computer_settings)
     return values, problems + invalid
 
@@ -127,15 +124,3 @@ def _network(network: Any) -> list[str]:
     except (TypeError, ValueError) as e:
         return [f"network: {e}"]
     return []
-
-
-def _tools(driver: ComputerDriverEnv, hidden: list[str]) -> list[str]:
-    tools = {tool for platform in driver.declaration["platforms"] for tool in platform["tools"]}
-    problems = []
-    for pattern in hidden:
-        if not isinstance(pattern, str) or not any(fnmatchcase(tool, pattern) for tool in tools):
-            problems.append(f"tools.hide: {pattern!r} matches none of {driver.id}'s tools ({', '.join(sorted(tools))})")
-        elif minimum := [tool for tool in MINIMUM_TOOLS if fnmatchcase(tool, pattern)]:
-            problems.append(f"tools.hide: {pattern!r} hides {', '.join(minimum)}, of the seven tools every computer "
-                            "offers")
-    return problems
