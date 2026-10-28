@@ -5,6 +5,8 @@ recording, teardown ending what a run left open, and a reset leaving it going.""
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 
 import pytest
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
@@ -313,3 +315,11 @@ async def test_a_start_without_a_child_env_reads_the_envs_own_card_as_before(sto
     assert entry["state"] == "failed" and "max_duration_s" in entry["error"]  # its own card declares no recording
     context = await _start().execute(_context(_Computer(store)))
     assert "environment_name" not in context.metadata[RECORDINGS_KEY]["desk"]
+
+
+def test_a_task_loads_every_built_in_step_without_the_protocols_computer_extra():
+    """The `computer` extra (PyAV, Pillow) is optional: importing tasks and the step registry mustn't need it."""
+    code = ("import sys; sys.modules.update(av=None, PIL=None); import agent_env.task; "
+            "from agent_env.task_step.registry import _builtin_registry; _builtin_registry()")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr[-2000:]
