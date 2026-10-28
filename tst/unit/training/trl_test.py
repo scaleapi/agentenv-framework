@@ -180,20 +180,21 @@ class _Hanging:
         return _Session()
 
 
-def test_a_tool_that_misses_its_deadline_is_ended_by_the_server_and_the_episode_and_its_session_go_on(
-        served, monkeypatch):
+def test_a_tool_that_misses_its_deadline_ends_the_episode_unscored_and_its_session_goes_on(
+        served, monkeypatch, caplog):
     monkeypatch.setattr(proxy_module, "ToolSession", _Hanging())
     env = served({"a": PLAYED}, tool_timeout=0.5, max_concurrent_envs=1)
     environment = env.factory()
 
     environment.reset(**env.dataset[0])
-    assert environment.wait() == "wait didn't answer within 0.5s"
-    environment.end_turn(response="Added a crate.")
-    assert environment.get_reward() == 1.0
+    with caplog.at_level(logging.WARNING, logger=trl.__name__):
+        assert environment.wait() == FAILED
+        assert environment.get_reward() is None
     environment.reset(**env.dataset[0])
     environment.end_turn(response="Added a crate.")
 
     assert environment.get_reward() == 1.0
+    assert "rollout left unscored: wait didn't answer within 0.5s, and the episode ended" in caplog.text
 
 
 def test_a_session_refused_after_one_was_dropped_leaves_only_that_rollout_unscored(served, caplog):
@@ -294,10 +295,22 @@ def test_a_tool_trl_cant_call_is_refused_with_how_to_fix_it(served, tools):
         env.factory  # noqa: B018
 
 
+class _SlowTeardown:
+    """A teardown hold that lets each teardown finish after half a second."""
+
+    async def wait(self):
+        await asyncio.sleep(0.5)
+
+    def set(self):
+        pass
+
+
 @pytest.mark.parametrize("end", ["close", "exit"])
-def test_a_bundle_served_by_local_plays_and_its_episodes_left_running_end_at_close_and_at_exit(
+def test_a_bundle_served_by_local_plays_and_its_episodes_left_running_end_at_close_and_at_exit_waiting_out_a_slow_teardown(
         tmp_path, monkeypatch, teardowns, end):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(trl, "EXIT_SECONDS", 0.1)
+    teardowns.hold = _SlowTeardown()
     unbound = {key: value for key, value in ALICE.items() if key not in ("env_ids", "role")}
     env = AgentEnv.local(layout(tmp_path / "dock", {"tasks/a.json": json.dumps([ITEMS, unbound, TURN, REPLIES])}))
     environment = env.factory()

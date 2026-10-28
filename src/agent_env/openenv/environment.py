@@ -36,8 +36,8 @@ END_TURN = Tool(
     input_schema={"type": "object", "properties": {"response": {"type": "string", "description": "Your reply."}}},
 )
 ENDED = "the episode has ended; call reset"
-#: The key of a tool call's deadline in seconds in its action's metadata, which a client sets to have the server end a
-#: call that runs past it.
+#: The key of a tool call's deadline in seconds in its action's metadata. A call that runs past it ends the episode, since
+#: cancelling the call doesn't stop what it does, and the session goes on.
 TIMEOUT_METADATA = "timeout_s"
 NOT_RESET = "no episode has started; call reset before stepping"
 
@@ -224,7 +224,9 @@ class AgentEnvEnvironment(Environment):
         except EpisodeError as e:
             return _tool_error(name, ToolErrorType.TOOL_NOT_FOUND, e)
         except TimeoutError:
-            return _tool_error(name, ToolErrorType.TIMEOUT, f"{name} didn't answer within {timeout_s:g}s")
+            ended = await self._end_with_error(f"{name} didn't answer within {timeout_s:g}s, and the episode ended, "
+                                               "since what the call does may still be under way")
+            return CallToolObservation(tool_name=name, done=True, reward=None, metadata=ended.metadata)
         except httpx.HTTPError as e:
             return _tool_error(name, ToolErrorType.TRANSPORT_ERROR, e)
         if result.isError:

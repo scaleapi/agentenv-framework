@@ -46,8 +46,9 @@ CONNECT_SECONDS = 60.0
 CLOSE_SECONDS = 300.0
 #: How much longer than a tool's deadline the client waits for the server to end the call, before dropping the session.
 GRACE_SECONDS = 30.0
-#: How long the exit hook waits for the sessions to close, and then for each server to stop.
-EXIT_SECONDS = 30.0
+#: How long the exit hook waits for the sessions to close, and then for each server ``AgentEnv.local`` started to tear
+#: down its episodes and stop: a sandbox's teardown may take two minutes, and they run at once.
+EXIT_SECONDS, EXIT_SERVER_SECONDS = 30.0, 180.0
 #: How often, and how far apart in seconds, an environment tries to open a session in place of a dropped one while the
 #: server is at its limit, which it stays at until it has seen the dropped one close.
 REOPEN_ATTEMPTS, REOPEN_SECONDS = 5, 1.0
@@ -73,8 +74,8 @@ class AgentEnv:
     Args:
         url: The server's base URL.
         split: The split ``dataset`` holds.
-        tool_timeout: One tool call's deadline in seconds, which the server ends the call at: the model is told the
-            tool didn't answer, and the episode goes on.
+        tool_timeout: One tool call's deadline in seconds. The server ends a call that misses it, and the episode with
+            it, since what the call does may still be under way: the rollout is left unscored, and the session kept.
         reset_timeout: How long an episode may take to deploy and open its first turn, and each turn to be ended,
             in seconds.
 
@@ -413,6 +414,9 @@ class _Server:
         _servers.discard(self)
         self._uvicorn.should_exit = True
         self._thread.join(timeout)
+        if self._thread.is_alive():
+            logger.warning("the bundle's server at %s was still tearing down its episodes after %gs; their sandboxes "
+                           "may be left running", self.url, timeout)
 
 
 def _episode_loop() -> asyncio.AbstractEventLoop:
@@ -439,14 +443,15 @@ async def _gathered(coroutines: Any) -> list[Any]:
 
 def _close_all() -> None:
     """A trainer that stops or crashes ends the episodes it left running, since TRL never closes its environments,
-    then stops the servers ``AgentEnv.local`` started, waiting at most ``EXIT_SECONDS`` for each. It runs before
-    threading's shutdown, while the thread pools an episode's teardown uses still take work."""
+    then stops the servers ``AgentEnv.local`` started, which tear down their episodes, waiting at most
+    ``EXIT_SECONDS`` and ``EXIT_SERVER_SECONDS``. It runs before threading's shutdown, while the thread pools an
+    episode's teardown uses still take work."""
     try:
         _on_loop(_gathered(environment._close() for environment in list(_environments)), EXIT_SECONDS)
     except Exception as e:
         logger.warning("couldn't end the episodes left running: %s", _why(e))
     for server in list(_servers):
-        server.stop(EXIT_SECONDS)
+        server.stop(EXIT_SERVER_SECONDS)
 
 
 threading._register_atexit(_close_all)
