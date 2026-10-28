@@ -233,16 +233,28 @@ def _unscrubbed(value: object, stored: object, scrubbed: object, path: str = "")
                 else:
                     given += _unscrubbed(value[key], item, scrubbed[key], at)
     elif isinstance(value, list) and isinstance(stored, list) and isinstance(scrubbed, list) and (
-            len(value) == len(stored) == len(scrubbed)):
-        for index, item in enumerate(stored):
+            len(stored) == len(scrubbed)):
+        unchanged = value == scrubbed
+        for index, item in enumerate(value):
+            if (source := _counterpart(value, index, scrubbed, unchanged)) is None:
+                continue
             at = f"{path}[{index}]"
-            if isinstance(item, str):
-                if value[index] == scrubbed[index] != item:
-                    value[index] = item
+            if isinstance(stored[source], str):
+                if item == scrubbed[source] != stored[source]:
+                    value[index] = stored[source]
                     given.append(at)
             else:
-                given += _unscrubbed(value[index], item, scrubbed[index], at)
+                given += _unscrubbed(item, stored[source], scrubbed[source], at)
     return given
+
+
+def _counterpart(value: list, index: int, scrubbed: list, unchanged: bool) -> int | None:
+    """The index of the stored item ``value[index]`` was scrubbed from: its own while the list is as scrubbed, else
+    the one scrubbed item it equals, when only one does, so a reordered list restores each item from its own."""
+    if unchanged:
+        return index
+    same = [other for other, item in enumerate(scrubbed) if item == value[index]]
+    return same[0] if len(same) == 1 else None
 
 
 def _graft(step: dict, keys: list[str], value: object) -> bool:

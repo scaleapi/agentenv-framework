@@ -368,3 +368,24 @@ def test_a_link_into_an_imported_image_s_folder_is_an_edit_to_its_image(local_st
     registered = register_bundle(folder)
 
     assert _written(registered)["crm-image"] == (2, False)
+
+
+def test_reordered_downloads_each_take_back_their_own_credentials(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Not credentials: two users' URLs for one file, which the import masks to the same text, joined in at run time.
+    first, second = ("https://" + user + ":" + "not-a-token@data.example.com/rows.csv" for user in ("ann", "bob"))
+    urls = [{"url": first, "filename": "ann.csv"}, {"url": second, "filename": "bob.csv"}]
+    Task.put(id="fetch", steps=[build_step({"id": "box", "type": "deploy_sandbox", "sandbox_name": "box",
+                                            "sandbox_mode": "vm"}),
+                                build_step({"id": "fetch", "type": "load_artifact", "sandbox_name": "box",
+                                            "urls": urls, "destination_path": "/data"})])
+    folder = import_task("fetch", tmp_path / "fetch", include_scopes={FieldScope.USER}).root
+    task_file = folder / "tasks/fetch.json"
+    steps = json.loads(task_file.read_text())
+    assert steps[1]["urls"][0]["url"] == steps[1]["urls"][1]["url"] != first
+    steps[1]["urls"].reverse()
+    task_file.write_text(json.dumps(steps))
+
+    register_bundle(folder)
+
+    assert Task.get("fetch", 2).to_dict()["steps"][1]["urls"] == list(reversed(urls))
