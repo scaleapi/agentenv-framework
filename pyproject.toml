@@ -149,7 +149,7 @@ artifacts = ["src/agent_env/env/published_images.json", "src/agent_env/explorer/
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tst", "packages/agentenv-protocol", ".github/scripts"]
-artifacts = ["src/agent_env/env/published_images.json"]
+artifacts = ["src/agent_env/env/published_images.json", "src/agent_env/explorer/static"]
 
 [tool.uv.workspace]
 members = ["packages/agentenv-protocol"]
