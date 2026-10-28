@@ -2076,7 +2076,7 @@ async def test_renamed_registration_serves_its_registered_name(agentenv_items_en
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_gateway_with_agentenv_environment(agentenv_items_env):
+async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch, tmp_path):
     """v1 data-plane (/v1/data:*) served by AgentEnvEnvironment + decorators.
 
     Counterpart to the legacy /api/reset coverage in test_gateway_with_single_mcp_server."""
@@ -2190,6 +2190,11 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
         )
         await env.load_environment_artifact(csv_artifact)
         assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["file:text/csv:a,b\n1,2"]}
+
+        # A file name with shell syntax in it is staged and loaded as it is, and runs nothing on the sandbox host.
+        await _load_shell_named_artifact(env, "items", monkeypatch, tmp_path)
+        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["shell-named"]}
+        assert not (tmp_path / "pwned").exists()
 
         # Environment Card extension end-to-end (urn:agentenv:set-errors/v1): a server-local
         # error-injection capability declared with @extension. Invoking it makes the named tool
@@ -2359,7 +2364,7 @@ async def test_verify_universe_roundtrip_export_all_v1_and_fallback(multi_env_it
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_gateway_with_website_env_v1(agentenv_website_env):
+async def test_gateway_with_website_env_v1(agentenv_website_env, monkeypatch, tmp_path):
     """v1 data-plane branch of WebsiteEnv.load_environment_artifact: supports_v1 -> reset + add inline,
     served by a Starlette AgentEnvStarletteApplication backend behind the gateway."""
     env = Env.get(agentenv_website_env.id, version=agentenv_website_env.version)
@@ -2403,8 +2408,30 @@ async def test_gateway_with_website_env_v1(agentenv_website_env):
         )
         await env.load_environment_artifact(csv_artifact)
         assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["file:text/csv:a,b\n1,2"]}
+
+        await _load_shell_named_artifact(env, "webitems", monkeypatch, tmp_path)
+        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["shell-named"]}
+        assert not (tmp_path / "pwned").exists()
     finally:
         await env.close()
+
+
+async def _load_shell_named_artifact(env, environment_name: str, monkeypatch, tmp_path) -> None:
+    """Load a seed whose file name runs ``touch pwned`` if the shell parses it, from ``tmp_path`` so a run leaves it there."""
+    artifact = EnvironmentArtifact.put(
+        id=f"test-{environment_name}-shell-named-service-data",
+        environment_name=environment_name,
+        file_artifact=FileArtifact.put_bytes(
+            id=f"test-{environment_name}-shell-named-data",
+            description=f"{environment_name} seed with shell syntax in its file name",
+            filename="$(touch pwned) `touch pwned`.json",
+            content=json.dumps({"items": ["shell-named"]}).encode(),
+            content_type="application/json",
+        ),
+    )
+    with monkeypatch.context() as m:
+        m.chdir(tmp_path)
+        await env.load_environment_artifact(artifact)
 
 
 @pytest.mark.asyncio
