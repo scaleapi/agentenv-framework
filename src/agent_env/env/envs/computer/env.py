@@ -170,7 +170,8 @@ class ComputerEnv(Env):
 
     async def reset(self, deployed: DeployedEnv) -> None:
         """Return the computer to boot state: its recordings ended, its container replaced with a fresh one of the same
-        image, on the same sandbox and port."""
+        image, on the same sandbox and port, so its address stays. An agent's MCP session ends with the old driver; one
+        held across the reset is answered 404, and MCP clients then start a new one."""
         await as_builtin(self._env_provider).reboot(self, deployed)
 
     async def close(self) -> None:
