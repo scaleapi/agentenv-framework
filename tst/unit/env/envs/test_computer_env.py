@@ -695,26 +695,26 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     env = _put(base, driver, display={"width": 1600, "height": 900})
     deployed = await Env.get(env.id).deploy(env_params={"computer_settings": {"timezone": "Asia/Tokyo"}})
     (sandbox,) = boots.sandboxes
-    recreated = []
+    resets = []
 
-    async def recreate_container(self, sandbox, **kwargs):
-        recreated.append((sandbox, kwargs))
-        boots.calls.append("recreate")
+    async def reset_container(self, sandbox, **kwargs):
+        resets.append((sandbox, kwargs))
+        boots.calls.append("reset_container")
 
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
-    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "recreate_container", recreate_container)
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset_container)
     monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
     boots.calls.clear()
 
     await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
         TaskStepContext(deployed_envs=[deployed]))
 
-    ((replaced, kwargs),) = recreated
+    ((replaced, kwargs),) = resets
     assert replaced is sandbox and not sandbox.terminated
     assert (kwargs["image_name"], kwargs["port"]) == (deployed.metadata["computer"]["image"], 18765)
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S)
-    assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "recreate", (COMPUTER_DISPLAY, "get", None)]
+    assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
 
 
 @pytest.mark.asyncio
@@ -723,7 +723,7 @@ async def test_a_reset_a_provider_cant_carry_out_fails_the_step_rather_than_skip
     env = _put(base, driver, display={"width": 1600, "height": 900})
     deployed = await Env.get(env.id).deploy()
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=boots.sandboxes[0]))
-    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "recreate_container",
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container",
                         AsyncMock(side_effect=NotImplementedError("its sandbox is the container itself")))
 
     with pytest.raises(RuntimeError, match="can't be reset on LocalSandboxProvider: its sandbox is the container"):

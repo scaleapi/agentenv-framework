@@ -118,7 +118,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         sandbox_provider = build_sandbox_provider(deployed.sandbox_type)
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
         try:
-            await sandbox_provider.recreate_container(sandbox, image_name=record["image"], port=env.driver.port,
+            await sandbox_provider.reset_container(sandbox, image_name=record["image"], port=env.driver.port,
                                                       env=_environment(env, computer, values, params))
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None

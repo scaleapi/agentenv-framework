@@ -750,11 +750,11 @@ class LocalSandboxProvider(SandboxProvider):
         sandbox.network_policy = NetworkPolicy(mode="allowlist")
         return sandbox
 
-    async def recreate_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
-        """Replace the sandbox's container with a fresh one, and on a closed network its relay too, since the fresh
+    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+        """Reset the sandbox's container to a fresh one, and on a closed network its relay too, since the fresh
         container's address on that network may differ."""
         if not (isinstance(sandbox, LocalSandbox) and sandbox.closed_network):
-            await super().recreate_container(sandbox, image_name=image_name, port=port, env=env)
+            await super().reset_container(sandbox, image_name=image_name, port=port, env=env)
             return
         await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} "
                                   f"{shlex.quote(sandbox.scoped_name('relay'))} > /dev/null")

@@ -628,7 +628,7 @@ async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_
     assert sandbox.network_policy.closed and sandbox.tunnel_urls[8000] == "http://127.0.0.1:41337"
 
     sandbox.scripts.clear()
-    await _RecordingProvider().recreate_container(sandbox, image_name="img:v1", port=8000, env={"A": "1"})
+    await _RecordingProvider().reset_container(sandbox, image_name="img:v1", port=8000, env={"A": "1"})
 
     assert [s.split()[1] for s in sandbox.scripts] == ["rm", "create", "start", "inspect", "run"]
     assert sandbox.scripts[0] == f"docker rm -f agent-{sandbox.sandbox_id} relay-{sandbox.sandbox_id} > /dev/null"
