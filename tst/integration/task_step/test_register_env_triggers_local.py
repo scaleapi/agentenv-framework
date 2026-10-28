@@ -1,7 +1,8 @@
 """Named nl-trigger executors on a local gateway: each nl action reaches only the executor it names, that executor acts
 in the env as its own role, personas react to each other through `when.roles`, replies wait out their delay and working
 hours in virtual time, deadlines fire on silence, and the trajectory names who made each call. Requires a docker daemon;
-spins up a throwaway ``registry:2``."""
+spins up a throwaway ``registry:2``. The tests share one deployed env, which ``items_env`` resets before each.
+"""
 
 import asyncio
 import functools
@@ -14,29 +15,48 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
+import pytest_asyncio
 
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
-from agent_env.env.gateway.constants import TRIGGER_IN_FLIGHT_STATUSES
+from agent_env.env.gateway.constants import METHOD_RESET, RPC_PATH, TRIGGER_IN_FLIGHT_STATUSES
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
 from tst.integration.env.envs.server_env_local_test import _put_items_image
-from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs, local_stack as local_stack
+from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs, local_stack_at
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 
+@pytest_asyncio.fixture(scope="module")
+async def suite(tmp_path_factory):
+    """One items env for the module, on a stack of its own: deploying one is most of what a test here costs."""
+    with pytest.MonkeyPatch.context() as monkeypatch, local_stack_at(monkeypatch, tmp_path_factory.mktemp("stack")):
+        _seed_bootstrap_envs()
+        env, deployed, host = await _deploy_items("trig")
+        try:
+            yield env, deployed, host
+        finally:
+            await env.close()
+
+
+@pytest_asyncio.fixture
+async def items_env(suite):
+    """The module's env as a fresh deploy leaves it: no triggers, executors or events, no clock, and no items."""
+    _, deployed, _ = suite
+    async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+        for path in ("/triggers/clear", "/clock/clear"):
+            (await client.post(path)).raise_for_status()
+        reset = (await client.post(RPC_PATH, json={"jsonrpc": "2.0", "id": "reset", "method": METHOD_RESET,
+                                                   "params": {}})).raise_for_status().json()
+        assert "error" not in reset, reset
+    return suite
+
+
 @pytest.mark.asyncio
-async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
-    _seed_bootstrap_envs()
-    uid = uuid.uuid4().hex[:8]
-    items = MCPServerEnv.put(id=f"trig-items-{uid}", environment_name="items",
-                             docker_image_artifact=_put_items_image(f"trig-items-{uid}"))
-    env = MultiEnv.put(id=f"trig-{uid}", mcp_server_envs=[items], name="suite")
-    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
-    # host.docker.internal: loopback on Docker Desktop, the bridge gateway on Linux.
-    host = env._sandbox.host_ips[-1]
+async def test_each_nl_action_reaches_the_executor_it_names(items_env):
+    env, deployed, host = items_env
     started: list[_Executor] = []
     triggers = [
         {"id": "to-alice", "when": {"type": "action", "tool": "list_items"},
@@ -60,7 +80,6 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
     finally:
         for executor in started:
             executor.stop()
-        await env.close()
 
     statuses = {t["id"]: t["status"] for t in state["triggers"]}
     assert statuses == {"to-alice": "fired", "to-bob": "fired", "on-add": "armed"}, state["events"]
@@ -75,14 +94,8 @@ async def test_each_nl_action_reaches_the_executor_it_names(local_stack):
 
 
 @pytest.mark.asyncio
-async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):
-    _seed_bootstrap_envs()
-    uid = uuid.uuid4().hex[:8]
-    items = MCPServerEnv.put(id=f"chain-items-{uid}", environment_name="items",
-                             docker_image_artifact=_put_items_image(f"chain-items-{uid}"))
-    env = MultiEnv.put(id=f"chain-{uid}", mcp_server_envs=[items], name="suite")
-    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
-    host = env._sandbox.host_ips[-1]
+async def test_personas_react_to_each_other_until_one_stays_quiet(items_env):
+    env, deployed, host = items_env
     started: list[_Executor] = []
     triggers = [
         {"id": "denise-hears-solver", "when": {"type": "action", "tool": "list_items"},
@@ -109,7 +122,6 @@ async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):
     finally:
         for executor in started:
             executor.stop()
-        await env.close()
 
     assert (denise.instructions, bob.instructions) == (["DENISE-TO-SOLVER", "DENISE-TO-BOB"],
                                                        ["BOB-TO-DENISE", "BOB-TO-DENISE"])
@@ -122,9 +134,8 @@ async def test_personas_react_to_each_other_until_one_stays_quiet(local_stack):
 
 
 @pytest.mark.asyncio
-async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(local_stack):
-    _seed_bootstrap_envs()
-    env, deployed, host = await _deploy_items("pace")
+async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(items_env):
+    env, deployed, host = items_env
     started: list[_Executor] = []
     triggers = [{"id": "bob-hears-solver", "when": {"type": "action", "tool": "list_items"},
                  "actions": [{"type": "nl", "executor": "bob", "instruction": "BOB-ACTS", "delay": "PT2M"}]}]
@@ -132,6 +143,8 @@ async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(lo
         bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[bob.agent], metadata={})
         async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+            # The env is shared, so its trajectory holds the earlier tests' calls: read this test's, after them.
+            earlier = len((await client.get("/trajectory")).raise_for_status().text.splitlines())
             await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
                                           executor_timeout_seconds=60,
                                           executor_hours={"bob": {"start": "09:00", "end": "17:00"}}).execute(context)
@@ -139,11 +152,11 @@ async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(lo
             await _arm_clock(client, "2026-10-14T08:50:00Z", 60)
             (await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}})).raise_for_status()
             state = await _quiet(client, {"bob-hears-solver": 1})
-            trajectory = [json.loads(line) for line in (await client.get("/trajectory")).raise_for_status().text.splitlines()]
+            lines = (await client.get("/trajectory")).raise_for_status().text.splitlines()
+            trajectory = [json.loads(line) for line in lines[earlier:]]
     finally:
         for executor in started:
             executor.stop()
-        await env.close()
 
     paced = [e for e in state["events"] if e["kind"] in ("delayed", "deferred", "action_ok")]
     assert [e["kind"] for e in paced] == ["delayed", "deferred", "action_ok"]
@@ -161,9 +174,8 @@ async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(lo
 
 
 @pytest.mark.asyncio
-async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(local_stack):
-    _seed_bootstrap_envs()
-    env, deployed, host = await _deploy_items("deadline")
+async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(items_env):
+    env, deployed, host = items_env
     started: list[_Executor] = []
     triggers = []
     for n in (1, 2):
@@ -186,7 +198,6 @@ async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(local_stack):
     finally:
         for executor in started:
             executor.stop()
-        await env.close()
 
     statuses = {t["id"]: t["status"] for t in state["triggers"]}
     assert (statuses["deadline-1"], statuses["deadline-2"]) == ("fired", "cancelled"), state["events"][-8:]
@@ -196,9 +207,8 @@ async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(local_stack):
 
 
 @pytest.mark.asyncio
-async def test_the_step_can_wait_for_start_of_run_time_triggers(local_stack):
-    _seed_bootstrap_envs()
-    env, deployed, host = await _deploy_items("await")
+async def test_the_step_can_wait_for_start_of_run_time_triggers(items_env):
+    env, deployed, host = items_env
     triggers = [{"id": "wf-1", "when": {"type": "time", "at": "2026-10-14T10:02:00Z"},
                  "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "WORLD-1"}}]},
                 {"id": "wf-2", "when": {"type": "time", "at": "2026-10-14T10:03:00Z"},
@@ -206,20 +216,17 @@ async def test_the_step_can_wait_for_start_of_run_time_triggers(local_stack):
                 {"id": "later", "when": {"type": "time", "at": "2026-10-14T18:00:00Z"},
                  "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "LATER"}}]}]
     context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[], metadata={})
-    try:
-        async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
-            await _arm_clock(client, "2026-10-14T10:00:00Z", 60)
-            started = time.monotonic()
-            await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
-                                          await_fired=["wf-1", "wf-2"], await_timeout_seconds=60).execute(context)
-            waited = time.monotonic() - started
-            state = (await client.get("/triggers/state")).raise_for_status().json()
-            with pytest.raises(RuntimeError, match=r"did not all fire within 3s; statuses \{'later': 'armed'\}"):
-                await RegisterEnvTriggersStep(id="reg-later", version=None, env_id=env.id, triggers=triggers[2:],
-                                              watch_roles=["default"], await_fired=["later"],
-                                              await_timeout_seconds=3).execute(context)
-    finally:
-        await env.close()
+    async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
+        await _arm_clock(client, "2026-10-14T10:00:00Z", 60)
+        started = time.monotonic()
+        await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers, watch_roles=["default"],
+                                      await_fired=["wf-1", "wf-2"], await_timeout_seconds=60).execute(context)
+        waited = time.monotonic() - started
+        state = (await client.get("/triggers/state")).raise_for_status().json()
+        with pytest.raises(RuntimeError, match=r"did not all fire within 3s; statuses \{'later': 'armed'\}"):
+            await RegisterEnvTriggersStep(id="reg-later", version=None, env_id=env.id, triggers=triggers[2:],
+                                          watch_roles=["default"], await_fired=["later"],
+                                          await_timeout_seconds=3).execute(context)
 
     awaited_first, awaited_later = (e["awaited"] for e in context.metadata["env_trigger_registrations"])
     assert awaited_first == {"wf-1": "fired", "wf-2": "fired"}
