@@ -1,0 +1,10 @@
+{
+  "name": "agentenv-browser-use",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@browser_use/pi": "0.1.0",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@modelcontextprotocol/sdk": "1.32.2"
+  }
+}

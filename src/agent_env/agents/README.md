@@ -71,6 +71,14 @@ a relay that adds task attribution, and takes its model from the prompt, else `o
 `install/v1` too, into a container or onto a Linux host with glibc. Its folder's `README.md` covers the extensions
 it implements. Run its smoke task with `agent-env run agents --task letta-code-smoke`.
 
+`agents/browser-use/` runs [Browser Use Pi](https://github.com/browser-use/browser-use-pi) behind the protocol's A2A
+agent framework: each turn is one `node agent.mjs` run that drives a Browser Use Cloud browser, or the one `cdp_url`
+names, with the task env's MCP tools beside it, and a context's turns continue one conversation. Name it as
+`browser-use`, its alias, or by its id, `@local/agentenv-framework/agents/browser-use`. It calls the `[model]`
+endpoint as an OpenAI-compatible one and takes its model from the prompt, and its browser key from
+`BROWSER_USE_API_KEY`. Its folder's `README.md` covers the extensions it implements. Run its smoke task with
+`agent-env run agents --task browser-use-smoke`.
+
 `agents/openhands/` runs the [OpenHands](https://github.com/OpenHands/software-agent-sdk) agent behind the
 protocol's A2A agent framework, driving the OpenHands SDK in process rather than a CLI: each turn is one run of a
 persisted SDK conversation, the task env's MCP servers go to its `mcp_config`, and its SDK events are the turn's

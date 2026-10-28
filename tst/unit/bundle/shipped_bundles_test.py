@@ -47,7 +47,8 @@ def test_the_shipped_aliases_are_agent_envs_alone_and_claude_code_names_the_defa
         "openhands": "@local/agentenv-framework/agents/openhands", "codex": "@local/agentenv-framework/agents/codex",
         "gemini": "@local/agentenv-framework/agents/gemini", "opencode": "@local/agentenv-framework/agents/opencode",
         "letta-code": "@local/agentenv-framework/agents/letta-code",
-        "pydantic-ai": "@local/agentenv-framework/agents/pydantic-ai"}
+        "pydantic-ai": "@local/agentenv-framework/agents/pydantic-ai",
+        "browser-use": "@local/agentenv-framework/agents/browser-use"}
     assert table.target("claude-code").target_id == get_config().get_default_a2a_agent_id()
 
 
