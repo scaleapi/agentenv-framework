@@ -177,13 +177,14 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     monkeypatch.setattr(composer, "docker_login", lambda signed_in: docker_calls.append(("login", signed_in)))
     monkeypatch.setattr(composer, "_joined", lambda index, images: (docker_calls.append(("join", index)),
                                                                     docker.joined(index, images)))
-    first = _put(base, driver)
+    announced = []
+    first = _put(base, driver, on_build=lambda: announced.append("first"))
     docker_calls.clear()
     second = _put(base, driver, id="@local/~/kit/other", environment_name="other", display={"width": 640, "height": 480},
-                  network={"mode": "allowlist"})
+                  network={"mode": "allowlist"}, on_build=lambda: announced.append("second"))
 
     built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
-    assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
+    assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused) and announced == ["first"]
     assert {arch: reused[arch]["image"] for arch in reused} == {arch: built[arch]["image"] for arch in built}
     assert {arch: (r["installed"], r["emulated"]) for arch, r in reused.items()} == {
         "amd64": ({"mss": "10.1.0"}, True), "arm64": ({"mss": "10.1.0"}, False)}

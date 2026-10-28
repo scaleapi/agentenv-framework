@@ -33,7 +33,12 @@ def composed(tmp_path, monkeypatch, local_stores, cli_routing, builds):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: None)
     calls = []
-    monkeypatch.setattr(composer, "compose", lambda env: calls.append((env.id, env.computer.id, env.driver.id)))
+
+    def compose(env, on_build=None):
+        on_build()
+        calls.append((env.id, env.computer.id, env.driver.id))
+
+    monkeypatch.setattr(composer, "compose", compose)
     return calls
 
 

@@ -4,6 +4,7 @@ metadata as it builds (``composed``), and the arches built written as its comput
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
 class ComputerEnv(Env):
     type: ClassVar[str] = "computer"
     description = "A computer: a base computer and a driver, composed at put into an image for each form and arch"
-    builds_at_put: ClassVar[bool] = True
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("computer", artifact_type="computer"),
                                                   EntityRef.env("driver", env_type=ComputerDriverEnv.type))
 
@@ -55,9 +55,10 @@ class ComputerEnv(Env):
     @classmethod
     def put(cls, *, id: str, computer: ComputerArtifact, driver: ComputerDriverEnv, environment_name: str,
             apps: Any = (), display: Any = None, network: Any = None, computer_settings: Any = None,
-            compose: bool = True) -> Self:
+            compose: bool = True, on_build: Optional[Callable[[], None]] = None) -> Self:
         """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it unless ``compose`` is
-        False. Refused, naming every mismatch, before anything is stored."""
+        False, calling ``on_build`` just before it builds an image. Refused, naming every mismatch, before anything is
+        stored."""
         values, problems = gate.check(computer, driver, apps=list(apps), display=display, network=network,
                                       computer_settings=computer_settings or {})
         if problems:
@@ -66,7 +67,7 @@ class ComputerEnv(Env):
             id=id, version=None, environment_name=environment_name,
             computer=computer, driver=driver, display=display, network=network, computer_settings=values))
         if compose:
-            composer.compose(env)
+            composer.compose(env, on_build=on_build)
         return env
 
     @classmethod
@@ -83,7 +84,7 @@ class ComputerEnv(Env):
                                                                                        ComputerDriverEnv)
         try:
             return cls.put(id=ctx.id, computer=base, driver=driver,
-                           environment_name=fields.pop("environment_name", ctx.name), **fields)
+                           environment_name=fields.pop("environment_name", ctx.name), on_build=ctx.on_build, **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
 

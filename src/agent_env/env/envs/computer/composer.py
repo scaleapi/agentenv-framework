@@ -22,6 +22,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -64,15 +65,18 @@ _PROTOCOL = "agentenv-framework-protocol"
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
 
 
-def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None) -> None:
+def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
+            on_build: Callable[[], None] | None = None) -> None:
     """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel,
-    recording each as it starts and finishes, then write the env's computer over every pair built so far."""
+    recording each as it starts and finishes, then write the env's computer over every pair built so far. ``on_build``
+    is called once, just before the first image is built here; reusing them all calls it never."""
     base, driver = env.computer, env.driver
+    building = _once(on_build)
     pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base) for arch in gate.arches(base, driver)]
     record = _Record(env)
     record.started(pairs)
     with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
-        futures = {pool.submit(_built, env, base, driver, form, arch): (form, arch) for form, arch in pairs}
+        futures = {pool.submit(_built, env, base, driver, form, arch, building): (form, arch) for form, arch in pairs}
         for future in as_completed(futures):
             form, arch = futures[future]
             result = future.result()
@@ -97,8 +101,10 @@ def pending(env: ComputerEnv) -> list[tuple[str, str]]:
             if composed.get(form, {}).get(arch, {}).get("status") not in _BUILT]
 
 
-def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str) -> dict:
-    """The status of ``form`` and ``arch`` once built and pushed, or reused, or the stage that failed and why."""
+def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
+           building: Callable[[], None]) -> dict:
+    """The status of ``form`` and ``arch`` once built and pushed, or reused, or the stage that failed and why;
+    ``building`` is called before anything builds."""
     stage, key = "build", None
     try:
         with tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work:
@@ -124,6 +130,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             if emulated and platform not in _emulated_platforms():
                 return _failed(env, form, arch, "build", key, f"this machine can't build {platform}: its Docker has "
                                "no emulation for it")
+            building()
             _ready_base(base, arch)
             (context / "Dockerfile").write_text(f"{dockerfile}LABEL {KEY_LABEL}={key}\n")
             local = f"agentenv-computer:{key[7:23]}-{arch}"
@@ -144,6 +151,18 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
         return _failed(env, form, arch, stage, key, f"{' '.join(e.cmd[:2])} failed: {(e.stderr or '').strip()}")
     except (RuntimeError, ValueError, OSError) as e:
         return _failed(env, form, arch, stage, key, f"{type(e).__name__}: {e}")
+
+
+def _once(fn: Callable[[], None] | None) -> Callable[[], None]:
+    """``fn``, called at most once however many builds call it at once; nothing when it's None."""
+    lock, called = threading.Lock(), []
+
+    def once() -> None:
+        with lock:
+            if fn is not None and not called:
+                called.append(True)
+                fn()
+    return once
 
 
 def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:

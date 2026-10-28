@@ -231,8 +231,6 @@ class Env(ABC):
     type: ClassVar[str] = "env"
     toml_refs: ClassVar[tuple[EntityRef, ...]] = ()
     env_provider_types: ClassVar[tuple[str, ...]] = ()
-    #: Whether writing one builds images with this machine's Docker, which a bundle run says before it writes one.
-    builds_at_put: ClassVar[bool] = False
 
     def __init__(self, id: str, version: Optional[int], metadata: Optional[dict[str, Any]] = None):
         self.id: str = id

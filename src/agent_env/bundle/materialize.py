@@ -156,8 +156,8 @@ def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Writ
         if write.id in plan.published:
             return _write_published_image(plan, write)
         return _write_build_context(plan, write, here, on_build)
-    if write.kind is BundleKind.ENV and get_env_registry()[write.source.entry.type].builds_at_put and on_build:
-        on_build(write)
+    if write.kind is BundleKind.ENV:
+        return _write_env(plan, write, _before(on_build, write))
     return _WRITERS[write.kind](plan, write)
 
 
@@ -283,10 +283,11 @@ def _write_agent(plan: Plan, write: Write) -> int:
                               AuthoringContext(plan.bundle_of(entry), entry)).version
 
 
-def _write_env(plan: Plan, write: Write) -> int:
+def _write_env(plan: Plan, write: Write, on_build: Callable[[], None] | None = None) -> int:
     entry = write.source.entry
     cls = get_env_registry()[entry.type]
-    return cls.from_toml(_pinned(plan, write, cls.toml_refs), AuthoringContext(plan.bundle_of(entry), entry)).version
+    return cls.from_toml(_pinned(plan, write, cls.toml_refs),
+                         AuthoringContext(plan.bundle_of(entry), entry, on_build=on_build)).version
 
 
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:

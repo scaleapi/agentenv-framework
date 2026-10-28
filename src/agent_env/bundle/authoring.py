@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +49,8 @@ class AuthoringContext:
 
     bundle: Bundle
     entry: BundleEntry
+    #: Called just before writing the entry builds an image with this machine's Docker, which a run says it does.
+    on_build: Callable[[], None] | None = None
 
     @property
     def id(self) -> str:
