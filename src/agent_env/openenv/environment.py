@@ -27,6 +27,7 @@ from openenv.core.env_server.types import Observation, State
 
 from agent_env.task import EpisodeError, EpisodeSpec, Task
 from agent_env.task.episode import Episode, Turn
+from agent_env.task.episode.rules import DEPLOYS, works_in_sandbox
 from agent_env.task.episode.run import TurnTools
 
 END_TURN = Tool(
@@ -46,6 +47,15 @@ class ServedTask:
     name: str
     spec: EpisodeSpec
     reward: Callable[[dict[str, float]], float | None]
+
+    @property
+    def toolset(self) -> dict[str, Any]:
+        """Where the played agent's tools come from: the envs it works in, its role in them, and whether its turns offer
+        ``bash`` in its sandbox. Tasks that agree on it offer the same tools, so a trainer can group them."""
+        agent = self.spec.trainer_agents[0]
+        [deploy] = [step for step in self.task.steps if step.type in DEPLOYS and step.agent_name == agent]
+        return {"envs": list(getattr(deploy, "env_ids", None) or []), "role": getattr(deploy, "role", None),
+                "bash": works_in_sandbox(self.task.steps, agent)}
 
 
 @dataclass
@@ -301,7 +311,7 @@ class AgentEnvEnvironment(Environment):
         served = self._task_at(split, index)
         prompt, system_prompt = served.spec.prompts[0]
         return {"id": served.task.id, "name": served.name, "index": index, "prompt": prompt,
-                "system_prompt": system_prompt, "agent": served.spec.trainer_agents[0]}
+                "system_prompt": system_prompt, "agent": served.spec.trainer_agents[0], "toolset": served.toolset}
 
     def _task_metadata(self) -> dict[str, Any] | None:
         if self._served_task is None:
