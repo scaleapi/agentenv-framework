@@ -35,6 +35,10 @@ agent_default = "local"   # agents too
 # snapshot = "agentenv-docker"        # boot every sandbox from this Docker-capable snapshot instead of building
 #                                     # the host image; a request bigger than the snapshot is refused
 
+# Optional boat.dev sandboxes (install the 'boat' extra):
+# [sandbox.providers.boat.config]
+# api_key = "secret:boat_api_key"     # or "env:BOAT_API_KEY"
+
 # [agents]
 # default_a2a_agent_id = "my-agent"   # what a deploy_agent step that names no agent deploys; by default the
 #                                     # agents bundle's Claude Code, @local/agentenv-framework/agents/claude-code

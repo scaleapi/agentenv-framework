@@ -14,7 +14,7 @@ marks, or contributor names to endorse or promote Scale AI, or related products.
 
 ## Python dependencies
 
-The runtime dependencies of `agentenv-framework` and its `aws`, `gcp`, `sail`, `tensorlake`, `tenki`, `boxd`, `daytona`, `openenv` and `trl` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
+The runtime dependencies of `agentenv-framework` and its `aws`, `gcp`, `sail`, `tensorlake`, `tenki`, `boxd`, `daytona`, `boat`, `openenv` and `trl` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
 
 ### a2a-sdk 0.3.26
 
@@ -136,6 +136,13 @@ The runtime dependencies of `agentenv-framework` and its `aws`, `gcp`, `sail`, `
 - Copyright: Copyright 2009-2026 Joshua Bronson. All rights reserved.
 - Source: <https://github.com/jab/bidict>
 - [License text 76](#license-text-76)
+
+### boat-sdk 1.13.0
+
+- License: MIT
+- Copyright: Copyright (c) Ascii
+- Source: <https://pypi.org/project/boat-sdk/1.13.0/>
+- [License text 4](#license-text-4)
 
 ### boto3 1.43.38
 
