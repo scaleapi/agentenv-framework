@@ -253,7 +253,12 @@ orchestrators call it the same way. What callers rely on:
   `_disable_network` fixture in a closer conftest when a loopback server is the point.
 - `tst/integration/` needs Docker and the local registry on `:5000` and runs on the local default
   backends. Minutes-long tests (real image builds, sandbox VMs, gateways, agents) carry
-  `@pytest.mark.int_test_slow` (or module-level `pytestmark`) and run serially.
+  `@pytest.mark.int_test_slow` (or module-level `pytestmark`) and run serially. CI splits them across
+  runners instead: `AGENTENV_TEST_SHARD=i/N` (`tst/util/shards.py`) runs the i-th of N groups, keeping a
+  file's tests together unless the table's `split_by_test` lists the file, and balancing the groups by
+  `tst/integration/slow_durations.json`. When the
+  shards' times drift apart, rewrite the table from a `main` run's `junit-integration-local-*`
+  artifacts with `.github/scripts/slow_test_durations.py`.
 - `tst/manual/` and `tst/benchmarks/` run only by hand, as each module's docstring says; no CI job
   collects them.
 - Skips are declared capability gaps, decided at collection time: the gates in
@@ -278,7 +283,9 @@ resolved, and the checks the `main` ruleset requires: `unit`, `integration-local
 pass, but a failing one does not block the merge.
 `.github/workflows/local-backends.yml` runs `unit`, `ui`, `integration-local`, `integration-local-slow`,
 `integration-local-gateway` (the slow tier's `gateway_test.py`, run beside the rest of it) and
-`installer`. The Python jobs install from `uv.lock` (public PyPI only), with the uv that
+`installer`. The slow tier runs on eight runners (`integration-local-slow (1/8)` to `(8/8)`) and the
+gateway tests on two, and `integration-local-slow` and `integration-local-gateway` each pass when all
+of their shards do. The Python jobs install from `uv.lock` (public PyPI only), with the uv that
 `.github/ci-requirements.txt` pins, and use no secrets and no external services (a `registry:2`
 container for the integration jobs). The `unit` job also fails if `uv.lock` resolves anything from a
 registry other than PyPI, if `agentenv-framework-protocol` is not the editable workspace member, if
@@ -331,7 +338,8 @@ proposes only a base's digest and patch updates, and a major or minor upgrade is
   with the types in use `feat`, `fix`, `refactor`, `test`, `docs`, `ci`, `chore`, `perf`, `build`,
   `security`; `!` marks a breaking change, and `plugin-api` requires it for a plugin-surface break.
 - Versions are cut by the maintainers' release automation. Never edit `version` in
-  `pyproject.toml` or push a tag in a PR.
+  `pyproject.toml` or push a tag in a PR. The release pins the framework's requirement on
+  agentenv-framework-protocol with `.github/scripts/shipped_bundles.py pin-pyproject`, which keeps its extras.
 - Names: the distribution is `agentenv-framework`, the import package `agent_env`, the console
   script `agent-env`. Only the first is what `uv add`, `pip install` and `importlib.metadata.version()` take.
 - Comments: default to none. The code says what; a docstring of one to three dense lines says why
