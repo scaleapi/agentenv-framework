@@ -1,6 +1,7 @@
 """A bundle's bundle.toml: what it requires is checked before the bundle resolves, a command refused for one this machine
 doesn't meet names the command that installs it, and a bundle without one is given one listing the plugins it uses."""
 
+import errno
 import json
 import os
 import sys
@@ -250,6 +251,22 @@ class TestCreate:
         assert _create(path, "second\n") is False
         assert path.read_text() == "first\n"
         assert os.listdir(tmp_path) == ["bundle.toml"]
+
+    @pytest.mark.parametrize("links", [True, False], ids=["staged", "in-place"])
+    def test_a_file_it_cant_write_whole_is_never_left_behind(self, tmp_path, monkeypatch, links):
+        real_open = open
+
+        def full(path, mode="r", **kwargs):
+            file = real_open(path, mode, **kwargs)
+            file.write = lambda text: (_ for _ in ()).throw(OSError(errno.ENOSPC, "No space left on device"))
+            return file
+
+        monkeypatch.setattr(requires_module, "open", full, raising=False)
+        if not links:
+            monkeypatch.setattr(requires_module.os, "link", lambda src, dst: (_ for _ in ()).throw(PermissionError()))
+
+        assert _create(tmp_path / "bundle.toml", "requires = []\n") is False
+        assert os.listdir(tmp_path) == []
 
     @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="a folder root can write to anyway")
     def test_a_folder_it_cant_write_to_is_left_as_it_is(self, tmp_path):

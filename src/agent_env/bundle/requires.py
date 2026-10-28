@@ -200,25 +200,32 @@ def _create(path: Path, text: str) -> bool:
     it under a name of its own, as the umask leaves new files, and linked into place, which fails if ``path`` exists."""
     staged = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-    except OSError:
-        return False
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            file.write(text)
+        if not _write_new(staged, text):
+            return False
         os.link(staged, path)
         return True
     except FileExistsError:
         return False
     except OSError:  # a filesystem without links: create it in place, still never over another's
-        try:
-            with open(path, "x", encoding="utf-8") as file:
-                file.write(text)
-            return True
-        except OSError:
-            return False
+        return _write_new(path, text)
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _write_new(path: Path, text: str) -> bool:
+    """Create ``path`` holding ``text``, unless it exists; whether it was written. One that can't be written whole, as
+    on a full disk, is removed again, so no part of it is left to read."""
+    try:
+        file = open(path, "x", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        with file:
+            file.write(text)
+        return True
+    except OSError:
+        path.unlink(missing_ok=True)
+        return False
 
 
 def _listing(found: Sequence[Use]) -> str:
