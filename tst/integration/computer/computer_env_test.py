@@ -1,8 +1,8 @@
 """A computer env composed on this machine: a bundle's env naming the shipped ubuntu-24.04 and reference by alias builds
-an image for each arch this machine's Docker can build, pushed to the local registry and written as the env's computer;
-the image of this machine's arch boots with everything running as the session user and passes the conformance probe
-at full three times in a row; and another env that changes only what doesn't change the image reuses it. Needs Docker
-and the local registry on localhost:5000."""
+an image for each arch this machine's Docker can build, pushed to the local registry and written as the env's computer,
+and gate 3 makes the image of this machine's arch ready; that image boots with everything running as the session user
+and passes the conformance probe at full three times in a row; and another env that changes only what doesn't change
+the image reuses it. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import json
@@ -68,14 +68,18 @@ def test_each_arch_this_machine_builds_is_composed_pushed_and_written_as_the_env
     with namespace_routing():
         computer = ComputerArtifact.get(composed.metadata["computer"]["id"], composed.metadata["computer"]["version"])
 
-    assert results[ARCH]["status"] == "unverified" and results[ARCH]["emulated"] is False
+    assert results[ARCH]["status"] == "ready" and results[ARCH]["emulated"] is False
+    assert results[ARCH]["probe"]["passed"] and results[ARCH]["probe"]["level"] == "full"
+    assert results[ARCH]["card"]["name"] == composed.environment_name
     assert {"mss", "python-xlib", "av", "agentenv-framework-protocol"} <= set(results[ARCH]["installed"])
     for arch, result in results.items():
-        assert result["status"] == "unverified" or "its Docker has no emulation for it" in result["reason"], result
-    built = sorted(arch for arch, result in results.items() if result["status"] == "unverified")
+        if arch != ARCH:
+            assert result["status"] == "unverified" or "its Docker has no emulation for it" in result["reason"], result
+    built = sorted(arch for arch, result in results.items() if result["status"] in ("ready", "unverified"))
     assert sorted(computer.arch) == built
     assert {arch: result["status"] for arch, result in computer.metadata["validated_images"]["container"].items()} == {
         arch: "passed" for arch in built}
+    assert computer.metadata["validated_boot"]["container"][ARCH] == results[ARCH]["probe"]
 
 
 @pytest.mark.asyncio
@@ -105,6 +109,7 @@ def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(composed
     first = composed.metadata["composed"]["container"]
 
     assert results[ARCH]["reused"] is True and results[ARCH]["image"] == first[ARCH]["image"]
+    assert results[ARCH]["status"] == "ready" and results[ARCH]["card"]["name"] == "other"
     assert results[ARCH]["installed"] == first[ARCH]["installed"] and results[ARCH]["emulated"] is False
     assert took < 60, took
 
