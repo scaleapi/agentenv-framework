@@ -318,11 +318,15 @@ def _descendants(pid: int) -> list[int]:
 
 
 @asynccontextmanager
-async def model_relay(headers: dict[str, str], on_forward=None):
-    """Keep endpoint credentials and task attribution on requests to the configured model endpoint only."""
+async def model_relay(headers: dict[str, str], model: str, on_forward=None):
+    """Keep endpoint credentials and task attribution on requests to the configured model endpoint only. The model
+    list is the turn's model alone: the CLI merges a listed model into its own with a scan of them all, which costs
+    minutes of CPU per command over an endpoint that lists thousands."""
     base = _base_url(os.environ)
     async with ClientSession(timeout=ClientTimeout(total=None), auto_decompress=False) as client:
         async def forward(request):
+            if request.method == "GET" and request.path.rstrip("/") == "/v1/models":
+                return web.json_response({"object": "list", "data": [{"id": model, "object": "model"}]})
             if on_forward is not None:
                 on_forward()
             outgoing = {"authorization": "Bearer " + os.environ.get("LITELLM_API_KEY", ""), **headers}
@@ -429,7 +433,7 @@ async def _turn(prompt, context_id, session_id, model, mcp_servers, system_promp
     home = Path(env["HOME"])
     (home / "context.json").write_text(json.dumps({"home": str(home)}))
     attribution = _attribution_headers(project_id, task_id)
-    async with model_relay(provider_headers(os.environ, attribution),
+    async with model_relay(provider_headers(os.environ, attribution), model,
                            on_forward=lambda: _record_attribution(project_id, task_id)) as relay:
         await _command(env, "connect", "openai-compatible", "--base-url", relay, "--api-key", "relay")
         agent_file = home / "agent-id.json"

@@ -13,7 +13,9 @@ run concurrently; turns in one context and snapshot operations are synchronized.
 The bridge connects the local backend with `letta connect openai-compatible`. A per-turn loopback relay forwards
 requests to `$LITELLM_BASE_URL/v1`, with `LITELLM_API_KEY`, `[model.headers]` (`LITELLM_EXTRA_HEADERS`), and
 `project_id` / `task_id` as `x-litellm-customer-id` and `x-litellm-tags`. The model defaults to
-`openai/gpt-4.1-mini`. Endpoint credentials stay at the relay. Registered MCP servers retain their names and headers;
+`openai/gpt-4.1-mini`. Endpoint credentials stay at the relay, which answers the CLI's model list with the turn's model
+alone: the CLI's merge of a listed model scans every model listed, which costs about 45 s of CPU per command over an
+endpoint that lists thousands. Registered MCP servers retain their names and headers;
 a task role replaces `AgentEnv-Role`. Before each turn, `letta mcp tools --full` discovers the exact schemas. A context-local mod registers them as
 direct Letta Code tools through `letta.tools.register`; each tool executes `letta mcp call` with its full
 `mcp__<server>__<tool>` name. Peer tools use the same path.

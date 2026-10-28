@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from pytest_socket import enable_socket
 
 from tst.unit.agents.letta_code.agent import a2a_server, letta_code_bridge as bridge
 
@@ -209,7 +210,7 @@ async def test_attribution_is_recorded_only_when_the_relay_forwards(monkeypatch)
     seen = []
 
     @asynccontextmanager
-    async def relay(headers, on_forward=None):
+    async def relay(headers, model, on_forward=None):
         seen.append(on_forward)
         yield "http://relay/v1"
 
@@ -315,3 +316,17 @@ async def test_a_cancelled_changelog_apply_holds_the_workspace_until_its_extract
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not agent._workspace._writer
+
+
+@pytest.mark.asyncio
+async def test_the_relay_lists_only_the_turns_model_and_forwards_nothing_for_it(monkeypatch):
+    enable_socket()  # the relay listens on loopback
+    # An endpoint that refuses every connection: the list must not come from it.
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:9")
+    forwarded = []
+    async with bridge.model_relay({}, "openai/gpt-4.1-mini", on_forward=lambda: forwarded.append(True)) as relay:
+        async with bridge.ClientSession() as client:
+            async with client.get(relay + "/models") as response:
+                listed = await response.json()
+    assert listed == {"object": "list", "data": [{"id": "openai/gpt-4.1-mini", "object": "model"}]}
+    assert forwarded == []
