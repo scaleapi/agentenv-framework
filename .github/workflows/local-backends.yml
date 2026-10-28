@@ -113,11 +113,11 @@ jobs:
   # (tst/util/shards.py). The gateway tests are a check of their own, split the same way. Each check passes
   # when all of its shards do (the integration-local-slow and integration-local-gateway jobs below).
   integration-local-slow-shard:
-    name: integration-local-slow (${{ matrix.shard }}/4)
+    name: integration-local-slow (${{ matrix.shard }}/8)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -140,7 +140,7 @@ jobs:
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
       - name: Slow integration tier on the local defaults
         env:
-          AGENTENV_TEST_SHARD: ${{ matrix.shard }}/4
+          AGENTENV_TEST_SHARD: ${{ matrix.shard }}/8
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
             tst/integration --ignore=tst/integration/env/gateway/gateway_test.py

@@ -93,7 +93,8 @@ def test_the_same_table_and_tests_always_give_the_same_shards():
 
 def test_the_committed_table_names_a_file_for_every_slow_tier_unit_it_splits():
     table = shards.load_table()
-    assert table["split_by_test"] == [SPLIT]
+    assert SPLIT in table["split_by_test"]
+    assert all((ROOT / path).is_file() for path in table["split_by_test"]), "split_by_test names a test file that is gone"
     assert all((ROOT / unit.split("::")[0]).is_file() for unit in table["seconds"]), "the table names a test file that is gone"
 
 
