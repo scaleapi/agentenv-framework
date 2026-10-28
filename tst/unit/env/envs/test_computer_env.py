@@ -137,7 +137,7 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
                                                                                                 local_stores):
     local_stores.set_image_store(OciRegistryImageStore("registry.example"))
     env = _put(base, driver, settings={"ubuntu-24.04": {"timezone": "Europe/Paris", "theme": "dark"}},
-               display={"width": 1600, "height": 900}, data_paths=(path for path in ["Documents", "Music"]))
+               display={"width": 1600, "height": 900})
 
     stored = Env.get(env.id)
     composed = stored.metadata["composed"]["container"]
@@ -152,7 +152,6 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
         "amd64": "passed", "arm64": "passed"}
     assert (computer.config["resolution"].default, computer.config["timezone"].default) == ("1600x900", "Europe/Paris")
     assert stored.settings == {base.id: {"timezone": "Europe/Paris", "theme": "dark"}}
-    assert stored.data_paths == ["Documents", "Music"]
     arm64 = next(build for build in docker.builds if build["platform"] == "linux/arm64")
     assert arm64["dockerfile"].splitlines() == [
         f"FROM {base.image().image_name}", "USER root", "COPY driver/ /opt/agentenv/drivers/desk/",
@@ -336,8 +335,6 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
     ({"tools": {"hide": ["computer_c*"]}}, "tools.hide: 'computer_c*' hides computer_click, of the seven tools every "
                                            "computer offers"),
     ({"tools": {"show": ["x"]}}, "tools is { hide = [<pattern>, ...] }"),
-    ({"data_paths": ["/etc"]}, "data_paths: '/etc' isn't a path inside the session user's home"),
-    ({"data_paths": ["../x"]}, "data_paths: '../x' isn't a path inside the session user's home"),
     ({"settings": {"mail": {"x": 1}}}, "settings.mail: names neither the computer, @local/~/kit/ubuntu-24.04, nor the "
                                       "driver, @local/~/kit/desk"),
     ({"settings": {"ubuntu-24.04": {"wallpaper": "x"}}},
@@ -346,7 +343,7 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
      "settings.ubuntu-24.04.timezone must be a str, like its default 'UTC', not 3"),
     ({"settings": {"desk": {"log_level": "debug"}}}, "settings.desk.log_level: @local/~/kit/desk declares no setting"),
 ], ids=["apps", "form", "display-zero", "display-side", "display-and-resolution", "network", "network-key",
-        "tools-hide", "tools-minimum", "tools-key", "data-absolute", "data-escapes", "settings-layer", "settings-name", "settings-type",
+        "tools-hide", "tools-minimum", "tools-key", "settings-layer", "settings-name", "settings-type",
         "settings-driver"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:

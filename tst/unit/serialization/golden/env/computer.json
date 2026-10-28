@@ -3,9 +3,6 @@
     "id": "ubuntu-24.04",
     "version": 1
   },
-  "data_paths": [
-    "Documents"
-  ],
   "display": {
     "height": 800,
     "width": 1280

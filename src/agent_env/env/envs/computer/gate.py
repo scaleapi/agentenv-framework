@@ -4,7 +4,6 @@ other and against what the env declares, and every mismatch is named."""
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer.conformance.checks import MINIMUM_TOOLS
@@ -22,7 +21,7 @@ MAX_SIDE = 32767
 
 
 def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, forms: list[str], apps: list, display: Any,
-          network: Any, hidden_tools: list[str], settings: Any, data_paths: list) -> tuple[dict, list[str]]:
+          network: Any, hidden_tools: list[str], settings: Any) -> tuple[dict, list[str]]:
     """The env's settings by layer id, and every way ``base``, ``driver`` and what the env declares don't compose."""
     problems = []
     if apps:
@@ -34,9 +33,6 @@ def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, forms: list[str]
     problems += _display(base, display, settings)
     problems += _network(network)
     problems += _tools(driver, hidden_tools)
-    problems += [f"data_paths: {path!r} isn't a path inside the session user's home" for path in data_paths
-                 if not isinstance(path, str) or not path or PurePosixPath(path).is_absolute()
-                 or ".." in PurePosixPath(path).parts]
     by_layer, invalid = layered(base, driver, settings)
     return by_layer, problems + invalid
 
