@@ -112,12 +112,14 @@ def _base(image, **changes):
                                                   "init": "supervisord", "input_channel": "env"}}, **changes})
 
 
-def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, install=True):
+def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, install=True, extra=None):
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "driver.py").write_text("class Desk: ...\n")
     (folder / "requirements.txt").write_text(requirements)
     files = FileArtifactUniverse.put_bundled("@local/~/kit/desk__files", files={
         name: folder / name for name in ("driver.py", "requirements.txt")})
+    if extra:
+        files = FileArtifactUniverse.put(files.id, file_artifacts={**files.get_file_artifacts(), **extra})
     supports = supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}]
     platforms = [{"platform": {"os": "linux", "arch": arch, "display": "x11"}, "provides": [], "tools": TOOLS,
                   "features": {}} for arch in ("amd64", "arm64")]
@@ -224,6 +226,19 @@ def test_a_pair_that_fails_is_recorded_with_its_log_and_the_rest_are_built_and_w
     assert b"did not complete successfully" in log.load()
     assert env.metadata["composed"]["container"]["arm64"]["status"] == "unverified"
     assert ComputerArtifact.get(env.metadata["computer"]["id"]).arch == ["arm64"]
+
+
+def test_a_driver_file_named_outside_its_folder_fails_the_build_before_anything_is_written_or_built(base, docker,
+                                                                                                    tmp_path):
+    escape = FileArtifact.put_bytes("@local/~/kit/escape", description="", filename="agentenv-escape", content=b"x",
+                                    content_type="text/plain")
+    driver = _driver(tmp_path / "driver", extra={"../../agentenv-escape": escape})
+
+    env = Env.get(_put(base, driver).id)
+
+    assert {(r["stage"], r["reason"]) for r in env.metadata["composed"]["container"].values()} == {
+        ("build", "ValueError: driver @local/~/kit/desk: '../../agentenv-escape' would be written outside its folder")}
+    assert docker.builds == []
 
 
 def test_a_machine_that_cant_emulate_the_other_arch_fails_that_arch_alone(base, driver, docker):

@@ -29,6 +29,7 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, docker_login, push_local_image
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.config import get_config
+from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.env import Env
 from agent_env.env.envs.computer import gate
 from agent_env.env.envs.computer.install import Install
@@ -194,7 +195,10 @@ def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifa
     layer = re.sub(r"[^a-z0-9-]+", "-", driver.id.rsplit("/", 1)[-1].lower()).strip("-") or "driver"
     folder = PurePosixPath(install.files)
     for name, artifact in driver.files.get_file_artifacts().items():
-        path = PurePosixPath(name)
+        try:
+            path = PurePosixPath(checked_path(name))
+        except Unwritable as e:
+            raise ValueError(f"driver {driver.id}: {e}") from None
         if folder == PurePosixPath(".") or path.is_relative_to(folder):
             target = context / "driver" / path.relative_to(folder)
             target.parent.mkdir(parents=True, exist_ok=True)
