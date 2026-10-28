@@ -14,9 +14,15 @@ from agent_env.cli.up import _bootstrap_envs, up
 from agent_env.env import GatewayEnv
 from agent_env.env import bootstrap
 from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, WEBSITE_BROWSER, InfraError, ensure_default_envs
+from agent_env.env.env import Env
+from agent_env.store.base import ConcurrentModificationError
 
 
 _DIGEST = "sha256:" + "5" * 64
+_INFRA_PUTS = pytest.mark.parametrize("kind, put", [
+    (GATEWAY, bootstrap.put_gateway_env), (SERVICE_DB, bootstrap.put_service_db_env),
+    (WEBSITE_BROWSER, bootstrap.put_website_browser_env),
+], ids=[GATEWAY, SERVICE_DB, WEBSITE_BROWSER])
 
 
 @pytest.fixture
@@ -42,10 +48,7 @@ def puts(local_stores, monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("kind, put", [
-    (GATEWAY, bootstrap.put_gateway_env), (SERVICE_DB, bootstrap.put_service_db_env),
-    (WEBSITE_BROWSER, bootstrap.put_website_browser_env),
-], ids=[GATEWAY, SERVICE_DB, WEBSITE_BROWSER])
+@_INFRA_PUTS
 def test_each_infra_image_keeps_the_build_context_it_is_built_from(local_stores, monkeypatch, kind, put):
     """So a VM or Modal running another platform than this machine builds it again from that; and those contexts are
     what its recorded build inputs cover. Each Dockerfile is named by its whole path: a bare name is looked up from
@@ -255,6 +258,38 @@ def test_a_published_image_is_registered_by_its_tag_and_digest_with_the_context_
     assert get_artifact_store().get_object(image.build_context_object_url)
     assert env.metadata[bootstrap.BUILD_INPUTS_KEY] == bootstrap.build_inputs_digest(GATEWAY)
     assert bootstrap._built_from_stock(env, GATEWAY)
+
+
+@_INFRA_PUTS
+def test_a_put_that_names_a_version_writes_only_that_next_one(local_stores, kind, put):
+    """So a promotion that read the env at one version writes nothing over a version someone put meanwhile."""
+    published = {dockerfile: _DIGEST for dockerfile in bootstrap._DOCKERFILES[kind]}
+    put("x", platform=None, published=published)
+
+    assert put("x", platform=None, published=published, version=2).version == 2
+    with pytest.raises(ConcurrentModificationError):
+        put("x", platform=None, published=published, version=2)
+    assert Env.get("x").version == 2
+
+
+@_INFRA_PUTS
+@pytest.mark.parametrize("version", [0, -1])
+def test_a_put_refuses_a_version_below_1_before_writing_anything(local_stores, monkeypatch, kind, put, version):
+    """The store would read 0 as "the next free version", and write one the caller didn't name."""
+    monkeypatch.setattr(bootstrap, "_image", lambda *args, **kwargs: pytest.fail("wrote an image"))
+
+    with pytest.raises(ValueError, match=f"can't be stored as version {version}"):
+        put("x", platform=None, published={}, version=version)
+
+
+def test_a_put_keeps_metadata_that_isnt_a_string(local_stores):
+    """Such as the record a promotion keeps on the version it wrote."""
+    stamp = {"stage": "dev", "passed": True, "previous": 1}
+
+    env = bootstrap.put_gateway_env("default", platform=None, published={bootstrap.GATEWAY_DOCKERFILE: _DIGEST},
+                                    metadata={"promotion": stamp})
+
+    assert Env.get("default", env.version).metadata["promotion"] == stamp
 
 
 def test_a_published_image_is_registered_from_its_own_dockerfile_whatever_folder_the_run_is_in(local_stores, tmp_path,
