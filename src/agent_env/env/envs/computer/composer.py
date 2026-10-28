@@ -65,10 +65,10 @@ _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PA
 
 
 def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None) -> None:
-    """Build each of ``pairs``, by default every form and arch the env composes, in parallel, recording each as it
-    starts and finishes, then write the env's computer over every pair built so far."""
+    """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel,
+    recording each as it starts and finishes, then write the env's computer over every pair built so far."""
     base, driver = env.computer, env.driver
-    pairs = pairs if pairs is not None else [(form, arch) for form in env.forms for arch in gate.arches(base, driver)]
+    pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base) for arch in gate.arches(base, driver)]
     record = _Record(env)
     record.started(pairs)
     with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
@@ -93,7 +93,7 @@ def current(env: ComputerEnv) -> bool:
 def pending(env: ComputerEnv) -> list[tuple[str, str]]:
     """The forms and arches of ``env`` not yet built: never started, failed, or left building by a put that stopped."""
     composed = env.metadata.get("composed", {})
-    return [(form, arch) for form in env.forms for arch in gate.arches(env.computer, env.driver)
+    return [(form, arch) for form in gate.forms(env.computer) for arch in gate.arches(env.computer, env.driver)
             if composed.get(form, {}).get(arch, {}).get("status") not in _BUILT]
 
 

@@ -164,7 +164,6 @@ ENV_FIXTURES = {
         environment_name="desktop",
         computer=ARTIFACT_FIXTURES["computer"]().model_copy(update={"version": 1}),
         driver=ENV_FIXTURES["computer_driver"](),
-        forms=["container"],
         display={"width": 1280, "height": 800},
         network={"mode": "allow_all"},
         hidden_tools=["computer_keyboard_*"],

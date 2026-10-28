@@ -12,9 +12,6 @@
     "version": 4
   },
   "environment_name": "desktop",
-  "forms": [
-    "container"
-  ],
   "hidden_tools": [
     "computer_keyboard_*"
   ],

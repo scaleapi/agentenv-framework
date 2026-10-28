@@ -66,8 +66,9 @@ def test_a_computer_env_naming_shipped_aliases_is_written_over_them_and_composed
     ('type = "computer"\ncomputer = "ubuntu-24.04"\n', 'driver is required: the driver, such as "reference"'),
     (DESKTOP.replace("display =", "ports = [80]\ndisplay ="), "unknown key 'ports'"),
     (DESKTOP.replace("display =", 'data_paths = ["Documents"]\ndisplay ='), "unknown key 'data_paths'"),
+    (DESKTOP.replace("display =", 'forms = ["container"]\ndisplay ='), "unknown key 'forms'"),
     (DESKTOP.replace("1600", "0"), "display is { width = <n>, height = <n> }, each 1 to 32767 pixels"),
-], ids=["no-computer", "no-driver", "unknown-key", "data-paths", "display"])
+], ids=["no-computer", "no-driver", "unknown-key", "data-paths", "forms", "display"])
 def test_a_computer_env_folder_that_declares_what_cant_compose_is_refused_naming_the_folder(tmp_path, composed, toml,
                                                                                             problem):
     plan = _plan(_bundle(tmp_path / "desk", toml))

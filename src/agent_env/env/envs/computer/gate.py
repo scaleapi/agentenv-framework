@@ -20,14 +20,12 @@ if TYPE_CHECKING:
 MAX_SIDE = 32767
 
 
-def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, forms: list[str], apps: list, display: Any,
-          network: Any, hidden_tools: list[str], settings: Any) -> tuple[dict, list[str]]:
+def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, display: Any, network: Any,
+          hidden_tools: list[str], settings: Any) -> tuple[dict, list[str]]:
     """The env's settings by layer id, and every way ``base``, ``driver`` and what the env declares don't compose."""
     problems = []
     if apps:
         problems.append("apps: computer app envs aren't supported yet")
-    problems += [f"forms: the {form} form isn't supported yet; a computer env composes {', '.join(FORMS)}"
-                 for form in forms if form not in FORMS]
     problems += _platform(base, driver)
     problems += _image(base)
     problems += _display(base, display, settings)
@@ -35,6 +33,11 @@ def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, forms: list[str]
     problems += _tools(driver, hidden_tools)
     by_layer, invalid = layered(base, driver, settings)
     return by_layer, problems + invalid
+
+
+def forms(base: ComputerArtifact) -> list[str]:
+    """The forms a composition of ``base`` builds: every one the base has."""
+    return [form for form in FORMS if getattr(base.forms, form, None)]
 
 
 def arches(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:

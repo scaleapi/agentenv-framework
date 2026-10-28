@@ -323,7 +323,6 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
 
 @pytest.mark.parametrize("changes, problem", [
     ({"apps": [{"env": "mail"}]}, "apps: computer app envs aren't supported yet"),
-    ({"forms": ["disk"]}, "forms: the disk form isn't supported yet; a computer env composes container"),
     ({"display": {"width": 0, "height": 800}}, "display is { width = <n>, height = <n> }, each 1 to 32767 pixels"),
     ({"display": {"width": 1280}}, "display is { width = <n>, height = <n> }"),
     ({"display": {"width": 1280, "height": 800}, "settings": {"ubuntu-24.04": {"resolution": "800x600"}}},
@@ -342,7 +341,7 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
     ({"settings": {"ubuntu-24.04": {"timezone": 3}}},
      "settings.ubuntu-24.04.timezone must be a str, like its default 'UTC', not 3"),
     ({"settings": {"desk": {"log_level": "debug"}}}, "settings.desk.log_level: @local/~/kit/desk declares no setting"),
-], ids=["apps", "form", "display-zero", "display-side", "display-and-resolution", "network", "network-key",
+], ids=["apps", "display-zero", "display-side", "display-and-resolution", "network", "network-key",
         "tools-hide", "tools-minimum", "tools-key", "settings-layer", "settings-name", "settings-type",
         "settings-driver"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
