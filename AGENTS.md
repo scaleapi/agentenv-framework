@@ -336,7 +336,8 @@ proposes only a base's digest and patch updates, and a major or minor upgrade is
   with the types in use `feat`, `fix`, `refactor`, `test`, `docs`, `ci`, `chore`, `perf`, `build`,
   `security`; `!` marks a breaking change, and `plugin-api` requires it for a plugin-surface break.
 - Versions are cut by the maintainers' release automation. Never edit `version` in
-  `pyproject.toml` or push a tag in a PR.
+  `pyproject.toml` or push a tag in a PR. The release pins the framework's requirement on
+  agentenv-framework-protocol with `.github/scripts/shipped_bundles.py pin-pyproject`, which keeps its extras.
 - Names: the distribution is `agentenv-framework`, the import package `agent_env`, the console
   script `agent-env`. Only the first is what `uv add`, `pip install` and `importlib.metadata.version()` take.
 - Comments: default to none. The code says what; a docstring of one to three dense lines says why
