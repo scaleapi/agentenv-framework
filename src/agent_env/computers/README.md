@@ -1,7 +1,8 @@
 Base computers that come with agent-env, each a `computer` artifact a computer env composes a driver and apps onto.
 
 `artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. tini starts
-supervisord, which runs every program as the session user, `user` (uid 1000); nothing in it runs as root. Its
+supervisord, which runs every program as the session user, `user` (uid 1000); nothing in it runs as root. Its home
+has a desktop's standard folders (`Desktop`, `Documents`, `Downloads`, `Pictures` and the rest, from `xdg-user-dirs`). Its
 container form's image is built from the folder's `Dockerfile`, and a release publishes it as
 `ghcr.io/scaleapi/agentenv-ubuntu-24.04:src-<hex>`, tagged by its sources, so a run pulls it by digest instead of
 building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.toml` gives it, or by its id,
