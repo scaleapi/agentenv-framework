@@ -127,8 +127,8 @@ class AgentEnv:
         """TRL's ``environment_factory``: an environment class per toolset of the server's tasks, or the one class when
         every task has the same. Building it plays one task of each toolset through, in turn, ending each of its turns
         empty, since TRL reads the tools from the class: its methods are every tool a turn offers, and one a turn
-        doesn't offer answers so."""
-        classes = on_loop(self._environments(), len(self._toolsets) * (self._reset_timeout + CLOSE_SECONDS))
+        doesn't offer answers so. Each call on a probe's session has the reset deadline."""
+        classes = on_loop(self._environments(), None)
         return classes[0] if len(classes) == 1 else {each.__name__: each for each in classes}
 
     def close(self) -> None:
