@@ -8,6 +8,7 @@ import logging
 import pytest
 
 import agent_env.providers.sandbox_providers.chained_sandbox_provider as chained_module
+import agent_env.providers.sandbox_providers.local_sandbox as lsm
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
@@ -654,3 +655,14 @@ async def test_a_pull_that_fails_again_is_raised_as_it_was(no_pause):
     with pytest.raises(RuntimeError, match="pull access denied"):
         await _pull(sandbox, "registry/agent:v1")
     assert sandbox.scripts == ["docker pull registry/agent:v1"] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_container_is_refused_a_platform_its_provider_doesnt_run_natively(monkeypatch):
+    monkeypatch.setattr(lsm, "host_platform", lambda: "linux/arm64")
+    with pytest.raises(ValueError, match="ModalSandboxProvider runs linux/amd64 natively, not linux/arm64"):
+        await ModalSandboxProvider().create_container(image_name="img", port=1, env={}, platform="linux/arm64")
+    with pytest.raises(ValueError, match="LocalSandboxProvider runs linux/arm64 natively, not linux/amd64"):
+        await LocalSandboxProvider().create_container(image_name="img", port=1, env={}, platform="linux/amd64")
+    assert LocalSandboxProvider.native_platforms() == {"linux/arm64"}
+    assert SandboxProvider.native_platforms() == {"linux/amd64"}

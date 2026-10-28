@@ -38,14 +38,22 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
-from agent_env.providers.sandbox_providers.host_images import build_here, built_here, present, pull_here
-from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, NetworkPolicy, VmSandbox
+from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
+from agent_env.providers.sandbox_providers.relay import relay_image
+from agent_env.providers.sandbox_providers.sandbox import (
+    SANDBOX_LABEL,
+    NetworkPolicy,
+    NetworkPolicyUnsupportedError,
+    VmSandbox,
+    port_bindings,
+)
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
     SANDBOX_MODE_VM,
     Accepts,
     SandboxProvider,
     on_this_machine_provider,
+    refuse_foreign_platform,
     refuse_unenforceable_policy,
 )
 from agent_env.store.object_store.local.tls import local_ca
@@ -105,6 +113,8 @@ LOCAL_TRUST_ENV = trust_env(LOCAL_TRUST_DIR)
 _CONTAINER_MODE_MARKER = ".agent-container-mode"
 # The sandbox's container port -> host port map, so a sandbox rebuilt from its id publishes and finds the same ports.
 _PORT_MAP_FILE = ".port-map.json"
+# The internal network a container with no network runs on, so a sandbox rebuilt from its id removes it and its relay.
+_CLOSED_NETWORK_FILE = ".closed-network"
 # The host ports sandboxes publish on: below the default ranges outgoing connections take their local ports from (32768
 # up on Linux, the VM Docker Desktop or Rancher Desktop runs Docker in included; 49152 up on macOS and Windows) and
 # below Kubernetes' node ports (30000-32767).
@@ -281,6 +291,12 @@ class LocalSandbox(VmSandbox):
         return f"{name}-{self.sandbox_id}"
 
     @property
+    def closed_network(self) -> str | None:
+        """The internal network create_container ran this sandbox's container on, with no route out, if it did."""
+        marker = self._work_dir / _CLOSED_NETWORK_FILE
+        return marker.read_text() if marker.exists() else None
+
+    @property
     def owns_container(self) -> bool:
         """Whether create_container started ``container_name`` for this sandbox, not an agent placed on it."""
         return (self._work_dir / _CONTAINER_MODE_MARKER).exists()
@@ -323,6 +339,8 @@ class LocalSandbox(VmSandbox):
                 await self._remove_labeled()
         finally:  # a container that wouldn't go must not keep the compose stack up
             await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
+            if self.closed_network is not None:
+                await self._remove_labeled()
             if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
                 # No `|| true`: `docker compose down` is idempotent (an already-down stack exits 0), so a
                 # non-zero exit is a real failure — surface it (exec_script raises, with the compose output)
@@ -615,6 +633,15 @@ class LocalSandboxProvider(SandboxProvider):
     def url_from_sandbox(self, url: str) -> str:
         return self.get_external_url(url)
 
+    @classmethod
+    def native_platforms(cls) -> frozenset[str]:
+        return frozenset({host_platform()})
+
+    @classmethod
+    def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
+        """Unrestricted, or a container with no network at all (``create_container``)."""
+        return not policy.restricts_egress or policy.closed
+
     async def create_vm(
         self,
         *,
@@ -630,6 +657,8 @@ class LocalSandboxProvider(SandboxProvider):
         network_policy: Optional[NetworkPolicy] = None,
     ) -> LocalSandbox:
         refuse_unenforceable_policy(self, network_policy)
+        if network_policy is not None and network_policy.restricts_egress:
+            raise NetworkPolicyUnsupportedError(f"{type(self).__name__} takes a container's network away, not a VM's")
         # Allocated here rather than in the sandbox constructor: probing for a free port
         # is I/O, and callers that only need a handle must not pay for it. Off the event
         # loop, since a draw waits for any other process's draw to finish.
@@ -652,18 +681,25 @@ class LocalSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        platform: Optional[str] = None,
     ) -> LocalSandbox:
-        sandbox = await super().create_container(
-            image_name=image_name,
-            port=port,
-            env=env,
-            cpu=cpu,
-            memory=memory,
-            disk_size_gb=disk_size_gb,
-            timeout=timeout,
-            attribution=attribution,
-            network_policy=network_policy,
-        )
+        refuse_unenforceable_policy(self, network_policy)
+        if network_policy is not None and network_policy.closed:
+            sandbox = await self._create_closed(image_name=image_name, port=port, env=env, timeout=timeout,
+                                                attribution=attribution, platform=platform)
+        else:
+            sandbox = await super().create_container(
+                image_name=image_name,
+                port=port,
+                env=env,
+                cpu=cpu,
+                memory=memory,
+                disk_size_gb=disk_size_gb,
+                timeout=timeout,
+                attribution=attribution,
+                network_policy=network_policy,
+                platform=platform,
+            )
         # The marker is how a later get_sandbox() (post-run teardown rebuilds the sandbox from disk)
         # learns this is a container and removes it. If we can't persist it, that reconstructed
         # teardown would take the VM path and leak the running container — so we can't just swallow
@@ -691,6 +727,42 @@ class LocalSandboxProvider(SandboxProvider):
                     )
                 raise
         return sandbox
+
+    async def _create_closed(self, *, image_name: str, port: int, env: dict[str, str], timeout: int,
+                             attribution: Optional[Attribution], platform: Optional[str]) -> LocalSandbox:
+        """The container on an internal network of its own, with no route out, and a relay on that network and the
+        default bridge publishing its ``port``: Docker publishes no port of a container on an internal network alone."""
+        refuse_foreign_platform(self, platform)
+        relay = await relay_image()
+        sandbox = await self.create_vm(exposed_ports=[port], timeout=timeout, attribution=attribution)
+        try:
+            await sandbox.pull_images([image_name])
+            network, relay_name = sandbox.scoped_name("closed"), sandbox.scoped_name("relay")
+            label = shlex.quote(f"{SANDBOX_LABEL}={sandbox.sandbox_id}")
+            (sandbox.work_dir / _CLOSED_NETWORK_FILE).write_text(network)
+            await sandbox.exec_script(f"docker network create --internal --label {label} {network} >/dev/null")
+            await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+            address = await sandbox.exec_script(
+                f"docker inspect -f '{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}' "
+                f"{shlex.quote(sandbox.container_name)}")
+            publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
+            await sandbox.exec_script(
+                f"docker run -d --name {relay_name} --label {label} {publish} {relay} {port}={address.strip()}:{port} "
+                f">/dev/null && docker network connect {network} {relay_name}")
+            sandbox.mode = SANDBOX_MODE_CONTAINER
+        except BaseException:
+            try:
+                await sandbox.terminate()
+            except Exception:
+                pass
+            raise
+        sandbox.network_policy = NetworkPolicy(mode="allowlist")
+        return sandbox
+
+    def _publish_args(self, sandbox: VmSandbox, port: int) -> str:
+        """A container with no network is reached through its relay; any other is published as everywhere."""
+        network = sandbox.closed_network if isinstance(sandbox, LocalSandbox) else None
+        return f"--network {shlex.quote(network)}" if network is not None else super()._publish_args(sandbox, port)
 
     async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
         """Where the configured store hands out local grants, create the container, copy the local transfer CA's

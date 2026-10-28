@@ -114,6 +114,11 @@ class NetworkPolicy:
     def restricts_egress(self) -> bool:
         return self.mode is not NetworkMode.ALLOW_ALL
 
+    @property
+    def closed(self) -> bool:
+        """An allowlist of nothing: no egress at all."""
+        return self.mode is NetworkMode.ALLOWLIST and not self.allow_hosts and not self.allow_cidrs
+
     def with_hosts(self, hosts: Iterable[str]) -> "NetworkPolicy":
         """Copy with ``hosts`` unioned in; a no-op for ALLOW_ALL, which needs no list."""
         if self.mode is not NetworkMode.ALLOWLIST:

@@ -24,6 +24,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts,
     SandboxProvider,
     apply_default_attribution,
+    refuse_foreign_platform,
 )
 from agent_env.providers.sandbox_providers.modal_image_build import context_image, fmt_exc
 
@@ -328,8 +329,10 @@ class ModalSandboxProvider(SandboxProvider):
         command: list[str] | None = None,
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
+        platform: Optional[str] = None,
         private_network: bool = False,
     ) -> Sandbox:
+        refuse_foreign_platform(self, platform)
         # The private network is i6pn, Modal's network between sandboxes, in the configured region.
         i6pn = private_network
         region = get_config().modal_default_region if private_network else None

@@ -15,6 +15,7 @@ import agent_env.providers.sandbox_providers.local_sandbox as ls
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.config import reset_config, set_object_store
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
@@ -585,6 +586,62 @@ async def test_create_container_publishes_the_allocated_host_port(monkeypatch, t
     assert made[0].host_port(8000) == 41337
     run_cmd = next(s for s in recorded if "docker create" in s)
     assert "-p 127.0.0.1:41337:8000 -p 172.17.0.1:41337:8000 " in run_cmd
+
+
+@pytest.mark.asyncio
+async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_relay_publishes(monkeypatch, tmp_path):
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+    monkeypatch.setattr(ls, "_free_host_port", lambda: 41337)
+    monkeypatch.setattr(ls, "relay_image", _relay_image)
+    made: list[LocalSandbox] = []
+
+    class _RecordingProvider(LocalSandboxProvider):
+        async def create_vm(self, **kwargs):
+            sandbox = await LocalSandboxProvider.create_vm(self, **kwargs)
+            sandbox._work_dir = tmp_path
+            sandbox.scripts = []
+
+            async def _record(script, *, max_retries=0):
+                sandbox.scripts.append(script)
+                return "172.30.0.2\n" if script.startswith("docker inspect") else ""
+
+            sandbox.exec_script = _record
+            made.append(sandbox)
+            return sandbox
+
+    sandbox = await _RecordingProvider().create_container(image_name="img:v1", port=8000, env={},
+                                                          network_policy=NetworkPolicy(mode="allowlist"))
+
+    network, label = f"closed-{sandbox.sandbox_id}", f"agentenv.sandbox={sandbox.sandbox_id}"
+    steps = [s.split()[1] for s in sandbox.scripts]
+    create = next(s for s in sandbox.scripts if s.startswith("docker create"))
+    assert steps == ["pull", "network", "create", "start", "inspect", "run"]
+    assert sandbox.scripts[1] == f"docker network create --internal --label {label} {network} >/dev/null"
+    assert f"--network {network} " in create and "-p " not in create
+    assert sandbox.scripts[-1] == (f"docker run -d --name relay-{sandbox.sandbox_id} --label {label} "
+                                   "-p 127.0.0.1:41337:8000 agentenv-relay:test 8000=172.30.0.2:8000 >/dev/null && "
+                                   f"docker network connect {network} relay-{sandbox.sandbox_id}")
+    assert sandbox.mode == SANDBOX_MODE_CONTAINER and sandbox.closed_network == network
+    assert sandbox.network_policy.closed and sandbox.tunnel_urls[8000] == "http://127.0.0.1:41337"
+
+
+@pytest.mark.asyncio
+async def test_a_container_with_no_network_takes_its_relay_and_network_with_it(tmp_path: Path):
+    sandbox = _RecordingLocalSandbox(tmp_path, sandbox_id="local-abc", listed=(0, "r1\n", ""))
+    sandbox.mode = SANDBOX_MODE_CONTAINER
+    (tmp_path / ls._CLOSED_NETWORK_FILE).write_text("closed-local-abc")
+
+    await sandbox.terminate()
+
+    assert sandbox.scripts[:3] == [f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true",
+                                   "docker ps -aq --filter label=agentenv.sandbox=local-abc", "docker rm -f r1 >/dev/null"]
+    assert "docker network ls -q --filter label=agentenv.sandbox=local-abc" in sandbox.scripts[3]
+
+
+async def _relay_image() -> str:
+    return "agentenv-relay:test"
 
 
 @pytest.mark.asyncio

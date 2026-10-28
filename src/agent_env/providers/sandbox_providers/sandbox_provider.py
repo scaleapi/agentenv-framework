@@ -15,6 +15,7 @@ from agent_env.attribution import Attribution
 from agent_env.config import runtime
 from agent_env.config import ENV_REF_PREFIX
 from agent_env.config.errors import ConfigError
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicy,
     NetworkPolicyUnsupportedError,
@@ -104,17 +105,20 @@ class SandboxProvider(ABC):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        platform: Optional[str] = None,
         private_network: bool = False,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
         Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
-        network this provider's other such containers share, at its ``private_host``.
+        network this provider's other such containers share, at its ``private_host``. ``platform`` is the one the
+        image must run as, refused unless the provider runs it natively (``native_platforms``).
 
         Default implementation: a container-only backend uses create_sandbox; a VM backend creates
         a VM, pulls the image, and starts it. Backends that bake the image in at creation override.
         """
+        refuse_foreign_platform(self, platform)
         if private_network:
             raise ValueError(f"{type(self).__name__} runs each container in a VM of its own, so it can't put "
                              "containers on a private network they share")
@@ -157,11 +161,14 @@ class SandboxProvider(ABC):
         """The ``docker run`` / ``docker create`` arguments for the sandbox's container."""
         env_flags = " \\\n    ".join(f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items())
         extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
-        publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
         return (
-            f"--name {shlex.quote(sandbox.container_name)} {publish} {extra_args}\\\n    "
+            f"--name {shlex.quote(sandbox.container_name)} {self._publish_args(sandbox, port)} {extra_args}\\\n    "
             f"{env_flags} \\\n    {shlex.quote(image_name)}"
         )
+
+    def _publish_args(self, sandbox: VmSandbox, port: int) -> str:
+        """How the sandbox's container is reached on ``port``: published on the sandbox's host."""
+        return " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
 
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support get_sandbox")
@@ -296,6 +303,11 @@ class SandboxProvider(ABC):
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
         """Whether this backend can enforce ``policy``. Default: unrestricted only."""
         return not policy.restricts_egress
+
+    @classmethod
+    def native_platforms(cls) -> frozenset[str]:
+        """The platforms its containers run without emulation."""
+        return frozenset({DEFAULT_BUILD_PLATFORM})
 
     @classmethod
     def effective_network_policy(cls, policy: Optional[NetworkPolicy]) -> NetworkPolicy:
@@ -618,6 +630,13 @@ def refuse_unenforceable_policy(provider: SandboxProvider, policy: Optional[Netw
         raise NetworkPolicyUnsupportedError(
             f"{type(provider).__name__} cannot enforce network policy mode {policy.mode.value!r}"
         )
+
+
+def refuse_foreign_platform(provider: SandboxProvider, platform: Optional[str]) -> None:
+    """Fail before provisioning rather than run ``platform`` emulated, or as another."""
+    if platform is not None and platform not in provider.native_platforms():
+        raise ValueError(f"{type(provider).__name__} runs {', '.join(sorted(provider.native_platforms()))} natively, "
+                         f"not {platform}")
 
 
 def _install_sandbox_type_guard(provider: SandboxProvider, name: str) -> SandboxProvider:
