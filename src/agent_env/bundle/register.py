@@ -39,13 +39,14 @@ from agent_env.store.image_store.oci_registry_credentials import is_loopback_hos
 from agent_env.store.routing import configured_store, namespace_routing
 from agent_env.task_step.registry import get_task_step_registry
 
-from ._import_report import written_files
+from ._import_report import file_digest
 from ._imported import Imported, as_imported, grafted, read_imported, source_of, where
 from ._secrets import credentials_in
+from .authoring import entry_files
 from .installed import installed_bundles
 from .ledger import Check, Ledger
 from .materialize import Materialization, Materialized, materialize
-from .parse import Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
+from .parse import CONFIG_FILES, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle, plan_entities
 from .run import _label
 from .resolve import BundleImage, Reference, ResolvedBundle, ResolvedEntry, resolve_bundle
@@ -239,9 +240,22 @@ def _held_as_imported(plan: Plan, imported: Imported | None) -> frozenset[str]:
     if imported is None:
         return frozenset()
     writes = [write for write in plan.writes if source_of(imported, plan, write) is not None]
-    root = plan.bundle.bundle.root
-    now = written_files(root, {where(root, write.source.entry) for write in writes})
+    now = {}
+    for entry in {write.source.entry for write in writes}:
+        now |= _files_of(plan.bundle.bundle, entry)
     return frozenset(write.id for write in writes if as_imported(imported, plan, write, now))
+
+
+def _files_of(bundle: Bundle, entry: BundleEntry) -> dict[str, str]:
+    """The files a write of ``entry`` reads, as its writer walks them, by their paths in the bundle, as their
+    ``file_digest``: a task's or eval's file, or every file of its folder and its toml."""
+    folder = where(bundle.root, entry)
+    if entry.kind in (BundleKind.TASK, BundleKind.EVAL):
+        return {folder: file_digest(entry.path)}
+    files = entry_files(bundle, entry, empty_ok=True)
+    if entry.kind in CONFIG_FILES and (toml := entry.path / CONFIG_FILES[entry.kind]).is_file():
+        files[toml.name] = toml
+    return {f"{folder}/{key}": file_digest(path) for key, path in files.items()}
 
 
 def _sources(plan: Plan, ids: Mapping[str, str], imported: Imported | None,
@@ -420,8 +434,11 @@ class RegistrationLedger(Ledger):
         if stored is None or stored < self.sources[key]:
             return None
         digest = self.digest(write, needs)
+        row = self._latest(*key)
+        recorded = row is not None and digest is not None and (row["bundle"], row["version"], row.get("digest")) == (
+            self._bundle(write), self.sources[key], digest.value)
         return Check(write, digest, self.sources[key], ("as it was imported",), stored, needs,
-                     adopted=digest is not None)
+                     adopted=digest is not None and not recorded)
 
     def _bundle(self, write: Write) -> str:
         """The bundle's identity, or for an entity an installed bundle comes with, that bundle's, which every bundle

@@ -7,7 +7,6 @@ import hashlib
 import json
 import posixpath
 import unicodedata
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version as package_version
@@ -201,16 +200,19 @@ def store_fingerprint() -> str:
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
 
-def written_files(root: Path, within: Iterable[str] | None = None) -> dict[str, str]:
-    """Each file under ``root``, or under its paths ``within``, but its README and provenance, by its path in NFC, as its
-    content hash, ``+x`` after it when it's executable."""
-    tops = [root] if within is None else [root / part for part in within]
+def written_files(root: Path) -> dict[str, str]:
+    """Each file under ``root`` but its README and provenance, by its path in NFC, as its ``file_digest``."""
     files = {}
-    for path in sorted({path for top in tops for path in ([top] if top.is_file() else top.rglob("*"))}):
+    for path in sorted(root.rglob("*")):
         relative = unicodedata.normalize("NFC", path.relative_to(root).as_posix())
         if path.is_file() and relative not in ("README.md", PROVENANCE):
-            files[relative] = file_sha256(path) + ("+x" if path.stat().st_mode & 0o111 else "")
+            files[relative] = file_digest(path)
     return files
+
+
+def file_digest(path: Path) -> str:
+    """``path``'s content hash, ``+x`` after it when it's executable, as an import records each file it wrote."""
+    return file_sha256(path) + ("+x" if path.stat().st_mode & 0o111 else "")
 
 
 def readme(description: str, imported: BundleImport) -> str:

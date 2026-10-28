@@ -74,7 +74,9 @@ def test_a_folder_registered_as_it_was_imported_writes_nothing_and_keeps_each_ve
     rows = get_config().get_document_store().query(REGISTRATIONS, Filter.of(status="done"))
     assert {(row["id"], row["version"]) for row in rows} == {("crm-image", 1), ("crm-env", 1), ("crm-data", 1),
                                                              ("triage", 1)}
+    (imported / "envs/crm-env/.DS_Store").write_bytes(b"left by Finder")
     assert _written(register_bundle(imported)) == _written(registered)
+    assert len(get_config().get_document_store().query(REGISTRATIONS, Filter())) == len(rows)
 
 
 def test_an_edit_rewrites_only_what_it_reaches_and_gives_back_what_the_import_left_out(imported):
@@ -351,3 +353,18 @@ def test_a_skill_the_folder_gives_a_source_of_its_own_keeps_it(local_stores, tmp
     skill = Task.get("skilled", 2).to_dict()["steps"][0]["skills"][0]
     assert {key: skill.get(key) for key in ("object_url", "s3_url", "body")} == {
         "object_url": source.get("object_url"), "s3_url": source.get("object_url"), "body": source.get("body")}
+
+
+def test_a_link_into_an_imported_image_s_folder_is_an_edit_to_its_image(local_stores, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _pushed(monkeypatch)
+    files = {"Dockerfile": "FROM python:3.12-slim\nCOPY . /app\n", "app.py": "print(1)\n"}
+    MCPServerEnv.put(id="crm-env", docker_image_artifact=context_image(tmp_path, "crm-image", files),
+                     environment_name="crm")
+    Task.put(id="one", steps=[build_step({"id": "env", "type": "deploy_env", "env_id": "crm-env"})])
+    folder = import_task("one", tmp_path / "one").root
+    (folder / "envs/crm-env/tasks").symlink_to("../../tasks", target_is_directory=True)
+
+    registered = register_bundle(folder)
+
+    assert _written(registered)["crm-image"] == (2, False)
