@@ -281,12 +281,12 @@ def test_the_pairs_left_to_build_are_those_failed_or_interrupted(base, driver, d
     composed["container"]["arm64"] = {"status": "building"}
     env.metadata = {**env.metadata, "composed": composed}
 
-    assert composer.pending(env, base, driver) == [("container", "amd64"), ("container", "arm64")]
+    assert composer.pending(env) == [("container", "amd64"), ("container", "arm64")]
     docker.fail.clear()
-    composer.compose(env, base, driver, composer.pending(env, base, driver))
+    composer.compose(env, composer.pending(env))
 
     assert {r["status"] for r in Env.get(env.id).metadata["composed"]["container"].values()} == {"unverified"}
-    assert composer.pending(Env.get(env.id), base, driver) == []
+    assert composer.pending(Env.get(env.id)) == []
 
 
 def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, docker, caplog):
@@ -503,11 +503,11 @@ def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_r
     env = _put(base, driver, compose=False)
     first, second, third = (Env.get(env.id) for _ in range(3))
 
-    composer.compose(first, base, driver, [("container", "amd64")])
-    composer.compose(second, base, driver, [("container", "arm64")])
+    composer.compose(first, [("container", "amd64")])
+    composer.compose(second, [("container", "arm64")])
     monkeypatch.setattr(composer, "_served", lambda ref, store: None)
     docker.fail["linux/arm64"] = "boom"
-    composer.compose(third, base, driver, [("container", "arm64")])
+    composer.compose(third, [("container", "arm64")])
 
     stored = Env.get(env.id)
     composed = stored.metadata["composed"]["container"]

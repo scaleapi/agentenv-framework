@@ -99,7 +99,7 @@ async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_pas
 def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(composed):
     with namespace_routing():
         started = time.monotonic()
-        other = ComputerEnv.put(id=f"{composed.id}-other", computer=composed.base(), driver=composed.driver_env(),
+        other = ComputerEnv.put(id=f"{composed.id}-other", computer=composed.computer, driver=composed.driver,
                                 environment_name="other", display={"width": 1024, "height": 768})
         took = time.monotonic() - started
         results = Env.get(other.id).metadata["composed"]["container"]

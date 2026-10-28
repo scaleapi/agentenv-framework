@@ -25,13 +25,13 @@ class ComputerEnv(Env):
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("computer", artifact_type="computer"),
                                                   EntityRef.env("driver", env_type=ComputerDriverEnv.type))
 
-    def __init__(self, id: str, version: Optional[int], environment_name: str, computer: dict, driver: dict,
-                 forms: list[str], display: Optional[dict] = None, network: Optional[dict] = None,
+    def __init__(self, id: str, version: Optional[int], environment_name: str, computer: ComputerArtifact,
+                 driver: ComputerDriverEnv, forms: list[str], display: Optional[dict] = None, network: Optional[dict] = None,
                  hidden_tools: Optional[list[str]] = None, settings: Optional[dict] = None,
                  data_paths: Optional[list[str]] = None, metadata: Optional[dict[str, Any]] = None):
         super().__init__(id, version, metadata=metadata)
         self.environment_name = environment_name
-        self.computer, self.driver = computer, driver  # each {"id": ..., "version": ...}
+        self.computer, self.driver = computer, driver
         self.forms = forms
         self.display, self.network = display, network
         self.hidden_tools = hidden_tools or []
@@ -41,15 +41,19 @@ class ComputerEnv(Env):
     def to_dict(self) -> dict:
         return {**super().to_dict(), "service_name": self.environment_name,
                 "environment_name": self.environment_name,  # dual-write with service_name during the rename
-                "computer": self.computer,
-                "driver": self.driver, "forms": self.forms, "display": self.display, "network": self.network,
+                "computer": {"id": self.computer.id, "version": self.computer.version},
+                "driver": {"id": self.driver.id, "version": self.driver.version}, "forms": self.forms, "display": self.display, "network": self.network,
                 "hidden_tools": self.hidden_tools, "settings": self.settings, "data_paths": self.data_paths}
 
     @classmethod
     def from_dict(cls, data: dict) -> ComputerEnv:
+        driver = Env.get(data["driver"]["id"], data["driver"]["version"])
+        if not isinstance(driver, ComputerDriverEnv):
+            raise TypeError(f"{data['driver']['id']} is a {driver.type} env, not a computer_driver env")
         return cls(id=data["id"], version=data.get("version"),
                    environment_name=data["environment_name"] if "environment_name" in data else data["service_name"],
-                   computer=data["computer"], driver=data["driver"], forms=data["forms"], display=data.get("display"),
+                   computer=ComputerArtifact.get(data["computer"]["id"], data["computer"]["version"]), driver=driver,
+                   forms=data["forms"], display=data.get("display"),
                    network=data.get("network"), hidden_tools=data.get("hidden_tools"), settings=data.get("settings"),
                    data_paths=data.get("data_paths"), metadata=data.get("metadata") or {})
 
@@ -72,11 +76,10 @@ class ComputerEnv(Env):
             raise ValueError(f"computer env {id!r}: " + "; ".join(problems))
         env = get_env_store().put_document(cls(
             id=id, version=None, environment_name=environment_name,
-            computer={"id": computer.id, "version": computer.version}, driver={"id": driver.id, "version": driver.version},
-            forms=forms, display=display, network=network, hidden_tools=hidden, settings=by_layer,
+            computer=computer, driver=driver, forms=forms, display=display, network=network, hidden_tools=hidden, settings=by_layer,
             data_paths=data_paths))
         if compose:
-            composer.compose(env, computer, driver)
+            composer.compose(env)
         return env
 
     @classmethod
@@ -97,15 +100,6 @@ class ComputerEnv(Env):
                            environment_name=fields.pop("environment_name", ctx.name), **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
-
-    def base(self) -> ComputerArtifact:
-        return ComputerArtifact.get(self.computer["id"], self.computer["version"])
-
-    def driver_env(self) -> ComputerDriverEnv:
-        driver = Env.get(self.driver["id"], self.driver["version"])
-        if not isinstance(driver, ComputerDriverEnv):
-            raise TypeError(f"{self.driver['id']} is a {driver.type} env, not a computer_driver env")
-        return driver
 
     async def deploy(self, **kwargs) -> DeployedEnv:
         statuses = {f"{form}/{arch}": result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()

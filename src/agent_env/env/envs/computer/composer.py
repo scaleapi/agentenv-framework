@@ -64,10 +64,10 @@ _PROTOCOL = "agentenv-framework-protocol"
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
 
 
-def compose(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv,
-            pairs: list[tuple[str, str]] | None = None) -> None:
+def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None) -> None:
     """Build each of ``pairs``, by default every form and arch the env composes, in parallel, recording each as it
     starts and finishes, then write the env's computer over every pair built so far."""
+    base, driver = env.computer, env.driver
     pairs = pairs if pairs is not None else [(form, arch) for form in env.forms for arch in gate.arches(base, driver)]
     record = _Record(env)
     record.started(pairs)
@@ -90,10 +90,10 @@ def current(env: ComputerEnv) -> bool:
     return "computer" in env.metadata and env.metadata["computer"].get("images") == _Record(env).built()
 
 
-def pending(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv) -> list[tuple[str, str]]:
+def pending(env: ComputerEnv) -> list[tuple[str, str]]:
     """The forms and arches of ``env`` not yet built: never started, failed, or left building by a put that stopped."""
     composed = env.metadata.get("composed", {})
-    return [(form, arch) for form in env.forms for arch in gate.arches(base, driver)
+    return [(form, arch) for form in env.forms for arch in gate.arches(env.computer, env.driver)
             if composed.get(form, {}).get(arch, {}).get("status") not in _BUILT]
 
 
@@ -325,7 +325,7 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
     if env.display is not None:
         config["resolution"]["default"] = f"{env.display['width']}x{env.display['height']}"
     computer = ComputerArtifact.put(
-        id=derive_id(env.stored_id, "computer"), description=f"{base.id} composed with {env.driver['id']} for {env.stored_id}",
+        id=derive_id(env.stored_id, "computer"), description=f"{base.id} composed with {env.driver.id} for {env.stored_id}",
         arch=arches, os=base.os.model_dump(), session=base.session.model_dump(), config=config,
         forms={"container": {"image": {"id": image.id, "version": image.version}, "init": base.forms.container.init,
                              "input_channel": base.forms.container.input_channel}})
