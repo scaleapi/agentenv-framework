@@ -43,7 +43,9 @@ unit-test: ## Run the unit test suite in parallel (no external services)
 #   "task-step-test-deploy-multi"), producing ERROR-at-setup cascades that
 #   look like real bugs but are pure concurrency. Running serial costs wall
 #   clock but is the only way to keep slow runs reliable without rewriting
-#   every module's fixtures with worker-unique tags.
+#   every module's fixtures with worker-unique tags. CI splits the slow tier
+#   across runners instead; AGENTENV_TEST_SHARD=2/4 make int-test-slow runs
+#   one runner's share (tst/util/shards.py).
 INT_PYTEST_ARGS_FAST ?= --dist=loadscope --tb=short --durations=20 -p no:cacheprovider
 INT_PYTEST_ARGS_SLOW ?= --tb=short --durations=20 -p no:cacheprovider
 INT_FAST_WORKERS ?= auto

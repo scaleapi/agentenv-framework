@@ -1,5 +1,6 @@
 """Shared pytest fixtures for all tests."""
 
+import os
 import shutil
 import signal
 import sys
@@ -10,6 +11,7 @@ import pytest
 from agent_env.config import reset_config
 from agent_env.store.document_store import document_store as document_store_module
 from agent_env.store.routing import disable_namespace_routing
+from tst.util import shards
 
 
 def _reset_store_singletons() -> None:
@@ -38,6 +40,24 @@ def pytest_configure(config):
 def pytest_unconfigure(config):
     _state_home.undo()
     shutil.rmtree(config.stash[_STATE_DIR], ignore_errors=True)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """With ``AGENTENV_TEST_SHARD=i/N``, run only the i-th of N groups of the selected tests (``tst/util/shards.py``).
+    Last, so it splits what ``-m`` and the other filters left."""
+    value = os.environ.get(shards.ENV_VAR)
+    if not value:
+        return
+    try:
+        index, count = shards.parse(value)
+    except ValueError as e:
+        raise pytest.UsageError(str(e)) from None
+    keep = set(shards.select([item.nodeid for item in items], index, count, shards.load_table()))
+    deselected = [item for item in items if item.nodeid not in keep]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = [item for item in items if item.nodeid in keep]
 
 
 @pytest.fixture
