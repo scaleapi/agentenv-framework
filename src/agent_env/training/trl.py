@@ -410,7 +410,11 @@ def _environment_class(name: str, tools: tuple[dict[str, Any], ...], shared: _Sh
     return _EnvironmentClass(name, (_Environment,), {**methods, "_shared": shared, "_tools": tools})
 
 
-def _reduce_environment_class(environment: _EnvironmentClass) -> tuple[Any, ...]:
+def _reduce_environment_class(environment: _EnvironmentClass) -> tuple[Any, ...] | str:
+    """A class ``_environment_class`` built pickles as what it's built from, and a subclass of one by its name, as any
+    class does, so it keeps what it overrides."""
+    if "_tools" not in vars(environment):
+        return environment.__qualname__
     return _environment_class, (environment.__name__, environment._tools, environment._shared)
 
 
