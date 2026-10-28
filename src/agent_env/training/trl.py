@@ -15,6 +15,7 @@ import logging
 import re
 import threading
 import time
+import uuid
 import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
@@ -204,15 +205,17 @@ class _Toolset:
     first: tuple[str, int, int]  # the split, index and turn count of its first task
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True)
 class _Shared:
     """What an environment class's instances share: the server, the tools every episode's first turn must offer, and
-    the deadlines."""
+    the deadlines. The key makes it equal to its pickled copies only, so ``AgentEnv.close`` also closes what a class
+    rebuilt from one opened."""
 
     url: str
     offered: frozenset[str]
     tool_timeout: float
     reset_timeout: float
+    key: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 class _Failed(Exception):

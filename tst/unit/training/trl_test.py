@@ -92,7 +92,11 @@ def test_the_factory_pickles_and_plays_in_a_spawned_process_as_asyncgrpos_rollou
 
     with multiprocessing.get_context("spawn").Pool(1) as pool:
         assert pool.apply(_play, (env.factory, env.dataset[0])) == 1.0
-    assert _tools(pickle.loads(pickle.dumps(env.factory))) == _tools(env.factory)
+    rebuilt = pickle.loads(pickle.dumps(env.factory))()
+    rebuilt.reset(**env.dataset[0])
+    assert (_tools(type(rebuilt)), rebuilt.add_item(item="crate")) == (_tools(env.factory), "add_item {'item': 'crate'}")
+    env.close()
+    assert rebuilt._client is None
     with pytest.raises(pickle.PicklingError, match="recorded"):
         pickle.dumps(type("recorded", (env.factory,), {"get_reward": lambda self: 0.5}))
 
