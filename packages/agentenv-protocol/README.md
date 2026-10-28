@@ -263,7 +263,8 @@ The card then declares `urn:agentenv:skill/v1` (`SKILL_EXTENSION_URI`), whose `g
 answers `{name, description, skill_md}`, the shape `skill-config/v1` takes, with the frontmatter
 written under the name the caller gives; a name that isn't lowercase letters, digits and single
 hyphens, up to 64, is refused `invalid_argument`. agent-env's `add_skills` step installs it on
-an agent through `env_ids`, named after the env's environment name.
+an agent through `env_ids`, named after the env's environment name; for an env behind a gateway,
+whose card nests its servers' cards, it installs each server's skill under that server's name.
 
 ### Uploading an export through a grant
 

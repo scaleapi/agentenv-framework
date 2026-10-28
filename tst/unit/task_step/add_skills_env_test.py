@@ -1,5 +1,6 @@
-"""``add_skills`` ``env_ids``: each env's skill, written by the env under its environment name, installed on the agent
-and recorded in the run; refused for an env the run didn't deploy or bind to the agent, or that serves no skill."""
+"""``add_skills`` ``env_ids``: each env's skill, or each of its child envs' behind a gateway, written under that card's
+environment name, installed on the agent and recorded in the run; refused for an env the run didn't deploy or bind to
+the agent, or that serves no skill."""
 
 import hashlib
 from types import SimpleNamespace
@@ -18,10 +19,14 @@ _SKILL = {"uri": SKILL_EXTENSION_URI, "params": {"methods": {
     "get": {"method": "GET", "endpoint": "/agentenv/ext/skill/get"}}}}
 
 
-def _env(env_id: str = "shop", name: str = "my-shop", extensions: tuple = (_SKILL,)) -> DeployedSandboxEnv:
+def _env(env_id: str = "shop", name: str = "my-shop", extensions: tuple = (_SKILL,), children: tuple = ()
+         ) -> DeployedSandboxEnv:
+    card = {"name": name, "capabilities": {"extensions": list(extensions)}}
+    if children:
+        card["children_environments"] = [{"name": child, "capabilities": {"extensions": list(served)}}
+                                         for child, served in children]
     return DeployedSandboxEnv(env_id=env_id, env_version=1, environment_card_url=f"http://{env_id}/.well-known/agent-env.json",
-                              environment_card={"name": name, "capabilities": {"extensions": list(extensions)}},
-                              sandbox_id=f"sb-{env_id}", sandbox_type="local")
+                              environment_card=card, sandbox_id=f"sb-{env_id}", sandbox_type="local")
 
 
 @pytest.fixture
@@ -30,7 +35,7 @@ def agent(monkeypatch):
     made = SimpleNamespace(calls=[], register=AsyncMock(return_value={"ok": True}))
 
     async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
-        made.calls.append((base_url, uri, method, params))
+        made.calls.append((base_url, card["name"], uri, method, params))
         return {"name": params["name"], "description": "How to use this env", "skill_md": f"---\nname: {params['name']}\n"}
 
     monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
@@ -53,10 +58,23 @@ def _step(*env_ids) -> AddSkillsTaskStep:
 async def test_each_envs_skill_is_installed_under_its_environment_name_and_recorded(agent):
     context = await _step("shop").execute(_context(_env()))
 
-    assert agent.calls == [("http://shop", SKILL_EXTENSION_URI, "get", {"name": "my-shop"})]
+    assert agent.calls == [("http://shop", "my-shop", SKILL_EXTENSION_URI, "get", {"name": "my-shop"})]
     agent.register.assert_awaited_once_with("deployed-agent", name="my-shop", description="How to use this env",
                                             skill_md="---\nname: my-shop\n")
-    assert context.metadata[ENV_SKILLS_KEY] == {"solver": {"shop": {"name": "my-shop", "skill_md": "---\nname: my-shop\n"}}}
+    assert context.metadata[ENV_SKILLS_KEY] == {"solver": {"shop": {"my-shop": "---\nname: my-shop\n"}}}
+
+
+@pytest.mark.asyncio
+async def test_an_env_behind_a_gateway_installs_each_child_envs_skill_under_the_childs_name(agent):
+    gateway = _env("office", name="office", extensions=(), children=(("mail", (_SKILL,)), ("Chat Room", (_SKILL,)),
+                                                                     ("calendar", ())))
+
+    context = await _step("office").execute(_context(gateway, bound=("office",)))
+
+    digest = hashlib.sha256(b"office/Chat Room").hexdigest()[:12]
+    assert [(card, params["name"]) for _, card, *_, params in agent.calls] == [
+        ("mail", "mail"), ("Chat Room", f"chat-room-{digest}")]
+    assert set(context.metadata[ENV_SKILLS_KEY]["solver"]["office"]) == {"mail", f"chat-room-{digest}"}
 
 
 @pytest.mark.asyncio
@@ -72,7 +90,8 @@ async def test_envs_whose_names_come_out_alike_get_skills_of_their_own(agent):
 @pytest.mark.parametrize("envs, bound, problem", [
     ((), ("shop",), "env 'shop' isn't deployed in this run"),
     ((_env(),), (), "env 'shop' isn't bound to agent 'solver': name it in the env_ids of its deploy_agent"),
-    ((_env(extensions=()),), ("shop",), f"env 'shop' serves no skill: its card has no {SKILL_EXTENSION_URI}"),
+    ((_env(extensions=(), children=(("mail", ()),)),), ("shop",),
+     f"env 'shop' serves no skill: neither its card nor a child env's declares {SKILL_EXTENSION_URI}"),
 ], ids=["not-deployed", "not-bound", "no-skill"])
 async def test_an_env_the_skill_cant_come_from_fails_the_step_naming_it(agent, envs, bound, problem):
     with pytest.raises(RuntimeError, match=problem.replace(".", "[.]")):

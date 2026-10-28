@@ -49,16 +49,19 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
 def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
     """``values``, of the base's settings by name, and the problems with them: a setting the base doesn't declare, a
     value of another type than its default's, or a secret's given as anything but a bare reference, since the env, the
-    task and the deploy record all keep what's given."""
+    task and the deploy record all keep what's given; a secret's reference is a string whatever its default is."""
     if not isinstance(values, dict):
         return {}, [f"computer_settings must be a table of the computer's setting values, not {values!r}"]
     checked, problems = {}, []
     for name, value in values.items():
         if (setting := base.config.get(name)) is None:
             problems.append(f"computer_settings.{name}: {base.id} declares no setting {name!r}")
-        elif setting.secret and not _names_a_secret(value):
-            problems.append(f"computer_settings.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or "
-                            f"{ENV_REF_PREFIX}NAME reference with no ?default, not its value")
+        elif setting.secret:
+            if _names_a_secret(value):
+                checked[name] = value
+            else:
+                problems.append(f"computer_settings.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or "
+                                f"{ENV_REF_PREFIX}NAME reference with no ?default, not its value")
         elif type(value) is not type(setting.default):
             problems.append(f"computer_settings.{name} must be a {type(setting.default).__name__}, like its default "
                             f"{setting.default!r}, not {value!r}")

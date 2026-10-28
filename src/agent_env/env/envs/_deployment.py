@@ -134,11 +134,12 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, file_artifact: File
 
 
 async def close_deployed(deployed: DeployedEnv, env_class: type[Env]) -> None:
-    """Close what a task deployed of an env_class env: a built-in's through its env, a plugin's by terminating the sandboxes its record names."""
+    """Close what a task deployed of an env_class env: through the env, unless a plugin's provider deployed a built-in, whose
+    record's sandboxes are terminated instead. A plugin's own env class, which has no env provider of agent-env's, closes itself."""
     from agent_env.task.teardown import RecordedSandbox, env_sandbox_ids, terminate
 
     env = await env_class.from_deployed_env(deployed)
-    if as_builtin(env._env_provider):
+    if not hasattr(env, "_env_provider") or as_builtin(env._env_provider):
         await env.close()
         return
     sandboxes = env_sandbox_ids(deployed)

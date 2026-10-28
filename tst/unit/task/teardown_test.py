@@ -207,6 +207,25 @@ def test_the_runs_open_recordings_end_then_each_env_still_up_closes_then_what_st
     assert (logged in caplog.text) if logged else "wasn't closed" not in caplog.text
 
 
+def test_an_env_class_of_a_plugins_own_closes_itself_and_its_sandboxes_still_go_by_id(terminated, monkeypatch):
+    closed = []
+
+    class _Own:
+        @classmethod
+        async def from_deployed_env(cls, deployed):
+            return cls()
+
+        async def close(self):
+            closed.append("closed")
+
+    monkeypatch.setattr(teardown.Env, "get", lambda env_id, version: _Own())
+
+    report = _run(_context())
+
+    assert closed == ["closed"]
+    assert {sandbox.sandbox_id for sandbox in report.terminated} == {"sb-box", "sb-db", "sb-gw", "sb-solver", "sb-vm"}
+
+
 def test_an_env_a_step_already_tore_down_is_not_closed_again(terminated, monkeypatch):
     close_deployed = AsyncMock()
     monkeypatch.setattr(teardown, "close_deployed", close_deployed)

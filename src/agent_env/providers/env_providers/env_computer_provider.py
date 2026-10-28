@@ -14,7 +14,7 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer import params as computer_params
-from agent_env.env.envs.computer.boot import READY_TIMEOUT_S, boot, ready, recorded_settings, settings_environment
+from agent_env.env.envs.computer.boot import READY_TIMEOUT_S, boot, discard, ready, recorded_settings, settings_environment
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
@@ -89,21 +89,25 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
-        _require_name(env, booted.card)
-        record = DeployedSandboxEnv(
-            env_id=env.id, env_version=env.version, env_provider_type=self.type,
-            environment_card_url=f"{booted.url}{WELL_KNOWN_PATH}", environment_card=booted.card,
-            environment_card_read_at_utc=datetime.now(timezone.utc).isoformat(),
-            sandbox_id=booted.sandbox.sandbox_id, sandbox_type=booted.sandbox.type,
-            sandbox_ids={ComputerEnv.type: {name: booted.sandbox.sandbox_id}},
-            metadata={"computer": {
-                "form": form, "arch": arch, "provider": type(sandbox_provider).__name__, "image": build["image"],
-                "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
-                "display": values.get("resolution"), "network": env.network,
-                "computer_settings": recorded_settings(computer, values),
-                "env_params": params.model_dump(exclude_defaults=True)}},
-        )
-        await _require_display(record, values.get("resolution"))
+        try:
+            _require_name(env, booted.card)
+            record = DeployedSandboxEnv(
+                env_id=env.id, env_version=env.version, env_provider_type=self.type,
+                environment_card_url=f"{booted.url}{WELL_KNOWN_PATH}", environment_card=booted.card,
+                environment_card_read_at_utc=datetime.now(timezone.utc).isoformat(),
+                sandbox_id=booted.sandbox.sandbox_id, sandbox_type=booted.sandbox.type,
+                sandbox_ids={ComputerEnv.type: {name: booted.sandbox.sandbox_id}},
+                metadata={"computer": {
+                    "form": form, "arch": arch, "provider": type(sandbox_provider).__name__, "image": build["image"],
+                    "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
+                    "display": values.get("resolution"), "network": env.network,
+                    "computer_settings": recorded_settings(computer, values),
+                    "env_params": params.model_dump(exclude_defaults=True)}},
+            )
+            await _require_display(record, values.get("resolution"))
+        except BaseException:
+            await discard(booted.sandbox)
+            raise
         return record
 
     async def reboot(self, env: ComputerEnv, deployed: DeployedSandboxEnv) -> None:

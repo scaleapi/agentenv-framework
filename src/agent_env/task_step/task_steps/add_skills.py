@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import ClassVar, Optional
 
 from agentenv_protocol import SKILL_EXTENSION_URI
+from agentenv_protocol.client import find_extension_method
 
-from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
@@ -18,8 +18,8 @@ from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
-#: ``context.metadata[ENV_SKILLS_KEY][agent_name][env_id]``: the skill add_skills installed from an env, as the env wrote
-#: it for that deploy.
+#: ``context.metadata[ENV_SKILLS_KEY][agent_name][env_id][skill_name]``: the SKILL.md add_skills installed from an env, as
+#: the env, or one of its child envs, wrote it for that deploy.
 ENV_SKILLS_KEY = "env_skills"
 
 
@@ -283,33 +283,42 @@ class AddSkillsTaskStep(TaskStep):
                 )
             skills_to_add.append(_build_skill_for_loaded_file_artifact_universe(fau_id, entry))
 
-        env_skills = {env_id: await _env_skill(context, agent, env_id) for env_id in self.env_ids}
+        env_skills = {env_id: await _env_skills(context, agent, env_id) for env_id in self.env_ids}
 
         deployed = get_a2a_agent_instance_store().get(agent.instance_id)
         for skill in skills_to_add:
             result = await A2AAgent.add_skill(deployed, skill)
             logger.info(f"Registered skill: {result}")
-        for env_id, skill in env_skills.items():
-            result = await A2AAgent.register_skill(deployed, name=skill["name"], description=skill["description"],
-                                                   skill_md=skill["skill_md"])
-            context.metadata.setdefault(ENV_SKILLS_KEY, {}).setdefault(self.agent_name, {})[env_id] = {
-                "name": skill["name"], "skill_md": skill["skill_md"]}
-            logger.info(f"Registered the skill of env {env_id}: {result}")
+        for env_id, skills in env_skills.items():
+            for skill in skills:
+                result = await A2AAgent.register_skill(deployed, name=skill["name"], description=skill["description"],
+                                                       skill_md=skill["skill_md"])
+                installed = context.metadata.setdefault(ENV_SKILLS_KEY, {}).setdefault(self.agent_name, {})
+                installed.setdefault(env_id, {})[skill["name"]] = skill["skill_md"]
+                logger.info(f"Registered the skill {skill['name']} of env {env_id}: {result}")
 
         return context
 
 
-async def _env_skill(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> dict:
-    """The skill the env ``env_id`` serves under its environment name: refused for an env this run didn't deploy or bind
-    to ``agent``, or that serves no skill."""
+async def _env_skills(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> list[dict]:
+    """The skills the env ``env_id`` serves, each under its card's environment name: its own card's, or else each of its
+    child envs' (a gateway's servers); refused for an env this run didn't deploy or bind to ``agent``, or that serves
+    none."""
     deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
     if deployed is None:
         raise RuntimeError(f"env '{env_id}' isn't deployed in this run")
     if env_id not in agent.env_ids:
         raise RuntimeError(f"env '{env_id}' isn't bound to agent '{agent.agent_name}': name it in the env_ids of its "
                            "deploy_agent")
-    name = _env_skill_name((deployed.environment_card or {}).get("name") or env_id, env_id)
-    try:
-        return await deployed.invoke(SKILL_EXTENSION_URI, "get", {"name": name})
-    except EnvCapabilityUnsupported:
-        raise RuntimeError(f"env '{env_id}' serves no skill: its card has no {SKILL_EXTENSION_URI}") from None
+    card = deployed.environment_card or {}
+    if find_extension_method(card, SKILL_EXTENSION_URI, "get") is not None:
+        serving = [(None, _env_skill_name(card.get("name") or env_id, env_id))]
+    else:
+        serving = [(child["name"], _env_skill_name(child["name"], f"{env_id}/{child['name']}"))
+                   for child in card.get("children_environments") or []
+                   if find_extension_method(child, SKILL_EXTENSION_URI, "get") is not None]
+    if not serving:
+        raise RuntimeError(f"env '{env_id}' serves no skill: neither its card nor a child env's declares "
+                           f"{SKILL_EXTENSION_URI}")
+    return [await deployed.invoke(SKILL_EXTENSION_URI, "get", {"name": name}, environment_name=child)
+            for child, name in serving]

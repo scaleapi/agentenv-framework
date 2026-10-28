@@ -643,7 +643,8 @@ def boots(monkeypatch):
 
     async def fake_boot(sandbox_provider, **kwargs):
         made.boots.append({**kwargs, "provider": type(sandbox_provider).__name__})
-        sandbox = SimpleNamespace(sandbox_id=f"local-{len(made.boots)}", type="local", terminated=False)
+        sandbox = SimpleNamespace(sandbox_id=f"local-{len(made.boots)}", type="local", terminated=False,
+                                  ON_THIS_MACHINE=True)
 
         async def terminate():
             sandbox.terminated = True
@@ -777,15 +778,17 @@ async def test_env_params_a_computer_env_cant_take_are_refused_at_save_and_at_de
 
 
 @pytest.mark.asyncio
-async def test_a_computer_that_boots_at_another_size_than_its_display_fails_the_deploy_and_is_torn_down(
-        base, driver, docker, boots):
+async def test_a_computer_that_boots_at_another_size_than_its_display_fails_the_deploy_and_goes_with_its_folder(
+        base, driver, docker, boots, monkeypatch):
     boots.display = (1280, 800)
+    removed = []
+    monkeypatch.setattr(boot, "remove_local_work_dir", removed.append)
     env = _put(base, driver, display={"width": 1600, "height": 900})
 
     with pytest.raises(RuntimeError, match="booted at 1280x800, not the 1600x900 its display sets"):
         await Env.get(env.id).deploy()
 
-    assert [sandbox.terminated for sandbox in boots.sandboxes] == [True]
+    assert [sandbox.terminated for sandbox in boots.sandboxes] == [True] and removed == ["local-1"]
 
 
 @pytest.mark.asyncio
@@ -816,8 +819,11 @@ def test_a_boot_mints_a_generated_setting_resolves_a_secret_its_record_withholds
     assert first["AGENTENV_SETTING_TOKEN"] != second["AGENTENV_SETTING_TOKEN"]
     assert boot.recorded_settings(computer, {}) == {"resolution": "1280x800", "timezone": "UTC", "token": boot.WITHHELD,
                                                     "api_key": boot.WITHHELD}
+    pin = computer.model_copy(update={"config": {"pin": base.config["timezone"].model_copy(
+        update={"default": 1234, "secret": True})}})
     for reference in ("env:DESK_KEY", "secret:desk/key"):
         assert gate.check_computer_settings(computer, {"api_key": reference}) == ({"api_key": reference}, [])
+        assert gate.check_computer_settings(pin, {"pin": reference}) == ({"pin": reference}, [])
     for value in ("s3cret", "env:DESK_KEY?s3cret", "env:", 3):
         assert gate.check_computer_settings(computer, {"api_key": value}) == ({}, [
             "computer_settings.api_key is a secret, so it takes a secret:KEY or env:NAME reference with no ?default, "
