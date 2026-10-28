@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import dataclasses
 import hashlib
+import json
 import shutil
 import threading
 import time
@@ -38,6 +39,8 @@ MP4 = "video/mp4; codecs=avc1"
 RECORDINGS_DIR = ".agentenv-recordings"
 SCOPES = ("display", "window")
 REASONS = ("end", "reset", "teardown")
+#: What an ended recording's manifest is uploaded as, under its id beside its segments.
+MANIFEST = "manifest.json"
 DEFAULT_FPS = 10
 #: The fallback polls ``@capture``, a full read of the screen each pass, so it is capped lower than streams.
 MAX_POLLED_FPS = 15
@@ -179,6 +182,10 @@ class Recordings:
             self.ended.popitem(last=False)
         return manifest
 
+    async def end_all(self, reason: str) -> list[dict]:
+        """End every recording not yet ended, each uploading under the grant it was started with; their manifests."""
+        return [await self.end(recording_id, None, reason) for recording_id in list(self.running)]
+
     def _hints(self, features: Recording, scope: str, window: Optional[str], fps: Optional[int],
                max_edge: Optional[int], cursor: bool, upload: Optional[dict]) -> tuple[RecordHints, Any]:
         if scope not in SCOPES:
@@ -287,11 +294,15 @@ class _Recording:
         with contextlib.suppress(OSError):
             self.hints.directory.rmdir()
         entries = [s.entry for s in self.segments]
-        return RecordingManifest(
+        manifest = RecordingManifest(
             recording_id=self.id, scope=self.hints.scope, format=MP4, fps=self.hints.fps, cursor=self.cursor,
             source="stream" if self.streams else "capture", started_at=entries[0].started_at if entries else None,
             ended_at=entries[-1].ended_at if entries else None, ended_by=self.ended_by, segments=entries,
             error=self.error if self.ended_by == "error" else None).wire()
+        if uploader is not None:  # beside the segments, so a reader who didn't end the recording finds it
+            with contextlib.suppress(Exception):
+                await uploader.upload(f"{self.id}/{MANIFEST}", json.dumps(manifest).encode())
+        return manifest
 
     async def _add_frame(self, item: RecordedFrame) -> None:
         frame = await self._in_thread(_video_frame, item.image, self.hints.max_edge)

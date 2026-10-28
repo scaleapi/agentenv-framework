@@ -149,7 +149,7 @@ async def test_a_chain_forwards_the_dict_as_is():
 @pytest.mark.asyncio
 async def test_the_quartet_is_no_longer_a_keyword_on_any_backend():
     """A caller still on the pre-dict signature fails loud rather than billing unattributed."""
-    from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+    from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 
     with pytest.raises(TypeError, match="team"):
         await LocalSandboxProvider().create_vm(team="t")

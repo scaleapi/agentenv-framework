@@ -13,7 +13,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
 from agent_env.providers.sandbox_providers.host_images import host_platform
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.util.capabilities import missing_capability_reason
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]

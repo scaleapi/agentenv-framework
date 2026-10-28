@@ -49,6 +49,7 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
         wm = _exec(name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK")
         environment = _exec(name, "sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -x xfwm4)/environ')
         accessibility = _exec(name, "pgrep", "-c", "at-spi2-registr")
+        folders = set(_exec(name, "ls", "/home/user").split())
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     assert {line.split()[0] for line in running.splitlines()} == {"dbus", "desktop", "xvfb"}
@@ -57,6 +58,7 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
     assert "dimensions:    1600x900 pixels" in screen and "window id #" in wm
     assert "TZ=Europe/Paris" in environment.splitlines() and "DISPLAY=:99" in environment.splitlines()
     assert int(accessibility) == 1
+    assert {"Desktop", "Documents", "Downloads", "Pictures"} <= folders
 
 
 def test_the_desktop_comes_back_however_often_x_dies(base):

@@ -8,12 +8,13 @@ import logging
 import pytest
 
 import agent_env.providers.sandbox_providers.chained_sandbox_provider as chained_module
+import agent_env.providers.sandbox_providers.local_docker.provider as lsm
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.config.loader import load_impl
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider, skip_refusing
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers import sandbox as sandbox_module
@@ -88,9 +89,10 @@ def test_modal_sandbox_instance_mode_is_container():
 
 
 @pytest.mark.asyncio
-async def test_default_create_container_mutates_mode_to_container():
+async def test_default_create_container_mutates_mode_to_container_and_reset_container_replaces_it_in_place():
     """The base SandboxProvider.create_container default impl should mutate the
-    returned VmSandbox's mode to 'container' once docker is running on it."""
+    returned VmSandbox's mode to 'container' once docker is running on it; reset_container
+    removes that container and runs a fresh one on the same VM, and a container-only sandbox is refused."""
 
     class _FakeVm(VmSandbox):
         type = "fake-vm"
@@ -124,6 +126,13 @@ async def test_default_create_container_mutates_mode_to_container():
     )
     assert result is fake_vm
     assert result.mode == "container"
+
+    fake_vm.scripts.clear()
+    await provider.reset_container(fake_vm, image_name="nginx:latest", port=8080, env={"A": "1"})
+    assert fake_vm.scripts[0] == "docker rm -f agent-api > /dev/null"
+    assert fake_vm.scripts[1].startswith("docker run -d --name agent-api ") and "-e A=1" in fake_vm.scripts[1]
+    with pytest.raises(NotImplementedError, match="sandbox is the container itself"):
+        await provider.reset_container(_FakeSandbox(), image_name="nginx:latest", port=8080, env={})
 
 
 @pytest.mark.asyncio
@@ -654,3 +663,10 @@ async def test_a_pull_that_fails_again_is_raised_as_it_was(no_pause):
     with pytest.raises(RuntimeError, match="pull access denied"):
         await _pull(sandbox, "registry/agent:v1")
     assert sandbox.scripts == ["docker pull registry/agent:v1"] * 2
+
+
+def test_local_docker_runs_this_machines_platform_natively_and_other_providers_linux_amd64(monkeypatch):
+    monkeypatch.setattr(lsm, "host_platform", lambda: "linux/arm64")
+    assert LocalSandboxProvider.native_platforms() == {"linux/arm64"}
+    assert ModalSandboxProvider.native_platforms() == {"linux/amd64"}
+    assert SandboxProvider.native_platforms() == {"linux/amd64"}

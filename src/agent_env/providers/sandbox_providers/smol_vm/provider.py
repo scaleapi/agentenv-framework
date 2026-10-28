@@ -24,7 +24,7 @@ from agent_env.config import get_config
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.routing import LocalRunImageStore
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
-from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_ENV, LocalSandboxProvider, local_grant_trust, start_trusting
+from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV, LocalSandboxProvider, local_grant_trust, start_trusting
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts, SandboxProvider, refuse_unenforceable_policy,
 )

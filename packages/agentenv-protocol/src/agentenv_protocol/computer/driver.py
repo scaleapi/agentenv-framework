@@ -46,6 +46,8 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     #: computer-recording/v1, from ``@record`` if the driver has one, else by polling ``@capture``; ``None`` turns
     #: it off.
     recording: ClassVar[Recording | None] = Recording()
+    #: What an agent should know about this driver's computer beyond what its card says, as markdown: the end of its skill.
+    notes: ClassVar[str] = ""
     tool_access = True
     #: What the base class keeps for the driver, built by ``__init__``.
     _computer: ComputerRuntime | None = None

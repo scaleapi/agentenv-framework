@@ -1,17 +1,19 @@
-"""A scripted drive of the Fixture Desk while the desktop records: the clicks, typing and scroll a person would make,
-each answered with a screenshot. A test finds each moment in the video by its send time, its screenshot's capture time
+"""A scripted drive of the Fixture Desk, the conformance fixture started on the computer as the probe starts it, while
+the desktop records: the clicks, typing and scroll a person would make, each answered with a screenshot. A test finds each moment in the video by its send time, its screenshot's capture time
 and thumbnail, and the clicked grid cell's box."""
 import asyncio
 import base64
 import io
 import json
 from datetime import datetime, timezone
+from importlib import resources
 
 from PIL import Image
 
 from agentenv_protocol.computer.conformance.client import Driver
 
 THUMB = (64, 40)
+FIXTURE = resources.files("agentenv_protocol.computer.conformance").joinpath("fixture.py").read_bytes()
 
 
 def _thumb(result):
@@ -21,7 +23,9 @@ def _thumb(result):
 
 async def verify(mcp_url):
     driver = await Driver.connect(mcp_url.rsplit("/mcp", 1)[0], 60)
-    for _ in range(60):  # the Fixture Desk starts beside the driver and writes its layout once it is up
+    await driver.add_file("desk/fixture.py", FIXTURE)
+    await driver.run("sh", "-c", "python3 desk/fixture.py fixture > desk/fixture.log 2>&1 &")
+    for _ in range(60):  # the Fixture Desk writes its layout once it is up
         out = await driver.run("cat", "fixture/layout.json")
         if out["exit_code"] == 0 and out["stdout"].strip():
             break

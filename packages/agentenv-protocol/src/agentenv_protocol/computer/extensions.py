@@ -1,10 +1,10 @@
-"""The framework extensions agentenv calls, never agents: readiness, display, coordinate spaces, keyboard settings,
-commands in the session and recordings."""
+"""The framework extensions agentenv calls, never agents: the computer skill, readiness, display, coordinate spaces,
+keyboard settings, commands in the session and recordings."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable, Optional
 
-from ..agent_env_environment import extension
+from ..agent_env_environment import agent_skill, extension
 from . import card
 from .card import (
     COMPUTER_DISPLAY,
@@ -18,6 +18,7 @@ from .card import (
 )
 from .errors import Internal, InvalidArgument, Unsupported
 from .operations import Display, ExecResult
+from .skill import skill
 from .spaces import check_space
 
 if TYPE_CHECKING:
@@ -35,6 +36,10 @@ class Extensions:
     display_modes: tuple
     layouts: tuple[str, ...]
     mounted_card: Callable[[], EnvironmentCard]
+
+    @agent_skill
+    async def _computer_skill(self) -> tuple[str, str]:
+        return await skill(self)
 
     @extension(COMPUTER_READY, op="status", method="GET",
                description="Whether the computer is usable now, by real checks; never sends input.")
@@ -114,7 +119,8 @@ class Extensions:
 
     @extension(COMPUTER_RECORDING, op="start",
                description="Record the display: start returns a recording whose segments upload through its grant as "
-                           "they close, and end seals it and returns its manifest; repeats answer the same.")
+                           "they close; end seals it and returns its manifest, uploaded beside them; end_all ends "
+                           "every one not yet ended; repeats answer the same.")
     async def _computer_recording_start(self, request_id: str, scope: str = "display", window: Optional[str] = None,
                                         fps: Optional[int] = None, max_edge: Optional[int] = None, cursor: bool = True,
                                         upload: Optional[dict] = None) -> dict:
@@ -124,6 +130,10 @@ class Extensions:
     async def _computer_recording_end(self, recording_id: str, upload: Optional[dict] = None,
                                       reason: str = "end") -> dict:
         return await self._computer.recordings.end(recording_id, upload, reason)
+
+    @extension(COMPUTER_RECORDING, op="end_all")
+    async def _computer_recording_end_all(self, reason: str = "end") -> dict:
+        return {"manifests": await self._computer.recordings.end_all(reason)}
 
 
 async def _run(computer: ComputerRuntime, cap: int, argv: list, cwd: Optional[str], env: Optional[dict],

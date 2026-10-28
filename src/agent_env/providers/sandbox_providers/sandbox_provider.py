@@ -15,6 +15,7 @@ from agent_env.attribution import Attribution
 from agent_env.config import runtime
 from agent_env.config import ENV_REF_PREFIX
 from agent_env.config.errors import ConfigError
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicy,
     NetworkPolicyUnsupportedError,
@@ -143,6 +144,16 @@ class SandboxProvider(ABC):
                 pass
             raise
 
+    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+        """Reset the container create_container ran on ``sandbox`` to a fresh one of ``image_name`` with ``env``, reached
+        on ``port`` as before: the sandbox, its id and its URLs stay. A backend whose sandbox is the container itself
+        can't reset it in place."""
+        if not isinstance(sandbox, VmSandbox):
+            raise NotImplementedError(f"{type(self).__name__}'s sandbox is the container itself, so it can't be reset "
+                                      "in place")
+        await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} > /dev/null")
+        await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+
     async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
         """Get ready to run ``image`` by its name, before create_sandbox or create_container is asked for it and outside
         any deadline on creating one, for the deploy ``attribution`` describes, as it describes the sandbox. Does
@@ -157,11 +168,14 @@ class SandboxProvider(ABC):
         """The ``docker run`` / ``docker create`` arguments for the sandbox's container."""
         env_flags = " \\\n    ".join(f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items())
         extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
-        publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
         return (
-            f"--name {shlex.quote(sandbox.container_name)} {publish} {extra_args}\\\n    "
+            f"--name {shlex.quote(sandbox.container_name)} {self._publish_args(sandbox, port)} {extra_args}\\\n    "
             f"{env_flags} \\\n    {shlex.quote(image_name)}"
         )
+
+    def _publish_args(self, sandbox: VmSandbox, port: int) -> str:
+        """How the sandbox's container is reached on ``port``: published on the sandbox's host."""
+        return " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
 
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support get_sandbox")
@@ -298,6 +312,11 @@ class SandboxProvider(ABC):
         return not policy.restricts_egress
 
     @classmethod
+    def native_platforms(cls) -> frozenset[str]:
+        """The platforms its containers run without emulation."""
+        return frozenset({DEFAULT_BUILD_PLATFORM})
+
+    @classmethod
     def effective_network_policy(cls, policy: Optional[NetworkPolicy]) -> NetworkPolicy:
         """``policy`` with the platform's own hosts unioned in; identity unless it allowlists."""
         if policy is None:
@@ -322,7 +341,7 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "boxd": "agent_env.providers.sandbox_providers.boxd.provider:BoxdSandboxProvider",
     "daytona": "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
     "boat": "agent_env.providers.sandbox_providers.boat.provider:BoatSandboxProvider",
-    "local": "agent_env.providers.sandbox_providers.local_sandbox:LocalSandboxProvider",
+    "local": "agent_env.providers.sandbox_providers.local_docker.provider:LocalSandboxProvider",
 }
 
 

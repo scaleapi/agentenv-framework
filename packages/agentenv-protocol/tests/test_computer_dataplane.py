@@ -1,5 +1,6 @@
 """The data plane on a computer: data/add writes file parts atomically under the session user's home, from inline
-bytes, an https URL or a read grant, with paths checked; data/get returns the data paths, inline or uploaded."""
+bytes, an https URL or a read grant, with paths checked; data/get returns the files under the paths it's given, or under
+the default data paths, inline or uploaded."""
 from __future__ import annotations
 
 import base64
@@ -15,7 +16,7 @@ pytest.importorskip("PIL")
 from computer_fake import FakeDriver, http_client, rpc  # noqa: E402
 
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI  # noqa: E402
-from agentenv_protocol.computer import ComputerSettings  # noqa: E402
+from agentenv_protocol.computer.dataplane import DEFAULT_DATA_PATHS  # noqa: E402
 
 
 @pytest.fixture
@@ -110,7 +111,7 @@ async def test_a_read_grant_part_is_downloaded_through_the_transfers_helper(home
 
 
 @pytest.mark.asyncio
-async def test_data_get_returns_the_data_paths_inline(home, tmp_path_factory):
+async def test_data_get_returns_the_files_under_the_paths_it_names_inline(home, tmp_path_factory):
     (home / "app" / "db").mkdir(parents=True)
     (home / "app" / "db" / "state.json").write_text('{"n": 1}')
     (home / "app" / "db" / "blob.bin").write_bytes(b"\x01")
@@ -118,14 +119,35 @@ async def test_data_get_returns_the_data_paths_inline(home, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside")
     (outside / "secret").write_text("no")
     (home / "app" / "db" / "escape").symlink_to(outside / "secret")
-    driver = FakeDriver(settings=ComputerSettings(data_paths=["app", "notes.md", "missing", "app/db"]))
-    async with http_client(driver) as http:
-        parts = (await http.post("/agentenv", json=rpc("data/get"))).json()["result"]["parts"]
+    async with http_client(FakeDriver()) as http:
+        parts = (await http.post("/agentenv", json=rpc("data/get", {"paths": ["app", "notes.md", "missing", "app/db"]}))
+                 ).json()["result"]["parts"]
     by_path = {p["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"]: p["file"] for p in parts}
     assert sorted(by_path) == ["app/db/blob.bin", "app/db/state.json", "notes.md"]
     assert base64.b64decode(by_path["app/db/state.json"]["bytes"]) == b'{"n": 1}'
     assert by_path["app/db/state.json"]["mimeType"] == "application/json" and by_path["notes.md"]["name"] == "notes.md"
     assert by_path["app/db/blob.bin"]["mimeType"] == "application/octet-stream"
+
+
+@pytest.mark.asyncio
+async def test_data_get_naming_no_paths_returns_the_default_data_paths(home):
+    for folder in DEFAULT_DATA_PATHS:
+        (home / folder).mkdir()
+        (home / folder / "f.txt").write_text(folder)
+    (home / ".cache").mkdir()
+    (home / ".cache" / "noise").write_text("no")
+    async with http_client(FakeDriver()) as http:
+        parts = (await http.post("/agentenv", json=rpc("data/get"))).json()["result"]["parts"]
+    assert sorted(p["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for p in parts) == [
+        "Desktop/f.txt", "Documents/f.txt", "Downloads/f.txt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paths, code", [(["../out"], -32000), (["/etc"], -32000), ("notes", -32602), ([1], -32602)])
+async def test_data_get_refuses_paths_outside_the_home(home, paths, code):
+    async with http_client(FakeDriver()) as http:
+        error = (await http.post("/agentenv", json=rpc("data/get", {"paths": paths}))).json()["error"]
+    assert error["code"] == code
 
 
 @pytest.mark.asyncio
@@ -138,9 +160,9 @@ async def test_data_get_uploads_under_a_write_namespace_grant(home):
     upload = AsyncMock()
     with patch("agentenv_protocol.computer.dataplane.NamespaceUploader") as uploader:
         uploader.return_value.upload = upload
-        driver = FakeDriver(settings=ComputerSettings(data_paths=["notes.md"]))
-        async with http_client(driver) as http:
-            parts = (await http.post("/agentenv", json=rpc("data/get", {"write_namespace": grant}))).json()["result"]["parts"]
+        async with http_client(FakeDriver()) as http:
+            parts = (await http.post("/agentenv", json=rpc("data/get", {"write_namespace": grant, "paths": ["notes.md"]}))
+                     ).json()["result"]["parts"]
     assert upload.await_args.args[0] == "notes.md" and upload.await_args.args[1] == home / "notes.md"
     assert parts == [{"kind": "file", "file": {"uri": "notes.md", "mimeType": "text/markdown", "name": "notes.md"},
                       "metadata": {DATA_OBJECTS_EXTENSION_URI: {"path": "notes.md"}}}]

@@ -9,6 +9,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import types
 import uuid
@@ -26,7 +27,7 @@ from .tool_access import DISABLE as TOOL_DISABLE, ENABLE as TOOL_ENABLE, PATHS a
 from .tool_access import extensions as tool_access_extensions
 from .tool_context import EMPTY, ToolContext, bound, context_from_http, context_from_mcp
 from .transfers import WriteNamespaceGrant
-from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
+from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, SKILL_EXTENSION_URI, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ RPC_ERROR_CODE_INVALID_REQUEST = -32600
 RPC_ERROR_CODE_METHOD_NOT_FOUND = -32601
 RPC_ERROR_CODE_INVALID_PARAMS = -32602
 RPC_ERROR_CODE_SERVER_ERROR = -32000
+_SKILL_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 
 
 def reset_data(fn: Callable) -> Callable:
@@ -124,6 +126,23 @@ def extension(uri: str, *, op: str | None = None, description: str | None = None
         return fn
 
     return deco
+
+
+def agent_skill(fn: Callable) -> Callable:
+    """Mark the method that writes this env's skill for agents, returning its description and its markdown body; it
+    is served under ``SKILL_EXTENSION_URI`` as ``get {name}``, which writes the SKILL.md under the name asked for."""
+
+    async def get(self, name: str) -> dict:
+        if len(name) > 64 or not _SKILL_NAME.fullmatch(name):
+            raise AgentEnvError("invalid_argument",
+                                f"a skill's name is lowercase letters, digits and single hyphens, up to 64, not {name!r}")
+        description, body = await fn(self) if inspect.iscoroutinefunction(fn) else fn(self)
+        frontmatter = f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n"
+        return {"name": name, "description": description, "skill_md": f"{frontmatter}\n{body}"}
+
+    get.__name__ = fn.__name__
+    return extension(SKILL_EXTENSION_URI, op="get", method="GET",
+                     description="get returns a SKILL.md for agents under the name it's given.")(get)
 
 
 def _extension_slug(uri: str) -> str:
@@ -1162,6 +1181,14 @@ async def _invoke_add(fn: Callable, params: dict) -> dict:
 
 async def _invoke_get(fn: Callable, params: dict) -> dict:
     kwargs = {}
+    takes_paths = "paths" in inspect.signature(fn).parameters
+    if isinstance(params, dict) and "paths" in params:
+        if not takes_paths:
+            raise _InvalidParams("data/get on this environment takes no paths: it returns all of its data")
+        if not isinstance(params["paths"], list) or not all(isinstance(path, str) for path in params["paths"]):
+            raise _InvalidParams("paths must be a list of strings")
+    if takes_paths:
+        kwargs["paths"] = params.get("paths") if isinstance(params, dict) else None
     if _takes_write_namespace(fn):
         if not isinstance(params, dict):
             raise _InvalidParams("data/get takes its params by name")

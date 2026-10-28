@@ -10,7 +10,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_agent_sandbox_provider, set_agent_sandbox_provider, reset_agent_sandbox_provider,
 )
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.e2b import E2BSandbox, E2BSandboxProvider

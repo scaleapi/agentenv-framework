@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from agentenv_protocol.computer.platform import Platform, supported
 
 from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
+from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 
@@ -29,7 +30,7 @@ def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, disp
     problems += _image(base)
     problems += _display(base, display, computer_settings)
     problems += _network(network)
-    values, invalid = _computer_settings(base, computer_settings)
+    values, invalid = check_computer_settings(base, computer_settings)
     return values, problems + invalid
 
 
@@ -45,21 +46,34 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     return [arch for arch in base.arch if arch in matching]
 
 
-def _computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
-    """``values``, of the base's settings by name, and the problems with them: a setting the base doesn't declare, or a
-    value of another type than its default's."""
+def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
+    """``values``, of the base's settings by name, and the problems with them: a setting the base doesn't declare, a
+    value of another type than its default's, or a secret's given as anything but a bare reference, since the env, the
+    task and the deploy record all keep what's given; a secret's reference is a string whatever its default is."""
     if not isinstance(values, dict):
         return {}, [f"computer_settings must be a table of the computer's setting values, not {values!r}"]
     checked, problems = {}, []
     for name, value in values.items():
         if (setting := base.config.get(name)) is None:
             problems.append(f"computer_settings.{name}: {base.id} declares no setting {name!r}")
+        elif setting.secret:
+            if _names_a_secret(value):
+                checked[name] = value
+            else:
+                problems.append(f"computer_settings.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or "
+                                f"{ENV_REF_PREFIX}NAME reference with no ?default, not its value")
         elif type(value) is not type(setting.default):
             problems.append(f"computer_settings.{name} must be a {type(setting.default).__name__}, like its default "
                             f"{setting.default!r}, not {value!r}")
         else:
             checked[name] = value
     return checked, problems
+
+
+def _names_a_secret(value: Any) -> bool:
+    """Whether ``value`` names a secret rather than holding it: a bare reference, as a stored context keeps one."""
+    return (isinstance(value, str) and value.startswith((ENV_REF_PREFIX, SECRET_REF_PREFIX)) and "?" not in value
+            and value not in (ENV_REF_PREFIX, SECRET_REF_PREFIX))
 
 
 def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:

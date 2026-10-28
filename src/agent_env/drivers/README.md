@@ -10,8 +10,9 @@ alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/drivers/
 A run that names it writes it: its files, what its class declares for each platform it supports, read without
 `mss`, `python-xlib` or PyAV installed, and how a computer installs it. Its `env.toml`'s `[install.linux]` has a
 computer env's composer put the folder in `/opt/agentenv/drivers/reference/`, install `requirements.txt` into a venv
-there, and run `agentenv_protocol.computer.serve driver.py:ReferenceDriver` as a session service on `port`, 18765. It deploys inside a computer, which agent-env can't create yet, so a deploy of it is
-refused until then. `python -m agentenv_protocol.computer.conformance <url>` checks it, or any driver, where it runs.
+there, and run `agentenv_protocol.computer.serve driver.py:ReferenceDriver` as a session service on `port`, 18765. It deploys only inside a computer env, as
+the shipped `desktop` example's driver. `python -m agentenv_protocol.computer.conformance <url>` checks it, or any
+driver, where it runs.
 
 This bundle has no tasks of its own: other bundles pull its drivers by alias, and `agent-env run drivers` has nothing
 to run.
