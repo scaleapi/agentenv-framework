@@ -403,8 +403,8 @@ def test_an_agent_named_by_an_installed_alias_is_pulled_in_and_the_task_names_it
     assert _writes(plan) == [(BundleKind.ARTIFACT, f"{SOLVER}__agent_image"), (BundleKind.AGENT, SOLVER),
                              (BundleKind.TASK, f"{ROOT}/t")]
     assert _step(plan)["a2a_agent_id"] == SOLVER
-    assert plan.aliases == {"solver-x": AliasUse("solver-x", SOLVER, "demo-dist's kit bundle")}
-    assert plan.aliases["solver-x"].agent_id == SOLVER and plan.store_refs == ()
+    assert plan.alias_uses[EntityKind.AGENT] == {"solver-x": AliasUse("solver-x", SOLVER, "demo-dist's kit bundle")}
+    assert plan.alias_uses[EntityKind.AGENT]["solver-x"].agent_id == SOLVER and plan.store_refs == ()
 
 
 ENV_ALIASED = {"envs/crm/Dockerfile": "FROM scratch\n", "envs/crm/env.toml": 'environment_name = "crm"\n',
@@ -422,8 +422,9 @@ def test_an_env_named_by_an_installed_alias_is_pulled_in_and_the_task_names_it_b
 
     assert (BundleKind.ENV, CRM) in _writes(plan)
     assert _step(plan, "env")["env_id"] == CRM and _step(plan, "agent")["env_ids"] == [CRM]
-    assert plan.env_aliases == {"crm-x": AliasUse("crm-x", CRM, "demo-dist's kit bundle", kind=EntityKind.ENV)}
-    assert plan.aliases == {} and plan.store_refs == ()
+    envs = plan.alias_uses[EntityKind.ENV]
+    assert envs == {"crm-x": AliasUse("crm-x", CRM, "demo-dist's kit bundle", kind=EntityKind.ENV)}
+    assert plan.alias_uses[EntityKind.AGENT] == {} and plan.store_refs == ()
 
 
 def test_the_stores_env_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
@@ -436,7 +437,8 @@ def test_the_stores_env_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
     plan = _plan(_task(bundle_dir, CRM_STEPS), kit)
 
     assert (BundleKind.ENV, CRM) not in _writes(plan) and _step(plan, "env")["env_id"] == "crm-x"
-    assert plan.env_aliases["crm-x"].store_version == 1 and [ref.id for ref in plan.store_refs] == ["crm-x"]
+    envs = plan.alias_uses[EntityKind.ENV]
+    assert envs["crm-x"].store_version == 1 and [ref.id for ref in plan.store_refs] == ["crm-x"]
 
 
 
@@ -450,6 +452,35 @@ def test_an_env_definition_naming_an_env_alias_is_refused_saying_to_name_the_env
     assert any(f"'crm-x' is an alias of {CRM}, which comes with demo-dist's kit bundle, and an env alias names an env only "
                "in a task's steps; name the env by its id" in problem for problem in problems), problems
 
+ARTIFACT_ALIASED = {"artifacts/notes/notes.txt": "a note\n", "artifacts/img/Dockerfile": "FROM scratch\n",
+                    ALIASES_FILE: '[artifacts]\nnotes = ["notes-x"]\nimg = ["img-x"]\n'}
+CRM_HERE = {"envs/crm/Dockerfile": "FROM scratch\n", "envs/crm/env.toml": 'environment_name = "crm"\n'}
+
+
+def test_an_artifact_named_by_an_installed_alias_is_pulled_in_and_the_task_names_it_by_id(bundle_dir, tmp_path):
+    kit = _kit(tmp_path, ARTIFACT_ALIASED)
+
+    plan = _plan(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"},
+                                    {"id": "load", "type": "load_artifact", "env_id": "crm", "artifact_id": "notes-x",
+                                     "depends_on": ["env"]}], CRM_HERE), kit)
+
+    assert (BundleKind.ARTIFACT, f"{KIT}/notes") in _writes(plan) and _step(plan, "load")["artifact_id"] == f"{KIT}/notes"
+    assert plan.alias_uses[EntityKind.ARTIFACT] == {
+        "notes-x": AliasUse("notes-x", f"{KIT}/notes", "demo-dist's kit bundle", kind=EntityKind.ARTIFACT)}
+    assert plan.alias_uses[EntityKind.ENV] == {} and plan.store_refs == ()
+
+
+def test_an_env_definition_naming_an_artifact_alias_is_refused_saying_to_name_the_artifact_by_its_id(bundle_dir,
+                                                                                                    tmp_path):
+    kit = _kit(tmp_path, ARTIFACT_ALIASED)
+
+    problems = _problems(_task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm"}],
+                               {"envs/crm/env.toml": 'environment_name = "crm"\nimage = "img-x"\n'}), kit)
+
+    assert any(f"'img-x' is an alias of {KIT}/img, which comes with demo-dist's kit bundle, and an artifact alias names "
+               "an artifact only in a task's steps; name the artifact by its id" in problem for problem in problems), problems
+
+
 def test_the_stores_agent_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
     """Someone's own agent of that id is the one they mean."""
     kit = _kit(tmp_path, ALIASED)
@@ -458,8 +489,9 @@ def test_the_stores_agent_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path)
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}]), kit)
 
     assert _writes(plan) == [(BundleKind.TASK, f"{ROOT}/t")] and _step(plan)["a2a_agent_id"] == "solver-x"
-    assert plan.aliases["solver-x"] == AliasUse("solver-x", SOLVER, "demo-dist's kit bundle", store_version=1)
-    assert plan.aliases["solver-x"].agent_id == "solver-x" and [ref.id for ref in plan.store_refs] == ["solver-x"]
+    agents = plan.alias_uses[EntityKind.AGENT]
+    assert agents["solver-x"] == AliasUse("solver-x", SOLVER, "demo-dist's kit bundle", store_version=1)
+    assert agents["solver-x"].agent_id == "solver-x" and [ref.id for ref in plan.store_refs] == ["solver-x"]
 
 
 def test_a_bundles_own_agent_named_like_an_installed_alias_is_the_one_it_names(bundle_dir, tmp_path):
@@ -468,7 +500,7 @@ def test_a_bundles_own_agent_named_like_an_installed_alias_is_the_one_it_names(b
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}],
                        {"agents/solver-x/Dockerfile": "FROM scratch\n"}), kit)
 
-    assert _step(plan)["a2a_agent_id"] == f"{ROOT}/solver-x" and plan.aliases == {}
+    assert _step(plan)["a2a_agent_id"] == f"{ROOT}/solver-x" and plan.alias_uses[EntityKind.AGENT] == {}
 
 
 def test_every_field_naming_an_alias_in_a_task_is_renamed(bundle_dir, tmp_path):
@@ -500,7 +532,8 @@ def test_a_pinned_reference_to_the_stores_agent_of_an_alias_id_names_that_agent(
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x",
                                      "a2a_agent_version": 1}]), kit)
 
-    assert [(ref.id, ref.version) for ref in plan.store_refs] == [("solver-x", 1)] and plan.aliases == {}
+    assert [(ref.id, ref.version) for ref in plan.store_refs] == [("solver-x", 1)]
+    assert plan.alias_uses[EntityKind.AGENT] == {}
 
 
 def test_an_alias_two_installed_bundles_give_is_refused_naming_both(bundle_dir, tmp_path):
@@ -525,7 +558,7 @@ def test_the_stores_agent_of_a_refused_alias_id_is_the_one_it_names(bundle_dir, 
 
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}]), kit, other)
 
-    assert [ref.id for ref in plan.store_refs] == ["solver-x"] and plan.aliases == {}
+    assert [ref.id for ref in plan.store_refs] == ["solver-x"] and plan.alias_uses[EntityKind.AGENT] == {}
 
 
 def test_an_agent_misspelling_an_alias_is_pointed_at_it(bundle_dir, tmp_path):
@@ -555,7 +588,7 @@ def test_a_default_agent_set_to_an_alias_is_pulled_in_for_a_step_naming_none(bun
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent"}]), kit)
 
     assert (BundleKind.AGENT, SOLVER) in _writes(plan) and "a2a_agent_id" not in _step(plan)
-    assert plan.aliases == {"solver-x": AliasUse("solver-x", SOLVER, "demo-dist's kit bundle")}
+    assert plan.alias_uses[EntityKind.AGENT] == {"solver-x": AliasUse("solver-x", SOLVER, "demo-dist's kit bundle")}
 
 
 def test_a_default_agent_set_to_an_alias_no_step_falls_back_to_isnt_read(bundle_dir, tmp_path, default_agent):
@@ -564,7 +597,7 @@ def test_a_default_agent_set_to_an_alias_no_step_falls_back_to_isnt_read(bundle_
 
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": SOLVER}]), kit)
 
-    assert plan.aliases == {}
+    assert plan.alias_uses[EntityKind.AGENT] == {}
 
 
 def test_checking_a_bundle_naming_an_alias_reads_no_store(bundle_dir, tmp_path, monkeypatch):

@@ -17,7 +17,7 @@ from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers import Run, RunRecordUnavailable
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from agent_env.task_step.task_steps.verifiers.run_context import (_fold, _message, _run, load_run_context,
+from agent_env.task_step.task_steps.verifiers.run_context import (EnvClock, _fold, _message, _run, load_run_context,
                                                                   render_run_context)
 
 TURNS = [("Can you book lunch with Dana?", "Booked for noon."),
@@ -497,14 +497,17 @@ async def test_a_message_carries_each_envs_virtual_time_when_the_conversation_re
 
     def with_clock(conversation_id):
         doc = original(conversation_id)
-        doc["messages"][0]["env_clock"] = {"calendar": "2026-10-17T09:00:00+00:00", "mail": None}
+        doc["messages"][0]["env_clock"] = [
+            {"env_id": "calendar", "env_step_id": "deploy_calendar", "virtual_time": "2026-10-17T09:00:00Z"},
+            {"env_id": "calendar", "env_step_id": "deploy_calendar_2", "virtual_time": "2026-10-18T09:00:00Z"}]
         return doc
 
     monkeypatch.setattr(conversation_store, "get_conversation", with_clock)
     run = await load_run_context(context, prompt_response)
 
     first, reply = run.turn(1).message, run.turn(1).reply
-    assert first.env_clock == {"calendar": datetime.fromisoformat("2026-10-17T09:00:00+00:00"), "mail": None}
+    assert first.env_clock == (EnvClock("calendar", "deploy_calendar", datetime.fromisoformat("2026-10-17T09:00:00Z")),
+                               EnvClock("calendar", "deploy_calendar_2", datetime.fromisoformat("2026-10-18T09:00:00Z")))
     assert reply.env_clock is None  # a message stored without a clock has none
 
 

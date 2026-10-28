@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import OrderedDict
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from mcp.types import CallToolResult
@@ -16,6 +17,7 @@ from .errors import DeliveryFailed, DeviceUnavailable, InputBusy, Internal
 from .frames import Frame, FrameStore, to_pil
 from .operations import GROUPS, INPUT, Display, ReadyCheck, resolve
 from .queue import InputQueue
+from .recording import RecordHints, Recordings
 from .results import EffectData, InputResult, send
 
 if TYPE_CHECKING:
@@ -37,6 +39,7 @@ class ComputerRuntime:
         self._releases: dict[str, asyncio.Task] = {}
         self._commands_running: dict[str, asyncio.Task] = {}
         self._commands_finished: OrderedDict = OrderedDict()
+        self.recordings = Recordings(self)
 
     def has(self, capability: str) -> bool:
         if capability in GROUPS:
@@ -55,6 +58,10 @@ class ComputerRuntime:
         except Exception as e:
             error = DeliveryFailed if operation in INPUT else Internal
             raise error(f"@{operation} failed: {type(e).__name__}: {e}") from e
+
+    def stream(self, hints: RecordHints) -> AsyncIterator:
+        """The driver's ``@record`` stream for one recording."""
+        return getattr(self.driver, self.operations["record"])(hints)
 
     async def display_now(self) -> Display:
         display = await self.call("display")

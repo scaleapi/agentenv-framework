@@ -159,7 +159,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     if model and env.get("ANTHROPIC_BASE_URL"):
         for alias in _MODEL_ALIASES:
             env.setdefault(alias, model)
-    headers = {**_model_headers(env.get(MODEL_HEADERS_ENV)), **_attribution_headers(project_id, task_id)}
+    headers = _with_attribution(_model_headers(env.get(MODEL_HEADERS_ENV)), _attribution_headers(project_id, task_id))
     if headers:
         env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(f"{name}: {value}" for name, value in headers.items())
     if max_thinking_tokens:
@@ -724,3 +724,23 @@ async def _spawn_claude(
     return ClaudeResult(response=final_response or "", tool_call_count=tool_count,
                         session_id=cli_session_id or session_id, trajectory=trajectory, error=err,
                         error_detail=detail, structured_output=structured_output)
+
+
+_TAGS_HEADER = "x-litellm-tags"
+
+
+def _with_attribution(headers: dict[str, str], attribution: dict[str, str]) -> dict[str, str]:
+    """``headers`` with the run's ``attribution`` over them, in any case, except that the run's x-litellm-tags join
+    theirs."""
+    merged = dict(headers)
+    for name, value in attribution.items():
+        configured = next((merged.pop(own) for own in list(merged) if own.lower() == name), None)
+        merged[name] = _join_tags(configured, value) if name == _TAGS_HEADER and configured else value
+    return merged
+
+
+def _join_tags(configured: str, run: str) -> str:
+    """x-litellm-tags as configured, then each of the run's tags whose key (the part before ``:``) they don't name."""
+    tags = [tag.strip() for tag in configured.split(",") if tag.strip()]
+    keys = {tag.partition(":")[0] for tag in tags}
+    return ",".join([*tags, *(tag for tag in run.split(",") if tag and tag.partition(":")[0] not in keys)])

@@ -836,6 +836,7 @@ class _SdkServices:
             solver_message=request.solver_message,
             context_id=request.context_id,
             env_triggers=request.env_triggers,
+            record_unfired=request.record_unfired,
         )
 
     async def triggers_state(self) -> dict[str, Any]:

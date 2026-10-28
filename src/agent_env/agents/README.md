@@ -11,8 +11,10 @@ tasks left as written.
 
 It needs Docker, and a model endpoint serving Anthropic's Messages API, `<base>/v1/messages`, which a LiteLLM gateway
 does: the `[model]` base URL and key reach it as `ANTHROPIC_BASE_URL` and a bearer token, and `[model.headers]` are sent
-on every model call. The `LITELLM_*` variables stay in its environment too, so a script the model runs can call the
-endpoint. The image holds Claude Code, which is Anthropic's software under its
+on every model call, with the run's `project_id` and `task_id` as `x-litellm-customer-id` and `x-litellm-tags` (the
+run's tags join an `x-litellm-tags` that `[model.headers]` names, whose own keys, such as `taskId`, win). The
+`LITELLM_*` variables stay in its environment too, so a script the model runs can call the endpoint. The image holds
+Claude Code, which is Anthropic's software under its
 [Commercial Terms](https://www.anthropic.com/legal/commercial-terms); a release also publishes the image, CLI included,
 at `ghcr.io/scaleapi/agentenv-claude-code:src-<hex>`, built from this folder, and again only when
 the folder changes. A run that deploys the agent registers that image when it's published for the sources installed: each deploy

@@ -58,6 +58,7 @@ from .constants import (
     PROTOCOL_VERSION,
     RPC_PATH,
     STATE_TOOL_NAME_CLASHES_KEY,
+    STEP_SOURCE_POST_TURN_HOOK,
     TOOL_DISABLE_ACTION,
     TOOL_ENABLE_ACTION,
     WELL_KNOWN_PATH,
@@ -77,6 +78,7 @@ logger = logging.getLogger(__name__)
 
 # RFC 9110's safe methods: a request using one asks for no change, so the proxy measures no write window for it.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+_STEP_API = {"source": "step_api"}
 
 
 class ToolNameClash(ValueError):
@@ -277,6 +279,20 @@ class Gateway:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
             self._register_get_time_tool()
             return self._json_response(state, 200)
+
+        @self._mcp.custom_route("/clock/advance", methods=["PUT"])
+        async def clock_advance(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict):
+                return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
+            try:
+                state = self._clock.advance(body.get("virtual_time"))
+            except ClockError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+            return self._json_response({**state, "due": self._trigger_engine.clock_advanced()}, 200)
 
         @self._mcp.custom_route("/clock/clear", methods=["POST"])
         async def clock_clear(request: Request) -> Response:
@@ -975,10 +991,14 @@ class Gateway:
             return self._json_response({"error": "Invalid JSON body"}, 400)
         action = body.get("action")
         role = self._request_role(request)
+        source = _step_source(body)
+        if source is None:
+            return self._json_response({"error": f"'source' may only be '{STEP_SOURCE_POST_TURN_HOOK}', with a "
+                                                 "non-empty 'hook_artifact_id' naming the hook"}, 400)
         if action == "list_tools":
             return self._step_list_tools(role)
         elif action == "call_tool":
-            return await self._step_call_tool(body, role)
+            return await self._step_call_tool(body, role, source)
         else:
             return self._json_response({"error": f"Unknown action: {action}. Expected 'list_tools' or 'call_tool'."}, 400)
 
@@ -996,7 +1016,7 @@ class Gateway:
         ]
         return self._json_response({"tools": tools}, 200)
 
-    async def _step_call_tool(self, body: dict, role: str) -> Response:
+    async def _step_call_tool(self, body: dict, role: str, source: dict = _STEP_API) -> Response:
         tool_name = body.get("tool_name")
         if not tool_name or not isinstance(tool_name, str):
             return self._json_response({"error": "Missing or invalid 'tool_name' field"}, 400)
@@ -1012,10 +1032,10 @@ class Gateway:
 
         server_url = self._tool_server_urls.get(tool_name)
         if server_url is None:
-            return await self._step_call_gateway_tool(tool_name, arguments, role)
+            return await self._step_call_gateway_tool(tool_name, arguments, role, source)
         tool_call_event_id = await self._log_event({
             "event_type": "tool_call",
-            "source": "step_api",
+            **source,
             "tool_call": {"function_name": tool_name, "arguments": arguments},
             **self._attribution(role),
         })
@@ -1025,13 +1045,13 @@ class Gateway:
                 try:
                     result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
                 except Exception as e:
-                    await self._log_failed_call(tool_call_event_id, changelog_before, e, source="step_api")
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e, **source)
                     raise
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
                 "event_type": "tool_call_result",
-                "source": "step_api",
+                **source,
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
                 "changelog_id_before": changelog_before,
@@ -1049,14 +1069,15 @@ class Gateway:
             error_detail = str(e) or repr(e)
             return self._json_response({"error": f"Tool execution failed ({type(e).__name__}): {error_detail}"}, 500)
 
-    async def _step_call_gateway_tool(self, tool_name: str, arguments: dict, role: str = DEFAULT_ROLE) -> Response:
+    async def _step_call_gateway_tool(self, tool_name: str, arguments: dict, role: str = DEFAULT_ROLE,
+                                      source: dict = _STEP_API) -> Response:
         """Call a FastMCP-registered tool (e.g. list_website_urls) for /step."""
         tool = self._mcp._tool_manager._tools.get(tool_name)
         if tool is None:
             return self._json_response({"error": f"Unknown tool: {tool_name}"}, 404)
         tool_call_event_id = await self._log_event({
             "event_type": "tool_call",
-            "source": "step_api",
+            **source,
             "tool_call": {"function_name": tool_name, "arguments": arguments},
             **self._attribution(role),
         })
@@ -1072,7 +1093,7 @@ class Gateway:
                 response_data = result.model_dump(mode="json", exclude_none=True)
             await self._log_event({
                 "event_type": "tool_call_result",
-                "source": "step_api",
+                **source,
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": response_data,
                 "changelog_id": changelog_id,
@@ -1317,6 +1338,16 @@ class _ProxyArgModelBase(ArgModelBase):
             output_name = field_info.alias if field_info.alias else field_name
             kwargs[output_name] = value
         return kwargs
+
+
+def _step_source(body: dict) -> dict | None:
+    """The trajectory tag of a /step call: step_api, or the post-turn hook its body names; None for any other source."""
+    if "source" not in body:
+        return _STEP_API
+    hook = body.get("hook_artifact_id")
+    if body["source"] != STEP_SOURCE_POST_TURN_HOOK or not isinstance(hook, str) or not hook:
+        return None
+    return {"source": STEP_SOURCE_POST_TURN_HOOK, "hook_artifact_id": hook}
 
 
 def _request_args(request: Request, body: bytes) -> dict:

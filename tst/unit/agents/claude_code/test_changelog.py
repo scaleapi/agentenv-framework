@@ -282,6 +282,27 @@ def test_each_tool_call_uploads_its_own_writes_and_the_increments_replay_them(tm
 
 
 @needs_gnu_tar
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every file")
+def test_a_file_the_agent_cant_read_is_skipped_and_the_rest_still_captured(tmp_path, staging):
+    """As /etc/ssl/private is to a non-root agent: tar can't read it, and the increment still uploads the rest."""
+    root = tmp_path / "workspace"
+    locked = root / "locked"
+    locked.mkdir(parents=True)
+    (locked / "key").write_text("secret")
+    locked.chmod(0)
+    try:
+        log, _, _, _ = _changelog(tmp_path, roots=[str(root)])
+        _enable(log)
+        (root / "marker.txt").write_text("token")
+        result = _capture(log, staging.port)
+    finally:
+        locked.chmod(0o700)
+
+    assert result.returncode == 0 and "captured seq=0" in result.stderr, result.stderr
+    assert str(root / "marker.txt").lstrip("/") in _members(staging.objects[f"{ROOT_PATH}/000000.tgz"])
+
+
+@needs_gnu_tar
 def test_a_capture_past_the_grants_object_limit_is_skipped_across_hook_processes(tmp_path, staging):
     root = tmp_path / "workspace"
     root.mkdir()

@@ -39,6 +39,7 @@ IMAGES = {
     "agentenv-pi": "src/agent_env/agents/agents/pi/Dockerfile",
     "agentenv-proxy": "src/agent_env/agents/agents/proxy/Dockerfile",
     "agentenv-mail-mcp": "src/agent_env/examples/mail-mcp/envs/mail/Dockerfile",
+    "agentenv-ubuntu-24.04": "src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile",
 }
 _TAG = re.compile(r"^src-[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -50,15 +51,15 @@ _PRINTED_CHARS = 200  # of what docker printed in place of a manifest, in the er
 # Docker Hub send.
 _RATE_LIMITED = re.compile(r"429 Too Many Requests|toomanyrequests", re.IGNORECASE)
 # What pip in an agent image's build answers for the agentenv-framework-protocol its release published moments earlier,
-# until PyPI's index, which a CDN caches, lists it.
-_NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-framework-protocol(\[[^\]]*\])?==")
+# until PyPI's index, which a CDN caches, lists it: pinned (an agent's), or a floor it names (the browser's recorder).
+_NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-framework-protocol(\[[^\]]*\])?(==|>=)")
 # How long to wait before each try again, so a burst of builds starting together spreads out.
 _RETRY_WAITS_SECONDS = (30, 60, 120)
 
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, the sidecars and the
 # browser answer their own commands, Claude Code's, Codex's, Gemini's, OpenCode's and pi's agents run their CLIs and
-# import their servers, OpenHands' imports its server, which loads the OpenHands SDK, the proxy imports its server, and
-# the mail example's env imports its server.
+# import their servers, OpenHands' imports its server, which loads the OpenHands SDK, the proxy imports its server, the
+# mail example's env imports its server, and the base computer's desktop comes up, every program running.
 _SMOKES = {
     "agentenv-gateway": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import gateway.entrypoint"],
     "agentenv-db-web": ["docker", "run", "--rm", "--entrypoint", "/usr/bin/pgweb", "{image}", "--version"],
@@ -79,6 +80,11 @@ _SMOKES = {
                     'pi --version && python3 -c "import a2a_server"'],
     "agentenv-proxy": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c", 'python -c "import a2a_server"'],
     "agentenv-mail-mcp": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import server"],
+    "agentenv-ubuntu-24.04": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+                              "start-desktop init & for _ in $(seq 60); do sleep 1;"
+                              " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
+                              " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
+                              " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
 }
 
 

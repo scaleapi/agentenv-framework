@@ -1,12 +1,13 @@
 """The files ``.github/workflows/publish-pypi.yml`` rewrites to pin agentenv-framework-protocol on a release, the
-pyproject with its sed and the shipped bundles' env and artifact requirements files with ``shipped_bundles.py pin``: each
-must hold exactly one protocol requirement, or the release ships an unpinned one. An agent's, and an env's whose image a
-release publishes, keep their floor."""
+pyproject with ``shipped_bundles.py pin-pyproject`` and the shipped bundles' env and artifact requirements files with
+``shipped_bundles.py pin``: each must hold exactly one protocol requirement, or the release ships an unpinned one, and
+the pin keeps its extras. An agent's, and an env's whose image a release publishes, keep their floor."""
 
 from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,35 @@ _spec.loader.exec_module(shipped_bundles)
 
 def test_the_pyproject_holds_the_one_quoted_protocol_requirement_the_release_pins():
     assert len(re.findall(r'"agentenv-framework-protocol[^"]*"', (REPO / "pyproject.toml").read_text())) == 1
+
+
+def test_the_release_pins_the_pyproject_keeping_the_extras_core_imports_from_the_protocol(tmp_path):
+    """The wheels 0.9.1363 to 0.9.1368 shipped a pin without [computer], so a bare install couldn't import av."""
+    shutil.copy(REPO / "pyproject.toml", tmp_path / "pyproject.toml")
+    (tmp_path / "packages/agentenv-protocol").mkdir(parents=True)
+    shutil.copy(REPO / "packages/agentenv-protocol/pyproject.toml", tmp_path / "packages/agentenv-protocol")
+
+    assert shipped_bundles.pin_pyproject(tmp_path) == (
+        f"agentenv-framework-protocol[computer]=={shipped_bundles.protocol_version()}")
+    assert "python3 .github/scripts/shipped_bundles.py pin-pyproject" in WORKFLOW
+    assert 'sed -i "s/\\"agentenv-framework-protocol' not in WORKFLOW
+
+
+def test_pin_pyproject_rewrites_only_the_quoted_requirement_and_again_changes_nothing(tmp_path):
+    repo = _repo(tmp_path, {})
+    text = ('[project]\nname = "x"\ndependencies = [\n    "agentenv-framework-protocol[computer]>=0.1.0",  # why\n'
+            '    "agentenv-framework-protocol-tools==1",\n]\n\n[tool.hatch.build.targets.sdist]\n'
+            'include = ["/src", "/packages/agentenv-protocol"]\n\n[tool.uv.sources]\n'
+            'agentenv-framework-protocol = { workspace = true }\n')
+    (repo / "pyproject.toml").write_text(text)
+    pinned = text.replace(">=0.1.0", "==1.2.3")
+
+    assert shipped_bundles.pin_pyproject(repo) == "agentenv-framework-protocol[computer]==1.2.3"
+    assert (repo / "pyproject.toml").read_text() == pinned
+    assert shipped_bundles.pin_pyproject(repo) == "agentenv-framework-protocol[computer]==1.2.3"
+    assert (repo / "pyproject.toml").read_text() == pinned
+    (repo / "pyproject.toml").write_text(text.replace("[computer]>=0.1.0", ""))
+    assert shipped_bundles.pin_pyproject(repo) == "agentenv-framework-protocol==1.2.3"
 
 
 def _repo(tmp_path: Path, requirements: dict[str, str]) -> Path:

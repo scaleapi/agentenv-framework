@@ -6,6 +6,7 @@
   "id": "slack-mcp-image",
   "image_digest": null,
   "image_name": "slack-mcp:v5",
+  "metadata": {},
   "platform": null,
   "source_digest": null,
   "tar_gz_object_url": "s3://artifact-bucket/artifacts/docker_image/slack-mcp-image/5/image.tar.gz",

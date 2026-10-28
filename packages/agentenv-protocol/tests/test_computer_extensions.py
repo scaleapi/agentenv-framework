@@ -164,8 +164,13 @@ async def test_a_background_apps_output_is_drained_after_the_call_returns(monkey
         r = await http.post("/agentenv/ext/computer-exec/run", json=_run(
             argv=["sh", "-c", "echo now; (sleep 0.4; echo later) &"]))
         draining = len(linux._draining)
-        await asyncio.sleep(1.0)
-    assert r.json()["stdout"] == "now\n" and draining >= 1 and not linux._draining
+
+        async def drained():
+            while linux._draining:
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(drained(), timeout=10)
+    assert r.json()["stdout"] == "now\n" and draining >= 1
 
 
 @pytest.mark.asyncio

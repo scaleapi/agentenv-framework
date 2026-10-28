@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.artifact.artifacts.cli import CliArtifact
+from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -94,6 +95,18 @@ ARTIFACT_FIXTURES = {
         command_name="slack",
         env_id="slack-env",
         env_version=2,
+    ),
+    "computer": lambda: ComputerArtifact(
+        id="ubuntu-24.04",
+        version=2,
+        description="Ubuntu 24.04 with XFCE on Xvfb",
+        arch=["amd64", "arm64"],
+        os={"type": "linux", "distribution": "ubuntu", "version": "24.04", "display": "x11"},
+        session={"user": "user"},
+        forms={"container": {"image": ArtifactRef(id="ubuntu-24.04__forms_container_image", version=1),
+                             "init": "supervisord", "input_channel": "env"}},
+        config={"resolution": {"default": "1280x800", "phase": "deploy"}},
+        metadata={"validated_images": {"container": {"amd64": {"status": "passed", "checked_at": "2026-10-27T18:00:00+00:00"}}}},
     ),
     "docker_image": lambda: _docker_image("slack-mcp-image", 5, "slack-mcp:v5"),
     "file": lambda: FileArtifact(

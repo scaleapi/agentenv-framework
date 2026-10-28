@@ -14,7 +14,7 @@ from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcom
                               dry_run_bundle, run_bundle)
 from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
                                         path_like, run_name)
-from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
+from agent_env.plugins._bundles import ALIAS_TABLES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.task.interrupts import Interrupts
@@ -144,7 +144,7 @@ def _list_installed() -> None:
         click.echo(f"{name:<{widths[0]}}  {package:<{widths[1]}}  {contents:<{widths[2]}}  {description}".rstrip())
 
     echo(*header)
-    aliases = (installed_aliases(bundles), installed_aliases(bundles, ENV_ALIASES))
+    aliases = tuple(installed_aliases(bundles, table) for table in ALIAS_TABLES)
     for bundle, row in zip(bundles, rows):
         echo(*row)
         if bundle.root is not None:

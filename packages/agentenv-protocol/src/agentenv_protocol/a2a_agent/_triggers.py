@@ -206,6 +206,7 @@ class TriggerEngine:
         solver_message: str = "",
         context_id: str = "default",
         env_triggers: Any = None,
+        record_unfired: bool = True,
     ) -> dict[str, Any]:
         if isinstance(turn, bool) or not isinstance(turn, int) or turn < 1:
             raise TriggerError("decide: 'turn' must be a positive integer")
@@ -256,6 +257,8 @@ class TriggerEngine:
                     elif action["type"] == "end":
                         done = True
 
+        if not fired_ids and not record_unfired:
+            return {"parts": [], "done": False, "fired": []}
         # Commit only after every predicate succeeds. A timed-out decision can then
         # be retried without consuming the turn or partially firing once-only rules.
         context = self._context_state(context_id)

@@ -332,8 +332,8 @@ def _translations(plan: Plan, ids: Mapping[str, str]) -> dict[str, Any]:
         "store_refs": tuple(reference(ref) for ref in plan.store_refs),
         "origins": {entity(entry): origin for entry, origin in plan.origins.items()},
         "published": {ids.get(id, id): publication for id, publication in plan.published.items()},
-        "aliases": {alias: _aliased(use, ids) for alias, use in plan.aliases.items()},
-        "env_aliases": {alias: _aliased(use, ids) for alias, use in plan.env_aliases.items()},
+        "alias_uses": {kind: {alias: _aliased(use, ids) for alias, use in uses.items()}
+                       for kind, uses in plan.alias_uses.items()},
     }
 
 

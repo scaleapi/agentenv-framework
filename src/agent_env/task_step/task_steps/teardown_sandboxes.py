@@ -25,6 +25,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.computer_recording import end_open_recordings
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 PROVIDER_CLOSE_TIMEOUT_SECONDS = 5
 
 TORN_DOWN_KEY = "torn_down_sandbox_ids"
+
 
 
 class TeardownSandboxesTaskStep(TaskStep):
@@ -87,8 +89,7 @@ class TeardownSandboxesTaskStep(TaskStep):
             logger.warning(f"teardown_sandboxes: not deployed in this run, skipping: {', '.join(missing)}")
         already = set(context.metadata.get(TORN_DOWN_KEY) or [])
         pending = {sid: (stype, default) for sid, (stype, default) in targets.items() if sid not in already}
-        for name in self.agent_names:  # a changelog staged on an agent goes into the store before the agent does
-            await drain_all(staged_changelogs(context.metadata, agent_name=name), within=LAST_DRAIN_SECONDS)
+        await before_teardown(context, LAST_DRAIN_SECONDS, env_ids=self.env_ids, agent_names=self.agent_names)
         results = await asyncio.gather(
             *(_terminate(sid, stype, default) for sid, (stype, default) in pending.items()),
             return_exceptions=True,
@@ -134,6 +135,20 @@ class TeardownSandboxesTaskStep(TaskStep):
             for env in envs:
                 targets.update({sid: (stype, "env") for sid, stype in _env_sandbox_ids(env)})
         return targets, missing
+
+
+async def before_teardown(context: TaskStepContext, within: float, env_ids: Optional[list[str]] = None,
+                          agent_names: Optional[list[str]] = None) -> None:
+    """Save what has to reach the stores before sandboxes go, each part within ``within`` seconds: the changelogs
+    staged on ``agent_names`` and the recordings open on ``env_ids``, or on every agent and env when None."""
+    for name in [None] if agent_names is None else agent_names:
+        await drain_all(staged_changelogs(context.metadata, agent_name=name), within=within)
+    if env_ids is None or env_ids:
+        try:
+            async with asyncio.timeout(within):
+                await end_open_recordings(context, env_ids)
+        except TimeoutError:
+            logger.warning("open recordings were not all ended within %gs", within)
 
 
 def _env_sandbox_ids(env) -> list[tuple[str, Optional[str]]]:
