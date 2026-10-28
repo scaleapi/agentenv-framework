@@ -22,7 +22,8 @@ RECORD = str(RELEASE_FILE.relative_to(REPO))
 _RUNS_DEPENDENCIES = re.compile(r"\buv (sync|run)\b|infra_images\.py")
 # What reads the shipped bundles' folders: an image's tag, its build, and the wheel.
 _READS_SHIPPED_SOURCES = re.compile(r"infra_images\.py (plan|write)|docker build\b|uv build --no-sources --out-dir dist")
-_PIN = "python3 .github/scripts/shipped_bundles.py pin"
+# The pin command, and not pin-pyproject, which pins the framework's own requirement.
+_PIN = re.compile(r"python3 \.github/scripts/shipped_bundles\.py pin(?![\w-])")
 
 
 def _runs(job: str) -> list[str]:
@@ -122,7 +123,8 @@ def test_every_job_that_reads_the_shipped_bundles_pins_the_protocol_first():
 
     assert set(readers) == {"infra-plan", "infra-build", "agent-build", "infra-record", "framework"}
     for job, runs in readers.items():
-        assert runs.count(_PIN) == 1 and runs.index(_PIN) < _READS_SHIPPED_SOURCES.search(runs).start(), job
+        pins = [pin.start() for pin in _PIN.finditer(runs)]
+        assert len(pins) == 1 and pins[0] < _READS_SHIPPED_SOURCES.search(runs).start(), job
 
 
 def test_the_pin_changes_no_published_images_sources():
