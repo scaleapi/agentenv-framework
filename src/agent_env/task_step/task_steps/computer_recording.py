@@ -20,6 +20,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.artifact.store import get_artifact_store
 from agent_env.config import get_config
 from agent_env.entity.refs import EntityRef
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.store.object_store.object_store import issues_grants_to
@@ -83,6 +84,7 @@ class StartComputerRecordingTaskStep(TaskStep):
         request_id = f"{context.instance_id}:{self.id}" if context.instance_id else uuid.uuid4().hex
         try:
             deployed = _deployed(context, self.env_id)
+            _refuse_no_network(deployed)
             namespace = _namespace(request_id)
             grant = _grant(deployed, namespace, self.environment_name)
             started = await deployed.invoke(COMPUTER_RECORDING, "start", {
@@ -188,6 +190,14 @@ def _deployed(context: TaskStepContext, env_id: str):
     if deployed is None:
         raise RuntimeError(f"env {env_id!r} isn't deployed in this run")
     return deployed
+
+
+def _refuse_no_network(deployed) -> None:
+    """A computer deployed with no network can't reach the store its recording's segments upload to."""
+    network = ((deployed.metadata or {}).get("computer") or {}).get("network")
+    if network and NetworkPolicy.from_dict(network).closed:
+        raise RuntimeError(f"env {deployed.env_id!r} was deployed with no network, so its computer can't upload a "
+                           "recording's segments")
 
 
 def _namespace(request_id: str) -> str:

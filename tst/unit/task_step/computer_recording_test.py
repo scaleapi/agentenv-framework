@@ -31,7 +31,7 @@ class _Computer:
 
     def __init__(self, store, env_id: str = "desktop", forgets: bool = False, garbles: bool = False,
                  drop_last: bool = False) -> None:
-        self.env_id, self.environment_card, self.sandbox_type = env_id, _CARD, "local"
+        self.env_id, self.environment_card, self.sandbox_type, self.metadata = env_id, _CARD, "local", None
         self.store, self.forgets, self.garbles, self.drop_last = store, forgets, garbles, drop_last
         self.calls: list[tuple[str, dict]] = []
         self.started: set[str] = set()
@@ -205,9 +205,14 @@ async def test_a_store_that_cant_sign_for_the_whole_recording_grants_what_it_can
 
 
 @pytest.mark.asyncio
-async def test_recording_an_env_this_run_didnt_deploy_fails_the_start(store):
+async def test_recording_an_env_this_run_didnt_deploy_or_that_has_no_network_fails_the_start(store):
     context = await _start(env_id="elsewhere").execute(_context(_Computer(store)))
     assert "env 'elsewhere' isn't deployed in this run" in context.metadata[RECORDINGS_KEY]["desk"]["error"]
+    closed = _Computer(store)
+    closed.metadata = {"computer": {"network": {"mode": "allowlist"}}}
+    context = await _start().execute(_context(closed))
+    assert "deployed with no network, so its computer can't upload" in context.metadata[RECORDINGS_KEY]["desk"]["error"]
+    assert closed.calls == []
 
 
 @pytest.mark.asyncio
