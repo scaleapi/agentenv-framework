@@ -38,7 +38,7 @@ OS = {"type": "linux", "distribution": "ubuntu", "version": "24.04", "display": 
 CONFIG = {"resolution": {"default": "1280x800", "phase": "deploy"}, "timezone": {"default": "UTC", "phase": "deploy"},
           "theme": {"default": "light", "phase": "build"}}
 SERVE = "venv/bin/python -m agentenv_protocol.computer.serve driver.py:Desk"
-TOOLS = ["computer_screenshot", "computer_click", "computer_type"]
+TOOLS = ["computer_screenshot", "computer_click", "computer_type", "computer_pointer_list"]
 
 
 class FakeDocker:
@@ -181,7 +181,7 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     first = _put(base, driver)
     docker_calls.clear()
     second = _put(base, driver, id="@local/~/kit/other", environment_name="other", display={"width": 640, "height": 480},
-                  network={"mode": "allowlist"}, tools={"hide": ["computer_type"]})
+                  network={"mode": "allowlist"}, tools={"hide": ["computer_pointer_list"]})
 
     built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
     assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
@@ -333,6 +333,8 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
      "network: allow_all permits everything; entries would be silently ignored"),
     ({"network": {"mode": "allowlist", "ports": [80]}}, "network is { mode, allow_hosts, allow_cidrs }"),
     ({"tools": {"hide": ["computer_drag*"]}}, "tools.hide: 'computer_drag*' matches none of @local/~/kit/desk's tools"),
+    ({"tools": {"hide": ["computer_c*"]}}, "tools.hide: 'computer_c*' hides computer_click, of the seven tools every "
+                                           "computer offers"),
     ({"tools": {"show": ["x"]}}, "tools is { hide = [<pattern>, ...] }"),
     ({"data_paths": ["/etc"]}, "data_paths: '/etc' isn't a path inside the session user's home"),
     ({"data_paths": ["../x"]}, "data_paths: '../x' isn't a path inside the session user's home"),
@@ -344,7 +346,7 @@ async def test_a_computer_env_doesnt_deploy_yet_and_says_how_far_it_got(base, dr
      "settings.ubuntu-24.04.timezone must be a str, like its default 'UTC', not 3"),
     ({"settings": {"desk": {"log_level": "debug"}}}, "settings.desk.log_level: @local/~/kit/desk declares no setting"),
 ], ids=["apps", "form", "display-zero", "display-side", "display-and-resolution", "network", "network-key",
-        "tools-hide", "tools-key", "data-absolute", "data-escapes", "settings-layer", "settings-name", "settings-type",
+        "tools-hide", "tools-minimum", "tools-key", "data-absolute", "data-escapes", "settings-layer", "settings-name", "settings-type",
         "settings-driver"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
