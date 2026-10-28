@@ -754,6 +754,21 @@ async def test_a_computer_that_boots_at_another_size_than_its_display_fails_the_
     assert [sandbox.terminated for sandbox in boots.sandboxes] == [True]
 
 
+@pytest.mark.asyncio
+async def test_a_boot_that_never_gets_ready_takes_its_sandbox_and_work_folder_down(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
+    sandbox = local_sandbox.LocalSandbox(exposed_ports=[18765], sandbox_id="local-unready")
+    sandbox.terminate = AsyncMock()
+    monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=TimeoutError("not ready")))
+
+    with pytest.raises(TimeoutError):
+        await boot.boot(SimpleNamespace(create_container=AsyncMock(return_value=sandbox)), image="img", arch="arm64",
+                        port=18765, environment={}, network_policy=None, timeout=60, attribution=None)
+
+    sandbox.terminate.assert_awaited_once()
+    assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None
+
+
 def test_a_boot_mints_a_generated_setting_resolves_a_secret_and_its_record_withholds_both(base, monkeypatch):
     monkeypatch.setenv("DESK_KEY", "s3cret")
     computer = base.model_copy(update={"config": {

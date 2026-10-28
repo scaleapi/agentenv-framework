@@ -5,6 +5,7 @@ gate 3 boot computers this way."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from agentenv_protocol.computer import COMPUTER_READY, SETTINGS_ENV
 
 from agent_env.config import get_config
 from agent_env.providers.env_providers.env_provider import _size_kwargs
+from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -78,11 +80,20 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, arch: str, port
         url = sandbox.tunnel_urls[port]
         return Booted(sandbox, url, await ready(url, READY_TIMEOUT_S))
     except BaseException:
-        try:
-            await sandbox.terminate()
-        except Exception:
-            pass
+        await discard(sandbox)
         raise
+
+
+async def discard(sandbox: Sandbox) -> None:
+    """Tear down a sandbox no run records, as a run's teardown would: terminate it, then remove its work folder when it
+    ran on this machine."""
+    try:
+        await sandbox.terminate()
+    except Exception:
+        return
+    if sandbox.ON_THIS_MACHINE:
+        with contextlib.suppress(OSError):
+            await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
 
 
 async def ready(url: str, timeout: float) -> dict:

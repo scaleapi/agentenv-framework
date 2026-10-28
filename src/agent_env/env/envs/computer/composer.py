@@ -170,7 +170,7 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
             async with asyncio.timeout(_PROBE_TIMEOUT_S):
                 return await run_probe(booted.url, "full"), booted.card, type(link).__name__
         finally:
-            await booted.sandbox.terminate()
+            await boot.discard(booted.sandbox)
     raise RuntimeError("; ".join(problems))
 
 
