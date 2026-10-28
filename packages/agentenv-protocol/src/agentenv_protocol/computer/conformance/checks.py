@@ -21,7 +21,7 @@ from pydantic import ValidationError
 from ... import client as protocol
 from ...client import ExtensionCallError
 from ...tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI
-from ...types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI
+from ...types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI, SKILL_EXTENSION_URI
 from ..card import (
     COMPUTER,
     COMPUTER_DISPLAY,
@@ -88,7 +88,7 @@ class Probe:
         for check, section in (("P0", self._ready), ("P1", self._card), ("P2", self._frame), ("P5", self._refusals),
                                ("X", self._display), ("X", self._spaces), ("X", self._keyboard_settings),
                                ("X", self._exec), ("X", self._data_get), ("X", self._tool_access),
-                               ("X", self._pointer)):
+                               ("X", self._pointer), ("X", self._skill)):
             await self._guarded(check, section)
         self._grants()
 
@@ -387,6 +387,18 @@ class Probe:
         if isinstance(cap, int):
             await self.check("X", "output past max_output_bytes is cut there", capped, COMPUTER_EXEC)
         await self.check("X", "a program that isn't there is refused with a code", missing, COMPUTER_EXEC)
+
+    async def _skill(self) -> None:
+        if not self.driver.declares(SKILL_EXTENSION_URI):
+            return
+
+        async def written() -> str | None:
+            got = await self.driver.invoke(SKILL_EXTENSION_URI, "get", {"name": "probe-skill"})
+            if got.get("name") != "probe-skill" or not str(got.get("skill_md")).startswith("---\nname: probe-skill\n"):
+                return f"it answered {got}"
+            return None if got.get("description") else "its description is empty"
+
+        await self.check("X", "the skill is written under the name it's asked for", written, SKILL_EXTENSION_URI)
 
     async def _data_get(self) -> None:
         if not self.driver.declares(INTAKE_EXTENSION_URI):

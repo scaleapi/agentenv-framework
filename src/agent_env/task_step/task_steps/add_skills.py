@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import ClassVar, Optional
 
-from agentenv_protocol.computer import COMPUTER
+from agentenv_protocol import SKILL_EXTENSION_URI
 
 from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
@@ -18,9 +18,9 @@ from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
-#: ``context.metadata[COMPUTER_SKILLS_KEY][agent_name][env_id]``: the computer skill add_skills installed, as its driver
-#: wrote it for that boot.
-COMPUTER_SKILLS_KEY = "computer_skills"
+#: ``context.metadata[ENV_SKILLS_KEY][agent_name][env_id]``: the skill add_skills installed from an env, as the env wrote
+#: it for that deploy.
+ENV_SKILLS_KEY = "env_skills"
 
 
 @dataclass
@@ -173,14 +173,14 @@ def _files_skill_name(universe_id: str) -> str:
     return f"{slug}-{digest}-files" if slug else f"{digest}-files"
 
 
-def _computer_skill_name(environment_name: str, env_id: str) -> str:
-    """``computer-<environment name>``; for a name that isn't a skill name as it stands, a slug of it and a hash of the
-    env's id, so two envs' names never come out the same."""
-    if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", environment_name) and len(environment_name) <= 55:
-        return f"computer-{environment_name}"
-    slug = re.sub(r"[^a-z0-9]+", "-", environment_name.lower()).strip("-")[:38].rstrip("-")
+def _env_skill_name(environment_name: str, env_id: str) -> str:
+    """The env's environment name, as the agent's MCP alias for it is; for a name that isn't a skill name as it stands,
+    a slug of it and a hash of the env's id, so two envs' names never come out the same."""
+    if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", environment_name) and len(environment_name) <= 64:
+        return environment_name
+    slug = re.sub(r"[^a-z0-9]+", "-", environment_name.lower()).strip("-")[:51].rstrip("-")
     digest = hashlib.sha256(env_id.encode("utf-8")).hexdigest()[:12]
-    return f"computer-{slug}-{digest}" if slug else f"computer-{digest}"
+    return f"{slug}-{digest}" if slug else digest
 
 
 def _build_skill_for_loaded_file_artifact_universe(universe_id: str, entry: dict) -> Skill:
@@ -198,7 +198,7 @@ class AddSkillsTaskStep(TaskStep):
         EntityRef.artifact("skills[].skill_artifact_id", version_field="skill_artifact_version", artifact_type="skill"),
         EntityRef.artifact("cli_artifact_ids[]", artifact_type="cli"),
         EntityRef.artifact("file_artifact_universe_ids[]"),
-        EntityRef.env("computer_env_ids[]"),
+        EntityRef.env("env_ids[]"),
     )
     field_scopes = {**TaskStep.field_scopes, "skills[].object_url": FieldScope.USER, "skills[].s3_url": FieldScope.USER}
 
@@ -212,13 +212,13 @@ class AddSkillsTaskStep(TaskStep):
         agent_name: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
-        computer_env_ids: Optional[list[str]] = None,
+        env_ids: Optional[list[str]] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.skills = [s if isinstance(s, Skill) else Skill.from_dict(s) for s in (skills or [])]
         self.cli_artifact_ids = list(cli_artifact_ids or [])
         self.file_artifact_universe_ids = list(file_artifact_universe_ids or [])
-        self.computer_env_ids = list(computer_env_ids or [])
+        self.env_ids = list(env_ids or [])
         self.agent_name = agent_name or TaskStep.DEFAULT_AGENT_NAME
 
     def to_dict(self) -> dict:
@@ -226,8 +226,8 @@ class AddSkillsTaskStep(TaskStep):
         base["skills"] = [s.to_dict() for s in self.skills]
         base["cli_artifact_ids"] = self.cli_artifact_ids
         base["file_artifact_universe_ids"] = self.file_artifact_universe_ids
-        if self.computer_env_ids:  # left out otherwise, so a step without one serializes as before
-            base["computer_env_ids"] = self.computer_env_ids
+        if self.env_ids:  # left out otherwise, so a step without one serializes as before
+            base["env_ids"] = self.env_ids
         base["agent_name"] = self.agent_name
         return base
 
@@ -239,7 +239,7 @@ class AddSkillsTaskStep(TaskStep):
             cli_artifact_ids=data.get("cli_artifact_ids"),
             file_artifact_universe_ids=data.get("file_artifact_universe_ids"),
             agent_name=data.get("agent_name"),
-            computer_env_ids=data.get("computer_env_ids"),
+            env_ids=data.get("env_ids"),
         )
 
     def config_problems(self) -> list[str]:
@@ -283,33 +283,33 @@ class AddSkillsTaskStep(TaskStep):
                 )
             skills_to_add.append(_build_skill_for_loaded_file_artifact_universe(fau_id, entry))
 
-        computer_skills = {env_id: await _computer_skill(context, agent, env_id) for env_id in self.computer_env_ids}
+        env_skills = {env_id: await _env_skill(context, agent, env_id) for env_id in self.env_ids}
 
         deployed = get_a2a_agent_instance_store().get(agent.instance_id)
         for skill in skills_to_add:
             result = await A2AAgent.add_skill(deployed, skill)
             logger.info(f"Registered skill: {result}")
-        for env_id, skill in computer_skills.items():
+        for env_id, skill in env_skills.items():
             result = await A2AAgent.register_skill(deployed, name=skill["name"], description=skill["description"],
                                                    skill_md=skill["skill_md"])
-            context.metadata.setdefault(COMPUTER_SKILLS_KEY, {}).setdefault(self.agent_name, {})[env_id] = {
+            context.metadata.setdefault(ENV_SKILLS_KEY, {}).setdefault(self.agent_name, {})[env_id] = {
                 "name": skill["name"], "skill_md": skill["skill_md"]}
-            logger.info(f"Registered the computer skill of {env_id}: {result}")
+            logger.info(f"Registered the skill of env {env_id}: {result}")
 
         return context
 
 
-async def _computer_skill(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> dict:
-    """The skill the computer env ``env_id`` serves, under ``computer-<its environment name>``: refused for an env this
-    run didn't deploy or bind to ``agent``, or whose driver serves no skill."""
+async def _env_skill(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> dict:
+    """The skill the env ``env_id`` serves under its environment name: refused for an env this run didn't deploy or bind
+    to ``agent``, or that serves no skill."""
     deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
     if deployed is None:
-        raise RuntimeError(f"computer env '{env_id}' isn't deployed in this run")
+        raise RuntimeError(f"env '{env_id}' isn't deployed in this run")
     if env_id not in agent.env_ids:
-        raise RuntimeError(f"computer env '{env_id}' isn't bound to agent '{agent.agent_name}': name it in the env_ids "
-                           "of its deploy_agent")
-    name = _computer_skill_name((deployed.environment_card or {}).get("name") or env_id, env_id)
+        raise RuntimeError(f"env '{env_id}' isn't bound to agent '{agent.agent_name}': name it in the env_ids of its "
+                           "deploy_agent")
+    name = _env_skill_name((deployed.environment_card or {}).get("name") or env_id, env_id)
     try:
-        return await deployed.invoke(COMPUTER, "skill", {"name": name})
+        return await deployed.invoke(SKILL_EXTENSION_URI, "get", {"name": name})
     except EnvCapabilityUnsupported:
-        raise RuntimeError(f"env '{env_id}' serves no computer skill: its card has no {COMPUTER} skill method") from None
+        raise RuntimeError(f"env '{env_id}' serves no skill: its card has no {SKILL_EXTENSION_URI}") from None

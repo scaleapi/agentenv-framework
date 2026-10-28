@@ -4,13 +4,9 @@ says nothing about any task."""
 from __future__ import annotations
 
 import getpass
-import json
 import os
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-from .errors import InvalidArgument
 
 if TYPE_CHECKING:
     from .driver import ComputerDriverEnvironment
@@ -26,13 +22,10 @@ SHORTCUTS = {
 """,
 }
 _SESSIONS = {"x11": "an X11 session", "wayland": "a Wayland session"}
-_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 
 
-async def skill(driver: ComputerDriverEnvironment, name: str) -> dict:
-    """The skill under ``name``, as skill-config/v1 takes one: its name, its description and its SKILL.md."""
-    if len(name) > 64 or not _NAME.fullmatch(name):
-        raise InvalidArgument(f"a skill's name is lowercase letters, digits and single hyphens, up to 64, not {name!r}")
+async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str]:
+    """The skill's description and its markdown body, as ``agent_skill`` takes them."""
     display = await driver._computer.display_now()
     platform = driver.platform
     system = " ".join(part for part in ((platform.distribution or platform.os or "").title(), platform.version,
@@ -56,8 +49,7 @@ async def skill(driver: ComputerDriverEnvironment, name: str) -> dict:
         sections += ["## Shortcuts", shortcuts.rstrip()]
     if notes := driver.notes.strip():
         sections += ["## Notes", notes]
-    frontmatter = f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n"
-    return {"name": name, "description": description, "skill_md": frontmatter + "\n" + "\n\n".join(sections) + "\n"}
+    return description, "\n\n".join(sections) + "\n"
 
 
 def _input(driver: ComputerDriverEnvironment) -> str:

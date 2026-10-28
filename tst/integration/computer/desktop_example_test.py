@@ -95,8 +95,8 @@ def test_an_agent_given_the_computers_skill_makes_a_folder_under_a_recording(sta
     context, manifest, frames = _recorded(ran.output, "agent", state)
     entry = context["metadata"]["computer_recordings"]["agent"]
     assert (entry["state"], entry["missing_segments"]) == ("ended", 0) and frames
-    skill = next(iter(context["metadata"]["computer_skills"]["default-agent"].values()))
-    assert skill["name"] == "computer-desktop" and "## Shortcuts" in skill["skill_md"]
+    skill = next(iter(context["metadata"]["env_skills"]["default-agent"].values()))
+    assert skill["name"] == "desktop" and "## Shortcuts" in skill["skill_md"]
 
 
 def _run(bundle: str, task: str):

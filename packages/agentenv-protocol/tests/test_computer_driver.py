@@ -170,7 +170,7 @@ async def test_the_card_declares_the_contract_the_driver_implements():
     assert computer["buttons"] == ["left", "right", "middle"] and computer["max_click_count"] == 3
     assert computer["keys"] == "all" and computer["platform"] == LINUX.as_dict() and computer["delivery"] == "foreground"
     assert computer["default_data_paths"] == ["Desktop", "Documents", "Downloads"]
-    assert computer["methods"]["skill"]["method"] == "GET"
+    assert "methods" not in computer and extensions["urn:agentenv:skill/v1"]["params"]["methods"]["get"]["method"] == "GET"
     assert extensions["urn:agentenv:computer-pointer/v1"]["params"]["buttons"] == ["left", "right", "middle"]
     assert set(extensions["urn:agentenv:computer-keyboard/v1"]["params"]["methods"]) == {"get", "set"}
     assert set(extensions["urn:agentenv:computer-display/v1"]["params"]["methods"]) == {"get", "set"}
@@ -189,8 +189,8 @@ async def test_the_skill_is_written_from_the_computer_as_it_booted_under_the_nam
     monkeypatch.setattr("agentenv_protocol.computer.skill.getpass.getuser", lambda: "user")
     monkeypatch.setattr(FakeDriver, "notes", "The dock is at the bottom.")
     async with http_client(FakeDriver()) as http:
-        answer = (await http.get("/agentenv/ext/computer/skill", params={"name": "computer-desktop"})).json()
-        refused = await http.get("/agentenv/ext/computer/skill", params={"name": "Computer Desktop"})
+        answer = (await http.get("/agentenv/ext/skill/get", params={"name": "computer-desktop"})).json()
+        refused = await http.get("/agentenv/ext/skill/get", params={"name": "Computer Desktop"})
     skill_md = answer["skill_md"]
     assert answer["name"] == "computer-desktop" and skill_md.startswith("---\nname: computer-desktop\ndescription: ")
     assert answer["description"] in skill_md and "Ubuntu 24.04 (amd64), 1280x800" in answer["description"]

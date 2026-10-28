@@ -8,7 +8,7 @@ time; a later run reuses the image. Deploying it boots that image in a container
 `tasks/probe.json` deploys it and runs the conformance probe at `full` against it, with `artifacts/check_probe/`. It
 needs Docker and the local registry on `localhost:5000`, and no model.
 
-`tasks/agent.json` has Claude Code, given the computer's skill (`add_skills` `computer_env_ids`), open the file
+`tasks/agent.json` has Claude Code, given the computer's skill (`add_skills` `env_ids`), open the file
 manager and make a folder named `Reports` in `Documents`, while the display is recorded; `artifacts/check_folder/`
 checks the folder through the driver. It needs a model endpoint as well.
 

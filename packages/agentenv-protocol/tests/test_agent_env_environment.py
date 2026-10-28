@@ -20,6 +20,7 @@ from starlette.routing import Route
 
 from agentenv_protocol import (
     HIDDEN_BY_DEFAULT_META_KEY,
+    SKILL_EXTENSION_URI,
     AgentEnvEnvironment,
     AgentEnvFastMCPApplication,
     AgentEnvStarletteApplication,
@@ -30,6 +31,7 @@ from agentenv_protocol import (
     EnvironmentInterface,
     EnvironmentTool,
     add_data,
+    agent_skill,
     create_fastmcp_app,
     environment_card,
     extension,
@@ -160,6 +162,26 @@ async def test_a_get_hook_that_takes_paths_gets_none_when_the_call_names_none():
         unnamed = await client.post("/agentenv", json=_rpc("data/get"))
     assert named.json()["result"]["parts"][0]["data"] == {"paths": ["a"]}
     assert unnamed.json()["result"]["parts"][0]["data"] == {"paths": None}
+
+
+class _SkillHandler:
+    @agent_skill
+    def _guide(self):
+        return "How to use the shop's API.", "# The shop\n\nOrders are placed with `place_order`.\n"
+
+
+@pytest.mark.asyncio
+async def test_an_env_serves_its_skill_under_the_name_its_asked_for_and_refuses_one_that_isnt_a_skill_name():
+    async with _client(_SkillHandler) as client:
+        card = (await client.get("/.well-known/agent-env.json")).json()
+        answer = (await client.get("/agentenv/ext/skill/get", params={"name": "shop"})).json()
+        refused = await client.get("/agentenv/ext/skill/get", params={"name": "The Shop"})
+    extensions = {e["uri"]: e for e in card["capabilities"]["extensions"]}
+    assert extensions[SKILL_EXTENSION_URI]["params"]["methods"]["get"]["method"] == "GET"
+    assert answer == {"name": "shop", "description": "How to use the shop's API.", "skill_md":
+                      '---\nname: shop\ndescription: "How to use the shop\'s API."\n---\n\n# The shop\n\n'
+                      "Orders are placed with `place_order`.\n"}
+    assert refused.status_code == 400 and "lowercase letters, digits and single hyphens" in refused.text
 
 
 @pytest.mark.asyncio

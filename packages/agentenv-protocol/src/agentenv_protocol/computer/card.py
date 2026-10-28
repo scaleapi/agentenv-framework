@@ -66,8 +66,6 @@ def served_operations(driver: ComputerDriverEnvironment, operations: list[str]) 
 
 
 def extension_params(driver: ComputerDriverEnvironment, uri: str) -> dict:
-    if uri == COMPUTER:
-        return computer_features(driver)
     if uri == COMPUTER_DISPLAY:
         return {"modes": [list(m) for m in driver.display_modes]}
     if uri == COMPUTER_SPACES:
@@ -96,7 +94,9 @@ def computer_features(driver: ComputerDriverEnvironment) -> dict:
 
 
 def declared_extensions(driver: ComputerDriverEnvironment) -> list[EnvironmentExtension]:
-    declared = []
+    declared = [EnvironmentExtension(
+        uri=COMPUTER, description="The seven computer_* tools: screenshot, click, drag, scroll, type, key, wait.",
+        params=computer_features(driver))]
     if driver.has("pointer"):
         declared.append(EnvironmentExtension(
             uri=COMPUTER_POINTER, description="The computer_pointer_* tools, and click and scroll at the pointer.",

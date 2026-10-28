@@ -247,6 +247,24 @@ names (`client.get_data(base_url, paths=[...])`), and is called with None when t
 none. A handler without one answers `invalid_params` to a call that names paths, rather than
 returning everything.
 
+### A skill for agents
+
+An env can hand agents a skill: a SKILL.md an agent reads before it uses the env. Mark the method
+that writes it with `@agent_skill`; it returns the skill's description and its markdown body,
+sync or async:
+
+```python
+@agent_skill
+def guide(self):
+    return "How to place and track orders.", "# The shop\n\nPlace orders with `place_order`.\n"
+```
+
+The card then declares `urn:agentenv:skill/v1` (`SKILL_EXTENSION_URI`), whose `get {name}`
+answers `{name, description, skill_md}`, the shape `skill-config/v1` takes, with the frontmatter
+written under the name the caller gives; a name that isn't lowercase letters, digits and single
+hyphens, up to 64, is refused `invalid_argument`. agent-env's `add_skills` step installs it on
+an agent through `env_ids`, named after the env's environment name.
+
 ### Uploading an export through a grant
 
 An export too large to return from `data/get` can go straight to the caller's object store. A
@@ -403,11 +421,11 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   (`stale_frame`) when the display geometry it was captured at changes.
 - **The input queue.** Input calls run one at a time in arrival order; one that waits past
   `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue.
-- **The computer skill.** `computer/v1`, whose params are the driver's features, serves `skill
-  {name}`: a SKILL.md for agents under that name, written from the computer as it booted (its
-  platform, session user and home, the live screen size, what its input takes, its OS's shortcuts)
-  and ending with the driver class's `notes`, markdown for what its card can't say. It answers in
-  the shape `skill-config/v1` takes: `{name, description, skill_md}`.
+- **The computer skill.** `computer/v1` declares the seven tools, its params the driver's
+  features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
+  class): a SKILL.md written from the computer as it booted (its platform, session user and home,
+  the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
+  class's `notes`, markdown for what its card can't say.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
   capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
   pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool

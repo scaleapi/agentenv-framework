@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable, Optional
 
-from ..agent_env_environment import extension
+from ..agent_env_environment import agent_skill, extension
 from . import card
 from .card import (
-    COMPUTER,
     COMPUTER_DISPLAY,
     COMPUTER_EXEC,
     COMPUTER_KEYBOARD,
@@ -38,11 +37,9 @@ class Extensions:
     layouts: tuple[str, ...]
     mounted_card: Callable[[], EnvironmentCard]
 
-    @extension(COMPUTER, op="skill", method="GET",
-               description="The seven computer_* tools: screenshot, click, drag, scroll, type, key, wait. skill returns "
-                           "a SKILL.md for agents under the name it's given, written from this computer as it booted.")
-    async def _computer_skill(self, name: str = "computer") -> dict:
-        return await skill(self, name)
+    @agent_skill
+    async def _computer_skill(self) -> tuple[str, str]:
+        return await skill(self)
 
     @extension(COMPUTER_READY, op="status", method="GET",
                description="Whether the computer is usable now, by real checks; never sends input.")
