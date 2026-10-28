@@ -72,6 +72,10 @@ aws = [
     { name = "boto3" },
     { name = "botocore" },
 ]
+boat = [
+    { name = "boat-sdk" },
+    { name = "urllib3" },
+]
 boxd = [
     { name = "boxd" },
 ]
@@ -82,6 +86,7 @@ dev = [
     { name = "anyio" },
     { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "boat-sdk" },
     { name = "boto3" },
     { name = "botocore" },
     { name = "boxd" },
@@ -111,6 +116,7 @@ dev = [
     { name = "tensorlake" },
     { name = "tomli-w" },
     { name = "transformers" },
+    { name = "urllib3" },
     { name = "vercel-sandbox" },
 ]
 gcp = [
@@ -148,11 +154,12 @@ vercel = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "boxd", "daytona", "gcp", "openenv", "sail", "tensorlake", "tenki", "trl", "vercel"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "daytona", "gcp", "openenv", "sail", "tensorlake", "tenki", "trl", "vercel"], marker = "extra == 'dev'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'trl'" },
     { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
     { name = "anyio", marker = "extra == 'vercel'", specifier = ">=4,<5" },
     { name = "av", marker = "extra == 'dev'", specifier = ">=17" },
+    { name = "boat-sdk", marker = "extra == 'boat'", specifier = "~=1.13.0" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "boxd", marker = "extra == 'boxd'", specifier = "~=0.2.17" },
@@ -198,10 +205,11 @@ requires-dist = [
     { name = "tensorlake", marker = "extra == 'tensorlake'", specifier = "~=0.5.140" },
     { name = "tomli-w", marker = "extra == 'dev'", specifier = "==1.2.0" },
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.2" },
+    { name = "urllib3", marker = "extra == 'boat'", specifier = ">=2.1.0,<3" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["openenv", "trl", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "dev", "smol"]
+provides-extras = ["openenv", "trl", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
@@ -684,6 +692,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a8/f2/8d2dd8276ca05e1f5157b6a0d34efb2f585f47a0fbed61e8aad04b221f0b/bidict-0.24.1.tar.gz", hash = "sha256:4dca6c17f0b01700e9f24359daa5ebabf7be022d99f4cb2a257b6af2a5076c88", size = 30818, upload-time = "2026-08-25T23:45:52.214Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/97/53/2a3c7d562271ec6b6e38e7216b3104899f8aa4180c0713cb8aaf69e29cd5/bidict-0.24.1-py3-none-any.whl", hash = "sha256:fd3eaa737917d8a14f4baa391670c433c4e3f6f5fd2cd99d4bf436437f432364", size = 36175, upload-time = "2026-08-25T23:45:51.096Z" },
+]
+
+[[package]]
+name = "boat-sdk"
+version = "1.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+    { name = "typing-extensions" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3c/9b/64dce867b101234a753e18248fda3cae9fd2511034e6b672a406488c14a7/boat_sdk-1.13.0.tar.gz", hash = "sha256:c06a2e3991e8c90f0dca5dfb0408e2e253398008525d1577ca652e1c7f6862e0", size = 228320, upload-time = "2026-10-28T00:43:34.736Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/53/cbe59c0102952fb093f49ffb840f7c29dffe2961e1f54d8239924f0608fb/boat_sdk-1.13.0-py3-none-any.whl", hash = "sha256:259cdd2d4114a165d08f6e4b67616565e25a971bdc90eb76cef8f269cc181ff9", size = 498388, upload-time = "2026-10-28T00:43:33.252Z" },
 ]
 
 [[package]]

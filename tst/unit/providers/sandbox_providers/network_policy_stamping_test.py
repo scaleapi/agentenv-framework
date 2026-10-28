@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_env.providers.sandbox_providers.boat.provider import BoatSandboxProvider
 from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
 from agent_env.providers.sandbox_providers.daytona.config import Settings as DaytonaSettings
 from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
@@ -142,6 +143,12 @@ async def _daytona() -> Sandbox:
     return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _boat() -> Sandbox:
+    from tst.unit.providers.sandbox_providers.boat_fakes import SETTINGS, FakeBoatApi
+    provider = BoatSandboxProvider(SETTINGS, api_factory=lambda settings: FakeBoatApi())
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
 async def _smol_vm() -> Sandbox:
     pytest.importorskip("smol")
     from agent_env.providers.sandbox_providers.smol_vm import provider as smol_module
@@ -167,6 +174,7 @@ FACTORIES = {
     "tenki": _tenki,
     "boxd": _boxd,
     "daytona": _daytona,
+    "boat": _boat,
     "smol_vm": _smol_vm,
     "local": _local,
 }
