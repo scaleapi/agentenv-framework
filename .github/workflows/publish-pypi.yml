@@ -421,11 +421,8 @@ jobs:
           echo "record=$RECORD" >> "$GITHUB_OUTPUT"
       - name: Build agentenv-framework, pinned to this release's agentenv-framework-protocol
         run: |
-          protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
-          # Only the quoted requirement: the directory name also appears in the sdist include list and the uv
-          # workspace members, and the bare name keys [tool.uv.sources]; none of those may be rewritten.
-          sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${protocol}\"/" pyproject.toml
-          grep -q "\"agentenv-framework-protocol==${protocol}\"" pyproject.toml
+          # The framework's requirement on the protocol keeps its extras, which core imports from.
+          python3 .github/scripts/shipped_bundles.py pin-pyproject
           # Each shipped bundle's images install the protocol this release ships with, keeping its extras.
           python3 .github/scripts/shipped_bundles.py pin
           uv build --no-sources --out-dir dist
