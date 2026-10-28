@@ -1,14 +1,12 @@
 """``AgentEnv`` on the OpenEnv server ``build_app`` makes, served on loopback over the Episode API's fake steps and
 used as TRL's trainers use it: the dataset and the environment classes, rollouts reset, stepped and scored on a reused
 environment, the turns a model leaves open, episodes left unscored, a server at capacity or missing, tasks with other
-tools, and a bundle served by ``AgentEnv.local`` whose episodes end at close and at exit. Then the tool methods TRL
-reads a tool's schema from."""
+tools, and a bundle served by ``AgentEnv.local`` whose episodes end at close and at exit."""
 
 import asyncio
 import inspect
 import json
 import logging
-from typing import Any, Literal
 
 import pytest
 from agentenv_protocol import EnvironmentTool, ToolResult
@@ -20,7 +18,7 @@ from agent_env.openenv.environment import Served, ServedTask
 from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.training import trl
-from agent_env.training.trl import ENDED, FAILED, AgentEnv, tool_method
+from agent_env.training.trl import ENDED, FAILED, AgentEnv
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
 from tst.unit.task.episode.run_test import ALICE, ITEMS, PANTRY, PANTRY_MCP, REPLIES, TURN, _tool_sessions
@@ -282,42 +280,3 @@ def test_a_bundle_served_by_local_plays_and_its_episodes_left_running_end_at_clo
     env.close() if end == "close" else trl._close_all()
 
     assert (len(teardowns.finished), environment._client, trl._servers) == (3, None, set())
-
-
-def test_a_tools_arguments_are_typed_and_documented_from_its_schema():
-    method = tool_method({"name": "restock", "description": "Restock a shelf.", "input_schema": {
-        "type": "object", "required": ["shelf", "count"],
-        "properties": {
-            "shelf": {"type": "string", "enum": ["top", "bottom"], "description": "which shelf"},
-            "count": {"type": "integer"},
-            "labels": {"type": "array", "items": {"type": "string"}, "title": "Labels"},
-            "note": {"type": ["string", "null"], "default": None, "description": "for the night shift"},
-            "options": {"type": "object", "properties": {"rush": {"type": "boolean"}}, "required": ["rush"]},
-        },
-    }})
-
-    parameters = inspect.signature(method).parameters
-    assert {name: (parameter.annotation, parameter.default) for name, parameter in parameters.items()} == {
-        "self": (inspect.Parameter.empty, inspect.Parameter.empty),
-        "shelf": (Literal["top", "bottom"], inspect.Parameter.empty),
-        "count": (int, inspect.Parameter.empty),
-        "labels": (list[str] | None, None),
-        "note": (str | None, None),
-        "options": (dict | None, None),
-    }
-    assert method.__doc__ == (
-        "Restock a shelf.\n\nArgs:\n    shelf: which shelf\n    count: count\n    labels: Labels\n"
-        "    note: for the night shift\n    options: options Fields: rush (boolean, required).")
-    assert tool_method({"name": "ping"}).__doc__ == "Call the ping tool."
-
-
-@pytest.mark.parametrize(("tool", "message"), [
-    ({"name": "get-situation"}, "can't be a TRL tool"),
-    ({"name": "reset"}, "can't be a TRL tool"),
-    ({"name": "_inspect"}, "can't be a TRL tool"),
-    ({"name": "plan", "input_schema": {"properties": {"ship-id": {"type": "integer"}}}}, "argument 'ship-id'"),
-    ({"name": "upload", "input_schema": {"properties": {"file": {"type": "file"}}}}, r"upload\.file: JSON Schema"),
-], ids=lambda value: value["name"] if isinstance(value, dict) else "")
-def test_a_tool_trl_cant_show_the_model_is_refused(tool: dict[str, Any], message):
-    with pytest.raises(ValueError, match=message):
-        tool_method(tool)

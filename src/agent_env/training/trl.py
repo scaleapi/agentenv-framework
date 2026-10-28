@@ -1,27 +1,25 @@
 """TRL's trainers on a bundle served as an OpenEnv env (``agent_env.openenv.build_app``, or the package ``openenv import``
 writes): ``AgentEnv`` reads the server's tasks into a dataset, and makes the ``environment_factory`` whose environments
 each play one episode of a task over OpenEnv's WebSocket, offer its turn's tools as methods and own its reward.
-``GRPOTrainer`` and AsyncGRPO take both as they are. Every session runs on one event-loop thread of this module's own,
-since TRL calls an environment synchronously, from its own threads."""
+``GRPOTrainer`` takes both as they are, verified with TRL 1.16, and AsyncGRPO takes the same ``environment_factory``;
+either needs TRL 1.15 or later, for an environment that owns its reward. Every session runs on one event-loop thread of
+this module's own, since TRL calls an environment synchronously, from its own threads."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import json
-import keyword
 import logging
-import operator
 import re
 import threading
 import time
 import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
-from functools import cached_property, reduce
+from functools import cached_property
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 import httpx
 import uvicorn
@@ -35,19 +33,19 @@ except ModuleNotFoundError as exc:
     raise ImportError("agent_env.training.trl requires pip install 'agentenv-framework[trl]'") from exc
 
 from agent_env.openenv import build_app
+from agent_env.openenv.environment import END_TURN as END_TURN_TOOL
+from agent_env.openenv.environment import Toolset
+from agent_env.training._tools import tool_method
 
 logger = logging.getLogger(__name__)
 
 FAILED = "The environment failed to answer, so this episode won't be scored."
 ENDED = "The episode has ended."
-END_TURN = "end_turn"
+END_TURN = END_TURN_TOOL.name
 CONNECT_SECONDS = 60.0
 CLOSE_SECONDS = 300.0
 
 _CAPACITY = re.compile(r"Server at capacity: \d+/(\d+)")
-_TYPES: dict[str, Any] = {"string": str, "integer": int, "number": float, "boolean": bool, "object": dict,
-                          "null": type(None)}
-_RESERVED = {"reset", "get_reward"}
 
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_lock = threading.Lock()
@@ -151,13 +149,13 @@ class AgentEnv:
         try:
             turn = await client.reset(split=split, index=index)
             while not turn.done:
-                listed = await client.step({"type": "list_tools"})
+                listed = await _list_tools(client)
                 if listed.done:
                     turn = listed
                     break
                 first = first or frozenset(tool["name"] for tool in listed.observation["tools"])
                 tools |= {tool["name"]: tool for tool in listed.observation["tools"] if tool["name"] not in tools}
-                turn = await client.step({"type": "call_tool", "tool_name": END_TURN, "arguments": {"response": ""}})
+                turn = await _end_turn(client, "")
                 if error := turn.observation.get("error"):
                     raise RuntimeError(f"task {index} of split {split!r} refused an empty {END_TURN}: "
                                        f"{error.get('message')}")
@@ -269,7 +267,7 @@ class _Environment:
         rollout.system = metadata.get("system_prompt") or None
         if expected is not None and (rollout.system, metadata.get("prompt")) != expected:
             raise _Failed("the turn's prompt differs from the dataset row's")
-        listed = await self._client.step({"type": "list_tools"})
+        listed = await _list_tools(self._client)
         if listed.done:
             raise _Failed(_error_of(listed.observation))
         if (offered := {tool["name"] for tool in listed.observation["tools"]}) != self._shared.offered:
@@ -284,8 +282,7 @@ class _Environment:
                 return ENDED
             try:
                 await rollout.started
-                result = await asyncio.wait_for(self._client.step(
-                    {"type": "call_tool", "tool_name": name, "arguments": arguments}), self._deadline(name))
+                result = await asyncio.wait_for(_call_tool(self._client, name, arguments), self._deadline(name))
             except _Failed as e:
                 await self._fail(rollout, str(e))
                 return FAILED
@@ -309,8 +306,7 @@ class _Environment:
             try:
                 await rollout.started
                 while not (rollout.done or rollout.failure):
-                    result = await self._client.step(
-                        {"type": "call_tool", "tool_name": END_TURN, "arguments": {"response": ""}})
+                    result = await _end_turn(self._client, "")
                     if error := result.observation.get("error"):
                         rollout.failure = f"{END_TURN}: {error.get('message')}"
                     self._answer(rollout, END_TURN, result)
@@ -434,6 +430,18 @@ async def _opened(url: str, timeout: float) -> GenericEnvClient:
     return client
 
 
+async def _list_tools(client: GenericEnvClient) -> Any:
+    return await client.step({"type": "list_tools"})
+
+
+async def _call_tool(client: GenericEnvClient, name: str, arguments: dict[str, Any]) -> Any:
+    return await client.step({"type": "call_tool", "tool_name": name, "arguments": arguments})
+
+
+async def _end_turn(client: GenericEnvClient, response: str) -> Any:
+    return await _call_tool(client, END_TURN, {"response": response})
+
+
 def _read_tasks(url: str) -> tuple[str, dict[str, list[dict[str, Any]]]]:
     """The server's env name, and each split's tasks as its Task API describes them."""
     with httpx.Client(base_url=url, timeout=CONNECT_SECONDS) as http:
@@ -462,7 +470,7 @@ def _toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, _T
         return {key: _Toolset(name, first) for key, first in firsts.items()}
     named: dict[str, _Toolset] = {}
     for key, first in firsts.items():
-        toolset = json.loads(key)
+        toolset: Toolset = json.loads(key)
         base = "+".join([*(env.rsplit("/", 1)[-1] for env in toolset["envs"]), *(["bash"] if toolset["bash"] else [])])
         base = base or "agent"
         taken = {toolset.name for toolset in named.values()}
@@ -496,101 +504,6 @@ def _error_of(observation: Mapping[str, Any]) -> str:
 
 def _why(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
-
-
-def tool_method(tool: Mapping[str, Any]) -> Callable[..., str]:
-    """A method calling ``tool``, typed and documented from its JSON Schema the way transformers' ``get_json_schema``
-    reads a function, so TRL shows the model the tool as the env describes it. Built without generating source."""
-    name = tool["name"]
-    if not _callable_name(name) or name in _RESERVED:
-        raise ValueError(f"the env's tool {name!r} can't be a TRL tool: TRL calls an environment's tools as its "
-                         "methods, so a tool's name must be a public Python identifier other than reset and "
-                         "get_reward. Rename the tool in the env")
-    schema = tool.get("input_schema") or {}
-    required = set(schema.get("required") or [])
-    parameters = [inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
-    annotations: dict[str, Any] = {}
-    described = []
-    for argument, spec in (schema.get("properties") or {}).items():
-        if not _callable_name(argument):
-            raise ValueError(f"the env's tool {name!r} takes an argument {argument!r}, which TRL can't pass: an "
-                             "argument's name must be a public Python identifier. Rename it in the env")
-        hint = _hint(spec, f"{name}.{argument}")
-        default = inspect.Parameter.empty
-        if argument not in required:
-            hint, default = hint | None, spec.get("default")
-        parameters.append(inspect.Parameter(argument, inspect.Parameter.KEYWORD_ONLY, default=default, annotation=hint))
-        annotations[argument] = hint
-        described.append(f"    {argument}: {_describe(argument, spec)}")
-    annotations["return"] = str
-
-    def method(self: _Environment, **arguments: Any) -> str:
-        return self._call(name, arguments)
-
-    method.__name__ = method.__qualname__ = name
-    method.__doc__ = (tool.get("description") or f"Call the {name} tool.") + (
-        "\n\nArgs:\n" + "\n".join(described) if described else "")
-    method.__annotations__ = annotations
-    method.__signature__ = inspect.Signature(parameters, return_annotation=str)
-    return method
-
-
-def _callable_name(name: str) -> bool:
-    return name.isidentifier() and not keyword.iskeyword(name) and not name.startswith("_")
-
-
-def _hint(schema: Mapping[str, Any], where: str) -> Any:
-    if options := schema.get("anyOf") or schema.get("oneOf"):
-        return _union([_hint(option, where) for option in options])
-    if "enum" in schema:
-        return Literal[tuple(schema["enum"])]
-    kind = schema.get("type")
-    if isinstance(kind, list):
-        return _union([_hint({**schema, "type": each}, where) for each in kind])
-    if kind == "array":
-        items = schema.get("items")
-        return list[_hint(items, where)] if items else list
-    if kind is None:
-        return Any
-    if kind not in _TYPES:
-        raise ValueError(f"{where}: JSON Schema type {kind!r} has no Python type TRL can show the model")
-    return _TYPES[kind]
-
-
-def _union(hints: list[Any]) -> Any:
-    return reduce(operator.or_, list(dict.fromkeys(hints)))
-
-
-def _describe(name: str, spec: Mapping[str, Any]) -> str:
-    """One line, since transformers ends an argument's description at the next line that looks like another."""
-    text = spec.get("description") or spec.get("title") or name
-    return " ".join(f"{text} {_fields(spec)}".split())
-
-
-def _fields(spec: Mapping[str, Any]) -> str:
-    """The fields of an object argument, or of an array's entries, which a Python type hint can't carry."""
-    for option in [spec, *(spec.get("anyOf") or spec.get("oneOf") or [])]:
-        if option.get("type") == "array" and (items := option.get("items") or {}).get("properties"):
-            return "Each entry: " + _field_list(items)
-        if option.get("type") == "object" and option.get("properties"):
-            return "Fields: " + _field_list(option)
-    return ""
-
-
-def _field_list(schema: Mapping[str, Any]) -> str:
-    required = set(schema.get("required") or [])
-    parts = []
-    for name, spec in schema["properties"].items():
-        kind = _kind(spec) + (", required" if name in required else "")
-        parts.append(f"{name} ({kind})" + (f": {spec['description']}" if spec.get("description") else ""))
-    return "; ".join(parts) + "."
-
-
-def _kind(spec: Mapping[str, Any]) -> str:
-    if options := spec.get("anyOf") or spec.get("oneOf"):
-        return " or ".join(_kind(option) for option in options)
-    kind = spec.get("type", "any")
-    return " or ".join(kind) if isinstance(kind, list) else kind
 
 
 __all__ = ["AgentEnv"]

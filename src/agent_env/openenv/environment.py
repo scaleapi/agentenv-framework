@@ -9,7 +9,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 from openenv.core.env_server.interfaces import Environment
@@ -39,6 +39,15 @@ ENDED = "the episode has ended; call reset"
 NOT_RESET = "no episode has started; call reset before stepping"
 
 
+class Toolset(TypedDict):
+    """Where a task's played agent gets its tools, as the Task API names it in each task's ``toolset``."""
+
+    envs: list[str]
+    role: str | None
+    access: list[dict[str, Any]]
+    bash: bool
+
+
 @dataclass(frozen=True)
 class ServedTask:
     """A task served as an episode, and its reward as a function of the scores it records, by step id."""
@@ -49,17 +58,18 @@ class ServedTask:
     reward: Callable[[dict[str, float]], float | None]
 
     @property
-    def toolset(self) -> dict[str, Any]:
+    def toolset(self) -> Toolset:
         """Where the played agent's tools come from: the envs it works in, its role in them, the changes the task makes
         to that role's tool access, and whether its turns offer ``bash`` in its sandbox. Tasks that agree on it offer
         the same tools, so a trainer can group them."""
         agent = self.spec.trainer_agents[0]
         [deploy] = [step for step in self.task.steps if step.type in DEPLOYS and step.agent_name == agent]
         role = getattr(deploy, "role", None)
-        return {"envs": list(getattr(deploy, "env_ids", None) or []), "role": role,
-                "access": [{"env": step.env_id, "action": step.action, "tools": step.tools} for step in self.task.steps
-                           if step.type == "modify_env_tool_access" and step.role == role],
-                "bash": works_in_sandbox(self.task.steps, agent)}
+        return Toolset(envs=list(getattr(deploy, "env_ids", None) or []), role=role,
+                       access=[{"env": step.env_id, "action": step.action, "tools": step.tools}
+                               for step in self.task.steps
+                               if step.type == "modify_env_tool_access" and step.role == role],
+                       bash=works_in_sandbox(self.task.steps, agent))
 
 
 @dataclass
