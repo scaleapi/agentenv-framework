@@ -68,13 +68,14 @@ def recorded_settings(computer: ComputerArtifact, values: dict[str, Any]) -> dic
             for name, setting in computer.config.items() if setting.phase == "deploy"}
 
 
-async def boot(sandbox_provider: SandboxProvider, *, image: str, arch: str, port: int, environment: dict[str, str],
+async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str],
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None) -> Booted:
-    """``image`` booted for ``arch`` with ``environment``, its driver's ``port`` reached on the sandbox, once the driver says
-    the computer is ready. A sandbox provider that doesn't run ``arch`` natively refuses it; a boot that fails is torn down."""
+    """``image`` booted with ``environment`` on ``sandbox_provider``, which the caller chose to run its arch natively,
+    its driver's ``port`` reached on the sandbox, once the driver says the computer is ready; a boot that fails is torn
+    down."""
     sandbox = await sandbox_provider.create_container(
-        image_name=image, port=port, env=environment, platform=f"linux/{arch}", network_policy=network_policy,
+        image_name=image, port=port, env=environment, network_policy=network_policy,
         disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
     try:
         url = sandbox.tunnel_urls[port]

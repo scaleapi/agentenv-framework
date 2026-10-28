@@ -2,6 +2,7 @@
 name>``, installed on the agent and recorded in the run; refused for an env the run didn't deploy or bind to the agent,
 or whose driver serves no skill."""
 
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -18,7 +19,7 @@ _SKILL_METHOD = {"uri": COMPUTER, "params": {"endpoint": "/agentenv/ext/computer
     "skill": {"method": "GET", "endpoint": "/agentenv/ext/computer/skill"}}}}
 
 
-def _desk(env_id: str = "desk", name: str = "My_Desk", extensions: tuple = (_SKILL_METHOD,)) -> DeployedSandboxEnv:
+def _desk(env_id: str = "desk", name: str = "my-desk", extensions: tuple = (_SKILL_METHOD,)) -> DeployedSandboxEnv:
     return DeployedSandboxEnv(env_id=env_id, env_version=1, environment_card_url=f"http://{env_id}/.well-known/agent-env.json",
                               environment_card={"name": name, "capabilities": {"extensions": list(extensions)}},
                               sandbox_id=f"sb-{env_id}", sandbox_type="local")
@@ -59,6 +60,15 @@ async def test_each_computer_envs_skill_is_installed_under_its_environment_name_
                                             skill_md="---\nname: computer-my-desk\n")
     assert context.metadata[COMPUTER_SKILLS_KEY] == {"solver": {"desk": {
         "name": "computer-my-desk", "skill_md": "---\nname: computer-my-desk\n"}}}
+
+
+@pytest.mark.asyncio
+async def test_envs_whose_names_come_out_alike_get_skills_of_their_own(agent):
+    await _step("desk", "other").execute(_context(_desk(name="my-desk"), _desk("other", name="My_Desk"),
+                                                  bound=("desk", "other")))
+
+    digest = hashlib.sha256(b"other").hexdigest()[:12]
+    assert [params["name"] for *_, params in agent.calls] == ["computer-my-desk", f"computer-my-desk-{digest}"]
 
 
 @pytest.mark.asyncio

@@ -176,14 +176,20 @@ async def test_what_a_run_left_open_registers_from_its_namespace_with_the_manife
 
 
 @pytest.mark.asyncio
-async def test_ending_one_envs_open_recordings_leaves_the_others(store):
-    desktop, other = _Computer(store), _Computer(store, env_id="other")
-    context = _context(desktop, other)
-    context = await _start("a").execute(context)
-    context = await _start("b", env_id="other").execute(context)
-    recording_steps.register_open_recordings(context, ["desktop"])
+async def test_ending_or_registering_one_envs_open_recordings_leaves_the_others(store):
+    desktop, other, third = _Computer(store), _Computer(store, env_id="other"), _Computer(store, env_id="third")
+    context = _context(desktop, other, third)
+    for name, env_id in (("a", "desktop"), ("b", "other"), ("c", "third")):
+        context = await _start(name, env_id=env_id).execute(context)
     recordings = context.metadata[RECORDINGS_KEY]
-    assert (recordings["a"]["state"], recordings["b"]["state"]) == ("ended", "open")
+
+    await recording_steps.end_open_recordings(context, ["desktop"])
+    recording_steps.register_open_recordings(context, ["other"])
+
+    assert [(recordings[n]["state"], recordings[n].get("ended_by")) for n in "abc"] == [
+        ("ended", "teardown"), ("ended", "error"), ("open", None)]
+    (_, start), (method, end) = desktop.calls
+    assert (method, end["reason"], end["upload"]["root_path"]) == ("end", "teardown", start["upload"]["root_path"])
 
 
 def test_the_steps_round_trip_and_refuse_what_they_cant_run():

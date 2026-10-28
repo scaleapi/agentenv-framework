@@ -173,6 +173,16 @@ def _files_skill_name(universe_id: str) -> str:
     return f"{slug}-{digest}-files" if slug else f"{digest}-files"
 
 
+def _computer_skill_name(environment_name: str, env_id: str) -> str:
+    """``computer-<environment name>``; for a name that isn't a skill name as it stands, a slug of it and a hash of the
+    env's id, so two envs' names never come out the same."""
+    if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", environment_name) and len(environment_name) <= 55:
+        return f"computer-{environment_name}"
+    slug = re.sub(r"[^a-z0-9]+", "-", environment_name.lower()).strip("-")[:38].rstrip("-")
+    digest = hashlib.sha256(env_id.encode("utf-8")).hexdigest()[:12]
+    return f"computer-{slug}-{digest}" if slug else f"computer-{digest}"
+
+
 def _build_skill_for_loaded_file_artifact_universe(universe_id: str, entry: dict) -> Skill:
     destination_path = entry["destination_path"]
     return Skill(
@@ -298,8 +308,7 @@ async def _computer_skill(context: TaskStepContext, agent: DeployedAgent, env_id
     if env_id not in agent.env_ids:
         raise RuntimeError(f"computer env '{env_id}' isn't bound to agent '{agent.agent_name}': name it in the env_ids "
                            "of its deploy_agent")
-    environment_name = (deployed.environment_card or {}).get("name") or env_id
-    name = ("computer-" + re.sub(r"[^a-z0-9]+", "-", environment_name.lower()).strip("-"))[:64].rstrip("-")
+    name = _computer_skill_name((deployed.environment_card or {}).get("name") or env_id, env_id)
     try:
         return await deployed.invoke(COMPUTER, "skill", {"name": name})
     except EnvCapabilityUnsupported:

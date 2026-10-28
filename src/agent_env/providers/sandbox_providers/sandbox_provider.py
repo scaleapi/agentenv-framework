@@ -105,20 +105,17 @@ class SandboxProvider(ABC):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
-        platform: Optional[str] = None,
         private_network: bool = False,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
         Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
-        network this provider's other such containers share, at its ``private_host``. ``platform`` is the one the
-        image must run as, refused unless the provider runs it natively (``native_platforms``).
+        network this provider's other such containers share, at its ``private_host``.
 
         Default implementation: a container-only backend uses create_sandbox; a VM backend creates
         a VM, pulls the image, and starts it. Backends that bake the image in at creation override.
         """
-        refuse_foreign_platform(self, platform)
         if private_network:
             raise ValueError(f"{type(self).__name__} runs each container in a VM of its own, so it can't put "
                              "containers on a private network they share")
@@ -640,13 +637,6 @@ def refuse_unenforceable_policy(provider: SandboxProvider, policy: Optional[Netw
         raise NetworkPolicyUnsupportedError(
             f"{type(provider).__name__} cannot enforce network policy mode {policy.mode.value!r}"
         )
-
-
-def refuse_foreign_platform(provider: SandboxProvider, platform: Optional[str]) -> None:
-    """Fail before provisioning rather than run ``platform`` emulated, or as another."""
-    if platform is not None and platform not in provider.native_platforms():
-        raise ValueError(f"{type(provider).__name__} runs {', '.join(sorted(provider.native_platforms()))} natively, "
-                         f"not {platform}")
 
 
 def _install_sandbox_type_guard(provider: SandboxProvider, name: str) -> SandboxProvider:

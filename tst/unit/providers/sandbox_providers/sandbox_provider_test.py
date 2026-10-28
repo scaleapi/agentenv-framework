@@ -665,12 +665,8 @@ async def test_a_pull_that_fails_again_is_raised_as_it_was(no_pause):
     assert sandbox.scripts == ["docker pull registry/agent:v1"] * 2
 
 
-@pytest.mark.asyncio
-async def test_a_container_is_refused_a_platform_its_provider_doesnt_run_natively(monkeypatch):
+def test_local_docker_runs_this_machines_platform_natively_and_other_providers_linux_amd64(monkeypatch):
     monkeypatch.setattr(lsm, "host_platform", lambda: "linux/arm64")
-    with pytest.raises(ValueError, match="ModalSandboxProvider runs linux/amd64 natively, not linux/arm64"):
-        await ModalSandboxProvider().create_container(image_name="img", port=1, env={}, platform="linux/arm64")
-    with pytest.raises(ValueError, match="LocalSandboxProvider runs linux/arm64 natively, not linux/amd64"):
-        await LocalSandboxProvider().create_container(image_name="img", port=1, env={}, platform="linux/amd64")
     assert LocalSandboxProvider.native_platforms() == {"linux/arm64"}
+    assert ModalSandboxProvider.native_platforms() == {"linux/amd64"}
     assert SandboxProvider.native_platforms() == {"linux/amd64"}

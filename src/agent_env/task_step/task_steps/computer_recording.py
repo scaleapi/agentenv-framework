@@ -1,9 +1,10 @@
 """Record a computer env's display. ``start_computer_recording`` starts a recording on a deployed env whose card, or
 whose child env's card (``environment_name``), declares computer-recording/v1, with a grant to upload its segments
 under a namespace of its own;
-``end_computer_recording`` ends it and registers its segments and manifest as one FileArtifactUniverse. A computer env
-ends its own recordings as it closes or resets, and teardown then registers what a run left open from each one's
-namespace (``register_open_recordings``)."""
+``end_computer_recording`` ends it and registers its segments and manifest as one FileArtifactUniverse. Teardown ends
+what a run left open, with fresh grants, before any env closes (``end_open_recordings``), and registers from its
+namespace one it didn't end in time (``register_open_recordings``); a computer env also ends its own as it closes or
+resets."""
 from __future__ import annotations
 
 import json
@@ -143,10 +144,19 @@ class EndComputerRecordingTaskStep(TaskStep):
         return context
 
 
+async def end_open_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
+    """End and register every recording still open in ``context`` (of ``env_ids`` only, when given), each with a fresh
+    grant, before its computer is torn down, whatever env serves it; ``end_recording`` says what happened to each."""
+    for name, entry in list((context.metadata.get(RECORDINGS_KEY) or {}).items()):
+        if entry.get("state") == "open" and (env_ids is None or entry["env_id"] in env_ids):
+            await end_recording(context, name, "teardown")
+
+
 def register_open_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
     """Register every recording still open in ``context`` (of ``env_ids`` only, when given) from what its namespace
     holds: the manifest its driver uploaded when its env ended it, or else the segments alone. Teardown calls it once
-    the envs have closed. Never raises: each entry says what happened."""
+    the envs have closed, for one ``end_open_recordings`` didn't end in time. Never raises: each entry says what
+    happened."""
     for name, entry in list((context.metadata.get(RECORDINGS_KEY) or {}).items()):
         if entry.get("state") == "open" and (env_ids is None or entry["env_id"] in env_ids):
             try:

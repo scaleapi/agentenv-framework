@@ -175,7 +175,7 @@ class _Shop:
     ("hangs", "env shop wasn't closed (timed out after 0.05s)"),
     ("can't", None),
 ])
-def test_each_env_still_up_closes_then_the_runs_open_recordings_register_then_its_sandboxes_go_by_id(
+def test_the_runs_open_recordings_end_then_each_env_still_up_closes_then_what_stayed_open_registers_then_its_sandboxes_go_by_id(
         terminated, monkeypatch, caplog, close, logged):
     steps = []
 
@@ -188,6 +188,10 @@ def test_each_env_still_up_closes_then_the_runs_open_recordings_register_then_it
         if close == "can't":
             raise NotImplementedError
 
+    async def end_open_recordings(context, env_ids):
+        steps.append(("end", env_ids, list(terminated)))
+
+    monkeypatch.setattr(teardown, "end_open_recordings", end_open_recordings)
     monkeypatch.setattr(teardown, "close_deployed", close_deployed)
     monkeypatch.setattr(teardown.Env, "get", lambda env_id, version: _Shop())
     monkeypatch.setattr(teardown, "register_open_recordings",
@@ -196,7 +200,9 @@ def test_each_env_still_up_closes_then_the_runs_open_recordings_register_then_it
 
     report = _run(context, timeout=0.05)
 
-    assert steps == [("close", "shop", _Shop, []), ("register", ["shop", "hosted"], [])]
+    assert steps == [
+        ("end", ["shop", "hosted"], []), ("close", "shop", _Shop, []), ("register", ["shop", "hosted"], []),
+    ]
     assert {sandbox.sandbox_id for sandbox in report.terminated} == {"sb-box", "sb-db", "sb-gw", "sb-solver", "sb-vm"}
     assert (logged in caplog.text) if logged else "wasn't closed" not in caplog.text
 

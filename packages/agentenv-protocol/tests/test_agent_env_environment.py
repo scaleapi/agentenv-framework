@@ -147,6 +147,21 @@ async def test_add_invalid_params_returns_error():
         assert r.json()["error"]["code"] == -32602 and "takes no paths" in r.json()["error"]["data"]["detail"]
 
 
+class _PathsHandler:
+    @get_data
+    async def _export(self, paths):
+        return [{"kind": "data", "data": {"paths": paths}}]
+
+
+@pytest.mark.asyncio
+async def test_a_get_hook_that_takes_paths_gets_none_when_the_call_names_none():
+    async with _client(_PathsHandler) as client:
+        named = await client.post("/agentenv", json=_rpc("data/get", {"paths": ["a"]}))
+        unnamed = await client.post("/agentenv", json=_rpc("data/get"))
+    assert named.json()["result"]["parts"][0]["data"] == {"paths": ["a"]}
+    assert unnamed.json()["result"]["parts"][0]["data"] == {"paths": None}
+
+
 @pytest.mark.asyncio
 async def test_unknown_method_returns_error():
     async with _client(_ItemsHandler) as client:

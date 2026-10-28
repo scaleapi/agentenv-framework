@@ -54,7 +54,6 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts,
     SandboxProvider,
     on_this_machine_provider,
-    refuse_foreign_platform,
     refuse_unenforceable_policy,
 )
 from agent_env.store.object_store.local.tls import local_ca
@@ -682,12 +681,11 @@ class LocalSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
-        platform: Optional[str] = None,
     ) -> LocalSandbox:
         refuse_unenforceable_policy(self, network_policy)
         if network_policy is not None and network_policy.closed:
             sandbox = await self._create_closed(image_name=image_name, port=port, env=env, timeout=timeout,
-                                                attribution=attribution, platform=platform)
+                                                attribution=attribution)
         else:
             sandbox = await super().create_container(
                 image_name=image_name,
@@ -699,7 +697,6 @@ class LocalSandboxProvider(SandboxProvider):
                 timeout=timeout,
                 attribution=attribution,
                 network_policy=network_policy,
-                platform=platform,
             )
         # The marker is how a later get_sandbox() (post-run teardown rebuilds the sandbox from disk)
         # learns this is a container and removes it. If we can't persist it, that reconstructed
@@ -730,10 +727,9 @@ class LocalSandboxProvider(SandboxProvider):
         return sandbox
 
     async def _create_closed(self, *, image_name: str, port: int, env: dict[str, str], timeout: int,
-                             attribution: Optional[Attribution], platform: Optional[str]) -> LocalSandbox:
+                             attribution: Optional[Attribution]) -> LocalSandbox:
         """The container on an internal network of its own, with no route out, and a relay on that network and the
         default bridge publishing its ``port``: Docker publishes no port of a container on an internal network alone."""
-        refuse_foreign_platform(self, platform)
         relay = await relay_image()
         sandbox = await self.create_vm(exposed_ports=[port], timeout=timeout, attribution=attribution)
         try:
@@ -747,6 +743,7 @@ class LocalSandboxProvider(SandboxProvider):
         except BaseException:
             try:
                 await sandbox.terminate()
+                await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
             except Exception:
                 pass
             raise

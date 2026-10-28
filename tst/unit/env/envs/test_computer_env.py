@@ -3,6 +3,7 @@ anything is stored; the composer builds each form and arch on this machine's Doc
 whichever env built it, records each result as it finishes, and writes the arches built as the env's computer. Docker
 and the registry are faked."""
 
+import asyncio
 import io
 import json
 import logging
@@ -27,6 +28,7 @@ from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env import env as env_module
 from agent_env.env.envs.computer import boot, composer
+from agent_env.env.envs.computer.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
@@ -63,7 +65,8 @@ class FakeDocker:
         self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
         self.probed, self.probe_fails = [], {}
 
-    async def probe(self, links, env, driver, arch, image):
+    async def probe(self, links, env, driver, image):
+        arch = self._arch(self.registry.manifests[image.rpartition("@")[2]]["config"]["digest"])
         self.probed.append((arch, image))
         if arch in self.probe_fails:
             checks = [CheckResult(check="P4", name="clicks show their effect", status="failed", detail=self.probe_fails[arch])]
@@ -345,6 +348,25 @@ def test_the_pairs_left_to_compose_are_those_failed_interrupted_or_unprobed_on_a
     assert {arch: r["status"] for arch, r in Env.get(env.id).metadata["composed"]["container"].items()} == {
         "amd64": "unverified", "arm64": "ready"}
     assert composer.pending(Env.get(env.id)) == []
+
+
+def test_the_probe_boots_a_build_at_the_envs_settings_as_a_deploy_does(base, driver, docker, monkeypatch):
+    env = _put(base, driver, compose=False, computer_settings={"timezone": "Europe/Paris"},
+               display={"width": 1600, "height": 900})
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs["environment"])
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(composer, "run_probe", AsyncMock(return_value="report"))
+
+    assert asyncio.run(_probe([SimpleNamespace()], env, driver, "img")) == (
+        "report", CARD, "SimpleNamespace")
+    assert {k: v for k, v in booted[0].items() if k.startswith("AGENTENV_SETTING_")} == {
+        "AGENTENV_SETTING_RESOLUTION": "1600x900", "AGENTENV_SETTING_TIMEZONE": "Europe/Paris"}
 
 
 def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_and_isnt_deployed(base, driver, docker,
@@ -650,8 +672,8 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
 
     (booted,) = boots.boots
     composed = Env.get(env.id).metadata["composed"]["container"]
-    assert (booted["arch"], booted["image"], booted["port"], booted["provider"]) == (
-        "arm64", composed["arm64"]["image"], 18765, "LocalSandboxProvider")
+    assert (booted["image"], booted["port"], booted["provider"]) == (composed["arm64"]["image"], 18765,
+                                                                     "LocalSandboxProvider")
     environment = booted["environment"]
     assert (environment["AGENTENV_SETTING_RESOLUTION"], environment["AGENTENV_SETTING_TIMEZONE"]) == ("1600x900", "Asia/Tokyo")
     assert json.loads(environment["AGENTENV_COMPUTER_SETTINGS"]) == {"default_space": "norm"}
@@ -693,6 +715,20 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "recreate", (COMPUTER_DISPLAY, "get", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_reset_a_provider_cant_carry_out_fails_the_step_rather_than_skipping_it(base, driver, docker, boots,
+                                                                                       monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    deployed = await Env.get(env.id).deploy()
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=boots.sandboxes[0]))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "recreate_container",
+                        AsyncMock(side_effect=NotImplementedError("its sandbox is the container itself")))
+
+    with pytest.raises(RuntimeError, match="can't be reset on LocalSandboxProvider: its sandbox is the container"):
+        await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+            TaskStepContext(deployed_envs=[deployed]))
 
 
 @pytest.mark.asyncio
@@ -760,8 +796,8 @@ async def test_a_boot_that_never_gets_ready_takes_its_sandbox_and_work_folder_do
     monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=TimeoutError("not ready")))
 
     with pytest.raises(TimeoutError):
-        await boot.boot(SimpleNamespace(create_container=AsyncMock(return_value=sandbox)), image="img", arch="arm64",
-                        port=18765, environment={}, network_policy=None, timeout=60, attribution=None)
+        await boot.boot(SimpleNamespace(create_container=AsyncMock(return_value=sandbox)), image="img", port=18765,
+                        environment={}, network_policy=None, timeout=60, attribution=None)
 
     sandbox.terminate.assert_awaited_once()
     assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None

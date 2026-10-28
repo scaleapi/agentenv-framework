@@ -1162,12 +1162,14 @@ async def _invoke_add(fn: Callable, params: dict) -> dict:
 
 async def _invoke_get(fn: Callable, params: dict) -> dict:
     kwargs = {}
+    takes_paths = "paths" in inspect.signature(fn).parameters
     if isinstance(params, dict) and "paths" in params:
-        if "paths" not in inspect.signature(fn).parameters:
+        if not takes_paths:
             raise _InvalidParams("data/get on this environment takes no paths: it returns all of its data")
         if not isinstance(params["paths"], list) or not all(isinstance(path, str) for path in params["paths"]):
             raise _InvalidParams("paths must be a list of strings")
-        kwargs["paths"] = params["paths"]
+    if takes_paths:
+        kwargs["paths"] = params.get("paths") if isinstance(params, dict) else None
     if _takes_write_namespace(fn):
         if not isinstance(params, dict):
             raise _InvalidParams("data/get takes its params by name")

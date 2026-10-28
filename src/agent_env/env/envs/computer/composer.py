@@ -135,7 +135,7 @@ def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, r
     if not (links := boot.native_links(get_env_sandbox_provider(), arch)):
         return {**result, "reason": f"no configured sandbox provider runs linux/{arch} natively to probe it"}
     try:
-        report, card, provider = asyncio.run(_probe(links, env, driver, arch, result["image"]))
+        report, card, provider = asyncio.run(_probe(links, env, driver, result["image"]))
     except TimeoutError:
         return _failed(env, form, arch, "probe", result["key"], f"the probe didn't finish within {_PROBE_TIMEOUT_S} s")
     except Exception as e:
@@ -153,15 +153,15 @@ def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, r
     return {**result, "status": "ready", "card": card, "probe": probe}
 
 
-async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, arch: str,
+async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv,
                  image: str) -> tuple[ProbeReport, dict, str]:
-    """``image`` booted at the base's own settings on the first of ``links`` that boots it, probed at ``full`` within
-    ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name."""
-    environment = boot.settings_environment(env.computer, {}, environment_name=env.environment_name)
+    """``image`` booted at the env's settings, as a deploy boots it, on the first of ``links`` that boots it, probed at
+    ``full`` within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name."""
+    environment = boot.settings_environment(env.computer, _values(env), environment_name=env.environment_name)
     problems = []
     for link in links:
         try:
-            booted = await boot.boot(link, image=image, arch=arch, port=driver.port, environment=environment,
+            booted = await boot.boot(link, image=image, port=driver.port, environment=environment,
                                      network_policy=None, timeout=_PROBE_TTL_S, attribution=None)
         except Exception as e:
             problems.append(f"{type(link).__name__}: {e}")
@@ -317,14 +317,15 @@ def _protocol_source() -> Path | None:
 
 
 def _build_settings(env: ComputerEnv, base: ComputerArtifact) -> dict[str, Any]:
-    """The env's values of the base's build-phase settings, which the composed image fixes: its display is the
-    resolution's, for a base that reads that at build."""
-    values = {**env.computer_settings, **({"resolution": _resolution(env.display)} if env.display else {})}
+    """The env's values of the base's build-phase settings, which the composed image fixes."""
+    values = _values(env)
     return {name: values[name] for name, setting in base.config.items() if setting.phase == "build" and name in values}
 
 
-def _resolution(display: dict) -> str:
-    return f"{display['width']}x{display['height']}"
+def _values(env: ComputerEnv) -> dict[str, Any]:
+    """The env's values of its base's settings: its ``computer_settings``, and its display as the resolution."""
+    display = env.display
+    return {**env.computer_settings, **({"resolution": f"{display['width']}x{display['height']}"} if display else {})}
 
 
 def _dockerfile(source: str, layer: str, install: Install, base: ComputerArtifact, build_settings: dict,
@@ -420,10 +421,8 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
     image = DockerImageArtifact.put_ref(derive_id(env.stored_id, "computer_image"), description=(
         f"{env.stored_id}'s composed computer"), image_name=index)
     config = {name: setting.model_dump() for name, setting in base.config.items()}
-    for name, value in env.computer_settings.items():
+    for name, value in _values(env).items():
         config[name]["default"] = value
-    if env.display is not None:
-        config["resolution"]["default"] = _resolution(env.display)
     computer = ComputerArtifact.put(
         id=derive_id(env.stored_id, "computer"), description=f"{base.id} composed with {env.driver.id} for {env.stored_id}",
         arch=arches, os=base.os.model_dump(), session=base.session.model_dump(), config=config,

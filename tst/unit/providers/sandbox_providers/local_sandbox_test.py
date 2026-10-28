@@ -637,6 +637,26 @@ async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_
 
 
 @pytest.mark.asyncio
+async def test_a_container_with_no_network_whose_setup_fails_goes_with_its_work_folder(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
+    monkeypatch.setattr(ls, "relay_image", _relay_image)
+
+    class _Unpullable(_RecordingLocalSandbox):
+        async def pull_images(self, image_names):
+            raise RuntimeError("pull access denied")
+
+    class _RefusedPull(LocalSandboxProvider):
+        async def create_vm(self, **kwargs):
+            return _Unpullable(None, sandbox_id="local-closed", exposed_ports=kwargs["exposed_ports"])
+
+    with pytest.raises(RuntimeError, match="pull access denied"):
+        await _RefusedPull().create_container(image_name="img:v1", port=8000, env={},
+                                              network_policy=NetworkPolicy(mode="allowlist"))
+
+    assert LocalSandbox.find_work_dir("local-closed") is None
+
+
+@pytest.mark.asyncio
 async def test_a_container_with_no_network_takes_its_relay_and_network_with_it(tmp_path: Path):
     sandbox = _RecordingLocalSandbox(tmp_path, sandbox_id="local-abc", listed=(0, "r1\n", ""))
     sandbox.mode = SANDBOX_MODE_CONTAINER

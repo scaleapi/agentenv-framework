@@ -84,7 +84,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         values = _values(computer, values)
         policy = NetworkPolicy.from_dict(env.network) if env.network else None
         booted = await boot(
-            sandbox_provider, image=build["image"], arch=arch, port=env.driver.port, network_policy=policy,
+            sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy,
             environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb)
         self._container_sandboxes.append(booted.sandbox)
@@ -117,8 +117,11 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         await end_recordings(deployed, "reset")
         sandbox_provider = build_sandbox_provider(deployed.sandbox_type)
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
-        await sandbox_provider.recreate_container(sandbox, image_name=record["image"], port=env.driver.port,
-                                                  env=_environment(env, computer, values, params))
+        try:
+            await sandbox_provider.recreate_container(sandbox, image_name=record["image"], port=env.driver.port,
+                                                      env=_environment(env, computer, values, params))
+        except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
+            raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
         _require_name(env, await ready(deployed.environment_url, READY_TIMEOUT_S))
         await _require_display(deployed, values.get("resolution"))
 
