@@ -666,7 +666,7 @@ def test_a_plugin_cannot_replace_a_built_in_env_provider(monkeypatch):
 def test_building_a_provider_whose_plugin_was_skipped_says_why(monkeypatch):
     _install(monkeypatch, env_providers=[_EP("bare", "_BareEnvProvider")])
 
-    with pytest.raises(ValueError, match=r"Unknown env_provider_type: 'bare' \(expected one of \['gateway', 'server'\]\) "
+    with pytest.raises(ValueError, match=r"Unknown env_provider_type: 'bare' \(expected one of \['computer', 'gateway', 'server'\]\) "
                                          r"\(.*_BareEnvProvider must implement close and deploy"):
         build_env_provider("bare")
 

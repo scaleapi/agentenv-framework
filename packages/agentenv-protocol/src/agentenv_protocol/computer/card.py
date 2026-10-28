@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .dataplane import DEFAULT_DATA_PATHS
 from .recording import recording_params
 from ..types import METHOD_ADD, EnvironmentExtension, EnvironmentTool, IntakeDeclaration, IntakeFormat, intake_extension
 
@@ -90,7 +91,7 @@ def declared_extensions(driver: ComputerDriverEnvironment) -> list[EnvironmentEx
     declared = [EnvironmentExtension(
         uri=COMPUTER, description="The seven computer_* tools: screenshot, click, drag, scroll, type, key, wait.",
         params={**features, "delivery": "foreground", "platform": driver.platform.as_dict(),
-                "supports": list(driver.supports)})]
+                "supports": list(driver.supports), "default_data_paths": list(DEFAULT_DATA_PATHS)})]
     if driver.has("pointer"):
         declared.append(EnvironmentExtension(
             uri=COMPUTER_POINTER, description="The computer_pointer_* tools, and click and scroll at the pointer.",
@@ -99,7 +100,7 @@ def declared_extensions(driver: ComputerDriverEnvironment) -> list[EnvironmentEx
     if driver.has("write_files"):
         intake.add = [IntakeFormat(part="file", format="file-tree", load="additive")]
     declared.append(intake_extension(intake, "data/add writes files under the session user's home; data/get "
-                                             "returns the env's data paths."))
+                                             "returns those under the paths it's given, or the default data paths."))
     return declared
 
 

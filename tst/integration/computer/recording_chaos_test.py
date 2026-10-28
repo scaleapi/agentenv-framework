@@ -113,8 +113,7 @@ async def test_a_restarted_driver_forgets_its_recording_and_keeps_the_segments_i
 async def _desk(image: str, *docker_args: str):
     """The desktop in a container of its own, and a client for its driver once it is ready."""
     name = f"agentenv-test-desk-{uuid.uuid4().hex[:8]}"
-    docker("run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}", *docker_args,
-            "-e", 'AGENTENV_COMPUTER_SETTINGS={"data_paths": ["fixture"]}', image)
+    docker("run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}", *docker_args, image)
     try:
         yield name, await _ready(name)
     finally:

@@ -143,6 +143,9 @@ async def test_add_invalid_params_returns_error():
         r = await client.post("/agentenv", json=_rpc("data/add", {"parts": [{"kind": "bogus"}]}))
         assert r.json()["error"]["code"] == -32602
 
+        r = await client.post("/agentenv", json=_rpc("data/get", {"paths": ["items"]}))
+        assert r.json()["error"]["code"] == -32602 and "takes no paths" in r.json()["error"]["data"]["detail"]
+
 
 @pytest.mark.asyncio
 async def test_unknown_method_returns_error():

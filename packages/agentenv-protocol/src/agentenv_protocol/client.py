@@ -57,11 +57,15 @@ async def add_data(base_url: str, parts: list[Part], timeout: int = 120, verify:
 
 
 async def get_data(
-    base_url: str, timeout: int = 30, verify: bool = True, *, write_namespace: WriteNamespaceGrant | None = None
+    base_url: str, timeout: int = 30, verify: bool = True, *, write_namespace: WriteNamespaceGrant | None = None,
+    paths: list[str] | None = None,
 ) -> GetDataResponse:
     """`data/get`. A server advertising `DATA_OBJECTS_EXTENSION_URI` may be handed `write_namespace` to upload
-    its export under; `uploaded_object_path` reads from the answer where it did."""
+    its export under; `uploaded_object_path` reads from the answer where it did. `paths` names what a computer
+    returns, relative to its user's home; an env that returns all of its data refuses them."""
     params = {} if write_namespace is None else {"write_namespace": write_namespace.model_dump(mode="json", exclude_none=True)}
+    if paths is not None:
+        params["paths"] = paths
     return GetDataResponse.model_validate(await _rpc(base_url, METHOD_GET, params, timeout, verify))
 
 

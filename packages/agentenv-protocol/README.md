@@ -240,6 +240,13 @@ at the gateway.
 
 Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
 
+### Getting part of the data
+
+A `@get_data` handler that takes a `paths` parameter returns only the data under the paths a caller
+names (`client.get_data(base_url, paths=[...])`), and is called with None when the caller names
+none. A handler without one answers `invalid_params` to a call that names paths, rather than
+returning everything.
+
 ### Uploading an export through a grant
 
 An export too large to return from `data/get` can go straight to the caller's object store. A
@@ -405,8 +412,10 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
 - **The data plane.** `data/add` takes file parts that name their path, relative to the session
   user's home, under the `data-objects/v1` marker (`{"path": ...}`), as inline bytes, an https URL,
   or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
-  `data/get` returns the files under the settings' `data_paths`, inline or uploaded under a
-  `write_namespace` grant.
+  `data/get` returns the files under the `paths` it's given, relative to the home, or under the
+  card's `default_data_paths` (`Desktop`, `Documents`, `Downloads`) when it's given none, inline or
+  uploaded under a `write_namespace` grant. An environment whose `@get_data` hook takes no `paths`
+  refuses them.
 - **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
   access (`tool_access` is on).
 
@@ -417,7 +426,7 @@ was sent (`applied: "no"`); `Timeout`, `DeliveryFailed` and `Internal` mean it m
 other exception from an input operation is reported `delivery_failed` with `applied: "unknown"`.
 
 **Settings** reach the driver as one JSON value in `AGENTENV_COMPUTER_SETTINGS`
-(`ComputerSettings`): `data_paths`, `default_space`, `default_norm_scale`, `queue_wait_s`,
+(`ComputerSettings`): `default_space`, `default_norm_scale`, `queue_wait_s`,
 `tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`
 and `exec_timeout_s`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
 

@@ -82,8 +82,7 @@ def test_each_arch_this_machine_builds_is_composed_pushed_and_written_as_the_env
 async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_passes_the_probe_at_full(composed):
     image = composed.metadata["composed"]["container"][ARCH]["image"]
     name = f"agentenv-test-computer-{uuid.uuid4().hex[:8]}"
-    docker("run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}",
-           "-e", 'AGENTENV_COMPUTER_SETTINGS={"data_paths": ["fixture"]}', image)
+    docker("run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}", image)
     try:
         url = await _ready(name)
         reports = [await run_probe(url, "full") for _ in range(3)]

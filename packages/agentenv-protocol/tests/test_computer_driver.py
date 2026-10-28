@@ -147,9 +147,9 @@ def test_the_platform_is_detected(tmp_path, monkeypatch):
 
 def test_settings_come_from_one_json_value():
     assert load_settings({}) == ComputerSettings()
-    settings = load_settings({SETTINGS_ENV: '{"data_paths": ["notes"], "default_space": "norm", "tap_hold_ms": 20}'})
-    assert settings.data_paths == ["notes"] and settings.default_space == "norm" and settings.tap_hold_ms == 20
-    for raw in ('{"data_paths": ["../out"]}', '{"tap_hold_ms": -1}', '{"unknown": 1}', "not json"):
+    settings = load_settings({SETTINGS_ENV: '{"default_space": "norm", "tap_hold_ms": 20}'})
+    assert settings.default_space == "norm" and settings.tap_hold_ms == 20
+    for raw in ('{"default_space": "pixels"}', '{"tap_hold_ms": -1}', '{"data_paths": ["notes"]}', "not json"):
         with pytest.raises(ValueError, match=SETTINGS_ENV):
             load_settings({SETTINGS_ENV: raw})
 
@@ -169,6 +169,7 @@ async def test_the_card_declares_the_contract_the_driver_implements():
     computer = extensions["urn:agentenv:computer/v1"]["params"]
     assert computer["buttons"] == ["left", "right", "middle"] and computer["max_click_count"] == 3
     assert computer["keys"] == "all" and computer["platform"] == LINUX.as_dict() and computer["delivery"] == "foreground"
+    assert computer["default_data_paths"] == ["Desktop", "Documents", "Downloads"]
     assert extensions["urn:agentenv:computer-pointer/v1"]["params"]["buttons"] == ["left", "right", "middle"]
     assert set(extensions["urn:agentenv:computer-keyboard/v1"]["params"]["methods"]) == {"get", "set"}
     assert set(extensions["urn:agentenv:computer-display/v1"]["params"]["methods"]) == {"get", "set"}
