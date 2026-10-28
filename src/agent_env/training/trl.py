@@ -34,7 +34,7 @@ except ModuleNotFoundError as exc:
 
 from agent_env.openenv import build_app
 from agent_env.openenv.environment import END_TURN as END_TURN_TOOL
-from agent_env.openenv.environment import Toolset
+from agent_env.openenv.environment import TIMEOUT_METADATA, Toolset
 from agent_env.training._tools import tool_method
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,13 @@ ENDED = "The episode has ended."
 END_TURN = END_TURN_TOOL.name
 CONNECT_SECONDS = 60.0
 CLOSE_SECONDS = 300.0
+#: How much longer than a tool's deadline the client waits for the server to end the call, before dropping the session.
+GRACE_SECONDS = 30.0
+#: How long the exit hook waits for the sessions to close, and then for each server to stop.
+EXIT_SECONDS = 30.0
+#: How often, and how far apart in seconds, an environment tries to open a session in place of a dropped one while the
+#: server is at its limit, which it stays at until it has seen the dropped one close.
+REOPEN_ATTEMPTS, REOPEN_SECONDS = 5, 1.0
 
 _CAPACITY = re.compile(r"Server at capacity: \d+/(\d+)")
 
@@ -57,14 +64,17 @@ class AgentEnv:
     """A server's tasks for TRL. ``dataset`` holds one row per task of ``split``, and ``factory`` is the
     ``environment_factory`` whose environments play them: each holds one session on the server, ``reset`` starts the
     row's task, its methods call the turn's tools, ``end_turn`` hands over the reply and answers with the next turn's
-    prompt, and ``get_reward`` is the episode's reward, ``None`` when it ended in an error. A task's turn not ended by
-    the model ends with an empty reply. Tasks whose agents get different tools take TRL's multi-environment mode:
-    ``factory`` is then a dict, and each row names its ``environment``.
+    prompt, and ``get_reward`` is the episode's reward, ``None`` when it ended in an error. TRL hands an environment
+    no completion, so the model's reply reaches the task only through ``end_turn(response=...)``: a turn the model
+    leaves open ends with an empty reply, which a verifier judging the reply scores as such. Tasks whose agents get
+    different tools take TRL's multi-environment mode: ``factory`` is then a dict, and each row names its
+    ``environment``.
 
     Args:
         url: The server's base URL.
         split: The split ``dataset`` holds.
-        tool_timeout: One tool call's deadline in seconds. A call that misses it ends its episode unscored.
+        tool_timeout: One tool call's deadline in seconds, which the server ends the call at: the model is told the
+            tool didn't answer, and the episode goes on.
         reset_timeout: How long an episode may take to deploy and open its first turn, and each turn to be ended,
             in seconds.
 
@@ -112,21 +122,24 @@ class AgentEnv:
         return self.dataset_for(self.split)
 
     def dataset_for(self, split: str) -> Dataset:
-        """``split``'s tasks as TRL's rows: the ``prompt`` as chat messages, and the ``split`` and ``index`` that
-        ``reset`` plays, with the ``environment`` in multi-environment mode."""
+        """``split``'s tasks as TRL's rows: the ``prompt`` as chat messages, the ``split`` and ``index`` that
+        ``reset`` plays, the ``task_id`` it checks the episode against, and the ``environment`` in multi-environment
+        mode. The prompt is the model's to change."""
         several = len(self._toolsets) > 1
         return Dataset.from_list([{
             "prompt": _messages(task["system_prompt"], task["prompt"]), "split": split, "index": task["index"],
+            "task_id": task["id"],
             **({"environment": self._toolsets[_key(task)].name} if several else {}),
         } for task in self._split(split)])
 
     @cached_property
     def factory(self) -> type[_Environment] | dict[str, type[_Environment]]:
         """TRL's ``environment_factory``: an environment class per toolset of the server's tasks, or the one class when
-        every task has the same. Building it plays one task of each toolset through, in turn, ending each of its turns
-        empty, since TRL reads the tools from the class: its methods are every tool a turn offers, and one a turn
-        doesn't offer answers so. Each call on a probe's session has the reset deadline."""
-        classes = on_loop(self._environments(), None)
+        every task has the same. Building it walks one task of each toolset through its turns, in turn, ending each but
+        the last empty and listing its tools, then ends the episode unscored, since TRL reads the tools from the
+        class: its methods are every tool a turn offers, and one a turn doesn't offer answers so. Each call on a
+        probe's session has the reset deadline."""
+        classes = _on_loop(self._environments(), None)
         return classes[0] if len(classes) == 1 else {each.__name__: each for each in classes}
 
     def close(self) -> None:
@@ -134,7 +147,7 @@ class AgentEnv:
         started."""
         mine = [environment for environment in list(_environments) if environment._shared in self._shared]
         try:
-            on_loop(_gathered(environment._close() for environment in mine), CLOSE_SECONDS)
+            _on_loop(_gathered(environment._close() for environment in mine), CLOSE_SECONDS)
         finally:
             if self._server is not None:
                 self._server.stop()
@@ -143,22 +156,25 @@ class AgentEnv:
         return [await self._environment(toolset) for toolset in self._toolsets.values()]
 
     async def _environment(self, toolset: _Toolset) -> type[_Environment]:
-        split, index = toolset.first
+        split, index, turns = toolset.first
         client = await _opened(self.url, self._reset_timeout)
         first, tools = None, {}
         try:
             turn = await client.reset(split=split, index=index)
-            while not turn.done:
+            for number in range(turns):
+                if turn.done:
+                    break
                 listed = await _list_tools(client)
                 if listed.done:
                     turn = listed
                     break
                 first = first or frozenset(tool["name"] for tool in listed.observation["tools"])
                 tools |= {tool["name"]: tool for tool in listed.observation["tools"] if tool["name"] not in tools}
-                turn = await _end_turn(client, "")
-                if error := turn.observation.get("error"):
-                    raise RuntimeError(f"task {index} of split {split!r} refused an empty {END_TURN}: "
-                                       f"{error.get('message')}")
+                if number + 1 < turns:
+                    turn = await _end_turn(client, "")
+                    if error := turn.observation.get("error"):
+                        raise RuntimeError(f"task {index} of split {split!r} refused an empty {END_TURN}: "
+                                           f"{error.get('message')}")
         finally:
             with contextlib.suppress(Exception):
                 await client.close()
@@ -183,7 +199,7 @@ class AgentEnv:
 @dataclass(frozen=True)
 class _Toolset:
     name: str
-    first: tuple[str, int]
+    first: tuple[str, int, int]  # the split, index and turn count of its first task
 
 
 @dataclass(frozen=True, eq=False)
@@ -201,6 +217,19 @@ class _Failed(Exception):
     pass
 
 
+class _AtCapacity(RuntimeError):
+    def __init__(self, url: str, limit: str):
+        super().__init__(f"the server at {url} is at its limit of {limit} sessions at once, and the trainer holds one "
+                         "per rollout it generates at once: serve the bundle with MAX_CONCURRENT_ENVS (or "
+                         "max_concurrent_envs=) at least that many, or generate fewer rollouts at once")
+        self.limit = limit
+
+
+class _Misgrouped(_Failed):
+    """An episode offering other tools than its class has: a toolset that misses what tells tasks apart, which no
+    rollout fixes."""
+
+
 @dataclass
 class _Rollout:
     started: asyncio.Task[None] = field(init=False)
@@ -208,6 +237,7 @@ class _Rollout:
     done: bool = False
     reward: float | None = None
     failure: str | None = None
+    misgrouped: bool = False
 
 
 class _Environment:
@@ -219,59 +249,68 @@ class _Environment:
 
     def __init__(self) -> None:
         self._client: GenericEnvClient | None = None
+        self._opened = False
         self._rollout: _Rollout | None = None
         self._lock = asyncio.Lock()
         _environments.add(self)
 
-    def reset(self, *, split: str, index: int, prompt: list[dict[str, Any]] | None = None, **_: Any) -> None:
+    def reset(self, *, split: str, index: int, task_id: str | None = None, **_: Any) -> None:
         """Starts the row's episode and returns before it is deployed, since ``GRPOTrainer`` resets its environments
-        one at a time: the first tool call or ``get_reward`` waits for it. Raises when the server refuses the session,
-        as one at capacity does."""
-        on_loop(self._reset(split, index, _prompt_of(prompt)), CONNECT_SECONDS + CLOSE_SECONDS)
+        one at a time: the first tool call or ``get_reward`` waits for it. Raises when the server refuses this
+        environment's first session, as one at capacity does; a later session it refuses, after one was dropped,
+        leaves only that rollout unscored."""
+        _on_loop(self._reset(split, index, task_id), CONNECT_SECONDS + CLOSE_SECONDS)
 
     def get_reward(self) -> float | None:
+        """The episode's reward, or ``None`` when it ended in an error. Raises when the episode offered other tools
+        than this class has, which no rollout fixes."""
         rollout, self._rollout = self._rollout, None
         if rollout is None:
             return None
         try:
-            on_loop(self._finish(rollout), None)
+            _on_loop(self._finish(rollout), None)
         except Exception as e:
             rollout.failure = rollout.failure or _why(e)
+        if rollout.misgrouped:
+            raise RuntimeError(f"{rollout.failure}. The tasks of one toolset must offer the same tools, since TRL shows "
+                               "the model a class's: their toolset misses what tells them apart")
         if rollout.failure is not None:
             logger.warning("rollout left unscored: %s", rollout.failure)
             return None
         return rollout.reward
 
     def _call(self, name: str, arguments: dict[str, Any]) -> str:
-        return on_loop(self._step(name, arguments),
-                       self._shared.reset_timeout + self._shared.tool_timeout + CLOSE_SECONDS)
+        return _on_loop(self._step(name, arguments),
+                        self._shared.reset_timeout + self._shared.tool_timeout + GRACE_SECONDS + CLOSE_SECONDS)
 
-    async def _reset(self, split: str, index: int, expected: tuple[str | None, str] | None) -> None:
+    async def _reset(self, split: str, index: int, expected: str | None) -> None:
         async with self._lock:
             if (rollout := self._rollout) is not None:
                 rollout.started.cancel()
                 await asyncio.wait([rollout.started])
             self._rollout = None
-            if self._client is None:
-                self._client = await _opened(self._shared.url, self._shared.reset_timeout)
+            if not self._opened:
+                self._client, self._opened = await _opened(self._shared.url, self._shared.reset_timeout), True
             rollout = _Rollout()
             rollout.started = asyncio.ensure_future(self._begin(rollout, split, index, expected))
             self._rollout = rollout
 
-    async def _begin(self, rollout: _Rollout, split: str, index: int,
-                     expected: tuple[str | None, str] | None) -> None:
+    async def _begin(self, rollout: _Rollout, split: str, index: int, expected: str | None) -> None:
+        if self._client is None:
+            self._client = await _reopened(self._shared.url, self._shared.reset_timeout)
         reset = await self._client.reset(split=split, index=index)
         if reset.done:
             raise _Failed(_error_of(reset.observation))
         metadata = reset.observation.get("metadata") or {}
-        rollout.system = metadata.get("system_prompt") or None
-        if expected is not None and (rollout.system, metadata.get("prompt")) != expected:
-            raise _Failed("the turn's prompt differs from the dataset row's")
+        rollout.system, played = metadata.get("system_prompt") or None, (metadata.get("task") or {}).get("id")
+        if expected is not None and played != expected:
+            raise _Failed(f"the episode plays task {played!r}, not the row's {expected!r}")
         listed = await _list_tools(self._client)
         if listed.done:
             raise _Failed(_error_of(listed.observation))
         if (offered := {tool["name"] for tool in listed.observation["tools"]}) != self._shared.offered:
-            raise _Failed(f"the episode offers the tools {sorted(offered)}, not {sorted(self._shared.offered)}")
+            raise _Misgrouped(f"task {played!r} offers the tools {sorted(offered)}, not the "
+                              f"{sorted(self._shared.offered)} its toolset's first task does")
 
     async def _step(self, name: str, arguments: dict[str, Any]) -> str:
         async with self._lock:
@@ -282,26 +321,26 @@ class _Environment:
                 return ENDED
             try:
                 await rollout.started
-                result = await asyncio.wait_for(_call_tool(self._client, name, arguments), self._deadline(name))
+                deadline = None if name == END_TURN else self._shared.tool_timeout
+                result = await asyncio.wait_for(_call_tool(self._client, name, arguments, deadline),
+                                                None if deadline is None else deadline + GRACE_SECONDS)
             except _Failed as e:
+                rollout.misgrouped = isinstance(e, _Misgrouped)
                 await self._fail(rollout, str(e))
                 return FAILED
             except TimeoutError:
-                await self._fail(rollout, f"{name} didn't answer within {self._shared.tool_timeout:g}s")
+                await self._fail(rollout, f"{name} didn't answer within {self._shared.tool_timeout:g}s, and the "
+                                          f"server didn't end the call in the {GRACE_SECONDS:g}s after")
                 return FAILED
             except Exception as e:
                 await self._fail(rollout, f"{name}: {_why(e)}")
                 return FAILED
             return self._answer(rollout, name, result)
 
-    def _deadline(self, name: str) -> float | None:
-        """A tool's deadline; ``end_turn`` has the session's, the reset deadline, since the server answers it once the
-        task's next turn opens or its verifiers have scored the episode."""
-        return None if name == END_TURN else self._shared.tool_timeout
-
     async def _finish(self, rollout: _Rollout) -> None:
         """Ends the turns the model left open with an empty reply, until the episode is scored; each call on the
-        session has the reset's deadline."""
+        session has the reset's deadline, as ``end_turn`` does, since the server answers it once the next turn opens
+        or the verifiers have scored the episode."""
         async with self._lock:
             try:
                 await rollout.started
@@ -311,6 +350,7 @@ class _Environment:
                         rollout.failure = f"{END_TURN}: {error.get('message')}"
                     self._answer(rollout, END_TURN, result)
             except Exception as e:
+                rollout.misgrouped = isinstance(e, _Misgrouped)
                 await self._fail(rollout, str(e) if isinstance(e, _Failed) else _why(e))
 
     def _answer(self, rollout: _Rollout, name: str, result: Any) -> str:
@@ -338,7 +378,7 @@ class _Environment:
 
     async def _fail(self, rollout: _Rollout, why: str) -> None:
         """Records why the rollout won't be scored and drops the session, which may be out of step with the server; the
-        server ends a dropped session's episode, and the next reset opens another."""
+        server ends a dropped session's episode, and the next rollout opens another."""
         rollout.failure = rollout.failure or why
         client, self._client = self._client, None
         if client is not None:
@@ -369,13 +409,13 @@ class _Server:
         self.url = f"http://127.0.0.1:{self._uvicorn.servers[0].sockets[0].getsockname()[1]}"
         _servers.add(self)
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = CLOSE_SECONDS) -> None:
         _servers.discard(self)
         self._uvicorn.should_exit = True
-        self._thread.join(CLOSE_SECONDS)
+        self._thread.join(timeout)
 
 
-def episode_loop() -> asyncio.AbstractEventLoop:
+def _episode_loop() -> asyncio.AbstractEventLoop:
     global _loop
     with _loop_lock:
         if _loop is None:
@@ -384,8 +424,8 @@ def episode_loop() -> asyncio.AbstractEventLoop:
         return _loop
 
 
-def on_loop(coroutine: Coroutine[Any, Any, Any], timeout: float | None) -> Any:
-    future = asyncio.run_coroutine_threadsafe(coroutine, episode_loop())
+def _on_loop(coroutine: Coroutine[Any, Any, Any], timeout: float | None) -> Any:
+    future = asyncio.run_coroutine_threadsafe(coroutine, _episode_loop())
     try:
         return future.result(timeout)
     except TimeoutError:
@@ -399,14 +439,14 @@ async def _gathered(coroutines: Any) -> list[Any]:
 
 def _close_all() -> None:
     """A trainer that stops or crashes ends the episodes it left running, since TRL never closes its environments,
-    then stops the servers ``AgentEnv.local`` started. It runs before threading's shutdown, while the thread pools an
-    episode's teardown uses still take work."""
+    then stops the servers ``AgentEnv.local`` started, waiting at most ``EXIT_SECONDS`` for each. It runs before
+    threading's shutdown, while the thread pools an episode's teardown uses still take work."""
     try:
-        on_loop(_gathered(environment._close() for environment in list(_environments)), CLOSE_SECONDS)
+        _on_loop(_gathered(environment._close() for environment in list(_environments)), EXIT_SECONDS)
     except Exception as e:
         logger.warning("couldn't end the episodes left running: %s", _why(e))
     for server in list(_servers):
-        server.stop()
+        server.stop(EXIT_SECONDS)
 
 
 threading._register_atexit(_close_all)
@@ -422,20 +462,35 @@ async def _opened(url: str, timeout: float) -> GenericEnvClient:
         with contextlib.suppress(Exception):
             await client.close()
         if match := _CAPACITY.search(str(e)):
-            raise RuntimeError(
-                f"the server at {url} is at its limit of {match[1]} sessions at once, and the trainer holds one per "
-                "rollout it generates at once: serve the bundle with MAX_CONCURRENT_ENVS (or max_concurrent_envs=) "
-                "at least that many, or generate fewer rollouts at once") from e
+            raise _AtCapacity(url, match[1]) from e
         raise ConnectionError(f"couldn't open a session on the server at {url}: {_why(e)}") from e
     return client
+
+
+async def _reopened(url: str, timeout: float) -> GenericEnvClient:
+    """A session in place of a dropped one, tried again while the server is at its limit; raises _Failed, which leaves
+    the rollout unscored, when it can't open one."""
+    for attempt in range(REOPEN_ATTEMPTS):
+        try:
+            return await _opened(url, timeout)
+        except _AtCapacity as e:
+            if attempt + 1 == REOPEN_ATTEMPTS:
+                raise _Failed(f"its session was dropped, and the server stayed at its limit of {e.limit} sessions for "
+                              f"{(REOPEN_ATTEMPTS - 1) * REOPEN_SECONDS:g}s after") from e
+            await asyncio.sleep(REOPEN_SECONDS)
+        except ConnectionError as e:
+            raise _Failed(f"its session was dropped, and {e}") from e
 
 
 async def _list_tools(client: GenericEnvClient) -> Any:
     return await client.step({"type": "list_tools"})
 
 
-async def _call_tool(client: GenericEnvClient, name: str, arguments: dict[str, Any]) -> Any:
-    return await client.step({"type": "call_tool", "tool_name": name, "arguments": arguments})
+async def _call_tool(client: GenericEnvClient, name: str, arguments: dict[str, Any],
+                     deadline: float | None = None) -> Any:
+    """The call, with its ``deadline`` in seconds for the server to end it at."""
+    return await client.step({"type": "call_tool", "tool_name": name, "arguments": arguments,
+                              **({"metadata": {TIMEOUT_METADATA: deadline}} if deadline is not None else {})})
 
 
 async def _end_turn(client: GenericEnvClient, response: str) -> Any:
@@ -453,19 +508,19 @@ def _read_tasks(url: str) -> tuple[str, dict[str, list[dict[str, Any]]]]:
         splits = [split["name"] for split in http.get(f"/{name}/splits").raise_for_status().json()]
         tasks = {split: http.post(f"/{name}/tasks", json={"split": split}).raise_for_status().json()["tasks"]
                  for split in splits}
-    if not all("toolset" in task for described in tasks.values() for task in described):
-        raise ValueError(f"the server at {url} doesn't describe its tasks' toolsets, so it isn't a bundle served by "
-                         "agent_env.openenv.build_app from this version of agentenv-framework or later")
+    if not all("toolset" in task and "turns" in task for described in tasks.values() for task in described):
+        raise ValueError(f"the server at {url} doesn't describe its tasks' toolsets and turns, so it isn't a bundle "
+                         "served by agent_env.openenv.build_app from this version of agentenv-framework or later")
     return name, tasks
 
 
 def _toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, _Toolset]:
     """Each toolset the tasks have, with the first task that has it, named after the server when it's the only one
     and otherwise after its envs, and ``bash`` when its turns offer it."""
-    firsts: dict[str, tuple[str, int]] = {}
+    firsts: dict[str, tuple[str, int, int]] = {}
     for split, described in tasks.items():
         for task in described:
-            firsts.setdefault(_key(task), (split, task["index"]))
+            firsts.setdefault(_key(task), (split, task["index"], task["turns"]))
     if len(firsts) == 1:
         return {key: _Toolset(name, first) for key, first in firsts.items()}
     named: dict[str, _Toolset] = {}
@@ -488,14 +543,6 @@ def _key(task: Mapping[str, Any]) -> str:
 
 def _messages(system: str | None, prompt: str) -> list[dict[str, str]]:
     return [*([{"role": "system", "content": system}] if system else []), {"role": "user", "content": prompt}]
-
-
-def _prompt_of(messages: list[dict[str, Any]] | None) -> tuple[str | None, str] | None:
-    """The system prompt and prompt a row of ``dataset_for`` carries."""
-    if not messages:
-        return None
-    system = next((message["content"] for message in messages if message["role"] == "system"), None)
-    return system or None, messages[-1]["content"]
 
 
 def _error_of(observation: Mapping[str, Any]) -> str:

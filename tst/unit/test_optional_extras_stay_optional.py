@@ -143,6 +143,14 @@ def _only_in(extra: str) -> list[str]:
     return sorted(set().union(*(_module_paths(d) for d in extra_only)) - provided_by_core)
 
 
+def _outside(extra: str) -> list[str]:
+    """Module paths some extra installs and neither a core install nor ``extra``, with the extras it includes, does."""
+    installed = _closure(frozenset({extra}))
+    provided = set().union(*(_module_paths(d) for d in installed))
+    others = set().union(*(_closure(frozenset({other})) for other in _optional_requirements())) - installed
+    return sorted(set().union(*(_module_paths(d) for d in others)) - provided)
+
+
 def _not_in_core() -> list[str]:
     """Module paths some extra installs and a core install does not, including those two extras share."""
     core = _closure(frozenset())
@@ -258,10 +266,19 @@ def test_the_explorer_imports_without_any_extra():
     assert _run(_IMPORT, _not_in_core(), "agent_env.explorer.app") == ""
 
 
-@pytest.mark.parametrize(("module", "extra"), [("agent_env.openenv", "openenv"), ("agent_env.training.trl", "trl")])
+_EXTRA_MODULES = [("agent_env.openenv", "openenv"), ("agent_env.training.trl", "trl")]
+
+
+@pytest.mark.parametrize(("module", "extra"), _EXTRA_MODULES)
 def test_the_openenv_server_and_the_trl_helper_without_their_extra_name_the_extra_to_install(module, extra):
     message = _run(_IMPORT, _only_in(extra), module)
     assert message.endswith(f"pip install 'agentenv-framework[{extra}]'"), message
+
+
+@pytest.mark.parametrize(("module", "extra"), _EXTRA_MODULES)
+def test_the_openenv_server_and_the_trl_helper_import_with_their_extra_alone(module, extra):
+    """What `pip install 'agentenv-framework[<extra>]'` gives them is enough: no module only another extra installs."""
+    assert _run(_IMPORT, _outside(extra), module) == ""
 
 
 @pytest.mark.parametrize("package", _STORE_PACKAGES)

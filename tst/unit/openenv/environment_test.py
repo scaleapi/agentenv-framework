@@ -89,8 +89,9 @@ async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(te
     assert (env.num_tasks("smoke"), env.num_tasks("all")) == (1, 3)
     assert env.get_task("all", 2) == {"id": "dock-2", "name": "dock-2", "index": 2, "prompt": "Add crate 2.",
                                       "system_prompt": "You keep the items.", "agent": "alice",
-                                      "toolset": {"envs": ["items"], "role": "alice@example.com", "access": [],
-                                                  "bash": False}}
+                                      "toolset": {"envs": ["items"], "versions": {}, "role": "alice@example.com",
+                                                  "access": [], "bash": False},
+                                      "turns": 1}
     hide = {"id": "hide", "type": "modify_env_tool_access", "env_id": "items", "action": "disable",
             "role": "alice@example.com", "tools": ["add_item"]}
     hidden = _task(ITEMS, ALICE, hide, {**hide, "id": "other", "role": "bob@example.com"}, TURN, REPLIES)

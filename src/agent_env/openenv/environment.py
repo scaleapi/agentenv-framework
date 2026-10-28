@@ -36,6 +36,9 @@ END_TURN = Tool(
     input_schema={"type": "object", "properties": {"response": {"type": "string", "description": "Your reply."}}},
 )
 ENDED = "the episode has ended; call reset"
+#: The key of a tool call's deadline in seconds in its action's metadata, which a client sets to have the server end a
+#: call that runs past it.
+TIMEOUT_METADATA = "timeout_s"
 NOT_RESET = "no episode has started; call reset before stepping"
 
 
@@ -43,6 +46,7 @@ class Toolset(TypedDict):
     """Where a task's played agent gets its tools, as the Task API names it in each task's ``toolset``."""
 
     envs: list[str]
+    versions: dict[str, int | None]
     role: str | None
     access: list[dict[str, Any]]
     bash: bool
@@ -59,13 +63,15 @@ class ServedTask:
 
     @property
     def toolset(self) -> Toolset:
-        """Where the played agent's tools come from: the envs it works in, its role in them, the changes the task makes
-        to that role's tool access, and whether its turns offer ``bash`` in its sandbox. Tasks that agree on it offer
-        the same tools, so a trainer can group them."""
+        """Where the played agent's tools come from: the envs it works in and the versions the task deploys, its role
+        in them, the changes the task makes to that role's tool access, and whether its turns offer ``bash`` in its
+        sandbox. Tasks that agree on it offer the same tools, so a trainer can group them."""
         agent = self.spec.trainer_agents[0]
         [deploy] = [step for step in self.task.steps if step.type in DEPLOYS and step.agent_name == agent]
-        role = getattr(deploy, "role", None)
-        return Toolset(envs=list(getattr(deploy, "env_ids", None) or []), role=role,
+        role, envs = getattr(deploy, "role", None), list(getattr(deploy, "env_ids", None) or [])
+        return Toolset(envs=envs, role=role,
+                       versions={step.env_id: step.env_version for step in self.task.steps
+                                 if hasattr(step, "env_version") and step.env_id in envs},
                        access=[{"env": step.env_id, "action": step.action, "tools": step.tools}
                                for step in self.task.steps
                                if step.type == "modify_env_tool_access" and step.role == role],
@@ -185,7 +191,7 @@ class AgentEnvEnvironment(Environment):
         self._state.step_count += 1
         if action.tool_name == END_TURN.name:
             return await self._end_turn(action.tool_name, action.arguments.get("response") or "")
-        return await self._call(action, timeout_s)
+        return await self._call(action, timeout_s if timeout_s is not None else _deadline_of(action))
 
     def step(self, action: Any, timeout_s: float | None = None, **kwargs: Any) -> Observation:
         """OpenEnv's web playground steps from a worker thread; the episode lives on the loop its reset ran on."""
@@ -217,8 +223,8 @@ class AgentEnvEnvironment(Environment):
             result = await asyncio.wait_for(self._tools.call(name, action.arguments), timeout_s)
         except EpisodeError as e:
             return _tool_error(name, ToolErrorType.TOOL_NOT_FOUND, e)
-        except TimeoutError as e:
-            return _tool_error(name, ToolErrorType.TIMEOUT, e)
+        except TimeoutError:
+            return _tool_error(name, ToolErrorType.TIMEOUT, f"{name} didn't answer within {timeout_s:g}s")
         except httpx.HTTPError as e:
             return _tool_error(name, ToolErrorType.TRANSPORT_ERROR, e)
         if result.isError:
@@ -325,13 +331,19 @@ class AgentEnvEnvironment(Environment):
         served = self._task_at(split, index)
         prompt, system_prompt = served.spec.prompts[0]
         return {"id": served.task.id, "name": served.name, "index": index, "prompt": prompt,
-                "system_prompt": system_prompt, "agent": served.spec.trainer_agents[0], "toolset": served.toolset}
+                "system_prompt": system_prompt, "agent": served.spec.trainer_agents[0], "toolset": served.toolset,
+                "turns": len(served.spec.prompts)}
 
     def _task_metadata(self) -> dict[str, Any] | None:
         if self._served_task is None:
             return None
         return {"id": self._served_task.task.id, "name": self._served_task.name, "split": self._state.split,
                 "index": self._state.index}
+
+
+def _deadline_of(action: CallToolAction) -> float | None:
+    deadline = action.metadata.get(TIMEOUT_METADATA)
+    return float(deadline) if isinstance(deadline, (int, float)) and deadline > 0 else None
 
 
 def _tool(tool: Any) -> Tool:

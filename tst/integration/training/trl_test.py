@@ -14,7 +14,7 @@ from agent_env.artifact import FileArtifact
 from agent_env.training.trl import ENDED, AgentEnv
 from tst.integration.openenv.build_app_test import _left
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 
 def _tools(environment):

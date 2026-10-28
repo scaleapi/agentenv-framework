@@ -59,10 +59,10 @@ def test_the_dataset_holds_each_tasks_prompt_and_the_factory_offers_its_tools(se
     env = served({"a": PLAYED, "b": [ITEMS, ALICE, {**TURN, "prompt": "Add a barrel."}, REPLIES]}, {"smoke": ["b"]})
 
     assert env.dataset.to_list() == [
-        {"prompt": [SYSTEM, {"role": "user", "content": "Add a crate."}], "split": "all", "index": 0},
-        {"prompt": [SYSTEM, {"role": "user", "content": "Add a barrel."}], "split": "all", "index": 1}]
+        {"prompt": [SYSTEM, {"role": "user", "content": "Add a crate."}], "split": "all", "index": 0, "task_id": "a"},
+        {"prompt": [SYSTEM, {"role": "user", "content": "Add a barrel."}], "split": "all", "index": 1, "task_id": "b"}]
     assert env.dataset_for("smoke").to_list() == [
-        {"prompt": [SYSTEM, {"role": "user", "content": "Add a barrel."}], "split": "smoke", "index": 0}]
+        {"prompt": [SYSTEM, {"role": "user", "content": "Add a barrel."}], "split": "smoke", "index": 0, "task_id": "b"}]
     assert (env.factory.__name__, _tools(env.factory)) == ("dock", ["add_item", "end_turn", "get_reward", "reset"])
     assert inspect.signature(env.factory.end_turn).parameters["response"].annotation == str | None
     with pytest.raises(ValueError, match="has no split 'train'; it serves all, smoke"):
@@ -98,7 +98,7 @@ def test_end_turn_answers_with_the_next_turns_prompt_and_a_turn_left_open_ends_e
     assert environment.get_reward() == 1.0
 
 
-def test_an_episode_that_fails_or_isnt_its_rows_is_left_unscored_and_the_environment_plays_on(served, caplog):
+def test_an_episode_that_fails_or_isnt_its_rows_is_left_unscored_and_one_with_its_prompt_changed_plays(served, caplog):
     env = served({"a": PLAYED, "broken": [{**ITEMS, "fail": True}, ALICE, TURN, REPLIES]})
     played, broken = env.dataset.to_list()
     environment = env.factory()
@@ -107,15 +107,15 @@ def test_an_episode_that_fails_or_isnt_its_rows_is_left_unscored_and_the_environ
         environment.reset(**broken)
         assert environment.add_item(item="crate") == FAILED
         assert environment.get_reward() is None
-        environment.reset(**{**played, "prompt": [{"role": "user", "content": "Add a barrel."}]})
+        environment.reset(**{**played, "task_id": "broken"})
         assert environment.get_reward() is None
-    environment.reset(**played)
+    environment.reset(**{**played, "prompt": [{"role": "system", "content": "Think first."}, *played["prompt"]]})
     environment.end_turn(response="Added a crate.")
 
     assert environment.get_reward() == 1.0
     assert [record.getMessage() for record in caplog.records if record.name == trl.__name__] == [
         "rollout left unscored: RuntimeError: the env didn't come up",
-        "rollout left unscored: the turn's prompt differs from the dataset row's"]
+        "rollout left unscored: the episode plays task 'a', not the row's 'broken'"]
 
 
 class _SecondTurnTools:
@@ -180,21 +180,51 @@ class _Hanging:
         return _Session()
 
 
-def test_a_tool_that_misses_its_deadline_leaves_the_rollout_unscored_and_the_environment_plays_on(
-        served, monkeypatch, caplog):
+def test_a_tool_that_misses_its_deadline_is_ended_by_the_server_and_the_episode_and_its_session_go_on(
+        served, monkeypatch):
     monkeypatch.setattr(proxy_module, "ToolSession", _Hanging())
-    env = served({"a": PLAYED}, tool_timeout=0.5)
+    env = served({"a": PLAYED}, tool_timeout=0.5, max_concurrent_envs=1)
     environment = env.factory()
 
     environment.reset(**env.dataset[0])
-    with caplog.at_level(logging.WARNING, logger=trl.__name__):
-        assert environment.wait() == FAILED
-        assert environment.get_reward() is None
+    assert environment.wait() == "wait didn't answer within 0.5s"
+    environment.end_turn(response="Added a crate.")
+    assert environment.get_reward() == 1.0
     environment.reset(**env.dataset[0])
     environment.end_turn(response="Added a crate.")
 
     assert environment.get_reward() == 1.0
-    assert "rollout left unscored: wait didn't answer within 0.5s" in caplog.text
+
+
+def test_a_session_refused_after_one_was_dropped_leaves_only_that_rollout_unscored(served, caplog):
+    env = served({"a": PLAYED}, max_concurrent_envs=1)
+    first, second = env.factory(), env.factory()
+    first.reset(**env.dataset[0])
+    first.end_turn(response="Added a crate.")
+    assert first.get_reward() == 1.0
+    trl._on_loop(first._close(), 30)
+
+    second.reset(**env.dataset[0])
+    with caplog.at_level(logging.WARNING, logger=trl.__name__):
+        first.reset(**env.dataset[0])
+        assert first.get_reward() is None
+    trl._on_loop(second._close(), 30)
+    first.reset(**env.dataset[0])
+    first.end_turn(response="Added a crate.")
+
+    assert first.get_reward() == 1.0
+    assert "its session was dropped, and the server stayed at its limit of 1 sessions for 4s after" in caplog.text
+
+
+def test_a_rollout_whose_tools_arent_its_classs_stops_training(served, monkeypatch):
+    monkeypatch.setattr(proxy_module, "ToolSession", _SecondTurnTools())
+    env = served({"a": PLAYED})
+    environment = env.factory()
+
+    environment.reset(**env.dataset[0])
+    with pytest.raises(RuntimeError, match=r"task 'a' offers the tools \['add_item', 'end_turn', 'take_item'\], not "
+                                           r"the \['add_item', 'end_turn'\] its toolset's first task does"):
+        environment.get_reward()
 
 
 class _Slow(TaskStep):
