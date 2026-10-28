@@ -23,5 +23,7 @@ explorer's default address. To point it somewhere else, copy `.env.example` to `
 npm run build:static   # writes out/
 ```
 
-`agent-env up` serves the built UI when `[explorer] static_dir` in `.agentenv/config.toml` points
-at `out/`. Checks: `npm run typecheck`, `npm run test:smoke` and `npm run lint`.
+A release ships the built UI in the wheel, so an installed `agent-env up` serves it as is. From a
+source checkout, `agent-env up` serves the built UI when `[explorer] static_dir` in
+`.agentenv/config.toml` points at `out/`. Checks: `npm run typecheck`, `npm run test:smoke` and
+`npm run lint`.
