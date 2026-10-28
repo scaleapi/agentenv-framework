@@ -35,6 +35,7 @@ except ModuleNotFoundError as exc:
 from agent_env.openenv import build_app
 from agent_env.openenv.environment import END_TURN as END_TURN_TOOL
 from agent_env.openenv.environment import TIMEOUT_METADATA, Toolset
+from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS
 from agent_env.training._tools import tool_method
 
 logger = logging.getLogger(__name__)
@@ -46,9 +47,12 @@ CONNECT_SECONDS = 60.0
 CLOSE_SECONDS = 300.0
 #: How much longer than a tool's deadline the client waits for the server to end the call, before dropping the session.
 GRACE_SECONDS = 30.0
-#: How long the exit hook waits for the sessions to close, and then for each server ``AgentEnv.local`` started to tear
-#: down its episodes and stop: a sandbox's teardown may take two minutes, and they run at once.
-EXIT_SECONDS, EXIT_SERVER_SECONDS = 30.0, 180.0
+#: How long a server ``AgentEnv.local`` started is given to stop, at ``close`` and at exit: its episodes' teardowns run
+#: at once, and each saves the agents' changelogs, ends open recordings and terminates the sandboxes, every part within
+#: ``TERMINATE_TIMEOUT_SECONDS``.
+STOP_SECONDS = 3 * TERMINATE_TIMEOUT_SECONDS + 60.0
+#: How long the exit hook waits for the sessions to close.
+EXIT_SECONDS = 30.0
 #: How often, and how far apart in seconds, an environment tries to open a session in place of a dropped one while the
 #: server is at its limit, which it stays at until it has seen the dropped one close.
 REOPEN_ATTEMPTS, REOPEN_SECONDS = 5, 1.0
@@ -410,7 +414,7 @@ class _Server:
         self.url = f"http://127.0.0.1:{self._uvicorn.servers[0].sockets[0].getsockname()[1]}"
         _servers.add(self)
 
-    def stop(self, timeout: float = CLOSE_SECONDS) -> None:
+    def stop(self, timeout: float = STOP_SECONDS) -> None:
         _servers.discard(self)
         self._uvicorn.should_exit = True
         self._thread.join(timeout)
@@ -444,14 +448,14 @@ async def _gathered(coroutines: Any) -> list[Any]:
 def _close_all() -> None:
     """A trainer that stops or crashes ends the episodes it left running, since TRL never closes its environments,
     then stops the servers ``AgentEnv.local`` started, which tear down their episodes, waiting at most
-    ``EXIT_SECONDS`` and ``EXIT_SERVER_SECONDS``. It runs before threading's shutdown, while the thread pools an
-    episode's teardown uses still take work."""
+    ``EXIT_SECONDS`` for the sessions and ``STOP_SECONDS`` for each server. It runs before threading's shutdown, while
+    the thread pools an episode's teardown uses still take work."""
     try:
         _on_loop(_gathered(environment._close() for environment in list(_environments)), EXIT_SECONDS)
     except Exception as e:
         logger.warning("couldn't end the episodes left running: %s", _why(e))
     for server in list(_servers):
-        server.stop(EXIT_SERVER_SECONDS)
+        server.stop()
 
 
 threading._register_atexit(_close_all)
