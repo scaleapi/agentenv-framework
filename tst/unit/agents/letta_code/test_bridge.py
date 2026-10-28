@@ -330,3 +330,24 @@ async def test_the_relay_lists_only_the_turns_model_and_forwards_nothing_for_it(
                 listed = await response.json()
     assert listed == {"object": "list", "data": [{"id": "openai/gpt-4.1-mini", "object": "model"}]}
     assert forwarded == []
+
+
+@pytest.mark.asyncio
+async def test_a_caller_cancelled_twice_still_waits_for_the_work_and_its_last_step():
+    release = threading.Event()
+    finished = []
+
+    async def work():
+        await asyncio.to_thread(release.wait, 5)
+        finished.append(True)
+
+    task = asyncio.create_task(bridge.shielded(work()))
+    await asyncio.sleep(0.05)
+    for _ in range(2):
+        task.cancel()
+        await asyncio.sleep(0.05)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished == [True]

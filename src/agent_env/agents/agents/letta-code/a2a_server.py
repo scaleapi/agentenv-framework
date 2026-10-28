@@ -108,6 +108,8 @@ _FILE_DOWNLOAD_TIMEOUT_S = 60
 _PDF_RENDER_TIMEOUT_S = 60
 _PDF_RENDER_DPI = 150
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+# Random hex digits before an attachment's name when the task's inputs folder already holds a file of that name.
+_ATTACHMENT_PREFIX_CHARS = 8
 # The versioned format of the `letta -p --output-format stream-json` events this agent appends to its trajectory.
 TRAJECTORY_FORMAT = "letta-code-events/1"
 
@@ -180,7 +182,7 @@ def _materialize_and_render(part: FilePart, task_id: str) -> list[str]:
     name = _safe_name(part.name)
     target = directory / name
     if target.exists():
-        target = directory / f"{uuid.uuid4().hex[:8]}-{name}"
+        target = directory / f"{uuid.uuid4().hex[:_ATTACHMENT_PREFIX_CHARS]}-{name}"
     if part.bytes is not None:
         try:
             target.write_bytes(base64.b64decode(part.bytes, validate=True))

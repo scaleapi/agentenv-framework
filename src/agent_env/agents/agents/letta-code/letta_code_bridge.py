@@ -36,6 +36,9 @@ MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
 # Root under which each A2A context_id gets its own Letta Code data dir; lives
 # under $HOME so host-mode instances don't share session state.
 SESSIONS_ROOT = os.path.join(os.environ.get("HOME", "/data"), "sessions")
+# How many hex digits of the context id's SHA-1 name its data dir: short, and unique across any realistic number of
+# contexts on one host.
+_CONTEXT_DIR_HASH_CHARS = 16
 _CLI_TIMEOUT_S = 120
 # Largest model request body the relay accepts from the CLI.
 _RELAY_MAX_REQUEST_BYTES = 100 * 1024**2
@@ -50,7 +53,7 @@ def _base_url(environ: Mapping[str, str]) -> str:
 def context_data_dir(context_id: str) -> Path:
     """Per-context Letta Code data dir. A stable short hash keeps the path clean
     and filesystem-safe regardless of the context_id's charset."""
-    ctx_hash = hashlib.sha1(context_id.encode()).hexdigest()[:16]
+    ctx_hash = hashlib.sha1(context_id.encode()).hexdigest()[:_CONTEXT_DIR_HASH_CHARS]
     return Path(SESSIONS_ROOT) / ctx_hash
 
 
@@ -99,9 +102,12 @@ async def shielded(work):
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        with contextlib.suppress(BaseException):
-            await task
-        raise
+        # A cancel that arrives while it waits is held back too: an unshielded wait would pass it on to the work.
+        while True:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(task)
+            if task.done():
+                raise
 
 
 async def shielded_thread(func, *args, **kwargs):
