@@ -55,21 +55,26 @@ def _quiet(line: str) -> None:
 
 
 def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                    say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None) -> GatewayEnv:
+                    say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
+                    version: int | None = None) -> GatewayEnv:
     """Write the gateway env ``env_id``, its image registered from ``published``, each Dockerfile's published digest,
-    when given, else built for ``platform`` (this host's when None)."""
+    when given, else built for ``platform`` (this host's when None). It's stored as ``version`` when given, which must
+    be the env's next: ConcurrentModificationError otherwise."""
     artifact = _image("gateway", derive_id(env_id, "env_image"), "Created from agent-env CLI", GATEWAY_DOCKERFILE,
                       GATEWAY_IMAGE_TAG, platform=platform, say=say, published=published)
     say("Creating GatewayEnv...")
-    env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata=_metadata(GATEWAY, metadata))
+    env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata=_metadata(GATEWAY, metadata),
+                         version=version)
     say(f"Created GatewayEnv: id={env.id} version={env.version}")
     return env
 
 
 def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                       say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None) -> ServiceDBEnv:
+                       say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
+                       version: int | None = None) -> ServiceDBEnv:
     """Write the service-db env ``env_id``, its service-db, db-web and db-mcp images registered from ``published``, each
-    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None)."""
+    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None). It's stored as
+    ``version`` when given, which must be the env's next: ConcurrentModificationError otherwise."""
     db = _image("ServiceDB", derive_id(env_id, "db_image"), f"ServiceDB PostgreSQL image for {env_id}",
                 SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, platform=platform, say=say, published=published)
     db_web = _image("db-web", derive_id(env_id, "db_web_image"), "db-web lightweight web UI for database inspection",
@@ -78,22 +83,24 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
                     DB_MCP_DOCKERFILE, DB_MCP_IMAGE_NAME, platform=platform, say=say, published=published)
     say("Creating ServiceDBEnv...")
     env = ServiceDBEnv.put(id=env_id, db_docker_image_artifact=db, db_web_docker_image_artifact=db_web,
-                           db_mcp_docker_image_artifact=db_mcp, metadata=_metadata(SERVICE_DB, metadata))
+                           db_mcp_docker_image_artifact=db_mcp, metadata=_metadata(SERVICE_DB, metadata),
+                           version=version)
     say(f"Created ServiceDBEnv: id={env.id} version={env.version}")
     return env
 
 
 def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                            say: Callable[[str], None] = _quiet,
-                            published: Mapping[Path, str] | None = None) -> MCPServerEnv:
+                            say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
+                            version: int | None = None) -> MCPServerEnv:
     """Write the website browser as the MCP server env ``env_id``, its image registered from ``published``, each
-    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None)."""
+    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None). It's stored as
+    ``version`` when given, which must be the env's next: ConcurrentModificationError otherwise."""
     artifact = _image("website browser", derive_id(env_id, "env_image"), "Website browser MCP server",
                       WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_IMAGE_TAG, platform=platform, say=say,
                       published=published)
     say("Creating MCPServerEnv...")
     env = MCPServerEnv.put(id=env_id, docker_image_artifact=artifact, environment_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
-                           metadata=_metadata(WEBSITE_BROWSER, metadata))
+                           metadata=_metadata(WEBSITE_BROWSER, metadata), version=version)
     say(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name}")
     return env
 
