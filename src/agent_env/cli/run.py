@@ -18,9 +18,8 @@ from agent_env.plugins._bundles import ALIAS_TABLES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.teardown import RecordedSandbox, TeardownReport, kind, recorded_sandboxes, sandbox_ids
+from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport, kind, recorded_sandboxes, sandbox_ids
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY
 
 _COLORS = {Outcome.PASSED: "green", Outcome.BELOW_ONE: "yellow", Outcome.UNSCORED: "yellow", Outcome.FAILED: "red",
            Outcome.CANCELLED: "yellow"}

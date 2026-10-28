@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from agent_env.env.envs.mcp_server import MCPServerEnv
     from agent_env.env.envs.website import WebsiteEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider, _SandboxEnvironmentProvider
+    from agent_env.task_step.context import TaskStepContext
 
 logger = logging.getLogger(__name__)
 
@@ -133,20 +134,21 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, file_artifact: File
     })], timeout=timeout)
 
 
-async def close_deployed(deployed: DeployedEnv, env_class: type[Env]) -> None:
-    """Close what a task deployed of an env_class env: a built-in's through its env, a plugin's by terminating the sandboxes its record names."""
-    from agent_env.task_step.task_steps.teardown_sandboxes import _env_sandbox_ids, _terminate
+async def close_deployed(deployed: DeployedEnv, env_class: type[Env], context: Optional[TaskStepContext] = None) -> None:
+    """Close what a task deployed of an env_class env: a built-in's through its env, given the run's ``context``, a plugin's by
+    terminating the sandboxes its record names."""
+    from agent_env.task.teardown import RecordedSandbox, env_sandbox_ids, terminate
 
     env = await env_class.from_deployed_env(deployed)
     if as_builtin(env._env_provider):
-        await env.close()
+        await env.close(context)
         return
-    sandboxes = _env_sandbox_ids(deployed)
+    sandboxes = env_sandbox_ids(deployed)
     if not sandboxes:
         logger.warning(f"env '{deployed.env_id}' was deployed by env_provider_type '{deployed.env_provider_type}' outside "
                        "agent-env's sandboxes, so it isn't closed here; the deployment must end by itself")
-    results = await asyncio.gather(*(_terminate(sandbox_id, sandbox_type, "env") for sandbox_id, sandbox_type in sandboxes),
-                                   return_exceptions=True)
+    results = await asyncio.gather(*(terminate(RecordedSandbox(sandbox_id, sandbox_type, "env"))
+                                     for sandbox_id, sandbox_type in sandboxes), return_exceptions=True)
     for (sandbox_id, _), result in zip(sandboxes, results):
         if isinstance(result, BaseException):
             logger.warning(f"env '{deployed.env_id}': terminate {sandbox_id} failed: {result!r}")

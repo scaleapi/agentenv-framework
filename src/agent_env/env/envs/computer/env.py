@@ -25,6 +25,7 @@ from agent_env.env.envs.computer import params as computer_params
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import get_env_store
+from agent_env.task_step.task_steps.computer_recording import end_open_recordings
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -169,6 +170,10 @@ class ComputerEnv(Env):
         return env
 
     async def close(self, context: Optional[TaskStepContext] = None) -> None:
+        """End the env's recordings still open in the run's ``context``, so their segments reach the store, then tear
+        the computer down."""
+        if context is not None:
+            await end_open_recordings(context, [self.id])
         await close_replaced(self)
         if self._env_provider is not None:
             try:

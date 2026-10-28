@@ -1,10 +1,8 @@
 """start_computer_recording and end_computer_recording against a deployed env standing in for a driver: the grant
 it's handed, the artifact its uploaded segments and manifest become, what's registered when the driver forgot the
-recording, teardown ending what a run left open, and a reset leaving it going."""
+recording, ending what a run left open (as a computer env's close does at teardown), and a reset leaving it going."""
 
 from __future__ import annotations
-
-import asyncio
 
 import pytest
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
@@ -12,7 +10,6 @@ from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agent_env.artifact import Artifact
 from agent_env.config import set_object_store
 from agent_env.store.base import GrantUnavailableError
-from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import computer_recording as recording_steps
 from agent_env.task_step.task_steps.computer_recording import (
@@ -21,7 +18,6 @@ from agent_env.task_step.task_steps.computer_recording import (
     StartComputerRecordingTaskStep,
 )
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
-from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 from tst.util.granting_object_store import GrantingObjectStore
 
 _CARD = {"name": "desktop", "capabilities": {"extensions": [{"uri": COMPUTER_RECORDING, "params": {
@@ -31,13 +27,12 @@ _CARD = {"name": "desktop", "capabilities": {"extensions": [{"uri": COMPUTER_REC
 
 class _Computer:
     """A deployed env whose driver records: each end uploads one segment per started recording under its grant,
-    or leaves the last one out when ``drop_last``; it ``forgets`` the recording, ``garbles`` its manifest, or
-    ``hangs`` at end."""
+    or leaves the last one out when ``drop_last``; it ``forgets`` the recording or ``garbles`` its manifest."""
 
     def __init__(self, store, env_id: str = "desktop", forgets: bool = False, garbles: bool = False,
-                 hangs: bool = False, drop_last: bool = False) -> None:
+                 drop_last: bool = False) -> None:
         self.env_id, self.environment_card, self.sandbox_type = env_id, _CARD, "local"
-        self.store, self.forgets, self.garbles, self.hangs, self.drop_last = store, forgets, garbles, hangs, drop_last
+        self.store, self.forgets, self.garbles, self.drop_last = store, forgets, garbles, drop_last
         self.calls: list[tuple[str, dict]] = []
         self.started: set[str] = set()
 
@@ -53,8 +48,6 @@ class _Computer:
             raise RuntimeError("400 invalid_argument: there is no recording 'rec-1' on this computer")
         if self.garbles:
             return {"recording_id": "rec-1", "segments": "all of them"}
-        if self.hangs:
-            await asyncio.sleep(3600)
         segments = [{"index": 0, "path": "rec-1/0000.mp4", "uploaded": True},
                     {"index": 1, "path": "rec-1/0001.mp4", "uploaded": not self.drop_last}]
         if not self.drop_last:
@@ -154,7 +147,7 @@ async def test_a_fatal_end_raises_when_the_recording_couldnt_be_registered(store
 
 
 @pytest.mark.asyncio
-async def test_a_reset_leaves_a_recording_going_and_teardown_ends_what_a_run_left_open(store):
+async def test_a_reset_leaves_a_recording_going_and_ending_what_a_run_left_open_ends_it(store):
     desktop, other = _Computer(store), _Computer(store, env_id="other")
     context = _context(desktop, other)
     context = await _start("a").execute(context)
@@ -162,25 +155,18 @@ async def test_a_reset_leaves_a_recording_going_and_teardown_ends_what_a_run_lef
     await ResetEnvTaskStep(id="reset", version=None, env_id="other").execute(context)
     recordings = context.metadata[RECORDINGS_KEY]
     assert recordings["b"]["state"] == "open" and [method for method, _ in other.calls] == ["start"]
-    await teardown_run(context)
+    await recording_steps.end_open_recordings(context)
     assert (recordings["a"]["ended_by"], recordings["b"]["ended_by"]) == ("teardown", "teardown")
     assert [method for method, _ in desktop.calls] == ["start", "end"]
 
 
 @pytest.mark.asyncio
-async def test_teardown_goes_on_when_a_recording_wont_end_in_time(store):
-    context = await _start().execute(_context(_Computer(store, hangs=True)))
-    report = await teardown_run(context, timeout=0.2)
-    assert context.metadata[RECORDINGS_KEY]["desk"]["state"] == "open" and not report.left
-
-
-@pytest.mark.asyncio
-async def test_a_teardown_sandboxes_step_ends_the_recordings_of_its_envs_only(store):
+async def test_ending_one_envs_open_recordings_leaves_the_others(store):
     desktop, other = _Computer(store), _Computer(store, env_id="other")
     context = _context(desktop, other)
     context = await _start("a").execute(context)
     context = await _start("b", env_id="other").execute(context)
-    await TeardownSandboxesTaskStep(id="down", version=None, env_ids=["desktop"]).execute(context)
+    await recording_steps.end_open_recordings(context, ["desktop"])
     recordings = context.metadata[RECORDINGS_KEY]
     assert (recordings["a"]["state"], recordings["b"]["state"]) == ("ended", "open")
 
@@ -248,14 +234,14 @@ async def test_a_start_reusing_an_open_recordings_name_is_refused_and_leaves_it_
 
 
 @pytest.mark.asyncio
-async def test_teardown_goes_on_when_a_forgotten_recordings_namespace_cant_be_listed(store, monkeypatch):
+async def test_a_forgotten_recording_whose_namespace_cant_be_listed_is_marked_failed(store, monkeypatch):
     context = await _start().execute(_context(_Computer(store, forgets=True)))
 
     def unlisted(prefix):
         raise ConnectionError("the object store is down")
 
     monkeypatch.setattr(store, "list_at", unlisted)
-    await teardown_run(context)
+    await recording_steps.end_open_recordings(context)
     entry = context.metadata[RECORDINGS_KEY]["desk"]
     assert entry["state"] == "failed" and "then ConnectionError: the object store is down" in entry["error"]
 

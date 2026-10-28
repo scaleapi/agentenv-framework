@@ -27,6 +27,7 @@ from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env import env as env_module
 from agent_env.env.envs.computer import boot, composer
+from agent_env.env.envs.computer import env as computer_env_module
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
@@ -36,6 +37,8 @@ from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.providers.sandbox_providers import local_sandbox
 from agent_env.store.base import NotFoundError
+from agent_env.task import teardown
+from agent_env.task_step.context import TaskStepContext
 from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
@@ -662,6 +665,28 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
         "form": "container", "arch": "arm64", "provider": "LocalSandboxProvider", "display": "1600x900",
         "settings": {"resolution": "1600x900", "timezone": "Asia/Tokyo"}}
     assert record["computer"]["id"] == f"{env.id}__computer" and record["env_params"]["spaces"]["default_space"] == "norm"
+
+
+@pytest.mark.asyncio
+async def test_teardown_closes_a_computer_env_ending_its_open_recordings_before_its_computer_goes(
+        base, driver, docker, boots, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    deployed = await Env.get(env.id).deploy()
+    (sandbox,) = boots.sandboxes
+    ended = []
+
+    async def end_open_recordings(context, env_ids):
+        ended.append((context, env_ids, sandbox.terminated))
+
+    monkeypatch.setattr(computer_env_module, "end_open_recordings", end_open_recordings)
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(teardown, "terminate", AsyncMock(return_value=False))
+    context = TaskStepContext(deployed_envs=[deployed])
+
+    report = await teardown.teardown_run(context)
+
+    assert ended == [(context, [env.id], False)] and sandbox.terminated
+    assert [s.sandbox_id for s in report.terminated] == ["local-1"] and not report.failed
 
 
 @pytest.mark.asyncio

@@ -18,10 +18,8 @@ from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProv
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
 from agent_env.task import teardown
 from agent_env.task.task import _rolled_back_sandboxes
-from agent_env.task.teardown import RecordedSandbox, TeardownReport, recorded_sandboxes, teardown_run
+from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport, recorded_sandboxes, teardown_run
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
-from agent_env.task_step.task_steps import teardown_sandboxes
-from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY
 
 
 class _FakeSandbox:
@@ -66,10 +64,9 @@ class _Log(list):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("step_entry", [False, True])
 @pytest.mark.parametrize("failure", [False, True])
 @pytest.mark.parametrize("close_failure", [False, True, "stall"])
-async def test_owned_teardown_provider_is_closed(monkeypatch, step_entry, failure, close_failure):
+async def test_owned_teardown_provider_is_closed(monkeypatch, failure, close_failure):
     provider = MagicMock(ON_THIS_MACHINE=False)
     provider.terminate_sandbox = AsyncMock(side_effect=RuntimeError("denied") if failure else None)
     async def stalled_close():
@@ -77,11 +74,9 @@ async def test_owned_teardown_provider_is_closed(monkeypatch, step_entry, failur
 
     provider.close = AsyncMock(side_effect=(stalled_close if close_failure == "stall" else
                                RuntimeError("client close failed") if close_failure else None))
-    module = teardown_sandboxes if step_entry else teardown
-    monkeypatch.setattr(module, "build_sandbox_provider", lambda _: provider)
-    monkeypatch.setattr(module, "PROVIDER_CLOSE_TIMEOUT_SECONDS", 0.01, raising=False)
-    operation = (module._terminate("box", "vercel", "env") if step_entry else
-                 module._terminate(RecordedSandbox("box", "vercel", "env")))
+    monkeypatch.setattr(teardown, "build_sandbox_provider", lambda _: provider)
+    monkeypatch.setattr(teardown, "PROVIDER_CLOSE_TIMEOUT_SECONDS", 0.01)
+    operation = teardown.terminate(RecordedSandbox("box", "vercel", "env"))
     if failure:
         with pytest.raises(RuntimeError, match="denied"):
             await asyncio.wait_for(operation, 0.5)
@@ -100,7 +95,6 @@ def terminated(monkeypatch):
         return _FakeProvider(name, log)
 
     monkeypatch.setattr(teardown, "build_sandbox_provider", build)
-    monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", build)
     monkeypatch.setattr(teardown, "_DEFAULT_PROVIDERS", {
         slot: (lambda slot=slot: _FakeProvider(f"default-{slot}", log)) for slot in ("agent", "env", "sandbox")
     })
@@ -169,6 +163,51 @@ def test_a_sandbox_a_step_already_tore_down_is_not_terminated_again(terminated):
 
     assert sorted(sandbox_id for _, sandbox_id in terminated) == ["sb-box", "sb-solver"]
     assert len(report.terminated) == 2
+
+
+class _Shop:
+    pass
+
+
+@pytest.mark.parametrize("close, logged", [
+    ("closes", None),
+    ("raises", "env shop wasn't closed (RuntimeError: its recording didn't end); its sandboxes are terminated by id"),
+    ("hangs", "env shop wasn't closed (timed out after 0.05s)"),
+    ("can't", None),
+])
+def test_each_env_still_up_is_closed_with_the_runs_context_first_and_its_sandboxes_still_go_by_id(
+        terminated, monkeypatch, caplog, close, logged):
+    closed = []
+
+    async def close_deployed(deployed, env_class, context):
+        closed.append((deployed.env_id, env_class, context, list(terminated)))
+        if close == "raises":
+            raise RuntimeError("its recording didn't end")
+        if close == "hangs":
+            await asyncio.Event().wait()
+        if close == "can't":
+            raise NotImplementedError
+
+    monkeypatch.setattr(teardown, "close_deployed", close_deployed)
+    monkeypatch.setattr(teardown.Env, "get", lambda env_id, version: _Shop())
+    context = _context()
+
+    report = _run(context, timeout=0.05)
+
+    assert closed == [("shop", _Shop, context, [])]
+    assert {sandbox.sandbox_id for sandbox in report.terminated} == {"sb-box", "sb-db", "sb-gw", "sb-solver", "sb-vm"}
+    assert (logged in caplog.text) if logged else "wasn't closed" not in caplog.text
+
+
+def test_an_env_a_step_already_tore_down_is_not_closed_again(terminated, monkeypatch):
+    close_deployed = AsyncMock()
+    monkeypatch.setattr(teardown, "close_deployed", close_deployed)
+    context = _context()
+    context.metadata[TORN_DOWN_KEY] = ["sb-gw", "sb-db", "sb-vm"]
+
+    _run(context)
+
+    close_deployed.assert_not_awaited()
 
 
 @pytest.mark.parametrize("behavior, why", [

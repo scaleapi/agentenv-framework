@@ -28,6 +28,7 @@ _EXTENSION_CALL_TIMEOUT_S = 30
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.entity.export import ExportContext
+    from agent_env.task_step.context import TaskStepContext
     from .store import EnvQuery
 
 
@@ -369,6 +370,11 @@ class Env(ABC):
         An override takes ``deployed: DeployedEnv`` and narrows it with ``isinstance``.
         """
         raise NotImplementedError(f"{cls.__name__} cannot be rebuilt from a deployment")
+
+    async def close(self, context: Optional[TaskStepContext] = None) -> None:
+        """Release what deploy() made. Teardown calls it on each env a run deployed, with the run's ``context`` for a type
+        that saves part of it first, then terminates what's left by sandbox id; a type that can't close raises this."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement close()")
 
     async def reset(self, deployed: "DeployedEnv") -> None:
         """Return an already-deployed env to a clean between-tasks state.

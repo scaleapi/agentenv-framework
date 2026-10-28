@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv, LoadEnvironmentUniverseArtifactResult, LoadFileArtifactUniverseResult
     from agent_env.providers.env_state import DatabaseStateProvider
+    from agent_env.task_step.context import TaskStepContext
 
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
@@ -786,7 +787,7 @@ COMPOSE_EOF'''
         # (the final task step), so it persists wherever the Task runs — not only via this method.
         return context.instance_id
 
-    async def close(self) -> None:
+    async def close(self, context: Optional[TaskStepContext] = None) -> None:
         await close_replaced(self)
         if self._env_provider is not None:
             try:
