@@ -39,6 +39,7 @@ IMAGES = {
     "agentenv-openhands": "src/agent_env/agents/agents/openhands/Dockerfile",
     "agentenv-pi": "src/agent_env/agents/agents/pi/Dockerfile",
     "agentenv-proxy": "src/agent_env/agents/agents/proxy/Dockerfile",
+    "agentenv-pydantic-ai": "src/agent_env/agents/agents/pydantic-ai/Dockerfile",
     "agentenv-mail-mcp": "src/agent_env/examples/mail-mcp/envs/mail/Dockerfile",
     "agentenv-ubuntu-24.04": "src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile",
 }
@@ -59,8 +60,9 @@ _RETRY_WAITS_SECONDS = (30, 60, 120)
 
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, the sidecars and the
 # browser answer their own commands, Claude Code's, Codex's, Gemini's, OpenCode's and pi's agents run their CLIs and
-# import their servers, OpenHands' imports its server, which loads the OpenHands SDK, the proxy imports its server, the
-# mail example's env imports its server, and the base computer's desktop comes up, every program running.
+# import their servers, OpenHands' imports its server, which loads the OpenHands SDK, Pydantic AI's imports its
+# server, which loads Pydantic AI, the proxy imports its server, the mail example's env imports its server, and the
+# base computer's desktop comes up, every program running.
 _SMOKES = {
     "agentenv-gateway": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import gateway.entrypoint"],
     "agentenv-db-web": ["docker", "run", "--rm", "--entrypoint", "/usr/bin/pgweb", "{image}", "--version"],
@@ -82,6 +84,7 @@ _SMOKES = {
     "agentenv-pi": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                     'pi --version && python3 -c "import a2a_server"'],
     "agentenv-proxy": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c", 'python -c "import a2a_server"'],
+    "agentenv-pydantic-ai": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c", 'python -c "import a2a_server"'],
     "agentenv-mail-mcp": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import server"],
     "agentenv-ubuntu-24.04": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                               "start-desktop init & for _ in $(seq 60); do sleep 1;"

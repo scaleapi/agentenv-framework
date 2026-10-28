@@ -90,7 +90,7 @@ the previous release, so a clear pull request title is also the release note. A 
 
 A release also publishes the infra images agent-env ships, once the `PUBLISH_INFRA_IMAGES` repository variable is
 `true`: one per Dockerfile under `src/agent_env/env`, and one per shipped agent (`agentenv-claude-code`, its CLI
-included, `agentenv-codex`, `agentenv-gemini`, `agentenv-opencode`, `agentenv-pi` and `agentenv-openhands`), at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
+included, `agentenv-codex`, `agentenv-gemini`, `agentenv-opencode`, `agentenv-pi`, `agentenv-openhands` and `agentenv-pydantic-ai`), at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
 and linux/arm64, where the tag is the build context's source digest, so an unchanged Dockerfile is not built again.
 The agents' images install the newest `agentenv-framework-protocol` at or above the floor in their
 `requirements.txt`, which a release doesn't pin, so each is built again only when its folder changes: once the protocol

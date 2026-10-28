@@ -79,10 +79,20 @@ calls the `[model]` endpoint through LiteLLM and takes its model from the prompt
 `[model] default` (or the `agent` role) set. It declares `install/v1` too, for Debian or Ubuntu targets. Its folder's
 `README.md` covers the extensions it implements.
 
-A release publishes Codex's, Gemini's, OpenCode's, pi's and OpenHands' images too, at
+`agents/pydantic-ai/` runs a [Pydantic AI](https://ai.pydantic.dev) agent with the
+[Pydantic AI Harness](https://pydantic.dev/docs/ai/harness/) `Coder` tools (shell, file tools, sub-agents) behind the
+protocol's A2A agent framework, in process rather than a CLI: each turn is one run of the agent continuing the
+context's persisted message history, the task env's MCP servers are its toolsets, and its messages are the turn's
+trajectory. Name it as `pydantic-ai`, its alias, or by its id, `@local/agentenv-framework/agents/pydantic-ai`. It calls
+the `[model]` endpoint as an OpenAI-compatible one, `<base>/chat/completions`, and takes its model from the prompt, so
+its smoke task needs `[model] default` (or the `agent` role) set; a `vllm:` prefix, as in `vllm:qwen3.8-27b`, fits its
+requests to the model's family as a vLLM server needs. It declares `install/v1` too, for Debian or Ubuntu targets. Its
+folder's `README.md` covers the extensions it implements.
+
+A release publishes Codex's, Gemini's, OpenCode's, pi's, OpenHands' and Pydantic AI's images too, at
 `ghcr.io/scaleapi/agentenv-codex:src-<hex>`, `ghcr.io/scaleapi/agentenv-gemini:src-<hex>`,
-`ghcr.io/scaleapi/agentenv-opencode:src-<hex>`, `ghcr.io/scaleapi/agentenv-pi:src-<hex>` and
-`ghcr.io/scaleapi/agentenv-openhands:src-<hex>`, each built again only when its folder changes, and a run deploys
+`ghcr.io/scaleapi/agentenv-opencode:src-<hex>`, `ghcr.io/scaleapi/agentenv-pi:src-<hex>`,
+`ghcr.io/scaleapi/agentenv-openhands:src-<hex>` and `ghcr.io/scaleapi/agentenv-pydantic-ai:src-<hex>`, each built again only when its folder changes, and a run deploys
 them as it does Claude Code's: it pulls the image
 published for the sources installed, by its digest, and builds it from the agent's folder only when it can't.
 
@@ -98,4 +108,4 @@ others'. It has no alias and no smoke task: with nobody driving it, a prompt onl
 
 `agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs
 Claude Code's alone, `--task codex-smoke` Codex's, `--task gemini-smoke` Gemini's, `--task opencode-smoke` OpenCode's,
-`--task pi-smoke` pi's, `--task openhands-smoke` OpenHands'. 
+`--task pi-smoke` pi's, `--task openhands-smoke` OpenHands', `--task pydantic-ai-smoke` Pydantic AI's.

@@ -13,7 +13,8 @@ import agent_env
 AGENTS = Path(agent_env.__file__).parent / "agents" / "agents"
 
 
-@pytest.mark.parametrize("agent, variable", [("pi", "PI_A2A_WORKSPACE"), ("openhands", "OPENHANDS_A2A_WORKSPACE")])
+@pytest.mark.parametrize("agent, variable", [
+    ("pi", "PI_A2A_WORKSPACE"), ("openhands", "OPENHANDS_A2A_WORKSPACE"), ("pydantic-ai", "PYDANTIC_AI_A2A_WORKSPACE")])
 def test_an_installed_agent_works_in_the_directory_it_is_started_in_unless_that_is_the_root(tmp_path, agent, variable):
     here = tmp_path / f"{agent}-a2a"
     here.mkdir()
