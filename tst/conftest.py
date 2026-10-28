@@ -10,6 +10,7 @@ import pytest
 
 from agent_env.config import reset_config
 from agent_env.store.document_store import document_store as document_store_module
+from agent_env.store.object_store.local import grant_server as grant_server_module
 from agent_env.store.routing import disable_namespace_routing
 from tst.util import shards
 
@@ -107,8 +108,12 @@ def fresh_config_document():
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_config():
-    """Per-module store-singleton sweep; the config itself is reset per test above."""
+    """Per-module store-singleton sweep; the config itself is reset per test above. The grant servers close too:
+    one a module started under its own state root presents that root's CA, which the next module's containers
+    don't trust, and the next grant starts a server afresh."""
     _reset_store_singletons()
     yield
     reset_config()
     _reset_store_singletons()
+    for server in list(grant_server_module._servers.values()):
+        server.close()
