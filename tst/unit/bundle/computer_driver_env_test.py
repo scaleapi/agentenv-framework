@@ -178,11 +178,11 @@ def test_a_driver_whose_class_takes_too_long_to_read_is_refused(bundle_dir, monk
 
 
 @pytest.mark.asyncio
-async def test_a_driver_env_doesnt_deploy_until_there_is_a_computer_to_deploy_it_in(bundle_dir):
+async def test_a_driver_env_deploys_only_inside_a_computer_env(bundle_dir):
     _bundle(bundle_dir)
     _run(bundle_dir)
 
-    with pytest.raises(NotImplementedError, match="deploys inside a computer, and agent-env can't create a computer"):
+    with pytest.raises(NotImplementedError, match="deploys inside a computer, never on its own"):
         await Env.get(f"{ROOT}/desk").deploy()
 
 

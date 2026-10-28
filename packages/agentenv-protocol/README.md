@@ -403,6 +403,11 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   (`stale_frame`) when the display geometry it was captured at changes.
 - **The input queue.** Input calls run one at a time in arrival order; one that waits past
   `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue.
+- **The computer skill.** `computer/v1`, whose params are the driver's features, serves `skill
+  {name}`: a SKILL.md for agents under that name, written from the computer as it booted (its
+  platform, session user and home, the live screen size, what its input takes, its OS's shortcuts)
+  and ending with the driver class's `notes`, markdown for what its card can't say. It answers in
+  the shape `skill-config/v1` takes: `{name, description, skill_md}`.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
   capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
   pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool

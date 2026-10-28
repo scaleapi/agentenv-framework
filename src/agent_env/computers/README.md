@@ -21,7 +21,8 @@ with `startsecs=0`, so X dying however often never leaves it `FATAL`, as the XFC
 
 A computer env composes a driver onto it at put: an `envs/<name>/env.toml` of `type = "computer"` names
 `computer = "ubuntu-24.04"` and `driver = "reference"`, and its put builds an image of the two for each arch this
-machine's Docker can build.
+machine's Docker can build, then boots the one this machine runs natively and probes it. The shipped `desktop` example
+is that env, and `agent-env run desktop` deploys it.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

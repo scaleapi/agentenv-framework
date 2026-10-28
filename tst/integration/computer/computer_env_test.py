@@ -1,11 +1,11 @@
-"""A computer env composed on this machine: a bundle's env naming the shipped ubuntu-24.04 and reference by alias builds
-an image for each arch this machine's Docker can build, pushed to the local registry and written as the env's computer,
-and gate 3 makes the image of this machine's arch ready; that image boots with everything running as the session user
-and passes the conformance probe at full three times in a row; and another env that changes only what doesn't change
-the image reuses it. Needs Docker and the local registry on localhost:5000."""
+"""The shipped desktop example's computer env, composed on this machine: naming ubuntu-24.04 and reference by alias, it
+builds an image for each arch this machine's Docker can build, pushed to the local registry and written as the env's
+computer, and gate 3 makes the image of this machine's arch ready; that image boots with everything running as the
+session user and passes the conformance probe at full three times in a row; another env that changes only what doesn't
+change the image reuses it; and one with no network, deployed, is reached but reaches nothing, comes back from a reset
+fresh, and leaves nothing once torn down. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
-import json
 import platform
 import subprocess
 import time
@@ -18,59 +18,29 @@ from agentenv_protocol.computer.conformance import run_probe
 from agentenv_protocol.computer.conformance.client import Driver
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
-from agent_env.artifact.store import reset_artifact_store
-from agent_env.bundle import parse_bundle
-from agent_env.bundle.installed import installed_bundles
-from agent_env.bundle.materialize import materialize
-from agent_env.bundle.plan import plan_bundle
-from agent_env.bundle.resolve import BuiltImage, resolve_bundle
-from agent_env.config import configure, reset_config
 from agent_env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.store.routing import namespace_routing
+from agent_env.task.teardown import teardown_run
+from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.computer.conftest import docker
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 PORT = 18765
-DESKTOP = 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n'
 
 
-@pytest.fixture(scope="module")
-def composed(tmp_path_factory):
-    """The bundle's computer env, composed once for the module's tests, in stores of the module's own."""
-    root = tmp_path_factory.mktemp("composed")
-    patch = pytest.MonkeyPatch()
-    patch.chdir(root)
-    patch.setenv("XDG_STATE_HOME", str(root / "state"))
-    patch.setenv("AGENT_ENV_DOCUMENT_STORE", "local")
-    patch.setenv("AGENT_ENV_OBJECT_STORE", "local")
-    configure()
-    reset_artifact_store()
-    bundle = root / "desk"
-    for path, text in {"envs/desktop/env.toml": DESKTOP, "artifacts/notes/notes.txt": "a note\n", "tasks/t.json": json.dumps(
-            [{"id": "load", "type": "load_artifact", "env_id": "desktop", "artifact_id": "notes"}])}.items():
-        (bundle / path).parent.mkdir(parents=True, exist_ok=True)
-        (bundle / path).write_text(text)
+def test_each_arch_this_machine_builds_is_composed_pushed_and_written_as_the_envs_computer(desktop):
+    results = desktop.metadata["composed"]["container"]
     with namespace_routing():
-        plan = plan_bundle(resolve_bundle(parse_bundle(bundle)), installed=installed_bundles)
-        done = materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)))
-        env = next(Env.get(item.write.id) for item in done.writes if item.write.id.endswith("/desktop"))
-        yield env
-    reset_artifact_store()
-    reset_config()
-    patch.undo()
-
-
-def test_each_arch_this_machine_builds_is_composed_pushed_and_written_as_the_envs_computer(composed):
-    results = composed.metadata["composed"]["container"]
-    with namespace_routing():
-        computer = ComputerArtifact.get(composed.metadata["computer"]["id"], composed.metadata["computer"]["version"])
+        computer = ComputerArtifact.get(desktop.metadata["computer"]["id"], desktop.metadata["computer"]["version"])
 
     assert results[ARCH]["status"] == "ready" and results[ARCH]["emulated"] is False
     assert results[ARCH]["probe"]["passed"] and results[ARCH]["probe"]["level"] == "full"
-    assert results[ARCH]["card"]["name"] == composed.environment_name
+    assert results[ARCH]["card"]["name"] == desktop.environment_name
     assert {"mss", "python-xlib", "av", "agentenv-framework-protocol"} <= set(results[ARCH]["installed"])
     for arch, result in results.items():
         if arch != ARCH:
@@ -83,8 +53,8 @@ def test_each_arch_this_machine_builds_is_composed_pushed_and_written_as_the_env
 
 
 @pytest.mark.asyncio
-async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_passes_the_probe_at_full(composed):
-    image = composed.metadata["composed"]["container"][ARCH]["image"]
+async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_passes_the_probe_at_full(desktop):
+    image = desktop.metadata["composed"]["container"][ARCH]["image"]
     name = f"agentenv-test-computer-{uuid.uuid4().hex[:8]}"
     docker("run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}", image)
     try:
@@ -99,19 +69,46 @@ async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_pas
     assert users == {"user"}
 
 
-def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(composed):
+def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(desktop):
     with namespace_routing():
         started = time.monotonic()
-        other = ComputerEnv.put(id=f"{composed.id}-other", computer=composed.computer, driver=composed.driver,
+        other = ComputerEnv.put(id=f"{desktop.id}-other", computer=desktop.computer, driver=desktop.driver,
                                 environment_name="other", display={"width": 1024, "height": 768})
         took = time.monotonic() - started
         results = Env.get(other.id).metadata["composed"]["container"]
-    first = composed.metadata["composed"]["container"]
+    first = desktop.metadata["composed"]["container"]
 
     assert results[ARCH]["reused"] is True and results[ARCH]["image"] == first[ARCH]["image"]
     assert results[ARCH]["status"] == "ready" and results[ARCH]["card"]["name"] == "other"
     assert results[ARCH]["installed"] == first[ARCH]["installed"] and results[ARCH]["emulated"] is False
     assert took < 60, took
+
+
+@pytest.mark.asyncio
+async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_and_leaves_nothing(desktop):
+    with namespace_routing():
+        closed = ComputerEnv.put(id=f"{desktop.id}-closed", computer=desktop.computer, driver=desktop.driver,
+                                 environment_name="closed", network={"mode": "allowlist"})
+        deployed = await Env.get(closed.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            driver = await Driver.connect(deployed.environment_url, 30)
+            egress = await driver.run("python3", "-c", "import urllib.request; urllib.request.urlopen('http://1.1.1.1', timeout=5)")
+            await driver.run("sh", "-c", "echo x > Desktop/left.txt")
+            await ResetEnvTaskStep(id="reset", version=None, env_id=closed.id, fail_task_on_error=True).execute(context)
+            left = await (await Driver.connect(deployed.environment_url, 30)).run("test", "-e", "Desktop/left.txt")
+        finally:
+            report = await teardown_run(context)
+    sandbox = deployed.sandbox_id
+
+    assert egress["exit_code"] != 0 and "Network is unreachable" in egress["stderr"], egress
+    assert left["exit_code"] != 0
+    assert [s.sandbox_id for s in report.terminated] == [sandbox] and not report.failed
+    for listing in (["ps", "-aq", "--filter", f"label=agentenv.sandbox={sandbox}"],
+                    ["ps", "-aq", "--filter", f"name=agent-{sandbox}"],
+                    ["network", "ls", "-q", "--filter", f"label=agentenv.sandbox={sandbox}"]):
+        assert not docker(*listing).stdout.strip(), listing
+    assert LocalSandbox.find_work_dir(sandbox) is None
 
 
 async def _ready(name: str) -> str:

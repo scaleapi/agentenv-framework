@@ -1,13 +1,16 @@
-"""computer-recording/v1 on the scaffold's desktop when things go wrong: the X server killed mid-recording, segments
-rolling over, the disk filling up, clicks while it records at 30 fps, and the driver restarted. Each test runs the
-scaffold's image in a container of its own, so it can kill, fill and restart it, and decodes every segment it reads
-back. Needs a Docker daemon."""
+"""computer-recording/v1 on the shipped desktop example's computer when things go wrong: the X server killed
+mid-recording, segments rolling over, the disk filling up, clicks on the conformance fixture while it records at 30 fps,
+and the driver restarted. Each test runs the computer's composed image in a container of its own, so it can kill, fill
+and restart it, and decodes every segment it reads back. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import json
+import platform
 import subprocess
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
+from importlib import resources
 from pathlib import Path
 
 import av
@@ -18,7 +21,6 @@ from agentenv_protocol.computer import COMPUTER_READY, COMPUTER_RECORDING, Recor
 from agentenv_protocol.computer.conformance.client import Driver
 from agentenv_protocol.computer.recording import DISK_CHECK_S, RECORDINGS_DIR
 from tst.integration.computer.conftest import docker
-from tst.integration.computer.scaffold_test import _scaffold, _when
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -28,13 +30,13 @@ SEGMENT_S = Recording().max_segment_s
 FPS = 10
 
 
+ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
+FIXTURE = resources.files("agentenv_protocol.computer.conformance").joinpath("fixture.py").read_bytes()
+
+
 @pytest.fixture(scope="module")
-def image(tmp_path_factory, base):
-    tag = f"agentenv-test-recording-desk:{uuid.uuid4().hex[:8]}"
-    scaffold = _scaffold(tmp_path_factory.mktemp("desk") / "scaffold", base)
-    docker("build", "-q", "-t", tag, str(scaffold / "envs" / "desktop"))
-    yield tag
-    subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
+def image(desktop):
+    return desktop.metadata["composed"]["container"][ARCH]["image"]
 
 
 @pytest.mark.asyncio
@@ -136,6 +138,9 @@ async def _ready(name: str) -> Driver:
 
 
 async def _layout(driver: Driver) -> dict:
+    """The Fixture Desk, started through data/add and computer-exec as the probe starts it, once it wrote its layout."""
+    await driver.add_file("desk/fixture.py", FIXTURE)
+    await driver.run("sh", "-c", "python3 desk/fixture.py fixture > desk/fixture.log 2>&1 &")
     for _ in range(120):
         out = await driver.run("cat", "fixture/layout.json")
         if out["exit_code"] == 0 and out["stdout"].strip():
@@ -162,6 +167,10 @@ def _decoded(name: str, manifest: RecordingManifest, tmp: Path) -> list[int]:
         with av.open(str(local)) as video:
             counts.append(sum(1 for _ in video.decode(video=0)))
     return counts
+
+
+def _when(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
 def _gaps(manifest: RecordingManifest) -> list[float]:

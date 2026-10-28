@@ -91,9 +91,8 @@ class ComputerDriverEnv(Env):
         return fields
 
     async def deploy(self, **kwargs) -> DeployedEnv:
-        raise NotImplementedError(f"{self.id} is a computer_driver env, which deploys inside a computer, and "
-                                  "agent-env can't create a computer yet; serve the driver from an image of its own "
-                                  "as an mcp_server env meanwhile")
+        raise NotImplementedError(f"{self.id} is a computer_driver env, which deploys inside a computer, never on its "
+                                  "own: name it as a computer env's driver and deploy that")
 
 
 def _missing(os_type: str, install: Install, files: dict) -> list[str]:
