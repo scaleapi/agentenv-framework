@@ -272,20 +272,13 @@ class _Resolver:
     # Parts of a config
 
     def _toml_class(self, entry: BundleEntry) -> type:
-        group = None
-        if entry.kind is BundleKind.ENV:
-            if entry.type in _INFRA_ENVS:
-                self._problem(entry, f"a {entry.type} env isn't written from a bundle: config names the one every "
-                              f"deploy uses ({_INFRA_ENVS[entry.type]}), and a run builds it when it's missing")
-                raise _Skip
-            cls, group = get_env_registry().get(entry.type), _registration.ENVS
-        elif entry.kind is BundleKind.AGENT:
-            cls = A2AAgent if entry.type == A2AAgent.type else None
-        elif entry.kind is BundleKind.EVAL:
-            cls = Eval if entry.type == Eval.type else None
-        else:
-            cls, group = get_artifact_registry().get(canonical_type(entry.type)), _registration.ARTIFACTS
-        if cls is None:
+        if entry.kind is BundleKind.ENV and entry.type in _INFRA_ENVS:
+            self._problem(entry, f"a {entry.type} env isn't written from a bundle: config names the one every "
+                          f"deploy uses ({_INFRA_ENVS[entry.type]}), and a run builds it when it's missing")
+            raise _Skip
+        if (cls := entity_class(entry)) is None:
+            group = {BundleKind.ENV: _registration.ENVS, BundleKind.AGENT: None, BundleKind.EVAL: None}.get(
+                entry.kind, _registration.ARTIFACTS)
             name = canonical_type(entry.type) if group == _registration.ARTIFACTS else entry.type
             note = _registration.failure_note(group, name) if group else ""
             self._problem(entry, f"{entry.type!r} is not a known {entry.kind.store} type{note}")
@@ -470,6 +463,18 @@ class _Resolver:
 
     def _problem(self, entry: BundleEntry, message: str) -> None:
         self.problems.append(f"{relative(self.bundle.root, entry.path)}: {message}")
+
+
+def entity_class(entry: BundleEntry) -> type | None:
+    """The class that writes ``entry``: its env type's, its artifact type's, the agent's or the eval's; None for a type
+    nothing registers."""
+    if entry.kind is BundleKind.ENV:
+        return get_env_registry().get(entry.type)
+    if entry.kind is BundleKind.AGENT:
+        return A2AAgent if entry.type == A2AAgent.type else None
+    if entry.kind is BundleKind.EVAL:
+        return Eval if entry.type == Eval.type else None
+    return get_artifact_registry().get(canonical_type(entry.type))
 
 
 def _registry_problem(key: str, name: Any) -> str | None:

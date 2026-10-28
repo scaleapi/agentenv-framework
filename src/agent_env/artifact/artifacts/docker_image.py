@@ -132,7 +132,7 @@ class DockerImageArtifact(Artifact):
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
         image_store.ensure_repository(repository)
-        _push_local_image(image_name, image_ref, image_store)
+        push_local_image(image_name, image_ref, image_store)
         platform = normalize_platform(platform) if platform else _image_platform(image_ref)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
@@ -584,20 +584,13 @@ def push_context_image(id: str, context_path: str, dockerfile_path: str,
         before()
     local = f"{local_image_repository(id)}:{tag}"
     build_image(Path(context_path) / context.dockerfile, Path(context_path), local, platform=DEFAULT_BUILD_PLATFORM)
-    _push_local_image(local, ref, store)
+    push_local_image(local, ref, store)
     return ref, pin_digest(ref, store.auth(ref)).rpartition("@")[2]
 
 
-def _push_local_image(local_tag: str, image_ref: str, image_store) -> None:
-    auth = image_store.auth(image_ref)
-    if auth is not None:
-        login = subprocess.run(
-            ["docker", "login", "--username", auth.username, "--password-stdin", auth.registry],
-            input=auth.password, text=True, capture_output=True,
-        )
-        if login.returncode != 0:
-            raise RuntimeError(f"docker login failed: {login.stderr}")
-
+def push_local_image(local_tag: str, image_ref: str, image_store) -> None:
+    """Push this machine's ``local_tag`` to ``image_ref`` in ``image_store``, signing in with its credentials first."""
+    docker_login(image_store.auth(image_ref))
     for cmd, label in [
         (["docker", "tag", local_tag, image_ref], "tag"),
         (["docker", "push", image_ref], "push"),
@@ -606,6 +599,16 @@ def _push_local_image(local_tag: str, image_ref: str, image_store) -> None:
         if result.returncode != 0:
             raise RuntimeError(f"docker {label} failed: {result.stderr}")
     logger.info(f"Pushed {local_tag} -> {image_ref}")
+
+
+def docker_login(auth) -> None:
+    """Sign this machine's Docker in to ``auth``'s registry, when there are credentials to sign in with."""
+    if auth is None:
+        return
+    login = subprocess.run(["docker", "login", "--username", auth.username, "--password-stdin", auth.registry],
+                           input=auth.password, text=True, capture_output=True)
+    if login.returncode != 0:
+        raise RuntimeError(f"docker login failed: {login.stderr}")
 
 
 def _parse_copy_sources(dockerfile_text: str, dockerfile_rel_path: str | None = None) -> list[str]:

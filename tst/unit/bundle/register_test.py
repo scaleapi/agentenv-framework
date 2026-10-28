@@ -405,7 +405,7 @@ def test_an_image_is_built_and_pushed_once_under_the_tag_of_its_sources(home, mo
     monkeypatch.setattr(docker_image_module, "pin_digest", pin)
     monkeypatch.setattr(docker_image_module, "build_image",
                         lambda dockerfile, context, tag, platform: built.append((tag, platform)))
-    monkeypatch.setattr(docker_image_module, "_push_local_image",
+    monkeypatch.setattr(docker_image_module, "push_local_image",
                         lambda local, ref, image_store: (pushed.append(ref), served.add(ref)))
     context = layout(home / "context", {"Dockerfile": "FROM python:3.12-slim\n"})
 

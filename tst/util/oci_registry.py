@@ -31,8 +31,9 @@ class Registry:
         self.blobs[digest] = data
         return digest
 
-    def image(self, *layers: bytes, arch: str = "amd64") -> str:
-        config = self.blob(json.dumps({"os": "linux", "architecture": arch}).encode())
+    def image(self, *layers: bytes, arch: str = "amd64", labels: dict | None = None) -> str:
+        config = self.blob(json.dumps({"os": "linux", "architecture": arch,
+                                       **({"config": {"Labels": labels}} if labels else {})}).encode())
         manifest = {"mediaType": MANIFEST, "config": {"digest": config},
                     "layers": [{"digest": self.blob(layer)} for layer in layers]}
         return self._manifest(manifest)

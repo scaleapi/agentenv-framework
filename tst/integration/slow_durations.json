@@ -35,6 +35,7 @@
   "tst/integration/cli/run_bundle_skills_test.py": 23.2,
   "tst/integration/cli/run_role_models_test.py": 36.8,
   "tst/integration/computer/base_computer_test.py": 75.1,
+  "tst/integration/computer/computer_env_test.py": 90.0,
   "tst/integration/computer/recording_chaos_test.py": 167.6,
   "tst/integration/computer/scaffold_test.py": 109.6,
   "tst/integration/env/env_test.py": 11.3,

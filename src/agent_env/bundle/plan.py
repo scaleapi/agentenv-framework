@@ -34,6 +34,7 @@ from agent_env.config import get_config
 from agent_env.entity.refs import EntityKind, RefRole, default_agent_refs, ref_sites
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
+from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
@@ -64,7 +65,8 @@ from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
-from .resolve import BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, resolve_bundle
+from .resolve import (BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, entity_class,
+                      resolve_bundle)
 
 if TYPE_CHECKING:
     from .installed import InstalledBundle
@@ -96,7 +98,7 @@ _ENVIRONMENT = EnvironmentArtifact.model_fields["type"].default
 _FOLDER_HOOKS = {"written_besides": Artifact, "seeded_environments": SeedsEnvironments}
 # The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
 # its env.toml and the ledger can list what it's made from.
-_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv, ComputerDriverEnv)
+_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv, ComputerDriverEnv, ComputerEnv)
 # The env types whose from_toml also reads every file in the env's folder, which the ledger hashes as an artifact's.
 _ENV_FROM_FOLDERS = (ComputerDriverEnv,)
 
@@ -275,6 +277,7 @@ class _Planner:
         """``entry`` with each reference to an installed bundle's entity pointing at it, pulled into the plan, as a
         reference to the bundle's own entity points at that; for a task, with a reference for each step that deploys
         the configured default agent when this bundle or an installed one defines it."""
+        entry = self._pointed(entry)
         references = [ref if ref.local is not None else self._pulled(ref) for ref in entry.references]
         if entry.entry.kind is BundleKind.TASK and self.default_agents:
             references += self._default_agents(entry)
@@ -301,32 +304,28 @@ class _Planner:
 
     # Agents named by an installed bundle's alias
 
-    def _resolve_aliases(self) -> None:
-        """Point each task's reference to an agent, env or artifact by an alias an installed bundle gives it, and the
-        configured default agent when it's one, at what it names, pulled into the plan, unless the store has one of the
-        alias's id, which the reference keeps naming. A field naming the alias is rewritten to the id. A reference that
-        can't be pointed at the alias's entity is left with the problem the store ref check reports; ``alias_uses``
-        holds the aliases the plan names."""
+    def _resolve_aliases(self, *, runs: bool = True) -> None:
+        """Point each entry's reference to an agent, env or artifact by an alias an installed bundle gives it, and each
+        task's to the configured default agent when it's one, at what it names, pulled into the plan, unless the store
+        has one of the alias's id, which the reference keeps naming. A field naming the alias is rewritten to the id. A
+        reference that can't be pointed at the alias's entity is left with the problem the store ref check reports;
+        ``alias_uses`` holds the aliases the plan names. Without ``runs``, as when entities are written alone, tasks
+        and evals are left as they are, since none of them runs."""
         if self.installed is None:
             return
         installed = self.installed()
         self.alias_tables = {kind: installed_aliases(installed, table) for kind, table in _ALIAS_TABLES.items()}
+        own = {_key(entry.entry) for entry in self.entries}
+        for key, node in list(self.nodes.items()):  # those pulled in before the aliases were read
+            if key not in own and isinstance(node, ResolvedEntry) and (pointed := self._pointed(node)) is not node:
+                self.nodes[key], self.edges[key] = pointed, _needs(pointed)
         default = _UNREAD
         for index, entry in enumerate(self.entries):
-            if entry.entry.kind is not BundleKind.TASK:
+            if not runs and entry.entry.kind in (BundleKind.TASK, BundleKind.EVAL):
                 continue
-            references, aliased = [], {}
-            for ref in entry.references:
-                use = None
-                if ref.kind in self.alias_tables and ref.local is None:
-                    use = self._alias_use(ref.kind, ref.id, ref.version)
-                if isinstance(use, str):
-                    self.unpulled[ref.kind, ref.id, ref.version] = use
-                elif use is not None and use.store_version is None:
-                    aliased[ref.kind, ref.id] = use.target_id
-                    ref = self._pulled(replace(ref, id=use.target_id))
-                references.append(ref)
-            if self.default_agents and _leaves_an_agent_unset(entry):
+            pointed = self._pointed(entry)
+            references = list(pointed.references)
+            if entry.entry.kind is BundleKind.TASK and self.default_agents and _leaves_an_agent_unset(entry):
                 if default is _UNREAD:
                     default = self._alias_use(EntityKind.AGENT, get_config().get_default_a2a_agent_id(), None)
                     if isinstance(default, str):
@@ -334,7 +333,31 @@ class _Planner:
                 if isinstance(default, AliasUse) and default.store_version is None:
                     references += self._default_agents(entry, default.target_id)
             if references != list(entry.references):
-                self._replace(index, replace(entry, config=_renamed(entry.config, aliased), references=tuple(references)))
+                self._replace(index, replace(pointed, references=tuple(references)))
+
+    def _pointed(self, entry: ResolvedEntry) -> ResolvedEntry:
+        """``entry`` with each store reference naming an installed alias pointed at what the alias names, pulled in, and
+        each field naming the alias naming its id; none is pointed until ``_resolve_aliases`` reads the aliases."""
+        references, aliased = [], {}
+        for ref in entry.references:
+            if ref.local is None and (use := self._alias_of(ref)) is not None:
+                aliased[ref.kind, ref.id] = use.target_id
+                ref = self._pulled(replace(ref, id=use.target_id))
+            references.append(ref)
+        if not aliased:
+            return entry
+        return replace(entry, config=_renamed(entry, aliased), references=tuple(references))
+
+    def _alias_of(self, ref: Reference) -> AliasUse | None:
+        """The installed alias ``ref``, a store reference, names, to point it at: None when it names none, or the store's
+        entity of its id shadows it. Why an alias can't be named so is kept for the store ref check to report."""
+        if ref.kind not in self.alias_tables:
+            return None
+        use = self._alias_use(ref.kind, ref.id, ref.version)
+        if isinstance(use, str):
+            self.unpulled[ref.kind, ref.id, ref.version] = use
+            return None
+        return use if use is not None and use.store_version is None else None
 
     def _agent_override(self, name: str) -> AgentOverride | None:
         """The agent ``name`` names, as a task's reference to it would: this bundle's agent, an installed bundle's
@@ -504,6 +527,7 @@ class _Planner:
         return self._planned(selected_tasks + selected_evals, selected_tasks, selected_evals, override)
 
     def plan_entities(self, ids: Sequence[str]) -> Plan:
+        self._resolve_aliases(runs=False)
         self._check_writers()
         self._check_loops()
         return self._planned(self._select_entities(ids), [], [], None)
@@ -729,16 +753,10 @@ class _Planner:
         if found is None:
             at = f" version {ref.version}" if ref.version is not None else ""
             other = self.named.get(fold(ref.id))
-            table = self.alias_tables.get(ref.kind)
-            aliased = table.target(ref.id) if table is not None and ref.kind is not EntityKind.AGENT else None
             if other is not None:
                 hint = f"; this bundle's {other.kind.store} {other.name!r} has that name"
-            elif aliased is not None:  # a task's reference to it is pulled in; another entry's isn't, as aliases go
-                return (f"{ref.id!r} is an alias of {aliased.target_id}, which comes with {aliased.declared_by}, and an "
-                        f"{ref.kind.value} alias names an {ref.kind.value} only in a task's steps; name the "
-                        f"{ref.kind.value} by its id")
             else:
-                hint = table.hint(ref.id) if table is not None else ""
+                hint = table.hint(ref.id) if (table := self.alias_tables.get(ref.kind)) is not None else ""
             return f"there is no {kind} {ref.id!r}{at} in the store{hint}"
         if isinstance(found, str):
             return f"{kind} {ref.id!r} {found}"
@@ -1134,19 +1152,23 @@ def _leaves_an_agent_unset(task: ResolvedEntry) -> bool:
     return False
 
 
-def _renamed(steps: Any, ids: Mapping[tuple[EntityKind, str], str]) -> Any:
-    """A copy of a task's ``steps`` with each field naming an alias in ``ids``, by kind, naming what it names
-    instead."""
+def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) -> Any:
+    """A copy of ``entry``'s config with each field naming an alias in ``ids``, by kind, naming what it names instead:
+    a task's steps by their types' refs, any other entry's toml by its class's ``toml_refs``."""
     if not ids:
-        return steps
-    steps = copy.deepcopy(steps)
-    registry = get_task_step_registry()
-    for step in steps:
-        cls = registry.get(step.get("type")) if isinstance(step.get("type"), str) else None
-        for site in ref_sites(cls.entity_refs or () if cls is not None else (), step):
-            if site.ref.role is RefRole.INPUT and (site.ref.kind, site.value) in ids:
-                site.rewrite(ids[site.ref.kind, site.value])
-    return steps
+        return entry.config
+    config = copy.deepcopy(entry.config)
+    if entry.entry.kind is BundleKind.TASK:
+        registry = get_task_step_registry()
+        sites = [site for step in config
+                 for site in ref_sites(getattr(registry.get(step.get("type")) if isinstance(step.get("type"), str)
+                                               else None, "entity_refs", None) or (), step)]
+    else:
+        sites = list(ref_sites(getattr(entity_class(entry.entry), "toml_refs", ()), config, inline_pins=True))
+    for site in sites:
+        if site.ref.role is RefRole.INPUT and (site.ref.kind, site.value) in ids:
+            site.rewrite(ids[site.ref.kind, site.value])
+    return config
 
 
 def _needs(entry: ResolvedEntry) -> list[_Key]:
