@@ -59,12 +59,12 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
 
         if not isinstance(env, ComputerEnv):
             raise TypeError(f"env_provider_type '{self.type}' deploys a computer env, not a {env.type} env")
-        params, settings, problems = computer_params.checked(env, env_params)
+        params, values, problems = computer_params.checked(env, env_params)
         if problems:
             raise DeployRefused(f"{env.id}: " + "; ".join(problems))
         if not (builds := env.ready_builds(params.form)):
             raise DeployRefused(f"{env.id} has no ready build to deploy; its builds are {env.build_statuses() or 'none yet'}")
-        attempt = functools.partial(self._boot, env, builds, params, settings, ttl_seconds=ttl_seconds,
+        attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
                                     disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution)
         return await self._run(sandbox_provider, env.id, attempt)
 
@@ -72,7 +72,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         """No state store, so no changelog to install."""
 
     async def _boot(self, env: ComputerEnv, builds: list[tuple[str, str, dict]], params: computer_params.ComputerParams,
-                    settings: dict[str, dict], sandbox_provider: SandboxProvider, *, ttl_seconds: int,
+                    values: dict, sandbox_provider: SandboxProvider, *, ttl_seconds: int,
                     disk_size_gb: float, cpu: float | None, memory_mb: int | None,
                     attribution: Optional[Attribution]) -> DeployedSandboxEnv:
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
@@ -85,7 +85,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
         form, arch, build = native[0]
         computer, name = env.computer_artifact(), env.environment_name
-        values = _values(env, computer, settings)
+        values = _values(computer, values)
         policy = NetworkPolicy.from_dict(env.network) if env.network else None
         booted = await boot(
             sandbox_provider, image=build["image"], arch=arch, port=env.driver.port, network_policy=policy,
@@ -104,7 +104,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                 "form": form, "arch": arch, "provider": type(sandbox_provider).__name__, "image": build["image"],
                 "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
                 "display": values.get("resolution"), "network": env.network,
-                "settings": recorded_settings(computer, values), "env_params": params.model_dump(exclude_none=True)}},
+                "computer_settings": recorded_settings(computer, values),
+                "env_params": params.model_dump(exclude_defaults=True)}},
         )
         await _require_display(record, values.get("resolution"))
         await _hide_tools(record, env.hidden_tools)
@@ -115,9 +116,9 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         ended, its settings applied as that deploy applied them (a generated one minted afresh), on the same sandbox and
         port, readied as a deploy readies it."""
         record = deployed.metadata["computer"]
-        params, settings, _ = computer_params.checked(env, record["env_params"])
+        params, values, _ = computer_params.checked(env, record["env_params"])
         computer = ComputerArtifact.get(record["computer"]["id"], record["computer"]["version"])
-        values = _values(env, computer, settings)
+        values = _values(computer, values)
         await end_recordings(deployed, "reset")
         sandbox_provider = build_sandbox_provider(deployed.sandbox_type)
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
@@ -139,15 +140,16 @@ async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
         logger.warning(f"'{record.env_id}': its recordings weren't ended before its computer went: {e}")
 
 
-def _values(env: ComputerEnv, computer: ComputerArtifact, settings: dict[str, dict]) -> dict:
-    """The base's settings a boot applies: each one's default, under what ``env_params`` set."""
-    return {**{key: setting.default for key, setting in computer.config.items()}, **settings.get(env.computer.id, {})}
+def _values(computer: ComputerArtifact, values: dict) -> dict:
+    """The computer's settings a boot applies: each one's default, which carries the env's value, under what
+    ``env_params`` set."""
+    return {**{key: setting.default for key, setting in computer.config.items()}, **values}
 
 
 def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
                  params: computer_params.ComputerParams) -> dict[str, str]:
     return settings_environment(computer, values, environment_name=env.environment_name,
-                                spaces=params.spaces.model_dump() if params.spaces else None)
+                                driver_settings=params.driver_settings)
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:

@@ -44,11 +44,11 @@ def native_links(sandbox_provider: SandboxProvider, arch: str) -> list[SandboxPr
 
 
 def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, environment_name: str,
-                         spaces: Optional[dict] = None) -> dict[str, str]:
+                         driver_settings: Optional[dict] = None) -> dict[str, str]:
     """The environment a boot of ``computer`` gives it: each deploy-phase setting as ``AGENTENV_SETTING_<NAME>``, from
     ``values`` over its default, minted afresh when it's generated and resolved through the secret store when it's a
-    secret; the driver's default coordinate space, when ``spaces`` sets it, in ``AGENTENV_COMPUTER_SETTINGS``; and the
-    name its card is served under."""
+    secret; ``driver_settings``, when there are any, in ``AGENTENV_COMPUTER_SETTINGS``; and the name its card is served
+    under."""
     environment = {"ENVIRONMENT_NAME": environment_name}
     for name, setting in computer.config.items():
         if setting.phase != "deploy":
@@ -57,8 +57,8 @@ def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, 
         if setting.secret and not setting.generate:
             value = get_config().resolve_reference(value)
         environment[f"AGENTENV_SETTING_{name.upper()}"] = str(value)
-    if spaces:
-        environment[SETTINGS_ENV] = json.dumps(spaces)
+    if driver_settings:
+        environment[SETTINGS_ENV] = json.dumps(driver_settings)
     return environment
 
 

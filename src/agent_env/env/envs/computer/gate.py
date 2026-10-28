@@ -29,7 +29,7 @@ def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, disp
     problems += _image(base)
     problems += _display(base, display, computer_settings)
     problems += _network(network)
-    values, invalid = _computer_settings(base, computer_settings)
+    values, invalid = check_computer_settings(base, computer_settings)
     return values, problems + invalid
 
 
@@ -45,7 +45,7 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     return [arch for arch in base.arch if arch in matching]
 
 
-def _computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
+def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
     """``values``, of the base's settings by name, and the problems with them: a setting the base doesn't declare, or a
     value of another type than its default's."""
     if not isinstance(values, dict):

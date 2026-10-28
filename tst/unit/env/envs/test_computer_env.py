@@ -647,7 +647,7 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
     env = _put(base, driver, display={"width": 1600, "height": 900}, tools={"hide": ["computer_pointer_*"]})
 
     deployed = await Env.get(env.id).deploy(attribution={"run": "r1"}, env_params={
-        "settings": {"ubuntu-24.04": {"timezone": "Asia/Tokyo"}}, "spaces": {"default_space": "norm"}})
+        "computer_settings": {"timezone": "Asia/Tokyo"}, "driver_settings": {"default_space": "norm"}})
 
     (booted,) = boots.boots
     composed = Env.get(env.id).metadata["composed"]["container"]
@@ -655,24 +655,25 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
         "arm64", composed["arm64"]["image"], 18765, "LocalSandboxProvider")
     environment = booted["environment"]
     assert (environment["AGENTENV_SETTING_RESOLUTION"], environment["AGENTENV_SETTING_TIMEZONE"]) == ("1600x900", "Asia/Tokyo")
-    assert json.loads(environment["AGENTENV_COMPUTER_SETTINGS"]) == {"default_space": "norm", "default_norm_scale": 1000}
+    assert json.loads(environment["AGENTENV_COMPUTER_SETTINGS"]) == {"default_space": "norm"}
     assert environment["ENVIRONMENT_NAME"] == "desktop" and "AGENTENV_SETTING_THEME" not in environment
     assert boots.calls == [(COMPUTER_DISPLAY, "get", None),
                            (DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "*", "tools": ["computer_pointer_list"]})]
     assert (deployed.env_provider_type, deployed.sandbox_ids) == ("computer", {"computer": {"desktop": "local-1"}})
     assert deployed.environment_card == DRIVER_CARD and deployed.mcp_url == "http://127.0.0.1:20001/mcp"
     record = deployed.metadata["computer"]
-    assert {key: record[key] for key in ("form", "arch", "provider", "display", "settings")} == {
+    assert {key: record[key] for key in ("form", "arch", "provider", "display", "computer_settings")} == {
         "form": "container", "arch": "arm64", "provider": "LocalSandboxProvider", "display": "1600x900",
-        "settings": {"resolution": "1600x900", "timezone": "Asia/Tokyo"}}
-    assert record["computer"]["id"] == f"{env.id}__computer" and record["env_params"]["spaces"]["default_space"] == "norm"
+        "computer_settings": {"resolution": "1600x900", "timezone": "Asia/Tokyo"}}
+    assert record["computer"]["id"] == f"{env.id}__computer" and record["env_params"] == {
+        "computer_settings": {"timezone": "Asia/Tokyo"}, "driver_settings": {"default_space": "norm"}}
 
 
 @pytest.mark.asyncio
 async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_where_the_last_one_ran(
         base, driver, docker, boots, monkeypatch):
     env = _put(base, driver, display={"width": 1600, "height": 900}, tools={"hide": ["computer_pointer_*"]})
-    deployed = await Env.get(env.id).deploy(env_params={"settings": {"ubuntu-24.04": {"timezone": "Asia/Tokyo"}}})
+    deployed = await Env.get(env.id).deploy(env_params={"computer_settings": {"timezone": "Asia/Tokyo"}})
     (sandbox,) = boots.sandboxes
     recreated = []
 
@@ -723,12 +724,14 @@ async def test_teardown_closes_a_computer_env_ending_its_recordings_before_its_c
 @pytest.mark.asyncio
 @pytest.mark.parametrize("env_params, problem", [
     ({"form": "disk"}, "env_params.form: 'disk' isn't one of"),
-    ({"settings": {"ubuntu-24.04": {"theme": "dark"}}}, "env_params.settings: theme is a build-phase setting"),
-    ({"settings": {"ubuntu-24.04": {"resolution": "800x600"}}}, "the env's display sets the screen's size"),
-    ({"settings": {"ubuntu-24.04": {"timezone": 3}}}, "env_params.settings.ubuntu-24.04.timezone must be a str"),
-    ({"spaces": {"default_space": "polar"}}, "env_params.spaces.default_space"),
+    ({"computer_settings": {"theme": "dark"}}, "env_params.computer_settings: theme is a build-phase setting"),
+    ({"computer_settings": {"resolution": "800x600"}}, "the env's display sets the screen's size"),
+    ({"computer_settings": {"timezone": 3}}, "env_params.computer_settings.timezone must be a str"),
+    ({"driver_settings": {"default_space": "polar"}}, "env_params.driver_settings.default_space"),
+    ({"driver_settings": {"colour": "blue"}}, "env_params.driver_settings.colour: Extra inputs are not permitted"),
     ({"colour": "blue"}, "env_params.colour"),
-], ids=["form", "build-setting", "resolution-over-display", "setting-type", "space", "unknown"])
+], ids=["form", "build-setting", "resolution-over-display", "setting-type", "driver-setting", "driver-unknown",
+        "unknown"])
 async def test_env_params_a_computer_env_cant_take_are_refused_at_save_and_at_deploy(base, driver, docker, boots,
                                                                                      env_params, problem):
     env = _put(base, driver, display={"width": 1600, "height": 900})
