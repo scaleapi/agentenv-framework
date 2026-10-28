@@ -50,11 +50,15 @@ class ServedTask:
 
     @property
     def toolset(self) -> dict[str, Any]:
-        """Where the played agent's tools come from: the envs it works in, its role in them, and whether its turns offer
-        ``bash`` in its sandbox. Tasks that agree on it offer the same tools, so a trainer can group them."""
+        """Where the played agent's tools come from: the envs it works in, its role in them, the changes the task makes
+        to that role's tool access, and whether its turns offer ``bash`` in its sandbox. Tasks that agree on it offer
+        the same tools, so a trainer can group them."""
         agent = self.spec.trainer_agents[0]
         [deploy] = [step for step in self.task.steps if step.type in DEPLOYS and step.agent_name == agent]
-        return {"envs": list(getattr(deploy, "env_ids", None) or []), "role": getattr(deploy, "role", None),
+        role = getattr(deploy, "role", None)
+        return {"envs": list(getattr(deploy, "env_ids", None) or []), "role": role,
+                "access": [{"env": step.env_id, "action": step.action, "tools": step.tools} for step in self.task.steps
+                           if step.type == "modify_env_tool_access" and step.role == role],
                 "bash": works_in_sandbox(self.task.steps, agent)}
 
 

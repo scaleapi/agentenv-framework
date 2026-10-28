@@ -89,7 +89,13 @@ async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(te
     assert (env.num_tasks("smoke"), env.num_tasks("all")) == (1, 3)
     assert env.get_task("all", 2) == {"id": "dock-2", "name": "dock-2", "index": 2, "prompt": "Add crate 2.",
                                       "system_prompt": "You keep the items.", "agent": "alice",
-                                      "toolset": {"envs": ["items"], "role": "alice@example.com", "bash": False}}
+                                      "toolset": {"envs": ["items"], "role": "alice@example.com", "access": [],
+                                                  "bash": False}}
+    hide = {"id": "hide", "type": "modify_env_tool_access", "env_id": "items", "action": "disable",
+            "role": "alice@example.com", "tools": ["add_item"]}
+    hidden = _task(ITEMS, ALICE, hide, {**hide, "id": "other", "role": "bob@example.com"}, TURN, REPLIES)
+    assert ServedTask(hidden, "hidden", EpisodeSpec.from_task(hidden), _score_at("replies")).toolset["access"] == [
+        {"env": "items", "action": "disable", "tools": ["add_item"]}]
     assert [task["index"] for task in env.get_task_range("all", 1)] == [1, 2]
     assert [task["id"] for task in env.list_tasks("smoke")] == ["dock-0"]
     with pytest.raises(IndexError, match="split 'all' has 3 tasks, so it has no task 3"):

@@ -124,10 +124,10 @@ class AgentEnv:
 
     @cached_property
     def factory(self) -> type[_Environment] | dict[str, type[_Environment]]:
-        """TRL's ``environment_factory``: an environment class per toolset, or the one class when every task has the
-        same. Building it plays one task of each toolset to list its tools, since TRL reads them from the class."""
-        classes = on_loop(_gathered(self._environment(toolset) for toolset in self._toolsets.values()),
-                          self._reset_timeout + CLOSE_SECONDS)
+        """TRL's ``environment_factory``: an environment class per toolset of the server's tasks, or the one class when
+        every task has the same. Building it plays one task of each toolset in turn to list its tools, since TRL reads
+        them from the class."""
+        classes = on_loop(self._environments(), len(self._toolsets) * (self._reset_timeout + CLOSE_SECONDS))
         return classes[0] if len(classes) == 1 else {each.__name__: each for each in classes}
 
     def close(self) -> None:
@@ -139,6 +139,9 @@ class AgentEnv:
         finally:
             if self._server is not None:
                 self._server.stop()
+
+    async def _environments(self) -> list[type[_Environment]]:
+        return [await self._environment(toolset) for toolset in self._toolsets.values()]
 
     async def _environment(self, toolset: _Toolset) -> type[_Environment]:
         split, index = toolset.first
@@ -265,7 +268,7 @@ class _Environment:
             try:
                 await rollout.started
                 result = await asyncio.wait_for(self._client.step(
-                    {"type": "call_tool", "tool_name": name, "arguments": arguments}), self._shared.tool_timeout)
+                    {"type": "call_tool", "tool_name": name, "arguments": arguments}), self._deadline(name))
             except _Failed as e:
                 await self._fail(rollout, str(e))
                 return FAILED
@@ -276,6 +279,11 @@ class _Environment:
                 await self._fail(rollout, f"{name}: {_why(e)}")
                 return FAILED
             return self._answer(rollout, name, result)
+
+    def _deadline(self, name: str) -> float | None:
+        """A tool's deadline; ``end_turn`` has the session's, the reset deadline, since the server answers it once the
+        task's next turn opens or its verifiers have scored the episode."""
+        return None if name == END_TURN else self._shared.tool_timeout
 
     async def _finish(self, rollout: _Rollout) -> None:
         """Ends the turns the model left open with an empty reply, until the episode is scored; each call on the

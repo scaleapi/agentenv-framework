@@ -14,9 +14,11 @@ import pytest
 from agentenv_protocol import EnvironmentTool
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 
+from agent_env.config.runtime import Config
 from agent_env.openenv.app import _app, _score_at
 from agent_env.openenv.environment import Served, ServedTask
 from agent_env.task import EpisodeSpec, Task
+from agent_env.task_step.task_step import TaskStep
 from agent_env.training import trl
 from agent_env.training.trl import ENDED, FAILED, AgentEnv, tool_method
 from tst.unit.bundle._support import layout
@@ -155,6 +157,33 @@ def test_a_tool_that_misses_its_deadline_leaves_the_rollout_unscored_and_the_env
     assert "rollout left unscored: wait didn't answer within 0.5s" in caplog.text
 
 
+class _Slow(TaskStep):
+    """Takes a second, as a verifier that grades the episode after its last turn does."""
+
+    type = "trl_test_slow"
+    entity_refs = ()
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**cls._base_from_dict(data))
+
+    async def execute(self, context):
+        await asyncio.sleep(1)
+        return context
+
+
+def test_end_turn_waits_for_the_episodes_score_past_a_tools_deadline(served, monkeypatch):
+    registry = Config().task_step_registry()
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: {**registry, _Slow.type: _Slow})
+    env = served({"a": [ITEMS, ALICE, TURN, {"id": "slow", "type": _Slow.type}, REPLIES]}, tool_timeout=0.2)
+    environment = env.factory()
+
+    environment.reset(**env.dataset[0])
+
+    assert environment.end_turn(response="Added a crate.") == ENDED
+    assert environment.get_reward() == 1.0
+
+
 def test_a_server_at_capacity_refuses_the_reset_and_says_how_to_serve_more(served):
     env = served({"a": PLAYED}, max_concurrent_envs=1)
     first, second = env.factory(), env.factory()
@@ -174,7 +203,7 @@ def test_no_server_at_the_url_says_how_to_serve_one():
 
 def test_tasks_whose_agent_gets_other_tools_take_trls_multi_environment_mode(served, monkeypatch):
     _tool_sessions(monkeypatch, {"http://127.0.0.1:20031/items/mcp": ["add_item"], PANTRY_MCP: ["take_item"]})
-    env = served({"a": PLAYED, "p": [PANTRY, {**ALICE, "env_ids": ["pantry"]}, TURN, REPLIES]})
+    env = served({"a": PLAYED, "p": [PANTRY, {**ALICE, "env_ids": ["pantry"]}, TURN, REPLIES]}, max_concurrent_envs=1)
 
     assert {name: _tools(each) for name, each in env.factory.items()} == {
         "items": ["add_item", "end_turn", "get_reward", "reset"],
