@@ -28,7 +28,7 @@ from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
-from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
+from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
 from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT, unwritten_local_agent
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,

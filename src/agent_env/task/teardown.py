@@ -21,7 +21,7 @@ from typing import NamedTuple, Optional
 from agent_env.a2a_agent.staging import drain_all, staged_changelogs
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.envs._deployment import close_deployed
-from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
+from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     build_sandbox_provider,
     get_agent_sandbox_provider,

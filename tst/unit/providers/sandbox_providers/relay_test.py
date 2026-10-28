@@ -7,7 +7,7 @@ import socket
 import pytest
 from pytest_socket import enable_socket
 
-from agent_env.providers.sandbox_providers.relay import relay
+from agent_env.providers.sandbox_providers.local_docker.relay import relay
 
 
 @pytest.fixture(autouse=True)

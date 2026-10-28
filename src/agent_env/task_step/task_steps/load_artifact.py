@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Callable, ClassVar, Optional
 from urllib.parse import unquote, urlparse
 
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import DeployedAgent, TaskStepContext

@@ -34,7 +34,7 @@ import uuid
 from typing import Any, ClassVar, Optional
 
 from agent_env.config.model import MODEL_HEADERS_ENV
-from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
+from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,
     registered_sandbox_provider_classes,

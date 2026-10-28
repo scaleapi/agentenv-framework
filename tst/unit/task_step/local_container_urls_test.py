@@ -21,7 +21,7 @@ from agent_env.config.errors import ConfigError
 from agent_env.config.model import ModelConfig
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.providers.sandbox_providers import sandbox_provider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.install_agent import _build_param_resolvers

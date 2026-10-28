@@ -9,7 +9,7 @@ from typing import Any
 
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
 from agent_env.env.env import DeployedEnv
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, host_url_for
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 
 HEARTBEAT_KEY = "_heartbeat_fn"

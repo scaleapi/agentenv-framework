@@ -16,7 +16,7 @@ from agentenv_protocol.computer import COMPUTER_READY, SETTINGS_ENV
 
 from agent_env.config import get_config
 from agent_env.providers.env_providers.env_provider import _size_kwargs
-from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
+from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.computer import ComputerArtifact

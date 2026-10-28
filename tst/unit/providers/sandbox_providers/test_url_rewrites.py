@@ -7,8 +7,8 @@ import pytest
 
 from agent_env.config import reset_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
-from agent_env.providers.sandbox_providers import local_sandbox as local_sandbox_module
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider, host_url_for
+from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox_module
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider, host_url_for
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (

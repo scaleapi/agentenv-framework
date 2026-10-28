@@ -15,7 +15,7 @@ import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, remove_local_work_dir
 from agent_env.task import teardown
 from agent_env.task.task import _rolled_back_sandboxes
 from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport, recorded_sandboxes, teardown_run

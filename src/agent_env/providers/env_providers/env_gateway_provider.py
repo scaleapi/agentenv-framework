@@ -49,7 +49,7 @@ from agent_env.providers.env_providers.env_provider import (
     _size_kwargs,
     _tool_names,
 )
-from agent_env.providers.sandbox_providers.local_sandbox import remove_local_work_dir
+from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,

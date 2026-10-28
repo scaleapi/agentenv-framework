@@ -21,7 +21,7 @@ from agentenv_protocol.computer.conformance.client import Driver
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.store.routing import namespace_routing
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task.teardown import teardown_run

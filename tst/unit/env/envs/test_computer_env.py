@@ -37,7 +37,7 @@ from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
-from agent_env.providers.sandbox_providers import local_sandbox
+from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.store.base import NotFoundError
 from agent_env.task import teardown
 from agent_env.task_step.context import TaskStepContext

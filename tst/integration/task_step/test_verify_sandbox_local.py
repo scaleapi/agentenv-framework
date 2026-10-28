@@ -21,7 +21,7 @@ from agent_env.a2a_agent.a2a_agent import DeployedA2AAgent
 from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, get_config, reset_config
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.task import Task
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep

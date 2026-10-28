@@ -8,13 +8,13 @@ import logging
 import pytest
 
 import agent_env.providers.sandbox_providers.chained_sandbox_provider as chained_module
-import agent_env.providers.sandbox_providers.local_sandbox as lsm
+import agent_env.providers.sandbox_providers.local_docker.provider as lsm
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.config.loader import load_impl
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider, skip_refusing
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers import sandbox as sandbox_module

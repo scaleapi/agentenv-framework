@@ -14,7 +14,7 @@ import agent_env.artifact.store as artifact_store
 import agent_env.providers as providers
 from agent_env.artifact import DockerImageArtifact
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.store import ImageStore, RegistryAuth, set_object_store
 from agent_env.store.object_store.local import LocalFilesystemObjectStore
 

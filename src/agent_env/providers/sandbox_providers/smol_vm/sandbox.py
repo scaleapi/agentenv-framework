@@ -13,7 +13,7 @@ from smol import ConnectOptions, Machine
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, VmSandbox
 from agent_env.providers.sandbox_providers.host_images import host_platform, saved_here
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
 from agent_env.utils.docker.build import normalize_platform

@@ -341,7 +341,7 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "boxd": "agent_env.providers.sandbox_providers.boxd.provider:BoxdSandboxProvider",
     "daytona": "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
     "boat": "agent_env.providers.sandbox_providers.boat.provider:BoatSandboxProvider",
-    "local": "agent_env.providers.sandbox_providers.local_sandbox:LocalSandboxProvider",
+    "local": "agent_env.providers.sandbox_providers.local_docker.provider:LocalSandboxProvider",
 }
 
 

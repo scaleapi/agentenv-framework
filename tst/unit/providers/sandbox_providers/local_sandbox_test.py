@@ -11,10 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import agent_env.providers.sandbox_providers.local_sandbox as ls
+import agent_env.providers.sandbox_providers.local_docker.provider as ls
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.config import reset_config, set_object_store
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.store import LocalFilesystemObjectStore

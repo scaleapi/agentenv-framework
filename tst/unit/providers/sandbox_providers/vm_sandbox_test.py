@@ -997,7 +997,7 @@ async def test_a_vm_installs_the_trust_dir_in_its_container_through_itself_and_c
 
 @pytest.mark.asyncio
 async def test_start_trusting_a_container_on_a_vm_never_runs_docker_on_this_machine(tmp_path, monkeypatch):
-    import agent_env.providers.sandbox_providers.local_sandbox as ls
+    import agent_env.providers.sandbox_providers.local_docker.provider as ls
 
     monkeypatch.setattr(ls, "_copy_into_container", lambda *args: pytest.fail("docker cp ran on this machine"))
     (tmp_path / "ca.pem").write_bytes(b"ca")

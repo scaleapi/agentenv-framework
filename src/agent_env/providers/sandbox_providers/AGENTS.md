@@ -11,7 +11,7 @@ and runs verifiers over that machine's shell. A provider is two classes:
   `tunnel_urls`.
 
 Read `boxd/` (the smallest complete VM provider) and `e2b/` before writing anything. `tensorlake/`, `vercel/` and `tenki/`
-are further VM backends; `modal_sandbox.py` is a container backend; `local_sandbox.py` runs on this machine.
+are further VM backends; `modal_sandbox.py` is a container backend; `local_docker/` runs on this machine's Docker, with the relay a container closed off from every network is reached through.
 
 ## Workflow
 

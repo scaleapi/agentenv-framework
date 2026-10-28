@@ -39,7 +39,7 @@ from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
-from agent_env.providers.sandbox_providers.relay import relay_image
+from agent_env.providers.sandbox_providers.local_docker.relay import relay_image
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
     NetworkPolicy,
