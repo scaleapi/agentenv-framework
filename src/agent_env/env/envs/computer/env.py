@@ -169,6 +169,13 @@ class ComputerEnv(Env):
         env._deployed = deployed
         return env
 
+    async def reset(self, deployed: DeployedEnv, context: Optional[TaskStepContext] = None) -> None:
+        """Return the computer to boot state: end the env's recordings still open in ``context``, then replace its
+        container with a fresh one of the same image, on the same sandbox and port."""
+        if context is not None:
+            await end_open_recordings(context, [self.id])
+        await as_builtin(self._env_provider).reboot(self, deployed)
+
     async def close(self, context: Optional[TaskStepContext] = None) -> None:
         """End the env's recordings still open in the run's ``context``, so their segments reach the store, then tear
         the computer down."""

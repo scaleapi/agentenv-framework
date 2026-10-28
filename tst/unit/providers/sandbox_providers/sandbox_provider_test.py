@@ -89,9 +89,10 @@ def test_modal_sandbox_instance_mode_is_container():
 
 
 @pytest.mark.asyncio
-async def test_default_create_container_mutates_mode_to_container():
+async def test_default_create_container_mutates_mode_to_container_and_a_recreate_replaces_the_container_in_place():
     """The base SandboxProvider.create_container default impl should mutate the
-    returned VmSandbox's mode to 'container' once docker is running on it."""
+    returned VmSandbox's mode to 'container' once docker is running on it; recreate_container
+    removes that container and runs a fresh one on the same VM, and a container-only sandbox is refused."""
 
     class _FakeVm(VmSandbox):
         type = "fake-vm"
@@ -125,6 +126,13 @@ async def test_default_create_container_mutates_mode_to_container():
     )
     assert result is fake_vm
     assert result.mode == "container"
+
+    fake_vm.scripts.clear()
+    await provider.recreate_container(fake_vm, image_name="nginx:latest", port=8080, env={"A": "1"})
+    assert fake_vm.scripts[0] == "docker rm -f agent-api > /dev/null"
+    assert fake_vm.scripts[1].startswith("docker run -d --name agent-api ") and "-e A=1" in fake_vm.scripts[1]
+    with pytest.raises(NotImplementedError, match="sandbox is the container itself"):
+        await provider.recreate_container(_FakeSandbox(), image_name="nginx:latest", port=8080, env={})
 
 
 @pytest.mark.asyncio

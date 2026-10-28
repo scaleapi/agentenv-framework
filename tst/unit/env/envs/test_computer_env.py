@@ -35,6 +35,7 @@ from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.providers.sandbox_providers import local_sandbox
 from agent_env.store.base import NotFoundError
 from agent_env.task import teardown
@@ -665,6 +666,38 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
         "form": "container", "arch": "arm64", "provider": "LocalSandboxProvider", "display": "1600x900",
         "settings": {"resolution": "1600x900", "timezone": "Asia/Tokyo"}}
     assert record["computer"]["id"] == f"{env.id}__computer" and record["env_params"]["spaces"]["default_space"] == "norm"
+
+
+@pytest.mark.asyncio
+async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_where_the_last_one_ran(
+        base, driver, docker, boots, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900}, tools={"hide": ["computer_pointer_*"]})
+    deployed = await Env.get(env.id).deploy(env_params={"settings": {"ubuntu-24.04": {"timezone": "Asia/Tokyo"}}})
+    (sandbox,) = boots.sandboxes
+    steps = []
+
+    async def end_open_recordings(context, env_ids):
+        steps.append(("recordings", env_ids))
+
+    async def recreate_container(self, sandbox, **kwargs):
+        steps.append(("recreate", sandbox, kwargs))
+
+    monkeypatch.setattr(computer_env_module, "end_open_recordings", end_open_recordings)
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "recreate_container", recreate_container)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+    boots.calls.clear()
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    (_, ended), (_, recreated, kwargs) = steps
+    assert ended == [env.id] and recreated is sandbox and not sandbox.terminated
+    assert (kwargs["image_name"], kwargs["port"]) == (deployed.metadata["computer"]["image"], 18765)
+    assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
+    env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S)
+    assert boots.calls == [(COMPUTER_DISPLAY, "get", None),
+                           (DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "*", "tools": ["computer_pointer_list"]})]
 
 
 @pytest.mark.asyncio

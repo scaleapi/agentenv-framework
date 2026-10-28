@@ -59,7 +59,7 @@ class ResetEnvTaskStep(TaskStep):
             return context
         try:
             env = Env.get(deployed.env_id, deployed.env_version)
-            await env.reset(deployed)
+            await env.reset(deployed, context)
             logger.info("reset_env: reset env '%s'", self.env_id)
         except NotImplementedError:
             # Env doesn't support reset — not an error.

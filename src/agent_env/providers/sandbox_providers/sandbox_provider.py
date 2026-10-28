@@ -147,6 +147,16 @@ class SandboxProvider(ABC):
                 pass
             raise
 
+    async def recreate_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+        """Replace the container create_container ran on ``sandbox`` with a fresh one of ``image_name`` with ``env``,
+        reached on ``port`` as before: the sandbox, its id and its URLs stay. A backend whose sandbox is the container
+        itself can't replace it in place."""
+        if not isinstance(sandbox, VmSandbox):
+            raise NotImplementedError(f"{type(self).__name__}'s sandbox is the container itself, so it can't be replaced "
+                                      "in place")
+        await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} > /dev/null")
+        await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+
     async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
         """Get ready to run ``image`` by its name, before create_sandbox or create_container is asked for it and outside
         any deadline on creating one, for the deploy ``attribution`` describes, as it describes the sandbox. Does

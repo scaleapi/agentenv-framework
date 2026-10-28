@@ -12,13 +12,15 @@ import anyio
 from agentenv_protocol.computer import COMPUTER_DISPLAY
 from agentenv_protocol.tool_access import DISABLE, DISABLE_TOOL_EXTENSION_URI, WILDCARD
 
+from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv
 from agent_env.env.envs.computer import params as computer_params
-from agent_env.env.envs.computer.boot import boot, recorded_settings, settings_environment
+from agent_env.env.envs.computer.boot import READY_TIMEOUT_S, boot, ready, recorded_settings, settings_environment
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider, _tool_names
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
+from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 
 if TYPE_CHECKING:
     from agent_env.env.env import Env
@@ -77,19 +79,16 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
         form, arch, build = native[0]
-        computer, driver, name = env.computer_artifact(), env.driver, env.environment_name
-        values = {**{key: setting.default for key, setting in computer.config.items()}, **settings.get(env.computer.id, {})}
+        computer, name = env.computer_artifact(), env.environment_name
+        values = _values(env, computer, settings)
         policy = NetworkPolicy.from_dict(env.network) if env.network else None
         booted = await boot(
-            sandbox_provider, image=build["image"], arch=arch, port=driver.port, network_policy=policy,
-            environment=settings_environment(computer, values, environment_name=name,
-                                             spaces=params.spaces.model_dump() if params.spaces else None),
-            timeout=ttl_seconds, attribution=attribution, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb)
+            sandbox_provider, image=build["image"], arch=arch, port=env.driver.port, network_policy=policy,
+            environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
+            disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
-        if booted.card.get("name") != name:
-            raise RuntimeError(f"'{name}' serves a card named '{booted.card.get('name')}'; a computer env's driver must "
-                               "serve its card under the env's environment_name")
+        _require_name(env, booted.card)
         record = DeployedSandboxEnv(
             env_id=env.id, env_version=env.version, env_provider_type=self.type,
             environment_card_url=f"{booted.url}{WELL_KNOWN_PATH}", environment_card=booted.card,
@@ -105,6 +104,39 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         await _require_display(record, values.get("resolution"))
         await _hide_tools(record, env.hidden_tools)
         return record
+
+    async def reboot(self, env: ComputerEnv, deployed: DeployedSandboxEnv) -> None:
+        """Replace the computer ``deployed`` records with a fresh container of the image it booted, its settings applied
+        as that deploy applied them (a generated one minted afresh), on the same sandbox and port, readied as a deploy
+        readies it."""
+        record = deployed.metadata["computer"]
+        params, settings, _ = computer_params.checked(env, record["env_params"])
+        computer = ComputerArtifact.get(record["computer"]["id"], record["computer"]["version"])
+        values = _values(env, computer, settings)
+        sandbox_provider = build_sandbox_provider(deployed.sandbox_type)
+        sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
+        await sandbox_provider.recreate_container(sandbox, image_name=record["image"], port=env.driver.port,
+                                                  env=_environment(env, computer, values, params))
+        _require_name(env, await ready(deployed.environment_url, READY_TIMEOUT_S))
+        await _require_display(deployed, values.get("resolution"))
+        await _hide_tools(deployed, env.hidden_tools)
+
+
+def _values(env: ComputerEnv, computer: ComputerArtifact, settings: dict[str, dict]) -> dict:
+    """The base's settings a boot applies: each one's default, under what ``env_params`` set."""
+    return {**{key: setting.default for key, setting in computer.config.items()}, **settings.get(env.computer.id, {})}
+
+
+def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
+                 params: computer_params.ComputerParams) -> dict[str, str]:
+    return settings_environment(computer, values, environment_name=env.environment_name,
+                                spaces=params.spaces.model_dump() if params.spaces else None)
+
+
+def _require_name(env: ComputerEnv, card: dict) -> None:
+    if card.get("name") != env.environment_name:
+        raise RuntimeError(f"'{env.environment_name}' serves a card named '{card.get('name')}'; a computer env's driver "
+                           "must serve its card under the env's environment_name")
 
 
 async def _require_display(record: DeployedSandboxEnv, resolution: Optional[str]) -> None:

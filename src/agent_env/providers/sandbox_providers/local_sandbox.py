@@ -44,6 +44,7 @@ from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
     NetworkPolicy,
     NetworkPolicyUnsupportedError,
+    Sandbox,
     VmSandbox,
     port_bindings,
 )
@@ -737,18 +738,11 @@ class LocalSandboxProvider(SandboxProvider):
         sandbox = await self.create_vm(exposed_ports=[port], timeout=timeout, attribution=attribution)
         try:
             await sandbox.pull_images([image_name])
-            network, relay_name = sandbox.scoped_name("closed"), sandbox.scoped_name("relay")
+            network = sandbox.scoped_name("closed")
             label = shlex.quote(f"{SANDBOX_LABEL}={sandbox.sandbox_id}")
             (sandbox.work_dir / _CLOSED_NETWORK_FILE).write_text(network)
             await sandbox.exec_script(f"docker network create --internal --label {label} {network} >/dev/null")
-            await self._start_container(sandbox, image_name=image_name, port=port, env=env)
-            address = await sandbox.exec_script(
-                f"docker inspect -f '{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}' "
-                f"{shlex.quote(sandbox.container_name)}")
-            publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
-            await sandbox.exec_script(
-                f"docker run -d --name {relay_name} --label {label} {publish} {relay} {port}={address.strip()}:{port} "
-                f">/dev/null && docker network connect {network} {relay_name}")
+            await self._run_closed(sandbox, relay, image_name=image_name, port=port, env=env)
             sandbox.mode = SANDBOX_MODE_CONTAINER
         except BaseException:
             try:
@@ -758,6 +752,30 @@ class LocalSandboxProvider(SandboxProvider):
             raise
         sandbox.network_policy = NetworkPolicy(mode="allowlist")
         return sandbox
+
+    async def recreate_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+        """Replace the sandbox's container with a fresh one, and on a closed network its relay too, since the fresh
+        container's address on that network may differ."""
+        if not (isinstance(sandbox, LocalSandbox) and sandbox.closed_network):
+            await super().recreate_container(sandbox, image_name=image_name, port=port, env=env)
+            return
+        await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} "
+                                  f"{shlex.quote(sandbox.scoped_name('relay'))} > /dev/null")
+        await self._run_closed(sandbox, await relay_image(), image_name=image_name, port=port, env=env)
+
+    async def _run_closed(self, sandbox: LocalSandbox, relay: str, *, image_name: str, port: int,
+                          env: dict[str, str]) -> None:
+        """The container on the sandbox's closed network, then the relay publishing its ``port`` at its address there."""
+        network, relay_name = sandbox.closed_network, sandbox.scoped_name("relay")
+        label = shlex.quote(f"{SANDBOX_LABEL}={sandbox.sandbox_id}")
+        await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+        address = await sandbox.exec_script(
+            f"docker inspect -f '{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}' "
+            f"{shlex.quote(sandbox.container_name)}")
+        publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
+        await sandbox.exec_script(
+            f"docker run -d --name {relay_name} --label {label} {publish} {relay} {port}={address.strip()}:{port} "
+            f">/dev/null && docker network connect {network} {relay_name}")
 
     def _publish_args(self, sandbox: VmSandbox, port: int) -> str:
         """A container with no network is reached through its relay; any other is published as everywhere."""

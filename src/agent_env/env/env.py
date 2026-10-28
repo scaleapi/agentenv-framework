@@ -376,8 +376,9 @@ class Env(ABC):
         that saves part of it first, then terminates what's left by sandbox id; a type that can't close raises this."""
         raise NotImplementedError(f"{type(self).__name__} does not implement close()")
 
-    async def reset(self, deployed: "DeployedEnv") -> None:
-        """Return an already-deployed env to a clean between-tasks state.
+    async def reset(self, deployed: "DeployedEnv", context: Optional[TaskStepContext] = None) -> None:
+        """Return an already-deployed env to a clean between-tasks state; ``context`` is the run's, for a type that
+        saves part of it first.
 
         Base raises so the ``reset_env`` step treats it as unsupported; envs that
         can reset in place override this.
