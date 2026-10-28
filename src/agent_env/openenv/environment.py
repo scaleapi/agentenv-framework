@@ -169,8 +169,10 @@ class AgentEnvEnvironment(Environment):
                     raise EpisodeError("the run ended before the agent's first turn")
                 await self._open(turn)
         except Exception as e:
-            return await self._end_with_error(
-                f"the episode didn't open its first turn within {timeout_s:g}s" if deadline.expired() else e)
+            if deadline.expired():
+                return await self._end_with_error(f"the episode didn't open its first turn within {timeout_s:g}s",
+                                                  wait=False)
+            return await self._end_with_error(e)
         return Observation(done=False, reward=None, metadata={
             "prompt": turn.prompt, "system_prompt": turn.system_prompt, "task": self._task_metadata()})
 
@@ -231,7 +233,7 @@ class AgentEnvEnvironment(Environment):
             return _tool_error(name, ToolErrorType.TOOL_NOT_FOUND, e)
         except TimeoutError:
             ended = await self._end_with_error(f"{name} didn't answer within {timeout_s:g}s, and the episode ended, "
-                                               "since what the call does may still be under way")
+                                               "since what the call does may still be under way", wait=False)
             return CallToolObservation(tool_name=name, done=True, reward=None, metadata=ended.metadata)
         except httpx.HTTPError as e:
             return _tool_error(name, ToolErrorType.TRANSPORT_ERROR, e)
@@ -253,8 +255,11 @@ class AgentEnvEnvironment(Environment):
                         "prompt": turn.prompt, "system_prompt": turn.system_prompt})
                 scores = await self._episode.result()
         except Exception as e:
-            observation = await self._end_with_error(
-                f"{name} didn't finish within {timeout_s:g}s, and the episode ended" if deadline.expired() else e)
+            if deadline.expired():
+                observation = await self._end_with_error(f"{name} didn't finish within {timeout_s:g}s, and the episode "
+                                                         "ended", wait=False)
+            else:
+                observation = await self._end_with_error(e)
             return CallToolObservation(tool_name=name, done=True, reward=None, metadata=observation.metadata)
         await self._abandon("the episode ended")
         return CallToolObservation(tool_name=name, done=True, **self._scored(scores))
@@ -291,9 +296,9 @@ class AgentEnvEnvironment(Environment):
             error = _described(e)
         return (await self._end_with_error(error)).metadata
 
-    async def _end_with_error(self, error: Exception | str) -> Observation:
+    async def _end_with_error(self, error: Exception | str, *, wait: bool = True) -> Observation:
         message = error if isinstance(error, str) else _described(error)
-        await self._abandon(message)
+        await self._abandon(message, wait=wait)
         return self._error_observation(message)
 
     def _error_observation(self, error: str) -> Observation:
@@ -305,17 +310,18 @@ class AgentEnvEnvironment(Environment):
         async with self._lock:
             await self._abandon(reason)
 
-    async def _abandon(self, reason: str) -> None:
-        """Abandon the episode and close the turn's tools, waiting for the teardown; the caller holds the lock. The
-        abandon is tracked before anything is awaited, so a server shutting down meanwhile waits for it too, and a
-        caller cancelled while it waits leaves it running for the next reset to wait for."""
+    async def _abandon(self, reason: str, *, wait: bool = True) -> None:
+        """Abandon the episode and close the turn's tools, waiting for the teardown unless ``wait`` is false, as a call
+        past its deadline answers at once; the caller holds the lock. The abandon is tracked before anything is
+        awaited, so a server shutting down meanwhile waits for it too, and one not waited for, or whose caller is
+        cancelled while it waits, is left running for the next reset or close to wait for."""
         episode, self._episode = self._episode, None
         if episode is not None:
             self._ending = self._served.end_later(episode.abandon(reason))
         self._served.live.discard(self)
         await self._close_tools()
         self._turn = None
-        if (ending := self._ending) is not None:
+        if wait and (ending := self._ending) is not None:
             try:
                 await asyncio.shield(ending)
             finally:

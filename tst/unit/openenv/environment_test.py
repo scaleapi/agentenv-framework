@@ -230,19 +230,24 @@ async def test_a_run_that_fails_mid_turn_ends_the_episode_at_the_next_step(teard
 
 
 @pytest.mark.asyncio
-async def test_a_reset_or_an_end_turn_past_its_deadline_ends_the_episode_in_an_error_observation(teardowns, tools):
+async def test_a_reset_or_an_end_turn_past_its_deadline_answers_at_once_and_its_episode_is_torn_down_after(
+        teardowns, tools):
     held = {"id": "held", "type": "episode_test_gate"}
     deploying, turning = _env(ITEMS, held, ALICE, TURN, REPLIES), _env(ITEMS, ALICE, TURN, held, REPLIES)
-    reset = await deploying.reset_async(timeout_s=0.5)
     await turning.reset_async()
+    teardowns.hold = asyncio.Event()
 
+    reset = await deploying.reset_async(timeout_s=0.5)
     ended = await turning.step_async(CallToolAction(tool_name="end_turn", arguments={"response": "Added a crate."},
                                                     metadata={TIMEOUT_METADATA: 0.5}))
 
     assert (reset.done, reset.metadata["error"]) == (True, "the episode didn't open its first turn within 0.5s")
     assert (ended.done, ended.reward, ended.metadata["error"]) == (
         True, None, "end_turn didn't finish within 0.5s, and the episode ended")
-    assert len(teardowns.finished) == 2
+    await _until(lambda: len(teardowns.started) == 2)
+    assert teardowns.finished == []
+    teardowns.hold.set()
+    await _until(lambda: len(teardowns.finished) == 2)
 
 
 @pytest.mark.asyncio
