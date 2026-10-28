@@ -41,15 +41,6 @@ _UPLOAD_PART_BYTES = 4 * 1024 * 1024
 UNKNOWN_EXIT_CODE = -1
 # How long a cancelled exec waits for its command to be stopped before the cancellation is raised.
 _STOP_WAIT = 30.0
-# The image starts dockerd at boot; the first command can be ahead of it.
-DOCKER_READY = r"""
-for _ in $(seq 90); do
-  docker info >/dev/null 2>&1 && exec docker compose version
-  sleep 1
-done
-echo "docker daemon did not become ready" >&2
-exit 1
-"""
 
 RunCommand = Callable[..., Iterator[dict[str, Any]]]
 
@@ -122,6 +113,9 @@ class BoatSandbox(VmSandbox):
     """A boat sandbox with a Docker daemon. ``api`` is its provider's ``BoatApi``."""
 
     type = "boat"
+    # The image starts dockerd at boot, and the first command can be ahead of it: polled this often, this many times.
+    _DOCKER_READY_ATTEMPTS = 90
+    _DOCKER_READY_INTERVAL_SECONDS = 1
 
     def __init__(
         self,
@@ -153,7 +147,7 @@ class BoatSandbox(VmSandbox):
         run = _Run()
         script = shlex.join(command)
         try:
-            frames = await lifecycle.call(_follow, self._api, self.sandbox_id, script, run, self._run_command)
+            frames = await lifecycle.stream(_follow, self._api, self.sandbox_id, script, run, self._run_command)
         except asyncio.CancelledError:
             with run.lock:
                 run.cancelled = True
@@ -176,9 +170,21 @@ class BoatSandbox(VmSandbox):
         except (ApiException, *lifecycle.NETWORK_ERRORS) as exc:
             logger.warning("Stopping command %s in boat sandbox %s failed: %s", process_id, self.sandbox_id, exc)
 
+    @classmethod
+    def docker_ready_script(cls) -> str:
+        """A script that waits for the Docker daemon, then prints the Compose version, failing when either is missing."""
+        return (
+            f"for _ in $(seq {cls._DOCKER_READY_ATTEMPTS}); do\n"
+            "  docker info >/dev/null 2>&1 && exec docker compose version\n"
+            f"  sleep {cls._DOCKER_READY_INTERVAL_SECONDS}\n"
+            "done\n"
+            'echo "docker daemon did not become ready" >&2\n'
+            "exit 1\n"
+        )
+
     async def wait_for_vm(self) -> None:
         """Wait for Docker, which boat starts at boot, and require Compose v2, which ``deploy_env`` uses."""
-        code, version, err = await self.exec_with_output("bash", "-c", DOCKER_READY)
+        code, version, err = await self.exec_with_output("bash", "-c", self.docker_ready_script())
         if code != 0:
             raise RuntimeError(
                 f"Docker with Compose v2 is not ready in boat sandbox {self.sandbox_id}: {(err or version).strip()}"

@@ -99,10 +99,10 @@ class BoatSandboxProvider(SandboxProvider):
         return cls(parse_settings(config))
 
     async def close(self) -> None:
-        """Close the SDK client's connections."""
-        api_client = getattr(self._api, "api_client", None)
-        if api_client is not None:
-            await lifecycle.call(api_client.close)
+        """Close the SDK client's connections, which its urllib3 pool keeps; the SDK's own exit leaves them open."""
+        pool = getattr(getattr(getattr(self._api, "api_client", None), "rest_client", None), "pool_manager", None)
+        if pool is not None:
+            await lifecycle.call(pool.clear)
 
     def _handle(self, sandbox_id: str, tunnel_urls: Mapping[int, str]) -> BoatSandbox:
         # boat applies no egress policy, so every sandbox's is unrestricted.

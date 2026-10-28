@@ -1,7 +1,8 @@
 """Calling boat's synchronous SDK from asyncio, and creating and deleting sandboxes without leaking any.
 
-Every SDK call runs on a thread pool of the provider's own, so a long command's output stream never holds a thread of
-asyncio's default executor, which the object stores share. A create is idempotent: a retry after a lost answer sends
+SDK calls run on two thread pools of the provider's own: one for commands' output streams, which hold a thread for as
+long as their command runs, and one for every other call, so neither a busy stream pool nor asyncio's default executor,
+which the object stores share, can keep a stop or a delete from running. A create is idempotent: a retry after a lost answer sends
 the same key and gets the same sandbox, while a refusal (rate limit, no capacity) made nothing, so the next attempt
 takes a key of its own. A sandbox a create made but nothing holds, because the create failed or was cancelled, is found
 by its create label and deleted.
@@ -27,9 +28,13 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# Threads for SDK calls, shared by every boat sandbox in the process: an exec holds one for as long as its command runs.
-THREADS = 64
-_EXECUTOR = ThreadPoolExecutor(max_workers=THREADS, thread_name_prefix="agent-env-boat")
+# Threads shared by every boat sandbox in the process: an exec's output stream holds one of STREAM_THREADS for as long
+# as its command runs; creates, deletes, stops and the other short calls run on CALL_THREADS of their own.
+STREAM_THREADS = 64
+CALL_THREADS = 16
+THREADS = STREAM_THREADS + CALL_THREADS
+_STREAMS = ThreadPoolExecutor(max_workers=STREAM_THREADS, thread_name_prefix="agent-env-boat-stream")
+_CALLS = ThreadPoolExecutor(max_workers=CALL_THREADS, thread_name_prefix="agent-env-boat")
 # Failures of the connection, not answers from boat.
 NETWORK_ERRORS = (urllib3.exceptions.HTTPError, OSError)
 # Answers that refuse a create before anything is made: a full rate or concurrency limit, or no machine free.
@@ -50,8 +55,13 @@ class Retry:
 
 
 async def call(fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
-    """``fn(*args, **kwargs)`` on the provider's thread pool."""
-    return await asyncio.get_running_loop().run_in_executor(_EXECUTOR, functools.partial(fn, *args, **kwargs))
+    """``fn(*args, **kwargs)``, a short SDK call, on the calls' thread pool."""
+    return await asyncio.get_running_loop().run_in_executor(_CALLS, functools.partial(fn, *args, **kwargs))
+
+
+async def stream(fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """``fn(*args, **kwargs)``, which follows a command's output to its end, on the streams' thread pool."""
+    return await asyncio.get_running_loop().run_in_executor(_STREAMS, functools.partial(fn, *args, **kwargs))
 
 
 def _spawn(cleanup: Awaitable[object]) -> asyncio.Future[Any]:
@@ -177,7 +187,12 @@ async def create(api: Any, request: Any, token: str, retry: Retry) -> Any:
         if attempt + 1 < retry.attempts:
             delay = min(retry_after(last) or retry.base_delay * 2**attempt, retry.max_delay)
             logger.warning("boat refused or did not answer a sandbox create (%s); retrying in %ss", last, delay)
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                # An attempt that went unanswered may have made the sandbox, which nothing else knows of.
+                await settle(delete_labelled(api, token, retry), within=retry.cancel_wait)
+                raise
     # Out of attempts: an unanswered create may still have made its sandbox.
     await settle(delete_labelled(api, token, retry))
     assert last is not None

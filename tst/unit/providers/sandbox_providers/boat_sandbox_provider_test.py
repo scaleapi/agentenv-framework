@@ -25,7 +25,7 @@ from agent_env.providers.sandbox_providers.boat.config import (
     sandbox_type,
 )
 from agent_env.providers.sandbox_providers.boat.provider import BoatSandboxProvider
-from agent_env.providers.sandbox_providers.boat.sandbox import DOCKER_READY, BoatSandbox
+from agent_env.providers.sandbox_providers.boat.sandbox import BoatSandbox
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     _BUILTIN_SANDBOX_PROVIDERS,
@@ -46,7 +46,7 @@ def provider(api: FakeBoatApi, commands: FakeCommands | None = None) -> BoatSand
 
 
 def docker_ready(argv: list[str]) -> tuple[int, str, str]:
-    return (0, "Docker Compose version v5.3.1\n", "") if argv == ["bash", "-c", DOCKER_READY] else (0, "", "")
+    return (0, "Docker Compose version v5.3.1\n", "") if argv == ["bash", "-c", BoatSandbox.docker_ready_script()] else (0, "", "")
 
 
 # --- config ---
@@ -125,7 +125,7 @@ async def test_create_vm_sends_an_isolated_sandbox_and_returns_its_hosted_urls()
     assert isinstance(sandbox, BoatSandbox) and (sandbox.type, sandbox.mode) == ("boat", "vm")
     assert sandbox.tunnel_urls == {8000: api.url(sandbox.sandbox_id, 8000), 9000: api.url(sandbox.sandbox_id, 9000)}
     assert sandbox.network_policy == NetworkPolicy()
-    assert commands.commands == [["bash", "-c", DOCKER_READY]]
+    assert commands.commands == [["bash", "-c", BoatSandbox.docker_ready_script()]]
     assert api.hosts == []
 
 
@@ -186,6 +186,22 @@ async def test_a_create_that_never_answers_deletes_what_it_may_have_made(monkeyp
     token = api.creates[0]["request"].labels[CREATE_LABEL]
     assert api.label_queries == [[f"{CREATE_LABEL}={token}"]]
     assert api.sandboxes_by_id == {} and len(api.deletes) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_create_cancelled_while_it_waits_to_retry_deletes_what_the_unanswered_attempt_made(monkeypatch):
+    monkeypatch.setattr(BoatSandboxProvider, "_RETRY_BASE_DELAY", 30.0)
+    api = FakeBoatApi(create_errors=[api_error(500, "http_500")])
+    task = asyncio.create_task(provider(api).create_vm(setup_for_gateway=False))
+    for _ in range(100):
+        if api.sandboxes_by_id:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    token = api.creates[0]["request"].labels[CREATE_LABEL]
+    assert api.label_queries == [[f"{CREATE_LABEL}={token}"]] and api.sandboxes_by_id == {}
 
 
 @pytest.mark.asyncio
@@ -264,7 +280,15 @@ async def test_a_delete_that_keeps_failing_is_raised(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_close_closes_the_sdk_client():
+async def test_close_closes_the_sdk_clients_connections():
     api = FakeBoatApi()
     await provider(api).close()
-    assert api.api_client.closed
+    assert api.api_client.rest_client.pool_manager.cleared
+
+
+@pytest.mark.asyncio
+async def test_close_works_on_the_real_sdk_client():
+    """The SDK's ApiClient has no close of its own; the provider clears its connection pool instead."""
+    built = BoatSandboxProvider(SETTINGS)
+    await built.close()
+    await built.close()

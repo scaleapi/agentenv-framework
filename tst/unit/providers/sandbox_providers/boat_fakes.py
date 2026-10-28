@@ -49,11 +49,14 @@ class FakeBoatApi:
     label_queries: list[list[str]] = field(default_factory=list)
     stopped: list[tuple[str, int]] = field(default_factory=list)
     uploads: list[str] = field(default_factory=list)
-    api_client: SimpleNamespace = field(default_factory=lambda: SimpleNamespace(closed=False))
+    # The SDK's ApiClient, as far as close reaches: its REST client's urllib3 pool.
+    api_client: SimpleNamespace = field(
+        default_factory=lambda: SimpleNamespace(rest_client=SimpleNamespace(pool_manager=SimpleNamespace(cleared=False))))
     _ids: Iterator[int] = field(default_factory=itertools.count)
 
     def __post_init__(self) -> None:
-        self.api_client.close = lambda: setattr(self.api_client, "closed", True)
+        pool = self.api_client.rest_client.pool_manager
+        pool.clear = lambda: setattr(pool, "cleared", True)
 
     def url(self, sandbox_id: str, port: int) -> str:
         return f"https://box-{sandbox_id}-{port}.on.boat.dev"

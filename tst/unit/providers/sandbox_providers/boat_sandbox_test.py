@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import httpx
@@ -15,7 +16,7 @@ import urllib3
 
 from agent_env.providers.sandbox_providers.boat import lifecycle
 from agent_env.providers.sandbox_providers.boat import sandbox as sandbox_module
-from agent_env.providers.sandbox_providers.boat.sandbox import DOCKER_READY, UNKNOWN_EXIT_CODE, BoatSandbox
+from agent_env.providers.sandbox_providers.boat.sandbox import UNKNOWN_EXIT_CODE, BoatSandbox
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 
 from tst.unit.providers.sandbox_providers.boat_fakes import FakeBoatApi, FakeCommands, api_error
@@ -108,10 +109,33 @@ async def test_a_command_cancelled_before_it_started_is_stopped_when_it_starts()
 
 
 @pytest.mark.asyncio
+async def test_output_streams_filling_their_pool_leave_stops_and_deletes_a_thread(monkeypatch):
+    monkeypatch.setattr(lifecycle, "_STREAMS", ThreadPoolExecutor(max_workers=1))
+    api, commands = FakeBoatApi(), FakeCommands(gate=threading.Event())
+    busy = sandbox(commands, api)
+    running = asyncio.create_task(busy.exec("sleep", "600"))
+    assert await asyncio.to_thread(commands.started.wait, 5)
+    queued = asyncio.create_task(busy.exec("true"))
+    await asyncio.wait_for(busy.terminate(), 2)
+    queued.cancel()
+    running.cancel()
+    await asyncio.gather(queued, running, return_exceptions=True)
+    assert api.deletes == ["bx_1"] and ("bx_1", 100) in api.stopped
+    commands.gate.set()
+
+
+def test_the_readiness_wait_is_built_from_its_named_settings(monkeypatch):
+    monkeypatch.setattr(BoatSandbox, "_DOCKER_READY_ATTEMPTS", 7)
+    monkeypatch.setattr(BoatSandbox, "_DOCKER_READY_INTERVAL_SECONDS", 3)
+    script = BoatSandbox.docker_ready_script()
+    assert "$(seq 7)" in script and "sleep 3" in script
+
+
+@pytest.mark.asyncio
 async def test_setup_waits_for_docker_and_needs_compose():
     commands = FakeCommands(handler=lambda argv: (0, "Docker Compose version v5.3.1\n", ""))
     await sandbox(commands).setup_vm_for_gateway([8000])
-    assert commands.commands == [["bash", "-c", DOCKER_READY]]
+    assert commands.commands == [["bash", "-c", BoatSandbox.docker_ready_script()]]
     failing = FakeCommands(handler=lambda argv: (1, "", "docker daemon did not become ready\n"))
     with pytest.raises(RuntimeError, match="not ready in boat sandbox bx_1"):
         await sandbox(failing).wait_for_vm()
