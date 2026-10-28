@@ -71,12 +71,10 @@ def _report(imported: BundleImport, folder: Path) -> None:
 @click.option("--eval", "evals", multiple=True, help="Register this eval, by name, and the tasks it names. Repeatable.")
 @click.option("--prefix", default=None,
               help="What each entry's registry id opens with; by default the folder's name and a dash.")
-@click.option("--adopt", multiple=True,
-              help="An id the store holds that this bundle didn't register, to write a new version of. Repeatable.")
 @click.option("--dry-run", is_flag=True, help="Check everything and say what would be written; write nothing.")
 @click.option("--yes", is_flag=True, help="Write to a store other than this machine's own without asking.")
 def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefix: str | None,
-             adopt: tuple[str, ...], dry_run: bool, yes: bool):
+             dry_run: bool, yes: bool):
     """Write the bundle at FOLDER into the configured stores under registry ids, so whatever runs the stores' tasks
     runs what the folder runs.
 
@@ -87,11 +85,11 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
     image the bundle builds is built here for linux/amd64 with Docker and pushed to the configured image store, with
     its build context beside it.
 
-    It checks everything first and says what it would write: an id the store holds that this bundle didn't register,
-    an @local id left in what it would write, or, for a store other than this machine's, a credential written out or a
-    URL only this machine reaches, refuses the whole registration. A store other than this machine's is written only
-    after you confirm, or with --yes. Registering again writes only what changed since."""
-    options = {"tasks": tasks, "evals": evals, "prefix": prefix, "adopt": adopt}
+    It checks everything first and says what it would write: an @local id left in what it would write or, for a store
+    other than this machine's, a credential written out or a URL only this machine reaches refuses the whole
+    registration. An id the store holds already takes a new version, whoever wrote it. A store other than this
+    machine's is written only after you confirm, or with --yes. Registering again writes only what changed since."""
+    options = {"tasks": tasks, "evals": evals, "prefix": prefix}
     click.echo(f"Registering {folder} into:")
     for line in describe_target():
         click.echo(f"  {line}")

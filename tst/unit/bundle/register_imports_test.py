@@ -103,19 +103,16 @@ def test_a_given_back_field_the_store_holds_is_no_credential_written_out_to_a_sh
     assert _written(registered)["triage"] == (2, False)
 
 
-def test_an_edit_to_what_the_store_has_since_written_anew_is_refused_unless_adopted(imported, tmp_path):
+def test_an_untouched_entry_keeps_its_imported_version_and_an_edit_writes_past_what_the_store_has_since(imported,
+                                                                                                   tmp_path):
     FileArtifact.put("crm-data", description="someone else's", file_path=str(tmp_path / "crm.json"))
     kept = register_bundle(imported)
     (imported / "artifacts/crm-data/crm.json").write_text('{"edited": true}')
 
-    with pytest.raises(BundleError) as refused:
-        register_bundle(imported)
-    adopted = register_bundle(imported, adopt=["crm-data"])
+    edited = register_bundle(imported)
 
     assert _written(kept)["crm-data"] == (1, True)
-    assert refused.value.problems == ("artifacts/crm-data: 'crm-data' is at v2 in the store, newer than the v1 this "
-                                      "bundle last registered; pass --adopt crm-data to write over it",)
-    assert _written(adopted)["crm-data"] == (3, False)
+    assert _written(edited)["crm-data"] == (3, False)
 
 
 def test_an_image_whose_build_context_is_edited_is_pushed_and_its_env_rewritten(imported, monkeypatch):
