@@ -34,7 +34,7 @@ dependencies = [
     "click>=8.0.0",
     "cryptography>=42",  # the local transfer CA
     "httpx>=0.27.0",
-    "litellm>=1.96.0,<1.97",
+    "litellm>=1.96.0,<1.107",
     "mcp>=1.25,<2",  # same floor as env/gateway/requirements.txt and agentenv-protocol; 2.0.0 removed mcp.server.fastmcp, imported at module scope by env/gateway
     "packaging>=22",  # parses a bundle.toml's requires; evaluates a plugin's requirement markers with no extra
     "a2a-sdk==0.3.26",
@@ -45,7 +45,7 @@ dependencies = [
     "starlette>=0.40",  # the local grant server
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
-    "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
+    "e2b>=2.46.4,<2.60.0",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
     "fastapi>=0.110",  # the explorer, agent-env up
 ]
 
@@ -74,12 +74,12 @@ gcp = [
 ]
 # The sail_vm sandbox provider (Sail Research Sailboxes), selected with --sandbox sail_vm.
 sail = [
-    "sail~=0.12.8",  # Sailbox exec/fs/listener/egress APIs validated against the 0.12 line
+    "sail>=0.12.8,<0.17.0",  # Sailbox exec/fs/listener/egress APIs validated against the 0.12 line
 ]
 vercel = [
     "anyio>=4,<5",
     "httpx2>=2.13.1,<3",
-    "vercel-sandbox>=0.7.0,<0.8",  # provides the vercel.sandbox namespace without the full vercel bundle
+    "vercel-sandbox>=0.7.0,<0.11",  # provides the vercel.sandbox namespace without the full vercel bundle
 ]
 # The Tensorlake sandbox provider, selected as the built-in `tensorlake` backend.
 tensorlake = [
@@ -95,7 +95,7 @@ boxd = [
 ]
 # The Daytona sandbox provider, selected as the built-in `daytona` backend.
 daytona = [
-    "daytona~=0.224.0",  # AsyncDaytona sandboxes, sessions, file API, preview links and egress lists validated against 0.224
+    "daytona>=0.224,<0.227",  # AsyncDaytona sandboxes, sessions, file API, preview links and egress lists validated against 0.224
 ]
 # The boat.dev sandbox provider, selected as the built-in `boat` backend.
 boat = [
@@ -108,7 +108,7 @@ dev = [
     "transformers>=5.2",  # get_json_schema, which reads agent_env.training's tool methods as TRL shows them to a model
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
-    "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
+    "griffelib==2.4.1",  # the plugin API check; exact, since what it reports as a break changes between releases
     "tomli-w==1.2.0",  # the Codex agent's config writer, which only its image installs; its tests import it
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
@@ -118,7 +118,7 @@ dev = [
     "pytest-socket>=0.7.0",
     "pytest-timeout>=2.3.0",
     "pytest-xdist>=3.0.0",
-    "ruff==0.16.10",  # the lint gate; exact, since what it reports changes between releases
+    "ruff==0.17.2",  # the lint gate; exact, since what it reports changes between releases
 ]
 smol = [
     "smolmachines>=1.27.0",
