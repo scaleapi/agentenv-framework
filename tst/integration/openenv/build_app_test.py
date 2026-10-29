@@ -236,7 +236,7 @@ async def test_each_session_holds_its_own_deployment_and_every_way_it_ends_tears
     with _serving(build_app(str(root), max_concurrent_envs=2)) as url:
         rewards = await asyncio.gather(_play(url, add=True), _play(url, add=False))
         assert [ended.reward for _, ended in rewards] == [1.0, 0.0]
-        assert _left(items.sandboxes) == []
+        await _until(lambda: _left(items.sandboxes) == [])
 
         held = GenericEnvClient(base_url=url, message_timeout_s=300)
         await held.connect()

@@ -84,6 +84,7 @@ def test_a_rollout_plays_its_rows_task_and_an_environment_plays_one_after_anothe
     environment.reset(**row)
     assert environment.get_reward() == 0.0
     assert environment.get_reward() is None
+    env.close()
     assert len(teardowns.finished) == 3
 
 
