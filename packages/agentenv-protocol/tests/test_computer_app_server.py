@@ -283,17 +283,21 @@ def test_the_launcher_runs_the_app_through_its_own_server(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_the_sessions_windows_are_listed_by_class_instance_and_title(monkeypatch):
-    replies = {("-root", "_NET_CLIENT_LIST"): "_NET_CLIENT_LIST(WINDOW): window id # 0x1e00004, 0x2000003\n",
-               ("-id", "0x1e00004", "WM_CLASS", "_NET_WM_NAME"):
-                   '_NET_WM_NAME(UTF8_STRING) = "Inbox \\"work\\""\nWM_CLASS(STRING) = "mail", "Mail"\n',
-               ("-id", "0x2000003", "WM_CLASS", "_NET_WM_NAME"): ""}
+async def test_the_sessions_windows_are_listed_by_class_instance_and_title_from_either_name(monkeypatch):
+    replies = {("-root", "_NET_CLIENT_LIST"): "_NET_CLIENT_LIST(WINDOW): window id # 0x1e00004, 0x2000003, 0x2200001\n",
+               ("-id", "0x1e00004", "WM_CLASS", "_NET_WM_NAME", "WM_NAME"):
+                   '_NET_WM_NAME(UTF8_STRING) = "Inbox \\"work\\""\nWM_CLASS(STRING) = "mail", "Mail"\n'
+                   'WM_NAME(STRING) = "Inbox"\n',
+               ("-id", "0x2000003", "WM_CLASS", "_NET_WM_NAME", "WM_NAME"): "",
+               ("-id", "0x2200001", "WM_CLASS", "_NET_WM_NAME", "WM_NAME"):
+                   'WM_CLASS(STRING) = "xcalc", "XCalc"\n_NET_WM_NAME:  not found.\nWM_NAME(STRING) = "Calculator"\n'}
 
     async def xprop(*args):
         return replies[args]
 
     monkeypatch.setattr(session, "_xprop", xprop)
-    assert await session.windows() == [{"instance": "mail", "class": "Mail", "title": 'Inbox "work"'}]
+    assert await session.windows() == [{"instance": "mail", "class": "Mail", "title": 'Inbox "work"'},
+                                       {"instance": "xcalc", "class": "XCalc", "title": "Calculator"}]
 
 
 @pytest.mark.asyncio

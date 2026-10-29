@@ -587,13 +587,14 @@ card and tools on the Unix socket `.agentenv/server.sock` in that folder, with `
 the app's `launch` as its params, and the methods `launch` (POST), which starts the app in the
 desktop session, and `ready` (GET: an `AppReadiness` of `ready`, `problems`, `launched`, `waited_s`
 and `timeout_s`), which runs the app's readiness checks then, at once, each within 10 s. A server
-that can't start writes why to `.agentenv/server.failure` in the folder, and the driver reports that
-in its place. Once the session is up the server adds the app's launcher to the session user's menu,
-which runs `python -m agentenv_protocol.computer.launch <folder>` to ask the server, so the server
-starts every copy of the app, and launches a `boot` app, once per boot. The driver finds each app by
-the socket in its folder: the computer is ready once every app's server answers and each `boot` app,
-and each app with no launch, says it's ready; a `demand` app counts once something launches it. What
-the server does in the session (`agentenv_protocol.computer.session`) is Linux's.
+that can't start, or whose start in the session fails (adding the launcher, say), writes why to
+`.agentenv/server.failure` in the folder and exits, and the driver reports that in its place. Once
+the session is up the server adds the app's launcher to the session user's menu, which runs `python
+-m agentenv_protocol.computer.launch <folder>` to ask the server, so the server starts every copy of
+the app, and launches a `boot` app, once per boot. The driver finds each app by the socket in its
+folder: the computer is ready once every app's server answers and each `boot` app, and each app with
+no launch, says it's ready; a `demand` app counts once something launches it. What the server does
+in the session (`agentenv_protocol.computer.session`) is Linux's.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as

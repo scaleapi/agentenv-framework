@@ -44,15 +44,16 @@ def add_launcher(name: str, folder: Path) -> Path:
 
 async def windows() -> list[dict[str, str]]:
     """The window manager's top-level windows, each as its WM_CLASS ``instance`` and ``class`` and its ``title``, read
-    with ``xprop``; a window that closes while it's read is left out."""
+    with ``xprop``: ``_NET_WM_NAME``, or ``WM_NAME`` for a window that sets only that; a window that closes while it's
+    read is left out."""
     listed = await _xprop("-root", "_NET_CLIENT_LIST")
     found = []
     for window in re.findall(r"0x[0-9a-f]+", listed.partition("#")[2]):
-        props = await _xprop("-id", window, "WM_CLASS", "_NET_WM_NAME")
-        names = dict(re.findall(r'^(WM_CLASS|_NET_WM_NAME)[^=]*= (.*)$', props, re.MULTILINE))
+        props = await _xprop("-id", window, "WM_CLASS", "_NET_WM_NAME", "WM_NAME")
+        names = dict(re.findall(r'^(WM_CLASS|_NET_WM_NAME|WM_NAME)[^=]*= (.*)$', props, re.MULTILINE))
         parts = _strings(names.get("WM_CLASS", ""))
         if len(parts) == 2:
-            title = _strings(names.get("_NET_WM_NAME", ""))
+            title = _strings(names.get("_NET_WM_NAME") or names.get("WM_NAME", ""))
             found.append({"instance": parts[0], "class": parts[1], "title": title[0] if title else ""})
     return found
 

@@ -106,30 +106,60 @@ def test_what_isnt_a_driver_class_exits_saying_why(tmp_path, served, monkeypatch
     assert message in str(stopped.value) and served == []
 
 
-@pytest.mark.asyncio
-async def test_an_apps_server_serves_on_the_socket_in_its_folder_and_starts_the_app_once_it_serves(tmp_path,
-                                                                                                    monkeypatch,
-                                                                                                    isolated):
+@pytest.fixture
+def app_folder(tmp_path, monkeypatch, isolated):
+    """An app's folder, holding ``APP`` and what its last server left, whose server only runs its app's lifespan, as
+    uvicorn runs it around serving; each server is recorded."""
     (tmp_path / "app.py").write_text(APP)
     (tmp_path / SOCKET).parent.mkdir()
     (tmp_path / SOCKET).write_text("left by the last server")
     (tmp_path / FAILURE).write_text("RuntimeError: the last start failed")
     monkeypatch.chdir(tmp_path)
-    started, ran = [], []
+    ran = []
+
+    def run(server):
+        async def lifespan():
+            async with server.config.app.router.lifespan_context(server.config.app):
+                await asyncio.sleep(0.05)
+
+        asyncio.run(lifespan())
+        ran.append(server)
+
+    monkeypatch.setattr(serve_app.uvicorn.Server, "run", run)
+    return tmp_path, ran
+
+
+def test_an_apps_server_serves_on_the_socket_in_its_folder_and_starts_the_app_once_it_serves(app_folder,
+                                                                                             monkeypatch):
+    folder, ran = app_folder
+    started = []
 
     async def start(runtime):
         started.append(runtime)
 
     monkeypatch.setattr(AppRuntime, "start", start)
-    monkeypatch.setattr(serve_app.uvicorn, "run", lambda asgi, uds, log_level: ran.append((asgi, uds)))
 
     serve_app.main(["app.py:Notes"])
-    (asgi, uds), = ran
-    async with asgi.router.lifespan_context(asgi):
-        await asyncio.sleep(0)
 
-    assert uds == str(SOCKET) and not (tmp_path / SOCKET).exists() and not (tmp_path / FAILURE).exists()
+    (server,) = ran
+    assert server.config.uds == str(SOCKET) and not server.should_exit
+    assert not (folder / SOCKET).exists() and not (folder / FAILURE).exists()
     assert len(started) == 1 and isinstance(started[0], AppRuntime)
+
+
+def test_an_apps_server_whose_start_fails_stops_saying_why_in_the_apps_folder(app_folder, monkeypatch):
+    folder, ran = app_folder
+
+    async def start(runtime):
+        raise PermissionError("~/.local/share/applications isn't writable")
+
+    monkeypatch.setattr(AppRuntime, "start", start)
+
+    with pytest.raises(PermissionError):
+        serve_app.main(["app.py:Notes"])
+
+    assert ran[0].should_exit is True
+    assert (folder / FAILURE).read_text() == "PermissionError: ~/.local/share/applications isn't writable"
 
 
 @pytest.mark.parametrize("argv, failure", [
