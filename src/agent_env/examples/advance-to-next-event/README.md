@@ -21,7 +21,9 @@ after those lines:
 [Tue Feb 2, 6:00 PM · your scheduled check] Look for new 8x10 rugs under $300.
 ```
 
-The conversation ends when nothing can wake the agent any more, or the next thing is past `end_time`.
+The conversation ends when nothing can wake the agent any more, or the next thing is past `end_time`. It also ends,
+recorded as `triggers_still_firing`, if triggers are still running when `settle_timeout_seconds` runs out, rather
+than treat unfinished work as nothing left to happen. Envs whose clock was never armed are left out.
 
 Reference the hook from a `prompt_agent` step, after `sync_env_clock` (frozen: `virtual_seconds_per_real_second: 0`)
 and `configure_scheduled_checks` (`"roles": ["default"]`). `time_zone` on `prompt_agent` sets the zone the delivered
@@ -43,7 +45,7 @@ Its params, all optional:
 - `role`: the agent's AgentEnv-Role, whose checks and notifications it moves the clock to; `default` by default.
 - `time_zone`: the IANA zone the person's messages show their times in; UTC by default.
 - `person_messages`: `[{"at": RFC 3339 instant, "text": "..."}]`, what the person writes and when.
-- `settle_timeout_seconds`: how long to wait for triggers to settle, 300 by default.
+- `settle_timeout_seconds`: how long to wait for triggers to settle before ending the run, 300 by default.
 - `max_jumps_per_turn`: silent world events it may pass between two wakes, 500 by default.
 
 `max_conversation_turns` caps the wakes. The env needs a gateway with clock/v1 `advance` and notifications/v1. A hook

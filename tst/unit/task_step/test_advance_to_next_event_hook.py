@@ -232,6 +232,42 @@ async def test_a_repeating_check_wakes_once_per_time_and_the_record_names_why(ho
     assert [r.get("for") for r in records[:2]] == [["scheduled_check"], ["scheduled_check"]]
 
 
+@pytest.mark.asyncio
+async def test_what_the_last_allowed_jump_makes_due_still_wakes_the_agent(hook, gateway):
+    gateway._notifications.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
+    sent = await _turns(hook, _context(), params={"max_jumps_per_turn": 1})
+    assert sent[0] == ["[Tue Mar 3, 6:00 PM · your scheduled check] check for new rugs"]
+
+
+@pytest.mark.asyncio
+async def test_triggers_still_firing_at_the_settle_timeout_end_the_run_saying_so(hook, gateway, monkeypatch):
+    _register(gateway, {"id": "w-1", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
+                        "actions": [{"type": "notify", "channel": "Gmail", "text": "late"}]})
+    monkeypatch.setattr(hook, "_busy", lambda row, now: True)
+    context = _context()
+    sent = await _turns(hook, context, params={"settle_timeout_seconds": 0.05})
+    assert sent == [{"end": "triggers_still_firing"}]
+    assert context.metadata["post_turn_hooks"]["week"][-1]["envs"] == ["items"]
+
+
+class _UnarmedEnv:
+    env_id = "unarmed"
+
+    def supports(self, extension, method):
+        return True
+
+    async def invoke(self, extension, method, args=None):
+        return {"armed": False}
+
+
+@pytest.mark.asyncio
+async def test_an_env_whose_clock_was_never_armed_is_left_out(hook, gateway):
+    armed = _turn(hook, _context()).envs[0]
+    assert await hook._armed([armed, _UnarmedEnv()]) == [armed]
+    gateway._clock = Clock()
+    assert await _turns(hook, _context()) == [{"end": "no_armed_env_with_clock_and_notifications"}]
+
+
 def test_unknown_params_are_refused(hook):
     with pytest.raises(ValueError, match="takes"):
         hook._params({"nudge": "x"})

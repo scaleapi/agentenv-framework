@@ -25,17 +25,18 @@ async def post_turn(turn, params):
     if turn.last:
         return None
     end_time, role, zone, person, settle_timeout, max_jumps = _params(params)
-    envs = [env for env in turn.envs if env.supports(CLOCK, "advance") and env.supports(NOTIFICATIONS, "state")]
+    envs = await _armed(turn.envs)
     if not envs:
-        return _end(turn, "no_env_with_clock_and_notifications")
-    await _settle(turn, envs, settle_timeout)
+        return _end(turn, "no_armed_env_with_clock_and_notifications")
+    if (stuck := await _settle(turn, envs, settle_timeout)):
+        return _end(turn, "triggers_still_firing", envs=stuck)
     answer = await turn.user_triggers()
     if answer is not None:
         return answer
     t0 = min([_utc((await env.invoke(CLOCK, "state"))["t0"]) for env in envs])
     end = _end_instant(end_time, t0)
     sent = _delivered_person(turn)
-    for _ in range(max_jumps):
+    for jump in range(max_jumps + 1):
         now = await _now(envs)
         due = await _due(envs, role, now)
         due_person = [m for m in person if m["at"] <= now and _iso(m["at"]) not in sent]
@@ -44,6 +45,8 @@ async def post_turn(turn, params):
                          **({"person_at": [_iso(m["at"]) for m in due_person]} if due_person else {})})
             # prompt_agent puts what came due on notifications/v1 ahead of this; [] sends only that
             return {"message": _person_message(due_person, zone) if due_person else []}
+        if jump == max_jumps:  # checked above: what the last jump made due still wakes the agent
+            return _end(turn, "max_jumps_per_turn", at=_iso(now))
         nxt = await _next(envs, role, person, now, sent)
         if nxt is None:
             return _end(turn, "nothing_can_wake_the_agent", at=_iso(now))
@@ -51,9 +54,9 @@ async def post_turn(turn, params):
             return _end(turn, "end_time", next_at=_iso(nxt))
         for env in envs:
             await _advance(env, nxt)
-        await _settle(turn, envs, settle_timeout)
-    return _end(turn, "max_jumps_per_turn", at=_iso(await _now(envs)))
-
+        if (stuck := await _settle(turn, envs, settle_timeout)):
+            # ending here would read unfinished work as nothing left to happen, and lose what it sends
+            return _end(turn, "triggers_still_firing", envs=stuck, at=_iso(nxt))
 
 def _params(params):
     unknown = sorted(set(params) - set(PARAMS))
@@ -78,6 +81,16 @@ def _params(params):
     if isinstance(max_jumps, bool) or not isinstance(max_jumps, int) or max_jumps < 1:
         raise ValueError(f"max_jumps_per_turn must be a positive integer, got {max_jumps!r}")
     return end_time, role.strip(), zone, sorted(person, key=lambda m: m["at"]), timeout, max_jumps
+
+
+async def _armed(envs):
+    """The envs with clock advance and notifications state whose clock is armed; an unarmed one has no time to move."""
+    armed = []
+    for env in envs:
+        if env.supports(CLOCK, "advance") and env.supports(NOTIFICATIONS, "state"):
+            if (await env.invoke(CLOCK, "state")).get("armed"):
+                armed.append(env)
+    return armed
 
 
 async def _now(envs):
@@ -137,7 +150,8 @@ async def _advance(env, target):
 
 
 async def _settle(turn, envs, timeout):
-    """Wait until no trigger still fires (bar one waiting for a later time), so what an event set off has landed."""
+    """Wait until no trigger still fires (bar one waiting for a later time), so what an event set off has landed.
+    Returns the ids of the envs still firing when ``timeout`` ran out, empty when all settled."""
     deadline = time.monotonic() + timeout
     waiting = {i for i, env in enumerate(envs) if env.supports(TRIGGERS, "state")}
     while waiting and time.monotonic() < deadline:
@@ -152,8 +166,10 @@ async def _settle(turn, envs, timeout):
         if waiting:
             turn.heartbeat()
             await asyncio.sleep(POLL_SECONDS)
-    if waiting:
-        logger.warning(f"env(s) {sorted(envs[i].env_id for i in waiting)} still had triggers firing {timeout}s on")
+    stuck = sorted(envs[i].env_id for i in waiting)
+    if stuck:
+        logger.warning(f"env(s) {stuck} still had triggers firing {timeout}s on")
+    return stuck
 
 
 def _busy(row, now):
