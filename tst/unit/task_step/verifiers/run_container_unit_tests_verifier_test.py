@@ -423,17 +423,16 @@ def test_a_verifier_for_a_computer_runs_in_it_and_grades_only_the_reward_this_ru
 def test_a_verifier_for_a_computer_that_cant_clear_the_reward_file_grades_nothing(local_stores, monkeypatch,
                                                                                    tmp_path):
     computer = Computer(tmp_path).install(monkeypatch)
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "logs" / "reward.txt").write_text("1\n")
-    (tmp_path / "logs").chmod(0o555)
+    denied = {"exit_code": 1, "stdout": "", "stderr": "rm: cannot remove 'logs/reward.txt': Permission denied",
+              "truncated": False, "timed_out": False}
+    monkeypatch.setattr(computer, "_run", lambda params: denied if params["argv"][0] == "rm" else Computer._run(
+        computer, params))
     step = Step(id="scrape", version=None, env_id="desk", reward_path="logs/reward.txt", command="exit 1")
     ctx = TaskStepContext(deployed_envs=[computer.deployed()])
 
-    try:
-        with pytest.raises(RuntimeError, match="couldn't clear the reward file 'logs/reward.txt' before the tests"):
-            asyncio.run(step.execute(ctx))
-    finally:
-        (tmp_path / "logs").chmod(0o755)
+    with pytest.raises(RuntimeError, match="couldn't clear the reward file 'logs/reward.txt' before the tests, so one "
+                                           "left there would be graded: rm: cannot remove"):
+        asyncio.run(step.execute(ctx))
 
     assert "verifications" not in ctx.metadata
     assert [call[1]["argv"][:2] for call in computer.calls if call[0] == "run"] == [["rm", "-f"]]
