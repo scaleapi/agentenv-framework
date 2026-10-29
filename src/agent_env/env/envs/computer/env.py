@@ -21,9 +21,9 @@ from agent_env.env.envs._deployment import (
     deploy_through_provider,
     provider_or_class,
 )
-from agent_env.env.envs.computer import composer, gate, inside
-from agent_env.env.envs.computer import params as computer_params
-from agent_env.env.envs.computer.driver import ComputerDriverEnv
+from agent_env.env.envs.computer.utils import composer, gate, inside
+from agent_env.env.envs.computer.utils import params as computer_params
+from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import get_env_store
 from agent_env.providers.env_providers.env_computer_provider import end_recordings

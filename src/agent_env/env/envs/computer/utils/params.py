@@ -11,7 +11,7 @@ from agentenv_protocol.computer import ComputerSettings
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agent_env.artifact.artifacts.computer import SettingValue
-from agent_env.env.envs.computer import gate
+from agent_env.env.envs.computer.utils import gate
 
 if TYPE_CHECKING:
     from agent_env.env.envs.computer.env import ComputerEnv

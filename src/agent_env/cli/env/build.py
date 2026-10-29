@@ -4,7 +4,7 @@ building."""
 import click
 
 from agent_env.env import Env
-from agent_env.env.envs.computer import composer
+from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.store.base import NotFoundError
 

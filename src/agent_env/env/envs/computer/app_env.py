@@ -10,10 +10,10 @@ from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
-from agent_env.env.envs.computer import composer, gate
+from agent_env.env.envs.computer.utils import composer, gate
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer.install import AppInstall, installs, missing
-from agent_env.env.envs.computer.driver import ComputerDriverEnv, declared
+from agent_env.env.envs.computer.utils.install import AppInstall, installs, missing
+from agent_env.env.envs.computer.driver_env import ComputerDriverEnv, declared
 from agent_env.env.store import get_env_store
 from agent_env.store.ids import derive_id
 

@@ -43,7 +43,7 @@ from agent_env.config import ConfigError, get_config
 from agent_env.config.model import MODEL_HEADERS_ENV
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import require_sandbox
-from agent_env.env.envs.computer import inside
+from agent_env.env.envs.computer.utils import inside
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,

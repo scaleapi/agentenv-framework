@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Optional
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.install import Install, installs, missing
+from agent_env.env.envs.computer.utils.install import Install, installs, missing
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:

@@ -39,7 +39,7 @@ from agentenv_protocol.computer import COMPUTER_EXEC
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import DeployedSandboxEnv, require_sandbox
-from agent_env.env.envs.computer import inside
+from agent_env.env.envs.computer.utils import inside
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef

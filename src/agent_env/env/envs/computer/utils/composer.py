@@ -36,8 +36,8 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.env import Env
-from agent_env.env.envs.computer import boot, gate
-from agent_env.env.envs.computer.install import Install
+from agent_env.env.envs.computer.utils import boot, gate
+from agent_env.env.envs.computer.utils.install import Install
 from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
 from agent_env.store.base import ConcurrentModificationError
 from agent_env.store.ids import derive_id
@@ -51,8 +51,8 @@ if TYPE_CHECKING:
 
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
     from agent_env.env.envs.computer.env import ComputerEnv
-    from agent_env.env.envs.computer.app import ComputerAppEnv
-    from agent_env.env.envs.computer.driver import ComputerDriverEnv
+    from agent_env.env.envs.computer.app_env import ComputerAppEnv
+    from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 
 logger = logging.getLogger(__name__)
 

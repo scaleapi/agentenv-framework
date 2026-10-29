@@ -13,8 +13,8 @@ from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
-from agent_env.env.envs.computer import params as computer_params
-from agent_env.env.envs.computer.boot import (
+from agent_env.env.envs.computer.utils import params as computer_params
+from agent_env.env.envs.computer.utils.boot import (
     READY_TIMEOUT_S,
     app_settings_environment,
     boot,

@@ -9,7 +9,7 @@ import pytest
 from agent_env.bundle import BundleError
 from agent_env.bundle.materialize import materialize
 from agent_env.env import Env
-from agent_env.env.envs.computer.app import ComputerAppEnv
+from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from tst.unit.bundle._support import layout, plan_of
