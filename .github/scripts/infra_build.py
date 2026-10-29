@@ -34,6 +34,7 @@ IMAGES = {
     "agentenv-claude-code": "src/agent_env/agents/agents/claude-code/Dockerfile",
     "agentenv-codex": "src/agent_env/agents/agents/codex/Dockerfile",
     "agentenv-gemini": "src/agent_env/agents/agents/gemini/Dockerfile",
+    "agentenv-hermes": "src/agent_env/agents/agents/hermes/Dockerfile",
     "agentenv-letta-code": "src/agent_env/agents/agents/letta-code/Dockerfile",
     "agentenv-opencode": "src/agent_env/agents/agents/opencode/Dockerfile",
     "agentenv-openhands": "src/agent_env/agents/agents/openhands/Dockerfile",
@@ -59,7 +60,7 @@ _NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-frame
 _RETRY_WAITS_SECONDS = (30, 60, 120)
 
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, the sidecars and the
-# browser answer their own commands, Claude Code's, Codex's, Gemini's, OpenCode's and pi's agents run their CLIs and
+# browser answer their own commands, Claude Code's, Codex's, Gemini's, Hermes', OpenCode's and pi's agents run their CLIs and
 # import their servers, OpenHands' imports its server, which loads the OpenHands SDK, Pydantic AI's imports its
 # server, which loads Pydantic AI, the proxy imports its server, the mail example's env imports its server, and the
 # base computer's desktop comes up, every program running.
@@ -76,6 +77,8 @@ _SMOKES = {
                        'codex --version && mcp-remote --help >/dev/null && python -c "import a2a_server"'],
     "agentenv-gemini": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                         'gemini --version && python -c "import a2a_server"'],
+    "agentenv-hermes": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+                        'hermes --version && python -c "import a2a_server"'],
     "agentenv-letta-code": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                             'letta --version && python -c "import a2a_server"'],
     "agentenv-opencode": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
