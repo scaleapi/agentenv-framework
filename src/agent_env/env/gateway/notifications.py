@@ -25,7 +25,7 @@ from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from .caller import Caller
-from .clock import Clock, ClockError, _iso, _parse_duration, _parse_rfc3339
+from .clock import _ISO8601_DURATION_RE, Clock, ClockError, _iso, _parse_duration, _parse_rfc3339
 from .constants import DEFAULT_ROLE, WILDCARD
 
 SCHEDULE_CHECK_TOOL_NAME = "schedule_check"
@@ -51,20 +51,31 @@ SCHEDULE_CHECK_DESCRIPTION = (
     "(a reply you are waiting for, a listing to watch, a deadline), schedule a check: when it comes due you are "
     "woken with your note, so write the note so it tells you what to do. Give `at` (a time, or a duration from now "
     "such as PT6H) and/or `every` (a duration such as P1D, to repeat), with an optional `until`. Times are in this "
-    "environment's clock (see get_time); a time without a UTC offset is refused."
+    "environment's clock (see get_time); a time without a UTC offset is refused. You can have at most {max_active} "
+    "checks at once. Times you get back are in UTC."
 )
-_SCHEDULE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "note": {"type": "string", "description": "What to do when the check comes due."},
-        "at": {"type": "string", "description": "When: an RFC 3339 time with its offset (2027-02-02T18:00:00-08:00), "
-                                                "or an ISO 8601 duration from now (PT6H)."},
-        "every": {"type": "string", "description": "Repeat this often: an ISO 8601 duration (PT6H, P1D)."},
-        "until": {"type": "string", "description": "Stop repeating after this time (RFC 3339) or duration from now."},
-    },
-    "required": ["note"],
-    "additionalProperties": False,
-}
+_TIME_RULE = "a time with seconds and its UTC offset (2027-02-02T18:00:00-08:00), or a duration from now (PT6H)"
+_DURATION_RULE = "a duration in weeks, days, hours, minutes or seconds (PT6H, P1D, P1W)"
+
+
+def _schedule_schema(min_interval: str) -> dict[str, Any]:
+    """schedule_check's arguments, stating the rules the parser applies, with the configured shortest repeat."""
+    return {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "description": "What to do when the check comes due."},
+            "at": {"type": "string", "description": f"When it first comes due: {_TIME_RULE}."},
+            "every": {"type": "string", "description": (
+                f"Repeat this often: {_DURATION_RULE}, at least {min_interval}. No months or years; P1D is exactly "
+                "24 hours, not the same local time each day.")},
+            "until": {"type": "string", "description": (
+                "Only with every: stop after this time, or after this duration from now (not from at).")},
+        },
+        "required": ["note"],
+        "additionalProperties": False,
+    }
+
+
 _LIST_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
 _CANCEL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -79,15 +90,29 @@ class NotificationError(ValueError):
 
 
 def _when(text: Any, now: datetime, field: str) -> datetime:
-    """An RFC 3339 instant, or an ISO 8601 duration counted from now."""
-    if not isinstance(text, str) or not text:
-        raise NotificationError(f"{field} must be an RFC 3339 time or an ISO 8601 duration")
+    """A time with seconds and a UTC offset, or a duration counted from now; an error names `field`, the argument the
+    caller gave, not the clock's own virtual_time. A leading p of either case is read as a duration."""
+    if isinstance(text, str) and text[:1] in ("P", "p"):
+        try:
+            return now + _duration(text, field)
+        except OverflowError:
+            raise NotificationError(f"{field} is too far away")
     try:
-        return now + _parse_duration(text) if text.startswith("P") else _parse_rfc3339(text)
-    except ClockError as e:
-        raise NotificationError(f"{field}: {e}")
-    except OverflowError:
-        raise NotificationError(f"{field} is too far away")
+        return _parse_rfc3339(text)
+    except ClockError:
+        raise NotificationError(f"{field} must be {_TIME_RULE}, not {text!r}")
+
+
+def _duration(text: Any, field: str) -> timedelta:
+    """A duration in the units the clock takes; an error names `field` and those units."""
+    try:
+        return _parse_duration(text)
+    except (ClockError, OverflowError):
+        shape = _ISO8601_DURATION_RE.match(text) if isinstance(text, str) else None
+        if shape and any(shape.groups()):  # the right shape, too big to count
+            raise NotificationError(f"{field} is too long")
+        raise NotificationError(f"{field} must be {_DURATION_RULE}, not {text!r}: written in capitals, with no "
+                                "months or years, and only seconds may have a fraction")
 
 
 class Notifications:
@@ -108,6 +133,14 @@ class Notifications:
     @property
     def roles(self) -> tuple[str, ...]:
         return self._roles
+
+    @property
+    def max_active(self) -> int:
+        return self._max_active
+
+    @property
+    def min_interval(self) -> str:
+        return _iso_duration(self._min_interval)
 
     @property
     def enabled(self) -> bool:
@@ -177,10 +210,7 @@ class Notifications:
         now = self._now()
         step = None
         if every is not None:
-            try:
-                step = _parse_duration(every)
-            except (ClockError, OverflowError) as e:
-                raise NotificationError(f"every: {e}")
+            step = _duration(every, "every")
             if step < self._min_interval:
                 raise NotificationError(f"every must be at least {_iso_duration(self._min_interval)} apart")
         if at is None and step is None:
@@ -395,7 +425,9 @@ def build_check_tools(notifications: Notifications, make_arg_model: Callable[[st
             return _tool_error(str(e))
 
     specs = [
-        (SCHEDULE_CHECK_TOOL_NAME, schedule_check, SCHEDULE_CHECK_DESCRIPTION, _SCHEDULE_SCHEMA, False),
+        (SCHEDULE_CHECK_TOOL_NAME, schedule_check,
+         SCHEDULE_CHECK_DESCRIPTION.format(max_active=notifications.max_active),
+         _schedule_schema(notifications.min_interval), False),
         (LIST_SCHEDULED_CHECKS_TOOL_NAME, list_scheduled_checks, "Your scheduled checks that are still to come.",
          _LIST_SCHEMA, True),
         (CANCEL_SCHEDULED_CHECK_TOOL_NAME, cancel_scheduled_check, "Cancel one of your scheduled checks.",

@@ -80,7 +80,7 @@ def test_schedule_returns_what_the_gateway_decided_and_list_still_shows_the_note
     ({"note": "x"}, "give at"),
     ({"note": " ", "at": "PT1H"}, "note must say"),
     ({"note": "x", "at": "2027-02-01T06:00:00-08:00"}, "already passed"),
-    ({"note": "x", "at": "2027-02-01T18:00:00"}, "RFC 3339|RFC3339"),
+    ({"note": "x", "at": "2027-02-01T18:00:00"}, "at must be a time with seconds and its UTC offset"),
     ({"note": "x", "every": "PT10M"}, "at least"),
     ({"note": "x", "at": "PT1H", "until": "P1D"}, "until only applies"),
     ({"note": "x", "every": "PT6H", "until": "PT1H"}, "before the first"),
@@ -90,6 +90,22 @@ def test_schedule_returns_what_the_gateway_decided_and_list_still_shows_the_note
 def test_bad_checks_are_refused_with_the_reason(kwargs, error):
     with pytest.raises(NotificationError, match=error):
         _notifications().schedule(**kwargs)
+
+
+@pytest.mark.parametrize("kwargs, error", [
+    ({"at": "2027-02-02T18:00-08:00"}, "at must be a time with seconds and its UTC offset"),
+    ({"at": "tomorrow"}, "at must be a time with seconds"),
+    ({"at": "pt6h"}, "at must be a duration in weeks, days, hours, minutes or seconds"),
+    ({"every": "P1M"}, "every must be a duration .*no months or years"),
+    ({"every": "P1Y"}, "every must be a duration"),
+    ({"every": "PT1.5H"}, "every must be a duration .*only seconds may have a fraction"),
+    ({"every": "P9999999999D"}, "every is too long"),
+    ({"at": "PT1H", "every": "PT6H", "until": "next week"}, "until must be a time with seconds"),
+])
+def test_a_bad_time_s_error_names_the_argument_the_agent_gave_and_the_rule(kwargs, error):
+    with pytest.raises(NotificationError, match=error) as refused:
+        _notifications().schedule("x", **kwargs)
+    assert "virtual_time" not in str(refused.value) and "RFC" not in str(refused.value)
 
 
 @pytest.mark.parametrize("text", ["PT3H", "P1D", "P1DT6H30M", "PT0.001S", "PT1M0.5S"])
@@ -391,6 +407,33 @@ def test_the_tools_appear_only_once_a_task_turns_them_on_and_go_on_clear(gateway
     assert set(CHECK_TOOL_NAMES) <= set(tools) and set(CHECK_TOOL_NAMES) <= _gateway_tool_names(gateway)
     assert _request(gateway, "POST", "/notifications/clear", {}).status_code == 200
     assert not set(CHECK_TOOL_NAMES) & set(tools) and not set(CHECK_TOOL_NAMES) & _gateway_tool_names(gateway)
+
+
+def test_the_schedule_tool_states_the_rules_with_the_configured_limits(gateway):
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"], "max_active": 3, "min_interval": "PT2H"})
+    schedule = gateway._mcp._tool_manager._tools["schedule_check"]
+    assert schedule.description.endswith("You can have at most 3 checks at once. Times you get back are in UTC.")
+    described = {name: field["description"] for name, field in schedule.parameters["properties"].items()}
+    assert described["at"] == ("When it first comes due: a time with seconds and its UTC offset "
+                               "(2027-02-02T18:00:00-08:00), or a duration from now (PT6H).")
+    assert described["every"] == ("Repeat this often: a duration in weeks, days, hours, minutes or seconds (PT6H, P1D, "
+                                  "P1W), at least PT2H. No months or years; P1D is exactly 24 hours, not the same "
+                                  "local time each day.")
+    assert described["until"] == "Only with every: stop after this time, or after this duration from now (not from at)."
+
+
+def test_each_config_rebuilds_the_tools_so_their_descriptions_carry_its_limits(gateway):
+    def described() -> tuple[str, str, str]:
+        tool = gateway._mcp._tool_manager._tools["schedule_check"]
+        [mirrored] = [t for t in gateway._server_tools["gateway"] if t.name == "schedule_check"]
+        return tool.description, mirrored.description, mirrored.inputSchema["properties"]["every"]["description"]
+
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"], "max_active": 4})
+    assert "at most 4 checks" in described()[0] and "at most 4 checks" in described()[1]
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"], "max_active": 7, "min_interval": "PT3H"})
+    tool, mirrored, every = described()
+    assert "at most 7 checks" in tool and "at most 7 checks" in mirrored and "at least PT3H" in every
+    assert [t.name for t in gateway._server_tools["gateway"]].count("schedule_check") == 1
 
 
 def test_turning_checks_off_removes_the_tools(gateway):

@@ -1207,11 +1207,13 @@ class Gateway:
         self._trigger_engine.invalidate_readonly_cache()
 
     def _register_check_tools(self) -> None:
-        """Expose schedule_check and its siblings (idempotent). Called when a task turns scheduled checks on."""
+        """Expose schedule_check and its siblings when a config names roles, rebuilt on each config so their
+        descriptions carry its max_active and min_interval."""
+        self._unregister_check_tools()
         tools = self._mcp._tool_manager._tools
         for tool in build_check_tools(self._notifications, self._create_arg_model_from_schema):
             if tool.name not in self._tool_server_urls:
-                tools.setdefault(tool.name, tool)
+                tools[tool.name] = tool
         if self._mirror_check_descriptors():
             self._trigger_engine.invalidate_readonly_cache()
 
