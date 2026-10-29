@@ -1,5 +1,5 @@
-"""ConfigureWakeupsTaskStep posts the env's wakeups/v1 config as the stored card declares it and records it, and
-refuses before any request on a gateway without wakeups/v1. Only the gateway HTTP boundary is mocked."""
+"""ConfigureScheduledChecksTaskStep posts the env's notifications/v1 config as the stored card declares it and records
+it, and refuses before any request on a gateway without notifications/v1. Only the gateway HTTP boundary is mocked."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import httpx
 import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
-from agent_env.env.gateway.constants import EXT_WAKEUPS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
+from agent_env.env.gateway.constants import EXT_NOTIFICATIONS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_steps.configure_wakeups import ConfigureWakeupsTaskStep
+from agent_env.task_step.task_steps.configure_scheduled_checks import ConfigureScheduledChecksTaskStep
 
 _GATEWAY = "http://gw:18765"
 
@@ -22,17 +22,17 @@ async def test_posts_the_config_and_records_what_the_gateway_applied(monkeypatch
     sent = _mock_gateway(monkeypatch, {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"})
     out = await _step(max_active=5).execute(TaskStepContext(deployed_envs=[_record()], metadata={}))
     [request] = sent
-    assert (request.method, str(request.url)) == ("POST", f"{_GATEWAY}/wakeups/config")
+    assert (request.method, str(request.url)) == ("POST", f"{_GATEWAY}/notifications/config")
     assert json.loads(request.content) == {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"}
-    [entry] = out.metadata["wakeup_configurations"]
+    [entry] = out.metadata["scheduled_check_configurations"]
     assert entry["applied"] == {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"}
 
 
 @pytest.mark.asyncio
-async def test_a_gateway_without_wakeups_refuses_before_any_request(monkeypatch):
+async def test_a_gateway_without_notifications_refuses_before_any_request(monkeypatch):
     sent = _mock_gateway(monkeypatch, {})
-    older = [e for e in GATEWAY_EXTENSIONS if e["uri"] != EXT_WAKEUPS_URI]
-    with pytest.raises(RuntimeError, match="without urn:agentenv:wakeups/v1"):
+    older = [e for e in GATEWAY_EXTENSIONS if e["uri"] != EXT_NOTIFICATIONS_URI]
+    with pytest.raises(RuntimeError, match="without urn:agentenv:notifications/v1"):
         await _step().execute(TaskStepContext(deployed_envs=[_record(older)], metadata={}))
     assert sent == []
 
@@ -47,9 +47,9 @@ async def test_a_refused_config_raises_with_the_gateway_s_reason(monkeypatch):
 
 def test_round_trips_and_is_registered():
     step = _step(max_active=3, min_interval="PT2H")
-    again = ConfigureWakeupsTaskStep.from_dict(step.to_dict())
+    again = ConfigureScheduledChecksTaskStep.from_dict(step.to_dict())
     assert (again.max_active, again.min_interval, again.scheduled_checks) == (3, "PT2H", True)
-    assert get_task_step_registry()["configure_wakeups"] is ConfigureWakeupsTaskStep
+    assert get_task_step_registry()["configure_scheduled_checks"] is ConfigureScheduledChecksTaskStep
 
 
 @pytest.mark.parametrize("kwargs", [{"max_active": 0}, {"scheduled_checks": "yes"}])
@@ -58,8 +58,8 @@ def test_bad_settings_are_refused_when_the_step_is_built(kwargs):
         _step(**kwargs)
 
 
-def _step(**kwargs) -> ConfigureWakeupsTaskStep:
-    return ConfigureWakeupsTaskStep(id="wakeups-1", version=None, env_id="env-x", **kwargs)
+def _step(**kwargs) -> ConfigureScheduledChecksTaskStep:
+    return ConfigureScheduledChecksTaskStep(id="checks-1", version=None, env_id="env-x", **kwargs)
 
 
 def _record(extensions: list = GATEWAY_EXTENSIONS) -> DeployedEnv:

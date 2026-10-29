@@ -581,13 +581,13 @@ def _mock_gateway_by_path(monkeypatch, scripted: dict[str, list]) -> list[httpx.
 
 
 @pytest.mark.asyncio
-async def test_a_gateway_without_notify_agent_refuses_it(monkeypatch):
+async def test_a_gateway_without_notify_refuses_it(monkeypatch):
     sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["n"], "all": ["n"]})
     notify = [{"id": "n", "when": {"type": "action", "tool": "t"},
-               "actions": [{"type": "notify_agent", "channel": "Gmail", "text": "New email"}]}]
+               "actions": [{"type": "notify", "channel": "Gmail", "text": "New email"}]}]
     context = TaskStepContext(deployed_envs=[_record(_with_features("named_executors", "provoking_roles"))],
                               deployed_agents=[], metadata={})
-    with pytest.raises(RuntimeError, match=r"does not declare \['notify_agent'\]"):
+    with pytest.raises(RuntimeError, match=r"does not declare \['notify'\]"):
         await _step(triggers=notify).execute(context)
     assert sent == []
     context.deployed_envs = [_record()]
