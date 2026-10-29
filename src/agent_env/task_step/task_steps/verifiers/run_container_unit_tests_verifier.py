@@ -148,7 +148,8 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         base["command"] = self.command
         base["verifier_id"] = self.verifier_id
         base["setup_commands"] = self.setup_commands
-        base["user"] = self.user
+        if self.user is not None:  # a release before env_id targets reads a missing user as root, and null as None
+            base["user"] = self.user
         base["timeout_sec"] = self.timeout_sec
         base["env_vars"] = self.env_vars
         base["result_paths"] = self.result_paths

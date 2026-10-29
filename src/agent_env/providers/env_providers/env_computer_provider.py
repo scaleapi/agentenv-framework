@@ -63,6 +63,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
 
         if not isinstance(env, ComputerEnv):
             raise TypeError(f"env_provider_type '{self.type}' deploys a computer env, not a {env.type} env")
+        if env.computer is None:  # an app that names no computer to deploy alone on
+            raise DeployRefused(env.deploy_refusal())
         params, values, problems = computer_params.checked(env, env_params)
         if problems:
             raise DeployRefused(f"{env.id}: " + "; ".join(problems))

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -1345,7 +1346,7 @@ async def test_a_run_the_computer_stopped_at_its_timeout_is_reported_as_one(comp
 
 
 @pytest.mark.asyncio
-async def test_each_run_has_a_request_id_of_its_own_which_only_a_dropped_call_sends_again(computer, monkeypatch):
+async def test_a_run_whose_call_drops_fails_naming_why_and_the_next_one_runs_afresh(computer, monkeypatch):
     invoke, dropped = computer.invoke_extension, []
 
     async def drop_once(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
@@ -1355,11 +1356,17 @@ async def test_each_run_has_a_request_id_of_its_own_which_only_a_dropped_call_se
         return await invoke(base_url, card, uri, params, timeout, verify, method=method)
 
     monkeypatch.setattr("agentenv_protocol.client.invoke_extension", drop_once)
-    for _ in range(2):
+    with pytest.raises(RuntimeError, match=re.escape(
+            "env 'desk': the connection to its driver broke during computer-exec/v1 run (RemoteProtocolError: the "
+            "driver went away)")):
         await _run_in(computer, _DEFAULT_BODY)
+    await _run_in(computer, _DEFAULT_BODY)
 
-    runs = [params["request_id"] for kind, params, *_ in computer.calls if kind == "run" and params["argv"][0] == "python3"]
-    assert runs[0] == dropped[0] and runs[0] != runs[1]
+    runs = [params for kind, params, *_ in computer.calls if kind == "run"]
+    staged = [params["argv"] for params in runs if params["argv"][0] == "pkill"]
+    assert staged == [["pkill", "-f", ".agentenv/run_code/run-code-1/runner.py"]] * 2
+    scripts = [params["request_id"] for params in runs if params["argv"][0] == "python3"]
+    assert len(scripts) == 1 and scripts[0] != dropped[0]
 
 
 @pytest.mark.asyncio

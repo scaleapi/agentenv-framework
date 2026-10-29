@@ -634,6 +634,8 @@ class _DriverTarget:
         return inside.loopback(deployed)
 
     async def reset_dir(self, path: str) -> None:
+        """End whatever still runs from the folder, as a run whose driver died leaves going, then remove it."""
+        await self.run("pkill", "-f", f"{path}/runner.py")
         await self.remove_dir(path)
 
     async def remove_dir(self, path: str) -> None:

@@ -64,6 +64,11 @@ def test_reward_path_roundtrips():
     assert restored.reward_path == "/logs/verifier/reward.txt"
 
 
+def test_a_verifier_writes_its_user_only_when_set_so_an_older_release_reads_root():
+    assert "user" not in _step().to_dict()
+    assert Step.from_dict(_step(user="tester").to_dict()).to_dict()["user"] == "tester"
+
+
 def test_default_reward_path_none():
     step = Step(id="s", version=None, sandbox_name="h", container_name="c", command="x")
     assert step.reward_path is None

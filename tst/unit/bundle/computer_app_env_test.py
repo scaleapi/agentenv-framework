@@ -10,6 +10,7 @@ from agent_env.bundle import BundleError
 from agent_env.bundle.materialize import materialize
 from agent_env.env import Env
 from agent_env.env.envs.computer.app import ComputerAppEnv
+from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from tst.unit.bundle._support import layout, plan_of
 from tst.unit.bundle.computer_driver_env_test import DRIVER, LINUX
@@ -63,7 +64,8 @@ def _problems(root):
     return " ".join(caught.value.problems)
 
 
-def test_an_app_folder_is_written_with_its_files_and_what_its_class_declares(bundle_dir):
+@pytest.mark.asyncio
+async def test_an_app_folder_is_written_with_its_files_and_what_its_class_declares(bundle_dir):
     _bundle(bundle_dir)
 
     materialize(plan_of(bundle_dir))
@@ -83,6 +85,8 @@ def test_an_app_folder_is_written_with_its_files_and_what_its_class_declares(bun
     assert ComputerAppEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()
     (refusal,) = DeployEnvTaskStep(id="env", version=None, env_id=env.id).preflight()
     assert "names no computer and driver to deploy alone on; name them in its env.toml" in refusal
+    with pytest.raises(DeployRefused, match="names no computer and driver to deploy alone on"):
+        await env.deploy()
 
 
 @pytest.mark.parametrize("toml, extra, skill, problem", [

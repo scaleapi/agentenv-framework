@@ -32,7 +32,6 @@ BATCH_BYTES = 64 << 20
 #: How much longer than a command's own timeout its call waits for the answer.
 CALL_MARGIN_S = 30
 _READ_TIMEOUT_S = 120
-_TRIES = 3
 
 
 def missing(deployed: DeployedSandboxEnv) -> list[str]:
@@ -89,16 +88,14 @@ async def read_file(deployed: DeployedSandboxEnv, path: str) -> bytes:
 
 async def run(deployed: DeployedSandboxEnv, argv: list[str], *, timeout_s: float,
               env: Optional[dict[str, str]] = None) -> dict:
-    """computer-exec/v1 ``run``'s answer for ``argv``. A call whose connection drops is sent again with the same request
-    id, which a driver still running the first joins; any other call has an id of its own."""
+    """computer-exec/v1 ``run``'s answer for ``argv``, under a request id of its own. A call whose connection breaks
+    fails rather than being sent again: a driver that restarted would run the command a second time, beside the first,
+    which outlives the driver that started it."""
     params = {"argv": argv, "request_id": uuid.uuid4().hex, "timeout_s": timeout_s, **({"env": env} if env else {})}
-    for attempt in range(_TRIES):
-        try:
-            return await deployed.invoke(COMPUTER_EXEC, "run", params, timeout=timeout_s + CALL_MARGIN_S)
-        except httpx.TransportError as e:
-            if attempt == _TRIES - 1:
-                raise _broken(deployed, f"computer-exec/v1 run, {_TRIES} times", e) from e
-            await asyncio.sleep(2 ** attempt)
+    try:
+        return await deployed.invoke(COMPUTER_EXEC, "run", params, timeout=timeout_s + CALL_MARGIN_S)
+    except httpx.TransportError as e:
+        raise _broken(deployed, "computer-exec/v1 run", e) from e
 
 
 async def _add(deployed: DeployedSandboxEnv, parts: list[FilePart], size: int) -> None:
