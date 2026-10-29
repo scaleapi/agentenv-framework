@@ -5,6 +5,8 @@ a computer and a driver."""
 import json
 
 import pytest
+from agentenv_protocol.computer import Launch, Linux, Service
+from agentenv_protocol.computer.app import AppSkill, InstallStep
 
 from agent_env.bundle import BundleError
 from agent_env.bundle.materialize import materialize
@@ -74,13 +76,13 @@ async def test_an_app_folder_is_written_with_its_files_and_what_its_class_declar
     assert isinstance(env, ComputerAppEnv) and (env.environment_name, env.module) == ("mail", "app.py:Mail")
     assert sorted(env.files.file_artifact_ids) == ["app.py", "requirements.txt", "skill.md"]
     declared = env.declaration
-    assert (declared["supports"], declared["permissions"]) == (LINUX, ["camera"])
-    assert declared["install"] == {"linux": {"files": ".", "python": "requirements.txt",
-                                             "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}
-    assert declared["launch"] == {"at": "boot", "command": ["thunderbird"], "window": {"class": "thunderbird"}}
-    assert declared["settings"]["properties"]["password"]["writeOnly"] is True
-    assert (declared["skill"], declared["data"]) == ({"file": "skill.md"}, ["data/add", "data/get"])
-    assert declared["install_steps"] == [{"name": "profile", "scope": "session"}]
+    assert (declared.supports, declared.permissions) == (LINUX, ["camera"])
+    assert declared.install == {"linux": Linux(python="requirements.txt",
+                                               services=[Service(name="imap", command="venv/bin/python imap.py")])}
+    assert declared.launch == Launch(command=["thunderbird"], window={"class": "thunderbird"})
+    assert declared.settings["properties"]["password"]["writeOnly"] is True
+    assert (declared.skill, declared.data) == (AppSkill(file="skill.md"), ["data/add", "data/get"])
+    assert declared.install_steps == [InstallStep(name="profile", scope="session")]
     assert (env.computer, env.driver) == (None, None)
     assert ComputerAppEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()
     (refusal,) = DeployEnvTaskStep(id="env", version=None, env_id=env.id).preflight()

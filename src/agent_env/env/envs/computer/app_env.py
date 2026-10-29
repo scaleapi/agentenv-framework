@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
+from agentenv_protocol.computer import AppDeclaration
+
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -29,19 +31,16 @@ class ComputerAppEnv(ComputerEnv):
                    "class at put; deployed alone, a computer of its own")
 
     def __init__(self, id: str, version: Optional[int], environment_name: str, module: str, files: FileArtifactUniverse,
-                 declaration: dict, computer: Optional[ComputerArtifact] = None,
+                 declaration: AppDeclaration, computer: Optional[ComputerArtifact] = None,
                  driver: Optional[ComputerDriverEnv] = None, metadata: Optional[dict[str, Any]] = None):
         super().__init__(id, version, environment_name, computer, driver, metadata=metadata)
         self.module = module
         self.files = files
-        #: What its class declares: ``supports``, ``permissions``, ``install`` by OS type, ``launch``, the JSON schema
-        #: of its ``settings``, its ``skill``, the ``data`` operations it serves, its ``install_steps`` and
-        #: ``ready_checks``.
         self.declaration = declaration
 
     @property
     def install(self) -> dict[str, AppInstall]:
-        return {os_type: AppInstall.model_validate(table) for os_type, table in self.declaration["install"].items()}
+        return _installs(self.declaration)[0]
 
     def composed_apps(self) -> list[ComputerAppEnv]:
         return [self]
@@ -49,7 +48,7 @@ class ComputerAppEnv(ComputerEnv):
     def secret_settings(self) -> set[str]:
         """The names of its settings that are secrets: a ``SecretStr``, optional or not, which its schema marks
         ``writeOnly``."""
-        return {name for name, schema in self.declaration["settings"].get("properties", {}).items()
+        return {name for name, schema in self.declaration.settings.get("properties", {}).items()
                 if any(option.get("writeOnly") for option in [schema, *schema.get("anyOf", [])])}
 
     def to_dict(self) -> dict:
@@ -57,7 +56,7 @@ class ComputerAppEnv(ComputerEnv):
                 "environment_name": self.environment_name,  # dual-write with service_name during the rename
                 "module": self.module,
                 "files": {"id": self.files.id, "version": self.files.version, "type": self.files.type},
-                "declaration": self.declaration,
+                "declaration": self.declaration.model_dump(mode="json", exclude_none=True),
                 "computer": {"id": self.computer.id, "version": self.computer.version} if self.computer else None,
                 "driver": {"id": self.driver.id, "version": self.driver.version} if self.driver else None}
 
@@ -69,19 +68,20 @@ class ComputerAppEnv(ComputerEnv):
         computer = ComputerArtifact.get(data["computer"]["id"], data["computer"]["version"]) if data.get("computer") else None
         return cls(id=data["id"], version=data.get("version"), environment_name=data["environment_name"],
                    module=data["module"], files=Artifact.get(data["files"]["id"], version=data["files"]["version"]),
-                   declaration=data["declaration"], computer=computer, driver=driver,
+                   declaration=AppDeclaration.model_validate(data["declaration"]), computer=computer, driver=driver,
                    metadata=data.get("metadata") or {})
 
     @classmethod
-    def put(cls, *, id: str, environment_name: str, module: str, files: FileArtifactUniverse, declaration: dict,
-            computer: Optional[ComputerArtifact] = None, driver: Optional[ComputerDriverEnv] = None,
-            compose: bool = True, on_build: Optional[Callable[[], None]] = None) -> Self:
+    def put(cls, *, id: str, environment_name: str, module: str, files: FileArtifactUniverse,
+            declaration: AppDeclaration, computer: Optional[ComputerArtifact] = None,
+            driver: Optional[ComputerDriverEnv] = None, compose: bool = True,
+            on_build: Optional[Callable[[], None]] = None) -> Self:
         """Write the app once what it declares checks out, and with a computer and a driver, once it fits them (gate
         1); then compose it with them unless ``compose`` is False. Refused, naming every problem, before anything is
         stored."""
         app = cls(id=id, version=None, environment_name=environment_name, module=module, files=files,
                   declaration=declaration, computer=computer, driver=driver)
-        _, problems = installs(declaration["install"], AppInstall)
+        _, problems = _installs(declaration)
         if (computer is None) != (driver is None):
             problems.append("a computer app deploys alone on a computer and a driver; name both or neither")
         elif computer is not None and not problems:
@@ -100,11 +100,11 @@ class ComputerAppEnv(ComputerEnv):
         as a file universe, with the computer and driver env.toml names; its environment_name the folder's when it sets
         none."""
         fields = cls.accept_toml(data, ctx)
-        declaration = declared(ctx, fields["module"], cls.type)
+        declaration = AppDeclaration.model_validate(declared(ctx, fields["module"], cls.type))
         files = ctx.files()
-        found, problems = installs(declaration["install"], AppInstall)
+        found, problems = _installs(declaration)
         problems += [problem for os_type, install in found.items() for problem in missing(os_type, install, files)]
-        if (skill := (declaration["skill"] or {}).get("file")) is not None and skill not in files:
+        if (skill := declaration.skill and declaration.skill.file) is not None and skill not in files:
             problems.append(f"skill: {skill!r} isn't in this folder")
         if problems:
             ctx.refuse(list(map(ctx.config_problem, problems)))
@@ -140,3 +140,8 @@ class ComputerAppEnv(ComputerEnv):
             return (f"computer app env {self.id!r} names no computer and driver to deploy alone on; name them in its "
                     "env.toml")
         return super().deploy_refusal(sandbox_type=sandbox_type, env_params=env_params, **options)
+
+
+def _installs(declaration: AppDeclaration) -> tuple[dict[str, AppInstall], list[str]]:
+    """Its installs by OS type, each checked as the composer installs it, and the problems with them."""
+    return installs({os_type: linux.model_dump() for os_type, linux in declaration.install.items()}, AppInstall)

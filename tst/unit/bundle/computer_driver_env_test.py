@@ -6,6 +6,7 @@ computer."""
 import json
 
 import pytest
+from agentenv_protocol.computer.platform import Platform
 
 from agent_env.bundle import BundleError
 from agent_env.bundle.installed import installed_bundles
@@ -93,12 +94,12 @@ def test_a_driver_folder_is_written_with_its_files_and_what_its_class_declares(b
     assert isinstance(env, ComputerDriverEnv) and env.module == "driver.py:Desk"
     assert sorted(env.files.file_artifact_ids) == ["driver.py"]
     declared = env.declaration
-    assert declared["name"] == "desk" and declared["supports"] == LINUX
-    assert [p["platform"] for p in declared["platforms"]] == [{"os": "linux", "arch": "amd64", "display": "x11"},
-                                                              {"os": "linux", "arch": "arm64", "display": "x11"}]
-    linux = declared["platforms"][0]
-    assert "urn:agentenv:computer-exec/v1" in linux["provides"] and "urn:agentenv:computer-pointer/v1" not in linux["provides"]
-    assert len(linux["tools"]) == 7 and linux["features"]["buttons"] == ["left", "right"]
+    assert declared.name == "desk" and declared.supports == LINUX
+    assert [p.platform for p in declared.platforms] == [Platform(os="linux", arch="amd64", display="x11"),
+                                                        Platform(os="linux", arch="arm64", display="x11")]
+    linux = declared.platforms[0]
+    assert "urn:agentenv:computer-exec/v1" in linux.provides and "urn:agentenv:computer-pointer/v1" not in linux.provides
+    assert len(linux.tools) == 7 and linux.features["buttons"] == ["left", "right"]
     assert ComputerDriverEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()
 
 
@@ -124,7 +125,7 @@ def test_a_driver_is_written_again_only_when_one_of_its_files_changes(bundle_dir
     rewritten = _run(bundle_dir)
 
     assert rewritten[f"{ROOT}/desk"] == (2, False, ("files changed: driver.py",))
-    assert Env.get(f"{ROOT}/desk").declaration["platforms"][0]["features"]["buttons"] == ["left"]
+    assert Env.get(f"{ROOT}/desk").declaration.platforms[0].features["buttons"] == ["left"]
 
 
 @pytest.mark.parametrize("toml, supports, buttons, problem", [
@@ -196,8 +197,8 @@ def test_a_run_naming_the_reference_driver_writes_the_shipped_one(tmp_path, monk
     env = Env.get("@local/agentenv-framework/drivers/reference")
 
     assert "@local/agentenv-framework/drivers/reference" in written
-    assert env.declaration["name"] == "reference" and len(env.declaration["platforms"]) == 2
+    assert env.declaration.name == "reference" and len(env.declaration.platforms) == 2
     assert {"urn:agentenv:computer-pointer/v1", "urn:agentenv:computer-keyboard/v1",
-            "urn:agentenv:computer-exec/v1"} <= set(env.declaration["platforms"][0]["provides"])
+            "urn:agentenv:computer-exec/v1"} <= set(env.declaration.platforms[0].provides)
     assert (env.port, env.install["linux"].python) == (18765, "requirements.txt")
     assert env.install["linux"].services[0].command.endswith("agentenv_protocol.computer.serve driver.py:ReferenceDriver")

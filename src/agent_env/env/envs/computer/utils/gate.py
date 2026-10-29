@@ -45,9 +45,9 @@ def forms(base: ComputerArtifact) -> list[str]:
 def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[ComputerAppEnv] = ()) -> list[str]:
     """The architectures a composition of ``base``, ``driver`` and ``apps`` runs on: the base's that a platform of the
     driver's and of each app's matching the base's OS names, in the base's order."""
-    matching = {platform.arch for platform in _matching(base, driver.declaration["supports"])}
+    matching = {platform.arch for platform in _matching(base, driver.declaration.supports)}
     for app in apps:
-        matching &= {platform.arch for platform in _matching(base, app.declaration["supports"])}
+        matching &= {platform.arch for platform in _matching(base, app.declaration.supports)}
     return [arch for arch in base.arch if arch in matching]
 
 
@@ -55,8 +55,8 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
     """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``: a platform it doesn't support, no
     architecture in common, or no install for the base's OS."""
     os = base.os
-    if not _matching(base, app.declaration["supports"]):
-        named = ", ".join(_shown(platform) for entry in app.declaration["supports"] for platform in supported(entry))
+    if not _matching(base, app.declaration.supports):
+        named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
         return [f"app: {app.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
                 f"{os.display}); it supports {named or 'none'}"]
     problems = []
@@ -72,7 +72,7 @@ def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str) -> 
     a secret's given as anything but a bare reference (or null, where it's optional), a required one missing, and what
     the schema of its ``Settings`` refuses of the rest. A secret's reference never meets the constraints on its value,
     and its value never reaches a message."""
-    schema, secrets = app.declaration["settings"], app.secret_settings()
+    schema, secrets = app.declaration.settings, app.secret_settings()
     properties, required = schema.get("properties", {}), schema.get("required", [])
     problems = [f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]
     problems += [f"{at}.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME reference "
@@ -121,14 +121,14 @@ def _names_a_secret(value: Any) -> bool:
 
 def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     os = base.os
-    if not _matching(base, driver.declaration["supports"]):
-        named = ", ".join(_shown(platform) for entry in driver.declaration["supports"] for platform in supported(entry))
+    if not _matching(base, driver.declaration.supports):
+        named = ", ".join(_shown(platform) for entry in driver.declaration.supports for platform in supported(entry))
         return [f"driver: {driver.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
                 f"{os.display}); it supports {named}"]
     problems = []
     if not arches(base, driver):
         problems.append(f"driver: no architecture both run: {base.id} runs {', '.join(base.arch)}, and {driver.id} "
-                        f"{', '.join(sorted({p.arch for p in _matching(base, driver.declaration['supports'])}))}")
+                        f"{', '.join(sorted({p.arch for p in _matching(base, driver.declaration.supports)}))}")
     if (install := driver.install.get(os.type)) is None:
         problems.append(f"driver: {driver.id} declares no install for {os.type}")
     else:

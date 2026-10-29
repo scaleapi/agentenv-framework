@@ -9,6 +9,8 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Optional
 
+from agentenv_protocol.computer.driver import DriverDeclaration
+
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
@@ -30,20 +32,19 @@ class ComputerDriverEnv(Env):
     type: ClassVar[str] = "computer_driver"
     description = "A computer driver: the code that serves a computer's tools, and what it declares"
 
-    def __init__(self, id: str, version: Optional[int], module: str, files: FileArtifactUniverse, declaration: dict,
-                 install: Optional[dict[str, Install]] = None, port: int = DEFAULT_PORT,
+    def __init__(self, id: str, version: Optional[int], module: str, files: FileArtifactUniverse,
+                 declaration: DriverDeclaration, install: Optional[dict[str, Install]] = None, port: int = DEFAULT_PORT,
                  metadata: Optional[dict[str, Any]] = None):
         super().__init__(id, version, metadata=metadata)
         self.module = module
         self.files = files
-        #: The card's ``name``, the class's ``supports``, and per platform those name the extensions it ``provides``,
-        #: its ``tools`` and its computer/v1 ``features``.
         self.declaration = declaration
         self.install = install or {}
         self.port = port
 
     def to_dict(self) -> dict:
-        return {**super().to_dict(), "module": self.module, "declaration": self.declaration,
+        return {**super().to_dict(), "module": self.module,
+                "declaration": self.declaration.model_dump(mode="json", exclude_none=True),
                 "files": {"id": self.files.id, "version": self.files.version, "type": self.files.type},
                 "install": {os_type: install.model_dump(exclude_none=True) for os_type, install in self.install.items()},
                 "port": self.port}
@@ -53,14 +54,14 @@ class ComputerDriverEnv(Env):
         files = Artifact.get(data["files"]["id"], version=data["files"]["version"])
         install = {os_type: Install.model_validate(table) for os_type, table in (data.get("install") or {}).items()}
         return cls(id=data["id"], version=data.get("version"), module=data["module"], files=files,
-                   declaration=data["declaration"], install=install, port=data.get("port", DEFAULT_PORT),
-                   metadata=data.get("metadata") or {})
+                   declaration=DriverDeclaration.model_validate(data["declaration"]), install=install,
+                   port=data.get("port", DEFAULT_PORT), metadata=data.get("metadata") or {})
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> ComputerDriverEnv:
         """The driver's class is read in a process of its own (``declared``)."""
         fields = cls.accept_toml(data, ctx)
-        declaration = declared(ctx, fields["module"], cls.type)
+        declaration = DriverDeclaration.model_validate(declared(ctx, fields["module"], cls.type))
         universe = FileArtifactUniverse.put_bundled(derive_id(ctx.id, "files"), files=ctx.files())
         return cls.put(id=ctx.id, module=fields["module"], files=universe, declaration=declaration,
                        install=fields["install"], port=fields.get("port", DEFAULT_PORT))

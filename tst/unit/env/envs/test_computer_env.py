@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, AppDeclaration, DriverDeclaration
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
@@ -159,7 +159,7 @@ def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, i
     services = services or [Service(name="driver", command=SERVE)]
     return ComputerDriverEnv.put(
         id="@local/~/kit/desk", module="driver.py:Desk", files=files,
-        declaration={"name": "desk", "supports": supports, "platforms": platforms},
+        declaration=DriverDeclaration.model_validate({"name": "desk", "supports": supports, "platforms": platforms}),
         install={"linux": Install(python="requirements.txt", services=services)} if install else {}, port=18765)
 
 
@@ -941,12 +941,12 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
     files = FileArtifactUniverse.put_bundled("@local/~/kit/mail__files", files={
         name: folder / name for name in ("app.py", "requirements.txt")})
-    declaration = {
+    declaration = AppDeclaration.model_validate({
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
         "permissions": [], "launch": None, "settings": settings, "skill": None,
         "data": [], "install_steps": [], "ready_checks": [],
         "install": {"linux": install or {"python": "requirements.txt", "services": [
-            {"name": "imap", "command": "venv/bin/python imap.py"}]}}}
+            {"name": "imap", "command": "venv/bin/python imap.py"}]}}})
     return ComputerAppEnv.put(**{"id": "@local/~/kit/mail", "environment_name": "mail", "module": "app.py:Mail",
                                  "files": files, "declaration": declaration, "computer": base, "driver": driver,
                                  "compose": compose, **changes})

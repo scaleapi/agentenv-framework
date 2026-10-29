@@ -14,7 +14,9 @@ import pytest
 pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
 
+from agentenv_protocol.computer import AppDeclaration  # noqa: E402
 from agentenv_protocol.computer._declare import _Stub, _StubModule, declare, main  # noqa: E402
+from agentenv_protocol.computer.platform import Platform  # noqa: E402
 
 DRIVER = '''import not_installed_here
 from not_installed_here.input import Base, Keyboard
@@ -116,12 +118,12 @@ def test_a_class_whose_imports_arent_installed_declares_what_it_serves_on_each_p
 
     declared = declare(folder, "driver.py", "Desk")
 
-    assert declared["name"] == "desk" and declared["supports"] == LINUX
-    assert [p["platform"] for p in declared["platforms"]] == [{"os": "linux", "arch": "amd64", "display": "x11"},
-                                                              {"os": "linux", "arch": "arm64", "display": "x11"}]
-    linux = declared["platforms"][0]
-    assert {"urn:agentenv:computer/v1", "urn:agentenv:computer-exec/v1"} <= set(linux["provides"])
-    assert len(linux["tools"]) == 7 and linux["features"]["buttons"] == ["left", "right"]
+    assert declared.name == "desk" and declared.supports == LINUX
+    assert [p.platform for p in declared.platforms] == [Platform(os="linux", arch="amd64", display="x11"),
+                                                        Platform(os="linux", arch="arm64", display="x11")]
+    linux = declared.platforms[0]
+    assert {"urn:agentenv:computer/v1", "urn:agentenv:computer-exec/v1"} <= set(linux.provides)
+    assert len(linux.tools) == 7 and linux.features["buttons"] == ["left", "right"]
 
 
 def test_a_stub_is_itself_again_except_for_dunders(folder):
@@ -150,7 +152,10 @@ def test_main_prints_only_the_declaration_or_exits_1_with_why_it_cant(folder, ca
     _driver(folder)
     assert main([str(folder), "driver.py", "Desk"]) == 0
     printed = capsys.readouterr()
-    assert json.loads(printed.out)["name"] == "desk" and printed.err == "loading the desk driver\n"
+    printed_declaration = json.loads(printed.out)
+    assert (printed_declaration["type"], printed_declaration["name"]) == ("computer_driver", "desk")
+    assert printed_declaration["platforms"][0]["platform"] == {"os": "linux", "arch": "amd64", "display": "x11"}
+    assert printed.err == "loading the desk driver\n"
 
     _driver(folder, buttons=("thumb",))
     assert main([str(folder), "driver.py", "Desk"]) == 1
@@ -163,9 +168,9 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
 
     declared = declare(folder, "app.py", "Mail")
 
-    assert declared.pop("type") == "computer_app"
-    settings = declared.pop("settings")
-    assert declared == {
+    assert isinstance(declared, AppDeclaration)
+    settings = declared.settings
+    assert declared.model_dump(mode="json", exclude_none=True, exclude={"settings"}) == {
         "supports": LINUX, "permissions": ["camera"],
         "install": {"linux": {"files": "linux", "python": "requirements.txt",
                               "services": [{"name": "imap", "command": "bin/imap"}]}},

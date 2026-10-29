@@ -65,6 +65,43 @@ class Launch(BaseModel):
     ready: Optional[Ready] = None
 
 
+class AppSkill(BaseModel):
+    """Where an app's skill for agents comes from: a ``file`` of its folder, or the ``@agent_skill`` ``method`` that
+    writes it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file: Optional[str] = None
+    method: Optional[str] = None
+
+
+class InstallStep(BaseModel):
+    """An ``@install_step`` method, by name, and whom it runs as."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    scope: Literal["system", "session"]
+
+
+class AppDeclaration(BaseModel):
+    """What a ComputerAppEnvironment class declares, as a ``computer_app`` env stores it: the platforms it ``supports``,
+    as a driver names them; its ``install`` by OS type; ``settings``, the JSON schema of its ``Settings``; and the
+    ``data`` methods, ``install_steps`` and ``ready_checks`` it serves, by name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    supports: list[dict[str, Any]]
+    permissions: list[str]
+    install: dict[str, Linux]
+    launch: Optional[Launch] = None
+    settings: dict[str, Any]
+    skill: Optional[AppSkill] = None
+    data: list[str]
+    install_steps: list[InstallStep]
+    ready_checks: list[str]
+
+
 def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[str]] = None) -> Callable:
     """Declare what an app is: the platforms it supports, as a driver names them, and the permissions it needs of the
     computer. Its env.toml names it and the computer and driver it deploys alone on."""
@@ -110,9 +147,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         self.settings = self.Settings.model_validate(values)
 
     @classmethod
-    def declaration(cls) -> dict[str, Any]:
-        """What the class declares, as a ``computer_app`` env stores it. Raises ValueError for a skill declared twice
-        or an install that isn't a ``Linux``."""
+    def declaration(cls) -> AppDeclaration:
+        """What the class declares. Raises ValueError for a skill declared twice or an install that isn't a
+        ``Linux``."""
         if cls.linux is not None and not isinstance(cls.linux, Linux):
             raise ValueError(f"{cls.__name__}.linux is a Linux(...), not {cls.linux!r}")
         methods = _methods(cls)
@@ -121,18 +158,17 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         if cls.skill is not None and skill_methods:
             raise ValueError(f"{cls.__name__} declares its skill twice: skill = {cls.skill!r} and @agent_skill "
                              f"{skill_methods[0]}")
-        return {
-            "supports": cls.supports, "permissions": cls.permissions,
-            "install": {"linux": cls.linux.model_dump(exclude_none=True)} if cls.linux is not None else {},
-            "launch": cls.launch.model_dump(exclude_none=True) if cls.launch is not None else None,
-            "settings": cls.Settings.model_json_schema(),
-            "skill": {"file": cls.skill} if cls.skill is not None else
-                     {"method": skill_methods[0]} if skill_methods else None,
-            "data": sorted({_DATA_METHODS[op] for fn in methods if (op := getattr(fn, _OP_ATTR, None)) in _DATA_METHODS}),
-            "install_steps": [{"name": fn.__name__, "scope": getattr(fn, _INSTALL_STEP_ATTR)} for fn in methods
-                              if hasattr(fn, _INSTALL_STEP_ATTR)],
-            "ready_checks": [fn.__name__ for fn in methods if hasattr(fn, _READY_CHECK_ATTR)],
-        }
+        return AppDeclaration(
+            supports=cls.supports, permissions=cls.permissions,
+            install={"linux": cls.linux} if cls.linux is not None else {},
+            launch=cls.launch, settings=cls.Settings.model_json_schema(),
+            skill=AppSkill(file=cls.skill) if cls.skill is not None else
+                  AppSkill(method=skill_methods[0]) if skill_methods else None,
+            data=sorted({_DATA_METHODS[op] for fn in methods if (op := getattr(fn, _OP_ATTR, None)) in _DATA_METHODS}),
+            install_steps=[InstallStep(name=fn.__name__, scope=getattr(fn, _INSTALL_STEP_ATTR)) for fn in methods
+                           if hasattr(fn, _INSTALL_STEP_ATTR)],
+            ready_checks=[fn.__name__ for fn in methods if hasattr(fn, _READY_CHECK_ATTR)],
+        )
 
 
 def _methods(cls: type) -> list[Callable]:

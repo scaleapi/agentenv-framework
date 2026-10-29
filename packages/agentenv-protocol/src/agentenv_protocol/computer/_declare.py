@@ -14,10 +14,13 @@ import sys
 import types
 from pathlib import Path
 
-from .app import ComputerAppEnvironment
+from .app import AppDeclaration, ComputerAppEnvironment
 from .card import COMPUTER
-from .driver import ComputerDriverEnvironment
+from .driver import ComputerDriverEnvironment, DriverDeclaration, DriverPlatform
 from .platform import supported
+
+#: The env type that stores each kind of declaration, which the printed JSON carries as ``type``.
+_ENV_TYPES = {AppDeclaration: "computer_app", DriverDeclaration: "computer_driver"}
 
 
 class _StubMeta(type):
@@ -59,11 +62,10 @@ class _Stubs(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         return None
 
 
-def declare(folder: Path, file: str, name: str) -> dict:
-    """What the class ``name`` in ``folder/file`` declares, under ``type``, the env type that stores it: an app's
-    ``ComputerAppEnvironment.declaration()``; a driver's card name, its ``supports``, and for each platform those name,
-    the extensions it provides, its tools and the computer/v1 features. Raises ValueError for a class that is neither,
-    or a driver that declares no platform."""
+def declare(folder: Path, file: str, name: str) -> AppDeclaration | DriverDeclaration:
+    """What the class ``name`` in ``folder/file`` declares: an app's ``ComputerAppEnvironment.declaration()``; a
+    driver's card name, its ``supports``, and for each platform those name, the extensions it provides, its tools and
+    the computer/v1 features. Raises ValueError for a class that is neither, or a driver that declares no platform."""
     sys.path.insert(0, str(folder))
     sys.meta_path.append(_Stubs())
     spec = importlib.util.spec_from_file_location("computer_driver_module", folder / file)
@@ -71,23 +73,24 @@ def declare(folder: Path, file: str, name: str) -> dict:
     spec.loader.exec_module(module)
     cls = getattr(module, name, None)
     if isinstance(cls, type) and issubclass(cls, ComputerAppEnvironment):
-        return {"type": "computer_app", **cls.declaration()}
+        return cls.declaration()
     if not (isinstance(cls, type) and issubclass(cls, ComputerDriverEnvironment)):
         raise ValueError(f"{file} has no ComputerDriverEnvironment or ComputerAppEnvironment subclass named {name}")
     platforms = [platform for entry in cls.supports for platform in supported(entry)]
     if not platforms:
         raise ValueError(f"{name} declares no platform: name them with @computer_driver(supports=[...])")
     cards = [(platform, cls.declaration(platform)) for platform in platforms]
-    return {"type": "computer_driver", "name": cards[0][1].name, "supports": list(cls.supports), "platforms": [
-        {"platform": platform.as_dict(), "provides": [e.uri for e in card.capabilities.extensions],
-         "tools": [t.name for t in card.capabilities.tools],
-         "features": next({k: v for k, v in e.params.items() if k not in ("endpoint", "methods")}
-                          for e in card.capabilities.extensions if e.uri == COMPUTER)}
-        for platform, card in cards]}
+    return DriverDeclaration(name=cards[0][1].name, supports=list(cls.supports), platforms=[
+        DriverPlatform(platform=platform, provides=[e.uri for e in card.capabilities.extensions],
+                       tools=[t.name for t in card.capabilities.tools],
+                       features=next({k: v for k, v in e.params.items() if k not in ("endpoint", "methods")}
+                                     for e in card.capabilities.extensions if e.uri == COMPUTER))
+        for platform, card in cards])
 
 
 def main(argv: list[str]) -> int:
-    """Print the declaration as the only output; what the module prints while it loads goes to stderr."""
+    """Print the declaration as the only output, its env type as ``type``; what the module prints while it loads goes
+    to stderr."""
     folder, file, name = argv
     try:
         with contextlib.redirect_stdout(sys.stderr):
@@ -95,7 +98,7 @@ def main(argv: list[str]) -> int:
     except Exception as e:
         print(f"{type(e).__name__}: {e}", file=sys.stderr)
         return 1
-    print(json.dumps(declared))
+    print(json.dumps({"type": _ENV_TYPES[type(declared)], **declared.model_dump(mode="json", exclude_none=True)}))
     return 0
 
 

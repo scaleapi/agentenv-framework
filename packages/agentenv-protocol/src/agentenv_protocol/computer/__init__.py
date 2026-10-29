@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from .app import (
     APP_SETTINGS_ENV,
+    AppDeclaration,
     ComputerAppEnvironment,
     Launch,
     Linux,
@@ -74,12 +75,12 @@ if TYPE_CHECKING:
         COMPUTER_RECORDING,
         COMPUTER_SPACES,
     )
-    from .driver import DEFAULT_IDENTITY, ComputerDriverEnvironment, computer_driver
+    from .driver import DEFAULT_IDENTITY, ComputerDriverEnvironment, DriverDeclaration, computer_driver
     from .recording import RecordedFrame, RecordedSegment, RecordHints, Recording, frames_in_thread
 
 # The names whose modules need the computer extra (mcp, av and Pillow), by module.
 _ON_USE = {
-    "driver": ("ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY"),
+    "driver": ("ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration"),
     "card": ("COMPUTER", "COMPUTER_READY", "COMPUTER_DISPLAY", "COMPUTER_SPACES", "COMPUTER_POINTER",
              "COMPUTER_KEYBOARD", "COMPUTER_EXEC", "COMPUTER_RECORDING"),
     "recording": ("Recording", "RecordHints", "RecordedFrame", "RecordedSegment", "frames_in_thread"),
@@ -94,8 +95,9 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
-    "ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY",
+    "ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration",
     "ComputerAppEnvironment", "computer_app", "install_step", "ready_check", "Linux", "Service", "Launch", "Ready",
+    "AppDeclaration",
     "APP_SETTINGS_ENV",
     "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV",
     "display", "set_display", "capture", "click", "drag", "scroll", "type_text", "press",

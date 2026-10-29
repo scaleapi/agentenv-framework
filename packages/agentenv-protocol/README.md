@@ -576,9 +576,9 @@ class MailApp(ComputerAppEnvironment):
   in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
   its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
 
-`MailApp.declaration()` returns what the class declares, as a `computer_app` env stores it, and
-`python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it, or a driver's,
-without the class's own dependencies installed.
+`MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
+env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
+JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
 
 ## A2A agent framework
 
