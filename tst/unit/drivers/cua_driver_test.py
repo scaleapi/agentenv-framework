@@ -216,15 +216,39 @@ async def test_readiness_waits_for_a_daemon_that_isnt_answering(module, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_a_dropped_daemon_connection_is_device_unavailable_and_reopened(module, daemon):
+async def test_a_read_is_sent_again_after_the_daemon_restarts_but_input_is_not(module, daemon):
     driver = module.CuaDriver()
     await driver.screen()
     await daemon.stop()
-
     with pytest.raises(DeviceUnavailable, match="cua-driver's daemon isn't answering"):
         await driver.screen()
     await daemon.start()
-    assert (await driver.screen()).width == 1280 and daemon.connections == 2
+    assert (await driver.screen()).width == 1280
+
+    await daemon.stop()
+    await daemon.start()
+    assert (await driver.screen()).width == 1280
+    await daemon.stop()
+    await daemon.start()
+    with pytest.raises(DeviceUnavailable):
+        await driver.click_at(1, 1, "left", 1, [])
+    await driver.click_at(2, 2, "left", 1, [])
+    assert [args["x"] for name, args in daemon.calls() if name == "click"] == [2]
+
+
+@pytest.mark.asyncio
+async def test_one_of_cua_drivers_read_only_tools_is_sent_again_after_a_restart_and_its_input_tools_are_not(module,
+                                                                                                         daemon):
+    async with mcp_session(module.CuaDriver()) as session:
+        await session.call_tool("list_windows", {})
+        await daemon.stop()
+        await daemon.start()
+        read = await session.call_tool("list_windows", {})
+        await daemon.stop()
+        await daemon.start()
+        clicked = await session.call_tool("click", {"element_token": "s1:1"})
+    assert not read.isError and clicked.isError and "isn't answering" in clicked.content[0].text
+    assert [name for name, _ in daemon.calls()] == ["list_windows", "list_windows"]
 
 
 def test_the_skill_pack_is_written_offline_from_the_executable(module, monkeypatch, tmp_path):

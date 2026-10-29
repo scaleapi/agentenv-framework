@@ -2,7 +2,8 @@
 (``daemon.sh``), agents get its own tools as its pinned version lists them (``tools.json``), beside the ``computer_*``
 tools, and the computer/v1 operations are its desktop-scope calls. The daemon takes line-delimited JSON on a Unix
 socket; the framework's calls and each caller's run on connections of their own, the framework's in a session of its
-own. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs."""
+own. When a connection drops, as when the daemon restarts, a read is sent once more on a new one; input is not, since
+some of it may have arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs."""
 from __future__ import annotations
 
 import asyncio
@@ -138,7 +139,8 @@ class CuaDriver(ComputerDriverEnvironment):
         """A call to one of cua-driver's own tools, on its caller's connection, answered as cua-driver answers it."""
         connection = self._callers.setdefault(self.caller_identity(ToolContext.current()), _Connection())
         try:
-            reply = await connection.request({"method": "call", "name": tool, "args": arguments})
+            reply = await connection.request({"method": "call", "name": tool, "args": arguments},
+                                             retry=tool in _read_only())
         except DeviceUnavailable as e:
             return _refused(e.message)
         if not reply.get("ok"):
@@ -149,10 +151,12 @@ class CuaDriver(ComputerDriverEnvironment):
         await self._call(name, DeliveryFailed, scope="desktop", **args)
 
     async def _call(self, name: str, failure: type[Exception], **args: Any) -> dict:
-        """The result of one of cua-driver's tools called in the framework's session; ``failure`` names what went
-        wrong when it fails or refuses."""
+        """The result of one of cua-driver's tools called in the framework's session, a read (``DeviceUnavailable``
+        when it fails) sent again on a new connection when this one dropped; ``failure`` names what went wrong when
+        it fails or refuses."""
         reply = await self._framework.request({"method": "call", "name": name,
-                                               "args": {**args, "session": FRAMEWORK_SESSION}})
+                                               "args": {**args, "session": FRAMEWORK_SESSION}},
+                                              retry=failure is DeviceUnavailable)
         if not reply.get("ok"):
             raise failure(f"cua-driver {name}: {reply.get('error')}")
         result = reply["result"]
@@ -162,7 +166,7 @@ class CuaDriver(ComputerDriverEnvironment):
 
     async def _pinned_checks(self) -> list[ReadyCheck]:
         try:
-            listed = (await self._framework.request({"method": "list"}))["result"]["tools"]
+            listed = (await self._framework.request({"method": "list"}, retry=True))["result"]["tools"]
         except DeviceUnavailable:
             return [ReadyCheck("cua-driver", False, "its daemon isn't answering yet")]
         digest, expected = await asyncio.to_thread(_executable_sha256), EXECUTABLES.get(self.platform.arch or "")
@@ -183,21 +187,32 @@ class _Connection:
         self._stream: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None
         self._lock = asyncio.Lock()
 
-    async def request(self, payload: dict) -> dict:
+    async def request(self, payload: dict, *, retry: bool = False) -> dict:
+        """The daemon's reply to ``payload``; with ``retry``, sent once more on a new connection when an open one has
+        dropped."""
         async with self._lock:
+            was_open = self._stream is not None
             try:
-                if self._stream is None:
-                    self._stream = await asyncio.open_unix_connection(str(SOCKET), limit=REPLY_LIMIT)
-                reader, writer = self._stream
-                writer.write((json.dumps(payload) + "\n").encode())
-                await writer.drain()
-                line = await reader.readline()
-                if not line:
-                    raise ConnectionError("the daemon closed the connection")
-            except (OSError, ValueError) as e:
-                self._close()
-                raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
-            return json.loads(line)
+                return await self._exchange(payload)
+            except DeviceUnavailable:
+                if not (retry and was_open):
+                    raise
+            return await self._exchange(payload)
+
+    async def _exchange(self, payload: dict) -> dict:
+        try:
+            if self._stream is None:
+                self._stream = await asyncio.open_unix_connection(str(SOCKET), limit=REPLY_LIMIT)
+            reader, writer = self._stream
+            writer.write((json.dumps(payload) + "\n").encode())
+            await writer.drain()
+            line = await reader.readline()
+            if not line:
+                raise ConnectionError("the daemon closed the connection")
+        except (OSError, ValueError) as e:
+            self._close()
+            raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
+        return json.loads(line)
 
     def _close(self) -> None:
         if self._stream is not None:
@@ -208,6 +223,11 @@ class _Connection:
 @functools.cache
 def _manifest() -> list[dict]:
     return json.loads(MANIFEST.read_text())
+
+
+@functools.cache
+def _read_only() -> frozenset[str]:
+    return frozenset(t["name"] for t in _manifest() if (t["annotations"] or {}).get("readOnlyHint"))
 
 
 def _modifiers(keys) -> list[str]:
