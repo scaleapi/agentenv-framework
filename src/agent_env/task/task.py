@@ -9,6 +9,8 @@ import inspect
 import itertools
 import json
 import logging
+import re
+import shlex
 import time
 import uuid
 from dataclasses import dataclass
@@ -94,31 +96,42 @@ def _overlapping_survivors(
 
 def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskStep"]:
     """Round-trip each step through its own to_dict/from_dict with ``<key>``
-    seed placeholders replaced in every string leaf. Returns a NEW list, never
-    mutating the input; idempotent (an already-substituted string has no tokens
-    left). Used by Task.run(); a retry re-dispatches the same substituted step
+    seed placeholders replaced in every string leaf, in one left-to-right pass
+    so substituted text is never re-scanned. A value going into one of a step's
+    ``shell_fields`` must be text the shell reads literally, or the run is
+    refused before any step runs. Returns a NEW list, never mutating the input.
+    Used by Task.run(); a retry re-dispatches the same substituted step
     objects, so it executes exactly what the original run executed."""
     if not seed:
         return list(steps)
+    placeholders = re.compile("|".join(re.escape(f"<{key}>") for key in seed))
 
-    def _sub(value):
+    def _sub(value, step, field):
         if isinstance(value, str):
-            for k, v in seed.items():
-                value = value.replace(f"<{k}>", str(v))
-            return value
+            return placeholders.sub(lambda match: _seed_value(seed, match.group(0)[1:-1], step, field), value)
         if isinstance(value, list):
-            return [_sub(x) for x in value]
+            return [_sub(x, step, field) for x in value]
         if isinstance(value, dict):
-            return {k: _sub(v) for k, v in value.items()}
+            return {k: _sub(v, step, field) for k, v in value.items()}
         return value
 
     from agent_env.task_step.task_step import attach_retry_config
 
     out: list["TaskStep"] = []
     for step in steps:
-        data = _sub(step.to_dict())
+        data = {field: _sub(value, step, field) for field, value in step.to_dict().items()}
         out.append(attach_retry_config(type(step).from_dict(data), data))
     return out
+
+
+def _seed_value(seed: dict, key: str, step: "TaskStep", field: str) -> str:
+    value = str(seed[key])
+    if field in step.shell_fields and shlex.quote(value) != value:
+        raise ValueError(
+            f"Seed {key!r} can't go into step {step.id!r} field {field!r}: a value substituted into shell text may hold "
+            f"only letters, digits and _.:/@%+=,- (got {value!r})"
+        )
+    return value
 
 
 def recorded_scores(steps: list["TaskStep"], context: TaskStepContext) -> dict[str, float]:
@@ -488,8 +501,7 @@ class Task:
         # and concurrent runs must not race on a shared rewrite. And applied on
         # EVERY start_step, not only 0: a resume reloads the task with its
         # placeholders intact, so skipping substitution would hand later steps
-        # literal `<multienv_id>` strings. Substitution is idempotent — an
-        # already-replaced string has no tokens left.
+        # literal `<multienv_id>` strings.
         seed = context.metadata.get("seed") or {}
         steps = substitute_seed_in_steps(self.steps, seed) if seed else self.steps
         if start_step < 0 or start_step >= len(steps):
