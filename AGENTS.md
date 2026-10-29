@@ -137,9 +137,7 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
 - `[envs]`, `[artifacts]`, `[task_steps]` with `impls = ["module:Class", ...]`: extra classes for the
   registries. The identity is the class's `type` (a `ClassVar` on envs and steps, the Pydantic `type`
   default on artifacts); a class that keeps the base default, collides with a registered type, or
-  leaves a method its base requires unimplemented fails at registry build with `ConfigError`. A step
-  that runs one of its fields as shell text names it in `shell_fields`, so a run's seed can't put shell
-  syntax there.
+  leaves a method its base requires unimplemented fails at registry build with `ConfigError`.
 - For sandbox and state providers the table name must equal the `type` the provider produces,
   because that string is persisted and used to reconnect.
 - Entry points register the same kinds from an installed package, with the entry-point name as the

@@ -29,7 +29,6 @@ class RunDockerContainerTaskStep(TaskStep):
         ),
     )
     field_scopes = {**TaskStep.field_scopes, "docker_context_url": FieldScope.USER}
-    shell_fields = frozenset({"command_override", "ready_command"})
 
     def __init__(
         self,

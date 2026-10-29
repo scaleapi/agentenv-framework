@@ -59,7 +59,6 @@ def _outcome(passed: bool, justification: str) -> dict:
 class VerifySandboxTaskStep(TaskStep):
     type: ClassVar[str] = "verify_sandbox"
     entity_refs = ()
-    shell_fields = frozenset({"criteria.bash_cmd"})
 
     def __init__(
         self,

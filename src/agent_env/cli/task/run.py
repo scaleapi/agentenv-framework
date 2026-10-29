@@ -515,9 +515,8 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     waiting.
 
     Each row in the CSV becomes a seed dict passed to the task via
-    context.metadata["seed"]. Each <placeholder> in a step is rendered with
-    the seed's value before the run starts. A value bound for a shell command
-    may hold only letters, digits and _.:/@%+=,-, or the run is refused.
+    context.metadata["seed"]. Prompt templates with <placeholder> variables
+    are rendered using the seed values before being sent to the agent.
     """
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-batch{uuid4().hex[:6]}"

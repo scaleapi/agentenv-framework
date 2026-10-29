@@ -88,7 +88,6 @@ _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
 class RunContainerUnitTestsVerifierTaskStep(TaskStep):
     type: ClassVar[str] = "run_container_unit_tests_verifier"
     entity_refs = (EntityRef.env("env_id"),)
-    shell_fields = frozenset({"command", "setup_commands"})
 
     def __init__(
         self,
