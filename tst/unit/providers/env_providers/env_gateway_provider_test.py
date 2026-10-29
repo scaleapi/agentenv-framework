@@ -7,9 +7,11 @@ import contextlib
 import dataclasses
 import json
 import logging
+import os
 import re
 import shlex
 import socket
+import stat
 import subprocess
 from datetime import datetime
 from types import SimpleNamespace
@@ -41,6 +43,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
 )
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_DIR, LOCAL_TRUST_ENV, LocalSandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
@@ -1098,6 +1101,111 @@ def test_compose_reads_a_servers_card_on_its_card_port_and_its_mcp_on_the_mcp_po
     assert "18765" in services["website-browser"]["healthcheck"]["test"][1]
 
 
+@pytest.mark.parametrize("trust_files", [None, "./agentenv-trust"], ids=["no-local-grants", "local-grants"])
+def test_compose_hands_each_mcp_server_the_local_transfer_ca_when_there_is_one(trust_files):
+    """Services on a local compose stack reach the local grant server over TLS, so they mount its CA's trust files
+    and carry the sandbox's host mappings, which on Linux are how host.docker.internal resolves."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
+                     MCPServerConfig(image="mcp-items", environment_name="items")],
+        gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        extra_hosts=("host.docker.internal:host-gateway",),
+        trust_files=trust_files,
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    for name in ("slack", "items"):
+        env = dict(entry.split("=", 1) for entry in services[name]["environment"])
+        trusted = {key: env.get(key) for key in LOCAL_TRUST_ENV}
+        assert trusted == (LOCAL_TRUST_ENV if trust_files else dict.fromkeys(LOCAL_TRUST_ENV))
+        assert services[name].get("volumes") == ([f"{trust_files}:{LOCAL_TRUST_DIR}:ro"] if trust_files else None)
+        assert services[name].get("extra_hosts") == (["host.docker.internal:host-gateway"] if trust_files else None)
+
+
+def test_a_servers_own_variables_win_over_the_local_transfer_ca():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-items", environment_name="items",
+                                     extra_env_vars={"SSL_CERT_FILE": "/srv/own-roots.pem"})],
+        gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        trust_files="./trust",
+    )
+
+    keys = [entry.split("=", 1)[0] for entry in yaml.safe_load(compose)["services"]["items"]["environment"]]
+    env = dict(entry.split("=", 1) for entry in yaml.safe_load(compose)["services"]["items"]["environment"])
+    assert len(keys) == len(set(keys))
+    assert env["SSL_CERT_FILE"] == "/srv/own-roots.pem"
+    assert env["NODE_EXTRA_CA_CERTS"] == LOCAL_TRUST_ENV["NODE_EXTRA_CA_CERTS"]
+
+
+class _HostSandbox:
+    """Records what a deploy writes on its host."""
+
+    def __init__(self, on_this_machine: bool) -> None:
+        self.ON_THIS_MACHINE = on_this_machine
+        self.scripts: list[str] = []
+        self.files: dict[str, bytes] = {}
+
+    async def exec_script(self, script: str, **_) -> str:
+        self.scripts.append(script)
+        return ""
+
+    async def write_host_file(self, data: bytes, vm_path: str) -> None:
+        self.files[vm_path] = data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("on_this_machine", "local_grants", "staged"), [
+    (True, True, "./trust"),
+    (True, False, None),
+    (False, True, None),
+], ids=["on-this-machine", "no-local-grants", "elsewhere"])
+async def test_a_deploy_on_this_machine_writes_the_trust_files_beside_its_compose(
+    tmp_path, monkeypatch, on_this_machine, local_grants, staged
+):
+    """Any sandbox on this machine, a local VM's as well as local Docker's, gets them through its own host, which its
+    compose mounts from; a sandbox elsewhere is handed no local grants, so it gets none."""
+    (tmp_path / "ca.pem").write_bytes(b"ca")
+    (tmp_path / "ca-bundle.pem").write_bytes(b"roots+ca")
+    monkeypatch.setattr(env_gateway_provider, "local_grant_trust", lambda: tmp_path if local_grants else None)
+    sandbox = _HostSandbox(on_this_machine)
+
+    assert await EnvironmentGatewayProvider._stage_trust_files(sandbox) == staged
+
+    expected = {"/app/trust/ca-bundle.pem": b"roots+ca", "/app/trust/ca.pem": b"ca"} if staged else {}
+    assert sandbox.files == expected
+    assert sandbox.scripts == (["mkdir -p /app/trust", "chmod 755 /app/trust && chmod 644 /app/trust/*"] if staged else [])
+
+
+@pytest.mark.asyncio
+async def test_a_local_sandbox_keeps_the_trust_files_in_its_work_dir(tmp_path, monkeypatch):
+    """The CA's own folder may sit outside what Docker shares; the work dir, where the compose runs, is shared. The bundle
+    of public roots and the CA is a few hundred KB, so it is written in chunks, and a service running as any user reads
+    the files, whatever the deploy's umask."""
+    (tmp_path / "ca").mkdir()
+    trust = {"ca.pem": b"ca", "ca-bundle.pem": b"r" * (300 * 1024)}
+    for name, content in trust.items():
+        (tmp_path / "ca" / name).write_bytes(content)
+    monkeypatch.setattr(env_gateway_provider, "local_grant_trust", lambda: tmp_path / "ca")
+
+    umask = os.umask(0o077)
+    try:
+        assert await EnvironmentGatewayProvider._stage_trust_files(LocalSandbox(work_dir=tmp_path / "work")) == "./trust"
+    finally:
+        os.umask(umask)
+    staged = tmp_path / "work" / "trust"
+    assert {p.name: p.read_bytes() for p in staged.iterdir()} == trust
+    assert {p.name: stat.S_IMODE(p.stat().st_mode) for p in [staged, *staged.iterdir()]} == {
+        "trust": 0o755, "ca.pem": 0o644, "ca-bundle.pem": 0o644}
+
+
 # --- sidecar rendering --------------------------------------------------------
 
 class _FakeImageArtifact:
@@ -1353,6 +1461,41 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser():
     assert compose.call_args.kwargs["mcp_server_name"] == "crm"
     browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == "website-browser")
     assert browser.card_port == 18766  # its card is the recorder's
+
+
+@pytest.mark.asyncio
+async def test_deploy_via_vm_mounts_the_trust_files_it_staged_on_its_sandbox():
+    from agent_env.env.gateway import GatewayMode
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock())
+    gp._state_instance = MagicMock()
+    sandbox = AsyncMock()
+    sandbox_provider = MagicMock(create_vm=AsyncMock(return_value=sandbox))
+
+    class _Stop(Exception):
+        """Abort once the compose is rendered."""
+
+    with patch("agent_env.env.env.Env.get", side_effect=lambda env_id, *a, **k: MagicMock(docker_image_artifact=_loadable(env_id))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(EnvironmentGatewayProvider, "_stage_trust_files", AsyncMock(return_value="./trust")) as stage, \
+         patch.object(gp, "create_docker_compose", side_effect=_Stop) as compose:
+        with pytest.raises(_Stop):
+            await gp._deploy_via_vm(
+                sandbox_provider=sandbox_provider,
+                mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+                mcp_server_images=[_loadable("mcp-slack")],
+                gateway_port=18765,
+                website_configs=None,
+                website_images=None,
+                gateway_mode=GatewayMode.PERFORMANCE,
+                ttl_seconds=60,
+                disk_size_gb=10,
+            )
+
+    stage.assert_awaited_once_with(sandbox)
+    assert compose.call_args.kwargs["trust_files"] == "./trust"
 
 
 @pytest.mark.asyncio

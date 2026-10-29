@@ -49,7 +49,12 @@ from agent_env.providers.env_providers.env_provider import (
     _size_kwargs,
     _tool_names,
 )
-from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
+from agent_env.providers.sandbox_providers.local_docker.provider import (
+    LOCAL_TRUST_DIR,
+    LOCAL_TRUST_ENV,
+    local_grant_trust,
+    remove_local_work_dir,
+)
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -75,6 +80,8 @@ _LOG_TAIL_LINES = 30
 _LOG_LINE_CHARS = 300
 # Gathering it may stall with the connection; past this, the deploy raises the error it had.
 _DOWN_SERVICES_TIMEOUT_S = 60.0
+# Where beside the compose file its services' copy of the local transfer CA's trust files is kept.
+_TRUST_FILES_DIR = "trust"
 
 # MCP server health-check budget. Some servers wait on an upstream before they bind; a server
 # that is up passes its first probe, so the long start period only delays failing a broken one.
@@ -270,8 +277,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         host_ips: tuple[str, ...] = (),
         extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
+        trust_files: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
+        With ``trust_files``, where the compose finds the local transfer CA's trust files, each MCP server mounts
+        them where ``LOCAL_TRUST_ENV`` points, unless its own variables say otherwise, and carries ``extra_hosts``, so
+        it reaches and trusts the local grant server.
 
         Supports MCP servers, websites, or both. Website containers (backend + frontend) are added
         to the same docker network. The gateway receives WEBSITE_URLS env var for discovery.
@@ -418,9 +429,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - ENVIRONMENT_NAME={server.environment_name}",
                 f"      - DATABASE_URL={db_url}",
             ])
-            if server.extra_env_vars:
-                for key, value in server.extra_env_vars.items():
-                    lines.append(f"      - {key}={value}")
+            server_env = {**(LOCAL_TRUST_ENV if trust_files is not None else {}), **(server.extra_env_vars or {})}
+            lines.extend(f"      - {key}={value}" for key, value in server_env.items())
+            if trust_files is not None:
+                lines.extend(["    volumes:", f'      - "{trust_files}:{LOCAL_TRUST_DIR}:ro"'])
+                if extra_hosts:
+                    lines.extend(["    extra_hosts:", *(f'      - "{entry}"' for entry in extra_hosts)])
             lines.extend([
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "python3 -c \\"import socket; s=socket.create_connection((\'localhost\',{gateway_port}),2); s.close()\\""]',
@@ -799,6 +813,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 self._all_environments(mcp_servers, website_configs), instance=state_instance
             )
 
+        trust_files = await self._stage_trust_files(sandbox)
         compose_content = self.create_docker_compose(
             mcp_servers=mcp_servers,
             gateway_image=gateway_env.docker_image_artifact.image_name,
@@ -812,6 +827,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
+            trust_files=trust_files,
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
 
@@ -1120,6 +1136,20 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if line:
                 events.append(json.loads(line))
         return events
+
+    @staticmethod
+    async def _stage_trust_files(sandbox: VmSandbox) -> str | None:
+        """Write the local transfer CA's trust files beside the compose file and return where it finds them, on a sandbox
+        on this machine when the store hands out local grants, which its services are given; None otherwise. They are
+        made readable by any user a service runs as, whatever the umask they were written under."""
+        if not sandbox.ON_THIS_MACHINE or (trust_dir := await asyncio.to_thread(local_grant_trust)) is None:
+            return None
+        directory = shlex.quote(f"{GATEWAY_APP_DIR}/{_TRUST_FILES_DIR}")
+        await sandbox.exec_script(f"mkdir -p {directory}", max_retries=2)
+        for path in sorted(trust_dir.iterdir()):
+            await sandbox.write_host_file(await asyncio.to_thread(path.read_bytes), f"{GATEWAY_APP_DIR}/{_TRUST_FILES_DIR}/{path.name}")
+        await sandbox.exec_script(f"chmod 755 {directory} && chmod 644 {directory}/*", max_retries=2)
+        return f"./{_TRUST_FILES_DIR}"
 
     @staticmethod
     async def _write_file(sandbox: VmSandbox, path: str, content: str) -> None:

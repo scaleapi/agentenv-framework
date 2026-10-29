@@ -632,6 +632,7 @@ class MultiEnv(Env):
             host_ips=self._sandbox.host_ips,
             extra_hosts=self._sandbox.extra_hosts,
             mcp_server_name=self._mcp_server_name or self.name,
+            trust_files=await gw._stage_trust_files(self._sandbox),
         )
         compose_content = compose_content.replace(
             "    volumes:\n      - ./init-schemas.sql:/docker-entrypoint-initdb.d/init-schemas.sql\n", "",

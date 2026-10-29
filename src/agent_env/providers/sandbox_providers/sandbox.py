@@ -597,7 +597,8 @@ class VmSandbox(Sandbox):
         await self.exec_script(f": > {shlex.quote(vm_b64)}")
         for i in range(0, len(encoded), self._WFT_CHUNK_BYTES):
             await self.exec_script(f"printf '%s' {shlex.quote(encoded[i:i + self._WFT_CHUNK_BYTES])} >> {shlex.quote(vm_b64)}")
-        await self.exec_script(f"base64 -d {shlex.quote(vm_b64)} > {shlex.quote(vm_path)} && rm -f {shlex.quote(vm_b64)}")
+        # From stdin: macOS's base64, a local sandbox's, takes no file argument.
+        await self.exec_script(f"base64 -d < {shlex.quote(vm_b64)} > {shlex.quote(vm_path)} && rm -f {shlex.quote(vm_b64)}")
 
     async def write_host_file(self, data: bytes, vm_path: str) -> None:
         """Write bytes to vm_path on the VM host itself, not into the agent container."""
