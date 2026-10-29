@@ -272,13 +272,31 @@ def test_history_is_bounded_and_delivered_notifications_are_dropped():
     assert w._queue == []
 
 
-def test_clear_turns_checks_off_and_forgets_everything():
-    w = _notifications()
+def test_clear_resets_every_setting_and_forgets_everything():
+    w = _notifications(max_active=3, min_interval="PT2H")
     w.schedule("x", at="PT1H")
     w.notify("Gmail", "hello")
     w.clear()
     st = w.state()
-    assert (st["roles"], st["checks"], st["pending_notifications"]) == ([], [], [])
+    assert (st["roles"], st["max_active"], st["min_interval"]) == ([], 10, "PT1H")
+    assert (st["checks"], st["pending_notifications"]) == ([], [])
+
+
+def test_a_config_replaces_every_setting_so_a_field_left_out_goes_back_to_its_default():
+    n = _notifications(max_active=3, min_interval="PT2H")
+    st = n.configure({"max_active": 5})
+    assert (st["roles"], st["max_active"], st["min_interval"]) == ([], 5, "PT1H")
+    assert not n.enabled
+
+
+def test_a_new_config_leaves_existing_checks_as_they_are():
+    n = _notifications(max_active=3)
+    n.schedule("a", at="PT1H")
+    n.schedule("b", every="PT6H")
+    n.configure({"roles": ["default"], "max_active": 1, "min_interval": "PT12H"})
+    assert [(c["status"], c.get("every")) for c in n.state()["checks"]] == [("active", None), ("active", "PT6H")]
+    with pytest.raises(NotificationError, match="already have 1"):
+        n.schedule("c", at="PT2H")
 
 
 @pytest.mark.parametrize("body, error", [
@@ -407,6 +425,8 @@ def test_the_tools_appear_only_once_a_task_turns_them_on_and_go_on_clear(gateway
     assert set(CHECK_TOOL_NAMES) <= set(tools) and set(CHECK_TOOL_NAMES) <= _gateway_tool_names(gateway)
     assert _request(gateway, "POST", "/notifications/clear", {}).status_code == 200
     assert not set(CHECK_TOOL_NAMES) & set(tools) and not set(CHECK_TOOL_NAMES) & _gateway_tool_names(gateway)
+    state = _request(gateway, "GET", "/notifications/state").json()
+    assert (state["roles"], state["max_active"], state["min_interval"]) == ([], 10, "PT1H")
 
 
 def test_the_schedule_tool_states_the_rules_with_the_configured_limits(gateway):
@@ -444,8 +464,17 @@ def test_turning_checks_off_removes_the_tools(gateway):
 
 def test_config_is_refused_over_a_backing_server_tool_of_the_same_name(gateway):
     gateway._tool_server_urls["schedule_check"] = "http://svc:1/mcp"
-    r = _request(gateway, "POST", "/notifications/config", {})
+    r = _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
     assert r.status_code == 409 and "schedule_check" in r.json()["error"]
+
+
+@pytest.mark.parametrize("body", [{"roles": []}, {"max_active": 5}])
+def test_turning_checks_off_is_never_refused_over_a_backing_server_tool_of_the_same_name(gateway, body):
+    gateway._tool_server_urls["schedule_check"] = "http://svc:1/mcp"
+    proxied = gateway._mcp._tool_manager._tools["schedule_check"] = object()  # the backing server's, as discovery left it
+    r = _request(gateway, "POST", "/notifications/config", body)
+    assert r.status_code == 200 and r.json()["roles"] == []
+    assert gateway._mcp._tool_manager._tools["schedule_check"] is proxied
 
 
 def test_config_waits_for_tool_discovery_and_sees_what_it_found(gateway, monkeypatch):
@@ -456,7 +485,7 @@ def test_config_waits_for_tool_discovery_and_sees_what_it_found(gateway, monkeyp
         gateway._tools_discovered = True
 
     monkeypatch.setattr(gateway, "_ensure_tools_discovered", discover)
-    r = _request(gateway, "POST", "/notifications/config", {})
+    r = _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
     assert r.status_code == 409 and "schedule_check" in r.json()["error"]
 
 
@@ -465,9 +494,10 @@ def test_config_is_a_503_while_tool_discovery_fails(gateway, monkeypatch):
         raise RuntimeError("backing server down")
 
     monkeypatch.setattr(gateway, "_ensure_tools_discovered", discover)
-    r = _request(gateway, "POST", "/notifications/config", {})
+    r = _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
     assert r.status_code == 503 and "retry" in r.json()["error"]
     assert not set(CHECK_TOOL_NAMES) & set(gateway._mcp._tool_manager._tools)
+    assert _request(gateway, "POST", "/notifications/config", {"roles": []}).status_code == 200  # off needs no discovery
 
 
 def test_a_bad_config_is_a_400(gateway):

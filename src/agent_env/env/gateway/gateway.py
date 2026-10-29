@@ -328,21 +328,32 @@ class Gateway:
 
         @self._mcp.custom_route("/notifications/config", methods=["POST"])
         async def notifications_config(request: Request) -> Response:
-            try:  # the backing servers' tools must be known, or a later discovery would replace ours unseen
-                await self._ensure_tools_discovered()
-            except Exception as e:
-                return self._json_response(
-                    {"ok": False, "error": f"tool discovery has not completed ({type(e).__name__}); retry"}, 503)
-            taken = sorted(set(CHECK_TOOL_NAMES) & set(self._tool_server_urls))
-            if taken:
-                return self._json_response(
-                    {"ok": False, "error": f"{taken} already registered by a backing server"}, 409)
-            response = await _notifications_write(request, self._notifications.configure)
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            # A config that names roles registers the tools, so the backing servers' tools must be known (or a later
+            # discovery would replace ours unseen) and none may have their names. One that turns checks off
+            # (roles: [], the default) registers nothing, so neither can block it.
+            if not (isinstance(body, dict) and body.get("roles", []) == []):
+                try:
+                    await self._ensure_tools_discovered()
+                except Exception as e:
+                    return self._json_response(
+                        {"ok": False, "error": f"tool discovery has not completed ({type(e).__name__}); retry"}, 503)
+                taken = sorted(set(CHECK_TOOL_NAMES) & set(self._tool_server_urls))
+                if taken:
+                    return self._json_response(
+                        {"ok": False, "error": f"{taken} already registered by a backing server"}, 409)
+            try:
+                state = self._notifications.configure(body)
+            except NotificationError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
             if self._notifications.enabled:
                 self._register_check_tools()
             else:
                 self._unregister_check_tools()
-            return response
+            return self._json_response(state, 200)
 
         @self._mcp.custom_route("/notifications/state", methods=["GET"])
         async def notifications_state(request: Request) -> Response:

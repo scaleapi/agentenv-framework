@@ -149,7 +149,10 @@ class Notifications:
 
     def configure(self, body: Any) -> dict:
         """Name the roles that get the scheduled-check tools, with their limits; `roles: []` (the default) turns them
-        off. Notifications need no switch."""
+        off. Notifications need no switch. A config replaces every setting: a field left out goes back to its default,
+        so one without roles turns checks off. Existing checks stay as they are unless their role is left out:
+        lowering max_active leaves extra active checks in place, and raising min_interval leaves existing repeats
+        unchanged."""
         if not isinstance(body, dict):
             raise NotificationError("body must be a JSON object")
         unknown = sorted(set(body) - set(_CONFIG_FIELDS))
@@ -175,8 +178,10 @@ class Notifications:
         return self.state()
 
     def clear(self) -> dict:
+        """Back to how a gateway starts: every setting at its default (checks off), no checks, no notifications."""
         with self._lock:
-            self._roles = ()
+            self._roles, self._max_active = (), DEFAULT_MAX_ACTIVE
+            self._min_interval = _parse_duration(DEFAULT_MIN_INTERVAL)
             self._checks.clear()
             self._queue.clear()
             self._takes.clear()
