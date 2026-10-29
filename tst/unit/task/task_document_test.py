@@ -46,3 +46,21 @@ def test_without_an_unmet_requirement_it_names_only_the_type(monkeypatch, record
 
     assert str(caught.value) == "Unknown task step type: acme_task_document_test"
     assert caught.value.requirements == ()
+
+
+@pytest.mark.parametrize("record", [["not a requirement!"], ["evil; os_name != \"\x1b[2K\ragentenv-browser\""], [7]],
+                         ids=["unparseable", "terminal-escape", "not-a-string"])
+def test_a_record_that_isnt_a_requirement_is_named_and_never_offered(monkeypatch, record):
+    monkeypatch.setattr(_requirements, "installed", {}.get)
+
+    with pytest.raises(UnknownStepTypeError) as caught:
+        Task.from_dict({**_UNKNOWN, "requires": [*record, "agentenv-acme>=1.2"]})
+
+    assert "isn't a pip requirement that can be shown as written" in str(caught.value)
+    assert caught.value.requirements == ("agentenv-acme>=1.2",)
+    assert "plugin add 'agentenv-acme>=1.2'" in str(caught.value) and repr(record[0]) in str(caught.value)
+
+
+def test_a_record_that_isnt_a_list_is_read_as_none():
+    assert Task.from_dict({"id": "t", "type": "task", "version": 1, "steps": [], "requires": "agentenv-acme"}).requires \
+        is None

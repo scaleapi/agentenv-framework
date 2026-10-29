@@ -54,11 +54,14 @@ def incompatibility(dist: Any) -> Optional[str]:
 
 
 def unmet(requires: Iterable[str]) -> list[tuple[str, str]]:
-    """Each of ``requires`` that isn't met here, with why: its package isn't installed, is at a version it excludes, or
-    is without what the extras it names need. One whose marker is false here doesn't apply."""
+    """Each of ``requires`` that isn't met here, with why: it isn't a pip requirement this can show as written, its
+    package isn't installed, is at a version it excludes, or is without what the extras it names need. One whose marker
+    is false here doesn't apply."""
     found = []
     for line in requires:
-        requirement = Requirement(line)
+        if (requirement := parsed(line)) is None:
+            found.append((line, "which isn't a pip requirement that can be shown as written"))
+            continue
         if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""}):
             continue
         have = installed(canonicalize_name(requirement.name))
@@ -77,10 +80,12 @@ def unmet_problems(requires: Iterable[str], owner: str) -> tuple[list[str], list
     command that installs every plugin package among them, and those requirements. One on agent-env itself, which
     ``plugin add`` doesn't change, says to upgrade it instead."""
     found = unmet(requires)
-    core = [(line, why) for line, why in found if canonicalize_name(Requirement(line).name) in CORE]
-    plugins = [(line, why) for line, why in found if (line, why) not in core]
-    problems = [f"{owner}: requires {line!r}, {why}; upgrade agent-env with the installer that installed it"
-                for line, why in core]
+    names = {line: canonicalize_name(requirement.name) if (requirement := parsed(line)) else None for line, _ in found}
+    core = [(line, why) for line, why in found if names[line] in CORE]
+    plugins = [(line, why) for line, why in found if names[line] is not None and names[line] not in CORE]
+    problems = [f"{owner}: requires {line!r}, {why}" for line, why in found if names[line] is None]
+    problems += [f"{owner}: requires {line!r}, {why}; upgrade agent-env with the installer that installed it"
+                 for line, why in core]
     lines = [line for line, _ in plugins]
     if len(plugins) == 1:
         (line, why), = plugins
@@ -89,6 +94,17 @@ def unmet_problems(requires: Iterable[str], owner: str) -> tuple[list[str], list
         problems += [f"{owner}: requires {line!r}, {why}" for line, why in plugins]
         problems.append(f"{owner}: install what it requires with: {install_command(lines)}")
     return problems, lines
+
+
+def parsed(line: object) -> Requirement | None:
+    """``line`` as a pip requirement, or None when it isn't one, or holds a character a terminal wouldn't show as it
+    is, which could make the install it names look like another."""
+    if not isinstance(line, str) or not line.isprintable():
+        return None
+    try:
+        return Requirement(line)
+    except InvalidRequirement:
+        return None
 
 
 def install_command(requirements: Sequence[str]) -> str:

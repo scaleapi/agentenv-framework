@@ -13,9 +13,11 @@ from agent_env.cli import _install_prompt, cli, submitted_runs
 from agent_env.cli.task import _checks
 from agent_env.config import get_config
 from agent_env.env import MCPServerEnv
-from agent_env.env.bootstrap import GATEWAY, SERVICE_DB
+from agent_env.entity.refs import EntityKind
+from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, default_env_id
 from agent_env.env.store import ENVS_COLLECTION
 from agent_env.plugins import _requirements
+from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.store import TASKS_COLLECTION
@@ -213,3 +215,47 @@ def test_step_params_that_leave_what_a_step_references_as_stored_check_it(stores
         _checks.runnable_task("t", None, {"user_overrides": {"step_params": params}}, say=print)
 
     assert [line.split(":")[1].strip() for line in caught.value.message.splitlines()] == ["step 'env'", "step 'load'"]
+
+
+def test_a_reference_many_steps_make_is_read_once_and_named_at_each(stores, monkeypatch):
+    reads = []
+
+    def get(id, version):
+        reads.append((id, version))
+        raise UnknownDocumentTypeError("Unknown artifact type 'acme_artifact_task_run_test'")
+
+    monkeypatch.setitem(_checks._GETTERS, EntityKind.ARTIFACT, get)
+    _stored([{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
+             *({"id": f"load{i}", "type": "load_artifact", "sandbox_name": "box", "artifact_id": "acme-data",
+                "depends_on": [{"task_step_id": "box"}]} for i in range(3))])
+
+    with pytest.raises(click.ClickException) as caught:
+        _checks.runnable_task("t", None, {}, say=print)
+
+    assert reads == [("acme-data", None)]
+    assert [line.split(":")[1].strip() for line in caught.value.message.splitlines()] == [
+        "step 'load0'", "step 'load1'", "step 'load2'"]
+
+
+def test_an_infra_env_the_store_holds_is_left_as_it_is(stores, monkeypatch):
+    _mcp_env("crm")
+    _mcp_env(default_env_id(GATEWAY))  # whatever it was built from
+    _stored([{"id": "env", "type": "deploy_env", "env_id": "crm"}])
+    set_up = []
+    monkeypatch.setattr(_checks, "stores_are_local", lambda: True)
+    monkeypatch.setattr(_checks, "ensure_default_envs", lambda kinds, say: set_up.append(set(kinds)))
+
+    _checks.runnable_task("t", None, {}, say=print)
+
+    assert set_up == [{SERVICE_DB}]
+
+
+def test_a_record_that_isnt_a_requirement_is_refused_and_never_offered(terminal):
+    Task.put(id="t", steps=[], requires=["not a requirement!", MISSING])
+
+    result = _run(input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "task t v1: requires 'not a requirement!', which isn't a pip requirement that can be shown as written" in \
+        result.output
+    assert terminal["added"] == [[MISSING]]

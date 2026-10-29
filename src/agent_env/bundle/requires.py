@@ -171,7 +171,8 @@ def detected(found: Iterable[Use], declared: Iterable[str] = ()) -> list[str]:
     that distribution, else at least the version installed here."""
     by_name: dict[str, list[str]] = {}
     for line in declared:
-        by_name.setdefault(canonicalize_name(Requirement(line).name), []).append(line)
+        if (requirement := _requirements.parsed(line)) is not None:
+            by_name.setdefault(canonicalize_name(requirement.name), []).append(line)
     requires: set[str] = set()
     for use in found:
         if (requirement := use.provider.requirement()) is not None:

@@ -425,7 +425,7 @@ class Task:
             id=data["id"],
             version=data.get("version"),
             steps=steps,
-            requires=data.get("requires"),
+            requires=data["requires"] if isinstance(data.get("requires"), list) else None,
         )
 
     async def run(

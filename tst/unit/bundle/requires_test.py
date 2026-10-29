@@ -19,6 +19,7 @@ from agent_env.artifact import Artifact
 from agent_env.bundle import BundleError, dry_run_bundle, parse_bundle, prepare_bundle, run_bundle
 from agent_env.bundle import register as register_module
 from agent_env.bundle import requires as requires_module
+from agent_env.bundle.importer import import_task
 from agent_env.bundle.register import register_bundle
 from agent_env.bundle.requires import (
     Declaring, Provider, Providers, UnmetRequirements, _create, declare, declaring_for,
@@ -660,6 +661,14 @@ class TestRegisteredTasks:
         assert [(done.write.id, done.version, done.reasons) for done in changed] == [
             ("b-plugin", 2, ("requires agentenv-acme>=1.1,<2",))]
         assert Task.get("b-plugin").requires == ["agentenv-acme>=1.1,<2"]
+
+    def test_an_import_of_a_registered_task_keeps_the_range_it_records(self, stores):
+        root = layout(stores / "b", {**REGISTERED, "bundle.toml": 'requires = ["agentenv-acme>=1.0,<2"]\n'})
+        register_bundle(root)
+
+        imported = import_task("b-plugin", stores / "imported")
+
+        assert parse_bundle(imported.root).requires == ("agentenv-acme>=1.0,<2",)
 
 
 def test_unmet_requirements_are_a_bundle_error():
