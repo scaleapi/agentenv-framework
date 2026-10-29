@@ -485,13 +485,15 @@ def test_an_explicit_declaration_wins_over_the_data_objects_default(declared):
     assert protocol_v1.write_kinds(card.model_dump(mode="json", exclude_none=True)) == frozenset(declared)
 
 
-@pytest.mark.parametrize(("declared", "expected"), [
+@pytest.mark.parametrize(("params", "expected"), [
+    ({"write": "http-put-parts"}, frozenset()),
+    ({"write": [{"kind": "http-put-parts"}, "http-put"]}, frozenset({"http-put"})),
+    ({"write": None}, frozenset()),
+    (["http-put-parts"], frozenset()),
     ("http-put-parts", frozenset()),
-    ([{"kind": "http-put-parts"}, "http-put"], frozenset({"http-put"})),
-    (None, frozenset()),
-], ids=["a-string", "non-string-entries", "none"])
-def test_a_malformed_declaration_reads_as_the_kinds_it_names_by_name(declared, expected):
+], ids=["a-string", "non-string-entries", "none", "params-a-list", "params-a-string"])
+def test_a_malformed_declaration_reads_as_the_kinds_it_names_by_name(params, expected):
     card = {"name": "slack", "capabilities": {"extensions": [
-        {"uri": TRANSFERS_EXTENSION_URI, "description": "declared", "params": {"write": declared}},
+        {"uri": TRANSFERS_EXTENSION_URI, "description": "declared", "params": params},
     ]}}
     assert protocol_v1.write_kinds(card) == expected
