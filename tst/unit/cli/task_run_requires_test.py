@@ -9,18 +9,19 @@ from click.testing import CliRunner
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
-from agent_env.cli import _install_prompt, cli, submitted_runs
+from agent_env.cli import cli, submitted_runs
 from agent_env.cli.task import _checks
 from agent_env.config import get_config
 from agent_env.env import MCPServerEnv
 from agent_env.entity.refs import EntityKind
-from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, default_env_id
+from agent_env.env.bootstrap import GATEWAY, SERVICE_DB
 from agent_env.env.store import ENVS_COLLECTION
 from agent_env.plugins import _requirements
 from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.store import TASKS_COLLECTION
+from tst.unit._terminal import at_a_terminal
 
 MISSING = "agentenv-e2e-missing>=1"
 REFUSED = f"task t v1: requires '{MISSING}', which isn't installed; install it with: agent-env plugin add '{MISSING}'"
@@ -110,18 +111,7 @@ def test_a_task_whose_requirements_are_met_is_run(stores, monkeypatch):
 
 @pytest.fixture
 def terminal(stores, monkeypatch):
-    """A person at a terminal, an install that records what it's asked for, and a re-exec that stops the test."""
-    calls = {"added": [], "exec": []}
-
-    def execv(path, argv):
-        calls["exec"].append(argv)
-        raise SystemExit(0)
-
-    monkeypatch.setattr(_install_prompt, "_interactive", lambda: True)
-    monkeypatch.setattr(_install_prompt._plugin_changes, "add", lambda specs, **kwargs: calls["added"].append(specs))
-    monkeypatch.setattr(_install_prompt.os, "execv", execv)
-    monkeypatch.setenv(_install_prompt._ASKED, "")
-    return calls
+    return at_a_terminal(monkeypatch)
 
 
 @pytest.mark.parametrize("store", [
@@ -135,7 +125,7 @@ def test_at_a_terminal_it_offers_to_install_what_the_task_requires_and_runs_it_a
 
     assert result.exit_code == 0, result.output
     assert f"Install {MISSING} with agent-env plugin add? [y/N]: y" in result.output
-    assert terminal["added"] == [[MISSING]] and len(terminal["exec"]) == 1
+    assert terminal["added"] == [([MISSING], True)] and len(terminal["exec"]) == 1
 
 
 def test_a_task_needing_a_newer_agent_env_says_to_upgrade_it_and_never_asks(terminal):
@@ -162,11 +152,12 @@ def test_the_infra_envs_its_deploys_run_on_are_set_up_in_local_stores_but_for_th
     _stored([{"id": "env", "type": "deploy_env", "env_id": "crm"}])
     set_up = []
     monkeypatch.setattr(_checks, "stores_are_local", lambda: local)
-    monkeypatch.setattr(_checks, "ensure_default_envs", lambda kinds, say: set_up.append(set(kinds)))
+    monkeypatch.setattr(_checks, "ensure_default_envs",
+                        lambda kinds, say, missing_only: set_up.append((set(kinds), missing_only)))
 
     _checks.runnable_task("t", None, {"user_overrides": overrides}, say=print)
 
-    assert set_up == ([kinds] if kinds else [])
+    assert set_up == ([(kinds, True)] if kinds else [])
 
 
 def _mcp_env(id):
@@ -237,17 +228,17 @@ def test_a_reference_many_steps_make_is_read_once_and_named_at_each(stores, monk
         "step 'load0'", "step 'load1'", "step 'load2'"]
 
 
-def test_an_infra_env_the_store_holds_is_left_as_it_is(stores, monkeypatch):
+def test_the_infra_envs_are_set_up_only_where_the_store_doesnt_hold_them(stores, monkeypatch):
     _mcp_env("crm")
-    _mcp_env(default_env_id(GATEWAY))  # whatever it was built from
     _stored([{"id": "env", "type": "deploy_env", "env_id": "crm"}])
     set_up = []
     monkeypatch.setattr(_checks, "stores_are_local", lambda: True)
-    monkeypatch.setattr(_checks, "ensure_default_envs", lambda kinds, say: set_up.append(set(kinds)))
+    monkeypatch.setattr(_checks, "ensure_default_envs",
+                        lambda kinds, say, missing_only: set_up.append((set(kinds), missing_only)))
 
     _checks.runnable_task("t", None, {}, say=print)
 
-    assert set_up == [{SERVICE_DB}]
+    assert set_up == [({GATEWAY, SERVICE_DB}, True)]
 
 
 def test_a_record_that_isnt_a_requirement_is_refused_and_never_offered(terminal):
@@ -258,4 +249,4 @@ def test_a_record_that_isnt_a_requirement_is_refused_and_never_offered(terminal)
     assert result.exit_code == 0, result.output
     assert "task t v1: requires 'not a requirement!', which isn't a pip requirement that can be shown as written" in \
         result.output
-    assert terminal["added"] == [[MISSING]]
+    assert terminal["added"] == [([MISSING], True)]

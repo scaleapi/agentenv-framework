@@ -15,6 +15,7 @@ from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.banner import print_banner
 from agent_env.cli.task._checks import runnable_task
+from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE
 from agent_env.cli import submitted_runs
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_teardown
@@ -412,9 +413,9 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     if env_state_instance_id:
         initial_context.metadata.setdefault("user_overrides", {})["env_state_instance_id"] = env_state_instance_id
     if gateway_env_id:
-        initial_context.metadata.setdefault("user_overrides", {})["gateway_env_id"] = gateway_env_id
+        initial_context.metadata.setdefault("user_overrides", {})[GATEWAY_OVERRIDE] = gateway_env_id
     if service_db_env_id:
-        initial_context.metadata.setdefault("user_overrides", {})["service_db_env_id"] = service_db_env_id
+        initial_context.metadata.setdefault("user_overrides", {})[SERVICE_DB_OVERRIDE] = service_db_env_id
     initial_context.metadata["start_step"] = start_step
     initial_context.metadata[KEEP_KEY] = keep
     initial_context.metadata["task_id"] = task_id
@@ -529,9 +530,16 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     if not seed_rows:
         raise click.ClickException("No seeds found in CSV")
 
+    metadata = {"run_group_id": uuid4().hex, "task_id": task_id, KEEP_KEY: keep}
+    _stamp_agent_env_client_metadata(metadata, get_agent_env_client_id())
+    given = {"litellm_api_key": litellm_api_key, "judge_litellm_api_key": judge_litellm_api_key,
+             "apply_trajectory_filter": apply_trajectory_filter, "user_model": user_model, "judge_model": judge_model,
+             "agent_sandbox": agent_sandbox, "env_sandbox": env_sandbox, "env_state_type": env_state_type,
+             "env_state_instance_id": env_state_instance_id}
+    if overrides := {key: value for key, value in given.items() if value is not None and value != ""}:
+        metadata["user_overrides"] = overrides
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
-    task = _runnable(task_id, task_version, {"user_overrides": {"env_state_type": env_state_type,
-                                                                "env_state_instance_id": env_state_instance_id}})
+    task = _runnable(task_id, task_version, metadata)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
     suffixes = {step.universe_id_suffix or "" for step in task.steps if isinstance(step, CollectArtifactsTaskStep)}
     if is_local_id(task.id) and suffixes:
@@ -547,14 +555,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
 
     print_banner()
 
-    metadata = {"run_group_id": uuid4().hex, "task_id": task_id, KEEP_KEY: keep}
-    _stamp_agent_env_client_metadata(metadata, get_agent_env_client_id())
-    given = {"litellm_api_key": litellm_api_key, "judge_litellm_api_key": judge_litellm_api_key,
-             "apply_trajectory_filter": apply_trajectory_filter, "user_model": user_model, "judge_model": judge_model,
-             "agent_sandbox": agent_sandbox, "env_sandbox": env_sandbox, "env_state_type": env_state_type,
-             "env_state_instance_id": env_state_instance_id}
-    if overrides := {key: value for key, value in given.items() if value is not None and value != ""}:
-        metadata["user_overrides"] = overrides
 
     submissions = []
     for index, seed in enumerate(seed_rows, 1):

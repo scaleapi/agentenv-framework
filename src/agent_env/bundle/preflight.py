@@ -26,8 +26,9 @@ another platform builds them from; so they're named here, and refused here when 
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
@@ -504,9 +505,10 @@ class _Walk:
         self.problems.setdefault(problem, {})[where] = None
 
 
-def stored_infra(steps: Iterable[TaskStep]) -> frozenset[str]:
-    """The infra env kinds a stored task's ``steps`` deploy on through the gateway, reading the envs they deploy from
-    the store: the gateway, the service-db its local Postgres state runs in, and the website browser for its sites."""
+def stored_infra(steps: Iterable[TaskStep], user_overrides: Mapping[str, Any] | None = None) -> frozenset[str]:
+    """The infra env kinds a stored task's ``steps`` deploy on through the gateway, in a run with ``user_overrides``,
+    reading the envs they deploy from the store: the gateway, the service-db its local Postgres state runs in, and the
+    website browser for its sites."""
     kinds: set[str] = set()
     for step in steps:
         if not isinstance(step, DeployEnvTaskStep) or not step.env_id:
@@ -516,14 +518,16 @@ def stored_infra(steps: Iterable[TaskStep]) -> frozenset[str]:
         except ValueError:  # an id the run fills in, or an env this process can't load, which its deploy reports
             continue
         if deployment is not None and issubclass(deployment.provider, EnvironmentGatewayProvider):
-            kinds |= _gateway_infra(step, deployment)
+            kinds |= _gateway_infra(step, deployment, user_overrides or {})
     return frozenset(kinds)
 
 
-def _gateway_infra(step: DeployEnvTaskStep, deployment: _Deployment) -> set[str]:
-    """The infra env kinds ``step``'s deploy of ``deployment`` through the gateway runs on."""
+def _gateway_infra(step: DeployEnvTaskStep, deployment: _Deployment,
+                   user_overrides: Mapping[str, Any] | None = None) -> set[str]:
+    """The infra env kinds ``step``'s deploy of ``deployment`` through the gateway runs on, in a run with
+    ``user_overrides``."""
     kinds = {GATEWAY}
-    if _state_type(step) == LOCAL_POSTGRES_STATE_TYPE:
+    if _state_type(step, user_overrides or {}) == LOCAL_POSTGRES_STATE_TYPE:
         kinds.add(SERVICE_DB)
     if deployment.websites:
         kinds.add(WEBSITE_BROWSER)
@@ -555,12 +559,14 @@ def _stored_images(env: Env) -> tuple[list[_Image], bool]:
     return [_Image(f"env {env.id!r}'s image {image.id!r}", image) for image in images], bool(topology.website_configs)
 
 
-def _state_type(step: DeployEnvTaskStep) -> str | None:
-    """The type of the env state store the deploy runs on: an attached instance's own, else the one it creates."""
-    if step.env_state_instance_id is None:
-        return step.env_state_type or LOCAL_POSTGRES_STATE_TYPE
+def _state_type(step: DeployEnvTaskStep, user_overrides: Mapping[str, Any]) -> str | None:
+    """The type of the env state store the deploy runs on in a run with ``user_overrides``: an attached instance's
+    own, else the one it creates."""
+    state_type, instance_id = step.run_state(user_overrides)
+    if instance_id is None:
+        return state_type or LOCAL_POSTGRES_STATE_TYPE
     try:
-        return get_env_state_instance_store().get(step.env_state_instance_id).state_type
+        return get_env_state_instance_store().get(instance_id).state_type
     except NotFoundError:
         return None  # the deploy refuses an instance that isn't there
 

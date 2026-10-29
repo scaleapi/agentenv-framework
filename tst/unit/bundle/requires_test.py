@@ -34,6 +34,7 @@ from agent_env.plugins._requirements import install_command, unmet, unmet_proble
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
+from tst.unit._terminal import at_a_terminal
 from tst.unit.bundle._support import fake_plugins, layout
 
 ACME = "agentenv-acme"
@@ -496,21 +497,8 @@ class TestCommands:
 
 @pytest.fixture
 def terminal(stores, monkeypatch):
-    """A person at a terminal, an install that records what it's asked for, and a re-exec that stops the test."""
-    calls = {"added": [], "exec": []}
-
-    def add(specs, **kwargs):
-        calls["added"].append((specs, kwargs["yes"]))
-        return calls.get("code", 0)
-
-    def execv(path, argv):
-        calls["exec"].append((path, argv, os.environ.get(_install_prompt._ASKED)))
-        raise SystemExit(0)
-
-    monkeypatch.setattr(_install_prompt, "_interactive", lambda: True)
-    monkeypatch.setattr(_install_prompt._plugin_changes, "add", add)
-    monkeypatch.setattr(_install_prompt.os, "execv", execv)
-    monkeypatch.setenv(_install_prompt._ASKED, "")
+    """At a terminal, a bundle requiring what isn't installed, run by its path."""
+    calls = at_a_terminal(monkeypatch)
     root = _bundle(stores / "b", _Acme.type, toml='requires = ["agentenv-missing>=1"]\n')
     monkeypatch.setattr(sys, "argv", ["agent-env", "run", str(root)])
     return root, calls

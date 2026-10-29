@@ -49,6 +49,7 @@ WEBSITE_BROWSER_DOCKERFILE = _ENV_PACKAGE / "envs" / "website_browser" / "Docker
 WEBSITE_BROWSER_CONTEXT = WEBSITE_BROWSER_DOCKERFILE.parent
 
 GATEWAY, SERVICE_DB, WEBSITE_BROWSER = "gateway", "service-db", "website-browser"  # the kinds, named as their commands
+MISSING = "missing"  # the reason an infra env the store doesn't hold is set up
 
 
 def _quiet(line: str) -> None:
@@ -268,7 +269,7 @@ def infra_to_set_up(kinds: Iterable[str]) -> list[InfraSetup]:
             env = Env.get(env_id)
         except NotFoundError:
             if local:
-                setups.append(_pulled_or_built(kind, env_id, "missing"))
+                setups.append(_pulled_or_built(kind, env_id, MISSING))
             else:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
                                 f"local stores; put it with `{put_command(kind)}`")
@@ -298,16 +299,18 @@ def needs_docker(builds: Iterable[InfraSetup], reason: str) -> str:
     return f"building the {', '.join(build.kind for build in builds)} env needs docker, and {reason}"
 
 
-def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet) -> list[InfraSetup]:
-    """Set up the infra envs of ``kinds`` that ``infra_to_set_up`` names, each id locked so concurrent runs set it up
-    once, and return them. Raises InfraError before setting any up when one can't be: missing from stores that aren't
-    local, or to be built with docker unreachable."""
+def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet,
+                        missing_only: bool = False) -> list[InfraSetup]:
+    """Set up the infra envs of ``kinds`` that ``infra_to_set_up`` names, or with ``missing_only`` those of them the
+    store doesn't hold, leaving one it holds as it is, each id locked so concurrent runs set it up once, and return
+    them. Raises InfraError before setting any up when one can't be: missing from stores that aren't local, or to be
+    built with docker unreachable."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
     ids = [default_env_id(kind) for kind in kinds]
     with holding_locks(ids, on_wait=lambda: say("waiting for another agent-env run to finish setting up the infra envs")):
-        setups = infra_to_set_up(kinds)
+        setups = [setup for setup in infra_to_set_up(kinds) if not missing_only or setup.reason == MISSING]
         if (built := [setup for setup in setups if setup.builds]) and (reason := docker_unreachable()):
             raise InfraError([needs_docker(built, reason)])
         for setup in setups:

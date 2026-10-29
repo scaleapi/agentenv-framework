@@ -13,7 +13,8 @@ from agent_env.artifact.artifact import Artifact
 from agent_env.bundle.preflight import stored_infra
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.entity.refs import EntityKind, RefRole, ref_sites
-from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, default_env_id, ensure_default_envs, stores_are_local
+from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE
+from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, ensure_default_envs, stores_are_local
 from agent_env.env.env import Env
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.base import NotFoundError
@@ -21,7 +22,6 @@ from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.task import Task
 from agent_env.task.task import UnknownStepTypeError
 from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 
 # The entities a step reads whose type a plugin may register.
 _GETTERS = {EntityKind.ENV: Env.get, EntityKind.ARTIFACT: Artifact.get}
@@ -51,28 +51,10 @@ def runnable_task(task_id: str, version: int | None, metadata: Mapping[str, Any]
         raise UnmetRequirements(problems, unmet)
     if problems:
         raise click.ClickException("\n".join(problems))
-    given = {kind for kind, key in ((GATEWAY, "gateway_env_id"), (SERVICE_DB, "service_db_env_id")) if overrides.get(key)}
-    if stores_are_local() and (kinds := _missing(stored_infra(_with_state(steps, overrides)) - given)):
-        ensure_default_envs(kinds, say=say)
+    given = {kind for kind, key in ((GATEWAY, GATEWAY_OVERRIDE), (SERVICE_DB, SERVICE_DB_OVERRIDE)) if overrides.get(key)}
+    if stores_are_local() and (kinds := stored_infra(steps, overrides) - given):
+        ensure_default_envs(kinds, say=say, missing_only=True)
     return task
-
-
-def _missing(kinds: set[str] | frozenset[str]) -> set[str]:
-    """Those of ``kinds`` whose default infra env the store doesn't hold."""
-    missing = set()
-    for kind in kinds:
-        try:
-            Env.get(default_env_id(kind))
-        except NotFoundError:
-            missing.add(kind)
-    return missing
-
-
-def _with_state(steps: list[TaskStep], overrides: Mapping[str, Any]) -> list[TaskStep]:
-    """``steps``, each deploy_env step with the run's env state overrides, which it reads over its own."""
-    state = {key: overrides[key] for key in ("env_state_type", "env_state_instance_id") if overrides.get(key)}
-    return [type(step).from_dict({**step.to_dict(), **state}) if state and isinstance(step, DeployEnvTaskStep)
-            else step for step in steps]
 
 
 def _unknown_types(steps: list[TaskStep], params: Mapping[str, Mapping[str, Any]]) -> list[str]:
@@ -83,8 +65,7 @@ def _unknown_types(steps: list[TaskStep], params: Mapping[str, Mapping[str, Any]
     for step in steps:
         refs = type(step).entity_refs or ()
         given = set(params.get(step.id) or {})
-        replaced = {ref.kind for ref in refs
-                    if {ref.path.split(".")[0].removesuffix("[]"), ref.version_field} & given}
+        replaced = {ref.kind for ref in refs if {ref.field, ref.version_field} & given}
         for site in ref_sites(refs, step.to_dict()):
             get = _GETTERS.get(site.ref.kind)
             if site.ref.role is RefRole.OUTPUT or site.ref.kind in replaced or get is None \
