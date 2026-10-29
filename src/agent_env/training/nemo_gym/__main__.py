@@ -12,7 +12,7 @@ from agent_env.training.nemo_gym.prepare import write_server
 @click.option("--sandbox", help="Where the server deploys the bundle's envs, as agent-env run --sandbox takes it.")
 @click.option("--reward", help="The step whose score is the reward, for tasks that record several.")
 @click.option("--max-concurrent-envs", type=int, default=8, show_default=True,
-              help="The episodes the server runs at once, which must cover the rollouts Gym runs at once.")
+              help="The episodes the server runs at once; the rollouts past it wait for room.")
 def main(source: str, root: str, name: str | None, sandbox: str | None, reward: str | None,
          max_concurrent_envs: int) -> None:
     """Writes the resources server for SOURCE, a bundle or the URL of an OpenEnv server serving one, into the Gym root

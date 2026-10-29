@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     """Where the bundle is served: ``url``, an OpenEnv server's, or ``bundle``, a folder or an installed bundle's name,
     which this server serves on a loopback port, deploying where ``sandbox`` names, at most ``max_concurrent_envs``
-    episodes at once, which must cover the rollouts Gym runs at once. ``tool_timeout`` is one tool call's deadline in
+    episodes at once; the rollouts past it wait for room. ``tool_timeout`` is one tool call's deadline in
     seconds, and ``reset_timeout`` how long an episode may take to deploy and open its first turn, and each turn to be
     ended; the server ends an episode that misses one, and the rollout is masked."""
 
@@ -162,9 +162,11 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
 
 
 class _Session(Session):
-    """A rollout's session, which shows the model the tools its row lists."""
+    """A rollout's session, which shows the model the tools its row lists, and waits for room until its reset deadline,
+    since Gym runs every rollout of a step at once and a server at its limit makes the rest take turns."""
 
     offered_by = "the row shows the model"
+    patience = None
 
     def __init__(self, shared: Shared):
         super().__init__()

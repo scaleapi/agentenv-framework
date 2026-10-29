@@ -34,9 +34,9 @@ GRACE_SECONDS = 30.0
 #: agents' changelogs, ends open recordings and terminates the sandboxes, every part within
 #: ``TERMINATE_TIMEOUT_SECONDS``.
 STOP_SECONDS = 3 * TERMINATE_TIMEOUT_SECONDS + 60.0
-#: How often, and how far apart in seconds, a session tries to open while the server is at its limit, which it stays at
+#: How long, and how far apart in seconds, a session tries to open while the server is at its limit, which it stays at
 #: until it has seen a closed session go.
-REOPEN_ATTEMPTS, REOPEN_SECONDS = 5, 1.0
+REOPEN_PATIENCE, REOPEN_SECONDS = 4.0, 1.0
 
 _CAPACITY = re.compile(r"Server at capacity: \d+/(\d+)")
 
@@ -97,6 +97,9 @@ class Session:
     #: Whether the session opens at its first ``_start``, raising when the server refuses it, rather than as the
     #: episode starts, which leaves the rollout unscored.
     opens_at_start: ClassVar[bool] = False
+    #: How long the episode waits for the server to have room for its session, in seconds; ``None`` waits until the
+    #: reset deadline.
+    patience: ClassVar[float | None] = REOPEN_PATIENCE
 
     def __init__(self) -> None:
         self._client: GenericEnvClient | None = None
@@ -123,7 +126,9 @@ class Session:
 
     async def _begin(self, rollout: Rollout, split: str, index: int, expected: str | None) -> None:
         if self._client is None:
-            self._client = await reopened(self._shared.url, self._shared.reset_timeout, dropped=self._opened)
+            patience = self._shared.reset_timeout if self.patience is None else self.patience
+            self._client = await reopened(self._shared.url, self._shared.reset_timeout, dropped=self._opened,
+                                          patience=patience)
             self._opened = True
         reset = await self._client.reset(split=split, index=index, timeout_s=self._shared.reset_timeout)
         if reset.done:
@@ -258,17 +263,19 @@ async def opened(url: str, timeout: float) -> GenericEnvClient:
     return client
 
 
-async def reopened(url: str, timeout: float, *, dropped: bool) -> GenericEnvClient:
-    """A session, tried again while the server is at its limit, in place of a ``dropped`` one or for a rollout's own;
-    raises Failed, which leaves the rollout unscored, when it can't open one."""
+async def reopened(url: str, timeout: float, *, dropped: bool, patience: float) -> GenericEnvClient:
+    """A session, tried again every ``REOPEN_SECONDS`` for ``patience`` seconds while the server is at its limit, in
+    place of a ``dropped`` one or for a rollout's own; raises Failed, which leaves the rollout unscored, when it can't
+    open one."""
     lead = "its session was dropped, and " if dropped else ""
-    for attempt in range(REOPEN_ATTEMPTS):
+    deadline = time.monotonic() + patience
+    while True:
         try:
             return await opened(url, timeout)
         except AtCapacity as e:
-            if attempt + 1 == REOPEN_ATTEMPTS:
+            if time.monotonic() + REOPEN_SECONDS > deadline:
                 raise Failed(f"{lead}the server stayed at its limit of {e.limit} sessions for "
-                             f"{(REOPEN_ATTEMPTS - 1) * REOPEN_SECONDS:g}s{' after' if dropped else ''}") from e
+                             f"{patience:g}s{' after' if dropped else ''}") from e
             await asyncio.sleep(REOPEN_SECONDS)
         except ConnectionError as e:
             raise Failed(f"{lead}{e}") from e

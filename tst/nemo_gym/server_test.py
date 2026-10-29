@@ -4,9 +4,11 @@ the tool routes answer as text, verify ends the turns left open and scores the e
 session ends its episode, and a bundle named in the config is served for the server's lifetime. CI runs it on the
 nemo-gym ``uv.lock`` pins."""
 
+import asyncio
 import json
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -86,6 +88,27 @@ def test_a_closed_session_ends_its_episode_and_a_session_with_none_answers_so(se
     assert len(teardowns.finished) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_rollout_waits_for_room_while_the_server_is_at_its_limit(served, teardowns):
+    server = served({"a": PLAYED}, max_concurrent_envs=1)
+    app = _app(url=server.url)
+
+    async with _client(app) as first, _client(app) as second:
+        await first.post("/seed_session", json=_row())
+        await second.post("/seed_session", json=_row())
+        assert (await first.post("/add_item", json={"item": "crate"})).text == "add_item {'item': 'crate'}"
+        waiting = asyncio.ensure_future(second.post("/add_item", json={"item": "crate"}))
+        await asyncio.sleep(2)
+        assert not waiting.done()
+        first_verified = (await first.post("/verify", json=_verified(_row(), "Added a crate."))).json()
+        assert (await waiting).text == "add_item {'item': 'crate'}"
+        second_verified = (await second.post("/verify", json=_verified(_row(), "Added a crate."))).json()
+    server.stop()
+
+    assert [(each["reward"], each["mask_sample"]) for each in (first_verified, second_verified)] == [(1.0, False)] * 2
+    assert len(teardowns.finished) == 2
+
+
 def test_a_bundle_named_in_the_config_is_served_while_the_server_runs(tmp_path, monkeypatch, teardowns):
     monkeypatch.setenv("HOME", str(tmp_path))
     unbound = {key: value for key, value in ALICE.items() if key not in ("env_ids", "role")}
@@ -121,9 +144,19 @@ def _row(task_id="a", tools=(ADD_ITEM, FUNCTION_END_TURN)):
 
 
 def _verify(client, row, reply):
+    return client.post("/verify", json=_verified(row, reply)).json()
+
+
+def _verified(row, reply):
     output = [] if reply is None else [{"id": "msg", "type": "message", "role": "assistant", "status": "completed",
                                         "content": [{"type": "output_text", "text": reply, "annotations": []}]}]
     response = {"id": "resp", "created_at": 0.0, "model": "policy", "object": "response", "output": output,
                 "parallel_tool_calls": True, "tool_choice": "auto", "tools": []}
-    return client.post("/verify", json={**row, "response": response}).json()
+    return {**row, "response": response}
+
+
+def _client(app):
+    """A client of its own cookie jar, as each rollout of Gym's has, on the app without its lifespan, which serves
+    nothing for a config that names a url."""
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gym")
 

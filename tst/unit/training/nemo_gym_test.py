@@ -40,14 +40,14 @@ def served(teardowns, tools):
     bundle's; stopped after the test, if the test hasn't stopped it to wait out its episodes' teardowns."""
     servers = []
 
-    def serve(tasks, splits=None):
+    def serve(tasks, splits=None, max_concurrent_envs=8):
         by_name = {}
         for name, steps in tasks.items():
             task = Task.from_dict({"id": name, "version": 1, "steps": steps})
             by_name[name] = ServedTask(task, name, EpisodeSpec.from_task(task), _score_at("replies"))
         named = {split: tuple(by_name[name] for name in names) for split, names in (splits or {}).items()}
         servers.append(Server(_app(Served(splits={"all": tuple(by_name.values()), **named}, sandbox=None), "Dock Yard",
-                                   8)))
+                                   max_concurrent_envs)))
         return servers[-1]
 
     yield serve
