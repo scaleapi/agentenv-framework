@@ -204,6 +204,8 @@ async def test_the_skill_is_written_from_the_computer_as_it_booted_under_the_nam
 @pytest.mark.asyncio
 async def test_a_driver_whose_software_ships_a_skill_leads_with_it_and_the_computers_part_follows(monkeypatch):
     class Bundling(FakeDriver):
+        keys = ("Enter", "Escape", *(chr(code) for code in range(0x21, 0x7F)))
+
         async def bundled_skill(self):
             return "Drive any app through its own tools.", "# Desktop driver\n\nRead LINUX.md first.\n", {
                 "LINUX.md": "# Linux\n"}
@@ -213,6 +215,7 @@ async def test_a_driver_whose_software_ships_a_skill_leads_with_it_and_the_compu
     body = answer["skill_md"].partition("---\n\n")[2]
     assert body.startswith("# Desktop driver\n\nRead LINUX.md first.\n\n# This computer\n\nBeside the tools above")
     assert "## Input" in body and "# Using this computer" not in body and answer["files"] == {"LINUX.md": "# Linux\n"}
+    assert "- Keys: only `'Enter'`, `'Escape'`, and any printable ASCII character." in body
     assert answer["description"].startswith("Drive any app through its own tools. This computer: Ubuntu 24.04 (amd64)")
 
 

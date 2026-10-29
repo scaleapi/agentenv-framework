@@ -23,6 +23,7 @@ SHORTCUTS = {
 """,
 }
 _SESSIONS = {"x11": "an X11 session", "wayland": "a Wayland session"}
+_PRINTABLE = tuple(chr(code) for code in range(0x21, 0x7F))
 
 
 async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, str]]:
@@ -61,7 +62,7 @@ async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, 
 
 def _input(driver: ComputerDriverEnvironment) -> str:
     keys = ("any W3C key name, such as `'Enter'`, `'Control'`, `'ArrowLeft'` or `'a'`" if driver.keys == "all" else
-            "only " + ", ".join(f"`{key!r}`" for key in driver.keys))
+            _keys(driver.keys))
     space, scale = driver.settings.default_space, driver.settings.default_norm_scale
     points = ("pixels of the latest screenshot" if space == "frame" else
               f"0 to {scale} across and down the latest screenshot")
@@ -73,3 +74,10 @@ def _input(driver: ComputerDriverEnvironment) -> str:
         f"- Points are {points}, unless a call names another space.",
         "- Input is foreground: it goes to the focused window and moves the pointer, as a person's would.",
     ])
+
+
+def _keys(keys) -> str:
+    """The keys a driver takes, every printable ASCII character said once when it takes them all."""
+    every = set(_PRINTABLE) <= set(keys)
+    named = [key for key in keys if not (every and key in _PRINTABLE)]
+    return "only " + ", ".join(f"`{key!r}`" for key in named) + (", and any printable ASCII character" if every else "")
