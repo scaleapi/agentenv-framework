@@ -12,9 +12,12 @@ browser, which needs `BROWSER_USE_API_KEY`, or the Chrome DevTools endpoint `cdp
 `BROWSER_USE_A2A_CDP_URL`, which a registration can set with `--env-var`. A context's turns continue one conversation
 through a saved history file; each turn opens a fresh browser.
 
+It takes its model from the prompt, so a run needs `[model] default` (or the `agent` role) set, and the browser key
+reaches it through a registration of its own:
+
 ```bash
 agent-env a2a-agent put --id browser-use --dockerfile src/agent_env/agents/agents/browser-use/Dockerfile \
-    --default-model gpt-5.4-mini --env-var BROWSER_USE_API_KEY=...
+    --env-var BROWSER_USE_API_KEY=...
 agent-env run agents --task browser-use-smoke
 ```
 
