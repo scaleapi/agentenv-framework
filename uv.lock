@@ -145,6 +145,7 @@ tensorlake = [
 trl = [
     { name = "datasets" },
     { name = "openenv" },
+    { name = "transformers" },
 ]
 vercel = [
     { name = "anyio" },
@@ -206,7 +207,7 @@ requires-dist = [
     { name = "tenki", extras = ["async"], marker = "extra == 'tenki'", specifier = "~=1.4.1" },
     { name = "tensorlake", marker = "extra == 'tensorlake'", specifier = "~=0.5.140" },
     { name = "tomli-w", marker = "extra == 'dev'", specifier = "==1.2.0" },
-    { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.2" },
+    { name = "transformers", marker = "extra == 'trl'", specifier = ">=5.2" },
     { name = "urllib3", marker = "extra == 'boat'", specifier = ">=2.1.0,<3" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
