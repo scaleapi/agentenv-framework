@@ -21,11 +21,10 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id, local_image_repository
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
-from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
+from agent_env.store.image_store.oci_registry_credentials import image_reference_problem, is_loopback_host, names_registry, registry_host_from_ref
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
 from agent_env.utils.docker.context import BuildContext
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image, normalize_platform
-from agent_env.utils.names import image_reference_problem
 
 logger = logging.getLogger(__name__)
 

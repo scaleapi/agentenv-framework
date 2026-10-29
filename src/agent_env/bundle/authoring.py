@@ -19,10 +19,9 @@ from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
-from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
+from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, environment_name_problem
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.utils.card_naming import card_names_in_files
-from agent_env.utils.names import environment_name_problem
 from agent_env.utils.paths import os_reason
 
 from ._fs import relative, show, with_article

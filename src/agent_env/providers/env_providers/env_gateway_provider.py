@@ -57,7 +57,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts,
     SandboxProvider,
 )
-from agent_env.utils.names import environment_name_problem, image_reference_problem
+from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 from agent_env.utils.shell import write_file_script
 
 if TYPE_CHECKING:
@@ -1500,6 +1500,19 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
         mcp_server_name=name,
         names_gateway_on_vm=is_multi,
     )
+
+
+# Compose's service-name characters, with a letter or digit first so no name reads as a command-line option.
+_ENVIRONMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+def environment_name_problem(name: str) -> str | None:
+    """Why ``name`` can't be an environment name, None when it can: a gateway deploy makes it a compose service, a
+    container hostname and a schema, so it may carry nothing else."""
+    if isinstance(name, str) and _ENVIRONMENT_NAME.fullmatch(name):
+        return None
+    return (f"environment name {name!r} must start with a letter or digit and hold only letters, digits, "
+            f"'_', '.' and '-'")
 
 
 def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: list[WebsiteConfig] | None,

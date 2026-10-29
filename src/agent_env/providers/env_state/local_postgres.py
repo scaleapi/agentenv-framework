@@ -38,7 +38,7 @@ from agent_env.providers.env_state.env_state_provider import (
     StateContext,
     LOCAL_POSTGRES_STATE_TYPE,
 )
-from agent_env.utils.names import image_reference_problem
+from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
