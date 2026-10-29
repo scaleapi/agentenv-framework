@@ -49,8 +49,6 @@ PLAYWRIGHT_MCP_DOCKERFILE = _ENV_PACKAGE / "envs" / "playwright_mcp" / "Dockerfi
 PLAYWRIGHT_MCP_CONTEXT = PLAYWRIGHT_MCP_DOCKERFILE.parent
 
 GATEWAY, SERVICE_DB, WEBSITE_BROWSER = "gateway", "service-db", "website-browser"  # the kinds
-# The command that puts each kind: the website browser's is the browser that fills the slot, Playwright MCP.
-_COMMANDS = {GATEWAY: "gateway", SERVICE_DB: "service-db", WEBSITE_BROWSER: "playwright-mcp"}
 MISSING = "missing"  # the reason an infra env the store doesn't hold is set up
 
 
@@ -256,7 +254,16 @@ def default_env_id(kind: str) -> str:
 
 
 def put_command(kind: str) -> str:
-    return f"agent-env env {_COMMANDS[kind]} put --id {default_env_id(kind)}"
+    """The command that puts ``kind``'s env under the id config names. The website browser is an MCP server env, which
+    ``mcp-server put`` writes: over the image this install's release publishes when there is one, else built from the
+    Dockerfile agent-env ships."""
+    env_id = default_env_id(kind)
+    if kind != WEBSITE_BROWSER:
+        return f"agent-env env {kind} put --id {env_id}"
+    image = _PUBLISHED[PLAYWRIGHT_MCP_DOCKERFILE]
+    source = (f"--image-ref {image.ref()}" if published_digest(image) is not None
+              else f"--dockerfile {PLAYWRIGHT_MCP_DOCKERFILE}")
+    return f"agent-env env mcp-server put --id {env_id} --environment-name {PLAYWRIGHT_MCP_ENVIRONMENT_NAME} {source}"
 
 
 def infra_to_set_up(kinds: Iterable[str], *, missing_only: bool = False) -> list[InfraSetup]:

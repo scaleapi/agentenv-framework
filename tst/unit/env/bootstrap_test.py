@@ -167,6 +167,19 @@ def test_nothing_is_built_without_docker(puts, monkeypatch):
     assert puts == []
 
 
+@pytest.mark.parametrize("published_digest, source", [
+    ("sha256:" + "5" * 64, "--image-ref " + bootstrap._PUBLISHED[bootstrap.PLAYWRIGHT_MCP_DOCKERFILE].ref()),
+    (None, f"--dockerfile {bootstrap.PLAYWRIGHT_MCP_DOCKERFILE}"),
+], ids=["published", "unpublished"])
+def test_the_website_browser_is_put_with_mcp_server_put_over_the_published_image_when_there_is_one(
+        local_stores, monkeypatch, published_digest, source):
+    monkeypatch.setattr(bootstrap, "published_digest", lambda image: published_digest)
+
+    assert bootstrap.put_command(WEBSITE_BROWSER) == (
+        f"agent-env env mcp-server put --id playwright-mcp --environment-name playwright-mcp {source}")
+    assert bootstrap.put_command(GATEWAY) == "agent-env env gateway put --id default"
+
+
 def test_stores_that_arent_local_are_never_built_into(puts, published, monkeypatch):
     ensure_default_envs([GATEWAY])
     monkeypatch.setattr(bootstrap, "stores_are_local", lambda: False)
