@@ -180,14 +180,11 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         new task version: ``step_params`` for a targeted or resumed run, ``seed`` for
         ``task run-batch --seeds`` fan-out. Both are additive to the stored ``env_vars``.
 
-        Seed values reach the container as env vars rather than by string substitution,
-        because ``-e K=<quoted>`` is a separate docker argument and bash expands ``"$K"``
-        without re-parsing metacharacters. ``<key>`` placeholders are still rendered for
-        rows that vary a flag rather than a value, in one left-to-right pass so
-        substituted text is never re-scanned: replacing key-by-key, a value of ``<b>``
-        quotes to ``'<b>'`` and a later key ``b`` rewrites the placeholder *inside* those
-        quotes, yielding ``''$(id)''`` — quotes that close each other and leave the
-        value bare for bash.
+        Seed values reach the container as env vars, ``-e K=<quoted>``, and bash expands
+        ``"$K"`` without re-parsing them, so a command that takes data reads it that way.
+        A ``<key>`` in the stored command was already filled with the value as written
+        when the run started (``substitute_seed_in_steps``); this pass shell-quotes the
+        placeholders of a ``step_params`` command only.
         """
         overrides = self.step_param_overrides(context)
         seed = context.metadata.get("seed") or {}
