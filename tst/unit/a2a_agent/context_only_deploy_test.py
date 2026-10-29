@@ -7,9 +7,10 @@ import pytest
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.providers.sandbox_providers import local_sandbox, sandbox_provider
+from agent_env.providers.sandbox_providers import sandbox_provider
+from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts, SandboxProvider
 

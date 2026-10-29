@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from agent_env.artifact import DockerImageArtifact
 from agent_env.config import get_config
@@ -48,28 +49,36 @@ WEBSITE_BROWSER_DOCKERFILE = _ENV_PACKAGE / "envs" / "website_browser" / "Docker
 WEBSITE_BROWSER_CONTEXT = WEBSITE_BROWSER_DOCKERFILE.parent
 
 GATEWAY, SERVICE_DB, WEBSITE_BROWSER = "gateway", "service-db", "website-browser"  # the kinds, named as their commands
+MISSING = "missing"  # the reason an infra env the store doesn't hold is set up
 
 
 def _quiet(line: str) -> None:
     pass
 
 
-def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                    say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None) -> GatewayEnv:
+def put_gateway_env(env_id: str, *, platform: str | None, metadata: Mapping[str, Any] | None = None,
+                    say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
+                    version: int | None = None) -> GatewayEnv:
     """Write the gateway env ``env_id``, its image registered from ``published``, each Dockerfile's published digest,
-    when given, else built for ``platform`` (this host's when None)."""
+    when given, else built for ``platform`` (this host's when None). It's stored as ``version`` when given, which must
+    be the env's next: ConcurrentModificationError otherwise."""
+    _check_version(version)
     artifact = _image("gateway", derive_id(env_id, "env_image"), "Created from agent-env CLI", GATEWAY_DOCKERFILE,
                       GATEWAY_IMAGE_TAG, platform=platform, say=say, published=published)
     say("Creating GatewayEnv...")
-    env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata=_metadata(GATEWAY, metadata))
+    env = GatewayEnv.put(id=env_id, docker_image_artifact=artifact, metadata=_metadata(GATEWAY, metadata),
+                         version=version)
     say(f"Created GatewayEnv: id={env.id} version={env.version}")
     return env
 
 
-def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                       say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None) -> ServiceDBEnv:
+def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[str, Any] | None = None,
+                       say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
+                       version: int | None = None) -> ServiceDBEnv:
     """Write the service-db env ``env_id``, its service-db, db-web and db-mcp images registered from ``published``, each
-    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None)."""
+    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None). It's stored as
+    ``version`` when given, which must be the env's next: ConcurrentModificationError otherwise."""
+    _check_version(version)
     db = _image("ServiceDB", derive_id(env_id, "db_image"), f"ServiceDB PostgreSQL image for {env_id}",
                 SERVICE_DB_DOCKERFILE, SERVICE_DB_IMAGE_NAME, platform=platform, say=say, published=published)
     db_web = _image("db-web", derive_id(env_id, "db_web_image"), "db-web lightweight web UI for database inspection",
@@ -78,24 +87,33 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
                     DB_MCP_DOCKERFILE, DB_MCP_IMAGE_NAME, platform=platform, say=say, published=published)
     say("Creating ServiceDBEnv...")
     env = ServiceDBEnv.put(id=env_id, db_docker_image_artifact=db, db_web_docker_image_artifact=db_web,
-                           db_mcp_docker_image_artifact=db_mcp, metadata=_metadata(SERVICE_DB, metadata))
+                           db_mcp_docker_image_artifact=db_mcp, metadata=_metadata(SERVICE_DB, metadata),
+                           version=version)
     say(f"Created ServiceDBEnv: id={env.id} version={env.version}")
     return env
 
 
-def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapping[str, str] | None = None,
-                            say: Callable[[str], None] = _quiet,
-                            published: Mapping[Path, str] | None = None) -> MCPServerEnv:
+def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapping[str, Any] | None = None,
+                            say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
+                            version: int | None = None) -> MCPServerEnv:
     """Write the website browser as the MCP server env ``env_id``, its image registered from ``published``, each
-    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None)."""
+    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None). It's stored as
+    ``version`` when given, which must be the env's next: ConcurrentModificationError otherwise."""
+    _check_version(version)
     artifact = _image("website browser", derive_id(env_id, "env_image"), "Website browser MCP server",
                       WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_IMAGE_TAG, platform=platform, say=say,
                       published=published)
     say("Creating MCPServerEnv...")
     env = MCPServerEnv.put(id=env_id, docker_image_artifact=artifact, environment_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
-                           metadata=_metadata(WEBSITE_BROWSER, metadata))
+                           metadata=_metadata(WEBSITE_BROWSER, metadata), version=version)
     say(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name}")
     return env
+
+
+def _check_version(version: int | None) -> None:
+    """Refuse a version below 1 before anything is written: the store reads 0 as "the next free version"."""
+    if version is not None and version < 1:
+        raise ValueError(f"an env's versions start at 1, so it can't be stored as version {version}")
 
 
 def _image(label: str, artifact_id: str, description: str, dockerfile: Path, image_name: str, *, platform: str | None,
@@ -124,7 +142,7 @@ def _build_and_put(label: str, artifact_id: str, description: str, dockerfile: P
     return artifact
 
 
-def _metadata(kind: str, extra: Mapping[str, str] | None) -> dict[str, str]:
+def _metadata(kind: str, extra: Mapping[str, Any] | None) -> dict[str, Any]:
     dockerfile = _DOCKERFILES[kind][0]
     return {**detect_env_metadata(dockerfile, dockerfile.parent), **(extra or {}),
             BUILD_INPUTS_KEY: build_inputs_digest(kind)}
@@ -236,10 +254,11 @@ def put_command(kind: str) -> str:
     return f"agent-env env {kind} put --id {default_env_id(kind)}"
 
 
-def infra_to_set_up(kinds: Iterable[str]) -> list[InfraSetup]:
+def infra_to_set_up(kinds: Iterable[str], *, missing_only: bool = False) -> list[InfraSetup]:
     """The infra envs of ``kinds`` a run sets up, in local stores only: stock ones missing or built from other inputs,
     pulled when their images are published for these sources and built otherwise, and stock ones built here switched
-    once they're published. Raises InfraError naming the put command for each one missing from stores not all local."""
+    once they're published; with ``missing_only``, only those the store doesn't hold, one it holds read no further.
+    Raises InfraError naming the put command for each one missing from stores not all local."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
@@ -251,12 +270,12 @@ def infra_to_set_up(kinds: Iterable[str]) -> list[InfraSetup]:
             env = Env.get(env_id)
         except NotFoundError:
             if local:
-                setups.append(_pulled_or_built(kind, env_id, "missing"))
+                setups.append(_pulled_or_built(kind, env_id, MISSING))
             else:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
                                 f"local stores; put it with `{put_command(kind)}`")
             continue
-        if not (local and _built_from_stock(env, kind)):
+        if missing_only or not (local and _built_from_stock(env, kind)):
             continue
         recorded = (env.metadata or {}).get(BUILD_INPUTS_KEY)
         kept = {key: value for key, value in (env.metadata or {}).items() if not detected(key) and key != BUILD_INPUTS_KEY}
@@ -281,16 +300,18 @@ def needs_docker(builds: Iterable[InfraSetup], reason: str) -> str:
     return f"building the {', '.join(build.kind for build in builds)} env needs docker, and {reason}"
 
 
-def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet) -> list[InfraSetup]:
-    """Set up the infra envs of ``kinds`` that ``infra_to_set_up`` names, each id locked so concurrent runs set it up
-    once, and return them. Raises InfraError before setting any up when one can't be: missing from stores that aren't
-    local, or to be built with docker unreachable."""
+def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet,
+                        missing_only: bool = False) -> list[InfraSetup]:
+    """Set up the infra envs of ``kinds`` that ``infra_to_set_up`` names, or with ``missing_only`` those of them the
+    store doesn't hold, leaving one it holds as it is, each id locked so concurrent runs set it up once, and return
+    them. Raises InfraError before setting any up when one can't be: missing from stores that aren't local, or to be
+    built with docker unreachable."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
     ids = [default_env_id(kind) for kind in kinds]
     with holding_locks(ids, on_wait=lambda: say("waiting for another agent-env run to finish setting up the infra envs")):
-        setups = infra_to_set_up(kinds)
+        setups = infra_to_set_up(kinds, missing_only=missing_only)
         if (built := [setup for setup in setups if setup.builds]) and (reason := docker_unreachable()):
             raise InfraError([needs_docker(built, reason)])
         for setup in setups:

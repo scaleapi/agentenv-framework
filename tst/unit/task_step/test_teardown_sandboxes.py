@@ -11,13 +11,16 @@ from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.context_ops import build_context_update_ops
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_steps import teardown_sandboxes
-from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY, TeardownSandboxesTaskStep
+from agent_env.task import teardown
+from agent_env.task.teardown import TORN_DOWN_KEY
+from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 
 _BACKENDS = {"modal", "modal_vm"}
 
 
 class _FakeSandbox:
+    ON_THIS_MACHINE = False
+
     def __init__(self, provider, sandbox_id):
         self.provider, self.sandbox_id = provider, sandbox_id
 
@@ -28,6 +31,8 @@ class _FakeSandbox:
 
 
 class _FakeProvider:
+    ON_THIS_MACHINE = False
+
     def __init__(self, name, terminated, failing):
         self.name, self.terminated, self.failing = name, terminated, failing
 
@@ -60,8 +65,8 @@ def terminated(monkeypatch):
             raise ValueError(f"unknown backend {name}")
         return _FakeProvider(name, log, failing)
 
-    monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", build)
-    monkeypatch.setattr(teardown_sandboxes, "_DEFAULT_PROVIDERS", {
+    monkeypatch.setattr(teardown, "build_sandbox_provider", build)
+    monkeypatch.setattr(teardown, "_DEFAULT_PROVIDERS", {
         slot: (lambda slot=slot: _FakeProvider(f"default-{slot}", log, failing))
         for slot in ("agent", "env", "sandbox")
     })

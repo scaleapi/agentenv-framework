@@ -1,5 +1,6 @@
 """The data plane on a computer: ``data/add`` writes files under the session user's home, ``data/get`` returns the
-env's ``data_paths``. Each file part names its path, relative to the home, under the ``data-objects/v1`` marker."""
+files under the paths its caller names, or under ``DEFAULT_DATA_PATHS`` when it names none. Each file part names its
+path, relative to the home, under the ``data-objects/v1`` marker."""
 from __future__ import annotations
 
 import base64
@@ -10,10 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import httpx
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ..agent_env_environment import add_data, get_data
-from ..transfers import NamespaceUploader, ReadObject, WriteNamespaceGrant, download
+from ..transfers import NamespaceUploader, ReadObject, RelativePath, WriteNamespaceGrant, download
 from ..types import DATA_OBJECTS_EXTENSION_URI, FilePart, FileWithBytes, FileWithUri, uploaded_file_part, uploaded_object_path
 
 if TYPE_CHECKING:
@@ -22,6 +23,9 @@ if TYPE_CHECKING:
 
 #: The most an https URL part may fetch; a read grant carries its own limit.
 MAX_URL_BYTES = 1 << 30
+#: What ``data/get`` returns when its caller names no paths: the folders a desktop keeps its user's files in.
+DEFAULT_DATA_PATHS = ("Desktop", "Documents", "Downloads")
+_PATHS = TypeAdapter(list[RelativePath])
 
 
 class DataPlane:
@@ -47,8 +51,13 @@ class DataPlane:
         await self._computer.call("write_files", files)
 
     @get_data
-    async def _computer_data_get(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
-        files = _data_files(Path.home(), self.settings.data_paths)
+    async def _computer_data_get(self, write_namespace: Optional[WriteNamespaceGrant] = None,
+                                 paths: Optional[list[str]] = None) -> list:
+        try:
+            named = _PATHS.validate_python(paths) if paths is not None else list(DEFAULT_DATA_PATHS)
+        except ValidationError:
+            raise ValueError(f"data/get on a computer takes paths relative to the home, not {paths!r}") from None
+        files = _data_files(Path.home(), named)
         if write_namespace is not None:
             uploader = NamespaceUploader(write_namespace)
             parts = []
@@ -98,11 +107,11 @@ async def _get_url(file: FileWithUri) -> bytes:
     return bytes(data)
 
 
-def _data_files(home: Path, data_paths: list[str]) -> list[tuple[str, Path]]:
-    """Every file under the data paths, by its path relative to the home; a path not there yet is skipped."""
+def _data_files(home: Path, paths: list[str]) -> list[tuple[str, Path]]:
+    """Every file under ``paths``, by its path relative to the home; a path not there yet is skipped."""
     root = home.resolve()
     found: dict[str, Path] = {}
-    for relative in data_paths:
+    for relative in paths:
         target = home / relative
         if not target.exists() or not target.resolve().is_relative_to(root):
             continue

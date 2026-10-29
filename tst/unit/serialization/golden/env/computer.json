@@ -1,0 +1,46 @@
+{
+  "computer": {
+    "id": "ubuntu-24.04",
+    "version": 1
+  },
+  "computer_settings": {
+    "timezone": "Europe/Paris"
+  },
+  "display": {
+    "height": 800,
+    "width": 1280
+  },
+  "driver": {
+    "id": "reference-driver",
+    "version": 4
+  },
+  "environment_name": "desktop",
+  "id": "desktop",
+  "metadata": {
+    "composed": {
+      "container": {
+        "amd64": {
+          "built_at": "2026-10-28T10:02:11+00:00",
+          "emulated": false,
+          "image": "localhost:5000/agentenv-computers:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "installed": {
+            "mss": "10.1.0"
+          },
+          "key": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reused": false,
+          "status": "unverified"
+        }
+      }
+    },
+    "computer": {
+      "id": "desktop__computer",
+      "version": 1
+    }
+  },
+  "network": {
+    "mode": "allow_all"
+  },
+  "service_name": "desktop",
+  "type": "computer",
+  "version": 2
+}

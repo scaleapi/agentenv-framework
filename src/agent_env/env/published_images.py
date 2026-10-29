@@ -1,5 +1,5 @@
-"""The images agent-env publishes for the infra envs, the agents it ships and an example's env, for linux/amd64 and
-linux/arm64: one per Dockerfile, built from the Dockerfile's folder. Each is tagged by its build context's content, so
+"""The images agent-env publishes for the infra envs, the agents it ships, an example's env and its base computers, for
+linux/amd64 and linux/arm64: one per Dockerfile, built from the Dockerfile's folder. Each is tagged by its build context's content, so
 an install holding the same sources finds the image built from them; a release wheel also records the digest its
 release published under each tag."""
 
@@ -27,6 +27,7 @@ _SERVED: dict[str, str] = {}  # the digest the registry served each ref under, w
 # The agents bundle agent-env ships, whose agents a run deploys like a bundle's own.
 _AGENTS = Path(__file__).parents[1] / "agents" / "agents"
 _EXAMPLES = Path(__file__).parents[1] / "examples"
+_COMPUTERS = Path(__file__).parents[1] / "computers" / "artifacts"
 
 
 @dataclass(frozen=True)
@@ -56,8 +57,10 @@ AGENT_IMAGES = tuple(PublishedImage(f"agentenv-{folder.name}", folder / "Dockerf
                      for folder in sorted(_AGENTS.iterdir()) if (folder / "Dockerfile").is_file())
 # The example env `a2a-agent validate` deploys, so a remote sandbox pulls its image rather than building it.
 EXAMPLE_IMAGES = (PublishedImage("agentenv-mail-mcp", _EXAMPLES / "mail-mcp" / "envs" / "mail" / "Dockerfile"),)
+# The base computers the computers bundle ships, so a run pulls a base rather than building its desktop.
+COMPUTER_IMAGES = (PublishedImage("agentenv-ubuntu-24.04", _COMPUTERS / "ubuntu-24.04" / "Dockerfile"),)
 # The shipped bundles' published images, whose requirements keep a protocol floor.
-BUNDLE_IMAGES = AGENT_IMAGES + EXAMPLE_IMAGES
+BUNDLE_IMAGES = AGENT_IMAGES + EXAMPLE_IMAGES + COMPUTER_IMAGES
 
 
 def published_digest(image: PublishedImage) -> str | None:
@@ -68,7 +71,8 @@ def published_digest(image: PublishedImage) -> str | None:
 
 
 def published_bundle_image(sources: str) -> tuple[str, str] | None:
-    """The ref and digest of the image published for a shipped bundle's image (an agent's or an example env's) whose
+    """The ref and digest of the image published for a shipped bundle's image (an agent's, an example env's or a base
+    computer's) whose
     installed build context has the source digest ``sources`` (``BuildContext.source_digest(None)``), or None when no
     shipped image has those sources or the registry doesn't serve it anonymously, as a sandbox pulls it: a new package
     stays private until a package admin makes it public, and a sandbox running an image by name can't build it

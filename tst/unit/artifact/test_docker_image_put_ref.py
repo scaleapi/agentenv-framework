@@ -76,6 +76,16 @@ def test_a_name_without_its_registry_is_refused_before_any_request(local_stores,
         DockerImageArtifact.get("tool-image")
 
 
+@pytest.mark.parametrize("ref", ["ghcr.io/org/tool:v1\n    privileged: true", "ghcr.io/org/to ol:v1", "ghcr.io/org/Tool:v1"])
+def test_a_name_that_isnt_an_image_reference_is_refused_before_any_request(local_stores, resolved, ref):
+    with pytest.raises(ValueError, match="isn't an image reference"):
+        DockerImageArtifact.put_ref("tool-image", description="d", image_name=ref)
+
+    assert resolved == []
+    with pytest.raises(NotFoundError):
+        DockerImageArtifact.get("tool-image")
+
+
 @pytest.mark.parametrize("ref", ["localhost:5000/team/img:v1", "127.0.0.1:5000/img", "host.docker.internal:5000/img",
                                  "0.0.0.0:5000/img"])
 def test_a_registry_on_this_machine_is_refused_for_a_shared_store(local_stores, resolved, ref):

@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
-from pydantic import AliasChoices, ConfigDict, Field, model_serializer
+from pydantic import AliasChoices, ConfigDict, Field, model_serializer, model_validator
 
 from agent_env.artifact.artifact import FolderChild
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact, SeedsEnvironments
@@ -76,6 +76,15 @@ class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
         description="Legacy unpinned metadata FileArtifact ids",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _metadata_is_legacy(cls, data: Any) -> Any:
+        """A stored universe's ``metadata`` key holds its legacy metadata file ids, never artifact metadata."""
+        if isinstance(data, dict) and "metadata" in data:
+            data = {**data, "legacy_metadata": data["metadata"]}
+            del data["metadata"]
+        return data
+
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any):
@@ -105,6 +114,10 @@ class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
             data["service_artifact_refs"] = refs
             data["environment_artifact_refs"] = refs
         return data
+
+    def merge_metadata(self, updates: dict[str, Any], retries: int = 3) -> None:
+        raise TypeError(f"artifact {self.id!r} is an environment universe, whose metadata key holds its legacy metadata "
+                        f"file ids, so it keeps no artifact metadata")
 
     @classmethod
     def put(

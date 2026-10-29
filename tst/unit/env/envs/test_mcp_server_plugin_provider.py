@@ -25,6 +25,7 @@ from agent_env.plugins import _discovery
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
+from agent_env.task.teardown import RecordedSandbox
 
 _URL = "https://plug.example"
 _CARD = {"name": "email", "url": "/agentenv"}
@@ -469,9 +470,9 @@ async def test_validate_cleanup_terminates_the_sandboxes_a_plugins_record_names(
     context = SimpleNamespace(deployed_envs=[record], deployed_agents=[], instance_id="task-inst")
     with patch("agent_env.task.Task.put", return_value=MagicMock(id="t", version=1, run=AsyncMock(return_value=context))), \
          patch("agent_env.env.env.Env.get", return_value=_env()), \
-         patch("agent_env.task_step.task_steps.teardown_sandboxes._terminate", AsyncMock()) as terminate:
+         patch("agent_env.task.teardown.terminate", AsyncMock()) as terminate:
         assert await _env().validate() == "task-inst"
-    terminate.assert_awaited_once_with("sb-1", "local", "env")
+    terminate.assert_awaited_once_with(RecordedSandbox("sb-1", "local", "env"))
 
 
 @pytest.mark.asyncio
@@ -517,10 +518,10 @@ async def test_validate_cleanup_terminates_every_sandbox_even_when_one_is_alread
     record = DeployedSandboxEnv(env_id="mcp-email", env_version=1, env_provider_type="plugin_kw", mcp_url=f"{_URL}/mcp",
                                 sandbox_id="sb-gone", sandbox_type="local", sandbox_ids={"mcp_server": {"email": "sb-2"}})
     context = SimpleNamespace(deployed_envs=[record], deployed_agents=[], instance_id="task-inst")
-    terminate = AsyncMock(side_effect=lambda sandbox_id, *_: (_ for _ in ()).throw(RuntimeError("gone")) if sandbox_id == "sb-gone" else None)
+    terminate = AsyncMock(side_effect=lambda sandbox: (_ for _ in ()).throw(RuntimeError("gone")) if sandbox.sandbox_id == "sb-gone" else None)
     with patch("agent_env.task.Task.put", return_value=MagicMock(id="t", version=1, run=AsyncMock(return_value=context))), \
          patch("agent_env.env.env.Env.get", return_value=_env()), \
-         patch("agent_env.task_step.task_steps.teardown_sandboxes._terminate", terminate), caplog.at_level("WARNING"):
+         patch("agent_env.task.teardown.terminate", terminate), caplog.at_level("WARNING"):
         await _env().validate()
-    assert sorted(c.args[0] for c in terminate.await_args_list) == ["sb-2", "sb-gone"]
+    assert sorted(c.args[0].sandbox_id for c in terminate.await_args_list) == ["sb-2", "sb-gone"]
     assert "terminate sb-gone failed" in caplog.text

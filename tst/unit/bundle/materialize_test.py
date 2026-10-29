@@ -980,8 +980,9 @@ def test_a_dry_run_doesnt_preflight_a_step_reading_what_it_would_write_and_lists
 
     rewritten = _run(bundle_dir, dry_run=True)
 
-    assert [(write.id, step.id) for write, step in new.not_preflighted] == [(f"{ROOT}/t", "check")]
-    assert [(write.id, step.id) for write, step in rewritten.not_preflighted] == [(f"{ROOT}/t", "check")]
+    assert [(write.id, step.id) for write, step in new.not_preflighted] == [(f"{ROOT}/t", "greet"), (f"{ROOT}/t", "check")]
+    assert [(write.id, step.id) for write, step in rewritten.not_preflighted] == [(f"{ROOT}/t", "greet"),
+                                                                                  (f"{ROOT}/t", "check")]
 
 
 def test_a_second_run_of_the_bundle_waits_for_the_first_to_finish_writing(bundle_dir, tmp_path):

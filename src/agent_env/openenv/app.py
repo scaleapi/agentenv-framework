@@ -45,9 +45,14 @@ def build_app(
     with namespace_routing():
         prepared = {split: _prepared(source, sandbox) for split, source in _sources(bundle).items()}
         served = Served(splits=_served(_splits(bundle, prepared), reward), sandbox=sandbox)
+    return _app(served, _env_name(prepared), max_concurrent_envs)
+
+
+def _app(served: Served, env_name: str, max_concurrent_envs: int) -> FastAPI:
+    """OpenEnv's server for what ``served`` serves, with namespace routing on from its startup to its shutdown, which
+    tears down every open episode."""
     app = create_app(functools.partial(AgentEnvEnvironment, served), CallToolAction, CallToolObservation,
-                     env_name=_env_name(prepared), max_concurrent_envs=max_concurrent_envs,
-                     reset_observation_cls=Observation)
+                     env_name=env_name, max_concurrent_envs=max_concurrent_envs, reset_observation_cls=Observation)
     routing = ExitStack()
 
     async def route() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import uuid
 from importlib.metadata import version as pkg_version
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
@@ -22,6 +23,7 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.gateway import GatewayMode
 from agent_env.attribution import Attribution
+from agent_env.utils.paths import validate_file_name
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.entity.export import ExportContext
@@ -132,8 +134,9 @@ class WebsiteEnv(Env):
             artifact_id=artifact_id, artifact_version=artifact_version,
         )
 
-    def deploy_refusal(self, **options) -> str | None:
-        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find."""
+    def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
+        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
+        ``sandbox_type`` is deploy()'s own, which no provider takes."""
         return deploy_refusal(self, provider_or_class(self), options)
 
     @classmethod
@@ -187,17 +190,18 @@ class WebsiteEnv(Env):
     async def _copy_artifact_into_container(self, file_artifact) -> str:
         from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_SUFFIX, DOCKER_COMPOSE_PATH
         filename = file_artifact.filename
+        validate_file_name(filename)
         backend_service = f"{self.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}"
         # Random suffix so concurrent loads on a shared sandbox (parallel /load-universe,
         # MCP+website sharing a service_name, repeated loads) don't race on a shared path.
         vm_path = f"/tmp/_artifact_{self.environment_name}-{uuid.uuid4().hex[:8]}-{filename}"
         container_path = f"/tmp/data/{filename}"
-        compose = f"docker compose -f {DOCKER_COMPOSE_PATH}"
+        compose = f"docker compose -f {shlex.quote(DOCKER_COMPOSE_PATH)}"
 
         await self._sandbox.load_object_file(file_artifact.object_url, vm_path)
-        await self._sandbox.exec_script(f"{compose} exec -T {backend_service} mkdir -p /tmp/data")
-        await self._sandbox.exec_script(f"{compose} cp {vm_path} {backend_service}:{container_path}")
-        await self._sandbox.exec_script(f"rm -f {vm_path}")
+        await self._sandbox.exec_script(f"{compose} exec -T {shlex.quote(backend_service)} mkdir -p /tmp/data")
+        await self._sandbox.exec_script(f"{compose} cp {shlex.quote(vm_path)} {shlex.quote(f'{backend_service}:{container_path}')}")
+        await self._sandbox.exec_script(f"rm -f {shlex.quote(vm_path)}")
         return container_path
 
     async def _load_environment_artifact_legacy(self, file_artifact) -> None:

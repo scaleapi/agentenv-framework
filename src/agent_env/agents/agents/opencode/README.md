@@ -7,11 +7,16 @@ context: the protocol package comes from PyPI (`requirements.txt`), Node is pinn
 
 Each task runs `opencode run --format json` once in `/app`. A context's first task starts an OpenCode session, and each
 later task resumes it with `-s <session_id>`; each context keeps its sessions in a data directory of its own, under
-`$HOME/sessions/`. Text parts are the prompt, after the task's `system_prompt`, and file parts are written under
-`/app/inputs/<task>/` and attached with `--file`; a PDF goes as its pages' PNGs, rendered with `pdftoppm` where it is
-installed. Turns of different contexts run at once, and a context's turns one at a time.
+`$HOME/sessions/`. Text parts are the prompt, and file parts are written under `/app/inputs/<task>/` and attached with
+`--file`; a PDF goes as its pages' PNGs, rendered with `pdftoppm` where it is installed. Turns of different contexts run
+at once, as many as memory fits at about 900 MB each past the first 1 GB (`OPENCODE_MAX_CONCURRENT_TURNS` sets the
+number), and a context's turns one at a time.
 
-Each run's settings reach the CLI as `OPENCODE_CONFIG_CONTENT`, so nothing is written for it on disk:
+Each run's settings reach the CLI as `OPENCODE_CONFIG_CONTENT`, so nothing but the system prompt is written for it on
+disk:
+
+- the task's `system_prompt`, written to `system-prompt.md` in the context's data directory and named in
+  `instructions`, so it reaches the model as system instructions rather than as the user's words;
 
 - the model endpoint, `$LITELLM_BASE_URL/v1`, as an OpenAI-compatible provider with its key from `LITELLM_API_KEY`,
   `[model.headers]` (`LITELLM_EXTRA_HEADERS`) and the run's `project_id` and `task_id` as `x-litellm-customer-id` and

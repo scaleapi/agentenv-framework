@@ -62,7 +62,7 @@ async def test_the_fake_driver_passes_every_check_at_full_and_cleans_up(home):
     report = await _probe(driver)
     assert report.passed, _failed(report)
     assert report.driver == "FixtureDriver" and report.level == "full"
-    assert set(report.extensions.values()) == {"verified"} and len(report.extensions) == 12
+    assert set(report.extensions.values()) == {"verified"} and len(report.extensions) == 13
     counts = report.counts()
     assert counts["failed"] == counts["unverified"] == 0 and counts["not_applicable"] == 1
     assert {c.check for c in report.checks} == {f"P{n}" for n in range(10)} | {"X"}

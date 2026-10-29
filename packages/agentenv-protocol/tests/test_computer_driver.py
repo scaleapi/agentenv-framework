@@ -147,9 +147,9 @@ def test_the_platform_is_detected(tmp_path, monkeypatch):
 
 def test_settings_come_from_one_json_value():
     assert load_settings({}) == ComputerSettings()
-    settings = load_settings({SETTINGS_ENV: '{"data_paths": ["notes"], "default_space": "norm", "tap_hold_ms": 20}'})
-    assert settings.data_paths == ["notes"] and settings.default_space == "norm" and settings.tap_hold_ms == 20
-    for raw in ('{"data_paths": ["../out"]}', '{"tap_hold_ms": -1}', '{"unknown": 1}', "not json"):
+    settings = load_settings({SETTINGS_ENV: '{"default_space": "norm", "tap_hold_ms": 20}'})
+    assert settings.default_space == "norm" and settings.tap_hold_ms == 20
+    for raw in ('{"default_space": "pixels"}', '{"tap_hold_ms": -1}', '{"data_paths": ["notes"]}', "not json"):
         with pytest.raises(ValueError, match=SETTINGS_ENV):
             load_settings({SETTINGS_ENV: raw})
 
@@ -169,6 +169,8 @@ async def test_the_card_declares_the_contract_the_driver_implements():
     computer = extensions["urn:agentenv:computer/v1"]["params"]
     assert computer["buttons"] == ["left", "right", "middle"] and computer["max_click_count"] == 3
     assert computer["keys"] == "all" and computer["platform"] == LINUX.as_dict() and computer["delivery"] == "foreground"
+    assert computer["default_data_paths"] == ["Desktop", "Documents", "Downloads"]
+    assert "methods" not in computer and extensions["urn:agentenv:skill/v1"]["params"]["methods"]["get"]["method"] == "GET"
     assert extensions["urn:agentenv:computer-pointer/v1"]["params"]["buttons"] == ["left", "right", "middle"]
     assert set(extensions["urn:agentenv:computer-keyboard/v1"]["params"]["methods"]) == {"get", "set"}
     assert set(extensions["urn:agentenv:computer-display/v1"]["params"]["methods"]) == {"get", "set"}
@@ -179,6 +181,24 @@ async def test_the_card_declares_the_contract_the_driver_implements():
     assert card["capabilities"]["operations"] == ["data/add", "data/get"]
     assert {t["name"] for t in card["capabilities"]["tools"]} >= {"computer_click", "computer_pointer_list"}
     assert card["additionalInterfaces"] == [{"url": "/mcp", "transport": "mcp"}]
+
+
+@pytest.mark.asyncio
+async def test_the_skill_is_written_from_the_computer_as_it_booted_under_the_name_its_given(monkeypatch):
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "XFCE")
+    monkeypatch.setattr("agentenv_protocol.computer.skill.getpass.getuser", lambda: "user")
+    monkeypatch.setattr(FakeDriver, "notes", "The dock is at the bottom.")
+    async with http_client(FakeDriver()) as http:
+        answer = (await http.get("/agentenv/ext/skill/get", params={"name": "computer-desktop"})).json()
+        refused = await http.get("/agentenv/ext/skill/get", params={"name": "Computer Desktop"})
+    skill_md = answer["skill_md"]
+    assert answer["name"] == "computer-desktop" and skill_md.startswith("---\nname: computer-desktop\ndescription: ")
+    assert answer["description"] in skill_md and "Ubuntu 24.04 (amd64), 1280x800" in answer["description"]
+    for line in ("- Ubuntu 24.04 (amd64), an X11 session (XFCE).", "- You act as `user`", "- The screen is 1280x800.",
+                 "- Buttons: left, right, middle; up to 3 clicks", "pixels of the latest screenshot",
+                 "`['Alt', 'Tab']`", "## Notes\n\nThe dock is at the bottom."):
+        assert line in skill_md, line
+    assert refused.status_code == 400 and "lowercase letters, digits and single hyphens" in refused.text
 
 
 @pytest.mark.asyncio

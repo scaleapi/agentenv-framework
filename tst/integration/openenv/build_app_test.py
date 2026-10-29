@@ -29,7 +29,7 @@ from agent_env.task import Task
 from tst.integration.env.envs.server_env_local_test import VERIFY_CRATE, _docker, _free_port, _put_items_image
 from tst.util.a2a_test_agent import put_test_agent
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 RAISING_VERIFY = "async def verify(mcp_url):\n    raise RuntimeError('the verifier broke')\n"
 
@@ -230,14 +230,13 @@ async def test_every_failure_that_ends_an_episode_is_an_error_observation_and_a_
 
 
 @pytest.mark.asyncio
-@pytest.mark.int_test_slow
 async def test_each_session_holds_its_own_deployment_and_every_way_it_ends_tears_it_down(items):
     root = items.bundle("dock", {"crate": items()})
 
     with _serving(build_app(str(root), max_concurrent_envs=2)) as url:
         rewards = await asyncio.gather(_play(url, add=True), _play(url, add=False))
         assert [ended.reward for _, ended in rewards] == [1.0, 0.0]
-        assert _left(items.sandboxes) == []
+        await _until(lambda: _left(items.sandboxes) == [])
 
         held = GenericEnvClient(base_url=url, message_timeout_s=300)
         await held.connect()

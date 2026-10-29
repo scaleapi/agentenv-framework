@@ -32,7 +32,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
-from agent_env.providers.sandbox_providers.local_sandbox import LOCAL_TRUST_ENV, local_grant_trust, start_trusting
+from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV, local_grant_trust, start_trusting
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     Accepts,

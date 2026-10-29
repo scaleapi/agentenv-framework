@@ -7,7 +7,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..transfers import RelativePath
 
 SETTINGS_ENV = "AGENTENV_COMPUTER_SETTINGS"
 
@@ -15,12 +14,10 @@ Space = Literal["frame", "norm"]
 
 
 class ComputerSettings(BaseModel):
-    """``data_paths`` are relative to the session user's home and are what ``data/get`` returns; the rest are the
-    defaults the card reports and the framework extensions change."""
+    """The defaults the card reports and the framework extensions change."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    data_paths: list[RelativePath] = Field(default_factory=list)
     default_space: Space = "frame"
     default_norm_scale: int = Field(default=1000, ge=1, le=1_000_000)
     queue_wait_s: float = Field(default=30.0, gt=0, le=3600)

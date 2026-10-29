@@ -297,6 +297,10 @@ def echo_agent() -> A2AAgent:
         "daytona",
         id="daytona",
         marks=skip_without_remote_sandbox("daytona"),
+    ),    pytest.param(
+        "boat",
+        id="boat",
+        marks=skip_without_remote_sandbox("boat"),
     ),
 ])
 def sandbox_provider(request):
@@ -340,6 +344,10 @@ def sandbox_provider(request):
         set_sandbox_provider(build_sandbox_provider("daytona"))
         set_env_sandbox_provider(build_sandbox_provider("daytona"))
         set_agent_sandbox_provider(build_sandbox_provider("daytona"))
+    elif request.param == "boat":
+        set_sandbox_provider(build_sandbox_provider("boat"))
+        set_env_sandbox_provider(build_sandbox_provider("boat"))
+        set_agent_sandbox_provider(build_sandbox_provider("boat"))
     try:
         yield request.param
     finally:

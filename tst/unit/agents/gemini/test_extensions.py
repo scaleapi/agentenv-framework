@@ -11,7 +11,7 @@ import pytest
 from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1
 from starlette.testclient import TestClient
 
-from tst.unit.agents.gemini.agent import a2a_server, gemini_bridge
+from tst.unit.agents.gemini.agent import a2a_server, gemini_bridge, gemini_config
 from tst.unit.agents.gemini.support import card, namespace_grant, send
 
 AGENT_CONFIG_PATH = AGENT_CONFIG_V1.endpoint
@@ -76,8 +76,9 @@ def test_a_server_is_registered_without_underscores(home, client):
 
 
 def test_each_run_gets_its_servers_role_and_system_prompt_in_settings_of_its_own(monkeypatch, home, client):
-    """Turns of different roles running at once share no file: each CLI's system settings name its turn's role, the
-    SDK's peer tools among the servers, and its system prompt as a context file, all removed once the turn ends."""
+    """Turns of different roles running at once share no settings: each CLI's system settings name its turn's role,
+    the SDK's peer tools among the servers, and its system prompt as a context file named by its content, so the same
+    prompt keeps one path from turn to turn; all are removed once the turn ends."""
     runs = []
 
     async def fake_run_gemini(**kwargs):
@@ -94,8 +95,10 @@ def test_each_run_gets_its_servers_role_and_system_prompt_in_settings_of_its_own
     send(client, "one", context_id="ctx-1")
     client.post(AGENT_CONFIG_PATH, json={"role": None, "system_prompt": None})
     send(client, "two", context_id="ctx-2")
+    client.post(AGENT_CONFIG_PATH, json={"role": "solver", "system_prompt": "be brief"})
+    send(client, "three", context_id="ctx-1")
 
-    (first_path, first, first_context), (second_path, second, second_context) = runs
+    (first_path, first, first_context), (second_path, second, second_context), (_, third, _) = runs
     peer = first["mcpServers"]["peeragents"]["httpUrl"]
     assert re.fullmatch(r"http://127\.0\.0\.1:\d+/ext/peer-agents/mcp", peer)
     assert first["mcpServers"] == {
@@ -105,6 +108,7 @@ def test_each_run_gets_its_servers_role_and_system_prompt_in_settings_of_its_own
     }
     (prompt_file,) = first_context
     assert first["context"] == {"fileName": ["GEMINI.md", prompt_file]} and first_context[prompt_file] == "be brief"
+    assert third["context"] == first["context"]
     assert second["mcpServers"] == {
         "before": {"httpUrl": "https://gw/a/mcp", "headers": {"X-Key": "k"}},
         "audited": {"httpUrl": "https://gw/b/mcp", "headers": {"agentenv-role": "auditor"}},
@@ -114,6 +118,16 @@ def test_each_run_gets_its_servers_role_and_system_prompt_in_settings_of_its_own
     assert first_path != second_path and not first_path.exists() and not second_path.exists()
     assert not (home / ".gemini" / prompt_file).exists()
 
+
+
+def test_turns_sharing_a_system_prompt_share_its_file_until_the_last_ends(home):
+    with gemini_config.run_settings({}, "solver", "be brief") as first:
+        with gemini_config.run_settings({}, "auditor", "be brief") as second:
+            names = [json.loads(p.read_text())["context"]["fileName"][1] for p in (first, second)]
+            assert names[0] == names[1]
+        prompt = home / ".gemini" / names[0]
+        assert prompt.read_text() == "be brief" and not second.exists()
+    assert not prompt.exists() and not first.exists()
 
 def test_a_duplicate_url_or_name_is_a_409(home, client):
     client.post(MCP_CONFIG_PATH, json={"url": "https://gw/a/mcp", "name": "env1"})

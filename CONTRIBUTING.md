@@ -43,6 +43,7 @@ reinstalling.
 | `make int-test-slow` | tests that build images or deploy sandboxes, minutes each | Docker, and a sandbox backend for some |
 | `make clean-install-test` | both distributions built as the release builds them, installed into a fresh venv from public PyPI, and `agent-env run hello` run twice by name | Python 3.11, uv and git |
 | `make installer-test` | `plugin add` and `remove` through the real pip, uv and pipx, offline against wheels built from the checkout, and the new-user journey in containers with no network | uv, pipx and Docker; the first run downloads the dependencies once |
+| `make trl-test` | one TRL `GRPOTrainer` step on CPU through the training helper, with a tiny model | trl and CPU torch installed, and the Hugging Face Hub |
 
 CI runs the same tiers as the `unit`, `integration-local`, `integration-local-slow` and
 `integration-local-gateway` jobs (the last runs the slow tier's gateway tests beside the rest);
@@ -90,7 +91,7 @@ the previous release, so a clear pull request title is also the release note. A 
 
 A release also publishes the infra images agent-env ships, once the `PUBLISH_INFRA_IMAGES` repository variable is
 `true`: one per Dockerfile under `src/agent_env/env`, and one per shipped agent (`agentenv-claude-code`, its CLI
-included, `agentenv-codex`, `agentenv-gemini`, `agentenv-opencode`, `agentenv-pi` and `agentenv-openhands`), at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
+included, `agentenv-codex`, `agentenv-gemini`, `agentenv-hermes`, `agentenv-opencode`, `agentenv-pi`, `agentenv-openhands` and `agentenv-pydantic-ai`), at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
 and linux/arm64, where the tag is the build context's source digest, so an unchanged Dockerfile is not built again.
 The agents' images install the newest `agentenv-framework-protocol` at or above the floor in their
 `requirements.txt`, which a release doesn't pin, so each is built again only when its folder changes: once the protocol

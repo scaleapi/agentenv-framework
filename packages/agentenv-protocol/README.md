@@ -240,6 +240,32 @@ at the gateway.
 
 Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
 
+### Getting part of the data
+
+A `@get_data` handler that takes a `paths` parameter returns only the data under the paths a caller
+names (`client.get_data(base_url, paths=[...])`), and is called with None when the caller names
+none. A handler without one answers `invalid_params` to a call that names paths, rather than
+returning everything.
+
+### A skill for agents
+
+An env can hand agents a skill: a SKILL.md an agent reads before it uses the env. Mark the method
+that writes it with `@agent_skill`; it returns the skill's description and its markdown body,
+sync or async:
+
+```python
+@agent_skill
+def guide(self):
+    return "How to place and track orders.", "# The shop\n\nPlace orders with `place_order`.\n"
+```
+
+The card then declares `urn:agentenv:skill/v1` (`SKILL_EXTENSION_URI`), whose `get {name}`
+answers `{name, description, skill_md}`, the shape `skill-config/v1` takes, with the frontmatter
+written under the name the caller gives; a name that isn't lowercase letters, digits and single
+hyphens, up to 64, is refused `invalid_argument`. agent-env's `add_skills` step installs it on
+an agent through `env_ids`, named after the env's environment name; for an env behind a gateway,
+whose card nests its servers' cards, it installs each server's skill under that server's name.
+
 ### Uploading an export through a grant
 
 An export too large to return from `data/get` can go straight to the caller's object store. A
@@ -396,17 +422,24 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   (`stale_frame`) when the display geometry it was captured at changes.
 - **The input queue.** Input calls run one at a time in arrival order; one that waits past
   `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue.
+- **The computer skill.** `computer/v1` declares the seven tools, its params the driver's
+  features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
+  class): a SKILL.md written from the computer as it booted (its platform, session user and home,
+  the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
+  class's `notes`, markdown for what its card can't say.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
-  capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
-  pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
+  own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
   descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
   request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
   with `recording`, `computer-recording/v1` (below).
 - **The data plane.** `data/add` takes file parts that name their path, relative to the session
   user's home, under the `data-objects/v1` marker (`{"path": ...}`), as inline bytes, an https URL,
   or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
-  `data/get` returns the files under the settings' `data_paths`, inline or uploaded under a
-  `write_namespace` grant.
+  `data/get` returns the files under the `paths` it's given, relative to the home, or under the
+  card's `default_data_paths` (`Desktop`, `Documents`, `Downloads`) when it's given none, inline or
+  uploaded under a `write_namespace` grant. An environment whose `@get_data` hook takes no `paths`
+  refuses them.
 - **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
   access (`tool_access` is on).
 
@@ -417,7 +450,7 @@ was sent (`applied: "no"`); `Timeout`, `DeliveryFailed` and `Internal` mean it m
 other exception from an input operation is reported `delivery_failed` with `applied: "unknown"`.
 
 **Settings** reach the driver as one JSON value in `AGENTENV_COMPUTER_SETTINGS`
-(`ComputerSettings`): `data_paths`, `default_space`, `default_norm_scale`, `queue_wait_s`,
+(`ComputerSettings`): `default_space`, `default_norm_scale`, `queue_wait_s`,
 `tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`
 and `exec_timeout_s`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
 
@@ -456,13 +489,16 @@ class MyDriver(ComputerDriverEnvironment):
   `@pointer_position`: the slow path, at most 15 fps.
 - **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?}` returns
   `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
-  and returns the manifest. A repeated `request_id`, or a repeated `end`, answers the same. A start
-  past `max_concurrent` is refused `limit_exceeded`; `max_duration_s`, free disk under 512 MB or a stream
+  and returns the manifest; `end_all {reason?}` ends every recording not yet ended, each under the
+  grant it started with, and returns `{manifests}`, as the framework does before it resets or tears a
+  computer down. A repeated `request_id`, or a repeated `end`, answers the same. A start past
+  `max_concurrent` is refused `limit_exceeded`; `max_duration_s`, free disk under 512 MB or a stream
   failing for 60 s end a recording by itself.
 - **Segments.** A segment closes at `max_segment_s`, when the frame size changes or after a gap in the
   stream. Each uploads as it closes under `start`'s `write_namespace` grant, at
   `<recording_id>/<index>.mp4`, and is then deleted; `end`'s own grant uploads any that missed. With no
-  grant they stay under `~/.agentenv-recordings/`.
+  grant they stay under `~/.agentenv-recordings/`. An ended recording's manifest uploads beside its
+  segments, at `<recording_id>/manifest.json`, so a reader that didn't end it finds it there.
 - **The manifest** (`RecordingManifest`). Its `segments` (`ManifestSegment`) carry each one's path,
   `started_at` and `ended_at` (its first and last frames' capture times), size, frame count, byte size,
   SHA-256 and whether it uploaded, and `ended_by` says why the recording ended: `end`, `reset`,
@@ -500,6 +536,69 @@ the checks for an extension the card doesn't declare. P8 is not applicable to a 
 leasing, and unverified for one with it until the probe has lease checks. The probe calls as the
 default role; the tool-access check hides a tool from a role of its own, `agentenv-probe-<random>`,
 and gives it back.
+
+## Computer apps
+
+A computer app is software an agent uses on a computer, beside the driver: a desktop app, a service
+or both. Write one as a `ComputerAppEnvironment` subclass from `agentenv_protocol.computer`, an
+`AgentEnvEnvironment` whose class also says what it is to a computer. Writing one and reading what
+it declares need only the plain package: `agentenv_protocol.computer` imports what a driver needs
+(mcp, uvicorn, Pillow, PyAV) only when a driver's names are used. On a computer it runs as its own
+server, which needs the `app` extra (below).
+
+```python
+from pydantic import BaseModel, SecretStr
+from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Linux, Service, computer_app
+
+@computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+class MailApp(ComputerAppEnvironment):
+    linux = Linux(python="requirements.txt", services=[Service(name="imap", command="venv/bin/python imap.py")])
+    launch = Launch(command=["thunderbird"], window={"class": "thunderbird"})
+    skill = "skill.md"
+
+    class Settings(BaseModel):
+        signature: str = ""
+        password: SecretStr = SecretStr("")
+```
+
+- **`@computer_app`** names the platforms the app supports, as a driver names them, and the
+  `permissions` it needs of the computer. Its env.toml names the rest: the app itself
+  (`environment_name`) and the `computer` and `driver` it deploys alone on.
+- **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
+  copied under its prefix, which holds the class's file; `python`, a requirements file there,
+  installed into the venv every app gets beside them; `services`, programs the computer's init runs
+  from the prefix as the session user.
+- **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
+  the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
+  launch: a window matching `launch.window` by its class, instance or title, a port answering on
+  loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
+  sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
+  app.
+- **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
+  its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
+- **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
+  in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
+  its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+
+On a computer each app is its own server: `python -m agentenv_protocol.computer.serve_app
+<file>:<Class>`, a program the computer's init runs from the app's folder in the app's venv, which
+has the `app` extra (`agentenv-framework-protocol[app]`: mcp and uvicorn). It serves the class's
+card and tools on the Unix socket `.agentenv/server.sock` in that folder, with `computer-app/v1`:
+the app's `launch` as its params, and the methods `launch` (POST), which starts the app in the
+desktop session, and `ready` (GET: an `AppReadiness` of `ready`, `problems`, `launched`, `waited_s`
+and `timeout_s`), which runs the app's readiness checks then, at once, each within 10 s. A server
+that can't start, or whose start in the session fails (adding the launcher, say), writes why to
+`.agentenv/server.failure` in the folder and exits, and the driver reports that in its place. Once
+the session is up the server adds the app's launcher to the session user's menu, which runs `python
+-m agentenv_protocol.computer.launch <folder>` to ask the server, so the server starts every copy of
+the app, and launches a `boot` app, once per boot. The driver finds each app by the socket in its
+folder: the computer is ready once every app's server answers and each `boot` app, and each app with
+no launch, says it's ready; a `demand` app counts once something launches it. What the server does
+in the session (`agentenv_protocol.computer.session`) is Linux's.
+
+`MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
+env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
+JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
 
 ## A2A agent framework
 

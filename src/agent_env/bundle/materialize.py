@@ -17,16 +17,16 @@ write.
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import Artifact
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, push_context_image
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
-from agent_env.entity.refs import EntityRef, RefRole, ref_sites
+from agent_env.entity.refs import EntityKind, EntityRef, RefRole, ref_sites
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval, EvalTask
 from agent_env.providers.sandbox_providers.host_images import build, build_staged
@@ -43,6 +43,7 @@ from .ledger import Ledger, locked_ids, materializing
 from .parse import BundleError, BundleKind
 from .plan import Plan, Write, artifact_writer, env_writer, unpinned_store_refs
 from .resolve import BuiltImage, BundleImage, ReferencedImage, build_step
+
 
 @dataclass(frozen=True)
 class Materialized:
@@ -79,6 +80,7 @@ def materialize(
     on_build: Callable[[Write], None] | None = None,
     on_write: Callable[[Materialized], None] | None = None,
     build_here: frozenset[str] = frozenset(),
+    ledger: Ledger | None = None,
 ) -> Materialization:
     """Write ``plan``'s entities, tasks and evals. The first write that fails stops it, and every earlier
     one stays: they're in the ledger, so the next run reuses them. ``on_wait`` is called when another run
@@ -90,12 +92,16 @@ def materialize(
 
     ``dry_run`` checks and preflights what a run would, and writes nothing: no entity, ledger row or lock.
     Each write gets the version it would reuse or the store's next, which another run can take first. A step
-    reading what the run would write first isn't preflighted, since the store doesn't hold it yet."""
+    reading what the run would write first isn't preflighted, since the store doesn't hold it yet.
+
+    ``ledger`` keeps the rows, this run's in the ``@local`` namespace's store unless given; it also says whether each
+    task and eval names the versions it reads (``Ledger.pins_references``) and whether each image the bundle builds is
+    built here and pushed (``Ledger.pushes_images``), as a registration's does."""
     _refuse_unwritable(plan)
     if not namespace_routing_enabled():
         raise RuntimeError("materializing a bundle needs namespace routing, which the agent-env CLI turns on; "
                            "call it inside agent_env.store.routing.namespace_routing()")
-    ledger = Ledger.for_plan(plan)
+    ledger = ledger if ledger is not None else Ledger.for_plan(plan)
     entities = [write for write in plan.writes if write.kind not in (BundleKind.TASK, BundleKind.EVAL)]
     tasks = [write for write in plan.writes if write.kind is BundleKind.TASK]
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
@@ -119,23 +125,28 @@ def materialize(
     with nullcontext() if dry_run else materializing(locked_ids(plan), on_wait):
         for write in entities:
             here = write.id in build_here and not dry_run
-            through_ledger(write, lambda: _write_entity(plan, write, here, on_build))
+            if ledger.pushes_images and isinstance(write.source, BuiltImage) and write.id not in plan.published:
+                through_ledger(write, lambda: _write_pushed_image(plan, write, on_build))
+            else:
+                through_ledger(write, lambda: _write_entity(plan, write, here, on_build))
             if here and done[_key(write)].reused:
                 _build_reused(plan, write, done[_key(write)].version, on_build)
         unwritten = {_key(item.write) for item in done.values() if not item.reused} if dry_run else set()
+        written = done if ledger.pins_references else None
         built, problems, unchecked = {}, [], []
         for write in tasks:
             with _noted(plan, write, "preflighting"):
-                built[write.id] = _build(write)
+                built[write.id] = _build(write, plan, written)
                 found, skipped = _preflight(plan, write, built[write.id], unwritten)
             problems.extend(f"{_path(plan, write)}: {problem}" for problem in found)
             unchecked.extend((write, step) for step in skipped)
         if problems:
             raise BundleError(problems)
         for write in tasks:
-            through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps).version)
+            through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps,
+                                                   requires=write.requires).version)
         for write in evals:
-            through_ledger(write, lambda: _WRITERS[write.kind](plan, write))
+            through_ledger(write, lambda: _write_eval(plan, write, written))
     return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked))
 
 
@@ -146,6 +157,8 @@ def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Writ
         if write.id in plan.published:
             return _write_published_image(plan, write)
         return _write_build_context(plan, write, here, on_build)
+    if write.kind is BundleKind.ENV:
+        return _write_env(plan, write, _before(on_build, write))
     return _WRITERS[write.kind](plan, write)
 
 
@@ -167,6 +180,23 @@ def _write_build_context(plan: Plan, write: Write, here: bool, on_build: Callabl
                 dockerfile_path=staged.dockerfile, platform=None,
             ).version
         except (ValueError, RuntimeError) as e:  # a context it can't write, or the object store
+            raise BundleError([f"{_path(plan, write)}: {e}"]) from None
+
+
+def _write_pushed_image(plan: Plan, write: Write, on_build: Callable[[Write], None] | None) -> int:
+    """Register the image an entry's Dockerfile describes by its digest in the configured image store, built here and
+    pushed unless the store holds it already (``push_context_image``), with its build context beside it."""
+    image = write.source
+    with staged_build_context(plan.bundle_of(image.entry), image.entry, image.dockerfile) as staged:
+        try:
+            ref, digest = push_context_image(write.id, str(staged.path), staged.dockerfile, _before(on_build, write))
+            return DockerImageArtifact.put_ref(
+                write.id, description=_image_description(plan, write), image_name=ref, image_digest=digest,
+                context_path=str(staged.path), dockerfile_path=staged.dockerfile,
+            ).version
+        except DockerBuildError as e:
+            raise BundleError([f"{_path(plan, write)}: {_tail(str(e))}"]) from None
+        except (ValueError, RuntimeError) as e:  # the push, the registry's answer, or the object store
             raise BundleError([f"{_path(plan, write)}: {e}"]) from None
 
 
@@ -254,10 +284,11 @@ def _write_agent(plan: Plan, write: Write) -> int:
                               AuthoringContext(plan.bundle_of(entry), entry)).version
 
 
-def _write_env(plan: Plan, write: Write) -> int:
+def _write_env(plan: Plan, write: Write, on_build: Callable[[], None] | None = None) -> int:
     entry = write.source.entry
     cls = get_env_registry()[entry.type]
-    return cls.from_toml(_pinned(plan, write, cls.toml_refs), AuthoringContext(plan.bundle_of(entry), entry)).version
+    return cls.from_toml(_pinned(plan, write, cls.toml_refs),
+                         AuthoringContext(plan.bundle_of(entry), entry, on_build=on_build)).version
 
 
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:
@@ -276,11 +307,20 @@ def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:
     return config
 
 
-def _write_eval(plan: Plan, write: Write) -> int:
-    """An unpinned task ref, the bundle's own or a store's, is written without a version: the eval runs
-    its latest."""
-    tasks = [EvalTask(ref.id, ref.version) for ref in write.source.references]
+def _write_eval(plan: Plan, write: Write, written: Mapping[tuple[str, str], Materialized] | None = None) -> int:
+    """An unpinned task ref, the bundle's own or a store's, is written without a version, so the eval runs its latest;
+    given what was ``written``, as a registration is, each names the version it reads."""
+    tasks = [EvalTask(ref.id, ref.version if written is None or ref.version is not None
+                      else _read_version(plan, written, ref.kind, ref.id, own=ref.local is not None))
+             for ref in write.source.references]
     return Eval.put(id=write.id, tasks=tasks).version
+
+
+def _read_version(plan: Plan, written: Mapping[tuple[str, str], Materialized], kind: EntityKind, id: str, *,
+                  own: bool) -> int | None:
+    """The version a reference naming none reads of ``kind`` ``id``: the one ``written`` for the bundle's ``own``
+    entity, else the store's latest the plan read, or None when the plan read none."""
+    return written[kind.value, id].version if own else plan.store_latest.get((kind, id))
 
 
 # The writers this release has, by kind; any other kind is refused before anything is written. Tasks are
@@ -321,8 +361,28 @@ def _noted(plan: Plan, write: Write, doing: str) -> Iterator[None]:
         raise
 
 
-def _build(write: Write) -> Task:
-    return Task(id=write.id, version=None, steps=[build_step(step) for step in write.source.config])
+def _build(write: Write, plan: Plan, written: Mapping[tuple[str, str], Materialized] | None) -> Task:
+    """The task ``write`` puts: as resolved, or given what was ``written``, with each reference that takes a version
+    naming the one it reads."""
+    steps = write.source.config if written is None else pinned_steps(plan, write, written)
+    return Task(id=write.id, version=None, steps=[build_step(step) for step in steps])
+
+
+def pinned_steps(plan: Plan, write: Write, written: Mapping[tuple[str, str], Materialized]) -> list[dict]:
+    """A copy of the task ``write``'s steps with each reference it reads that names no version, where its field takes
+    one, naming the version it reads (``_read_version``)."""
+    steps = copy.deepcopy(write.source.config)
+    own = {(ref.kind, ref.id) for ref in write.source.references if ref.local is not None}
+    registry = get_task_step_registry()
+    for step in steps:
+        for site in ref_sites(registry[step["type"]].entity_refs or (), step):
+            if site.ref.role is not RefRole.INPUT or site.version_key is None or site.version is not None:
+                continue
+            own_entity = (site.ref.kind, site.value) in own
+            version = _read_version(plan, written, site.ref.kind, site.value, own=own_entity)
+            if version is not None:
+                site.rewrite(site.value, version)
+    return steps
 
 
 def _preflight(plan: Plan, write: Write, task: Task,

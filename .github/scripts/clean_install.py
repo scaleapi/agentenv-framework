@@ -21,7 +21,7 @@ import tomllib
 import zipfile
 from pathlib import Path
 
-from shipped_bundles import BUNDLES, bundle_roots
+from shipped_bundles import BUNDLES, bundle_roots, pin_pyproject
 
 REPO = Path(__file__).resolve().parents[2]
 PYPI = "https://pypi.org/simple"
@@ -46,10 +46,17 @@ def main() -> int:
     venv = work / "venv"
     env = _hermetic(work, venv / "bin")
 
-    _step("Build both distributions as the release does (sdist, then the wheel from it)")
-    for package in ("packages/agentenv-protocol", "."):
-        _run([uv, "tool", "run", "--python", sys.executable, "--from", "build", "pyproject-build",
-              "--outdir", str(work / "dist"), package], env=env, cwd=REPO)
+    _step("Build both distributions as the release does (sdist, then the wheel from it), the framework pinned to the "
+          "protocol as the release pins it")
+    pyproject = REPO / "pyproject.toml"
+    unpinned = pyproject.read_text()
+    try:
+        pin_pyproject()
+        for package in ("packages/agentenv-protocol", "."):
+            _run([uv, "tool", "run", "--python", sys.executable, "--from", "build", "pyproject-build",
+                  "--outdir", str(work / "dist"), package], env=env, cwd=REPO)
+    finally:
+        pyproject.write_text(unpinned)
     protocol = _one(work / "dist", "agentenv_framework_protocol-*.whl")
     framework = _one(work / "dist", "agentenv_framework-*.whl")
 

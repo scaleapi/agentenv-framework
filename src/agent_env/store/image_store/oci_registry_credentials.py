@@ -6,6 +6,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -88,6 +89,26 @@ def registry_host_from_ref(ref: str) -> str | None:
         return normalize_registry_host(first)
     except ValueError:
         return None
+
+
+# Docker's reference grammar (distribution/reference): [registry/]path[:tag][@digest], without its bracketed IPv6
+# registries, which an unquoted compose value reads as the start of a YAML list.
+_DOMAIN_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+_DOMAIN = rf"{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})*(?::[0-9]+)?"
+_PATH_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+_TAG = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"
+_DIGEST = r"[A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*:[0-9A-Fa-f]{32,}"
+_IMAGE_REFERENCE = re.compile(
+    rf"(?:{_DOMAIN}/)?{_PATH_COMPONENT}(?:/{_PATH_COMPONENT})*(?::{_TAG})?(?:@{_DIGEST})?"
+)
+
+
+def image_reference_problem(ref: str) -> str | None:
+    """Why ``ref`` isn't an image reference Docker takes, None when it is: a compose ``image:`` line holds it
+    unquoted, so it may carry nothing else."""
+    if isinstance(ref, str) and _IMAGE_REFERENCE.fullmatch(ref):
+        return None
+    return f"image name {ref!r} isn't an image reference ([registry/]repository[:tag][@digest])"
 
 
 def is_loopback_host(host: str | None) -> bool:

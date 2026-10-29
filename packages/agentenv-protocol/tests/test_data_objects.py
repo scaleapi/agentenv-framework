@@ -186,7 +186,7 @@ async def test_params_given_by_position_are_refused():
 
 
 @pytest.mark.asyncio
-async def test_get_data_sends_no_params_without_a_grant_and_the_grant_with_one(monkeypatch):
+async def test_get_data_sends_no_params_without_a_grant_or_paths_and_each_it_is_given(monkeypatch):
     sent: list[dict] = []
     real = httpx.AsyncClient
 
@@ -199,9 +199,11 @@ async def test_get_data_sends_no_params_without_a_grant_and_the_grant_with_one(m
     grant = _grant()
     await protocol_v1.get_data("http://env")
     await protocol_v1.get_data("http://env", write_namespace=grant)
+    await protocol_v1.get_data("http://env", paths=["Documents"])
 
     assert sent[0]["params"] == {}
     assert WriteNamespaceGrant.model_validate(sent[1]["params"]["write_namespace"]) == grant
+    assert sent[2]["params"] == {"paths": ["Documents"]}
 
 
 @pytest.mark.asyncio

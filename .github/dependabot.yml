@@ -43,11 +43,15 @@ updates:
       - "/src/agent_env/agents/agents/claude-code"
       - "/src/agent_env/agents/agents/codex"
       - "/src/agent_env/agents/agents/gemini"
+      - "/src/agent_env/agents/agents/hermes"
+      - "/src/agent_env/agents/agents/letta-code"
       - "/src/agent_env/agents/agents/opencode"
       - "/src/agent_env/agents/agents/openhands"
       - "/src/agent_env/agents/agents/pi"
       - "/src/agent_env/agents/agents/proxy"
+      - "/src/agent_env/agents/agents/pydantic-ai"
       - "/src/agent_env/examples/mail-mcp/envs/mail"
+      - "/src/agent_env/computers/artifacts/ubuntu-24.04"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5

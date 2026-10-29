@@ -26,10 +26,11 @@ _DIGEST = "sha256:" + "b" * 64
 
 
 def test_every_shipped_dockerfile_is_published_once_under_a_name_of_its_own():
-    """The infra envs', every shipped agent's and the env `a2a-agent validate` deploys."""
+    """The infra envs', every shipped agent's, the env `a2a-agent validate` deploys and every shipped base computer's."""
     shipped = [dockerfile for dockerfiles in bootstrap._DOCKERFILES.values() for dockerfile in dockerfiles]
     shipped += published_images._AGENTS.glob("*/Dockerfile")
     shipped.append(published_images._EXAMPLES / "mail-mcp" / "envs" / "mail" / "Dockerfile")
+    shipped += published_images._COMPUTERS.glob("*/Dockerfile")
 
     assert sorted(image.dockerfile for image in bootstrap.PUBLISHED_IMAGES) == sorted(shipped)
     assert len({image.name for image in bootstrap.PUBLISHED_IMAGES}) == len(bootstrap.PUBLISHED_IMAGES)

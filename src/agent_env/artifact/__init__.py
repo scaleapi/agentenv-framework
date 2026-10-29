@@ -3,6 +3,7 @@
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.artifacts.cli import CliArtifact
+from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -23,6 +24,7 @@ __all__ = [
     "Artifact",
     "ArtifactRef",
     "CliArtifact",
+    "ComputerArtifact",
     "DockerImageArtifact",
     "FileArtifact",
     "FileArtifactUniverse",

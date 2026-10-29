@@ -1,11 +1,19 @@
-"""Aliases installed bundles give their agents: the aliases.toml format, and the table of every installed bundle's."""
+"""Aliases installed bundles give their agents, envs and artifacts: the aliases.toml format, and the table of every
+installed bundle's."""
 
 import os
 
 import pytest
 
 from agent_env.bundle import BundleError, parse_bundle
-from agent_env.plugins._bundles import ALIASES_FILE, ENV_ALIASES, InstalledBundle, installed_aliases, read_aliases
+from agent_env.plugins._bundles import (
+    ALIASES_FILE,
+    ARTIFACT_ALIASES,
+    ENV_ALIASES,
+    InstalledBundle,
+    installed_aliases,
+    read_aliases,
+)
 from tst.unit.bundle._support import layout
 
 
@@ -22,11 +30,13 @@ def _read(tmp_path, text):
     return read_aliases(tmp_path / ALIASES_FILE)
 
 
-def test_an_aliases_file_gives_each_agent_and_env_its_aliases(tmp_path):
-    text = '[agents]\nclaude-code = ["claude-code", "claude"]\npi = ["pi"]\n[envs]\nmail = ["mail-mcp"]\n'
+def test_an_aliases_file_gives_each_agent_env_and_artifact_its_aliases(tmp_path):
+    text = ('[agents]\nclaude-code = ["claude-code", "claude"]\npi = ["pi"]\n[envs]\nmail = ["mail-mcp"]\n'
+            '[artifacts]\n"ubuntu-24.04" = ["ubuntu-24.04", "ubuntu"]\n')
 
     assert _read(tmp_path, text) == (
-        {"agents": {"claude-code": ("claude-code", "claude"), "pi": ("pi",)}, "envs": {"mail": ("mail-mcp",)}}, [])
+        {"agents": {"claude-code": ("claude-code", "claude"), "pi": ("pi",)}, "envs": {"mail": ("mail-mcp",)},
+         "artifacts": {"ubuntu-24.04": ("ubuntu-24.04", "ubuntu")}}, [])
 
 
 def test_a_bundle_without_an_aliases_file_gives_none(tmp_path):
@@ -44,7 +54,7 @@ def test_a_bundle_without_an_aliases_file_gives_none(tmp_path):
     ('[agents]\nx = []\n', "agents.x must be a list of aliases, not []"),
     ('[agents]\nx = ["a"]\ny = ["a"]\n', "agents.y: 'a' is listed for agents.x too; an alias names one agent"),
     ('[agents]\nx = ["a", "a"]\n', "agents.x: 'a' is listed twice"),
-    ('[skills]\nx = ["a"]\n', "[skills] isn't a table it takes; it takes [agents] and [envs]"),
+    ('[skills]\nx = ["a"]\n', "[skills] isn't a table it takes; it takes [agents], [envs] and [artifacts]"),
     ('[envs]\nx = ["a", "a"]\n', "envs.x: 'a' is listed twice; an alias names one env"),
     ('agents = 3\n', "[agents] must be a table"),
     ('[agents\n', "isn't valid TOML"),
@@ -89,14 +99,17 @@ def test_agent_envs_own_aliases_are_refused_to_any_other_bundle(tmp_path):
         "can't give it",)}
 
 
-def test_an_installed_bundle_gives_its_envs_aliases_of_their_own(tmp_path):
-    """An env alias and an agent alias are kept apart, each where a reference to its kind looks."""
-    mail = _bundle(tmp_path, "mail-mcp", aliases='[envs]\nmail = ["mail-mcp"]\n[agents]\nhelper = ["mail-mcp"]\n')
+def test_an_installed_bundle_gives_its_envs_and_artifacts_aliases_of_their_own(tmp_path):
+    """An env, an agent and an artifact alias are kept apart, each where a reference to its kind looks."""
+    mail = _bundle(tmp_path, "mail-mcp", aliases='[envs]\nmail = ["mail-mcp"]\n[agents]\nhelper = ["mail-mcp"]\n'
+                                                 '[artifacts]\ninbox = ["mail-mcp"]\n')
 
     envs, agents = installed_aliases((mail,), ENV_ALIASES), installed_aliases((mail,))
+    artifacts = installed_aliases((mail,), ARTIFACT_ALIASES)
 
     assert envs.target("mail-mcp").target_id == "@local/agentenv-framework/mail-mcp/mail"
     assert agents.target("mail-mcp").target_id == "@local/agentenv-framework/mail-mcp/helper"
+    assert artifacts.target("mail-mcp").target_id == "@local/agentenv-framework/mail-mcp/inbox"
     assert envs.hint("mail_mcp") == "; did you mean the alias 'mail-mcp'?"
 
 
@@ -153,7 +166,8 @@ def test_a_bundle_gives_its_agents_the_aliases_its_aliases_file_lists(tmp_path):
     ('[agents]\nsolver = ["helper"]\n', "aliases.toml: agents.solver: 'helper' is the agent 'helper''s name"),
     ('[agents]\nsolver = ["Solver"]\n', "aliases.toml: agents.solver: 'Solver' isn't an alias"),
     ('[envs]\nsolver = ["x"]\n', "aliases.toml: envs.solver: this bundle has no env 'solver'"),
-], ids=["no-such-agent", "another-agents-name", "syntax", "an-agent-as-an-env"])
+    ('[artifacts]\nsolver = ["x"]\n', "aliases.toml: artifacts.solver: this bundle has no artifact 'solver'"),
+], ids=["no-such-agent", "another-agents-name", "syntax", "an-agent-as-an-env", "an-agent-as-an-artifact"])
 def test_an_aliases_file_that_doesnt_fit_the_bundles_agents_is_refused(tmp_path, aliases, problem):
     root = layout(tmp_path / "kit", {**_AGENTS, ALIASES_FILE: aliases})
 

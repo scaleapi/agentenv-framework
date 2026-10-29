@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,10 +19,9 @@ from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
-from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
+from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, environment_name_problem
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.utils.card_naming import card_names_in_files
-
 from agent_env.utils.paths import os_reason
 
 from ._fs import relative, show, with_article
@@ -49,6 +48,8 @@ class AuthoringContext:
 
     bundle: Bundle
     entry: BundleEntry
+    #: Called just before writing the entry builds an image with this machine's Docker, which a run says it does.
+    on_build: Callable[[], None] | None = None
 
     @property
     def id(self) -> str:
@@ -172,6 +173,8 @@ class AuthoringContext:
                 problems.append(self.config_problem(problem))
             elif name is not None:
                 fields["environment_name"] = name
+                if name_problem := environment_name_problem(name):
+                    problems.append(self.config_problem(name_problem))
             if (name in GATEWAY_SERVICE_NAMES and provider is not None
                     and issubclass(provider, EnvironmentGatewayProvider)):
                 problems.append(self.config_problem(

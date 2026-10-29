@@ -203,6 +203,7 @@ def _build_config(
     role: str | None,
     effort: str | None = None,
     environ: Mapping[str, str] = os.environ,
+    instructions: list[str] | None = None,
 ) -> dict:
     """Assemble the inline OpenCode config passed via OPENCODE_CONFIG_CONTENT.
 
@@ -254,6 +255,8 @@ def _build_config(
         "permission": {"*": "allow", "question": "deny"},
         "autoupdate": False,
     }
+    if instructions:
+        config["instructions"] = list(instructions)
 
     if mcp_servers:
         mcp: dict[str, dict] = {}
@@ -265,6 +268,14 @@ def _build_config(
         config["mcp"] = mcp
 
     return config
+
+
+def _system_prompt_file(context_id: str, system_prompt: str) -> Path:
+    """The conversation's system prompt as the file its config's ``instructions`` name, written for this turn."""
+    path = context_data_dir(context_id) / "system-prompt.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(system_prompt)
+    return path
 
 
 _PROCESS_CLEANUP_TIMEOUT_S = 5
@@ -362,11 +373,10 @@ async def run_opencode(
     if attribution:
         _record_attribution(project_id, task_id)
 
-    # OpenCode's `run` has no system-prompt flag and its config `instructions`
-    # field takes file paths (not inline text), so we prepend the caller's
-    # system prompt to the message. The model follows it either way.
-    if system_prompt:
-        prompt = f"{system_prompt}\n\n{prompt}"
+    # OpenCode's `run` has no system-prompt flag, and its config `instructions` takes files, which reach the model as
+    # system instructions. Prepended to the message instead, a system prompt reads as the user's own words, and a
+    # model can take an instruction there for a prompt injection and refuse it.
+    instructions = [str(_system_prompt_file(context_id, system_prompt))] if system_prompt else None
     if output_format is not None:
         schema = validate_output_format(output_format)
         prompt += (
@@ -374,7 +384,8 @@ async def run_opencode(
             + json.dumps(schema, separators=(",", ":"))
         )
 
-    config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort)
+    config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
+                           instructions=instructions)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`
     # does NOT replay history to the model; `-s <session_id>` does. First turn

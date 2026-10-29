@@ -84,11 +84,30 @@ def build(image: DockerImageArtifact, before: Callable[[], None] | None = None) 
             before()
         with tempfile.TemporaryDirectory(prefix="agent-env-build-") as work:
             context = Path(work)
-            data = get_config().get_object_store_at(image.build_context_object_url).get(image.build_context_object_url)
-            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-                archive.extractall(context, filter="data")
+            _extract_context(image, context)
             logger.info(f"Building {image.image_name} from its build context on this machine...")
             _build(context, image.dockerfile_path, image.image_name, sources(image))
+
+
+def platform_tag(image: DockerImageArtifact, platform: str) -> str:
+    """The tag ``build_for`` holds ``image`` built for ``platform`` under: its name with the platform's arch after it."""
+    return f"{image.image_name}-{normalize_platform(platform).rsplit('/', 1)[-1]}"
+
+
+def build_for(image: DockerImageArtifact, platform: str) -> str:
+    """Have this machine's Docker hold ``image`` built for ``platform`` under ``platform_tag``, from its stored build
+    context unless one built from the same sources is held, natively or through Docker's emulation; the tag. Raises
+    DockerBuildError."""
+    tag, built_from = platform_tag(image, platform), f"{sources(image)}@{normalize_platform(platform)}"
+    with holding_locks([f"image-build:{built_from}"]):
+        if not holds(tag, built_from):
+            with tempfile.TemporaryDirectory(prefix="agent-env-build-") as work:
+                context = Path(work)
+                _extract_context(image, context)
+                logger.info(f"Building {tag} for {platform} from its build context on this machine...")
+                build_image(context / image.dockerfile_path, context, tag, platform=platform,
+                            labels={_SOURCES_LABEL: built_from})
+    return tag
 
 
 def build_staged(context: Path, dockerfile: str, image_name: str, image_sources: str,
@@ -101,6 +120,12 @@ def build_staged(context: Path, dockerfile: str, image_name: str, image_sources:
         if before is not None:
             before()
         _build(context, dockerfile, image_name, image_sources)
+
+
+def _extract_context(image: DockerImageArtifact, context: Path) -> None:
+    data = get_config().get_object_store_at(image.build_context_object_url).get(image.build_context_object_url)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        archive.extractall(context, filter="data")
 
 
 def _build(context: Path, dockerfile: str, image_name: str, image_sources: str) -> None:

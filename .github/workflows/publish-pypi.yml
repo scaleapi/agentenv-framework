@@ -384,10 +384,35 @@ jobs:
         run: uv run --no-sync python .github/scripts/infra_images.py public
 
   # A release's wheel names only images the registry serves under their tags.
+  # The explorer's built UI, which the framework job ships in the wheel: built here, so the job publishing to PyPI runs
+  # no npm.
+  explorer-ui:
+    needs: main-ci
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: src/agent_env/explorer/ui
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run build:static
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: explorer-ui
+          path: src/agent_env/explorer/ui/out
+          if-no-files-found: error
+
   framework:
-    needs: [protocol, infra-plan, infra-record]
+    needs: [protocol, infra-plan, infra-record, explorer-ui]
     if: >-
-      !cancelled() && needs.protocol.result == 'success'
+      !cancelled() && needs.protocol.result == 'success' && needs.explorer-ui.result == 'success'
       && (needs.infra-plan.result == 'skipped'
           || (needs.infra-plan.result == 'success' && needs.infra-record.result == 'success'))
     runs-on: ubuntu-latest
@@ -419,16 +444,20 @@ jobs:
           echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           python3 .github/scripts/infra_build.py verify-record src/agent_env/env/published_images.json
           echo "record=$RECORD" >> "$GITHUB_OUTPUT"
+      - name: Put the explorer's UI in the wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: explorer-ui
+          path: src/agent_env/explorer/static
       - name: Build agentenv-framework, pinned to this release's agentenv-framework-protocol
         run: |
-          protocol=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/agentenv-protocol/pyproject.toml)
-          # Only the quoted requirement: the directory name also appears in the sdist include list and the uv
-          # workspace members, and the bare name keys [tool.uv.sources]; none of those may be rewritten.
-          sed -i "s/\"agentenv-framework-protocol[^\"]*\"/\"agentenv-framework-protocol==${protocol}\"/" pyproject.toml
-          grep -q "\"agentenv-framework-protocol==${protocol}\"" pyproject.toml
+          # The framework's requirement on the protocol keeps its extras, which core imports from.
+          python3 .github/scripts/shipped_bundles.py pin-pyproject
           # Each shipped bundle's images install the protocol this release ships with, keeping its extras.
           python3 .github/scripts/shipped_bundles.py pin
           uv build --no-sources --out-dir dist
+          unzip -l dist/agentenv_framework-*.whl | grep -q agent_env/explorer/static/index.html \
+            || { echo "::error::the wheel has no explorer UI"; exit 1; }
       - name: Check its metadata renders
         run: uvx --index-url https://pypi.org/simple twine check --strict dist/*
       - name: Publish agentenv-framework

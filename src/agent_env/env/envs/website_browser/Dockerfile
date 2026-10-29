@@ -1,9 +1,10 @@
 FROM public.ecr.aws/docker/library/node:22-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4
 
 # Chromium runtime dependencies for headless mode, and python3 for the socket probe the gateway's compose
-# health-checks every MCP server with.
+# health-checks every MCP server with and for the recorder.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-minimal \
+    python3 \
+    python3-venv \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -38,7 +39,12 @@ RUN npm init -y && \
     npm install @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && \
     npx playwright install chromium
 
-COPY entrypoint.sh /app/entrypoint.sh
+# The recorder (recorder.py): computer-recording/v1 of the browser's page, idle until a recording starts.
+COPY recorder-requirements.txt /app/
+RUN python3 -m venv /opt/recorder && \
+    /opt/recorder/bin/pip install --no-cache-dir -r /app/recorder-requirements.txt
+
+COPY recorder.py entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
 CMD ["/app/entrypoint.sh"]

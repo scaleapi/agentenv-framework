@@ -37,6 +37,11 @@ INTAKE_EXTENSION_URI = "urn:agentenv:intake/v1"
 # it, answering with the part `uploaded_file_part` builds. A server that does not advertise it
 # is never sent one.
 DATA_OBJECTS_EXTENSION_URI = "urn:agentenv:data-objects/v1"
+
+# `get {name}` answers with the env's skill for agents, `{name, description, skill_md}` as
+# skill-config/v1 takes one: a SKILL.md an agent reads before it uses the env, written under the
+# name the caller gives. A server serves it through an `@agent_skill` handler.
+SKILL_EXTENSION_URI = "urn:agentenv:skill/v1"
 _RELATIVE_PATH = TypeAdapter(RelativePath)
 
 

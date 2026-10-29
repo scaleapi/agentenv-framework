@@ -28,7 +28,7 @@ pytestmark = pytest.mark.usefixtures("sigint_handled", "local_stores")
 
 
 class _Task:
-    id, version, steps = "t", 1, []
+    id, version, steps, requires = "t", 1, [], None
 
     def __init__(self, nap=0.0, failed_steps=None):
         self.nap, self.failed_steps, self.contexts, self.calls = nap, failed_steps, [], []

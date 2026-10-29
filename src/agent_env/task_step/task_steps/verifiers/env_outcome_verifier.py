@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 class EnvOutcomeVerifierTaskStep(TaskStep):
-    """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``."""
+    """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``, and an
+    ``env_url`` parameter the env's address, which the protocol client takes as it is."""
 
     type: ClassVar[str] = "env_outcome_verifier"
     entity_refs = (
@@ -119,11 +120,11 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             spec.loader.exec_module(module)
 
             logger.info(f"Running verify() from artifact '{self.file_artifact_id}' against {deployed.mcp_url}")
-            if "run" in inspect.signature(module.verify).parameters:
-                run = await load_run_context(context, self._graded_prompt(context))
-                results = await module.verify(deployed.mcp_url, run=run)
-            else:
-                results = await module.verify(deployed.mcp_url)
+            parameters = inspect.signature(module.verify).parameters
+            keywords = {"env_url": deployed.environment_url} if "env_url" in parameters else {}
+            if "run" in parameters:
+                keywords["run"] = await load_run_context(context, self._graded_prompt(context))
+            results = await module.verify(deployed.mcp_url, **keywords)
 
             score = aggregate_score(results, self.score_aggregator)
             if "verifications" not in context.metadata:
