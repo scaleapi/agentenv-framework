@@ -249,10 +249,41 @@ call's arguments as keywords, untouched, and returns that server's `CallToolResu
 the caller as it is. An `output_schema` is listed as the tool's `outputSchema` and isn't checked
 here, so `call` answers every result, its errors too, in a shape that schema admits. They're listed
 on the card beside the `@tool` methods, chosen by `served_tools` and under tool access like them;
-one named like another tool is refused. In the same way `forwarded_resources()` returns
-`ForwardedResource(uri, name, description, mime_type, read)` entries, MCP resources whose `read`
-returns their text. Both need mcp's FastMCP. The cua-driver driver serves cua-driver's own tools
-and skill resources this way, and its instructions with `@server_instructions`.
+one named like another tool is refused. They need mcp's FastMCP. The cua-driver driver serves
+cua-driver's own tools this way.
+
+### Resources
+
+Mark a method that serves MCP resources with `@resource`; an env may mark several, and each read
+calls the method, which returns text or bytes. The URI decides what's served:
+
+```python
+@environment_card(name="orders")
+class Orders(AgentEnvEnvironment):
+    @resource("docs://orders/refund-policy", mime_type="text/markdown")
+    def refund_policy(self) -> str:
+        """When a refund is allowed and who approves it."""
+        return POLICY.read_text()
+
+    @resource("orders://{order_id}")
+    async def order(self, order_id: str) -> str:
+        return json.dumps(await self.db.order(order_id))
+
+    @resource("skill://upstream/{file}", listed=lambda env: UPSTREAM["resources"])
+    async def upstream_file(self, file: str) -> str:
+        return await read_upstream(f"skill://upstream/{file}")
+```
+
+- A fixed URI is one resource. Its name defaults to the method's name and its description to the
+  docstring.
+- A template such as `orders://{order_id}` is an MCP resource template; the method takes its parts.
+- A template with `listed` serves the resources `listed` returns, each as MCP lists one (`uri`,
+  `name`, `description`, `mimeType`), and only those. Each is read through the method with its
+  URI's parts. That's how an env serves another server's resources from a list: the cua-driver
+  driver serves cua-driver's skill files this way.
+
+A URI served twice, a listed URI that doesn't match its template, and a method that doesn't take
+exactly the template's parts are refused. Resources need mcp's FastMCP.
 
 ### Instructions at connect
 

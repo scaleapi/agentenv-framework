@@ -28,7 +28,7 @@ from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
 from pydantic import AnyUrl
 
-from agentenv_protocol import EnvironmentTool, ForwardedResource, ForwardedTool, ToolContext, server_instructions
+from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, resource, server_instructions
 from agentenv_protocol.computer import (
     PRINTABLE_KEYS,
     ComputerDriverEnvironment,
@@ -95,10 +95,12 @@ class CuaDriver(ComputerDriverEnvironment):
                               functools.partial(self._forward, t["name"]), t["annotations"] or None, t.get("outputSchema"))
                 for t in _manifest()["tools"]]
 
-    def forwarded_resources(self) -> list[ForwardedResource]:
-        return [ForwardedResource(r["uri"], r["name"], r.get("description"), r["mimeType"],
-                                  functools.partial(self._resource, r["uri"]))
-                for r in _manifest()["resources"]]
+    @resource("skill://cua-driver/{file}", listed=lambda env: _manifest()["resources"])
+    async def skill_file(self, file: str) -> str:
+        """One of cua-driver's skill files as its own MCP server serves it, all of them read on first use."""
+        if self._texts is None:
+            self._texts = await _read_resources([r["uri"] for r in _manifest()["resources"]])
+        return self._texts[f"skill://cua-driver/{file}"]
 
     @server_instructions
     def cua_driver_instructions(self) -> str:
@@ -162,12 +164,6 @@ class CuaDriver(ComputerDriverEnvironment):
         if not reply.get("ok"):
             return _refused(reply.get("error") or "daemon reported failure", reply.get("exit_code") or 1)
         return CallToolResult.model_validate(reply["result"])
-
-    async def _resource(self, uri: str) -> str:
-        """One of cua-driver's skill resources as its own MCP server serves it, all of them read on first use."""
-        if self._texts is None:
-            self._texts = await _read_resources([r["uri"] for r in _manifest()["resources"]])
-        return self._texts[uri]
 
     async def _send(self, name: str, **args: Any) -> None:
         await self._call(name, DeliveryFailed, scope="desktop", **args)

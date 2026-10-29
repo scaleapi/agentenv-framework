@@ -14,7 +14,7 @@ import sys
 import types
 import uuid
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Awaitable, Callable, ClassVar, Literal, NamedTuple, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Union, get_args, get_origin, get_type_hints
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
@@ -40,6 +40,7 @@ _HIDDEN_BY_DEFAULT_ATTR = "_aee_hidden_by_default"
 _TOOL_OPTIONS_ATTR = "_aee_tool_options"
 _FORWARDED_ATTR = "_aee_forwarded"
 _INSTRUCTIONS_ATTR = "_aee_instructions"
+_RESOURCE_ATTR = "_aee_resource"
 _CARD_CONFIG_ATTR = "_aee_card_config"
 #: Set on the tool dispatch installed by ``_bind_tool_calls``; a guard downstream checks it at boot.
 _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
@@ -128,6 +129,28 @@ def extension(uri: str, *, op: str | None = None, description: str | None = None
         return fn
 
     return deco
+
+
+def resource(uri: str, *, name: str | None = None, description: str | None = None, mime_type: str = "text/plain",
+             listed: Callable[[Any], list[dict]] | None = None) -> Callable:
+    """Mark a method that serves MCP resources, returning their text or bytes; an env may mark several, and each read
+    calls the method. A fixed ``uri`` is one resource. A template such as ``orders://{order_id}`` is an MCP resource
+    template, the method taking its parts, unless ``listed`` is given: it takes the env and returns the resources to
+    list, each as MCP lists one (``uri``, ``name``, ``description``, ``mimeType``), each read through the method with
+    its URI's parts. ``name`` defaults to the method's name and ``description`` to its docstring."""
+    parts = set(re.findall(r"{(\w+)}", uri))
+
+    def mark(fn: Callable) -> Callable:
+        params = set(list(inspect.signature(fn).parameters)[1:])
+        if params != parts:
+            raise ValueError(f"@resource {uri!r} needs a method taking {sorted(parts) or 'nothing'} besides self, "
+                             f"not {sorted(params)}")
+        if listed is not None and not parts:
+            raise ValueError(f"@resource {uri!r} lists resources only from a template URI")
+        setattr(fn, _RESOURCE_ATTR, _ResourceMarker(uri, name, description, mime_type, listed))
+        return fn
+
+    return mark
 
 
 def server_instructions(fn: Callable) -> Callable:
@@ -228,15 +251,23 @@ class ForwardedTool(NamedTuple):
     output_schema: dict | None = None
 
 
-class ForwardedResource(NamedTuple):
-    """An MCP resource an environment serves on another server's behalf, as that server lists it; ``read`` returns its
-    text."""
+class _ResourceMarker(NamedTuple):
+    uri: str
+    name: str | None
+    description: str | None
+    mime_type: str
+    listed: Callable[[Any], list[dict]] | None
+
+
+class _ServedResource(NamedTuple):
+    """One resource, or a resource template when ``template``, as it is registered: ``read`` returns its content."""
 
     uri: str
     name: str
     description: str | None
     mime_type: str
-    read: Callable[[], Awaitable[str]]
+    read: Callable
+    template: bool
 
 
 class _ToolOptions(NamedTuple):
@@ -279,10 +310,9 @@ class AgentEnvApplication(ABC):
         tool_handlers = _served_tools(handler, _with_forwarded(_discover_tools(handler, environment_card.name), handler))
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
-        hook = getattr(handler, "forwarded_resources", None)
-        self._resources: list[ForwardedResource] = hook() if hook is not None else []
+        self._resources = _discover_resources(handler)
         if self._resources and not self.supports_tools:
-            raise ValueError(f"forwarded resources require a FastMCP-backed application; {type(self).__name__} cannot "
+            raise ValueError(f"@resource methods require a FastMCP-backed application; {type(self).__name__} cannot "
                              "serve MCP resources")
         environment_card = _merge_tools(environment_card, tool_handlers)
         self._tool_access = (
@@ -331,7 +361,7 @@ class AgentEnvApplication(ABC):
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
         raise NotImplementedError(f"{type(self).__name__} does not serve MCP tools")
 
-    def _register_resource(self, app: Any, resource: ForwardedResource) -> None:
+    def _register_resource(self, app: Any, resource: _ServedResource) -> None:
         raise NotImplementedError(f"{type(self).__name__} does not serve MCP resources")
 
     def _check_tool_binding(self, app: Any) -> None:
@@ -415,11 +445,17 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             is_async=True,
             annotations=_mcp_tool_annotations(forwarded.annotations) if forwarded.annotations is not None else None)
 
-    def _register_resource(self, app: Any, resource: ForwardedResource) -> None:
+    def _register_resource(self, app: Any, resource: _ServedResource) -> None:
+        """A resource as it is, its description absent when it has none, or a template through FastMCP's own
+        decorator."""
         from mcp.server.fastmcp.resources import FunctionResource
 
         if self._binding != "dispatch":
-            raise RuntimeError(f"the forwarded resource {resource.uri!r} needs mcp's FastMCP")
+            raise RuntimeError(f"the resource {resource.uri!r} needs mcp's FastMCP")
+        if resource.template:
+            app.resource(resource.uri, name=resource.name, description=resource.description,
+                         mime_type=resource.mime_type)(resource.read)
+            return
         app.add_resource(FunctionResource(uri=resource.uri, name=resource.name, description=resource.description,
                                           mime_type=resource.mime_type, fn=resource.read))
 
@@ -642,10 +678,6 @@ class AgentEnvEnvironment:
     def forwarded_tools(self) -> list[ForwardedTool]:
         """Tools served on another server's behalf, each with its own schema, beside the ``@tool`` methods: listed on
         the card, chosen by ``served_tools`` and under tool access like them. Needs mcp's FastMCP."""
-        return []
-
-    def forwarded_resources(self) -> list[ForwardedResource]:
-        """MCP resources served on another server's behalf. Needs mcp's FastMCP."""
         return []
 
     def on_tool_call(self, context: ToolContext) -> Any:
@@ -1014,6 +1046,39 @@ def _marked_members(handler: Any, marker_attr: str):
         marker = getattr(attr, marker_attr, None)
         if marker is not None:
             yield attr, marker
+
+
+def _discover_resources(handler: Any) -> list[_ServedResource]:
+    """The resources and resource templates the handler's @resource methods serve; a URI served twice is refused."""
+    served: list[_ServedResource] = []
+    for method, marker in _marked_members(handler, _RESOURCE_ATTR):
+        name, description = marker.name or method.__name__, marker.description or inspect.getdoc(method)
+        if marker.listed is None:
+            served.append(_ServedResource(marker.uri, name, description, marker.mime_type, method, "{" in marker.uri))
+            continue
+        for entry in marker.listed(handler):
+            parts = _template_parts(marker.uri, entry["uri"])
+            if parts is None:
+                raise ValueError(f"the listed resource {entry['uri']!r} doesn't match {marker.uri!r}")
+            served.append(_ServedResource(entry["uri"], entry["name"], entry.get("description"),
+                                          entry.get("mimeType") or marker.mime_type, _with_parts(method, parts), False))
+    uris = [resource.uri for resource in served]
+    if duplicated := sorted({uri for uri in uris if uris.count(uri) > 1}):
+        raise ValueError(f"resources served twice: {duplicated}")
+    return served
+
+
+def _template_parts(template: str, uri: str) -> dict[str, str] | None:
+    """The parts of ``uri`` that ``template``'s ``{name}`` slots match, each within one path segment."""
+    match = re.fullmatch(re.sub(r"\\\{(\w+)\\\}", r"(?P<\1>[^/]+)", re.escape(template)), uri)
+    return match.groupdict() if match else None
+
+
+def _with_parts(method: Callable, parts: dict[str, str]) -> Callable:
+    def read() -> Any:
+        return method(**parts)
+
+    return read
 
 
 def _instructions(handler: Any) -> str | None:
