@@ -183,8 +183,8 @@ _UNKNOWN_ENV = [{"id": "env", "type": "deploy_env", "env_id": "acme-env"},
 @pytest.mark.parametrize("metadata", [
     {"start_step": 3},
     {"start_step": 1, "user_overrides": {"step_params": {"load": {"artifact_id": "absent"}}}},
-], ids=["resumed-past-them", "overridden"])
-def test_what_only_the_steps_a_run_skips_or_overrides_read_is_left_alone(stores, monkeypatch, metadata):
+], ids=["resumed-past-them", "replaced"])
+def test_what_only_the_steps_a_run_skips_or_its_step_params_replace_read_is_left_alone(stores, monkeypatch, metadata):
     store = get_config().get_document_store()
     store.insert(ENVS_COLLECTION, {"id": "acme-env", "type": "acme_env_task_run_test", "version": 1})
     store.insert("artifacts", {"id": "acme-data", "type": "acme_artifact_task_run_test", "version": 1})
@@ -198,3 +198,18 @@ def test_what_only_the_steps_a_run_skips_or_overrides_read_is_left_alone(stores,
     assert env == "task t v1: step 'env': env_id 'acme-env': Unknown env type: acme_env_task_run_test"
     assert load.startswith("task t v1: step 'load': artifacts[0].id 'acme-data': Unknown artifact type "
                            "'acme_artifact_task_run_test'")
+
+
+@pytest.mark.parametrize("params", [{"load": {"destination_path": "/tmp/data"}}, {"env": {"memory_mb": 4096}}],
+                         ids=["load-elsewhere", "other-params"])
+def test_step_params_that_leave_what_a_step_references_as_stored_check_it(stores, monkeypatch, params):
+    store = get_config().get_document_store()
+    store.insert(ENVS_COLLECTION, {"id": "acme-env", "type": "acme_env_task_run_test", "version": 1})
+    store.insert("artifacts", {"id": "acme-data", "type": "acme_artifact_task_run_test", "version": 1})
+    _stored(_UNKNOWN_ENV)
+    monkeypatch.setattr(_checks, "stores_are_local", lambda: False)
+
+    with pytest.raises(click.ClickException) as caught:
+        _checks.runnable_task("t", None, {"user_overrides": {"step_params": params}}, say=print)
+
+    assert [line.split(":")[1].strip() for line in caught.value.message.splitlines()] == ["step 'env'", "step 'load'"]

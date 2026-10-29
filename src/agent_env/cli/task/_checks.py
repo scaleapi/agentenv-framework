@@ -45,8 +45,7 @@ def runnable_task(task_id: str, version: int | None, metadata: Mapping[str, Any]
     steps = task.steps[metadata.get("start_step") or 0:]  # the steps the run runs
     params = overrides.get("step_params") or {}
     problems, unmet = unmet_problems(task.requires or (), owner)
-    # A step the run gives step_params reads them its own way, in place of what it names.
-    problems += [f"{owner}: {problem}" for problem in _unknown_types([step for step in steps if step.id not in params])]
+    problems += [f"{owner}: {problem}" for problem in _unknown_types(steps, params)]
     if unmet:
         raise UnmetRequirements(problems, unmet)
     if problems:
@@ -64,14 +63,20 @@ def _with_state(steps: list[TaskStep], overrides: Mapping[str, Any]) -> list[Tas
             else step for step in steps]
 
 
-def _unknown_types(steps: list[TaskStep]) -> list[str]:
-    """Each env and artifact one of ``steps`` reads, as the store holds it, whose type nothing here registers. One the
-    store doesn't hold, or whose id the run fills in, is left to its step."""
+def _unknown_types(steps: list[TaskStep], params: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """Each env and artifact one of ``steps`` reads, as the store holds it, whose type nothing here registers. A step's
+    ``params`` (the run's step_params) naming one of its fields that references a kind replace what it reads of that
+    kind, so those references are left to it, as is one the store doesn't hold or whose id the run fills in."""
     found = []
     for step in steps:
-        for site in ref_sites(type(step).entity_refs or (), step.to_dict()):
+        refs = type(step).entity_refs or ()
+        given = set(params.get(step.id) or {})
+        replaced = {ref.kind for ref in refs
+                    if {ref.path.split(".")[0].removesuffix("[]"), ref.version_field} & given}
+        for site in ref_sites(refs, step.to_dict()):
             get = _GETTERS.get(site.ref.kind)
-            if site.ref.role is RefRole.OUTPUT or get is None or not isinstance(site.value, str):
+            if site.ref.role is RefRole.OUTPUT or site.ref.kind in replaced or get is None \
+                    or not isinstance(site.value, str):
                 continue
             try:
                 get(site.value, site.version if isinstance(site.version, int) else None)
