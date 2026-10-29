@@ -55,7 +55,7 @@ def _make_engine(monkeypatch, responses: dict, known_tools=None, delays: dict | 
     gw = _FakeGateway(responses, known_tools)
     delays = delays or {}
 
-    async def fake_internal_call(self, tool_name, arguments):
+    async def fake_internal_call(self, tool_name, arguments, role=None):
         gw.calls.append((tool_name, dict(arguments) if isinstance(arguments, dict) else arguments))
         if tool_name in delays:
             await asyncio.sleep(delays[tool_name])
@@ -501,7 +501,7 @@ async def test_nl_action_verify_can_template_the_provoking_call(monkeypatch):
     engine.register({"triggers": [spec],
                      "executor": {"a2a_url": "http://executor.local", "role": "executor"}})
 
-    async def fake_executor(self, instruction, context_id):
+    async def fake_executor(self, executor, instruction, context_id):
         return "done"
     monkeypatch.setattr(TriggerEngine, "_call_executor", fake_executor)
 

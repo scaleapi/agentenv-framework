@@ -48,6 +48,11 @@ class ServiceDBEnv(Env):
         self.db_web_docker_image_artifact = db_web_docker_image_artifact
         self.db_mcp_docker_image_artifact = db_mcp_docker_image_artifact
 
+    @property
+    def images(self) -> list[DockerImageArtifact]:
+        """Its three images: the database, db-web and db-mcp."""
+        return [self.db_docker_image_artifact, self.db_web_docker_image_artifact, self.db_mcp_docker_image_artifact]
+
     def to_config(self) -> ServiceDBConfig:
         return ServiceDBConfig(
             db_image=self.db_docker_image_artifact.image_name,

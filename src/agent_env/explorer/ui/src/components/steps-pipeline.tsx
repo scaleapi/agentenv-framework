@@ -9,7 +9,6 @@ import {
   ReactFlowProvider,
 } from '@xyflow/react';
 import dagre from '@dagrejs/dagre';
-import { STEP_COLORS } from './task-steps-shared';
 import {
   CopyButton,
   ConfigDetail,
@@ -18,6 +17,21 @@ import {
   FlowCanvas,
   truncate,
 } from './flow-shared';
+
+const STEP_COLORS: Record<string, string> = {
+  deploy_env: '#3b82f6',
+  load_artifact: '#8b5cf6',
+  deploy_agent: '#06b6d4',
+  prompt_agent: '#f59e0b',
+  collect_artifacts: '#14b8a6',
+  rubrics_verifier: '#10b981',
+  env_outcome_verifier: '#10b981',
+  run_code: '#84cc16',
+  publish: '#6366f1',
+  register_env_triggers: '#0d9488',
+  register_agent_triggers: '#c026d3',
+  sync_env_clock: '#0891b2',
+};
 
 const DEFAULT_COLOR = '#6b7280';
 

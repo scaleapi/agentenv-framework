@@ -9,6 +9,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -22,22 +23,30 @@ pytestmark = [pytest.mark.int_test_slow]
 
 from agent_env.artifact import Artifact, CliArtifact, DockerImageArtifact, FileArtifact, FileArtifactUniverse, EnvironmentArtifact, EnvironmentUniverseArtifact
 from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
-from agentenv_protocol import DataPart, FilePart, client as protocol_v1
+from agentenv_protocol import DataPart, FilePart, ToolSession, client as protocol_v1
 from agent_env.env.envs import WebsiteEnv
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, GatewayMode, TOOL_DISABLE_ACTION, TOOL_ENABLE_ACTION
+from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, TRIGGER_WEBSITE
 from agent_env.env.gateway.get_time import (
     GET_TIME_TOOL_DESCRIPTION as GET_TIME_DESC,
     GET_TIME_TOOL_NAME as GET_TIME,
+    _SCHEMA as GET_TIME_SCHEMA,
 )
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.website_browser import (
-    PLAYWRIGHT_MCP_VERSION,
     WEBSITE_BROWSER_IMAGE_TAG,
     WEBSITE_BROWSER_ENVIRONMENT_NAME,
 )
+from agent_env.env.snapshot_store import compute_env_fingerprint
 from agent_env.config import get_config
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from tst.util.capabilities import MCP_SERVER_SOURCES, missing_capability_reason, skip_without_remote_sandbox
+from tst.util.capabilities import (
+    MCP_SERVER_SOURCES,
+    missing_capability_reason,
+    skip_without_default_a2a_agent,
+    skip_without_model_endpoint,
+    skip_without_remote_sandbox,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +73,7 @@ GATEWAY_IMAGE = DockerImageConfig(
     name="gateway",
     dockerfile=ENV_DIR / "gateway" / "Dockerfile",
     tag="env-gateway",
-    context=ENV_DIR,
+    context=ENV_DIR / "gateway",
     service_name="gateway",
 )
 
@@ -229,7 +238,6 @@ def website_browser_env() -> MCPServerEnv:
     logger.info(f"Building {img.name} Docker image...")
     result = subprocess.run(
         ["docker", "build", "--platform", "linux/amd64",
-         "--build-arg", f"PLAYWRIGHT_MCP_VERSION={PLAYWRIGHT_MCP_VERSION}",
          "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
         capture_output=True,
         text=True,
@@ -451,6 +459,30 @@ def agentenv_website_env() -> WebsiteEnv:
         id="sail_vm",
         marks=skip_without_remote_sandbox("sail_vm"),
     ),
+    pytest.param(
+        "tensorlake",
+        id="tensorlake",
+        marks=skip_without_remote_sandbox("tensorlake"),
+    ),
+    pytest.param(
+        "tenki",
+        id="tenki",
+        marks=skip_without_remote_sandbox("tenki"),
+    ),
+    pytest.param(
+        "boxd",
+        id="boxd",
+        marks=skip_without_remote_sandbox("boxd"),
+    ),
+    pytest.param(
+        "daytona",
+        id="daytona",
+        marks=skip_without_remote_sandbox("daytona"),
+    ),    pytest.param(
+        "boat",
+        id="boat",
+        marks=skip_without_remote_sandbox("boat"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -472,6 +504,21 @@ def sandbox_provider(request):
     elif request.param == "sail_vm":
         set_sandbox_provider(build_sandbox_provider("sail_vm"))
         set_env_sandbox_provider(build_sandbox_provider("sail_vm"))
+    elif request.param == "tensorlake":
+        set_sandbox_provider(build_sandbox_provider("tensorlake"))
+        set_env_sandbox_provider(build_sandbox_provider("tensorlake"))
+    elif request.param == "tenki":
+        set_sandbox_provider(build_sandbox_provider("tenki"))
+        set_env_sandbox_provider(build_sandbox_provider("tenki"))
+    elif request.param == "boxd":
+        set_sandbox_provider(build_sandbox_provider("boxd"))
+        set_env_sandbox_provider(build_sandbox_provider("boxd"))
+    elif request.param == "daytona":
+        set_sandbox_provider(build_sandbox_provider("daytona"))
+        set_env_sandbox_provider(build_sandbox_provider("daytona"))
+    elif request.param == "boat":
+        set_sandbox_provider(build_sandbox_provider("boat"))
+        set_env_sandbox_provider(build_sandbox_provider("boat"))
     try:
         yield request.param
     finally:
@@ -765,6 +812,15 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
                 await session.initialize()
                 tools_result = await session.list_tools()
                 assert "list_emails" in [t.name for t in tools_result.tools]
+
+        # The protocol package's ToolSession sees what the SDK client sees, and a hidden tool's call is an error result
+        async with ToolSession(mcp_url=result.mcp_url, role="default") as default_session:
+            assert "list_emails" not in [t.name for t in await default_session.list_tools()]
+            hidden = await default_session.call_tool("list_emails", {"folder_name": "INBOX"})
+            assert hidden.isError and "is disabled for role 'default'" in hidden.text, hidden
+        async with ToolSession(mcp_url=result.mcp_url, role="cli") as cli_session:
+            assert "list_emails" in [t.name for t in await cli_session.list_tools()]
+            assert "alex.chen@techcorp.com" in (await cli_session.call_tool("list_emails", {"folder_name": "INBOX"})).text
 
         # Re-enable: list_emails accessible to default role again
         async with httpx.AsyncClient() as client:
@@ -1146,7 +1202,7 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
 
             # Verify schema in /step list_tools response
             list_emails_tool = next(t for t in tools if t["name"] == "list_emails")
-            assert "folder_name" in str(list_emails_tool["parameters"]), f"Expected folder_name in schema via /step"
+            assert "folder_name" in str(list_emails_tool["parameters"]), "Expected folder_name in schema via /step"
 
             resp = await _step_call_tool(client, gateway_url, "list_emails", {"folder_name": "INBOX"})
             content_text = _step_content_text(resp)
@@ -1169,7 +1225,7 @@ async def test_gateway_with_multi_mcp_server(sandbox_provider, multi_env, enviro
             assert "gateway" not in server_names  # no websites configured
             slack_server = next(s for s in state["mcp_servers"] if s["name"] == "slack")
             assert any(t["name"] == "channels_list" for t in slack_server["tools"])
-            assert "changelog_id" in state, f"Expected changelog_id in /state response"
+            assert "changelog_id" in state, "Expected changelog_id in /state response"
 
         load_result = await multi_env.load_environment_universe_artifact(environment_universe_artifact)
 
@@ -1560,7 +1616,7 @@ async def _verify_list_tools(mcp_url: str, tool_verifier_callback: callable):
             if assertion_errors:
                 raise
             if verified:
-                logger.info(f"  Verified (ignoring cleanup error)")
+                logger.info("  Verified (ignoring cleanup error)")
                 break
             logger.info(f"  Attempt {attempt + 1} failed: {type(eg).__name__}")
             if attempt < max_retries - 1:
@@ -1614,7 +1670,12 @@ async def test_snapshot_cli(multi_env, environment_universe_artifact):
         logger.info(f"Snapshot record: {snapshot}")
 
         # Verify get_clean returns the same snapshot
-        clean_snapshot = get_env_snapshot_store().get_clean(multi_env.id, environment_universe_artifact.id)
+        clean_snapshot = get_env_snapshot_store().get_clean(
+            multi_env.id,
+            environment_universe_artifact.id,
+            environment_universe_artifact.version,
+            env_fingerprint=compute_env_fingerprint(multi_env),
+        )
         assert clean_snapshot is not None, "Expected clean snapshot via get_clean"
         assert clean_snapshot.instance_id == result.instance_id
 
@@ -1640,7 +1701,7 @@ async def test_load_from_snapshot(multi_env, environment_universe_artifact):
         result = await multi_env.deploy()
 
         # Load universe — should use the snapshot created by test_snapshot_cli
-        load_result = await multi_env.load_environment_universe_artifact(environment_universe_artifact)
+        await multi_env.load_environment_universe_artifact(environment_universe_artifact)
 
         # Verify data was loaded correctly via MCP tools
         async def assert_loaded_data(session, tools_result, tool_names):
@@ -1724,7 +1785,7 @@ async def test_gateway_consistent_mode(multi_env, environment_universe_artifact)
             response = await client.get(f"{result.gateway_url}/state", timeout=30)
             response.raise_for_status()
             state = response.json()
-            assert "changelog_id" in state, f"Expected changelog_id in /state response"
+            assert "changelog_id" in state, "Expected changelog_id in /state response"
             assert isinstance(state["changelog_id"], int) and state["changelog_id"] > 0, (
                 f"Expected positive changelog_id in /state after writes, got {state['changelog_id']}"
             )
@@ -1735,6 +1796,73 @@ async def test_gateway_consistent_mode(multi_env, environment_universe_artifact)
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_gateway_changes_name_the_role_behind_each_write(mcp_server_envs, email_service_artifact):
+    """Every changelog row a tool call wrote names its role and tool, and the call's result carries the ids it spanned."""
+    email_ref = mcp_server_envs["email"]
+    email_env = Env.get(email_ref.id, version=email_ref.version)
+    try:
+        result = await email_env.deploy()
+        await email_env.load_environment_artifact(email_service_artifact)  # the changelog's triggers go in after a load
+        gw = result.gateway_url
+        async with httpx.AsyncClient() as client:
+            seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
+            after_id = seen[-1]["id"] if seen else 0
+            for role, subject in (("default", "first"), ("alice@example.com", "second")):
+                resp = await client.post(f"{gw}/step", headers={AGENT_ENV_ROLE_HEADER: role}, timeout=60, json={
+                    "action": "call_tool", "tool_name": "send_email",
+                    "arguments": {"recipients": ["dana@example.com"], "subject": subject, "content": "body"}})
+                assert resp.status_code == 200, resp.text
+
+            changes = (await client.get(f"{gw}/changes", params={"after_id": after_id}, timeout=30)).json()
+            assert changes["changes"] and changes["has_more"] is False, changes
+            actors = [c["actors"] for c in changes["changes"]]
+            assert all(len(who) == 1 and who[0]["kind"] == "tool_call" and who[0]["tool"] == "send_email"
+                       for who in actors), actors
+            roles = [who[0]["role"] for who in actors]
+            assert set(roles) == {"default", "alice@example.com"} and roles == sorted(roles, key=lambda r: r != "default")
+
+            events = await _trajectory_events(client, gw)
+            results = [e for e in events if e["event_type"] == "tool_call_result"][-2:]
+            assert all(e["changelog_id"] > (e["changelog_id_before"] or 0) for e in results), results
+    finally:
+        await email_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gateway_changes_name_the_request_behind_a_write_through_the_rest_proxy(mcp_server_envs,
+                                                                                      email_service_artifact):
+    """An MCP client writing through /svc/mcp-email/mcp (an SSE answer) is a write window too, named by its role."""
+    email_ref = mcp_server_envs["email"]
+    email_env = Env.get(email_ref.id, version=email_ref.version)
+    try:
+        result = await email_env.deploy()
+        await email_env.load_environment_artifact(email_service_artifact)
+        gw = result.gateway_url
+        async with httpx.AsyncClient() as client:
+            seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
+            after_id = seen[-1]["id"] if seen else 0
+            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "carol@example.com"}, timeout=60) as as_carol:
+                async with streamable_http_client(f"{gw}/svc/mcp-email/mcp", http_client=as_carol) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        sent = await session.call_tool("send_email", {
+                            "recipients": ["dana@example.com"], "subject": "lunch?", "content": "noon"})
+                        assert not sent.isError, sent
+
+            changes = (await client.get(f"{gw}/changes", params={"after_id": after_id}, timeout=30)).json()["changes"]
+            assert changes, "the call wrote no changelog row"
+            assert all([(a["kind"], a["role"], a["request"]["route"], a["request"]["service"], a["request"]["path"])
+                        for a in c["actors"]] == [("request", "carol@example.com", "svc", "mcp-email", "/mcp")]
+                       for c in changes), changes
+    finally:
+        await email_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@skip_without_model_endpoint()
+@skip_without_default_a2a_agent()
 async def test_env_validator_task(mcp_server_envs):
     """Test MCPServerEnv.validate(): lazily creates task, runs validation, persists metadata."""
     from agent_env.task import Task
@@ -1924,7 +2052,7 @@ async def test_renamed_registration_serves_its_registered_name(agentenv_items_en
         assert [c["name"] for c in result.environment_card["children_environments"]] == ["renameditems"]
         card = await protocol_v1.get_card(base)
         assert card["name"] == "renameditems"
-        assert [t["name"] for t in card["capabilities"]["tools"]] == ["renameditems_add_item"]
+        assert [t["name"] for t in card["capabilities"]["tools"]] == ["renameditems_add_item", "renameditems_whoami"]
 
         sent: list[tuple[str, str]] = []
         real_send = httpx.AsyncClient.send
@@ -1955,7 +2083,7 @@ async def test_renamed_registration_serves_its_registered_name(agentenv_items_en
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_gateway_with_agentenv_environment(agentenv_items_env):
+async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch, tmp_path):
     """v1 data-plane (/v1/data:*) served by AgentEnvEnvironment + decorators.
 
     Counterpart to the legacy /api/reset coverage in test_gateway_with_single_mcp_server."""
@@ -1978,7 +2106,8 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
             "urn:agentenv:export-as-file/v1",
         }
         # Decorator tools ride capabilities.tools ({environment_name} resolved); imperative tools stay handshake-only.
-        assert [t["name"] for t in card["capabilities"]["tools"]] == ["items_add_item"]
+        assert [t["name"] for t in card["capabilities"]["tools"]] == ["items_add_item", "items_whoami"]
+        assert not protocol_v1.find_tool(card, "items_whoami")["inputSchema"].get("properties")
         add_item_tool = protocol_v1.find_tool(card, "items_add_item")
         assert add_item_tool["description"] == "Add an item to the store."
         assert add_item_tool["inputSchema"]["required"] == ["item"]
@@ -2032,6 +2161,13 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
 
         await _verify_list_tools(mcp_url=result.mcp_url, tool_verifier_callback=assert_tool_sees_items)
 
+        # The role a ToolSession sends reaches the child's tool as its caller, with the gateway's key for each session
+        async with (ToolSession(mcp_url=result.mcp_url, role="alice@example.com") as alice,
+                    ToolSession(mcp_url=result.mcp_url) as anonymous):
+            seen = [json.loads((await session.call_tool("items_whoami")).text) for session in (alice, alice, anonymous)]
+        assert [caller["role"] for caller in seen] == ["alice@example.com", "alice@example.com", None]
+        assert seen[0]["session"] == seen[1]["session"] != seen[2]["session"] and None not in {c["session"] for c in seen}
+
         # Exercise load_environment_artifact's v1 branch end-to-end (supports_v1 -> reset + add inline).
         items_artifact = EnvironmentArtifact.put(
             id="test-items-service-data",
@@ -2061,6 +2197,11 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env):
         )
         await env.load_environment_artifact(csv_artifact)
         assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["file:text/csv:a,b\n1,2"]}
+
+        # A file name with shell syntax in it is staged and loaded as it is, and runs nothing on the sandbox host.
+        await _load_shell_named_artifact(env, "items", monkeypatch, tmp_path)
+        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["shell-named"]}
+        assert not (tmp_path / "pwned").exists()
 
         # Environment Card extension end-to-end (urn:agentenv:set-errors/v1): a server-local
         # error-injection capability declared with @extension. Invoking it makes the named tool
@@ -2230,7 +2371,7 @@ async def test_verify_universe_roundtrip_export_all_v1_and_fallback(multi_env_it
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_gateway_with_website_env_v1(agentenv_website_env):
+async def test_gateway_with_website_env_v1(agentenv_website_env, monkeypatch, tmp_path):
     """v1 data-plane branch of WebsiteEnv.load_environment_artifact: supports_v1 -> reset + add inline,
     served by a Starlette AgentEnvStarletteApplication backend behind the gateway."""
     env = Env.get(agentenv_website_env.id, version=agentenv_website_env.version)
@@ -2274,8 +2415,30 @@ async def test_gateway_with_website_env_v1(agentenv_website_env):
         )
         await env.load_environment_artifact(csv_artifact)
         assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["file:text/csv:a,b\n1,2"]}
+
+        await _load_shell_named_artifact(env, "webitems", monkeypatch, tmp_path)
+        assert (await protocol_v1.get_data(base)).parts[0].data == {"items": ["shell-named"]}
+        assert not (tmp_path / "pwned").exists()
     finally:
         await env.close()
+
+
+async def _load_shell_named_artifact(env, environment_name: str, monkeypatch, tmp_path) -> None:
+    """Load a seed whose file name runs ``touch pwned`` if the shell parses it, from ``tmp_path`` so a run leaves it there."""
+    artifact = EnvironmentArtifact.put(
+        id=f"test-{environment_name}-shell-named-service-data",
+        environment_name=environment_name,
+        file_artifact=FileArtifact.put_bytes(
+            id=f"test-{environment_name}-shell-named-data",
+            description=f"{environment_name} seed with shell syntax in its file name",
+            filename="$(touch pwned) `touch pwned`.json",
+            content=json.dumps({"items": ["shell-named"]}).encode(),
+            content_type="application/json",
+        ),
+    )
+    with monkeypatch.context() as m:
+        m.chdir(tmp_path)
+        await env.load_environment_artifact(artifact)
 
 
 @pytest.mark.asyncio
@@ -2704,6 +2867,42 @@ async def test_gateway_trigger_registration_is_fail_loud(sandbox_provider, mcp_s
         await email_env.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gateway_website_trigger_fires_on_a_request_through_the_website_proxy(slack_website_env):
+    """A request through the /website proxy fires the website trigger that names it, held by its barrier and attributed."""
+    visit = {"id": "visit", "when": {"type": "website", "app": "slack", "method": "GET", "path": {"equals": "/"}},
+             "barrier": {"at": "provoking_call"},
+             "actions": [{"type": "permission", "action": "disable", "role": "default", "tools": ["list_website_urls"]}]}
+    try:
+        result = await slack_website_env.deploy()
+        gw = result.gateway_url
+        card = await protocol_v1.get_card(gw)
+        assert TRIGGER_WEBSITE in protocol_v1.extension_params(card, EXT_TRIGGERS_URI)["features"], card
+
+        async with httpx.AsyncClient() as client:
+            unknown = await client.post(f"{gw}/triggers/register", timeout=30, json={
+                "triggers": [{**visit, "when": {**visit["when"], "app": "calendar"}}]})
+            assert unknown.status_code == 400 and "unknown website 'calendar'" in unknown.text, unknown.text
+            registered = await client.post(f"{gw}/triggers/register", json={"triggers": [visit]}, timeout=30)
+            assert registered.status_code == 200, registered.text
+
+            missing = await client.get(f"{gw}/website/slack/missing.css", timeout=30)
+            assert missing.status_code == 404
+            page = await client.get(f"{gw}/website/slack/", timeout=30)
+            assert page.status_code == 200 and "Slack Workspace" in page.text
+            roles = (await client.get(f"{gw}/state", timeout=30)).json()["roles"]
+            assert roles.get("default", {}).get("disabled") == ["list_website_urls"], roles
+
+            state = await _triggers_state(client, gw)
+            [row] = state["triggers"]
+            assert (row["type"], row["status"], row["fire_count"]) == ("website", "fired", 1), row
+            assert [e["provoking"] for e in state["events"] if e["kind"] == "detected"] == [
+                {"source": "website", "app": "slack", "method": "GET", "path": "/", "status": 200, "role": "default"}]
+    finally:
+        await slack_website_env.close()
+
+
 # One internal MCP round trip each, measured at ~8ms. A `queued` trigger exists only while a fire
 # is still running, so the chain is what holds that window open long enough to sample from outside
 # the deployment -- there is no slow tool to lean on, and a fire cannot be paused from the client.
@@ -2785,6 +2984,11 @@ async def test_gateway_queued_trigger_is_not_reported_settled(sandbox_provider, 
 @pytest.mark.asyncio
 @pytest.mark.integration
 @pytest.mark.int_test_slow
+@pytest.mark.parametrize(
+    "sandbox_provider",
+    [pytest.param("modal_vm", id="modal_vm", marks=skip_without_remote_sandbox("modal_vm"))],
+    indirect=True,
+)
 async def test_gateway_triggers_nl_executor(sandbox_provider, mcp_server_envs, email_service_artifact):
     """Deployed e2e for the nl fire-action: a real claude-code A2A executor agent realizes an NL event
     over A2A, gated by the engine's typed verify. The one trigger type the hermetic test can't cover
@@ -2796,9 +3000,6 @@ async def test_gateway_triggers_nl_executor(sandbox_provider, mcp_server_envs, e
     from agent_env.task_step.context import TaskStepContext
     from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
     from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
-
-    if sandbox_provider != "modal_vm":
-        pytest.skip("nl-executor e2e runs on modal_vm only (VM-mode agent deploy)")
 
     email_ref = mcp_server_envs["email"]
     email_env = Env.get(email_ref.id, version=email_ref.version)
@@ -2939,6 +3140,15 @@ async def _get_time_values(client, gw: str, mcp_url: str) -> tuple[str, str]:
     return payload["current_time"], json.loads(_step_content_text(r.json()))["current_time"]
 
 
+async def _get_time_in_zone(client, gw: str, mcp_url: str, zone: str) -> list[dict]:
+    """get_time with a `time_zone` over both call paths."""
+    arguments = {"time_zone": zone}
+    r = await client.post(f"{gw}/step", json={"action": "call_tool", "tool_name": GET_TIME, "arguments": arguments},
+                          timeout=30)
+    assert r.status_code == 200 and not r.json().get("isError"), f"/step get_time in {zone} failed: {r.text}"
+    return [json.loads(_step_content_text(r.json())), json.loads(await _clock_call_tool(mcp_url, GET_TIME, arguments))]
+
+
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
@@ -3022,13 +3232,21 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
             assert armed.servers - {"gateway"} == unarmed.servers, armed.servers
             tool = armed.mcp[GET_TIME]
             assert tool.description == GET_TIME_DESC
-            assert tool.inputSchema == {"type": "object", "properties": {}, "additionalProperties": False}
+            assert tool.inputSchema == GET_TIME_SCHEMA
             assert tool.annotations.readOnlyHint is True, tool.annotations
             # Bound to the LIVE armed clock, not a stale t0 captured at registration. Both call
             # paths, generous window because the clock is running at 3600x.
             for v in await _get_time_values(client, gw, result.mcp_url):
                 drift = (_dt(v) - _dt(t0a)).total_seconds()
                 assert 0 <= drift <= 3600 * (time.monotonic() - armed_at + 2), (v, t0a, drift)
+            # The gateway image resolves IANA names, link names such as US/Eastern too, on both call paths.
+            for payload in await _get_time_in_zone(client, gw, result.mcp_url, "Asia/Tokyo"):
+                assert payload["time_zone"] == "Asia/Tokyo" and payload["local_time"].endswith("+09:00"), payload
+                assert datetime.fromisoformat(payload["local_time"]) == _dt(payload["current_time"]), payload
+            for payload in await _get_time_in_zone(client, gw, result.mcp_url, "US/Eastern"):
+                local = datetime.fromisoformat(payload["local_time"])
+                assert local == _dt(payload["current_time"]), payload
+                assert local.utcoffset() == local.astimezone(ZoneInfo("America/New_York")).utcoffset(), payload
 
             # rate cap: 1 real s = 1 virtual day is the ceiling.
             assert (await client.put(f"{gw}/clock/set-time",

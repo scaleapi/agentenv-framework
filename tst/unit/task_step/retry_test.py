@@ -23,13 +23,14 @@ import pytest
 
 import agent_env.task.task as task_module
 import agent_env.task.store as store_mod
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
+from agent_env.env.env import DeployedGatewayEnv
 from agent_env.store import LocalSqliteDocumentStore
 from agent_env.store.document_store import Filter
 from agent_env.task.step_journal import _SCHEDULER_STEP_ID, _SEED_STEP_ID, commit_ordered, replay_context
 from agent_env.task.store import (
     TASK_INSTANCES_COLLECTION,
     TASK_STEP_JOURNAL_COLLECTION,
+    SupersededAttemptError,
     TaskInstanceStore,
     set_task_instance_store,
 )
@@ -702,7 +703,7 @@ async def test_cancel_during_the_undo_leaves_a_consistent_record(store, monkeypa
         await run_task
 
     inst = store.get(ctx.instance_id)
-    assert inst.status == "failed"
+    assert inst.status == "cancelled"
     # Stored record and live context agree: the span is gone from both.
     assert inst.completed_steps == []
     assert inst.context["deployed_envs"] == [] and ctx.deployed_envs == []
@@ -742,6 +743,13 @@ async def test_recovered_failure_is_marked_retried(store):
     fs = result.metadata["failed_steps"]
     assert [f["step_id"] for f in fs] == ["s1"]
     assert all(f.get("retried") for f in fs)
+
+
+@pytest.mark.asyncio
+async def test_a_run_drops_the_recorded_failures_of_the_steps_it_runs_again(store):
+    context = TaskStepContext(metadata={"failed_steps": [{"step_id": "s0", "error": "earlier"}, {"step_id": "x"}]})
+    await Task(id="t", version=1, steps=[_FakeDeployEnv("s0")]).run(context=context)
+    assert context.metadata["failed_steps"] == [{"step_id": "x"}]
 
 
 def test_rolled_back_sandboxes_is_the_difference_between_stored_and_replayed():
@@ -853,7 +861,8 @@ def test_stale_epoch_write_is_fenced_and_leaves_no_journal_hole(store):
     assert doc["attempt_epoch"] == 1 and "s1" not in doc["context"]["metadata"]
 
     _record(store, iid, "s1", {"s0": 1}, {"s0": 1, "s1": "attempt2"}, epoch=1)   # the re-run
-    _record(store, iid, "s1", {"s0": 1}, {"s0": 1, "s1": "attempt1"}, epoch=0)   # the zombie
+    with pytest.raises(SupersededAttemptError, match="epoch 0"):                  # the zombie, refused out loud
+        _record(store, iid, "s1", {"s0": 1}, {"s0": 1, "s1": "attempt1"}, epoch=0)
 
     d = _doc(store, iid)
     assert d["context"]["metadata"]["s1"] == "attempt2"                      # fenced
@@ -878,7 +887,8 @@ def test_a_writer_that_passed_the_fence_before_the_undo_cannot_displace_the_reru
 
     real_bump = store._bump_journal_seq
     monkeypatch.setattr(store, "_bump_journal_seq", lambda _s, _iid: dict(stale_view))  # resumes on its stale read
-    _record(store, iid, "s1", {"s0": 1}, {"s0": 1, "s1": "attempt1"}, epoch=0)
+    with pytest.raises(SupersededAttemptError):
+        _record(store, iid, "s1", {"s0": 1}, {"s0": 1, "s1": "attempt1"}, epoch=0)
     monkeypatch.setattr(store, "_bump_journal_seq", real_bump)
 
     d = _doc(store, iid)
@@ -920,6 +930,99 @@ def test_current_epoch_write_lands_after_an_undo(store):
     _record(store, iid, "s0", {}, {"s0": 2}, epoch=1)
     d = _doc(store, iid)
     assert d["context"]["metadata"] == {"s0": 2} and d["attempt_epoch"] == 1
+
+
+def test_a_dispatcher_still_on_the_old_epoch_after_a_re_register_is_told_its_write_did_not_land(store):
+    # A caller that pre-creates the instance and then re-registers it moves it to epoch 1. A step it
+    # still records under epoch 0 used to vanish, so dependents ran on a context without it.
+    iid = _seeded(store)
+    store.upsert_instance(iid, "t", 1, total_steps=3)
+    store.seed_context(iid, build_context_update_ops(None, TaskStepContext()))
+    with pytest.raises(SupersededAttemptError, match="dispatched under attempt epoch 0"):
+        _record(store, iid, "s0", {}, {"s0": "deployed"}, epoch=0)
+    assert _doc(store, iid)["completed_steps"] == []
+    _record(store, iid, "s0", {}, {"s0": "deployed"}, epoch=_doc(store, iid)["attempt_epoch"])
+    d = _doc(store, iid)
+    assert d["context"]["metadata"] == {"s0": "deployed"} and [c["step_id"] for c in d["completed_steps"]] == ["s0"]
+
+
+@pytest.mark.asyncio
+async def test_record_step_complete_raises_a_fenced_write_and_still_only_logs_a_store_error(store, monkeypatch, caplog):
+    iid = _seeded(store)
+    store.upsert_instance(iid, "t", 1, total_steps=3)
+    with pytest.raises(SupersededAttemptError):
+        await store_mod.record_step_complete(iid, "s0", _ops({}, {"s0": 1}), 3, "now", attempt_epoch=0)
+
+    def store_down(*_args, **_kwargs):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(store, "record_step_complete_sync", store_down)
+    with caplog.at_level(logging.ERROR):
+        await store_mod.record_step_complete(iid, "s0", _ops({}, {"s0": 1}), 3, "now", attempt_epoch=1)
+    assert "Failed to record step complete" in caplog.text
+
+
+class _Gated:
+    type = "gated"
+
+    def __init__(self, id: str, gate: asyncio.Event, fails: bool = False):
+        self.id, self.depends_on, self.retry_config, self.fail_task_on_error = id, None, None, True
+        self._gate, self._fails = gate, fails
+
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        await self._gate.wait()
+        if self._fails:
+            raise RuntimeError("superseded boom")
+        context.metadata[self.id] = "superseded"
+        return context
+
+
+@pytest.mark.asyncio
+async def test_an_attempt_a_re_register_superseded_writes_nothing_to_the_run(store):
+    gate = asyncio.Event()
+    task = Task(id="t", version=1, steps=[_Gated("s0", gate), _Gated("s1", gate, fails=True)])
+    superseded = asyncio.create_task(task.run(instance_id="i"))
+    while _doc(store, "i") is None:
+        await asyncio.sleep(0)
+    store.upsert_instance("i", "t", 1, 2)
+    gate.set()
+    with pytest.raises(SupersededAttemptError, match="'s0'"):   # stops at its first refused write; s1 never runs
+        await superseded
+    d = _doc(store, "i")
+    assert (d["status"], d["completed_steps"], d["context"]["metadata"]) == ("running", [], {})
+
+
+@pytest.mark.parametrize("leniency", ["tolerant", "retrying"])
+@pytest.mark.asyncio
+async def test_a_superseded_run_stops_even_at_a_step_that_tolerates_or_retries_failure(store, leniency):
+    # Neither tolerating the step nor rolling it back can make this run's writes land, so s1 must not run.
+    gate = asyncio.Event()
+    s0 = _Gated("s0", gate)
+    if leniency == "tolerant":
+        s0.fail_task_on_error = False
+    else:
+        s0.retry_config = RetryConfig(retry_from_step_id="s0")
+    superseded = asyncio.create_task(Task(id="t", version=1, steps=[s0, _Gated("s1", gate, fails=True)]).run(instance_id="i"))
+    while _doc(store, "i") is None:
+        await asyncio.sleep(0)
+    store.upsert_instance("i", "t", 1, 2)
+    gate.set()
+    with pytest.raises(SupersededAttemptError, match="'s0'"):   # not s1's "superseded boom": s1 never ran
+        await superseded
+    d = _doc(store, "i")
+    assert (d["status"], d["completed_steps"], d["context"]["metadata"]) == ("running", [], {})
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_run_is_recorded_cancelled(store):
+    run = asyncio.create_task(Task(id="t", version=1, steps=[_Gated("s0", asyncio.Event())]).run(instance_id="i"))
+    while _doc(store, "i") is None:
+        await asyncio.sleep(0)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    d = _doc(store, "i")
+    assert (d["status"], d["error"]) == ("cancelled", "cancelled")
 
 
 # --------------------------------------------------------------------------- #

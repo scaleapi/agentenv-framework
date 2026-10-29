@@ -26,6 +26,7 @@ CONFIG_INVALID = "config-invalid"
 GROUP_BUILD_FAILED = "group-build-failed"
 ENTRY_POINTS_UNREADABLE = "entry-points-unreadable"
 QUALIFIED_ONLY = "qualified-only"
+ALIAS_REFUSED = "alias-refused"
 
 # Where each code may appear: a contribution status, or "error" for a group, config or discovery error.
 CODES: dict[str, frozenset[str]] = {
@@ -44,4 +45,5 @@ CODES: dict[str, frozenset[str]] = {
     GROUP_BUILD_FAILED: frozenset({"blocked", "error"}),
     ENTRY_POINTS_UNREADABLE: frozenset({"error"}),
     QUALIFIED_ONLY: frozenset({"active"}),
+    ALIAS_REFUSED: frozenset({"active"}),
 }

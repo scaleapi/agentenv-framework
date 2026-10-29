@@ -14,7 +14,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.task_step.snapshot_utils.agent_state_capture import trajectory_object_url
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)

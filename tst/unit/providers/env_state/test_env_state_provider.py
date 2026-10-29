@@ -286,3 +286,13 @@ def test_sidecar_specs_skip_images_the_image_store_does_not_own(image_store, cap
     assert none == []
     assert "pgweb image sosedoff/pgweb is not in the image store" in caplog.text
     assert "db-mcp image" not in caplog.text
+
+
+def test_container_images_name_what_the_container_path_starts(image_store):
+    """The servicedb's image and each sidecar's the provider provisions, so a gateway can check them before it starts
+    any."""
+    provider = LocalPostgresStateProvider(ServiceDBConfig(db_image=f"{_REPOSITORIES}/servicedb:v3",
+                                                          db_web_image=f"{_REPOSITORIES}/pgweb:v1",
+                                                          db_mcp_image="crystaldba/postgres-mcp"))
+
+    assert provider.container_images() == [f"{_REPOSITORIES}/servicedb:v3", f"{_REPOSITORIES}/pgweb:v1"]

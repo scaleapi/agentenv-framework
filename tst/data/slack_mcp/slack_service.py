@@ -342,7 +342,6 @@ class SlackService(BaseService):
             Status: Not implemented in v0.
             Future endpoint to persist messages and update indices.
             """
-            error = SlackError(error="not_implemented")
             return json.dumps(
                 {
                     "ok": False,

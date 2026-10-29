@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
 import agent_env.providers.sandbox_providers.chained_sandbox_provider as chained_module
+import agent_env.providers.sandbox_providers.local_docker.provider as lsm
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.config.loader import load_impl
-from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider, skip_refusing
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox, ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
+from agent_env.providers.sandbox_providers import sandbox as sandbox_module
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, _pull
 from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS, SandboxProvider, build_sandbox_provider
 from agent_env.store import ImageStore, RegistryAuth
@@ -74,6 +77,8 @@ class _StubProvider(SandboxProvider):
 @pytest.mark.parametrize("name", sorted(_BUILTIN_SANDBOX_PROVIDERS))
 def test_each_builtin_impl_string_loads(name):
     # A stale string only fails when that backend is built: the registry skips it at DEBUG.
+    if name == "smol_vm":
+        pytest.importorskip("smol")
     assert issubclass(load_impl(_BUILTIN_SANDBOX_PROVIDERS[name], SandboxProvider), SandboxProvider)
 
 
@@ -84,9 +89,10 @@ def test_modal_sandbox_instance_mode_is_container():
 
 
 @pytest.mark.asyncio
-async def test_default_create_container_mutates_mode_to_container():
+async def test_default_create_container_mutates_mode_to_container_and_reset_container_replaces_it_in_place():
     """The base SandboxProvider.create_container default impl should mutate the
-    returned VmSandbox's mode to 'container' once docker is running on it."""
+    returned VmSandbox's mode to 'container' once docker is running on it; reset_container
+    removes that container and runs a fresh one on the same VM, and a container-only sandbox is refused."""
 
     class _FakeVm(VmSandbox):
         type = "fake-vm"
@@ -120,6 +126,13 @@ async def test_default_create_container_mutates_mode_to_container():
     )
     assert result is fake_vm
     assert result.mode == "container"
+
+    fake_vm.scripts.clear()
+    await provider.reset_container(fake_vm, image_name="nginx:latest", port=8080, env={"A": "1"})
+    assert fake_vm.scripts[0] == "docker rm -f agent-api > /dev/null"
+    assert fake_vm.scripts[1].startswith("docker run -d --name agent-api ") and "-e A=1" in fake_vm.scripts[1]
+    with pytest.raises(NotImplementedError, match="sandbox is the container itself"):
+        await provider.reset_container(_FakeSandbox(), image_name="nginx:latest", port=8080, env={})
 
 
 @pytest.mark.asyncio
@@ -283,8 +296,76 @@ async def test_chain_create_sandbox_all_fail_raises_with_all_names():
     assert "second boom" in msg
 
 
+def test_skip_refusing_leaves_a_provider_none_of_whose_links_it_refuses():
+    chain = ChainedSandboxProvider([_StubProvider(), _StubProvider()])
+
+    assert skip_refusing(chain, lambda link: None, what="it") is chain
+
+
+def test_skip_refusing_chains_the_links_it_doesnt_refuse_noting_each_it_skips(caplog):
+    first, second, third = _StubProvider(), _StubProvider(), _StubProvider()
+
+    with caplog.at_level(logging.INFO, logger=chained_module.__name__):
+        running = skip_refusing(ChainedSandboxProvider([first, second, third]),
+                                lambda link: "which is too far" if link is not third else None, what="it")
+
+    assert running.links == (third,)
+    warned, noted = [r for r in caplog.records if "sandbox_provider_skipped" in r.getMessage()]
+    assert (warned.levelno, noted.levelno) == (logging.WARNING, logging.INFO)  # the first, preferred, is warned of
+    assert warned.getMessage() == "sandbox_provider_skipped provider=_StubProvider: which is too far"
+
+
+@pytest.mark.parametrize("provider, refusal", [
+    (_StubProvider(), "with _StubProvider, which is too far"),
+    (ChainedSandboxProvider([_StubProvider(), _StubProvider()]),
+     "with _StubProvider, which is too far; nor with _StubProvider, which is too far"),
+], ids=["one", "chain"])
+def test_skip_refusing_names_each_refusal_when_it_refuses_every_link(provider, refusal):
+    with pytest.raises(ValueError, match=f"^Can't deploy it {refusal}$"):
+        skip_refusing(provider, lambda link: "which is too far", what="it")
+
+
+class _Vm(VmSandbox):
+    """A VM sandbox of ``platform``, recording whether it was terminated."""
+
+    type = "fake"
+
+    def __init__(self, sandbox_id: str, platform: str):
+        self.sandbox_id, self.tunnel_urls, self.vnc_url = sandbox_id, {}, None
+        self.mode, self.platform, self.terminated = "vm", platform, False
+
+    async def terminate(self) -> None:
+        self.terminated = True
+
+
+@pytest.mark.asyncio
+async def test_a_chain_closes_a_vm_that_cant_run_the_image_and_tries_the_next_provider(caplog):
+    arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+    amd, arm = _Vm("amd", "linux/amd64"), _Vm("arm", "linux/arm64")
+    chain = ChainedSandboxProvider([_StubProvider(sandbox=amd), _StubProvider(sandbox=arm)])
+    await chain.prepare_image(arm64)
+
+    assert await chain.create_sandbox(image_name="img:v1", port=8000, env={}) is arm
+    assert amd.terminated and not arm.terminated
+    assert "gave a VM that can't load the image: 'img' v1 is a linux/arm64 image" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_chain_none_of_whose_vms_runs_the_image_names_each_refusal():
+    arm64 = DockerImageArtifact(id="img", version=1, description="d", image_name="img:v1", platform="linux/arm64",
+                                tar_gz_object_url="s3://bucket/img.tar.gz")
+    chain = ChainedSandboxProvider([_StubProvider(sandbox=_Vm("one", "linux/amd64")),
+                                    _StubProvider(sandbox=_Vm("two", "linux/amd64"))])
+    await chain.prepare_image(arm64)
+
+    with pytest.raises(RuntimeError, match="All 2 providers failed: _StubProvider: ValueError.*linux/arm64 image.*; "
+                                           "_StubProvider: ValueError"):
+        await chain.create_sandbox(image_name="img:v1", port=8000, env={})
+
+
 _CONTEXT_ONLY = DockerImageArtifact(id="solver-image", version=2, description="d", image_name="local/solver-0123456789ab:v2",
-                                    build_context_object_url="s3://bucket/ctx.tar.gz")
+                                    build_context_object_url="s3://bucket/ctx.tar.gz", dockerfile_path="Dockerfile")
 
 
 class _PreparingProvider(_StubProvider):
@@ -532,18 +613,27 @@ def test_cpu_floor_differs_between_container_and_vm_backends():
 
 
 class _PullingVm(VmSandbox):
-    def __init__(self, first_pull_error: str | None):
+    """Its first ``failures`` pulls fail with ``pull_error``."""
+
+    def __init__(self, pull_error: str | None, failures: int = 1):
+        self.sandbox_id = "vm-test"
         self.scripts: list[str] = []
-        self._first_pull_error = first_pull_error
+        self._pull_error = pull_error
+        self._failures = failures
 
     async def terminate(self) -> None:
         pass
 
     async def exec_script(self, script: str, *, max_retries: int = 0) -> str:
         self.scripts.append(script)
-        if self._first_pull_error and len(self.scripts) == 1:
-            raise RuntimeError(f"Script failed (exit 1):\nstdout: \nstderr: {self._first_pull_error}")
+        if self._pull_error and len(self.scripts) <= self._failures:
+            raise RuntimeError(f"Script failed (exit 1):\nstdout: \nstderr: {self._pull_error}")
         return ""
+
+
+@pytest.fixture
+def no_pause(monkeypatch):
+    monkeypatch.setattr(sandbox_module, "_REGISTRY_RETRY_SECONDS", 0)
 
 
 @pytest.mark.asyncio
@@ -557,9 +647,26 @@ async def test_an_image_with_nothing_for_this_platform_is_pulled_for_amd64():
 
 
 @pytest.mark.asyncio
-async def test_any_other_pull_failure_is_raised_as_it_was():
-    sandbox = _PullingVm("Error response from daemon: pull access denied for registry/agent")
+async def test_any_other_pull_failure_runs_once_more(no_pause):
+    """As a registry's 404 for a blob it holds, which passes."""
+    sandbox = _PullingVm("Error response from daemon: failed to copy: httpReadSeeker: failed open: not found")
+
+    await _pull(sandbox, "registry/agent:v1")
+
+    assert sandbox.scripts == ["docker pull registry/agent:v1"] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_pull_that_fails_again_is_raised_as_it_was(no_pause):
+    sandbox = _PullingVm("Error response from daemon: pull access denied for registry/agent", failures=2)
 
     with pytest.raises(RuntimeError, match="pull access denied"):
         await _pull(sandbox, "registry/agent:v1")
-    assert sandbox.scripts == ["docker pull registry/agent:v1"]
+    assert sandbox.scripts == ["docker pull registry/agent:v1"] * 2
+
+
+def test_local_docker_runs_this_machines_platform_natively_and_other_providers_linux_amd64(monkeypatch):
+    monkeypatch.setattr(lsm, "host_platform", lambda: "linux/arm64")
+    assert LocalSandboxProvider.native_platforms() == {"linux/arm64"}
+    assert ModalSandboxProvider.native_platforms() == {"linux/amd64"}
+    assert SandboxProvider.native_platforms() == {"linux/amd64"}

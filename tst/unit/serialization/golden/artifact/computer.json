@@ -1,0 +1,49 @@
+{
+  "arch": [
+    "amd64",
+    "arm64"
+  ],
+  "config": {
+    "resolution": {
+      "default": "1280x800",
+      "generate": false,
+      "phase": "deploy",
+      "scope": "task",
+      "secret": false
+    }
+  },
+  "description": "Ubuntu 24.04 with XFCE on Xvfb",
+  "forms": {
+    "container": {
+      "image": {
+        "id": "ubuntu-24.04__forms_container_image",
+        "version": 1
+      },
+      "init": "supervisord",
+      "input_channel": "env"
+    }
+  },
+  "id": "ubuntu-24.04",
+  "metadata": {
+    "validated_images": {
+      "container": {
+        "amd64": {
+          "checked_at": "2026-10-27T18:00:00+00:00",
+          "status": "passed"
+        }
+      }
+    }
+  },
+  "os": {
+    "build": null,
+    "display": "x11",
+    "distribution": "ubuntu",
+    "type": "linux",
+    "version": "24.04"
+  },
+  "session": {
+    "user": "user"
+  },
+  "type": "computer",
+  "version": 2
+}

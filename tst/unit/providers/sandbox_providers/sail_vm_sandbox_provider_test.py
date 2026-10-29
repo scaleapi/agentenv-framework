@@ -407,3 +407,16 @@ def test_a_rejected_key_can_be_retried():
     assert _sdk.API_KEY_ENV not in os.environ
     _sdk.connect("sail-secret", "agent-env", sdk=sdk)
     assert sdk.reset_transports.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_terminate_sandbox_terminates_through_the_handle_and_counts_a_sailbox_gone_as_terminated():
+    sailbox = _sailbox()
+    sdk = _fake_sdk(sailbox)
+    provider = _provider(sdk)
+
+    await provider.terminate_sandbox("sb_1")
+    sailbox.terminate.aio.assert_awaited_once()
+
+    sdk.Sailbox.get.aio = AsyncMock(side_effect=sdk.NotFoundError("gone"))
+    await provider.terminate_sandbox("sb_gone")

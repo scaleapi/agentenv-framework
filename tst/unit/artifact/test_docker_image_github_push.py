@@ -14,7 +14,7 @@ import agent_env.artifact.store as artifact_store
 import agent_env.providers as providers
 from agent_env.artifact import DockerImageArtifact
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.store import ImageStore, RegistryAuth, set_object_store
 from agent_env.store.object_store.local import LocalFilesystemObjectStore
 
@@ -86,7 +86,8 @@ def build(monkeypatch):
     async def create_vm(**kwargs):
         return vm
 
-    monkeypatch.setattr(providers, "get_sandbox_provider", lambda: SimpleNamespace(create_vm=create_vm))
+    monkeypatch.setattr(providers, "get_sandbox_provider", lambda: SimpleNamespace(create_vm=create_vm,
+                                                                                    ON_THIS_MACHINE=False))
     monkeypatch.setattr(artifact_store, "get_artifact_store", lambda: SimpleNamespace(next_version=lambda id: 3))
     monkeypatch.setattr(
         DockerImageArtifact, "put_tar", classmethod(lambda cls, id, **kwargs: SimpleNamespace(id=id, version=3, **kwargs))

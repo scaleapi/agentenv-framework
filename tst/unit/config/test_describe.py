@@ -98,7 +98,9 @@ def test_resolving_and_describing_a_bare_install_create_nothing(tmp_path):
 def test_a_config_file_is_reported_as_the_source_with_its_path(tmp_path):
     path = _write_config(tmp_path, MONGO_TOML)
 
-    sections = _sections(describe_config())
+    report = describe_config()
+    assert report.config_path == path
+    sections = _sections(report)
     assert sections["document"].impl_name == "MongoDocumentStore"
     assert sections["document"].winner.where == "[stores.document]"
     assert sections["document"].winner.kind == "file"
@@ -611,6 +613,28 @@ config = { authorization = "Bearer abc", oauth_id = "z", passphrase = "p", datab
     assert resolved["oauth_id"] == MASK
     assert resolved["passphrase"] == MASK
     assert resolved["database"] == "keep"
+
+
+def test_model_header_values_are_masked_whatever_the_header_is_called(tmp_path, monkeypatch):
+    """A header's name doesn't say it carries a credential (`X-Api-Key`), so every literal header value is
+    masked, in [model.headers] and [model.params.extra_headers] alike; a reference still names its secret."""
+    path = _write_config(tmp_path, """
+[model]
+base_url = "https://example.invalid"
+
+[model.headers]
+"X-Api-Key" = "literal-header-key"
+"X-Bill-To" = "secret:bill_to"
+
+[model.params.extra_headers]
+"X-Portkey-Virtual-Key" = "literal-virtual-key"
+""")
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(path))
+
+    rendered = render(describe_config())
+
+    assert "literal-header-key" not in rendered and "literal-virtual-key" not in rendered
+    assert "secret:bill_to" in rendered
 
 
 def test_a_section_name_used_as_a_key_inside_another_table_is_warned_about(tmp_path, monkeypatch):

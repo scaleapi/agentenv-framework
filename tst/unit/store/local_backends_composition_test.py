@@ -167,7 +167,8 @@ def test_skill_artifact_put_and_download(local_stores, tmp_path):
 
     art = SkillArtifact.put(id="local-skill", skill_dir=skill_dir)
     assert art.skill_object_url.startswith("file://")
-    assert local_stores.get_object_store().get_object_key(art.skill_object_url) == "artifacts/skill/local-skill/1"
+    assert re.fullmatch(r"artifacts/skill/local-skill/1-[0-9a-f]+",
+                        local_stores.get_object_store().get_object_key(art.skill_object_url))
     assert art.skill_files_id == "local-skill__files"
     with download_skill(art.skill_object_url) as out:
         names = sorted(p.name for p in out.rglob("*") if p.is_file())
@@ -207,7 +208,8 @@ def test_a_local_id_cli_bundle_round_trips(local_stores, cli_routing, tmp_path):
     cli_dir = _cli_dir(tmp_path, "cli", {"bin/tool": b"#!/bin/sh\n", "lib/data.txt": b"d"})
     art = CliArtifact.put(id=HOSTILE, command_name="tool", entrypoint="bin/tool", cli_dir=cli_dir)
 
-    assert local_stores.get_object_store().get_object_key(art.cli_object_url) == f"artifacts/cli/{HOSTILE_SEGMENT}/1"
+    assert re.fullmatch(rf"artifacts/cli/{re.escape(HOSTILE_SEGMENT)}/1-[0-9a-f]+",
+                        local_stores.get_object_store().get_object_key(art.cli_object_url))
     assert art.cli_files_id == f"{HOSTILE}__files"
     loaded = {rel: fa.load() for rel, fa in CliArtifact.get(HOSTILE).get_cli_files().get_file_artifacts().items()}
     assert loaded == {"bin/tool": b"#!/bin/sh\n", "lib/data.txt": b"d"}
@@ -246,7 +248,7 @@ def test_a_docker_image_names_its_repository_and_tarball_from_the_encoded_id(
     local_registry = []
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: local_registry.append(repository))
     pushed = []
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: pushed.append(ref))
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
@@ -277,7 +279,7 @@ def test_an_local_id_outside_the_cli_is_refused_before_any_image_or_object_is_wr
     images = FakeImageStore()
     set_image_store(images)
     pushed = []
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: pushed.append(ref))
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
@@ -327,7 +329,7 @@ def test_a_put_bundled_that_fails_partway_doesnt_block_the_next(local_stores, mo
 
 def test_a_docker_image_put_that_stops_before_its_document_doesnt_block_the_next(local_stores, monkeypatch):
     set_image_store(FakeImageStore())
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: None)
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
     put_tar = docker_image.DockerImageArtifact.put_tar

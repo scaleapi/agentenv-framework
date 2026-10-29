@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Callable, ClassVar, Optional
+import shlex
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,15 +18,20 @@ _SNAPSHOT_AFTER_LOAD_ENV_VAR = "AGENT_ENV_SNAPSHOT_AFTER_LOAD"
 # behaviour, or hold it fixed while bisecting a contention problem.
 _LOAD_CONCURRENCY_ENV_VAR = "AGENT_ENV_LOAD_CONCURRENCY"
 
+# `nproc` is GNU coreutils; macOS has only `getconf`.
+_CORE_COUNT_PROBE = "nproc 2>/dev/null || getconf _NPROCESSORS_ONLN"
+
 def _snapshot_after_load_default() -> bool:
     return os.environ.get(_SNAPSHOT_AFTER_LOAD_ENV_VAR, "").strip().lower() in ("1", "true", "yes")
 
 if TYPE_CHECKING:
     from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
+    from agent_env.env.env import DeployedEnv, LoadEnvironmentUniverseArtifactResult, LoadFileArtifactUniverseResult
     from agent_env.providers.env_state import DatabaseStateProvider
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (
@@ -34,6 +40,7 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.envs.website_browser import WEBSITE_BROWSER_RECORDER_PORT
 from agent_env.store.ids import derive_id
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
@@ -105,6 +112,15 @@ class MultiEnv(Env):
             ctx.refuse([refusal])
         return cls.put(id=ctx.id, **env)
 
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a multi env naming its envs, which ``from_toml`` reads back as it."""
+        toml = {"type": self.type, "mcp_server_envs": [out.ref(env) for env in self.mcp_server_envs]}
+        if self.website_envs:
+            toml["website_envs"] = [out.ref(env) for env in self.website_envs]
+        if self.name:
+            toml["name"] = self.name
+        return {**toml, **self.provider_toml(out, self.env_provider_type)}
+
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a multi env takes. Raises BundleError listing every problem."""
@@ -131,8 +147,9 @@ class MultiEnv(Env):
         _hand_record_to_child_envs(self, deployed_env)
         return deployed_env
 
-    def deploy_refusal(self, **options) -> str | None:
-        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find."""
+    def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
+        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
+        ``sandbox_type`` is deploy()'s own, which no provider takes."""
         return deploy_refusal(self, provider_or_class(self), options)
 
     @classmethod
@@ -474,7 +491,7 @@ class MultiEnv(Env):
         cores = None
         if self._sandbox is not None:
             try:
-                cores = int((await self._sandbox.exec_script("nproc")).strip())
+                cores = int((await self._sandbox.exec_script(_CORE_COUNT_PROBE)).strip())
             except Exception as e:  # noqa: BLE001 — a probe, not a dependency
                 logger.warning("Could not read sandbox core count (%s); loading all %d services at once", e, total)
         if not cores or cores < 1:
@@ -570,7 +587,7 @@ class MultiEnv(Env):
         from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME, DB_MCP_SERVICE_NAME, PGWEB_SERVICE_NAME
         from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
         from agent_env.providers.env_state import LocalPostgresStateProvider
-        from agent_env.config import get_config
+        from agent_env.config import gateway_env_id, get_config, service_db_env_id
 
         if self._sandbox is None:
             raise RuntimeError("Environment not deployed - call deploy() first")
@@ -585,8 +602,8 @@ class MultiEnv(Env):
         # Regenerate docker-compose.yml with the snapshot image (no init-schemas volume needed)
         logger.info("Regenerating docker-compose.yml with snapshot image...")
         config = get_config()
-        gateway_env = Env.get(config.default_gateway_env_id)
-        service_db = Env.get(config.default_service_db_env_id)
+        gateway_env = Env.get(gateway_env_id(config))
+        service_db = Env.get(service_db_env_id(config))
         service_db_config = service_db.to_config()
         service_db_config.db_image = db_image.image_name
 
@@ -601,7 +618,8 @@ class MultiEnv(Env):
         ]
         if website_configs:
             website_browser_env = Env.get(config.default_website_browser_env_id)
-            mcp_servers = list(mcp_servers) + [MCPServerConfig(image=website_browser_env.docker_image_artifact.image_name, environment_name=website_browser_env.environment_name)]
+            mcp_servers = list(mcp_servers) + [MCPServerConfig(image=website_browser_env.docker_image_artifact.image_name, environment_name=website_browser_env.environment_name,
+                                                               card_port=WEBSITE_BROWSER_RECORDER_PORT)]
 
         compose_content = gw.create_docker_compose(
             mcp_servers=mcp_servers,
@@ -618,10 +636,7 @@ class MultiEnv(Env):
         compose_content = compose_content.replace(
             "    volumes:\n      - ./init-schemas.sql:/docker-entrypoint-initdb.d/init-schemas.sql\n", "",
         )
-        write_script = f'''cat > {DOCKER_COMPOSE_PATH} << 'COMPOSE_EOF'
-{compose_content}
-COMPOSE_EOF'''
-        await self._sandbox.exec_script(write_script)
+        await gw._write_file(self._sandbox, DOCKER_COMPOSE_PATH, compose_content)
 
         # Remove old servicedb container and its anonymous volume, then start fresh from snapshot image
         logger.info("Recreating servicedb container with snapshot image...")
@@ -651,11 +666,9 @@ COMPOSE_EOF'''
         environment_names = list(dict.fromkeys(
             [env.environment_name for env in self.mcp_server_envs] + [env.environment_name for env in self.website_envs]
         ))
-        svc_list = " ".join(environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME])
+        svc_list = " ".join(map(shlex.quote, environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME]))
         logger.info(f"Recreating services: {svc_list}")
-        await self._sandbox.exec_script(
-            f"cd {GATEWAY_APP_DIR} && docker compose up -d --force-recreate {svc_list}"
-        )
+        await gw._compose_up(self._sandbox, f"--force-recreate {svc_list}")
         await gw._wait_for_gateway(self._sandbox, self._sandbox.host_port(AGENT_ENV_GATEWAY_MCP_PORT))
 
         # Install changelog triggers for each service

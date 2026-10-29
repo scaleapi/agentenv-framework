@@ -12,7 +12,7 @@ import pytest
 
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep, bound_deployment
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 
 ENV_ID = "multi-env"
@@ -39,13 +39,9 @@ def _fake_env_deploying_to(mcp_url: str, sandbox_id: str):
     return env
 
 
-def _agent_bound_to(step_id: str | None) -> DeployAgentTaskStep:
-    return DeployAgentTaskStep(
-        id=f"ag-{step_id or 'unbound'}",
-        version=None,
-        env_ids=[ENV_ID],
-        env_step_id=step_id,
-    )
+def _bound(context: TaskStepContext, env_id: str, env_step_id: str | None):
+    """The deployment an agent bound to ``env_step_id`` gets, as deploy_agent resolves it."""
+    return bound_deployment(context, env_id, env_step_id=env_step_id, step_id=f"ag-{env_step_id or 'unbound'}")
 
 
 async def _deploy_two_in_parallel() -> TaskStepContext:
@@ -80,8 +76,8 @@ async def test_each_agent_binds_to_the_env_it_depends_on():
     context = await _deploy_two_in_parallel()
     by_step = {(d.metadata or {}).get("deploy_step_id"): d for d in context.deployed_envs}
 
-    bound_a = _agent_bound_to("env-a")._deployed_env(context, ENV_ID)
-    bound_b = _agent_bound_to("env-b")._deployed_env(context, ENV_ID)
+    bound_a = _bound(context, ENV_ID, "env-a")
+    bound_b = _bound(context, ENV_ID, "env-b")
 
     assert bound_a.mcp_url == by_step["env-a"].mcp_url
     assert bound_b.mcp_url == by_step["env-b"].mcp_url
@@ -96,7 +92,7 @@ async def test_agent_without_env_step_id_refuses_to_guess():
     context = await _deploy_two_in_parallel()
 
     with pytest.raises(RuntimeError, match="2 deployments of env"):
-        _agent_bound_to(None)._deployed_env(context, ENV_ID)
+        _bound(context, ENV_ID, None)
 
 
 @pytest.mark.asyncio
@@ -108,7 +104,7 @@ async def test_single_deployment_still_resolves_without_env_step_ids():
         Env.get.return_value = _fake_env_deploying_to("https://only.modal.host/mcp", "sb-ONLY")
         await step.execute(context)
 
-    bound = _agent_bound_to(None)._deployed_env(context, ENV_ID)
+    bound = _bound(context, ENV_ID, None)
     assert bound.sandbox_id == "sb-ONLY"
 
 
@@ -134,7 +130,7 @@ async def test_env_step_id_naming_no_deployment_is_an_error():
     context = await _deploy_two_in_parallel()
 
     with pytest.raises(RuntimeError, match="names no deployment"):
-        _agent_bound_to("env-typo")._deployed_env(context, ENV_ID)
+        _bound(context, ENV_ID, "env-typo")
 
 
 @pytest.mark.asyncio
@@ -150,7 +146,7 @@ async def test_stale_env_step_id_errors_even_with_a_single_deployment():
         await step.execute(context)
 
     with pytest.raises(RuntimeError, match="names no deployment"):
-        _agent_bound_to("env-typo")._deployed_env(context, ENV_ID)
+        _bound(context, ENV_ID, "env-typo")
 
 
 @pytest.mark.asyncio
@@ -161,7 +157,7 @@ async def test_env_never_deployed_here_still_resolves_to_none():
     """
     context = await _deploy_two_in_parallel()
 
-    assert _agent_bound_to("env-a")._deployed_env(context, "oc-halt-ask-human") is None
+    assert _bound(context, "oc-halt-ask-human", "env-a") is None
 
 
 def test_deploy_agent_env_step_id_round_trips():

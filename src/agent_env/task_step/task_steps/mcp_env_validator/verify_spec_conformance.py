@@ -28,7 +28,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from agent_env.env import legacy_protocol
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.mcp_env_validator.verify_mcp_tool_schema import (
     resolve_defs_ref,

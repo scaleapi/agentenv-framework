@@ -1,13 +1,14 @@
 """Resolving a parsed bundle: every declared reference rewritten to the id it names, before any write."""
 
 import json
+import random
 
 import pytest
 
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import resolve as resolve_module
-from agent_env.bundle.resolve import BuiltImage, Output, Reference, resolve_bundle
-from agent_env.entity_refs import EntityKind, EntityRef
+from agent_env.bundle.resolve import BuiltImage, Output, Reference, ReferencedImage, resolve_bundle
+from agent_env.entity.refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
@@ -78,7 +79,8 @@ def problems(bundle) -> tuple[str, ...]:
 
 
 def refs(entry) -> list[tuple]:
-    return [(r.kind, r.id, r.version, getattr(r.local, "name", None) or getattr(r.local, "dockerfile", None))
+    return [(r.kind, r.id, r.version,
+             getattr(r.local, "name", None) or getattr(r.local, "dockerfile", None) or getattr(r.local, "ref", None))
             for r in entry.references]
 
 
@@ -252,6 +254,38 @@ def test_an_output_resolves_for_a_step_that_depends_on_its_writer(make, depends_
     assert entry.config[2]["artifact_id"] == f"{ROOT}/t/tickets-cli"
 
 
+def _walked(edges, index):
+    """The steps ``index`` runs after, by the plain transitive walk of the scheduler's rule."""
+    direct = [set(range(i)) if named is None else set(named) for i, named in enumerate(edges)]
+    seen, frontier = set(), list(direct[index])
+    while frontier:
+        current = frontier.pop()
+        if current not in seen:
+            seen.add(current)
+            frontier.extend(direct[current])
+    return seen
+
+
+def test_a_steps_upstream_is_what_the_scheduler_runs_it_after_cycles_and_later_steps_included():
+    rng = random.Random(0)
+    for _ in range(500):
+        size = rng.randint(1, 10)
+        edges = [None if rng.random() < 0.4 else rng.sample(range(size), rng.randint(0, min(3, size)))
+                 for _ in range(size)]
+        for index in range(size):
+            assert resolve_module._upstream(edges, index) == _walked(edges, index), (edges, index)
+
+
+@pytest.mark.timeout(60)
+def test_a_task_of_thousands_of_steps_resolves(make):
+    steps = [{"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "command_name": "c",
+              "cli_artifact_id": "tickets-cli"}]
+    steps += [{"id": f"d{i}", "type": "deploy_env", "env_id": "tickets"} for i in range(3000)]
+    steps.append({"id": "install", "type": "load_artifact", "agent_name": "solver", "artifact_id": "tickets-cli"})
+
+    assert resolved(make(tasks={"t": steps}), "t").config[-1]["artifact_id"] == f"{ROOT}/t/tickets-cli"
+
+
 @pytest.mark.parametrize(("depends_on", "problem"), [
     ("cli", "depends_on is a list of step ids, not 'cli'"),
     ([7], 'a depends_on entry is a step id or {"task_step_id": "<step id>"}, not 7'),
@@ -354,7 +388,7 @@ def test_an_image_key_left_out_or_given_a_dockerfile_builds_the_folder(make):
     web = next(e for e in result.entries if e.entry.name == "web")
     assert web.config == {"type": "composite_test", "image": f"{ROOT}/web__env_image",
                           "backend_image": f"{ROOT}/web__backend_image"}
-    assert [image for image in result.built_images if image.entry == web.entry] == [
+    assert [image for image in result.images if image.entry == web.entry] == [
         BuiltImage(f"{ROOT}/web__env_image", web.entry, "Dockerfile"),
         BuiltImage(f"{ROOT}/web__backend_image", web.entry, "Dockerfile.backend"),
     ]
@@ -362,12 +396,69 @@ def test_an_image_key_left_out_or_given_a_dockerfile_builds_the_folder(make):
                          (EntityKind.ARTIFACT, f"{ROOT}/web__backend_image", None, "Dockerfile.backend")]
 
 
+def test_an_image_key_naming_a_registry_image_has_the_bundle_reference_it(make):
+    bundle = make(files={
+        "envs/web/env.toml": 'type = "composite_test"\nimage = { ref = "ghcr.io/acme/web:1" }\n'
+                             'backend_image = { ref = "ghcr.io/acme/api@sha256:' + "a" * 64 + '" }\n',
+        "agents/judge/agent.toml": 'image = { ref = "ghcr.io/acme/judge:2" }\n',
+    })
+    result = resolve_bundle(bundle)
+    web, judge = (next(e for e in result.entries if e.entry.name == name) for name in ("web", "judge"))
+    assert (web.config, judge.config) == (
+        {"type": "composite_test", "image": f"{ROOT}/web__env_image", "backend_image": f"{ROOT}/web__backend_image"},
+        {"image": f"{ROOT}/judge__agent_image"})
+    assert [image for image in result.images if image.entry in (web.entry, judge.entry)] == [
+        ReferencedImage(f"{ROOT}/web__env_image", web.entry, "ghcr.io/acme/web:1"),
+        ReferencedImage(f"{ROOT}/web__backend_image", web.entry, "ghcr.io/acme/api@sha256:" + "a" * 64),
+        ReferencedImage(f"{ROOT}/judge__agent_image", judge.entry, "ghcr.io/acme/judge:2"),
+    ]
+    assert refs(judge) == [(EntityKind.ARTIFACT, f"{ROOT}/judge__agent_image", None, "ghcr.io/acme/judge:2")]
+
+
+def test_an_image_folder_is_the_image_built_from_its_dockerfile_or_the_registry_image_its_toml_names(make):
+    result = resolve_bundle(make(files={
+        "artifacts/base-mcp/artifact.toml": 'description = "the shared server image"\n',
+        "artifacts/nginx/artifact.toml": 'type = "docker_image"\nref = "docker.io/library/nginx:1.27"\n',
+        "agents/judge/agent.toml": 'image = "nginx"\n',
+    }))
+    base, nginx = (next(entry for entry in result.bundle.entries if entry.name == name)
+                   for name in ("base-mcp", "nginx"))
+    judge = next(entry for entry in result.entries if entry.entry.name == "judge")
+
+    assert [image for image in result.images if image.entry in (base, nginx)] == [
+        BuiltImage(f"{ROOT}/base-mcp", base, "Dockerfile", description="the shared server image"),
+        ReferencedImage(f"{ROOT}/nginx", nginx, "docker.io/library/nginx:1.27"),
+    ]
+    assert not [entry for entry in result.entries if entry.entry in (base, nginx)]
+    assert (judge.config, refs(judge)) == (
+        {"image": f"{ROOT}/nginx"}, [(EntityKind.ARTIFACT, f"{ROOT}/nginx", None, "nginx")])
+
+
+@pytest.mark.parametrize("files, problem", [
+    ({"artifacts/img/artifact.toml": 'type = "docker_image"\n'},
+     'artifacts/img: an image folder needs a Dockerfile, or ref = "<image>" in its artifact.toml'),
+    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": 'ref = "ghcr.io/acme/img:1"\n'},
+     "artifacts/img: artifact.toml: ref names a registry image, so this folder builds none; remove ref or its "
+     "Dockerfile"),
+    ({"artifacts/img/artifact.toml": 'type = "docker_image"\nref = "img:1"\n'},
+     "artifacts/img: artifact.toml: ref: 'img:1' doesn't name its registry; spell it out, as in "
+     "docker.io/library/img:1"),
+    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": 'platform = "linux/amd64"\n'},
+     "artifacts/img: artifact.toml: unknown key 'platform'; a docker_image artifact takes description, ref, type "
+     "and id"),
+    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": "description = 1\n"},
+     "artifacts/img: artifact.toml: description must be a string, not 1"),
+], ids=["nothing to build", "both", "no registry", "unknown key", "description type"])
+def test_an_image_folder_its_toml_cant_describe_is_a_problem(make, files, problem):
+    assert problem in problems(make(files=files))
+
+
 def test_an_agent_names_a_store_image_or_builds_its_folder(make):
     result = resolve_bundle(make(files={"agents/judge/agent.toml": 'image = { artifact = "claude-image", version = 3 }\n'}))
     solver, judge = (next(e for e in result.entries if e.entry.name == name) for name in ("solver", "judge"))
     assert (solver.config, judge.config) == (
         {"image": f"{ROOT}/solver__agent_image"}, {"image": {"artifact": "claude-image", "version": 3}})
-    assert [image for image in result.built_images if image.entry.kind is BundleKind.AGENT] == [
+    assert [image for image in result.images if image.entry.kind is BundleKind.AGENT] == [
         BuiltImage(f"{ROOT}/solver__agent_image", solver.entry, "Dockerfile")]
     assert (refs(solver), refs(judge)) == (
         [(EntityKind.ARTIFACT, f"{ROOT}/solver__agent_image", None, "Dockerfile")],
@@ -378,7 +469,10 @@ def test_an_agent_names_a_store_image_or_builds_its_folder(make):
 @pytest.mark.parametrize(("toml", "problem"), [
     ('image = "base-mcp"\nbackend_image = { dockerfile = "Dockerfile.missing" }', "backend_image: there is no 'Dockerfile.missing' in "
      "this folder to build"),
-    ('image = { ref = "ghcr.io/acme/web:1" }', "image: an external image ({ ref = ... }) isn't supported yet"),
+    ('image = { ref = "ghcr.io/acme/web:1", platform = "linux/amd64" }',
+     "image: a registry image takes only ref, not platform"),
+    ('image = { ref = "web:1" }',
+     "image: 'web:1' doesn't name its registry; spell it out, as in docker.io/library/web:1"),
     ('image = "greeting"', "image: 'greeting' is this bundle's file_artifact_universe, but this field takes "
      "docker_image"),
     ('image = "base-mcp"\nbackend_image = { dockerfile = "../tickets/Dockerfile" }', "backend_image: there is no "
@@ -439,9 +533,11 @@ def test_entities_without_references_resolve_to_a_copy_of_their_config(make):
     result = resolve_bundle(make())
     built = (BundleKind.AGENT, BundleKind.ENV)  # each names the image built from its folder
     assert {(e.entry.kind, e.entry.name): e.references for e in result.entries if e.entry.kind not in built} == {
-        (BundleKind.ARTIFACT, "greeting"): (), (BundleKind.ARTIFACT, "base-mcp"): (), (BundleKind.SKILL, "pdf"): (),
+        (BundleKind.ARTIFACT, "greeting"): (), (BundleKind.SKILL, "pdf"): (),
     }
-    assert {image.entry.kind for image in result.built_images} == set(built)
+    # base-mcp, an image folder, is the image built from it
+    assert {(image.entry.kind, image.entry.name) for image in result.images if image.entry.kind not in built} == {
+        (BundleKind.ARTIFACT, "base-mcp")}
 
 
 @pytest.mark.parametrize(("depends_on", "problem"), [

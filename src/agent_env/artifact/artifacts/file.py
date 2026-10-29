@@ -13,6 +13,7 @@ from agent_env.config import get_config
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
 class FileArtifact(Artifact):
@@ -82,10 +83,10 @@ class FileArtifact(Artifact):
             content_type=content_type,
         )
 
-        # Store artifact document in MongoDB
+        # The object is keyed by the reserved version; the document takes the next free one, the same unless a
+        # concurrent write took it first.
         instance = cls(
             id=id,
-            version=version,
             description=description,
             filename=filename,
             content_type=content_type,
@@ -118,9 +119,10 @@ class FileArtifact(Artifact):
             content_type=content_type,
         )
 
+        # The object is keyed by the reserved version; the document takes the next free one, the same unless a
+        # concurrent write took it first.
         instance = cls(
             id=id,
-            version=version,
             description=description,
             filename=filename,
             content_type=content_type,
@@ -131,10 +133,32 @@ class FileArtifact(Artifact):
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> Self:
         """Write the folder's one file (``put_attempt``); ``description`` defaults to the file's name."""
-        fields = ctx.accept(data, **cls.toml_keys)
+        fields = cls.accept_toml(data, ctx)
         filename, path = ctx.file()
         return cls.put_attempt(ctx.id, description=fields.get("description", filename), file_path=str(path),
                                filename=filename)
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder holding this file, which ``from_toml`` reads back as it."""
+        out.file(self.filename, self.object_url)
+        return {"type": self.type, **({} if self.description == self.filename else {"description": self.description})}
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an artifact.toml, a file takes, and the folder's one file. Raises BundleError listing
+        every problem."""
+        problems = []
+        if (files := ctx.try_files(empty_ok=True)) is not None:  # None when the plan's walk reports why
+            remedy = "leave out its declared type to write the folder as a file_artifact_universe"
+            if not files:
+                problems.append(ctx.no_files("files to write"))
+            elif problem := ctx.not_one_file(files, remedy):
+                problems.append(problem)
+        fields, more = ctx.accepted(data, **cls.toml_keys)
+        problems += more
+        if problems:
+            ctx.refuse(problems)
+        return fields
 
     @classmethod
     def put_attempt(cls, id: str, *, description: str, file_path: str, filename: str) -> Self:
@@ -176,11 +200,10 @@ class FileArtifact(Artifact):
             content_type = "application/octet-stream"
 
         artifact_store = get_artifact_store()
-        version = artifact_store.next_version(id)
+        artifact_store.check_writable(id)
         stored_url = store.put_file_at(object_url, file_path, content_type)
         instance = cls(
             id=id,
-            version=version,
             description=description,
             filename=filename,
             content_type=content_type,
@@ -217,10 +240,8 @@ class FileArtifact(Artifact):
         content_type = metadata.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
         artifact_store = get_artifact_store()
-        version = artifact_store.next_version(id)
         instance = cls(
             id=id,
-            version=version,
             description=description,
             filename=filename,
             content_type=content_type,

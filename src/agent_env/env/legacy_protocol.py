@@ -135,7 +135,7 @@ async def reset_via_mcp_tool(
                     reset_done = True
         except BaseExceptionGroup as eg:
             if reset_done:
-                logger.info(f"load_environment_artifact: succeeded (ignoring cleanup ExceptionGroup)")
+                logger.info("load_environment_artifact: succeeded (ignoring cleanup ExceptionGroup)")
                 break
             logger.info(f"load_environment_artifact attempt {attempt + 1}/{max_retries} failed: {eg}")
             if attempt < max_retries - 1:

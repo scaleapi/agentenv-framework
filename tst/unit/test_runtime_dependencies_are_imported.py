@@ -14,12 +14,16 @@ import sys
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 import agent_env
 
 SRC = Path(agent_env.__file__).resolve().parent
 PYPROJECT = SRC.parents[1] / "pyproject.toml"
 CONTAINER_ONLY = (SRC / "env" / "gateway",)
 SELF = "agentenv-framework"
+# The Smol SDK has no wheel for some development hosts and is deliberately absent from [dev].
+_UNINSTALLED_OPTIONAL_MODULES = {"smolmachines": frozenset({"smol"})}
 
 
 def _normalize(name: str) -> str:
@@ -36,13 +40,18 @@ def _runtime_requirements() -> list[str]:
 
 
 def _optional_requirements() -> dict[str, list[str]]:
-    """Each runtime extra's own distributions; ``dev`` is test tooling."""
+    """Each runtime extra's distributions, with those of the extras it includes; ``dev`` is test tooling."""
     extras = tomllib.loads(PYPROJECT.read_text())["project"]["optional-dependencies"]
-    return {
-        extra: [name for dep in deps if (name := _requirement_name(dep)) != SELF]
-        for extra, deps in extras.items()
-        if extra != "dev"
-    }
+
+    def distributions(extra: str) -> list[str]:
+        found = []
+        for dep in extras[extra]:
+            requirement = Requirement(dep)
+            found += ([_normalize(requirement.name)] if _normalize(requirement.name) != SELF
+                      else [name for included in sorted(requirement.extras) for name in distributions(included)])
+        return found
+
+    return {extra: distributions(extra) for extra in extras if extra != "dev"}
 
 
 @functools.cache
@@ -53,7 +62,13 @@ def _import_names(distribution: str) -> frozenset[str]:
     }
     # Editable installs (the in-repo protocol package) publish no top-level map, and that distribution's name
     # differs from its import package's, so read the packages under the directory its .pth file adds.
-    return frozenset(names or _editable_import_names(distribution) or {distribution.replace("-", "_")})
+    if names:
+        return frozenset(names)
+    try:
+        editable = _editable_import_names(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return _UNINSTALLED_OPTIONAL_MODULES[distribution]
+    return frozenset(editable or {distribution.replace("-", "_")})
 
 
 def _editable_import_names(distribution: str) -> set[str]:
@@ -73,7 +88,11 @@ def _editable_import_names(distribution: str) -> set[str]:
 def _module_paths(distribution: str) -> frozenset[str]:
     """Every dotted module path the installed distribution's files provide, namespaces included."""
     paths: set[str] = set()
-    for file in importlib.metadata.distribution(distribution).files or []:
+    try:
+        files = importlib.metadata.distribution(distribution).files or []
+    except importlib.metadata.PackageNotFoundError:
+        return _UNINSTALLED_OPTIONAL_MODULES[distribution]
+    for file in files:
         if file.suffix != ".py" or ".." in file.parts:
             continue
         parts = file.with_suffix("").parts
@@ -157,17 +176,19 @@ def test_every_optional_dependency_is_imported_by_the_library():
     assert all(not deps for deps in unused.values()), f"extra dependencies nothing imports: {unused}"
 
 
-def test_a_module_using_an_extra_imports_only_what_the_extra_and_core_declare():
-    """Otherwise the extra works only while something else happens to install the package."""
+def test_a_module_using_an_extra_imports_only_what_one_extra_and_core_declare():
+    """Otherwise the extra works only while something else happens to install the package. A module may use the
+    extras an extra includes, as ``trl`` includes ``openenv``."""
     core = _runtime_requirements()
-    for extra, deps in _optional_requirements().items():
-        own = [d for d in deps if d not in core]
-        for path in _library_files():
-            imports = [c for c in _imports(path) if _third_party(c)]
-            if not any(_owners(c, own) for c in imports):
-                continue
-            undeclared = [c[0] for c in imports if not _owners(c, core + deps)]
-            assert undeclared == [], (
-                f"{path.relative_to(SRC)} uses the {extra!r} extra but imports {undeclared}, "
-                f"which neither it nor the core dependencies declare"
-            )
+    extras = _optional_requirements()
+    for path in _library_files():
+        imports = [c for c in _imports(path) if _third_party(c)]
+        used = [extra for extra, deps in extras.items() if any(_owners(c, [d for d in deps if d not in core])
+                                                               for c in imports)]
+        if not used:
+            continue
+        undeclared = min(([c[0] for c in imports if not _owners(c, core + extras[extra])] for extra in used), key=len)
+        assert undeclared == [], (
+            f"{path.relative_to(SRC)} uses the {used} extras but imports {undeclared}, which no one of them "
+            f"declares with the core dependencies"
+        )

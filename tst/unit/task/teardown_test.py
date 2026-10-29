@@ -8,18 +8,23 @@ import os
 import tempfile
 import time
 
+from unittest.mock import AsyncMock, MagicMock
+
+import modal
 import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, remove_local_work_dir
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, remove_local_work_dir
 from agent_env.task import teardown
-from agent_env.task.teardown import RecordedSandbox, TeardownReport, recorded_sandboxes, teardown_run
+from agent_env.task.task import _rolled_back_sandboxes
+from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport, recorded_sandboxes, teardown_run
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
-from agent_env.task_step.task_steps import teardown_sandboxes
-from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY
 
 
 class _FakeSandbox:
+    ON_THIS_MACHINE = False
+
     def __init__(self, provider, sandbox_id):
         self.provider, self.sandbox_id = provider, sandbox_id
 
@@ -33,6 +38,8 @@ class _FakeSandbox:
 
 
 class _FakeProvider:
+    ON_THIS_MACHINE = False
+
     def __init__(self, name, log):
         self.name, self.log = name, log
 
@@ -41,6 +48,12 @@ class _FakeProvider:
             raise RuntimeError(f"no sandbox {sandbox_id}")
         return _FakeSandbox(self, sandbox_id)
 
+    async def terminate_sandbox(self, sandbox_id):
+        await (await self.get_sandbox(sandbox_id)).terminate()
+
+    async def close(self):
+        pass
+
 
 class _Log(list):
     """The (provider, sandbox_id) terminate log, and how given sandboxes misbehave."""
@@ -48,6 +61,28 @@ class _Log(list):
     def __init__(self):
         super().__init__()
         self.behaviors: dict[str, str] = {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("close_failure", [False, True, "stall"])
+async def test_owned_teardown_provider_is_closed(monkeypatch, failure, close_failure):
+    provider = MagicMock(ON_THIS_MACHINE=False)
+    provider.terminate_sandbox = AsyncMock(side_effect=RuntimeError("denied") if failure else None)
+    async def stalled_close():
+        await asyncio.Event().wait()
+
+    provider.close = AsyncMock(side_effect=(stalled_close if close_failure == "stall" else
+                               RuntimeError("client close failed") if close_failure else None))
+    monkeypatch.setattr(teardown, "build_sandbox_provider", lambda _: provider)
+    monkeypatch.setattr(teardown, "PROVIDER_CLOSE_TIMEOUT_SECONDS", 0.01)
+    operation = teardown.terminate(RecordedSandbox("box", "vercel", "env"))
+    if failure:
+        with pytest.raises(RuntimeError, match="denied"):
+            await asyncio.wait_for(operation, 0.5)
+    else:
+        await asyncio.wait_for(operation, 0.5)
+    provider.close.assert_awaited_once()
 
 
 @pytest.fixture
@@ -60,7 +95,6 @@ def terminated(monkeypatch):
         return _FakeProvider(name, log)
 
     monkeypatch.setattr(teardown, "build_sandbox_provider", build)
-    monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", build)
     monkeypatch.setattr(teardown, "_DEFAULT_PROVIDERS", {
         slot: (lambda slot=slot: _FakeProvider(f"default-{slot}", log)) for slot in ("agent", "env", "sandbox")
     })
@@ -99,6 +133,12 @@ def test_every_recorded_sandbox_is_found_once_and_attributed_to_what_made_it():
     )
 
 
+def test_the_sandboxes_a_retry_rolled_back_are_found_like_live_ones():
+    gone = _rolled_back_sandboxes(_context().to_dict(), TaskStepContext().to_dict())
+    rolled_back = TaskStepContext(metadata={"retry_resets": [{"rolled_back_sandboxes": gone}]})
+    assert recorded_sandboxes(rolled_back) == recorded_sandboxes(_context())
+
+
 def test_each_sandbox_is_terminated_through_its_backend_and_recorded_so_a_second_call_does_nothing(terminated):
     context = _context()
 
@@ -125,6 +165,78 @@ def test_a_sandbox_a_step_already_tore_down_is_not_terminated_again(terminated):
     assert len(report.terminated) == 2
 
 
+class _Shop:
+    pass
+
+
+@pytest.mark.parametrize("close, logged", [
+    ("closes", None),
+    ("raises", "env shop wasn't closed (RuntimeError: its driver is gone); its sandboxes are terminated by id"),
+    ("hangs", "env shop wasn't closed (timed out after 0.05s)"),
+    ("can't", None),
+])
+def test_the_runs_open_recordings_end_then_each_env_still_up_closes_then_what_stayed_open_registers_then_its_sandboxes_go_by_id(
+        terminated, monkeypatch, caplog, close, logged):
+    steps = []
+
+    async def close_deployed(deployed, env_class):
+        steps.append(("close", deployed.env_id, env_class, list(terminated)))
+        if close == "raises":
+            raise RuntimeError("its driver is gone")
+        if close == "hangs":
+            await asyncio.Event().wait()
+        if close == "can't":
+            raise NotImplementedError
+
+    async def end_open_recordings(context, env_ids):
+        steps.append(("end", env_ids, list(terminated)))
+
+    monkeypatch.setattr(teardown, "end_open_recordings", end_open_recordings)
+    monkeypatch.setattr(teardown, "close_deployed", close_deployed)
+    monkeypatch.setattr(teardown.Env, "get", lambda env_id, version: _Shop())
+    monkeypatch.setattr(teardown, "register_open_recordings",
+                        lambda context, env_ids: steps.append(("register", env_ids, list(terminated))))
+    context = _context()
+
+    report = _run(context, timeout=0.05)
+
+    assert steps == [
+        ("end", ["shop", "hosted"], []), ("close", "shop", _Shop, []), ("register", ["shop", "hosted"], []),
+    ]
+    assert {sandbox.sandbox_id for sandbox in report.terminated} == {"sb-box", "sb-db", "sb-gw", "sb-solver", "sb-vm"}
+    assert (logged in caplog.text) if logged else "wasn't closed" not in caplog.text
+
+
+def test_an_env_class_of_a_plugins_own_closes_itself_and_its_sandboxes_still_go_by_id(terminated, monkeypatch):
+    closed = []
+
+    class _Own:
+        @classmethod
+        async def from_deployed_env(cls, deployed):
+            return cls()
+
+        async def close(self):
+            closed.append("closed")
+
+    monkeypatch.setattr(teardown.Env, "get", lambda env_id, version: _Own())
+
+    report = _run(_context())
+
+    assert closed == ["closed"]
+    assert {sandbox.sandbox_id for sandbox in report.terminated} == {"sb-box", "sb-db", "sb-gw", "sb-solver", "sb-vm"}
+
+
+def test_an_env_a_step_already_tore_down_is_not_closed_again(terminated, monkeypatch):
+    close_deployed = AsyncMock()
+    monkeypatch.setattr(teardown, "close_deployed", close_deployed)
+    context = _context()
+    context.metadata[TORN_DOWN_KEY] = ["sb-gw", "sb-db", "sb-vm"]
+
+    _run(context)
+
+    close_deployed.assert_not_awaited()
+
+
 @pytest.mark.parametrize("behavior, why", [
     ("raise", "RuntimeError: boom"),
     ("gone", "RuntimeError: no sandbox sb-gw"),
@@ -140,6 +252,44 @@ def test_a_terminate_that_fails_is_reported_not_raised_and_the_others_still_go(t
     assert report.still_up == (RecordedSandbox("sb-gw", "modal", "env"),)
     assert len(report.terminated) == 4
     assert "sb-gw" not in context.metadata[TORN_DOWN_KEY]
+
+
+def test_a_record_that_names_its_backend_is_terminated_by_id_and_one_that_doesnt_through_a_handle(
+    terminated, monkeypatch,
+):
+    by_id = []
+
+    async def terminate_sandbox(self, sandbox_id):
+        by_id.append((self.name, sandbox_id))
+
+    monkeypatch.setattr(_FakeProvider, "terminate_sandbox", terminate_sandbox)
+    context = TaskStepContext(deployed_sandboxes=[
+        DeployedSandbox(sandbox_name="named", sandbox_id="sb-named", sandbox_mode="vm", sandbox_type="modal"),
+        DeployedSandbox(sandbox_name="unnamed", sandbox_id="sb-unnamed", sandbox_mode="vm"),
+    ])
+
+    report = _run(context)
+
+    assert by_id == [("modal", "sb-named")]
+    assert terminated == [("default-sandbox", "sb-unnamed")]
+    assert {sandbox.sandbox_id for sandbox in report.terminated} == {"sb-named", "sb-unnamed"}
+
+
+def test_a_modal_sandbox_that_already_finished_is_counted_down_not_reported_up(monkeypatch):
+    sb = MagicMock()
+    sb.tunnels.aio = AsyncMock(side_effect=modal.exception.ConflictError("Sandbox has already finished with status terminated"))
+    sb.terminate.aio = AsyncMock()
+    monkeypatch.setattr(modal.Sandbox, "from_id", MagicMock(aio=AsyncMock(return_value=sb)))
+    monkeypatch.setattr(ModalSandboxProvider, "_get_client", AsyncMock(return_value=MagicMock()))
+    context = TaskStepContext(deployed_sandboxes=[
+        DeployedSandbox(sandbox_name="box", sandbox_id="sb-finished", sandbox_mode="container", sandbox_type="modal")])
+
+    report = _run(context)
+
+    assert report.terminated == (RecordedSandbox("sb-finished", "modal", "sandbox"),)
+    assert report.still_up == ()
+    assert context.metadata[TORN_DOWN_KEY] == ["sb-finished"]
+    sb.tunnels.aio.assert_not_called()
 
 
 def test_cancelling_it_returns_what_it_reached_and_leaves_the_rest(terminated):

@@ -7,7 +7,6 @@ containers, so ``LocalSandbox`` shares the Docker daemon's path namespace.
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 
 import click
@@ -15,20 +14,9 @@ import click
 from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, InfraError, default_env_id, ensure_default_envs
 
 
-def _require_explorer_deps() -> None:
-    """The explorer needs the optional ``[explorer]`` extra (fastapi, uvicorn). Check without importing
-    them, so a missing extra is an actionable hint rather than a stack trace."""
-    missing = [m for m in ("fastapi", "uvicorn") if importlib.util.find_spec(m) is None]
-    if missing:
-        raise click.ClickException(
-            f"agent-env up serves the local explorer, which needs the optional 'explorer' extra "
-            f"(missing: {', '.join(missing)}). Install it with:  pip install 'agentenv-framework[explorer]'"
-        )
-
-
 def _bootstrap_envs() -> None:
-    """Build the two envs ``deploy_env`` resolves by id (service-db, gateway) when they're missing or were built from
-    other inputs than this release's, so `up` is cheap after the first run, which builds their images."""
+    """Set up the two envs ``deploy_env`` resolves by id (service-db, gateway) when they're missing or were built from
+    other inputs than this release's, so `up` is cheap after the first run, which pulls or builds their images."""
     try:
         builds = ensure_default_envs((SERVICE_DB, GATEWAY), say=lambda line: click.echo(f"  {line}"))
     except InfraError as e:
@@ -45,7 +33,6 @@ def up(no_bootstrap: bool) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     click.echo("agent-env up")
-    _require_explorer_deps()
 
     from agent_env.config import configure, get_config, get_runner
     from agent_env.store.routing import configured_store

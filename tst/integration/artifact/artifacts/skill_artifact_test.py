@@ -6,6 +6,7 @@ other artifact tests in this directory.
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 
@@ -51,7 +52,7 @@ class TestSkillArtifact:
         assert created.agent_skills_spec_version == AGENT_SKILLS_SPEC_VERSION
         assert created.license == "Apache-2.0"
         assert created.skill_object_url.startswith(get_config().get_object_store().object_url("artifacts/skill/"))
-        assert created.skill_object_url.rstrip("/").endswith(f"/artifacts/skill/{artifact_id}/{created.version}")
+        assert re.search(rf"/artifacts/skill/{artifact_id}/{created.version}-[0-9a-f]+/$", created.skill_object_url)
 
         retrieved = Artifact.get(artifact_id)
         assert isinstance(retrieved, SkillArtifact)
@@ -68,5 +69,5 @@ class TestSkillArtifact:
         artifact_id = _unique_id("skill-invalid")
         skill_dir = _write_skill_dir(artifact_id, frontmatter_name="something-else", tmp_path=tmp_path)
 
-        with pytest.raises(ValueError, match="must equal the SkillArtifact id"):
+        with pytest.raises(ValueError, match=f"'something-else' must be '{artifact_id}'"):
             SkillArtifact.put(id=artifact_id, skill_dir=skill_dir)

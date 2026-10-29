@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from agent_env.artifact.artifact import Artifact
 
@@ -21,7 +21,7 @@ class Universe(Artifact):
     # ``type`` literal default (e.g. ``type: Literal["environment_universe"] = "environment_universe"``).
     __is_abstract__: ClassVar[bool] = True
 
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         # A subclass is concrete if its ``type`` field has a non-empty default.
         type_field = cls.model_fields.get("type")

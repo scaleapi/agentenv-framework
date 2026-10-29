@@ -1,19 +1,35 @@
 """Open data-plane protocol and server SDK for agent environments."""
 
 from . import client
+from .client import ExtensionCallError
+from .errors import Applied, AgentEnvError
 from .preflight import intake_fit_check
+from .tool_client import ToolResult, ToolSession, ToolSessionError
 from .agent_env_environment import (
+    HIDDEN_BY_DEFAULT_META_KEY,
     AgentEnvApplication,
     AgentEnvEnvironment,
     AgentEnvFastMCPApplication,
     AgentEnvStarletteApplication,
     add_data,
+    agent_skill,
     create_fastmcp_app,
     environment_card,
     extension,
     get_data,
+    injecting,
     reset_data,
     tool,
+)
+from .tool_context import (
+    DEFAULT_ROLE,
+    ROLE_HEADER,
+    ROLE_META_KEY,
+    SESSION_META_KEY,
+    Caller,
+    ToolContext,
+    bound,
+    normalize_role,
 )
 from .manifest import (
     CLI_COMMANDS,
@@ -43,6 +59,7 @@ from .types import (
     METHOD_RESET,
     PROTOCOL_VERSION,
     RPC_PATH,
+    SKILL_EXTENSION_URI,
     WELL_KNOWN_PATH,
     AddDataRequest,
     AddDataResponse,
@@ -76,8 +93,19 @@ __all__ = [
     "reset_data",
     "add_data",
     "get_data",
+    "agent_skill",
     "extension",
     "tool",
+    "injecting",
+    "ToolContext",
+    "Caller",
+    "normalize_role",
+    "bound",
+    "ROLE_META_KEY",
+    "SESSION_META_KEY",
+    "HIDDEN_BY_DEFAULT_META_KEY",
+    "ROLE_HEADER",
+    "DEFAULT_ROLE",
     "EnvironmentCapabilities",
     "EnvironmentCard",
     "EnvironmentExtension",
@@ -92,10 +120,14 @@ __all__ = [
     "intake_fit_check",
     "INTAKE_EXTENSION_URI",
     "DATA_OBJECTS_EXTENSION_URI",
+    "SKILL_EXTENSION_URI",
     "uploaded_file_part",
     "uploaded_object_path",
     "MCP_PATH",
     "MCP_TRANSPORT",
+    "ToolSession",
+    "ToolResult",
+    "ToolSessionError",
     "MANIFEST_VERSION",
     "INTERFACE_MANIFEST_PATH",
     "GET_INTERFACES_EXTENSION_URI",
@@ -118,6 +150,9 @@ __all__ = [
     "AddDataResponse",
     "GetDataResponse",
     "error_body",
+    "AgentEnvError",
+    "Applied",
+    "ExtensionCallError",
     "PROTOCOL_VERSION",
     "RPC_PATH",
     "WELL_KNOWN_PATH",

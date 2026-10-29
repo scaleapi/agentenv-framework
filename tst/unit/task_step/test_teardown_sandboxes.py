@@ -11,13 +11,16 @@ from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.context_ops import build_context_update_ops
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_steps import teardown_sandboxes
-from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY, TeardownSandboxesTaskStep
+from agent_env.task import teardown
+from agent_env.task.teardown import TORN_DOWN_KEY
+from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 
 _BACKENDS = {"modal", "modal_vm"}
 
 
 class _FakeSandbox:
+    ON_THIS_MACHINE = False
+
     def __init__(self, provider, sandbox_id):
         self.provider, self.sandbox_id = provider, sandbox_id
 
@@ -28,11 +31,19 @@ class _FakeSandbox:
 
 
 class _FakeProvider:
+    ON_THIS_MACHINE = False
+
     def __init__(self, name, terminated, failing):
         self.name, self.terminated, self.failing = name, terminated, failing
 
     async def get_sandbox(self, sandbox_id):
         return _FakeSandbox(self, sandbox_id)
+
+    async def terminate_sandbox(self, sandbox_id):
+        await (await self.get_sandbox(sandbox_id)).terminate()
+
+    async def close(self):
+        pass
 
 
 class _Log(list):
@@ -54,8 +65,8 @@ def terminated(monkeypatch):
             raise ValueError(f"unknown backend {name}")
         return _FakeProvider(name, log, failing)
 
-    monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", build)
-    monkeypatch.setattr(teardown_sandboxes, "_DEFAULT_PROVIDERS", {
+    monkeypatch.setattr(teardown, "build_sandbox_provider", build)
+    monkeypatch.setattr(teardown, "_DEFAULT_PROVIDERS", {
         slot: (lambda slot=slot: _FakeProvider(f"default-{slot}", log, failing))
         for slot in ("agent", "env", "sandbox")
     })
@@ -139,6 +150,20 @@ async def test_an_env_tears_down_every_sandbox_behind_it_on_its_own_backend(term
         ("modal", "sb-gw"),         # primary and "gateway" entry are one sandbox
         ("modal_vm", "sb-vm"),      # keyed by a backend name: that backend, not the env's
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_typed_sandbox_is_terminated_by_id_without_a_handle(terminated, monkeypatch):
+    async def no_handle(self, sandbox_id):
+        raise AssertionError(f"asked {self.name} for a handle to {sandbox_id}")
+
+    async def by_id(self, sandbox_id):
+        self.terminated.append((self.name, sandbox_id))
+
+    monkeypatch.setattr(_FakeProvider, "get_sandbox", no_handle)
+    monkeypatch.setattr(_FakeProvider, "terminate_sandbox", by_id)
+    await _step(agent_names=["solver"]).execute(_context())
+    assert terminated == [("modal", "sb-solver")]
 
 
 @pytest.mark.asyncio

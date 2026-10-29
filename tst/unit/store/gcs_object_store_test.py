@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -85,6 +86,7 @@ class _FakeBucket:
         blob.metadata, blob.content_type, blob.size = stored.metadata, stored.content_type, len(stored.data)
         blob.updated, blob.generation = stored.updated, stored.generation
         blob.content_encoding = stored.content_encoding
+        blob.md5_hash = base64.b64encode(hashlib.md5(stored.data).digest()).decode()  # as GCS reports a whole object's
         return blob
 
 
@@ -92,7 +94,7 @@ class _FakeBlob:
     def __init__(self, client: _FakeClient, bucket: str, name: str) -> None:
         self.client, self.bucket_name, self.name = client, bucket, name
         self.metadata: dict | None = None
-        self.content_type = self.size = self.updated = self.generation = self.content_encoding = None
+        self.content_type = self.size = self.updated = self.generation = self.content_encoding = self.md5_hash = None
 
     def upload_from_string(self, data, content_type=None, if_generation_match=None) -> None:
         self._write(data, content_type, if_generation_match)

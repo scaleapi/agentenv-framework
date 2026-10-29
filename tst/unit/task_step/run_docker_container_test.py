@@ -11,7 +11,7 @@ import pytest
 
 from agent_env.config import set_object_store
 from agent_env.providers.sandbox_providers import sandbox_provider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.run_docker_container import (
     RunDockerContainerTaskStep as Step,

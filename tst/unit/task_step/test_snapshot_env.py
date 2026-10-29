@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from types import SimpleNamespace
 
 import pytest
 from agentenv_protocol import FilePart
@@ -60,6 +61,7 @@ def test_dict_roundtrip_and_registry():
         original_universe_artifact_id="base-universe",
         export_timeout_seconds=120,
         include_env_trajectory=True,
+        include_env_changes=True,
     )
     data = step.to_dict()
     assert data["type"] == "snapshot_env"
@@ -69,7 +71,7 @@ def test_dict_roundtrip_and_registry():
     for attr in (
         "env_id", "env_instance_id", "gateway_url", "snapshot_id",
         "original_universe_artifact_id", "export_timeout_seconds",
-        "include_env_trajectory",
+        "include_env_trajectory", "include_env_changes",
     ):
         assert getattr(restored, attr) == getattr(step, attr)
 
@@ -79,6 +81,7 @@ def test_from_dict_defaults():
     assert step.env_id is None
     assert step.export_timeout_seconds == SnapshotEnvTaskStep.DEFAULT_EXPORT_TIMEOUT_SECONDS
     assert step.include_env_trajectory is False
+    assert step.include_env_changes is False
 
 
 # ── env resolution ───────────────────────────────────────────────────────────
@@ -448,6 +451,92 @@ async def test_trajectory_capture_with_a_gateway_url_override_reads_the_override
     await _step(env_id="env-1", gateway_url="https://override/", include_env_trajectory=True).execute(_ctx(*deployments))
 
     assert [(m, u) for m, u, _ in client.requests] == [("GET", "https://override/trajectory")]
+
+
+# ── env changes capture ──────────────────────────────────────────────────────
+
+class _FakeChangesClient(_FakeAsyncClient):
+    """Answers GET /changes from `rows`, paged by after_id and limit as the gateway pages them."""
+
+    def __init__(self, rows=None, error=None, page_size=2):
+        super().__init__(error=error)
+        self.rows = rows or []
+        self.page_size = page_size
+
+    async def request(self, method, url, params=None):
+        self.requests.append((method, url, params))
+        if self.error:
+            raise self.error
+        page = [r for r in self.rows if r["id"] > params["after_id"]]
+        body = {"changes": page[:self.page_size], "has_more": len(page) > self.page_size}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
+
+
+def _change(row_id, *actors):
+    return {"id": row_id, "table_name": "messages", "operation": "INSERT", "row_id": f"m{row_id}",
+            "actors": [{"kind": "tool_call", "event_id": f"event_{a}", "tool": "mail_send_message", "role": "default"}
+                       for a in actors]}
+
+
+@pytest.mark.asyncio
+async def test_changes_capture_pages_every_row_into_jsonl_and_counts_the_attributed(monkeypatch):
+    _wire_fake_snapshot(monkeypatch)
+    rows = [_change(1, 1), _change(2, 3), _change(3), _change(4, 5, 6), _change(5, 7)]
+    client = _FakeChangesClient(rows)
+    store = _wire_fake_capture(monkeypatch, client)
+
+    ctx = _ctx(_deployed())
+    await _step(include_env_changes=True).execute(ctx)
+
+    ((key, (data, content_type)),) = store.uploads.items()
+    assert key.startswith("env_changes/instance_id=task-x-65717eb66eeec083/env-1-") and key.endswith(".jsonl")
+    assert [json.loads(line) for line in data.decode().splitlines()] == rows and content_type == "application/jsonl"
+    entry = ctx.metadata["env_changes"]["env-1"]
+    assert {k: entry[k] for k in ("change_count", "attributed_count", "ambiguous_count")} == {
+        "change_count": 5, "attributed_count": 3, "ambiguous_count": 1}
+    assert entry["object_url"] == f"s3://fake-bucket/{key}" and entry["capture_step_id"] == "snap-1"
+    assert [(m, u, p["after_id"]) for m, u, p in client.requests] == [
+        ("GET", "https://gw-1/changes", 0), ("GET", "https://gw-1/changes", 2), ("GET", "https://gw-1/changes", 4)]
+    assert "env_trajectory" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+async def test_changes_capture_failure_is_fail_open(monkeypatch):
+    _wire_fake_snapshot(monkeypatch)
+    store = _wire_fake_capture(monkeypatch, _FakeChangesClient(error=RuntimeError("gateway unreachable")))
+
+    ctx = _ctx(_deployed())
+    await _step(include_env_changes=True).execute(ctx)
+
+    assert ctx.metadata["env_changes"]["env-1"]["error"] == "RuntimeError: gateway unreachable"
+    assert store.uploads == {} and ctx.metadata["env_snapshotted_universes"]["snap-1"]["version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_changes_capture_records_one_sentence_when_the_card_offers_no_changes(monkeypatch):
+    _wire_fake_snapshot(monkeypatch)
+    client = _FakeChangesClient([_change(1, 1)])
+    _wire_fake_capture(monkeypatch, client)
+    deployed = _deployed()
+    deployed.environment_card = {"capabilities": {"extensions": [e for e in GATEWAY_EXTENSIONS if e["uri"] == EXT_STATE_URI]}}
+
+    ctx = _ctx(deployed)
+    await _step(include_env_changes=True).execute(ctx)
+
+    assert ctx.metadata["env_changes"]["env-1"]["error"] == (
+        "EnvCapabilityUnsupported: env 'env-1' does not offer 'get' on urn:agentenv:changes/v1.")
+    assert client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_changes_capture_with_a_gateway_url_override_reads_the_override(monkeypatch):
+    _wire_fake_snapshot(monkeypatch)
+    client = _FakeChangesClient([_change(1, 1)])
+    _wire_fake_capture(monkeypatch, client)
+
+    await _step(env_id="env-1", gateway_url="https://override/", include_env_changes=True).execute(_ctx())
+
+    assert [(m, u) for m, u, _ in client.requests] == [("GET", "https://override/changes")]
 
 
 # ── core: all-or-nothing + streaming guard ───────────────────────────────────

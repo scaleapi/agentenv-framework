@@ -6,6 +6,7 @@ through, the field round-trips as None and the env silently deploys without it.
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
 import pytest
@@ -219,3 +220,15 @@ def test_merge_metadata_is_a_noop_for_empty_values(tmp_path):
 
     assert recording.updates == []
     assert _read(bundle)["metadata"] is None
+
+
+def test_instance_ids_do_not_follow_a_reseeded_random():
+    """A trainer reseeds ``random`` between deploys; the instance ids must still differ, or records collide."""
+    store = EnvInstanceStore()
+    set_document_store(FakeDocumentStore())
+    ids = []
+    for _ in range(2):
+        random.seed(0)
+        ids.append(store.create_instance(DeployedEnv(env_id="portsim", env_version=1), ttl_seconds=60).instance_id)
+
+    assert ids[0] != ids[1]

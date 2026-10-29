@@ -23,16 +23,12 @@ if os.path.exists(base_service_path) and base_service_path not in sys.path:
 
 # Import from MCP server (DO NOT MODIFY these source files)
 try:
-    from database import SlackDatabase, UserTable, ChannelTable, MessageTable
+    from database import SlackDatabase, UserTable, MessageTable
     from models import (
         User,
         Channel,
         Message,
-        ChannelType,
-        MessageType,
         generate_slack_ts,
-        ts_to_datetime,
-        datetime_to_ts,
     )
     IMPORTS_AVAILABLE = True
     TABLES_AVAILABLE = True

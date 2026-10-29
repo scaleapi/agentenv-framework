@@ -2,7 +2,6 @@
 Application configuration.
 """
 import os
-from typing import Optional
 
 
 class Settings:

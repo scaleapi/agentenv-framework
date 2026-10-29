@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.a2a_agent import validator as validator_module
 from agent_env.a2a_agent.validator import A2AAgentValidator
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
@@ -32,6 +33,13 @@ from agent_env.store.ids import fs_safe, image_repository, key_segment
 from agent_env.store.routing import LocalNamespaceDocumentStore
 from agent_env.task import Task
 from tst.unit.store.fakes import FakeDocumentStore, FakeImageStore, SigningObjectStore, reattach_for_snapshot
+
+
+@pytest.fixture(autouse=True)
+def no_validation_env_write(monkeypatch):
+    """The env the validator writes first is a2a_agent_validate_test's; these runs write none."""
+    monkeypatch.setattr(validator_module, "write_validation_env", lambda on_progress: None)
+
 
 LOCAL_ID = "@local/t/Chaos"
 LOCAL_ENV = "@local/~/bundle/envs/e"
