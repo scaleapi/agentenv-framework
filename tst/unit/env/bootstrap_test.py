@@ -11,7 +11,8 @@ from click.testing import CliRunner
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.cli.up import _bootstrap_envs, up
-from agent_env.env import GatewayEnv
+from agent_env.config import get_config
+from agent_env.env import GatewayEnv, MCPServerEnv
 from agent_env.env import bootstrap
 from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, WEBSITE_BROWSER, InfraError, ensure_default_envs
 from agent_env.env.env import Env
@@ -175,9 +176,29 @@ def test_the_website_browser_is_put_with_mcp_server_put_over_the_published_image
         local_stores, monkeypatch, published_digest, source):
     monkeypatch.setattr(bootstrap, "published_digest", lambda image: published_digest)
 
-    assert bootstrap.put_command(WEBSITE_BROWSER) == (
-        f"agent-env env mcp-server put --id playwright-mcp --environment-name playwright-mcp {source}")
-    assert bootstrap.put_command(GATEWAY) == "agent-env env gateway put --id default"
+    assert bootstrap.put_hint(WEBSITE_BROWSER) == (
+        f"`agent-env env mcp-server put --id playwright-mcp --environment-name playwright-mcp {source}`")
+    assert bootstrap.put_hint(GATEWAY) == "`agent-env env gateway put --id default`"
+
+
+def test_a_browser_agent_env_doesnt_ship_is_never_set_up_and_its_hint_is_generic(puts, monkeypatch):
+    monkeypatch.setattr(bootstrap, "published_digest", lambda image: None)
+    monkeypatch.setattr(get_config(), "default_website_browser_env_id", "browseruse-mcp")
+
+    with pytest.raises(InfraError) as e:
+        ensure_default_envs([WEBSITE_BROWSER, GATEWAY])
+    assert e.value.problems == [
+        "the website-browser env 'browseruse-mcp' isn't in the store, and agent-env sets up only the website browser "
+        "it ships, 'playwright-mcp'; put it with `agent-env env mcp-server put --id browseruse-mcp --environment-name "
+        "<its name> --image-ref <its image>`, as for the browser agent-env ships: `--environment-name playwright-mcp "
+        f"--dockerfile {bootstrap.PLAYWRIGHT_MCP_DOCKERFILE}`"]
+    assert puts == []
+
+    MCPServerEnv.put(id="browseruse-mcp", environment_name="browseruse-mcp", docker_image_artifact=get_artifact_store(
+        ).put_document(DockerImageArtifact(id="browseruse-mcp__env_image", description="b", image_name="b:v1",
+                                           tar_gz_s3_url="file:///b.tar.gz")))
+    assert ensure_default_envs([WEBSITE_BROWSER]) == []
+    assert puts == []
 
 
 def test_stores_that_arent_local_are_never_built_into(puts, published, monkeypatch):

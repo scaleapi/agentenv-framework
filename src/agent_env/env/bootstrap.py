@@ -253,17 +253,27 @@ def default_env_id(kind: str) -> str:
     return get_config().get_default_env_id(_DEFAULT_ENV_ID_KEYS[kind])
 
 
-def put_command(kind: str) -> str:
-    """The command that puts ``kind``'s env under the id config names. The website browser is an MCP server env, which
-    ``mcp-server put`` writes: over the image this install's release publishes when there is one, else built from the
-    Dockerfile agent-env ships."""
+def ships(kind: str, env_id: str) -> bool:
+    """Whether agent-env sets up ``kind``'s env as ``env_id``: the gateway and service-db under any id, as it ships one
+    of each, and the website browser only under the id of the one it ships, since the slot may name any browser."""
+    return kind != WEBSITE_BROWSER or env_id == PLAYWRIGHT_MCP_ENVIRONMENT_NAME
+
+
+def put_hint(kind: str) -> str:
+    """How to put ``kind``'s env under the id config names, as a message says it. The website browser is an MCP server
+    env, which ``mcp-server put`` writes: the one agent-env ships over the image this install's release publishes when
+    there is one, else built from its Dockerfile; any other browser over its own image."""
     env_id = default_env_id(kind)
     if kind != WEBSITE_BROWSER:
-        return f"agent-env env {kind} put --id {env_id}"
+        return f"`agent-env env {kind} put --id {env_id}`"
     image = _PUBLISHED[PLAYWRIGHT_MCP_DOCKERFILE]
-    source = (f"--image-ref {image.ref()}" if published_digest(image) is not None
-              else f"--dockerfile {PLAYWRIGHT_MCP_DOCKERFILE}")
-    return f"agent-env env mcp-server put --id {env_id} --environment-name {PLAYWRIGHT_MCP_ENVIRONMENT_NAME} {source}"
+    shipped = (f"--environment-name {PLAYWRIGHT_MCP_ENVIRONMENT_NAME} "
+               + (f"--image-ref {image.ref()}" if published_digest(image) is not None
+                  else f"--dockerfile {PLAYWRIGHT_MCP_DOCKERFILE}"))
+    if ships(kind, env_id):
+        return f"`agent-env env mcp-server put --id {env_id} {shipped}`"
+    return (f"`agent-env env mcp-server put --id {env_id} --environment-name <its name> --image-ref <its image>`, "
+            f"as for the browser agent-env ships: `{shipped}`")
 
 
 def infra_to_set_up(kinds: Iterable[str], *, missing_only: bool = False) -> list[InfraSetup]:
@@ -281,11 +291,14 @@ def infra_to_set_up(kinds: Iterable[str], *, missing_only: bool = False) -> list
         try:
             env = Env.get(env_id)
         except NotFoundError:
-            if local:
+            if not ships(kind, env_id):
+                problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env sets up only the website "
+                                f"browser it ships, {PLAYWRIGHT_MCP_ENVIRONMENT_NAME!r}; put it with {put_hint(kind)}")
+            elif local:
                 setups.append(_pulled_or_built(kind, env_id, MISSING))
             else:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
-                                f"local stores; put it with `{put_command(kind)}`")
+                                f"local stores; put it with {put_hint(kind)}")
             continue
         if missing_only or not (local and _built_from_stock(env, kind)):
             continue
