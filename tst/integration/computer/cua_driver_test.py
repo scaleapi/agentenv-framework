@@ -1,7 +1,8 @@
 """The cua-driver driver on the ubuntu-24.04 base, as the cua-driver test bundle's desktop names it: its put composes
 an image for each arch this machine's Docker builds, gate 3 makes this machine's ready at full with cua-driver's own tools
-beside the computer_* tools; deployed, an agent's session drives Thunar by element token through cua-driver's tools,
-in a cua-driver session another agent's doesn't see, computer-ready reports the pinned cua-driver, and the skill leads with cua-driver's own pack. Needs Docker and the local
+beside the computer_* tools; deployed, an agent's session gets cua-driver's instructions at connect and reads its skill
+resources, drives Thunar by element token through cua-driver's tools, in a cua-driver session another agent's doesn't
+see, computer-ready reports the pinned cua-driver, and the skill leads with cua-driver's own pack. Needs Docker and the local
 registry on localhost:5000."""
 
 import asyncio
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from pydantic import AnyUrl
 
 import agent_env
 from agentenv_protocol import SKILL_EXTENSION_URI
@@ -26,14 +28,14 @@ from agent_env.task_step.context import TaskStepContext
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
-MANIFEST = Path(agent_env.__file__).parent / "drivers" / "envs" / "cua-driver" / "tools.json"
+MANIFEST = Path(agent_env.__file__).parent / "drivers" / "envs" / "cua-driver" / "mcp.json"
 COMPUTER_TOOLS = {"computer_screenshot", "computer_click", "computer_drag", "computer_scroll", "computer_type",
                   "computer_key", "computer_wait"}
 
 
 def test_gate_3_makes_this_machines_arch_ready_with_cua_drivers_tools_beside_the_computers(cua_desktop):
     results = cua_desktop.metadata["composed"]["container"]
-    pinned = {tool["name"] for tool in json.loads(MANIFEST.read_text())}
+    pinned = {tool["name"] for tool in json.loads(MANIFEST.read_text())["tools"]}
 
     assert results[ARCH]["status"] == "ready" and results[ARCH]["emulated"] is False
     assert results[ARCH]["probe"]["passed"] and results[ARCH]["probe"]["level"] == "full"
@@ -53,7 +55,8 @@ async def test_an_agent_drives_thunar_by_element_token_in_its_own_session_and_it
         try:
             async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
                 async with ClientSession(read, write) as session:
-                    await session.initialize()
+                    connected = await session.initialize()
+                    linux = await session.read_resource(AnyUrl("skill://cua-driver/LINUX.md"))
                     started = await session.call_tool("start_session", {"session": "agent"})
                     mine = await session.call_tool("list_sessions", {})
                     launched = await session.call_tool("launch_app", {"name": "thunar"})
@@ -75,6 +78,7 @@ async def test_an_agent_drives_thunar_by_element_token_in_its_own_session_and_it
 
     assert not launched.isError and not clicked.isError and parent["window_id"] == window["window_id"]
     assert not started.isError and "agent" in _named(mine) and "agent" not in _named(others)
+    assert connected.instructions == json.loads(MANIFEST.read_text())["instructions"] and "AT-SPI" in linux.contents[0].text
     checks = {check["name"]: check for check in ready["checks"]}
     assert ready["ready"] and checks["cua-driver"]["ok"] and checks["cua-driver tools"]["detail"] == "66 tools, as pinned"
     assert {"LINUX.md", "WORKFLOW.md", "RUNTIME.md"} <= set(skill["files"])

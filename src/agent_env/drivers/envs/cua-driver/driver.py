@@ -1,6 +1,7 @@
 """cua-driver as a computer driver, for an X11 desktop on Linux: trycua's cua-driver runs on the computer as a daemon,
-which this file starts when run as a script, agents get its own tools as its pinned version lists them (``tools.json``),
-beside the ``computer_*`` tools, and the computer/v1 operations are its desktop-scope calls. The daemon takes
+which this file starts when run as a script, agents get what its own MCP server serves at its pinned version
+(``mcp.json``): its instructions, its tools beside the ``computer_*`` tools, and its skill resources, read from it. The
+computer/v1 operations are its desktop-scope calls. The daemon takes
 line-delimited JSON on a Unix socket, and each call goes on a connection of its own, as cua-driver's own MCP server sends
 them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
 cua-driver starts again after ending it for idling, where a named one stays ended. A call the daemon can't take, as
@@ -22,9 +23,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
+from pydantic import AnyUrl
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext
+from agentenv_protocol import EnvironmentTool, ForwardedResource, ForwardedTool, ToolContext
 from agentenv_protocol.computer import (
     PRINTABLE_KEYS,
     ComputerDriverEnvironment,
@@ -46,8 +50,9 @@ from agentenv_protocol.computer import (
 
 #: Where cua-driver's daemon listens.
 SOCKET = Path("/run/agentenv/cua-driver.sock")
-#: cua-driver's tools as its pinned version lists them, which the running daemon must list the same.
-MANIFEST = Path(__file__).with_name("tools.json")
+#: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version: its
+#: instructions, its tools, which the running daemon must list the same, and its skill resources.
+MANIFEST = Path(__file__).with_name("mcp.json")
 #: The sha256 of the cua-driver executable each arch's pinned wheel installs.
 EXECUTABLES = {
     "amd64": "bf57b2f3778a0a7daa9388e241f20ce948b32a7a2f4dd102e497f34e54137934",
@@ -83,11 +88,20 @@ class CuaDriver(ComputerDriverEnvironment):
         self._callers: dict[str | None, str] = {}
         self._pinned: list[ReadyCheck] | None = None
         self._skill: tuple[str, str, dict[str, str]] | None = None
+        self._texts: dict[str, str] | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
-                              functools.partial(self._forward, t["name"]), t["annotations"] or None)
-                for t in _manifest()]
+                              functools.partial(self._forward, t["name"]), t["annotations"] or None, t.get("outputSchema"))
+                for t in _manifest()["tools"]]
+
+    def forwarded_resources(self) -> list[ForwardedResource]:
+        return [ForwardedResource(r["uri"], r["name"], r.get("description"), r["mimeType"],
+                                  functools.partial(self._resource, r["uri"]))
+                for r in _manifest()["resources"]]
+
+    def instructions(self) -> str:
+        return _manifest()["instructions"]
 
     async def ready_checks(self) -> list[ReadyCheck]:
         """That the daemon answers as the pinned cua-driver does: its executable's sha256 and its tools, checked
@@ -145,8 +159,14 @@ class CuaDriver(ComputerDriverEnvironment):
         except DeviceUnavailable as e:
             return _refused(e.message)
         if not reply.get("ok"):
-            return _refused(reply.get("error") or f"cua-driver refused {tool}")
+            return _refused(reply.get("error") or "daemon reported failure", reply.get("exit_code") or 1)
         return CallToolResult.model_validate(reply["result"])
+
+    async def _resource(self, uri: str) -> str:
+        """One of cua-driver's skill resources as its own MCP server serves it, all of them read on first use."""
+        if self._texts is None:
+            self._texts = await _read_resources([r["uri"] for r in _manifest()["resources"]])
+        return self._texts[uri]
 
     async def _send(self, name: str, **args: Any) -> None:
         await self._call(name, DeliveryFailed, scope="desktop", **args)
@@ -172,12 +192,12 @@ class CuaDriver(ComputerDriverEnvironment):
             return [ReadyCheck("cua-driver", False, "its daemon isn't answering yet")]
         digest, expected = await asyncio.to_thread(_executable_sha256), EXECUTABLES.get(self.platform.arch or "")
         running = {t["name"]: t["input_schema"] for t in listed}
-        pinned = {t["name"]: t["inputSchema"] for t in _manifest()}
+        pinned = {t["name"]: t["inputSchema"] for t in _manifest()["tools"]}
         differ = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
         return [ReadyCheck("cua-driver", digest == expected, "the pinned executable" if digest == expected else
                            f"its executable's sha256 is {digest}, not the pinned {expected}"),
                 ReadyCheck("cua-driver tools", not differ, f"{len(running)} tools, as pinned" if not differ else
-                           f"these tools differ from tools.json: {', '.join(differ)}")]
+                           f"these tools differ from mcp.json: {', '.join(differ)}")]
 
 
 class _ReplyLost(DeviceUnavailable):
@@ -205,8 +225,17 @@ async def _request(payload: dict) -> dict:
         writer.close()
 
 
+async def _read_resources(uris: list[str]) -> dict[str, str]:
+    """cua-driver's skill resources as its own MCP server serves them, on the running daemon."""
+    server = StdioServerParameters(command=str(_executable()), args=["mcp", "--socket", str(SOCKET)],
+                                   env={**os.environ, **QUIET})
+    async with stdio_client(server) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        return {uri: (await session.read_resource(AnyUrl(uri))).contents[0].text for uri in uris}
+
+
 @functools.cache
-def _manifest() -> list[dict]:
+def _manifest() -> dict:
     return json.loads(MANIFEST.read_text())
 
 
@@ -216,8 +245,10 @@ def _modifiers(keys) -> list[str]:
     return [MODIFIERS[key] for key in keys]
 
 
-def _refused(message: str) -> CallToolResult:
-    return CallToolResult(isError=True, content=[TextContent(type="text", text=message)])
+def _refused(message: str, exit_code: int = 1) -> CallToolResult:
+    """A failed call as cua-driver's own MCP server answers one, which every tool's output schema admits."""
+    return CallToolResult(isError=True, content=[TextContent(type="text", text=message)],
+                          structuredContent={"code": "tool_invocation_failed", "exit_code": exit_code})
 
 
 def _text(result: dict) -> str:

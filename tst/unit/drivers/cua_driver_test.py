@@ -1,6 +1,6 @@
 """The cua-driver driver against a fake cua-driver daemon on a Unix socket: the computer/v1 operations become its
-desktop-scope calls in the framework's own session, its own tools are listed as pinned and forwarded in their caller's
-own session as they came, readiness checks the pinned executable and tools, and the skill leads with cua-driver's pack."""
+desktop-scope calls in the framework's own session; its instructions, tools and skill resources are served as its own
+MCP server serves them, its tools forwarded in their caller's own session as they came, readiness checks the pinned executable and tools, and the skill leads with cua-driver's pack."""
 from __future__ import annotations
 
 import asyncio
@@ -79,9 +79,12 @@ class FakeDaemon:
             return {"ok": True, "result": {"tools": self.tools}}
         name = request["name"]
         if name in self.fail:
-            return {"ok": False, "error": f"unknown tool {name}", "exit_code": 1}
+            return {"ok": False, "error": f"unknown tool {name}", "exit_code": 64}
         if name in self.refuse:
             return {"ok": True, "result": {"isError": True, "content": [{"type": "text", "text": f"{name} refused"}]}}
+        if name == "list_windows":
+            return {"ok": True, "result": {"content": [{"type": "text", "text": "Found 0 windows"}],
+                                           "structuredContent": {"windows": []}}}
         if name == "get_screen_size":
             return {"ok": True, "result": {"content": [{"type": "text", "text": "1280x800"}],
                                            "structuredContent": {"width": 1280, "height": 800, "scale_factor": 1.0}}}
@@ -111,7 +114,7 @@ def module(monkeypatch):
 async def daemon(module, monkeypatch):
     """A fake daemon on a socket the driver is pointed at, under a short /tmp path for macOS's socket path limit."""
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="cd-") as folder:
-        fake = FakeDaemon(module._manifest(), Path(folder) / "cua-driver.sock")
+        fake = FakeDaemon(module._manifest()["tools"], Path(folder) / "cua-driver.sock")
         monkeypatch.setattr(module, "SOCKET", fake.path)
         await fake.start()
         yield fake
@@ -172,18 +175,22 @@ async def test_cua_drivers_tools_are_listed_as_pinned_and_forwarded_in_their_cal
     async with mcp_session(driver) as session:
         listed = {t.name: t for t in (await session.list_tools()).tools}
         await session.call_tool("computer_screenshot", {})
-        answered = await session.call_tool("get_window_state", {"pid": 42, "window_id": 7, "query": "OK"})
+        answered = await session.call_tool("get_accessibility_tree", {"pid": 42, "window_id": 7})
         launched = await session.call_tool("launch_app", {"name": "thunar"})
 
-    manifest = {t["name"]: t for t in module._manifest()}
+    manifest = {t["name"]: t for t in module._manifest()["tools"]}
     assert set(manifest) <= set(listed) and {"computer_click", "computer_screenshot"} <= set(listed)
     assert listed["get_window_state"].inputSchema == manifest["get_window_state"]["inputSchema"]
     assert listed["get_window_state"].annotations.readOnlyHint == manifest["get_window_state"]["annotations"]["readOnlyHint"]
+    assert {name: listed[name].outputSchema for name in manifest} == {
+        name: tool.get("outputSchema") for name, tool in manifest.items()}
+    assert driver.mcp.instructions == module._manifest()["instructions"]
     framework, *_, caller = [r["session_id"] for _, r in daemon.requests if r["method"] == "call"]
     assert caller != framework and daemon.calls(caller) == [
-        ("get_window_state", {"pid": 42, "window_id": 7, "query": "OK"}), ("launch_app", {"name": "thunar"})]
+        ("get_accessibility_tree", {"pid": 42, "window_id": 7}), ("launch_app", {"name": "thunar"})]
     assert not launched.isError
-    assert answered.structuredContent == {"tool": "get_window_state"} and answered.content[0].text == "did get_window_state"
+    assert answered.structuredContent == {"tool": "get_accessibility_tree"}
+    assert answered.content[0].text == "did get_accessibility_tree"
 
 
 @pytest.mark.asyncio
@@ -191,7 +198,7 @@ async def test_each_caller_gets_a_cua_driver_session_of_its_own(module, daemon):
     async with mcp_session(module.CuaDriver()) as session:
         for caller in ("a", "b", "a"):
             await session.call_tool("list_windows", {}, meta={SESSION_META_KEY: caller})
-        await session.call_tool("get_session", {"session": "mine"}, meta={SESSION_META_KEY: "b"})
+        await session.call_tool("get_accessibility_tree", {"session": "mine"}, meta={SESSION_META_KEY: "b"})
 
     a, b, again, named = [(r["session_id"], r["args"]) for _, r in daemon.requests if r["method"] == "call"]
     assert a[0] != b[0] and again == a and named == (b[0], {"session": "mine"})
@@ -205,7 +212,9 @@ async def test_a_failed_call_to_one_of_cua_drivers_tools_reaches_its_caller_as_a
         await daemon.stop()
         down = await session.call_tool("list_windows", {})
     assert failed.isError and failed.content[0].text == "unknown tool list_apps"
+    assert failed.structuredContent == {"code": "tool_invocation_failed", "exit_code": 64}
     assert down.isError and "cua-driver's daemon isn't answering" in down.content[0].text
+    assert down.structuredContent == {"code": "tool_invocation_failed", "exit_code": 1}
 
 
 @pytest.mark.asyncio
@@ -217,13 +226,13 @@ async def test_readiness_checks_the_pinned_executable_and_tools_until_they_pass_
     daemon.tools[0] = {**daemon.tools[0], "input_schema": {"type": "object"}}
 
     wrong = await driver.ready_checks()
-    daemon.tools[0] = {"name": daemon.tools[0]["name"], "input_schema": module._manifest()[0]["inputSchema"]}
+    daemon.tools[0] = {"name": daemon.tools[0]["name"], "input_schema": module._manifest()["tools"][0]["inputSchema"]}
     right = await driver.ready_checks()
     lists = sum(1 for _, r in daemon.requests if r["method"] == "list")
     again = await driver.ready_checks()
 
     assert [(c.name, c.ok) for c in wrong] == [("cua-driver", False), ("cua-driver tools", False)]
-    assert wrong[0].detail.startswith("its executable's sha256 is 0000") and module._manifest()[0]["name"] in wrong[1].detail
+    assert wrong[0].detail.startswith("its executable's sha256 is 0000") and module._manifest()["tools"][0]["name"] in wrong[1].detail
     assert [(c.name, c.ok) for c in right] == [("cua-driver", True), ("cua-driver tools", True)]
     assert again == right and sum(1 for _, r in daemon.requests if r["method"] == "list") == lists
 
@@ -273,6 +282,27 @@ async def test_a_request_cancelled_in_flight_leaves_no_reply_for_the_next_one(mo
 
     shot = await driver.grab()
     assert (shot.width, shot.mode) == (1280, "png") and daemon.connections == 2
+
+
+@pytest.mark.asyncio
+async def test_cua_drivers_skill_resources_are_listed_as_pinned_and_read_once_from_its_own_mcp_server(module, monkeypatch):
+    reads = []
+
+    async def read_resources(uris):
+        reads.append(uris)
+        return {uri: f"text of {uri}" for uri in uris}
+
+    monkeypatch.setattr(module, "_read_resources", read_resources)
+    async with mcp_session(module.CuaDriver()) as session:
+        listed = (await session.list_resources()).resources
+        skill = await session.read_resource("skill://cua-driver/SKILL.md")
+        linux = await session.read_resource("skill://cua-driver/LINUX.md")
+
+    pinned = module._manifest()["resources"]
+    assert [(str(r.uri), r.name, r.description, r.mimeType) for r in listed] == [
+        (r["uri"], r["name"], r.get("description"), r["mimeType"]) for r in pinned]
+    assert skill.contents[0].text == "text of skill://cua-driver/SKILL.md" and linux.contents[0].text.endswith("LINUX.md")
+    assert reads == [[r["uri"] for r in pinned]]
 
 
 def test_the_skill_pack_is_written_offline_from_the_executable(module, monkeypatch, tmp_path):

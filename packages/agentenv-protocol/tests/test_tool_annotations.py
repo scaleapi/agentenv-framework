@@ -20,6 +20,7 @@ from agentenv_protocol import (  # noqa: E402
     AgentEnvFastMCPApplication,
     EnvironmentCard,
     EnvironmentTool,
+    ForwardedResource,
     ForwardedTool,
     environment_card,
     tool,
@@ -214,6 +215,7 @@ async def test_update_tool_needs_a_mounted_env_and_a_served_tool():
 
 _CLICK = {"type": "object", "additionalProperties": False, "properties": {
     "element_token": {"type": "string"}, "x": {"type": "integer"}, "count": {"type": "integer", "minimum": 1}}}
+_FOUND = {"type": "object", "required": ["rows"], "properties": {"rows": {"type": "array"}}}
 
 
 @environment_card(name="forwarding")
@@ -232,8 +234,21 @@ class _Forwarding(AgentEnvEnvironment):
                                            ImageContent(type="image", data="aGk=", mimeType="image/png")],
                                   structuredContent={"hit": "button OK"})
 
+        async def find(**arguments) -> CallToolResult:
+            return CallToolResult(isError=True, content=[TextContent(type="text", text="the daemon isn't answering")])
+
         return [ForwardedTool(EnvironmentTool(name="click", description="Click an element.", inputSchema=_CLICK), click,
-                              {"readOnlyHint": False, "destructiveHint": False})]
+                              {"readOnlyHint": False, "destructiveHint": False}),
+                ForwardedTool(EnvironmentTool(name="find", inputSchema={"type": "object"}), find, None, _FOUND)]
+
+    def forwarded_resources(self) -> list[ForwardedResource]:
+        async def read() -> str:
+            return "# Guide"
+
+        return [ForwardedResource("skill://other/SKILL.md", "other", "How to use it.", "text/markdown", read)]
+
+    def instructions(self) -> str:
+        return "Read the guide first."
 
 
 @pytest.mark.asyncio
@@ -244,12 +259,27 @@ async def test_a_forwarded_tool_is_listed_with_its_own_schema_and_called_with_it
         async with create_connected_server_and_client_session(env.create_app()) as session:
             listed = {t.name: t for t in (await session.list_tools()).tools}
             result = await session.call_tool("click", {"element_token": "s1:4", "count": 2})
+            found = await session.call_tool("find", {})
 
     assert listed["click"].inputSchema == _CLICK and listed["click"].description == "Click an element."
     assert listed["click"].annotations.readOnlyHint is False and listed["click"].outputSchema is None
+    assert listed["find"].outputSchema == _FOUND and found.isError and found.content[0].text == "the daemon isn't answering"
     assert calls == [{"element_token": "s1:4", "count": 2}]
     assert [c.type for c in result.content] == ["text", "image"] and result.structuredContent == {"hit": "button OK"}
     assert {t.name: t.inputSchema for t in env.mounted_card().capabilities.tools}["click"] == _CLICK
+
+
+@pytest.mark.asyncio
+async def test_forwarded_resources_and_the_instructions_are_served_as_the_other_server_serves_them():
+    app = _Forwarding([]).create_app()
+    with anyio.fail_after(30):
+        async with create_connected_server_and_client_session(app) as session:
+            listed = (await session.list_resources()).resources
+            read = await session.read_resource("skill://other/SKILL.md")
+
+    assert [(str(r.uri), r.name, r.description, r.mimeType) for r in listed] == [
+        ("skill://other/SKILL.md", "other", "How to use it.", "text/markdown")]
+    assert read.contents[0].text == "# Guide" and app.instructions == "Read the guide first."
 
 
 def test_a_forwarded_tool_named_like_a_tool_is_refused():

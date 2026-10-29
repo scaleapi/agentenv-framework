@@ -243,12 +243,17 @@ Where the binding lives depends on the app. On mcp's own FastMCP it wraps the to
 ### Tools served on another server's behalf
 
 An environment can serve tools another server defines, each with that server's own schema:
-`forwarded_tools()` returns `ForwardedTool(tool, call, annotations)` entries, where `tool` is an
-`EnvironmentTool` carrying the other server's `inputSchema`, and `call` takes the call's arguments
-as keywords, untouched, and returns that server's `CallToolResult`, which reaches the caller as it
-is. They're listed on the card beside the `@tool` methods, chosen by `served_tools` and under tool
-access like them; one named like another tool is refused. They need mcp's FastMCP. The cua-driver
-driver serves cua-driver's own tools this way.
+`forwarded_tools()` returns `ForwardedTool(tool, call, annotations, output_schema)` entries, where
+`tool` is an `EnvironmentTool` carrying the other server's `inputSchema`, and `call` takes the
+call's arguments as keywords, untouched, and returns that server's `CallToolResult`, which reaches
+the caller as it is. An `output_schema` is listed as the tool's `outputSchema` and isn't checked
+here, so `call` answers every result, its errors too, in a shape that schema admits. They're listed
+on the card beside the `@tool` methods, chosen by `served_tools` and under tool access like them;
+one named like another tool is refused. In the same way `forwarded_resources()` returns
+`ForwardedResource(uri, name, description, mime_type, read)` entries, MCP resources whose `read`
+returns their text, and `instructions()` returns what the MCP server tells an agent when it
+connects, which clients may put in its context. All of them need mcp's FastMCP. The cua-driver
+driver serves cua-driver's own instructions, tools and skill resources this way.
 
 ### Getting part of the data
 
