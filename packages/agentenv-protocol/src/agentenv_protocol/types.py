@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
-from .transfers import RelativePath
+from .transfers import RelativePath, Uploaded
 
 
 def error_body(code: str, message: str, **fields: Any) -> dict:
@@ -42,6 +42,13 @@ DATA_OBJECTS_EXTENSION_URI = "urn:agentenv:data-objects/v1"
 # skill-config/v1 takes one: a SKILL.md an agent reads before it uses the env, written under the
 # name the caller gives. A server serves it through an `@agent_skill` handler.
 SKILL_EXTENSION_URI = "urn:agentenv:skill/v1"
+
+# A declaration-only extension: the write grant kinds this server's library uploads through, as
+# `params = {"write": [kind, ...]}`. A `data/get` handler that takes a `write_object` param (a
+# `transfers.WriteObject`) lists `http-put` and `http-put-parts`, after `http-post-policy` when it also takes
+# `write_namespace`. A card without it takes `http-post-policy` alone when it advertises
+# `DATA_OBJECTS_EXTENSION_URI`, and no write grant otherwise.
+TRANSFERS_EXTENSION_URI = "urn:agentenv:transfers/v1"
 _RELATIVE_PATH = TypeAdapter(RelativePath)
 
 
@@ -86,6 +93,24 @@ def uploaded_file_part(path: str, *, name: Optional[str] = None, mime_type: Opti
         file=FileWithUri(uri=path, name=name, mimeType=mime_type),
         metadata={DATA_OBJECTS_EXTENSION_URI: {"path": path}},
     )
+
+
+def uploaded_object_part(uploaded: Uploaded, *, name: str, mime_type: Optional[str] = None) -> FilePart:
+    """The `data/get` answer saying the export was uploaded through its `write_object` grant: `uploaded` as
+    the upload reported it, and `name` (a relative file name) and `mime_type` for the record of it."""
+    name = _RELATIVE_PATH.validate_python(name)
+    return FilePart(
+        file=FileWithUri(uri=name, name=name, mimeType=mime_type),
+        metadata={TRANSFERS_EXTENSION_URI: {"uploaded": uploaded.model_dump(mode="json", exclude_none=True)}},
+    )
+
+
+def uploaded_object(part: Part) -> Optional[Uploaded]:
+    """What `part` says was uploaded through the `write_object` grant; None when it names no upload."""
+    marker = (part.metadata or {}).get(TRANSFERS_EXTENSION_URI) if isinstance(part, FilePart) else None
+    if not isinstance(marker, dict) or "uploaded" not in marker:
+        return None
+    return Uploaded.model_validate(marker["uploaded"])
 
 
 def uploaded_object_path(part: Part) -> Optional[str]:
