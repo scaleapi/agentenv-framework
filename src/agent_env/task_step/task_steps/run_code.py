@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -52,6 +53,8 @@ _RUN_DIR = "/tmp/agent_env_run_code"
 _COMPUTER_RUN_DIR = ".agentenv/run_code"
 # How much longer than the script's timeout a computer lets the runner run, so the runner stops the script first.
 _RUNNER_SLACK_S = 10
+# What a POSIX extended regular expression, as `pkill -f` reads one, gives a meaning to outside brackets.
+_ERE_SPECIAL = re.compile(r"[.\[\\()*+?{|^$]")
 
 # The bootstrap we run in the sandbox: `python3 runner.py <run_dir> <entrypoint> <script_file> <timeout_seconds>`.
 _RUNNER_SOURCE = (Path(__file__).parent / "run_code_runner.py").read_text(encoding="utf-8")
@@ -635,7 +638,7 @@ class _DriverTarget:
 
     async def reset_dir(self, path: str) -> None:
         """End whatever still runs from the folder, as a run whose driver died leaves going, then remove it."""
-        await self.run("pkill", "-f", f"{path}/runner.py")
+        await self.run("pkill", "-f", _ERE_SPECIAL.sub(r"\\\g<0>", f"{path}/runner.py"))
         await self.remove_dir(path)
 
     async def remove_dir(self, path: str) -> None:

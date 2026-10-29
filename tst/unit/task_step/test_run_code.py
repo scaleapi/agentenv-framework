@@ -1359,12 +1359,13 @@ async def test_a_run_whose_call_drops_fails_naming_why_and_the_next_one_runs_afr
     with pytest.raises(RuntimeError, match=re.escape(
             "env 'desk': the connection to its driver broke during computer-exec/v1 run (RemoteProtocolError: the "
             "driver went away)")):
-        await _run_in(computer, _DEFAULT_BODY)
-    await _run_in(computer, _DEFAULT_BODY)
+        await _run_in(computer, _DEFAULT_BODY, id="read.v1")
+    await _run_in(computer, _DEFAULT_BODY, id="read.v1")
 
     runs = [params for kind, params, *_ in computer.calls if kind == "run"]
     staged = [params["argv"] for params in runs if params["argv"][0] == "pkill"]
-    assert staged == [["pkill", "-f", ".agentenv/run_code/run-code-1/runner.py"]] * 2
+    assert staged == [["pkill", "-f", r"\.agentenv/run_code/read\.v1/runner\.py"]] * 2
+    assert not re.search(staged[0][2], "python3 /home/u/.agentenv/run_code/read-v1/runner.py")
     scripts = [params["request_id"] for params in runs if params["argv"][0] == "python3"]
     assert len(scripts) == 1 and scripts[0] != dropped[0]
 
