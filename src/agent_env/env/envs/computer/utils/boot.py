@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV
+from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
 
 from agent_env.config import get_config
 from agent_env.providers.env_providers.env_provider import _size_kwargs
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
 READY_TIMEOUT_S = 180.0
 #: How much longer than the slowest starting app's own readiness timeout a computer may take, for the rest of it first.
 APP_READY_MARGIN_S = 30.0
+#: How long one computer-ready status may take: the driver's own checks, then every app's server at once.
+_STATUS_TIMEOUT_S = int(ANSWER_TIMEOUT_S) + 15
 _POLL_S = 0.5
 #: How a setting a record keeps shows a secret's or a generated one's value, which it never holds.
 WITHHELD = "<withheld>"
@@ -128,7 +131,8 @@ async def ready(url: str, timeout: float) -> dict:
             while True:
                 try:
                     card = await protocol_v1.get_card(url, timeout=5)
-                    status = await protocol_v1.invoke_extension(url, card, COMPUTER_READY, None, 10, method="status")
+                    status = await protocol_v1.invoke_extension(url, card, COMPUTER_READY, None, _STATUS_TIMEOUT_S,
+                                                                method="status")
                     if status.get("ready"):
                         return card
                     last = "not ready: " + "; ".join(f"{check['name']}: {check.get('detail')}"

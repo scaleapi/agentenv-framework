@@ -10,11 +10,13 @@ import httpx
 
 from .. import client
 from ..types import RPC_PATH, WELL_KNOWN_PATH
-from .app import CHECK_TIMEOUT_S, COMPUTER_APP, SOCKET
+from .app import CHECK_TIMEOUT_S, COMPUTER_APP, FAILURE, SOCKET
 from .operations import ReadyCheck
 
 #: Where a composed computer installs its apps, a folder each.
 APPS = Path("/opt/agentenv/apps")
+#: How long an app's server may take to answer, its checks run at once, before it counts as not answering.
+ANSWER_TIMEOUT_S = CHECK_TIMEOUT_S + 5
 
 
 def expected() -> list[Path]:
@@ -23,7 +25,8 @@ def expected() -> list[Path]:
 
 
 async def check(folder: Path) -> ReadyCheck:
-    """Whether the app in ``folder`` is ready, as its own server says; named by its card once the server answers."""
+    """Whether the app in ``folder`` is ready, as its own server says, or why its server last failed to start; named by
+    its card once the server answers."""
     name = folder.name
     try:
         async with _client(folder / SOCKET) as http:
@@ -32,7 +35,7 @@ async def check(folder: Path) -> ReadyCheck:
             launch = client.extension_params(card, COMPUTER_APP).get("launch")
             answer = (await http.get(f"{RPC_PATH}/ext/computer-app/ready")).raise_for_status().json()
     except (httpx.HTTPError, OSError):
-        return ReadyCheck(f"app {name}", False, "its server isn't answering yet")
+        return ReadyCheck(f"app {name}", False, _unanswered(folder))
     if launch is not None and launch["at"] == "demand" and not answer["launched"]:
         return ReadyCheck(f"app {name}", True, "its server answers; it launches on demand")
     if answer["ready"]:
@@ -42,6 +45,13 @@ async def check(folder: Path) -> ReadyCheck:
     return ReadyCheck(f"app {name}", False, f"{when}: {'; '.join(answer['problems'])}")
 
 
+def _unanswered(folder: Path) -> str:
+    try:
+        return f"its server failed to start: {(folder / FAILURE).read_text()}"
+    except FileNotFoundError:
+        return "its server isn't answering yet"
+
+
 def _client(socket: Path) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(socket)), base_url="http://app",
-                             timeout=CHECK_TIMEOUT_S * 4)
+                             timeout=ANSWER_TIMEOUT_S)

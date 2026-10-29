@@ -32,11 +32,12 @@ _DATA_METHODS = {"reset_data": METHOD_RESET, "add_data": METHOD_ADD, "get_data":
 WINDOW_KEYS = frozenset({"class", "instance", "title"})
 #: The framework extension an app's own server serves: its launch as params, and its ``launch`` and ``ready`` methods.
 COMPUTER_APP = "urn:agentenv:computer-app/v1"
-#: Where an app's own server listens, in the app's folder.
+#: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
 SOCKET = Path(".agentenv/server.sock")
+FAILURE = Path(".agentenv/server.failure")
 #: Where an app's server marks that it launched the app since the computer booted.
 LAUNCHED = Path("/run/agentenv/apps")
-#: How long one readiness check may take.
+#: How long one readiness check may take; an app's checks run at once.
 CHECK_TIMEOUT_S = 10.0
 
 
@@ -231,7 +232,8 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             checks.append(("command", lambda: _command(ready.command)))
         checks += [(f"@ready_check {fn.__name__}", lambda fn=fn: _ready_check(fn, self))
                    for fn in _methods(type(self)) if hasattr(fn, _READY_CHECK_ATTR)]
-        problems = [problem for name, check in checks if (problem := await _bounded(name, check)) is not None]
+        found = await asyncio.gather(*(_bounded(name, check) for name, check in checks))
+        problems = [problem for problem in found if problem is not None]
         if self.launch is not None and self._computer_app_launched_at is None:
             problems.insert(0, f"its launch failed: {self._computer_app_launch_failed}"
                             if self._computer_app_launch_failed else "not launched yet")

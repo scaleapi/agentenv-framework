@@ -23,9 +23,20 @@ import agentenv_protocol.computer.launch as launcher  # noqa: E402
 from agentenv_protocol import client  # noqa: E402
 from agentenv_protocol.computer import ComputerAppEnvironment, Launch, ReadyCheck, Ready, ready_check  # noqa: E402
 from agentenv_protocol.computer import app as app_module, apps, serve_app, session  # noqa: E402
-from agentenv_protocol.computer.app import COMPUTER_APP, SOCKET  # noqa: E402
+from agentenv_protocol.computer.app import COMPUTER_APP, FAILURE, SOCKET  # noqa: E402
 
 READY = "/agentenv/ext/computer-app/ready"
+APP = '''from agentenv_protocol.computer import ComputerAppEnvironment
+
+
+class Helper:
+    pass
+
+
+class Broken(ComputerAppEnvironment):
+    def __init__(self):
+        raise RuntimeError("no mailbox")
+'''
 
 
 class Mail(ComputerAppEnvironment):
@@ -93,7 +104,7 @@ async def test_an_apps_server_is_ready_once_it_launched_the_app_and_each_check_p
 
 
 @pytest.mark.asyncio
-async def test_a_check_that_fails_hangs_or_raises_says_so_without_holding_up_the_server(desktop, monkeypatch):
+async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_the_server(desktop, monkeypatch):
     monkeypatch.setattr(app_module, "CHECK_TIMEOUT_S", 1.0)
     with socket.socket() as closed:
         closed.bind(("127.0.0.1", 0))
@@ -109,6 +120,11 @@ async def test_a_check_that_fails_hangs_or_raises_says_so_without_holding_up_the
             return True
 
         @ready_check
+        async def waiting(self):
+            await asyncio.sleep(3)
+            return True
+
+        @ready_check
         async def broken(self):
             raise RuntimeError("mailbox locked")
 
@@ -117,8 +133,8 @@ async def test_a_check_that_fails_hangs_or_raises_says_so_without_holding_up_the
 
     assert answer["problems"] == ["not launched yet", f"nothing answers on port {port}",
                                   f"{shlex.join(exits)} exited 1: no database yet", "@ready_check stuck ran past 1 s",
-                                  "@ready_check broken: RuntimeError: mailbox locked"]
-    assert time.monotonic() - started < 2.5
+                                  "@ready_check waiting ran past 1 s", "@ready_check broken: RuntimeError: mailbox locked"]
+    assert time.monotonic() - started < 1.8
 
 
 @pytest.mark.asyncio
@@ -161,6 +177,8 @@ async def test_the_driver_asks_each_apps_server_on_the_socket_in_its_folder(desk
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
         monkeypatch.setattr(apps, "APPS", Path(root))
         (Path(root) / "gone").mkdir()
+        (Path(root) / "broken" / SOCKET).parent.mkdir(parents=True)
+        (Path(root) / "broken" / FAILURE).write_text("RuntimeError: no mailbox")
         async with contextlib.AsyncExitStack() as stack:
             served = {name: await stack.enter_async_context(_serving(cls(), Path(root) / name, monkeypatch))
                       for name, cls in [("mail", Mail), ("music", Music), ("sync", Sync)]}
@@ -174,6 +192,7 @@ async def test_the_driver_asks_each_apps_server_on_the_socket_in_its_folder(desk
             playing = await apps.check(Path(root) / "music")
 
     assert first == [
+        ReadyCheck("app broken", False, "its server failed to start: RuntimeError: no mailbox"),
         ReadyCheck("app gone", False, "its server isn't answering yet"),
         ReadyCheck("app mail", False, "not ready yet, 0 s in: not launched yet; no window with class 'Mail'; "
                                       "@ready_check inbox_synced returned False"),
@@ -192,6 +211,7 @@ async def test_serving_an_app_starts_it_once_the_server_serves_on_the_socket_in_
                                      "class Notes(ComputerAppEnvironment):\n    pass\n")
     (tmp_path / SOCKET).parent.mkdir()
     (tmp_path / SOCKET).write_text("left by the last server")
+    (tmp_path / FAILURE).write_text("RuntimeError: the last start failed")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setattr(sys, "modules", dict(sys.modules))
@@ -204,24 +224,53 @@ async def test_serving_an_app_starts_it_once_the_server_serves_on_the_socket_in_
     async with asgi.router.lifespan_context(asgi):
         await asyncio.sleep(0)
 
-    assert uds == str(SOCKET) and not (tmp_path / SOCKET).exists()
+    assert uds == str(SOCKET) and not (tmp_path / SOCKET).exists() and not (tmp_path / FAILURE).exists()
     assert [cls.__name__ for cls in started] == ["Notes"]
 
 
-@pytest.mark.parametrize("argv, message", [
-    ([], serve_app.USAGE), (["app.py"], serve_app.USAGE), (["missing.py:Notes"], "missing.py isn't a file"),
-    (["app.py:Helper"], "has no ComputerAppEnvironment subclass named Helper"),
-], ids=["nothing", "no-class", "no-file", "not-an-app"])
-def test_what_isnt_an_app_class_exits_saying_why(tmp_path, monkeypatch, argv, message):
-    (tmp_path / "app.py").write_text("class Helper:\n    pass\n")
+@pytest.mark.parametrize("argv, failure", [
+    ([], f"SystemExit: {serve_app.USAGE}"), (["app.py"], f"SystemExit: {serve_app.USAGE}"),
+    (["missing.py:Notes"], "SystemExit: missing.py isn't a file"),
+    (["app.py:Helper"], "SystemExit: app.py has no ComputerAppEnvironment subclass named Helper"),
+    (["app.py:Broken"], "RuntimeError: no mailbox"),
+], ids=["nothing", "no-class", "no-file", "not-an-app", "fails-to-construct"])
+def test_a_server_that_cant_start_says_why_in_the_apps_folder(tmp_path, monkeypatch, argv, failure):
+    (tmp_path / "app.py").write_text(APP)
+    (tmp_path / SOCKET).parent.mkdir()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setattr(sys, "modules", dict(sys.modules))
 
-    with pytest.raises(SystemExit) as stopped:
+    with pytest.raises((SystemExit, RuntimeError)) as stopped:
         serve_app.main(argv)
 
-    assert message in str(stopped.value)
+    assert (tmp_path / FAILURE).read_text() == failure == f"{type(stopped.value).__name__}: {stopped.value}"
+
+
+@pytest.mark.asyncio
+async def test_the_drivers_readiness_asks_every_apps_server_at_once(desktop, monkeypatch):
+    pytest.importorskip("PIL")
+    from computer_fake import FakeDriver, http_client
+
+    class Settling(ComputerAppEnvironment):
+        @ready_check
+        async def settled(self):
+            await asyncio.sleep(1)
+            return True
+
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
+        monkeypatch.setattr(apps, "APPS", Path(root))
+        async with contextlib.AsyncExitStack() as stack:
+            for name in ("mail", "music", "sync"):
+                await stack.enter_async_context(_serving(Settling(), Path(root) / name, monkeypatch))
+            started = time.monotonic()
+            async with http_client(FakeDriver()) as http:
+                status = (await http.get("/agentenv/ext/computer-ready/status")).json()
+            took = time.monotonic() - started
+
+    assert [check for check in status["checks"] if check["name"].startswith("app ")] == [
+        {"name": f"app {name}", "ok": True, "detail": "ready"} for name in ("mail", "music", "sync")]
+    assert status["ready"] is True and took < 2.5
 
 
 @pytest.mark.asyncio

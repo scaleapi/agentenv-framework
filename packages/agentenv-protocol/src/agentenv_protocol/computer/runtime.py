@@ -177,7 +177,7 @@ class ComputerRuntime:
             checks += list(await self.driver.ready_checks())
         except Exception as e:
             checks.append(ReadyCheck("driver", False, f"{type(e).__name__}: {e}"))
-        checks += [await apps.check(folder) for folder in self.apps]
+        checks += await asyncio.gather(*(apps.check(folder) for folder in self.apps))
         if all(c.ok for c in checks):
             self.ready = True
         return checks

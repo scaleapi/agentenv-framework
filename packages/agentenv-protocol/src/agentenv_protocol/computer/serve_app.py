@@ -1,23 +1,34 @@
 """Serve a computer app's class from its file, as its computer's program starts it:
 ``python -m agentenv_protocol.computer.serve_app <file>:<Class>``, run in the app's folder, serves the class's card and
 ``computer-app/v1`` on the Unix socket ``.agentenv/server.sock`` there. Once it serves, the app's server adds the app's
-launcher and launches a boot app (``ComputerAppEnvironment._computer_app_start``). Needs the ``app`` extra."""
+launcher and launches a boot app (``ComputerAppEnvironment._computer_app_start``). A server that can't start writes why
+to ``.agentenv/server.failure``, which its computer's driver reports. Needs the ``app`` extra."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import sys
+import traceback
 from pathlib import Path
 
 import uvicorn
 
 from ._load import load_class
-from .app import SOCKET, ComputerAppEnvironment
+from .app import FAILURE, SOCKET, ComputerAppEnvironment
 
 USAGE = "usage: python -m agentenv_protocol.computer.serve_app <file>:<Class>"
 
 
 def main(argv: list[str]) -> None:
+    FAILURE.unlink(missing_ok=True)
+    try:
+        _serve(argv)
+    except (Exception, SystemExit) as e:
+        FAILURE.write_text(traceback.format_exception_only(e)[-1].strip())
+        raise
+
+
+def _serve(argv: list[str]) -> None:
     if len(argv) != 1 or ":" not in argv[0]:
         raise SystemExit(USAGE)
     file, _, name = argv[0].partition(":")
