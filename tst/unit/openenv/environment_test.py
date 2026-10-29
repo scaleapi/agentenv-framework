@@ -13,7 +13,7 @@ from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction, T
 
 import agent_env.task.episode.run as episode_run
 from agent_env.openenv.app import _score_at
-from agent_env.openenv.environment import ENDED, NOT_RESET, AgentEnvEnvironment, Served, ServedTask
+from agent_env.openenv.environment import ENDED, NOT_RESET, TIMEOUT_METADATA, AgentEnvEnvironment, Served, ServedTask
 from agent_env.task import EpisodeError, EpisodeSpec, Task
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN, _gate, _until
 
@@ -21,9 +21,9 @@ AGAIN = {**TURN, "id": "again", "prompt_id": "again", "prompt": "Add another.", 
 
 
 class _Tools:
-    """Stands in for the proxy's ``ToolSession``: every env offers ``offered``, and a call answers with what ``answers`` maps
-    its tool to, raising it when it's an exception. A session opens once ``release``, a ``threading.Event`` since the
-    in-process proxy runs on a loop of its own, is set, when there is one."""
+    """Stands in for the proxy's ``ToolSession``: every env offers ``offered``, tools or their names, and a call answers
+    with what ``answers`` maps its tool to, raising it when it's an exception. A session opens once ``release``, a
+    ``threading.Event`` since the in-process proxy runs on a loop of its own, is set, when there is one."""
 
     def __init__(self, offered, answers):
         self.offered, self.answers, self.closed, self.release = offered, answers, 0, None
@@ -38,8 +38,9 @@ class _Tools:
                 return self
 
             async def list_tools(self):
-                return [EnvironmentTool(name=name, description=f"{name}.", inputSchema={"type": "object"})
-                        for name in tools.offered]
+                return [tool if isinstance(tool, EnvironmentTool)
+                        else EnvironmentTool(name=tool, description=f"{tool}.", inputSchema={"type": "object"})
+                        for tool in tools.offered]
 
             async def call_tool(self, name, arguments=None):
                 answer = tools.answers.get(name, ToolResult(content=[{"type": "text", "text": f"{name} {arguments}"}]))
@@ -88,7 +89,20 @@ async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(te
     assert env.list_splits() == ["smoke", "all"]
     assert (env.num_tasks("smoke"), env.num_tasks("all")) == (1, 3)
     assert env.get_task("all", 2) == {"id": "dock-2", "name": "dock-2", "index": 2, "prompt": "Add crate 2.",
-                                      "system_prompt": "You keep the items.", "agent": "alice"}
+                                      "system_prompt": "You keep the items.", "agent": "alice",
+                                      "toolset": {"envs": ["items"], "versions": {}, "role": "alice@example.com",
+                                                  "access": [], "bash": False},
+                                      "turns": 1}
+    hide = {"id": "hide", "type": "modify_env_tool_access", "env_id": "items", "action": "disable",
+            "role": "alice@example.com", "tools": ["add_item"]}
+    hidden = _task(ITEMS, ALICE, hide, {**hide, "id": "other", "role": "bob@example.com"}, TURN, REPLIES)
+    assert ServedTask(hidden, "hidden", EpisodeSpec.from_task(hidden), _score_at("replies")).toolset["access"] == [
+        {"env": "items", "action": "disable", "tools": ["add_item"]}]
+    roleless = {key: value for key, value in ALICE.items() if key != "role"}
+    defaulted = _task(ITEMS, roleless, {**hide, "role": "default"}, TURN, REPLIES)
+    assert ServedTask(defaulted, "defaulted", EpisodeSpec.from_task(defaulted), _score_at("replies")).toolset == {
+        "envs": ["items"], "versions": {}, "role": None, "access": [{"env": "items", "action": "disable",
+                                                                      "tools": ["add_item"]}], "bash": False}
     assert [task["index"] for task in env.get_task_range("all", 1)] == [1, 2]
     assert [task["id"] for task in env.list_tasks("smoke")] == ["dock-0"]
     with pytest.raises(IndexError, match="split 'all' has 3 tasks, so it has no task 3"):
@@ -101,9 +115,10 @@ async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(te
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("reply", "reward"), [("Added a crate.", 1.0), ("", 0.0)])
-async def test_an_episode_resets_to_its_turn_steps_through_the_envs_tools_and_is_scored_on_end_turn(
+async def test_an_episode_resets_to_its_turn_steps_through_the_envs_tools_and_is_scored_on_end_turn_before_teardown(
         teardowns, tools, reply, reward):
     env = _env(ITEMS, ALICE, TURN, REPLIES)
+    teardowns.hold = asyncio.Event()
 
     reset = await env.reset_async(split="all", index=0)
     assert (reset.done, reset.reward) == (False, None)
@@ -127,7 +142,10 @@ async def test_an_episode_resets_to_its_turn_steps_through_the_envs_tools_and_is
     after = await _call(env, "add_item")
     assert (after.done, after.reward, after.metadata["status"], after.metadata["error"]) == (
         True, None, "error", ENDED)
-    assert teardowns.finished == [env.state.episode_id]
+    await _until(lambda: teardowns.started == [env.state.episode_id])
+    assert teardowns.finished == []
+    teardowns.hold.set()
+    await _until(lambda: teardowns.finished == [env.state.episode_id])
 
 
 @pytest.mark.asyncio
@@ -222,6 +240,27 @@ async def test_a_run_that_fails_mid_turn_ends_the_episode_at_the_next_step(teard
 
 
 @pytest.mark.asyncio
+async def test_a_reset_or_an_end_turn_past_its_deadline_answers_at_once_and_its_episode_is_torn_down_after(
+        teardowns, tools):
+    held = {"id": "held", "type": "episode_test_gate"}
+    deploying, turning = _env(ITEMS, held, ALICE, TURN, REPLIES), _env(ITEMS, ALICE, TURN, held, REPLIES)
+    await turning.reset_async()
+    teardowns.hold = asyncio.Event()
+
+    reset = await deploying.reset_async(timeout_s=0.5)
+    ended = await turning.step_async(CallToolAction(tool_name="end_turn", arguments={"response": "Added a crate."},
+                                                    metadata={TIMEOUT_METADATA: 0.5}))
+
+    assert (reset.done, reset.metadata["error"]) == (True, "the episode didn't open its first turn within 0.5s")
+    assert (ended.done, ended.reward, ended.metadata["error"]) == (
+        True, None, "end_turn didn't finish within 0.5s, and the episode ended")
+    await _until(lambda: len(teardowns.started) == 2)
+    assert teardowns.finished == []
+    teardowns.hold.set()
+    await _until(lambda: len(teardowns.finished) == 2)
+
+
+@pytest.mark.asyncio
 async def test_an_end_turn_the_proxy_refuses_ends_the_episode_in_an_error_observation(teardowns, tools, monkeypatch):
     env = _env(ITEMS, ALICE, TURN, REPLIES)
     await env.reset_async()
@@ -238,7 +277,7 @@ async def test_an_end_turn_the_proxy_refuses_ends_the_episode_in_an_error_observ
 
 
 @pytest.mark.asyncio
-async def test_a_teardown_that_fails_ends_the_episode_in_an_error_observation_and_frees_the_session(
+async def test_a_teardown_that_fails_after_the_episode_is_scored_leaves_its_reward_and_frees_the_session(
         teardowns, tools, monkeypatch):
     async def failing(context, **_):
         raise RuntimeError("the sandbox didn't stop")
@@ -250,8 +289,7 @@ async def test_a_teardown_that_fails_ends_the_episode_in_an_error_observation_an
     await env.reset_async()
     await asyncio.to_thread(env.close)
 
-    assert (ended.done, ended.reward, ended.metadata["status"]) == (True, None, "error")
-    assert ended.metadata["error"] == "RuntimeError: the sandbox didn't stop"
+    assert (ended.done, ended.reward, ended.metadata["scores"]) == (True, 1.0, {"replies": 1.0})
     assert (env._served.live, list(episode_run._live)) == (set(), [])
 
 

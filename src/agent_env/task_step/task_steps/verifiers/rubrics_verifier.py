@@ -434,7 +434,7 @@ class RubricsVerifierTaskStep(TaskStep):
         version: Optional[int],
         criteria: list[dict],
         prompt_id: str,
-        default_model: str = "claude-sonnet-4-6",
+        default_model: Optional[str] = None,
         default_model_api_base: Optional[str] = None,
         score_aggregator: Optional[ScoreAggregator] = None,
         verifier_id: Optional[str] = None,
@@ -489,7 +489,9 @@ class RubricsVerifierTaskStep(TaskStep):
         self.verifier_id = verifier_id or uuid.uuid4().hex
         self.criteria = criteria
         self.prompt_id = prompt_id
-        self.default_model = default_model
+        # A stored judge always holds a model: its author's, or the one the config names for judges, as for a step
+        # built in code, which the A2A validator's are.
+        self.default_model = default_model or get_config().get_model_for_role("judge") or "claude-sonnet-4-6"
         self.default_model_api_base = default_model_api_base
         if isinstance(score_aggregator, str):
             score_aggregator = ScoreAggregator(score_aggregator)
@@ -593,15 +595,13 @@ class RubricsVerifierTaskStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> RubricsVerifierTaskStep:
-        from agent_env.config import get_config
-
         raw_agg = data.get("score_aggregator")
         raw_tf = data.get("trajectory_filter")
         return cls(
             **cls._base_from_dict(data),
             criteria=data["criteria"],
             prompt_id=data["prompt_id"],
-            default_model=data.get("default_model") or get_config().get_model_for_role("judge") or "claude-sonnet-4-6",
+            default_model=data.get("default_model"),
             default_model_api_base=data.get("default_model_api_base"),
             score_aggregator=ScoreAggregator(raw_agg) if raw_agg else None,
             verifier_id=data.get("verifier_id"),

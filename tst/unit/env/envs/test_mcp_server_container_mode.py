@@ -28,7 +28,7 @@ from agent_env.providers.env_providers.env_gateway_provider import DeployedGatew
 from agent_env.providers.env_providers.env_provider import _builtin_env_providers, build_env_provider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.teardown_sandboxes import _env_sandbox_ids
+from agent_env.task.teardown import env_sandbox_ids
 from tst.util.sandbox_providers import mock_provider
 
 _GW = "https://gw.example"
@@ -62,7 +62,7 @@ async def test_a_container_deploy_stages_into_the_server_and_records_every_conta
     assert env._sandbox is sandboxes["srv"]
     assert (deployed.sandbox_id, deployed.sandbox_type) == ("gw", "modal")
     assert deployed.sandbox_ids == _RECORDED
-    assert {i for i, _ in _env_sandbox_ids(deployed)} == {sb.sandbox_id for sb in env._env_provider._container_sandboxes}
+    assert {i for i, _ in env_sandbox_ids(deployed)} == {sb.sandbox_id for sb in env._env_provider._container_sandboxes}
     sandboxes["srv"].write_file_from_object.assert_awaited_once_with("s3://bucket/email.json", "/data/email.json")
     sandboxes["gw"].write_file_from_object.assert_not_awaited()
 
@@ -226,7 +226,7 @@ async def test_a_deploy_without_a_gateway_records_the_servers_own_card():
         "server", "srv", "modal", {"mcp_server": {"email": "srv"}})
     assert (deployed.environment_card_url, deployed.environment_card, deployed.mcp_url, deployed.mcp_server_name) == (
         f"{_SRV}{WELL_KNOWN_PATH}", _LEAF_CARD, f"{_SRV}/mcp", "email")
-    assert {i for i, _ in _env_sandbox_ids(deployed)} == {"srv"}
+    assert {i for i, _ in env_sandbox_ids(deployed)} == {"srv"}
 
 
 @pytest.mark.asyncio
@@ -308,7 +308,7 @@ async def test_validation_deploys_a_server_env_as_declared_on_the_default_sandbo
 
 
 def _env(env_provider_type: str = "gateway") -> MCPServerEnv:
-    return MCPServerEnv(id="mcp-email", version=1, docker_image_artifact=MagicMock(), environment_name="email",
+    return MCPServerEnv(id="mcp-email", version=1, docker_image_artifact=MagicMock(image_name="mcp-email"), environment_name="email",
                         env_provider_type=env_provider_type)
 
 

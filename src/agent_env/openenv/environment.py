@@ -9,7 +9,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 from openenv.core.env_server.interfaces import Environment
@@ -25,8 +25,10 @@ from openenv.core.env_server.mcp_types import (
 )
 from openenv.core.env_server.types import Observation, State
 
+from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.task import EpisodeError, EpisodeSpec, Task
 from agent_env.task.episode import Episode, Turn
+from agent_env.task.episode.rules import DEPLOYS, works_in_sandbox
 from agent_env.task.episode.run import TurnTools
 
 END_TURN = Tool(
@@ -35,7 +37,21 @@ END_TURN = Tool(
     input_schema={"type": "object", "properties": {"response": {"type": "string", "description": "Your reply."}}},
 )
 ENDED = "the episode has ended; call reset"
+#: The key of a call's deadline in seconds in its action's metadata, ``end_turn``'s included; ``reset_async`` takes one as
+#: ``timeout_s``. A call that runs past it ends the episode, since cancelling the call doesn't stop what it does, and the
+#: session goes on; so no call holds a session longer than its client waits.
+TIMEOUT_METADATA = "timeout_s"
 NOT_RESET = "no episode has started; call reset before stepping"
+
+
+class Toolset(TypedDict):
+    """Where a task's played agent gets its tools, as the Task API names it in each task's ``toolset``."""
+
+    envs: list[str]
+    versions: dict[str, int | None]
+    role: str | None
+    access: list[dict[str, Any]]
+    bash: bool
 
 
 @dataclass(frozen=True)
@@ -46,6 +62,22 @@ class ServedTask:
     name: str
     spec: EpisodeSpec
     reward: Callable[[dict[str, float]], float | None]
+
+    @property
+    def toolset(self) -> Toolset:
+        """Where the played agent's tools come from: the envs it works in and the versions the task deploys, its role
+        in them, the changes the task makes to that role's tool access, and whether its turns offer ``bash`` in its
+        sandbox. Tasks that agree on it offer the same tools, so a trainer can group them."""
+        agent = self.spec.trainer_agents[0]
+        [deploy] = [step for step in self.task.steps if step.type in DEPLOYS and step.agent_name == agent]
+        role, envs = getattr(deploy, "role", None), list(getattr(deploy, "env_ids", None) or [])
+        return Toolset(envs=envs, role=role,
+                       versions={step.env_id: step.env_version for step in self.task.steps
+                                 if hasattr(step, "env_version") and step.env_id in envs},
+                       access=[{"env": step.env_id, "action": step.action, "tools": step.tools}
+                               for step in self.task.steps
+                               if step.type == "modify_env_tool_access" and step.role == (role or DEFAULT_ROLE)],
+                       bash=works_in_sandbox(self.task.steps, agent))
 
 
 @dataclass
@@ -107,13 +139,13 @@ class AgentEnvEnvironment(Environment):
     # The episode
 
     async def reset_async(self, seed: int | None = None, episode_id: str | None = None, *, split: str | None = None,
-                          index: int | None = None, **kwargs: Any) -> Observation:
+                          index: int | None = None, timeout_s: float | None = None, **kwargs: Any) -> Observation:
         """Plays task ``index`` of ``split``, or without either the first task served, as OpenEnv's ORS and verifiers
-        importers do."""
+        importers do, and ends the episode if its first turn hasn't opened ``timeout_s`` seconds in."""
         async with self._lock:
-            return await self._reset(split, index)
+            return await self._reset(split, index, timeout_s)
 
-    async def _reset(self, split: str | None, index: int | None) -> Observation:
+    async def _reset(self, split: str | None, index: int | None, timeout_s: float | None) -> Observation:
         await self._abandon("reset")
         self._loop = asyncio.get_running_loop()
         self._served_task, self._state = None, State(episode_id=None, step_count=0, done=False)
@@ -128,14 +160,19 @@ class AgentEnvEnvironment(Environment):
         self._state = State(episode_id=None, step_count=0, task_id=self._served_task.task.id,
                             task_name=self._served_task.name, split=split, index=index, turn=None, done=False)
         self._served.live.add(self)
+        deadline = asyncio.timeout(timeout_s)
         try:
-            self._episode = await self._served_task.spec.start(sandbox=self._served.sandbox)
-            self._state.episode_id = self._episode.id
-            turn = await self._episode.next_turn()
-            if turn is None:
-                raise EpisodeError("the run ended before the agent's first turn")
-            await self._open(turn)
+            async with deadline:
+                self._episode = await self._served_task.spec.start(sandbox=self._served.sandbox)
+                self._state.episode_id = self._episode.id
+                turn = await self._episode.next_turn()
+                if turn is None:
+                    raise EpisodeError("the run ended before the agent's first turn")
+                await self._open(turn)
         except Exception as e:
+            if deadline.expired():
+                return await self._end_with_error(f"the episode didn't open its first turn within {timeout_s:g}s",
+                                                  wait=False)
             return await self._end_with_error(e)
         return Observation(done=False, reward=None, metadata={
             "prompt": turn.prompt, "system_prompt": turn.system_prompt, "task": self._task_metadata()})
@@ -159,8 +196,10 @@ class AgentEnvEnvironment(Environment):
         if (stopped := await self._why_stopped()) is not None:
             return CallToolObservation(tool_name=action.tool_name, done=True, reward=None, metadata=stopped)
         self._state.step_count += 1
+        if timeout_s is None:
+            timeout_s = _deadline_of(action)
         if action.tool_name == END_TURN.name:
-            return await self._end_turn(action.tool_name, action.arguments.get("response") or "")
+            return await self._end_turn(action.tool_name, action.arguments.get("response") or "", timeout_s)
         return await self._call(action, timeout_s)
 
     def step(self, action: Any, timeout_s: float | None = None, **kwargs: Any) -> Observation:
@@ -193,8 +232,10 @@ class AgentEnvEnvironment(Environment):
             result = await asyncio.wait_for(self._tools.call(name, action.arguments), timeout_s)
         except EpisodeError as e:
             return _tool_error(name, ToolErrorType.TOOL_NOT_FOUND, e)
-        except TimeoutError as e:
-            return _tool_error(name, ToolErrorType.TIMEOUT, e)
+        except TimeoutError:
+            ended = await self._end_with_error(f"{name} didn't answer within {timeout_s:g}s, and the episode ended, "
+                                               "since what the call does may still be under way", wait=False)
+            return CallToolObservation(tool_name=name, done=True, reward=None, metadata=ended.metadata)
         except httpx.HTTPError as e:
             return _tool_error(name, ToolErrorType.TRANSPORT_ERROR, e)
         if result.isError:
@@ -202,20 +243,26 @@ class AgentEnvEnvironment(Environment):
         return CallToolObservation(tool_name=name, result={
             "content": result.content, "structured_content": None, "meta": None, "data": result.text, "is_error": False})
 
-    async def _end_turn(self, name: str, response: str) -> CallToolObservation:
+    async def _end_turn(self, name: str, response: str, timeout_s: float | None) -> CallToolObservation:
+        deadline = asyncio.timeout(timeout_s)
         try:
-            await self._turn.end(response)
-            await self._close_tools()
-            turn = await self._episode.next_turn()
-            if turn is not None:
-                await self._open(turn)
-                return CallToolObservation(tool_name=name, done=False, reward=None, result={
-                    "prompt": turn.prompt, "system_prompt": turn.system_prompt})
-            scores = await self._episode.result()
+            async with deadline:
+                await self._turn.end(response)
+                await self._close_tools()
+                turn = await self._episode.next_turn()
+                if turn is not None:
+                    await self._open(turn)
+                    return CallToolObservation(tool_name=name, done=False, reward=None, result={
+                        "prompt": turn.prompt, "system_prompt": turn.system_prompt})
+                scores = await self._episode.result(teardown=False)
         except Exception as e:
-            observation = await self._end_with_error(e)
+            if deadline.expired():
+                observation = await self._end_with_error(f"{name} didn't finish within {timeout_s:g}s, and the episode "
+                                                         "ended", wait=False)
+            else:
+                observation = await self._end_with_error(e)
             return CallToolObservation(tool_name=name, done=True, reward=None, metadata=observation.metadata)
-        await self._abandon("the episode ended")
+        await self._abandon("the episode ended", wait=False)
         return CallToolObservation(tool_name=name, done=True, **self._scored(scores))
 
     def _scored(self, scores: dict[str, float]) -> dict[str, Any]:
@@ -250,9 +297,9 @@ class AgentEnvEnvironment(Environment):
             error = _described(e)
         return (await self._end_with_error(error)).metadata
 
-    async def _end_with_error(self, error: Exception | str) -> Observation:
+    async def _end_with_error(self, error: Exception | str, *, wait: bool = True) -> Observation:
         message = error if isinstance(error, str) else _described(error)
-        await self._abandon(message)
+        await self._abandon(message, wait=wait)
         return self._error_observation(message)
 
     def _error_observation(self, error: str) -> Observation:
@@ -264,17 +311,18 @@ class AgentEnvEnvironment(Environment):
         async with self._lock:
             await self._abandon(reason)
 
-    async def _abandon(self, reason: str) -> None:
-        """Abandon the episode and close the turn's tools, waiting for the teardown; the caller holds the lock. The
-        abandon is tracked before anything is awaited, so a server shutting down meanwhile waits for it too, and a
-        caller cancelled while it waits leaves it running for the next reset to wait for."""
+    async def _abandon(self, reason: str, *, wait: bool = True) -> None:
+        """Abandon the episode and close the turn's tools, waiting for the teardown unless ``wait`` is false, as a call
+        past its deadline answers at once; the caller holds the lock. The abandon is tracked before anything is
+        awaited, so a server shutting down meanwhile waits for it too, and one not waited for, or whose caller is
+        cancelled while it waits, is left running for the next reset or close to wait for."""
         episode, self._episode = self._episode, None
         if episode is not None:
             self._ending = self._served.end_later(episode.abandon(reason))
         self._served.live.discard(self)
         await self._close_tools()
         self._turn = None
-        if (ending := self._ending) is not None:
+        if wait and (ending := self._ending) is not None:
             try:
                 await asyncio.shield(ending)
             finally:
@@ -301,13 +349,19 @@ class AgentEnvEnvironment(Environment):
         served = self._task_at(split, index)
         prompt, system_prompt = served.spec.prompts[0]
         return {"id": served.task.id, "name": served.name, "index": index, "prompt": prompt,
-                "system_prompt": system_prompt, "agent": served.spec.trainer_agents[0]}
+                "system_prompt": system_prompt, "agent": served.spec.trainer_agents[0], "toolset": served.toolset,
+                "turns": len(served.spec.prompts)}
 
     def _task_metadata(self) -> dict[str, Any] | None:
         if self._served_task is None:
             return None
         return {"id": self._served_task.task.id, "name": self._served_task.name, "split": self._state.split,
                 "index": self._state.index}
+
+
+def _deadline_of(action: CallToolAction) -> float | None:
+    deadline = action.metadata.get(TIMEOUT_METADATA)
+    return float(deadline) if isinstance(deadline, (int, float)) and deadline > 0 else None
 
 
 def _tool(tool: Any) -> Tool:

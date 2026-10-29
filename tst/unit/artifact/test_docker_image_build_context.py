@@ -122,7 +122,7 @@ class _DockerSave:
 
 def test_put_keeps_the_whole_context_and_records_how_to_build_it(local_stores, context, monkeypatch):
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: None)
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
@@ -137,7 +137,7 @@ def test_put_keeps_the_whole_context_and_records_how_to_build_it(local_stores, c
 
 def test_put_refuses_a_context_it_cant_take_before_pushing_anything(local_stores, context, monkeypatch):
     pushed = []
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: pushed.append(ref))
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     os.mkfifo(context / "pipe")
 
@@ -158,7 +158,7 @@ def test_the_platform_of_an_image_is_named_as_docker_build_takes_it(monkeypatch,
 
 def test_put_records_the_platform_it_built_for_when_none_is_given(local_stores, context, monkeypatch):
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: None)
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: "linux/arm64")
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 

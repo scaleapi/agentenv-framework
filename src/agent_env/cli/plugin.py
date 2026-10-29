@@ -35,7 +35,7 @@ from agent_env.plugins import (
 )
 from agent_env.plugins._cli import CLI_PLUGINS_GROUP, CLI_ROOT_OPTIONS_GROUP, cli_contributions, cli_discovery_errors
 from agent_env.plugins._discovery import discovery_error
-from agent_env.plugins._bundles import ENV_ALIASES, InstalledAliases, installed_aliases
+from agent_env.plugins._bundles import ALIAS_TABLES, InstalledAliases, installed_aliases
 from agent_env.plugins._report import (
     ALIAS_REFUSED,
     ENTRY_POINTS_UNREADABLE,
@@ -154,7 +154,7 @@ def _bundle_contributions(*, load: bool) -> tuple[dict[tuple[str, str], list[Con
     except Exception as e:
         return {}, {BUNDLES: Diagnostic(ENTRY_POINTS_UNREADABLE, discovery_error(e))}
     found: dict[tuple[str, str], list[Contribution]] = {}
-    aliases = (installed_aliases(bundles), installed_aliases(bundles, ENV_ALIASES))
+    aliases = tuple(installed_aliases(bundles, table) for table in ALIAS_TABLES)
     for bundle in bundles:
         found.setdefault((bundle.package, bundle.version), []).append(
             _bundle_contribution(bundle, bundles, aliases, load=load))
@@ -164,7 +164,7 @@ def _bundle_contributions(*, load: bool) -> tuple[dict[tuple[str, str], list[Con
 def _bundle_contribution(bundle: InstalledBundle, bundles: tuple[InstalledBundle, ...],
                          aliases: tuple[InstalledAliases, ...], *, load: bool) -> Contribution:
     """Whether ``bundle`` runs, by the checks ``agent-env run`` makes before it reads a store, and whether it gets each
-    alias it gives an agent or env. Without loading plugins, only that the folder parses."""
+    alias it gives an agent, env or artifact. Without loading plugins, only that the folder parses."""
     namesakes = tuple(Claimant(other.package, other.version, other.value)
                       for other in bundles if other.name == bundle.name and other is not bundle)
     if bundle.problem:

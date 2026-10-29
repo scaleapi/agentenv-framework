@@ -1,0 +1,3 @@
+name: agentenv
+version: 1.0.0
+description: Runs one agent-env turn in process (`hermes agentenv turn`) and writes the turn's hook events as JSON lines to the file descriptor AGENTENV_EVENTS_FD names.

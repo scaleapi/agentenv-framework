@@ -404,6 +404,20 @@ async def test_without_a_prompt_id_the_runs_last_prompt_is_graded(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_verify_asking_for_env_url_is_handed_the_envs_address(monkeypatch):
+    context, _, _ = recorded_run()
+    context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://127.0.0.1:20001/mcp",
+                                                 environment_url="http://127.0.0.1:20001"))
+    script = (b"async def verify(mcp_url, env_url, run=None):\n"
+              b"    return [{'id': 'c', 'score': 1.0, 'env_url': env_url, 'turns': len(run.turns)}]\n")
+
+    await _outcome(script, monkeypatch, prompt_id="p1").execute(context)
+
+    [row] = context.metadata["verifications"]["v"]["results"]
+    assert (row["env_url"], row["turns"]) == ("http://127.0.0.1:20001", 3)
+
+
+@pytest.mark.asyncio
 async def test_a_verify_with_an_unrelated_second_parameter_is_called_as_before(monkeypatch):
     context, _, _ = recorded_run()
     context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://mcp"))

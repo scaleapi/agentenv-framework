@@ -1,9 +1,12 @@
-"""Reading a driver class where its own dependencies aren't installed: a module no finder finds imports as an inert
-stub, the class is read without running it, and what it declares for each platform it supports comes back."""
+"""Reading a driver or app class where its own dependencies aren't installed: a module no finder finds imports as an
+inert stub, the class is read without running it, and what it declares comes back: a driver's for each platform it
+supports, an app's as ComputerAppEnvironment says. An app's code needs only the plain package."""
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
 
 import pytest
@@ -11,7 +14,9 @@ import pytest
 pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
 
+from agentenv_protocol.computer import AppDeclaration  # noqa: E402
 from agentenv_protocol.computer._declare import _Stub, _StubModule, declare, main  # noqa: E402
+from agentenv_protocol.computer.platform import Platform  # noqa: E402
 
 DRIVER = '''import not_installed_here
 from not_installed_here.input import Base, Keyboard
@@ -52,6 +57,46 @@ class Desk(ComputerDriverEnvironment):
     @press
     def press_keys(self, keys): pass
 '''
+APP = '''import not_installed_here
+from pydantic import BaseModel, SecretStr
+
+from agentenv_protocol import add_data, agent_skill, reset_data
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Linux, Ready, Service, computer_app,
+                                        install_step, ready_check)
+
+
+@computer_app(supports={supports}, permissions=["camera"])
+class Mail(ComputerAppEnvironment):
+    linux = Linux(files="linux", python="requirements.txt", services=[Service(name="imap", command="bin/imap")])
+    launch = Launch(at="demand", command=["thunderbird"], window={{"class": "Thunderbird"}},
+                    ready=Ready(window=True, timeout_s=30))
+
+    class Settings(BaseModel):
+        account: str = "user@example.com"
+        password: SecretStr = SecretStr("")
+
+    @install_step()
+    def packages(self): not_installed_here.apt()
+
+    @install_step(scope="session")
+    def profile(self): pass
+
+    @ready_check
+    def inbox_open(self): return True
+
+    @agent_skill
+    def guide(self): return "Mail", "Read mail."
+
+    @add_data
+    async def load(self, parts): pass
+
+    @reset_data
+    async def reset(self): pass
+
+
+class Twice(Mail):
+    skill = "skill.md"
+'''
 LINUX = [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}]
 
 
@@ -74,12 +119,12 @@ def test_a_class_whose_imports_arent_installed_declares_what_it_serves_on_each_p
 
     declared = declare(folder, "driver.py", "Desk")
 
-    assert declared["name"] == "desk" and declared["supports"] == LINUX
-    assert [p["platform"] for p in declared["platforms"]] == [{"os": "linux", "arch": "amd64", "display": "x11"},
-                                                              {"os": "linux", "arch": "arm64", "display": "x11"}]
-    linux = declared["platforms"][0]
-    assert {"urn:agentenv:computer/v1", "urn:agentenv:computer-exec/v1"} <= set(linux["provides"])
-    assert len(linux["tools"]) == 7 and linux["features"]["buttons"] == ["left", "right"]
+    assert declared.name == "desk" and declared.supports == LINUX
+    assert [p.platform for p in declared.platforms] == [Platform(os="linux", arch="amd64", display="x11"),
+                                                        Platform(os="linux", arch="arm64", display="x11")]
+    linux = declared.platforms[0]
+    assert {"urn:agentenv:computer/v1", "urn:agentenv:computer-exec/v1"} <= set(linux.provides)
+    assert len(linux.tools) == 7 and linux.features["buttons"] == ["left", "right"]
 
 
 def test_a_stub_is_itself_again_except_for_dunders(folder):
@@ -93,8 +138,8 @@ def test_a_stub_is_itself_again_except_for_dunders(folder):
 
 
 @pytest.mark.parametrize("name, supports, problem", [
-    ("Connection", LINUX, "driver.py has no ComputerDriverEnvironment subclass named Connection"),
-    ("Missing", LINUX, "driver.py has no ComputerDriverEnvironment subclass named Missing"),
+    ("Connection", LINUX, "driver.py has no ComputerDriverEnvironment or ComputerAppEnvironment subclass named Connection"),
+    ("Missing", LINUX, "driver.py has no ComputerDriverEnvironment or ComputerAppEnvironment subclass named Missing"),
     ("Desk", [], "Desk declares no platform: name them with @computer_driver(supports=[...])"),
 ])
 def test_a_name_that_isnt_a_driver_or_declares_no_platform_is_refused(folder, name, supports, problem):
@@ -108,9 +153,89 @@ def test_main_prints_only_the_declaration_or_exits_1_with_why_it_cant(folder, ca
     _driver(folder)
     assert main([str(folder), "driver.py", "Desk"]) == 0
     printed = capsys.readouterr()
-    assert json.loads(printed.out)["name"] == "desk" and printed.err == "loading the desk driver\n"
+    printed_declaration = json.loads(printed.out)
+    assert (printed_declaration["type"], printed_declaration["name"]) == ("computer_driver", "desk")
+    assert printed_declaration["platforms"][0]["platform"] == {"os": "linux", "arch": "amd64", "display": "x11"}
+    assert printed.err == "loading the desk driver\n"
 
     _driver(folder, buttons=("thumb",))
     assert main([str(folder), "driver.py", "Desk"]) == 1
     printed = capsys.readouterr()
     assert printed.out == "" and printed.err.splitlines()[-1].startswith("TypeError: Desk: buttons include left")
+
+
+def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_computer(folder):
+    (folder / "app.py").write_text(APP.format(supports=LINUX))
+
+    declared = declare(folder, "app.py", "Mail")
+
+    assert isinstance(declared, AppDeclaration)
+    settings = declared.settings
+    assert declared.model_dump(mode="json", exclude_none=True, exclude={"settings"}) == {
+        "supports": LINUX, "permissions": ["camera"],
+        "install": {"linux": {"files": "linux", "python": "requirements.txt",
+                              "services": [{"name": "imap", "command": "bin/imap"}]}},
+        "launch": {"at": "demand", "command": ["thunderbird"], "window": {"class": "Thunderbird"},
+                   "ready": {"window": True, "timeout_s": 30.0}},
+        "skill": {"method": "guide"}, "data": ["data/add", "data/reset"],
+        "install_steps": [{"name": "packages", "scope": "system"}, {"name": "profile", "scope": "session"}],
+        "ready_checks": ["inbox_open"]}
+    assert list(settings["properties"]) == ["account", "password"] and settings["properties"]["password"]["writeOnly"]
+
+
+def test_an_app_declaring_its_skill_twice_is_refused(folder):
+    (folder / "app.py").write_text(APP.format(supports=LINUX))
+
+    with pytest.raises(ValueError, match=re.escape("Twice declares its skill twice: skill = 'skill.md' and "
+                                                   "@agent_skill guide")):
+        declare(folder, "app.py", "Twice")
+
+
+@pytest.mark.parametrize("change, problem", [
+    ('launch = Launch(command=["mail"], ready=Ready(timeout_s=5))', "Ready waits on nothing: set window, port or command"),
+    ('launch = Launch(command=["mail"], ready=Ready(window=True))', "ready waits on a window: name it with Launch(window="),
+    ('launch = Launch(command=["mail"], window={"role": "main"})', "window matches by class, instance, title, not"),
+])
+def test_an_app_whose_launch_or_readiness_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
+    (folder / "app.py").write_text(APP.format(supports=LINUX) + f"""
+
+@computer_app(supports={LINUX})
+class Changed(Mail):
+    {change}
+""")
+
+    assert main([str(folder), "app.py", "Changed"]) == 1
+    assert problem in capsys.readouterr().err.splitlines()[-1]
+
+
+def test_an_app_reads_the_settings_its_computer_gives_it_by_its_name(monkeypatch):
+    from pydantic import BaseModel
+
+    from agentenv_protocol.computer import APP_SETTINGS_ENV, ComputerAppEnvironment
+
+    class Notes(ComputerAppEnvironment):
+        class Settings(BaseModel):
+            signature: str = ""
+            lines: int = 1
+
+    monkeypatch.setenv("ENVIRONMENT_NAME", "notes")
+    monkeypatch.setenv(APP_SETTINGS_ENV, json.dumps({"notes": {"signature": "-- Ada"}, "mail": {"lines": 9}}))
+
+    assert Notes().settings == Notes.Settings(signature="-- Ada", lines=1)
+
+
+def test_an_apps_code_needs_only_the_plain_package():
+    blocked = """
+import importlib.abc, sys
+class Blocked(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path, target=None):
+        if name.split(".")[0] in ("mcp", "av", "PIL", "uvicorn"):
+            raise ImportError(name)
+sys.meta_path.insert(0, Blocked())
+from agentenv_protocol.computer import ComputerAppEnvironment, Linux, computer_app
+print(sorted(name for name in sys.modules if name.startswith("agentenv_protocol.computer.")))
+"""
+    done = subprocess.run([sys.executable, "-c", blocked], capture_output=True, text=True, env=os.environ)
+
+    assert done.returncode == 0, done.stderr
+    assert "agentenv_protocol.computer.driver" not in done.stdout

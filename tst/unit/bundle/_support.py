@@ -2,14 +2,17 @@
 configured store that fails any test reaching it."""
 
 import shutil
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.bundle import parse_bundle
+from agent_env.bundle import requires as requires_module
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import BuiltImage, resolve_bundle
 from agent_env.config import get_config
 from agent_env.env.published_images import AGENT_IMAGES
+from agent_env.plugins import Inventory, _requirements
 from agent_env.store.document_store import DocumentStore
 
 # The digest the registry fixture pins every tag to.
@@ -44,6 +47,26 @@ def listing(folder):
     """The files under ``folder``, as POSIX paths relative to it, a link marked with a trailing ``@``."""
     return sorted(path.relative_to(folder).as_posix() + ("@" if path.is_symlink() else "")
                   for path in Path(folder).rglob("*") if not path.is_dir() or path.is_symlink())
+
+
+def fake_plugins(monkeypatch, distributions=(), *, versions=None, packages=None, metadata=None, failures=None):
+    """This machine's packages, as a bundle's requirements and detection read them: the plugin ``distributions`` the
+    inventory lists, and the ``failures`` of those that didn't load; each installed package's version, by its
+    canonical name; the packages each top-level module comes from; and each package's ``metadata`` (``requires``,
+    ``files``)."""
+    def read(name):
+        if name not in (metadata or {}):
+            raise PackageNotFoundError(name)
+        return metadata[name]
+
+    monkeypatch.setattr(requires_module, "inventory", lambda load: Inventory(
+        distributions=tuple(distributions), group_errors={}, discovery_errors={}, config_path=None, config_error=None,
+        loaded=load))
+    monkeypatch.setattr(requires_module, "load_failures", lambda: failures or {})
+    monkeypatch.setattr(requires_module, "packages_distributions", lambda: packages or {})
+    monkeypatch.setattr(requires_module, "distribution", read)
+    monkeypatch.setattr(_requirements, "installed", (versions or {}).get)
+    monkeypatch.setattr(_requirements, "distribution", read)
 
 
 def plan_of(root):

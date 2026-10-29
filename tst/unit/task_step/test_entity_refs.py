@@ -160,7 +160,7 @@ def test_declared_paths_match_what_to_dict_writes():
         LoadArtifactTaskStep(id="l", version=None, env_id="crm", artifact_id="seed", artifact_version=1),
         AddSkillsTaskStep(
             id="s", version=None, skills=[{"skill_artifact_id": "sk", "skill_artifact_version": 5}],
-            cli_artifact_ids=["cli-crm"], file_artifact_universe_ids=["fau-crm"],
+            cli_artifact_ids=["cli-crm"], file_artifact_universe_ids=["fau-crm"], env_ids=["desk"],
         ),
         DeployAgentTaskStep(id="a", version=None, env_ids=["crm", "mail"], a2a_agent_id="triage", a2a_agent_version=3),
         PromptAgentTaskStep(id="p", version=None, prompt="hi", snapshot_config=SnapshotConfig(env_id="tickets")),
@@ -175,7 +175,7 @@ def test_declared_paths_match_what_to_dict_writes():
         "load_artifact": [("env_id", "crm", None), ("artifacts[0].id", "seed", 1)],
         "add_skills": [
             ("skills[0].skill_artifact_id", "sk", 5), ("cli_artifact_ids[0]", "cli-crm", None),
-            ("file_artifact_universe_ids[0]", "fau-crm", None),
+            ("file_artifact_universe_ids[0]", "fau-crm", None), ("env_ids[0]", "desk", None),
         ],
         "deploy_agent": [("env_ids[0]", "crm", None), ("env_ids[1]", "mail", None), ("a2a_agent_id", "triage", 3)],
         "prompt_agent": [("snapshot_config.env_id", "tickets", None)],

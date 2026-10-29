@@ -327,7 +327,6 @@ async def test_cleanup_records_an_already_deleted_sandbox_as_torn_down(monkeypat
     client = provider._client
     provider._client.get_sandbox.side_effect = type("Missing", (Exception,), {"status_code": 404})("gone")
     monkeypatch.setattr(teardown, "build_sandbox_provider", lambda _: provider)
-    monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", lambda _: provider)
     context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
         sandbox_name="box", sandbox_id="gone", sandbox_mode="vm", sandbox_type="vercel",
     )])
@@ -339,7 +338,7 @@ async def test_cleanup_records_an_already_deleted_sandbox_as_torn_down(monkeypat
         await teardown_sandboxes.TeardownSandboxesTaskStep(
             id="cleanup", version=1, sandbox_names=["box"],
         ).execute(context)
-    assert context.metadata[teardown_sandboxes.TORN_DOWN_KEY] == ["gone"]
+    assert context.metadata[teardown.TORN_DOWN_KEY] == ["gone"]
     client.get_sandbox.assert_awaited_once_with(name="gone")
     client.aclose.assert_awaited_once()
 
@@ -375,7 +374,6 @@ async def test_cleanup_does_not_mark_permission_failure_as_torn_down(monkeypatch
     provider = _provider()
     provider._client.get_sandbox.side_effect = type("Forbidden", (Exception,), {"status_code": 403})("forbidden")
     monkeypatch.setattr(teardown, "build_sandbox_provider", lambda _: provider)
-    monkeypatch.setattr(teardown_sandboxes, "build_sandbox_provider", lambda _: provider)
     context = TaskStepContext(deployed_sandboxes=[DeployedSandbox(
         sandbox_name="box", sandbox_id="box", sandbox_mode="vm", sandbox_type="vercel",
     )])
@@ -384,7 +382,7 @@ async def test_cleanup_does_not_mark_permission_failure_as_torn_down(monkeypatch
         assert len(report.failed) == 1 and report.still_up
     else:
         await teardown_sandboxes.TeardownSandboxesTaskStep(id="cleanup", version=1, sandbox_names=["box"]).execute(context)
-    assert not context.metadata.get(teardown_sandboxes.TORN_DOWN_KEY)
+    assert not context.metadata.get(teardown.TORN_DOWN_KEY)
 
 
 @pytest.mark.parametrize("tags", [{}, {"a": "1"}, {str(i): str(i) for i in range(5)}])

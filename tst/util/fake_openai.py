@@ -1,6 +1,7 @@
 """A fake OpenAI Chat Completions endpoint, so an agent that calls the model through LiteLLM runs with no model key:
-``POST .../chat/completions`` is answered by a responder, as one JSON completion, and every request is recorded. A
-fault queued with ``fail_next`` replaces the next answer: an HTTP error, or an answer that stalls."""
+``POST .../chat/completions`` is answered by a responder, as one JSON completion or, to a request that asks for a
+stream, as server-sent chunks, and every request is recorded. A fault queued with ``fail_next`` replaces the next
+answer: an HTTP error, or an answer that stalls."""
 
 import json
 import threading
@@ -117,7 +118,22 @@ class FakeOpenAI:
                     return
                 if fault is not None and fault.kind == "stall":
                     time.sleep(fault.seconds)
-                self._send(200, _completion(body, fake.respond(body)))
+                completion = _completion(body, fake.respond(body))
+                if body.get("stream"):
+                    self._stream(completion)
+                else:
+                    self._send(200, completion)
+
+            def _stream(self, completion: dict) -> None:
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream")
+                self.end_headers()
+                try:
+                    for chunk in _chunks(completion):
+                        self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
             def _send(self, status: int, payload: dict) -> None:
                 data = json.dumps(payload).encode()
@@ -138,6 +154,21 @@ class FakeOpenAI:
     def __exit__(self, *exc) -> None:
         self._server.shutdown()
         self._server.server_close()
+
+
+def _chunks(completion: dict) -> list[dict]:
+    """``completion`` as the chunks a stream sends: its message whole as one delta, its finish, then its usage."""
+    (choice,) = completion["choices"]
+    message = choice["message"]
+    delta = {"role": "assistant", "content": message["content"]}
+    if "tool_calls" in message:
+        delta["tool_calls"] = [{"index": index, **call} for index, call in enumerate(message["tool_calls"])]
+    head = {key: completion[key] for key in ("id", "created", "model")} | {"object": "chat.completion.chunk"}
+    return [
+        {**head, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+        {**head, "choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]},
+        {**head, "choices": [], "usage": completion["usage"]},
+    ]
 
 
 def _completion(body: dict, reply: Text | ToolCall) -> dict:

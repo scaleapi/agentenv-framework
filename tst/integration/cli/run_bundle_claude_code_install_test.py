@@ -17,7 +17,7 @@ from click.testing import CliRunner
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
-from agent_env.providers.sandbox_providers.local_sandbox import _host_ips
+from agent_env.providers.sandbox_providers.local_docker.provider import _host_ips
 from agent_env.store.object_store.local.grant_server import grant_server
 from tst.util.fake_anthropic import FakeAnthropic, Fault, tool_then_answer
 

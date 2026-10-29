@@ -1,6 +1,6 @@
 [project]
 name = "agentenv-framework-protocol"
-version = "0.1.382"
+version = "0.1.402"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
 license = "Apache-2.0"
@@ -33,6 +33,12 @@ agent = [
     "mcp>=1.25,<2",  # the peer-agents tools' MCP server; 2.0 removed the server API it serves them with
     "python-multipart>=0.0.13",  # the staging extension's upload forms
     "regex>=2023.12.25",
+    "uvicorn>=0.30",
+]
+# A computer app's own server: ComputerAppEnvironment serves its card and computer-app/v1 over mcp's FastMCP, on a Unix
+# socket through uvicorn.
+app = [
+    "mcp>=1.25,<2",
     "uvicorn>=0.30",
 ]
 # A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, and

@@ -35,10 +35,11 @@ from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY, TeardownSandboxesTaskStep
+from agent_env.task.teardown import TORN_DOWN_KEY
+from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 from tst.util.a2a_test_agent import put_test_agent
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 _REPO = Path(__file__).resolve().parents[4]
 

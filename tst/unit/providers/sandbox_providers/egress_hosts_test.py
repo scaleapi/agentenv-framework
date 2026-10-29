@@ -102,4 +102,5 @@ def test_the_builtin_floor_is_pinned(builtin_registry):
     assert set(all_sandbox_egress_hosts()) == {
         "*.modal.host", "*.w.modal.host", "*.e2b.app", "*.sail.box", "*.sandbox.tensorlake.ai", "*.sb.tenki.sh",
         "*.us.sb.tenki.sh", "*.vercel.run", "*.boxd.sh", "*.daytonaproxy01.net", "*.daytonaproxy01.eu",
+        "*.on.boat.dev",
     }

@@ -14,13 +14,14 @@ from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcom
                               dry_run_bundle, run_bundle)
 from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
                                         path_like, run_name)
-from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
+from agent_env.bundle.requires import UnmetRequirements
+from agent_env.cli._install_prompt import offer_to_install
+from agent_env.plugins._bundles import ALIAS_TABLES, installed_aliases
 from agent_env.plugins._discovery import discovery_error
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.teardown import RecordedSandbox, TeardownReport, kind, recorded_sandboxes, sandbox_ids
+from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport, kind, recorded_sandboxes, sandbox_ids
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.teardown_sandboxes import TORN_DOWN_KEY
 
 _COLORS = {Outcome.PASSED: "green", Outcome.BELOW_ONE: "yellow", Outcome.UNSCORED: "yellow", Outcome.FAILED: "red",
            Outcome.CANCELLED: "yellow"}
@@ -54,6 +55,10 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
 
     BUNDLE is a folder, or the name of a bundle an installed package provides (PACKAGE/NAME when several
     packages provide that name). Without BUNDLE, it lists the installed bundles.
+
+    A bundle's bundle.toml names the plugin packages it requires, and a run refuses to start without them; in a
+    terminal it offers to install them with agent-env plugin add. A folder with no bundle.toml that uses plugin
+    packages is given one, which a dry run only says it would write.
 
     With no --task or --eval, it runs every eval or, in a bundle without evals, every task. Each task runs
     once, at most four at a time, and the run exits 1 if any of them failed. With --verbose, a run that
@@ -91,6 +96,8 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                             id_root=id_root, keep=keep)
     except BundleError as e:
         _note_an_installed_namesake(e, bundle, root, id_root)
+        if isinstance(e, UnmetRequirements) and not dry_run:
+            offer_to_install(e)
         raise
     except RunInterrupted as stop:
         with Interrupts():
@@ -144,7 +151,7 @@ def _list_installed() -> None:
         click.echo(f"{name:<{widths[0]}}  {package:<{widths[1]}}  {contents:<{widths[2]}}  {description}".rstrip())
 
     echo(*header)
-    aliases = (installed_aliases(bundles), installed_aliases(bundles, ENV_ALIASES))
+    aliases = tuple(installed_aliases(bundles, table) for table in ALIAS_TABLES)
     for bundle, row in zip(bundles, rows):
         echo(*row)
         if bundle.root is not None:

@@ -25,6 +25,12 @@ def validate_relative_filename(filename: str) -> None:
         raise ValueError(f"Filename {filename!r} must not contain '..' segments")
 
 
+def validate_file_name(filename: str) -> None:
+    """Reject anything but one plain file name: an env stages a loaded artifact at host and container paths built from it."""
+    if filename in ("", ".", "..") or "/" in filename or "\\" in filename or any(ord(c) < 32 or ord(c) == 127 for c in filename):
+        raise ValueError(f"Artifact filename {filename!r} must be a single file name, with no '/', '\\' or control characters")
+
+
 def os_reason(e: OSError) -> str:
     """What an OSError says went wrong, as a problem message names it."""
     if e.errno == errno.ELOOP:

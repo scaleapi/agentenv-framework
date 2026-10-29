@@ -24,7 +24,7 @@ import httpx
 from agent_env.a2a_agent import A2AAgent
 from agent_env.config import get_config
 from agent_env.entity.scopes import FieldScope
-from agent_env.providers.sandbox_providers.local_sandbox import (
+from agent_env.providers.sandbox_providers.local_docker.provider import (
     LOCAL_TRUST_DIR,
     LOCAL_TRUST_ENV,
     host_url_for,

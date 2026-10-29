@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1367"
+version = "0.9.1387"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,9 +34,10 @@ dependencies = [
     "click>=8.0.0",
     "cryptography>=42",  # the local transfer CA
     "httpx>=0.27.0",
+    "jsonschema>=4.20",  # checks an app's settings against its Settings' schema before a deploy
     "litellm>=1.96.0,<1.97",
     "mcp>=1.25,<2",  # same floor as env/gateway/requirements.txt and agentenv-protocol; 2.0.0 removed mcp.server.fastmcp, imported at module scope by env/gateway
-    "packaging>=22",  # evaluates a plugin's requirement markers with no extra
+    "packaging>=22",  # parses a bundle.toml's requires; evaluates a plugin's requirement markers with no extra
     "a2a-sdk==0.3.26",
     "pydantic>=2.12",  # model_validate(extra=...) reads agent responses tolerantly
     "pymongo>=4.7",
@@ -53,6 +54,12 @@ dependencies = [
 # agent_env.openenv: bundle tasks served as OpenEnv envs. No cap: OpenEnv ships a minor release a week.
 openenv = [
     "openenv>=0.9",
+]
+# agent_env.training.trl: TRL's trainers on a bundle served as an OpenEnv env. TRL itself is the trainer's to pin.
+trl = [
+    "agentenv-framework[openenv]",
+    "datasets>=3",
+    "transformers>=5.2",  # renders the tools as TRL shows them to a model; 5.2 is what TRL's environment_factory needs
 ]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
@@ -92,8 +99,13 @@ boxd = [
 daytona = [
     "daytona~=0.224.0",  # AsyncDaytona sandboxes, sessions, file API, preview links and egress lists validated against 0.224
 ]
+# The boat.dev sandbox provider, selected as the built-in `boat` backend.
+boat = [
+    "boat-sdk~=1.13.0",  # sandboxes, labels, hosted ports, detached commands and their output stream validated against 1.13
+    "urllib3>=2.1.0,<3",  # the SDK's transport, whose errors are what a dropped connection raises
+]
 dev = [
-    "agentenv-framework[aws,boxd,daytona,gcp,openenv,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boat,boxd,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
@@ -118,7 +130,9 @@ agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
 agents = "agent_env"
+computers = "agent_env"
 drivers = "agent_env"
+desktop = "agent_env.examples"
 hello = "agent_env.examples"
 echo-mcp = "agent_env.examples"
 mail-mcp = "agent_env.examples"
@@ -136,14 +150,14 @@ Changelog = "https://github.com/scaleapi/agentenv-framework/releases"
 packages = ["src/agent_env"]
 # The explorer UI *source* lives at src/agent_env/explorer/ui/ (a Next.js project).
 # Keep it out of the wheel — only its built output ships, copied to explorer/static/
-# by the UI build step. node_modules/out/.next are already .gitignore-excluded.
+# by the release workflow. node_modules/out/.next are already .gitignore-excluded.
 exclude = ["src/agent_env/explorer/ui"]
-# The release workflow writes it and git ignores it; a build ships it when it's there.
-artifacts = ["src/agent_env/env/published_images.json"]
+# The release workflow writes these and git ignores them; a build ships them when they're there.
+artifacts = ["src/agent_env/env/published_images.json", "src/agent_env/explorer/static"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tst", "packages/agentenv-protocol", ".github/scripts"]
-artifacts = ["src/agent_env/env/published_images.json"]
+artifacts = ["src/agent_env/env/published_images.json", "src/agent_env/explorer/static"]
 
 [tool.uv.workspace]
 members = ["packages/agentenv-protocol"]

@@ -383,6 +383,25 @@ def test_a_granted_changelog_rewinds_a_fresh_agent_and_resumes_its_conversation(
     assert gemini_bridge.find_session_file(resumed, cwd=a2a_server.GEMINI_CWD) is not None
 
 
+@needs_gnu_tar
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every file")
+def test_a_file_the_agent_cant_read_is_skipped_and_the_rest_still_captured(home, changelog_dir, client, staging):
+    """As /etc/ssl/private is to a non-root agent: tar can't read it, and the increment still uploads the rest."""
+    locked = home / "locked"
+    locked.mkdir()
+    (locked / "key").write_text("secret")
+    locked.chmod(0)
+    try:
+        client.post(CHANGELOG_PATH, json={"write_namespace": staging.grant(), "roots": [str(home)]})
+        (home / "marker.txt").write_text("token")
+        result = staging.capture(changelog_dir, "write_file", SESSION_ID)
+    finally:
+        locked.chmod(0o700)
+
+    assert "captured seq=0" in result.stderr, result.stderr
+    assert f"{staging.ROOT_PATH}/000000.tgz" in staging.objects
+
+
 def test_changelog_apply_accepts_the_empty_baseline(home, changelog_dir, client, store):
     assert client.put(CHANGELOG_PATH, json={"increments": [], "resume_conversation": False}).json() == {"count": 0}
     assert store.requests == []

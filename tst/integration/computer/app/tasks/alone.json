@@ -1,0 +1,5 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "notes",
+   "env_params": {"app_settings": {"notes": {"signature": "-- Ada", "token": "env:NOTES_TOKEN"}}}},
+  {"id": "service", "type": "run_code", "env_id": "notes", "script_artifact_id": "check_notes"}
+]

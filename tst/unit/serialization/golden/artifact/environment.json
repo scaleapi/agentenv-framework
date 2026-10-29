@@ -5,6 +5,7 @@
     "version": 2
   },
   "id": "slack-service",
+  "metadata": {},
   "service_name": "slack",
   "type": "environment",
   "version": 7

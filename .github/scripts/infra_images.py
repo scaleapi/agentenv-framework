@@ -5,8 +5,8 @@ installed, and no job that holds a token to push images or publish to PyPI runs 
 ``plan`` prints each image's name, repository, tag, Dockerfile and context as JSON, ``--missing`` only those the
 registry hasn't published: it has no image under the tag, or refuses to show one, as GHCR does for a package that
 doesn't exist yet, so the first publish can start. ``--only infra`` lists only the infra images, and ``--only agents``
-only the agents' images, which a release builds after it publishes the protocol, as an agent's protocol floor may name
-it. ``write PATH`` records the digest the registry serves under every
+only the images that install the protocol, the agents' and the website browser's, which a release builds after it
+publishes the protocol, as their protocol floor may name it. ``write PATH`` records the digest the registry serves under every
 image's tag as a release wheel carries them, and fails if any is missing. ``public`` warns about each image a user, who
 pulls anonymously, can't. The registry is read with ``GHCR_TOKEN`` (as ``GITHUB_ACTOR``) when it's set, anonymously
 otherwise, and always anonymously by ``public``.
@@ -26,9 +26,10 @@ from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest
 
 REPO = Path(__file__).resolve().parents[2]
-# "agents" is the shipped bundles' images, the agents' and an example env's, which install the protocol a release
-# publishes.
-_GROUPS = {"infra": tuple(image for image in PUBLISHED_IMAGES if image not in BUNDLE_IMAGES), "agents": BUNDLE_IMAGES}
+# "agents" is the images that install the protocol a release publishes: the shipped bundles', the agents' and an
+# example env's, and the website browser's, whose recorder installs it.
+_AFTER_PROTOCOL = BUNDLE_IMAGES + tuple(image for image in PUBLISHED_IMAGES if image.name == "agentenv-website-browser")
+_GROUPS = {"infra": tuple(image for image in PUBLISHED_IMAGES if image not in _AFTER_PROTOCOL), "agents": _AFTER_PROTOCOL}
 
 
 def main() -> int:

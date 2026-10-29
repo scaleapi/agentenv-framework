@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
@@ -96,6 +99,26 @@ class Filter:
 
 # --- Sort ------------------------------------------------------------------
 
+
+
+_expected_versions: ContextVar[Mapping[str, int]] = ContextVar("agent_env_expected_versions", default={})
+
+
+@contextmanager
+def expecting_version(entity_id: str, version: int) -> Iterator[None]:
+    """Inside the block, a put of ``entity_id`` that names no version writes exactly ``version``, which must be the
+    id's next, as one that names it does: a write that loses a race to another raises ConcurrentModificationError
+    rather than land on the version after the other's."""
+    token = _expected_versions.set({**_expected_versions.get(), entity_id: version})
+    try:
+        yield
+    finally:
+        _expected_versions.reset(token)
+
+
+def expected_version(entity_id: str) -> Optional[int]:
+    """The version ``expecting_version`` holds a put of ``entity_id`` to, or None."""
+    return _expected_versions.get().get(entity_id)
 
 @dataclass(frozen=True)
 class SortKey:
@@ -465,9 +488,10 @@ class VersionedEntityStore(Generic[T]):
         if not isinstance(doc.get("id"), str):
             raise ValueError(f"an entity in {self._collection!r} needs a string id, got {doc.get('id')!r}")
         self._doc_store.check_id(doc["id"])
-        if doc.get("version"):
-            self.insert_next(doc, doc["version"])
-            return doc["version"]
+        version = doc.get("version") or expected_version(doc["id"])
+        if version:
+            self.insert_next(doc, version)
+            return version
         last_error: Optional[DuplicateKeyError] = None
         for _ in range(max_retries):
             version = self.next_version(doc["id"])

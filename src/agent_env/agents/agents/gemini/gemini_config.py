@@ -3,16 +3,20 @@
 `~/.gemini/settings.json` holds what every run shares, the changelog's hook. Each run
 gets settings of its own as the CLI's system settings, which override the user's: the
 task's MCP servers with the turn's role header, and the turn's system prompt as a
-context file. So turns running at once never share a role or a system prompt.
+context file named by its content. So turns running at once never share a role, and a
+system prompt keeps one path from turn to turn.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import threading
 import uuid
+from collections import Counter
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +28,8 @@ SYSTEM_SETTINGS_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 _DEFAULT_SYSTEM_SETTINGS = Path("/etc/gemini-cli/settings.json")
 # The CLI's context file in a workspace, which a run with a system prompt still loads beside its own.
 _WORKSPACE_CONTEXT_FILE = "GEMINI.md"
+_prompt_files: Counter[Path] = Counter()
+_prompt_files_lock = threading.Lock()
 
 
 def gemini_home() -> Path:
@@ -66,7 +72,8 @@ def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
                  system_prompt: str | None) -> Iterator[Path]:
     """One run's system settings, in an owner-only file of its own that names `servers` with `role`; with a
     `system_prompt`, also a context file the CLI layers on its own system prompt (the CLI has no flag for one, and
-    replacing its system prompt would lose its tool protocol). Both are removed when the run ends."""
+    replacing its system prompt would lose its tool protocol). The settings go when the run ends, the context file
+    when the last run naming it does."""
     home = gemini_home()
     runs = home / "agentenv-runs"
     runs.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -76,13 +83,9 @@ def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
         **(settings.get("mcpServers") if isinstance(settings.get("mcpServers"), dict) else {}),
         **{settings_name(name): _server_entry(info["url"], info.get("headers"), role) for name, info in servers.items()},
     }
-    written: list[Path] = []
-    try:
+    with ExitStack() as stack:
         if system_prompt:
-            # The CLI's global context files live in its home, and only this run's settings name this one.
-            context = home / f"agentenv-system-prompt-{token}.md"
-            context.write_text(system_prompt)
-            written.append(context)
+            context = stack.enter_context(_prompt_file(home, system_prompt))
             settings["context"] = {
                 **(settings.get("context") if isinstance(settings.get("context"), dict) else {}),
                 "fileName": [_WORKSPACE_CONTEXT_FILE, context.name],
@@ -90,9 +93,25 @@ def run_settings(servers: Mapping[str, Mapping[str, Any]], role: str | None,
         path = runs / f"{token}.json"
         # It carries the MCP servers' headers.
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
+            stack.callback(path.unlink, missing_ok=True)
             json.dump(settings, handle)
-        written.append(path)
+        yield path
+
+
+@contextmanager
+def _prompt_file(home: Path, system_prompt: str) -> Iterator[Path]:
+    """The system prompt as a global context file named by its content: the CLI writes the file's path into the
+    model's system instruction, so a name new each turn would miss the provider's prompt cache on every turn."""
+    path = home / f"agentenv-system-prompt-{hashlib.sha256(system_prompt.encode()).hexdigest()[:32]}.md"
+    with _prompt_files_lock:
+        if not _prompt_files[path]:
+            path.write_text(system_prompt)
+        _prompt_files[path] += 1
+    try:
         yield path
     finally:
-        for path in written:
-            path.unlink(missing_ok=True)
+        with _prompt_files_lock:
+            _prompt_files[path] -= 1
+            if not _prompt_files[path]:
+                del _prompt_files[path]
+                path.unlink(missing_ok=True)

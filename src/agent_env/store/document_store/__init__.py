@@ -31,6 +31,8 @@ from agent_env.store.document_store.document_store import (
     VersionedEntityStore,
     VersionedEntityStoreCache,
     compare_and_swap,
+    expected_version,
+    expecting_version,
     reject_reserved_id,
     rev_precondition,
 )
@@ -46,6 +48,8 @@ __all__ = [
     "VersionedEntityStore",
     "VersionedEntityStoreCache",
     "compare_and_swap",
+    "expected_version",
+    "expecting_version",
     "reject_reserved_id",
     "rev_precondition",
     "Filter",

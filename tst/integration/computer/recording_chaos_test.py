@@ -1,13 +1,16 @@
-"""computer-recording/v1 on the scaffold's desktop when things go wrong: the X server killed mid-recording, segments
-rolling over, the disk filling up, clicks while it records at 30 fps, and the driver restarted. Each test runs the
-scaffold's image in a container of its own, so it can kill, fill and restart it, and decodes every segment it reads
-back. Needs a Docker daemon."""
+"""computer-recording/v1 on the shipped desktop example's computer when things go wrong: the X server killed
+mid-recording, segments rolling over, the disk filling up, clicks on the conformance fixture while it records at 30 fps,
+and the driver restarted. Each test runs the computer's composed image in a container of its own, so it can kill, fill
+and restart it, and decodes every segment it reads back. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import json
+import platform
 import subprocess
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
+from importlib import resources
 from pathlib import Path
 
 import av
@@ -17,7 +20,7 @@ from agentenv_protocol.client import ExtensionCallError
 from agentenv_protocol.computer import COMPUTER_READY, COMPUTER_RECORDING, Recording, RecordingManifest
 from agentenv_protocol.computer.conformance.client import Driver
 from agentenv_protocol.computer.recording import DISK_CHECK_S, RECORDINGS_DIR
-from tst.integration.computer.scaffold_test import _scaffold, _when
+from tst.integration.computer.conftest import docker
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -27,12 +30,13 @@ SEGMENT_S = Recording().max_segment_s
 FPS = 10
 
 
+ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
+FIXTURE = resources.files("agentenv_protocol.computer.conformance").joinpath("fixture.py").read_bytes()
+
+
 @pytest.fixture(scope="module")
-def image(tmp_path_factory):
-    tag = f"agentenv-test-recording-desk:{uuid.uuid4().hex[:8]}"
-    _docker("build", "-q", "-t", tag, str(_scaffold(tmp_path_factory.mktemp("desk") / "scaffold") / "envs" / "desktop"))
-    yield tag
-    subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
+def image(desktop):
+    return desktop.metadata["composed"]["container"][ARCH]["image"]
 
 
 @pytest.mark.asyncio
@@ -40,7 +44,7 @@ async def test_a_recording_outlives_its_x_server_with_a_gap_and_a_new_segment(im
     async with _desk(image) as (name, driver):
         started = await _start(driver)
         await asyncio.sleep(3)
-        _docker("exec", name, "pkill", "-9", "Xvfb")
+        docker("exec", name, "pkill", "-9", "Xvfb")
         await asyncio.sleep(6)
         manifest = await _end(driver, started)
         decoded = _decoded(name, manifest, tmp_path)
@@ -68,7 +72,7 @@ async def test_a_full_disk_ends_a_recording_as_limit_and_what_it_recorded_plays(
     async with _desk(image, "--mount", tmpfs) as (name, driver):
         started = await _start(driver)
         await asyncio.sleep(2)
-        _docker("exec", name, "dd", "if=/dev/zero", f"of={RECORDINGS}/fill", "bs=1M", "count=150")
+        docker("exec", name, "dd", "if=/dev/zero", f"of={RECORDINGS}/fill", "bs=1M", "count=150")
         await asyncio.sleep(2 * DISK_CHECK_S)
         manifest = await _end(driver, started)
         decoded = _decoded(name, manifest, tmp_path)
@@ -99,7 +103,7 @@ async def test_a_restarted_driver_forgets_its_recording_and_keeps_the_segments_i
     async with _desk(image) as (name, driver):
         started = await _start(driver)
         await asyncio.sleep(SEGMENT_S + 2)
-        _docker("restart", "-t", "2", name)
+        docker("restart", "-t", "2", name)
         driver = await _ready(name)
         with pytest.raises(ExtensionCallError) as refused:
             await _end(driver, started)
@@ -111,8 +115,7 @@ async def test_a_restarted_driver_forgets_its_recording_and_keeps_the_segments_i
 async def _desk(image: str, *docker_args: str):
     """The desktop in a container of its own, and a client for its driver once it is ready."""
     name = f"agentenv-test-desk-{uuid.uuid4().hex[:8]}"
-    _docker("run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}", *docker_args,
-            "-e", 'AGENTENV_COMPUTER_SETTINGS={"data_paths": ["fixture"]}', image)
+    docker("run", "-d", "--name", name, "-p", f"127.0.0.1::{PORT}", *docker_args, image)
     try:
         yield name, await _ready(name)
     finally:
@@ -135,6 +138,9 @@ async def _ready(name: str) -> Driver:
 
 
 async def _layout(driver: Driver) -> dict:
+    """The Fixture Desk, started through data/add and computer-exec as the probe starts it, once it wrote its layout."""
+    await driver.add_file("desk/fixture.py", FIXTURE)
+    await driver.run("sh", "-c", "python3 desk/fixture.py fixture > desk/fixture.log 2>&1 &")
     for _ in range(120):
         out = await driver.run("cat", "fixture/layout.json")
         if out["exit_code"] == 0 and out["stdout"].strip():
@@ -157,16 +163,16 @@ def _decoded(name: str, manifest: RecordingManifest, tmp: Path) -> list[int]:
     counts = []
     for segment in manifest.segments:
         local = tmp / segment.path.replace("/", "-")
-        local.write_bytes(_docker("exec", name, "cat", f"{RECORDINGS}/{segment.path}").stdout)
+        local.write_bytes(docker("exec", name, "cat", f"{RECORDINGS}/{segment.path}").stdout)
         with av.open(str(local)) as video:
             counts.append(sum(1 for _ in video.decode(video=0)))
     return counts
 
 
+def _when(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
 def _gaps(manifest: RecordingManifest) -> list[float]:
     segments = manifest.segments
     return [(_when(b.started_at) - _when(a.ended_at)).total_seconds() for a, b in zip(segments, segments[1:])]
-
-
-def _docker(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], check=True, capture_output=True)

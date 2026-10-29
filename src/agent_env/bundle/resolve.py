@@ -25,6 +25,7 @@ from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.registry import get_env_registry
 from agent_env.eval.eval import Eval
 from agent_env.plugins import _registration
+from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import LOCAL_PREFIX, derive_id, validate_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task_step.registry import get_task_step_registry
@@ -32,7 +33,8 @@ from agent_env.task_step.task_step import TaskStep, attach_retry_config, depende
 
 from ._fs import fold, relative, show
 from .authoring import AuthoringContext, default_dockerfile
-from .parse import DOCKERFILE, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
+from .parse import BUNDLE_TOML, DOCKERFILE, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
+from .requires import UnmetRequirements
 
 # Step keys that hold step ids, never entity ids.
 _STEP_ID_KEYS = ("id", "type", "depends_on")
@@ -107,7 +109,8 @@ class ResolvedBundle:
 
 
 def resolve_bundle(bundle: Bundle) -> ResolvedBundle:
-    """Resolve every entry's references. Raises BundleError listing every problem found."""
+    """Resolve every entry's references. Raises BundleError listing every problem found, UnmetRequirements when the
+    bundle.toml requires a package that isn't installed or not at a version it allows."""
     return _Resolver(bundle).resolve()
 
 
@@ -169,6 +172,8 @@ class _Resolver:
                         self.ignored[kind, fold(name)] = path
 
     def resolve(self) -> ResolvedBundle:
+        problems, unmet = unmet_problems(self.bundle.requires or (), BUNDLE_TOML)
+        self.problems.extend(problems)
         resolved = []
         for entry in self.bundle.entries:
             if self._image_folder(entry):
@@ -178,7 +183,7 @@ class _Resolver:
             except _Skip:
                 pass
         if self.problems:
-            raise BundleError(self.problems)
+            raise UnmetRequirements(self.problems, unmet) if unmet else BundleError(self.problems)
         return ResolvedBundle(self.bundle, tuple(resolved), tuple(self.images))
 
     # One method per kind of config
@@ -272,20 +277,13 @@ class _Resolver:
     # Parts of a config
 
     def _toml_class(self, entry: BundleEntry) -> type:
-        group = None
-        if entry.kind is BundleKind.ENV:
-            if entry.type in _INFRA_ENVS:
-                self._problem(entry, f"a {entry.type} env isn't written from a bundle: config names the one every "
-                              f"deploy uses ({_INFRA_ENVS[entry.type]}), and a run builds it when it's missing")
-                raise _Skip
-            cls, group = get_env_registry().get(entry.type), _registration.ENVS
-        elif entry.kind is BundleKind.AGENT:
-            cls = A2AAgent if entry.type == A2AAgent.type else None
-        elif entry.kind is BundleKind.EVAL:
-            cls = Eval if entry.type == Eval.type else None
-        else:
-            cls, group = get_artifact_registry().get(canonical_type(entry.type)), _registration.ARTIFACTS
-        if cls is None:
+        if entry.kind is BundleKind.ENV and entry.type in _INFRA_ENVS:
+            self._problem(entry, f"a {entry.type} env isn't written from a bundle: config names the one every "
+                          f"deploy uses ({_INFRA_ENVS[entry.type]}), and a run builds it when it's missing")
+            raise _Skip
+        if (cls := entity_class(entry)) is None:
+            group = {BundleKind.ENV: _registration.ENVS, BundleKind.AGENT: None, BundleKind.EVAL: None}.get(
+                entry.kind, _registration.ARTIFACTS)
             name = canonical_type(entry.type) if group == _registration.ARTIFACTS else entry.type
             note = _registration.failure_note(group, name) if group else ""
             self._problem(entry, f"{entry.type!r} is not a known {entry.kind.store} type{note}")
@@ -293,13 +291,19 @@ class _Resolver:
         return cls
 
     def _image(self, entry: BundleEntry, config: dict, ref: EntityRef, references: list[Reference]) -> bool:
-        """Record the image an image key has the bundle write: the folder's Dockerfile when ``image`` is left out,
-        ``{ dockerfile = "<path>" }``, or a registry image, ``{ ref = "<image>" }``. False when the key names an image
-        artifact instead."""
-        if ref.artifact_type != "docker_image" or ref.path != ref.field:
+        """Record the image an image key has the bundle write: the folder's Dockerfile when a top-level ``image`` is
+        left out, ``{ dockerfile = "<path>" }``, or a registry image, ``{ ref = "<image>" }``. A key in a table, such as
+        a computer's ``forms.container.image``, says which. False when the key names an image artifact instead."""
+        if ref.artifact_type != "docker_image" or "[]" in ref.path:
             return False
-        value = config.get(ref.path)
-        role = f"{entry.kind.store}_image" if ref.path == "image" else ref.path
+        *tables, key = ref.path.split(".")
+        owner = config
+        for table in tables:
+            owner = owner.get(table) if isinstance(owner, dict) else None
+        if not isinstance(owner, dict) or (tables and key not in owner):
+            return False
+        value = owner.get(key)
+        role = f"{entry.kind.store}_image" if ref.path == "image" else ref.path.replace(".", "_")
         if isinstance(value, dict) and "ref" in value:
             name = value["ref"]
             if value.keys() != {"ref"}:
@@ -308,7 +312,7 @@ class _Resolver:
             elif problem := _registry_problem(ref.path, name):
                 self._problem(entry, problem)
             else:
-                self._implied(ReferencedImage(derive_id(entry.id, role), entry, name), config, ref, references)
+                self._implied(ReferencedImage(derive_id(entry.id, role), entry, name), owner, key, ref, references)
             return True
         if value is None:
             dockerfile = default_dockerfile(ref.path)
@@ -325,11 +329,11 @@ class _Resolver:
         if not (inside and path.is_file()):
             self._problem(entry, f"{ref.path}: there is no {dockerfile!r} in this folder to build")
             return True
-        self._implied(BuiltImage(derive_id(entry.id, role), entry, dockerfile), config, ref, references)
+        self._implied(BuiltImage(derive_id(entry.id, role), entry, dockerfile), owner, key, ref, references)
         return True
 
-    def _implied(self, image: BundleImage, config: dict, ref: EntityRef, references: list[Reference]) -> None:
-        config[ref.path] = image.id
+    def _implied(self, image: BundleImage, owner: dict, key: str, ref: EntityRef, references: list[Reference]) -> None:
+        owner[key] = image.id
         self.images.append(image)
         references.append(Reference(EntityKind.ARTIFACT, image.id, None, image, ref.path, ref.artifact_type))
 
@@ -464,6 +468,18 @@ class _Resolver:
 
     def _problem(self, entry: BundleEntry, message: str) -> None:
         self.problems.append(f"{relative(self.bundle.root, entry.path)}: {message}")
+
+
+def entity_class(entry: BundleEntry) -> type | None:
+    """The class that writes ``entry``: its env type's, its artifact type's, the agent's or the eval's; None for a type
+    nothing registers."""
+    if entry.kind is BundleKind.ENV:
+        return get_env_registry().get(entry.type)
+    if entry.kind is BundleKind.AGENT:
+        return A2AAgent if entry.type == A2AAgent.type else None
+    if entry.kind is BundleKind.EVAL:
+        return Eval if entry.type == Eval.type else None
+    return get_artifact_registry().get(canonical_type(entry.type))
 
 
 def _registry_problem(key: str, name: Any) -> str | None:

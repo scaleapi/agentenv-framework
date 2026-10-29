@@ -47,7 +47,7 @@ ROLELESS_CONFIG = _agent_config(["name", "description"])
 
 
 @pytest.mark.asyncio
-async def test_a_card_with_both_paths_gets_the_role_on_both(wiring, caplog):
+async def test_a_card_with_both_paths_gets_the_role_on_both_and_the_agent_records_its_envs(wiring, caplog):
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         context = await wiring.deploy(_card(HEADERS_MCP, ROLE_CONFIG), role="executor")
 
@@ -56,7 +56,7 @@ async def test_a_card_with_both_paths_gets_the_role_on_both(wiring, caplog):
     ]
     assert wiring.bodies("/ext/agent-config") == [{"name": "solver", "role": "executor"}]
     assert not [m for m in caplog.messages if "role" in m]
-    assert [a.role for a in context.deployed_agents] == ["executor"]
+    assert [(a.role, a.env_ids) for a in context.deployed_agents] == [("executor", ["crm"])]
 
 
 @pytest.mark.asyncio

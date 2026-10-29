@@ -17,7 +17,7 @@ from agent_env.bundle import parse_bundle
 from agent_env.bundle.installed import find_bundle
 from agent_env.cli import cli
 from agent_env.config import configure, get_config, reset_config
-from agent_env.providers.sandbox_providers.local_sandbox import _host_ips
+from agent_env.providers.sandbox_providers.local_docker.provider import _host_ips
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task

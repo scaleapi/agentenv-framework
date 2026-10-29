@@ -1,10 +1,11 @@
 """What a driver's card says: the extensions, the tools, extensions and data-plane methods its operations support,
-the extensions' params, the extensions it declares without handlers, and the descriptions that name the default
-coordinate space."""
+the extensions' params (computer/v1's are the driver's features), the extensions it declares without handlers, and the
+descriptions that name the default coordinate space."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .dataplane import DEFAULT_DATA_PATHS
 from .recording import recording_params
 from ..types import METHOD_ADD, EnvironmentExtension, EnvironmentTool, IntakeDeclaration, IntakeFormat, intake_extension
 
@@ -79,18 +80,23 @@ def extension_params(driver: ComputerDriverEnvironment, uri: str) -> dict:
     return {}
 
 
-def declared_extensions(driver: ComputerDriverEnvironment) -> list[EnvironmentExtension]:
-    features = {
+def computer_features(driver: ComputerDriverEnvironment) -> dict:
+    """computer/v1's params: what the seven tools take, how input is delivered, the platform and the default data
+    paths."""
+    return {
         "buttons": list(driver.buttons), "max_click_count": driver.max_click_count,
         "keys": driver.keys if driver.keys == "all" else list(driver.keys), "max_text_length": driver.max_text_length,
         "max_wait_ms": driver.max_wait_ms, "max_drag_points": driver.max_drag_points,
         "max_duration_ms": driver.max_duration_ms, "max_key_repeat": driver.max_key_repeat,
-        "max_scroll_amount": driver.max_scroll_amount,
+        "max_scroll_amount": driver.max_scroll_amount, "delivery": "foreground", "platform": driver.platform.as_dict(),
+        "supports": list(driver.supports), "default_data_paths": list(DEFAULT_DATA_PATHS),
     }
+
+
+def declared_extensions(driver: ComputerDriverEnvironment) -> list[EnvironmentExtension]:
     declared = [EnvironmentExtension(
         uri=COMPUTER, description="The seven computer_* tools: screenshot, click, drag, scroll, type, key, wait.",
-        params={**features, "delivery": "foreground", "platform": driver.platform.as_dict(),
-                "supports": list(driver.supports)})]
+        params=computer_features(driver))]
     if driver.has("pointer"):
         declared.append(EnvironmentExtension(
             uri=COMPUTER_POINTER, description="The computer_pointer_* tools, and click and scroll at the pointer.",
@@ -99,7 +105,7 @@ def declared_extensions(driver: ComputerDriverEnvironment) -> list[EnvironmentEx
     if driver.has("write_files"):
         intake.add = [IntakeFormat(part="file", format="file-tree", load="additive")]
     declared.append(intake_extension(intake, "data/add writes files under the session user's home; data/get "
-                                             "returns the env's data paths."))
+                                             "returns those under the paths it's given, or the default data paths."))
     return declared
 
 

@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -265,6 +266,30 @@ _HOST_WORKDIR = "/app"
 _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install.sh host {{agent_name}} {{a2a_port}} {_HOST_WORKDIR}"]
 
 
+# Each `opencode run` peaks near 900 MB, and the server, its bridge and the OS need about 1 GB more. A VM that ran
+# every concurrent turn at once ran out of memory and its kernel killed one (exit -9), so turns past the cap wait.
+TURN_MEMORY_MB, RESERVED_MEMORY_MB = 900, 1024
+
+
+def max_concurrent_turns(environ: Mapping[str, str] = os.environ) -> int:
+    """How many `opencode run` processes may run at once: OPENCODE_MAX_CONCURRENT_TURNS, else as many as memory fits."""
+    if configured := environ.get("OPENCODE_MAX_CONCURRENT_TURNS"):
+        return max(1, int(configured))
+    return max(1, (memory_mb() - RESERVED_MEMORY_MB) // TURN_MEMORY_MB)
+
+
+def memory_mb(cgroup_limit: Path = Path("/sys/fs/cgroup/memory.max")) -> int:
+    """The memory this server's processes may use: the machine's, or its cgroup's limit when that's lower."""
+    total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    try:
+        limit = cgroup_limit.read_text().strip()
+    except OSError:
+        limit = "max"
+    if limit.isdigit():
+        total = min(total, int(limit))
+    return total // 2**20
+
+
 @a2a_agent(
     identity=AgentIdentity(
         name="OpenCode",
@@ -305,6 +330,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
     """Bridges A2A tasks onto `opencode run`."""
 
     def __init__(self) -> None:
+        self._turn_slots = asyncio.Semaphore(max_concurrent_turns())
         self._turn_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._changelog: dict[str, Any] | None = None
         self._changelog_lock = asyncio.Lock()
@@ -337,23 +363,24 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
             except FilePartMaterializeError as exc:
                 return TaskResult.failure("filepart_error", str(exc), error_type="infra_error")
             try:
-                result = await run_opencode(
-                    prompt=prompt,
-                    context_id=context_id,
-                    session_id=session_id,
-                    model=request.config.model,
-                    effort=request.config.effort,
-                    mcp_servers=dict(request.mcp_servers),
-                    system_prompt=request.config.system_prompt,
-                    output_format=request.config.output_format,
-                    timeout_s=request.config.timeout_seconds,
-                    project_id=request.config.project_id,
-                    task_id=request.config.task_id,
-                    role=request.config.role,
-                    attachment_paths=attachments,
-                    event_callback=record,
-                    workspace=str(WORKSPACE_DIR),
-                )
+                async with self._turn_slots:
+                    result = await run_opencode(
+                        prompt=prompt,
+                        context_id=context_id,
+                        session_id=session_id,
+                        model=request.config.model,
+                        effort=request.config.effort,
+                        mcp_servers=dict(request.mcp_servers),
+                        system_prompt=request.config.system_prompt,
+                        output_format=request.config.output_format,
+                        timeout_s=request.config.timeout_seconds,
+                        project_id=request.config.project_id,
+                        task_id=request.config.task_id,
+                        role=request.config.role,
+                        attachment_paths=attachments,
+                        event_callback=record,
+                        workspace=str(WORKSPACE_DIR),
+                    )
             except Exception:
                 logger.exception("OpenCode invocation failed")
                 return TaskResult.failure(
@@ -479,7 +506,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 await asyncio.to_thread(shutil.copyfile, _CHANGELOG_SNAR, pending_snar)
                 await asyncio.to_thread(
                     subprocess.run,
-                    ["tar", f"--listed-incremental={pending_snar}",
+                    ["tar", "--ignore-failed-read", f"--listed-incremental={pending_snar}",
                      *_changelog_backup_exclusions(),
                      f"--exclude={_CHANGELOG_DIR}", "-czf", str(archive), *roots, str(record)],
                     check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -605,7 +632,7 @@ def _baseline_changelog(roots: list[str]) -> None:
     _CHANGELOG_SNAR.unlink(missing_ok=True)
     present = [root for root in roots if Path(root).exists()]
     subprocess.run(
-        ["tar", f"--listed-incremental={_CHANGELOG_SNAR}",
+        ["tar", "--ignore-failed-read", f"--listed-incremental={_CHANGELOG_SNAR}",
          *_changelog_backup_exclusions(),
          "-cf", "/dev/null", *present],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,

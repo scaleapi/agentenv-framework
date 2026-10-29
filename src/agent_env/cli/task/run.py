@@ -11,11 +11,15 @@ from uuid import uuid4
 
 import click
 
+from agent_env.bundle.requires import UnmetRequirements
+from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.banner import print_banner
+from agent_env.cli.task._checks import runnable_task
+from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE
 from agent_env.cli import submitted_runs
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_teardown
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.runner.runner import KEEP_KEY, RunStatus
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
 from agent_env.store.routing import run_scope
@@ -377,8 +381,6 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
 
-    from agent_env.task import Task
-
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-run{uuid4().hex[:6]}"
     if context_json:
@@ -411,15 +413,15 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     if env_state_instance_id:
         initial_context.metadata.setdefault("user_overrides", {})["env_state_instance_id"] = env_state_instance_id
     if gateway_env_id:
-        initial_context.metadata.setdefault("user_overrides", {})["gateway_env_id"] = gateway_env_id
+        initial_context.metadata.setdefault("user_overrides", {})[GATEWAY_OVERRIDE] = gateway_env_id
     if service_db_env_id:
-        initial_context.metadata.setdefault("user_overrides", {})["service_db_env_id"] = service_db_env_id
+        initial_context.metadata.setdefault("user_overrides", {})[SERVICE_DB_OVERRIDE] = service_db_env_id
     initial_context.metadata["start_step"] = start_step
     initial_context.metadata[KEEP_KEY] = keep
     initial_context.metadata["task_id"] = task_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
-    task = Task.get(task_id, version=task_version)
+    task = _runnable(task_id, task_version, initial_context.metadata)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
 
     print_banner()
@@ -464,6 +466,16 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         raise SystemExit(1)
 
 
+def _runnable(task_id: str, task_version: int | None, metadata: dict):
+    """The stored task, checked before the first step a run with ``metadata`` runs (``runnable_task``); a refusal for
+    what it requires offers, in a terminal, to install it and run the command again."""
+    try:
+        return runnable_task(task_id, task_version, metadata, say=click.echo)
+    except UnmetRequirements as e:
+        offer_to_install(e)
+        raise
+
+
 def _seed_universe_id(task, seed: dict) -> str | None:
     """The universe a seed's runs collect into, so runs of one seed share it: derived from the task version and the
     seed's id, else its name. None leaves collect_artifacts to name it after the run."""
@@ -506,8 +518,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     context.metadata["seed"]. Prompt templates with <placeholder> variables
     are rendered using the seed values before being sent to the agent.
     """
-    from agent_env.task import Task
-
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-batch{uuid4().hex[:6]}"
 
@@ -520,8 +530,16 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     if not seed_rows:
         raise click.ClickException("No seeds found in CSV")
 
+    metadata = {"run_group_id": uuid4().hex, "task_id": task_id, KEEP_KEY: keep}
+    _stamp_agent_env_client_metadata(metadata, get_agent_env_client_id())
+    given = {"litellm_api_key": litellm_api_key, "judge_litellm_api_key": judge_litellm_api_key,
+             "apply_trajectory_filter": apply_trajectory_filter, "user_model": user_model, "judge_model": judge_model,
+             "agent_sandbox": agent_sandbox, "env_sandbox": env_sandbox, "env_state_type": env_state_type,
+             "env_state_instance_id": env_state_instance_id}
+    if overrides := {key: value for key, value in given.items() if value is not None and value != ""}:
+        metadata["user_overrides"] = overrides
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
-    task = Task.get(task_id, version=task_version)
+    task = _runnable(task_id, task_version, metadata)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
     suffixes = {step.universe_id_suffix or "" for step in task.steps if isinstance(step, CollectArtifactsTaskStep)}
     if is_local_id(task.id) and suffixes:
@@ -537,14 +555,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
 
     print_banner()
 
-    metadata = {"run_group_id": uuid4().hex, "task_id": task_id, KEEP_KEY: keep}
-    _stamp_agent_env_client_metadata(metadata, get_agent_env_client_id())
-    given = {"litellm_api_key": litellm_api_key, "judge_litellm_api_key": judge_litellm_api_key,
-             "apply_trajectory_filter": apply_trajectory_filter, "user_model": user_model, "judge_model": judge_model,
-             "agent_sandbox": agent_sandbox, "env_sandbox": env_sandbox, "env_state_type": env_state_type,
-             "env_state_instance_id": env_state_instance_id}
-    if overrides := {key: value for key, value in given.items() if value is not None and value != ""}:
-        metadata["user_overrides"] = overrides
 
     submissions = []
     for index, seed in enumerate(seed_rows, 1):

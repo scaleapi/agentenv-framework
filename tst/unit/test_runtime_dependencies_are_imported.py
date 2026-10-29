@@ -14,6 +14,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 import agent_env
 
 SRC = Path(agent_env.__file__).resolve().parent
@@ -38,13 +40,18 @@ def _runtime_requirements() -> list[str]:
 
 
 def _optional_requirements() -> dict[str, list[str]]:
-    """Each runtime extra's own distributions; ``dev`` is test tooling."""
+    """Each runtime extra's distributions, with those of the extras it includes; ``dev`` is test tooling."""
     extras = tomllib.loads(PYPROJECT.read_text())["project"]["optional-dependencies"]
-    return {
-        extra: [name for dep in deps if (name := _requirement_name(dep)) != SELF]
-        for extra, deps in extras.items()
-        if extra != "dev"
-    }
+
+    def distributions(extra: str) -> list[str]:
+        found = []
+        for dep in extras[extra]:
+            requirement = Requirement(dep)
+            found += ([_normalize(requirement.name)] if _normalize(requirement.name) != SELF
+                      else [name for included in sorted(requirement.extras) for name in distributions(included)])
+        return found
+
+    return {extra: distributions(extra) for extra in extras if extra != "dev"}
 
 
 @functools.cache
@@ -169,17 +176,19 @@ def test_every_optional_dependency_is_imported_by_the_library():
     assert all(not deps for deps in unused.values()), f"extra dependencies nothing imports: {unused}"
 
 
-def test_a_module_using_an_extra_imports_only_what_the_extra_and_core_declare():
-    """Otherwise the extra works only while something else happens to install the package."""
+def test_a_module_using_an_extra_imports_only_what_one_extra_and_core_declare():
+    """Otherwise the extra works only while something else happens to install the package. A module may use the
+    extras an extra includes, as ``trl`` includes ``openenv``."""
     core = _runtime_requirements()
-    for extra, deps in _optional_requirements().items():
-        own = [d for d in deps if d not in core]
-        for path in _library_files():
-            imports = [c for c in _imports(path) if _third_party(c)]
-            if not any(_owners(c, own) for c in imports):
-                continue
-            undeclared = [c[0] for c in imports if not _owners(c, core + deps)]
-            assert undeclared == [], (
-                f"{path.relative_to(SRC)} uses the {extra!r} extra but imports {undeclared}, "
-                f"which neither it nor the core dependencies declare"
-            )
+    extras = _optional_requirements()
+    for path in _library_files():
+        imports = [c for c in _imports(path) if _third_party(c)]
+        used = [extra for extra, deps in extras.items() if any(_owners(c, [d for d in deps if d not in core])
+                                                               for c in imports)]
+        if not used:
+            continue
+        undeclared = min(([c[0] for c in imports if not _owners(c, core + extras[extra])] for extra in used), key=len)
+        assert undeclared == [], (
+            f"{path.relative_to(SRC)} uses the {used} extras but imports {undeclared}, which no one of them "
+            f"declares with the core dependencies"
+        )

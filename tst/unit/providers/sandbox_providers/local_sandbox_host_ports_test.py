@@ -22,11 +22,11 @@ from pytest_socket import enable_socket
 
 from agent_env.config.paths import state_root
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
-from agent_env.providers.sandbox_providers import local_sandbox as local_sandbox_module
+from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox_module
 from agent_env.env.envs.service_db import DB_MCP_PORT, DB_WEB_PORT
 from agent_env.providers.sandbox_providers.boxd.sandbox import BoxdSandbox
 from agent_env.providers.sandbox_providers.daytona.sandbox import DaytonaSandbox
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.e2b import E2BSandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox

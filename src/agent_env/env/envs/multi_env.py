@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.envs.website_browser import WEBSITE_BROWSER_RECORDER_PORT
 from agent_env.store.ids import derive_id
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
@@ -145,8 +147,9 @@ class MultiEnv(Env):
         _hand_record_to_child_envs(self, deployed_env)
         return deployed_env
 
-    def deploy_refusal(self, **options) -> str | None:
-        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find."""
+    def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
+        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
+        ``sandbox_type`` is deploy()'s own, which no provider takes."""
         return deploy_refusal(self, provider_or_class(self), options)
 
     @classmethod
@@ -615,7 +618,8 @@ class MultiEnv(Env):
         ]
         if website_configs:
             website_browser_env = Env.get(config.default_website_browser_env_id)
-            mcp_servers = list(mcp_servers) + [MCPServerConfig(image=website_browser_env.docker_image_artifact.image_name, environment_name=website_browser_env.environment_name)]
+            mcp_servers = list(mcp_servers) + [MCPServerConfig(image=website_browser_env.docker_image_artifact.image_name, environment_name=website_browser_env.environment_name,
+                                                               card_port=WEBSITE_BROWSER_RECORDER_PORT)]
 
         compose_content = gw.create_docker_compose(
             mcp_servers=mcp_servers,
@@ -632,10 +636,7 @@ class MultiEnv(Env):
         compose_content = compose_content.replace(
             "    volumes:\n      - ./init-schemas.sql:/docker-entrypoint-initdb.d/init-schemas.sql\n", "",
         )
-        write_script = f'''cat > {DOCKER_COMPOSE_PATH} << 'COMPOSE_EOF'
-{compose_content}
-COMPOSE_EOF'''
-        await self._sandbox.exec_script(write_script)
+        await gw._write_file(self._sandbox, DOCKER_COMPOSE_PATH, compose_content)
 
         # Remove old servicedb container and its anonymous volume, then start fresh from snapshot image
         logger.info("Recreating servicedb container with snapshot image...")
@@ -665,7 +666,7 @@ COMPOSE_EOF'''
         environment_names = list(dict.fromkeys(
             [env.environment_name for env in self.mcp_server_envs] + [env.environment_name for env in self.website_envs]
         ))
-        svc_list = " ".join(environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME])
+        svc_list = " ".join(map(shlex.quote, environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME]))
         logger.info(f"Recreating services: {svc_list}")
         await gw._compose_up(self._sandbox, f"--force-recreate {svc_list}")
         await gw._wait_for_gateway(self._sandbox, self._sandbox.host_port(AGENT_ENV_GATEWAY_MCP_PORT))

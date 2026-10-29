@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,7 @@ from agentenv_protocol.computer import recording as recording_module  # noqa: E4
 from agentenv_protocol.transfers import TransferError  # noqa: E402
 
 START, END = "/agentenv/ext/computer-recording/start", "/agentenv/ext/computer-recording/end"
+END_ALL = "/agentenv/ext/computer-recording/end_all"
 
 
 @pytest.fixture(autouse=True)
@@ -129,7 +131,7 @@ async def test_every_driver_serves_recording_unless_it_turns_it_off():
     async with http_client(Off()) as http:
         off = (await http.get("/.well-known/agent-env.json")).json()
     extension = next(e for e in card["capabilities"]["extensions"] if e["uri"] == COMPUTER_RECORDING)
-    assert set(extension["params"]["methods"]) == {"start", "end"}
+    assert set(extension["params"]["methods"]) == {"start", "end", "end_all"}
     assert {k: v for k, v in extension["params"].items() if k not in ("methods", "endpoint")} == {
         "formats": ["video/mp4; codecs=avc1"], "scopes": ["display"], "fps": {"default": 10, "max": 15},
         "cursor": True, "source": "capture", "max_segment_s": 15, "max_concurrent": 2, "max_duration_s": 86_400}
@@ -270,7 +272,7 @@ async def test_segments_upload_as_they_close_and_end_retries_with_a_fresh_grant(
     (segment,) = manifest["segments"]
     assert segment["uploaded"] is True and "upload_error" not in segment
     assert [root for root, _ in calls] == ["rec/run-1", "rec/run-2"]
-    assert calls[1][1].await_args.args[0] == segment["path"]
+    assert [call.args[0] for call in calls[1][1].await_args_list] == [segment["path"], f"{manifest['recording_id']}/manifest.json"]
     assert not (home / ".agentenv-recordings" / segment["path"]).exists()
 
 
@@ -340,12 +342,33 @@ async def test_bad_calls_are_refused_with_a_code(path, body, status, code):
 
 
 @pytest.mark.asyncio
-async def test_uploaded_segments_are_not_sent_again_at_end(home):
+async def test_uploaded_segments_are_not_sent_again_at_end_and_the_manifest_goes_beside_them(home):
     upload = AsyncMock()
     with patch.object(recording_module, "NamespaceUploader") as uploader:
         uploader.return_value.upload = upload
         _, manifest = await _record(Recorded(), 1.4, start={"upload": _grant()})
-    assert all(s["uploaded"] for s in manifest["segments"]) and upload.await_count == len(manifest["segments"]) >= 2
+    paths = [call.args[0] for call in upload.await_args_list]
+    assert all(s["uploaded"] for s in manifest["segments"]) and len(manifest["segments"]) >= 2
+    assert paths == [s["path"] for s in manifest["segments"]] + [f"{manifest['recording_id']}/manifest.json"]
+    assert json.loads(upload.await_args_list[-1].args[1]) == manifest
+
+
+@pytest.mark.asyncio
+async def test_end_all_ends_every_recording_not_yet_ended_with_the_grant_it_started_with(home):
+    upload = AsyncMock()
+    driver = Recorded()
+    with patch.object(recording_module, "NamespaceUploader") as uploader:
+        uploader.return_value.upload = upload
+        async with http_client(driver) as http:
+            started = [(await http.post(START, json={"request_id": rid, "fps": 10, "upload": _grant()})).json()
+                       for rid in ("a", "b")]
+            await _first_frame(driver, started[0])
+            ended = (await http.post(END, json={"recording_id": started[0]["recording_id"]})).json()
+            rest = (await http.post(END_ALL, json={"reason": "teardown"})).json()["manifests"]
+            again = (await http.post(END_ALL, json={"reason": "teardown"})).json()["manifests"]
+    assert ended["ended_by"] == "end" and [m["recording_id"] for m in rest] == [started[1]["recording_id"]]
+    assert rest[0]["ended_by"] == "teardown" and again == []
+    assert f"{started[1]['recording_id']}/manifest.json" in [call.args[0] for call in upload.await_args_list]
 
 
 @pytest.mark.asyncio

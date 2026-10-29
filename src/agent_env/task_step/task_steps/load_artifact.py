@@ -13,12 +13,15 @@ from dataclasses import dataclass
 from typing import Callable, ClassVar, Optional
 from urllib.parse import unquote, urlparse
 
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+from agent_env.env.env import Env
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
+from agent_env.store.base import NotFoundError
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.utils.paths import validate_relative_filename
 
@@ -121,6 +124,11 @@ def _url_downloads(step_id: str, urls: list[UrlEntry]) -> list[tuple[str, str]]:
     return downloads
 
 
+# The method an env type defines when it loads each kind of environment artifact.
+_ENVIRONMENT_LOADERS = {EnvironmentArtifact: "load_environment_artifact",
+                        EnvironmentUniverseArtifact: "load_environment_universe_artifact"}
+
+
 @dataclass
 class _LoadInputs:
     """What a load_artifact step loads and where, after per-run overrides."""
@@ -212,6 +220,24 @@ class LoadArtifactTaskStep(TaskStep):
     def config_problems(self) -> list[str]:
         """A step naming nothing to load."""
         return [] if self._names_a_source() else [self._nothing_to_load()]
+
+    def preflight(self) -> list[str]:
+        """An environment artifact this step names for an env whose type loads none."""
+        if self.env_id is None:
+            return []
+        try:
+            env = Env.get(self.env_id)
+            artifacts = [Artifact.get(ref["id"], ref.get("version")) for ref in self.artifacts]
+        except NotFoundError:  # what the run reports
+            return []
+        return [refusal for artifact in artifacts if (refusal := self._unloadable(env, self.env_id, artifact))]
+
+    def _unloadable(self, env: Env, env_id: str, artifact: Artifact) -> Optional[str]:
+        """Why ``env`` can't load ``artifact``, an environment artifact its type has no loader for; None when it can."""
+        loader = next((loader for kind, loader in _ENVIRONMENT_LOADERS.items() if isinstance(artifact, kind)), None)
+        if loader is None or hasattr(env, loader):
+            return None
+        return f"load_artifact '{self.id}': {env.type} env '{env_id}' loads no {artifact.type} artifacts, so not '{artifact.id}'"
 
     def _names_a_source(self) -> bool:
         return bool(self.artifacts or self.urls or self.collected_artifacts_step_id or self.artifact_from_step_id)
@@ -589,6 +615,8 @@ class LoadArtifactTaskStep(TaskStep):
                 if env is None:
                     env_obj = Env.get(deployed.env_id, deployed.env_version)
                     env = await type(env_obj).from_deployed_env(deployed)
+                if refusal := self._unloadable(env, deployed.env_id, artifact):
+                    raise RuntimeError(refusal)
                 if isinstance(artifact, EnvironmentArtifact):
                     await env.load_environment_artifact(artifact)
                 else:

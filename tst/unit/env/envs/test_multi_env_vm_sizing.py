@@ -22,8 +22,11 @@ from tst.util.sandbox_providers import mock_provider
 
 
 def _env(n_mcp: int = 0, n_web: int = 0) -> MultiEnv:
-    env = MultiEnv(id="e", version=1, mcp_server_envs=[MagicMock() for _ in range(n_mcp)])
-    env.website_envs = [MagicMock() for _ in range(n_web)]
+    env = MultiEnv(id="e", version=1, mcp_server_envs=[
+        MagicMock(environment_name=f"mcp{i}", **{"docker_image_artifact.image_name": f"mcp{i}"}) for i in range(n_mcp)])
+    env.website_envs = [MagicMock(environment_name=f"web{i}", **{"backend_docker_image_artifact.image_name": f"web{i}-be",
+                                                                 "frontend_docker_image_artifact.image_name": f"web{i}-fe"})
+                        for i in range(n_web)]
     return env
 
 

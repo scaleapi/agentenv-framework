@@ -21,10 +21,10 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id, local_image_repository
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
-from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
-from agent_env.store.image_store.registry_api import pin_digest, pinned_from
+from agent_env.store.image_store.oci_registry_credentials import image_reference_problem, is_loopback_host, names_registry, registry_host_from_ref
+from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
 from agent_env.utils.docker.context import BuildContext
-from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, normalize_platform
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image, normalize_platform
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class DockerImageArtifact(Artifact):
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
         image_store.ensure_repository(repository)
-        _push_local_image(image_name, image_ref, image_store)
+        push_local_image(image_name, image_ref, image_store)
         platform = normalize_platform(platform) if platform else _image_platform(image_ref)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
@@ -193,6 +193,8 @@ class DockerImageArtifact(Artifact):
         owner = "DockerImageArtifact.put_tar"
         if not tar_gz_object_url:
             raise ValueError(f"{owner}(): tar_gz_object_url is empty")
+        if problem := image_reference_problem(image_name):
+            raise ValueError(f"{owner}(): {problem}")
         for url in (tar_gz_object_url, build_context_object_url):
             if url:
                 get_config().check_object_url(id, url)
@@ -223,6 +225,8 @@ class DockerImageArtifact(Artifact):
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
+        if problem := image_reference_problem(image_name):
+            raise ValueError(problem)
         if not names_registry(image_name):
             raise ValueError(f"{image_name!r} doesn't name its registry; spell it out, as in "
                              f"docker.io/library/{image_name}")
@@ -561,16 +565,36 @@ class GitHubBuildResult:
     docker_context_github_url: str | None
 
 
-def _push_local_image(local_tag: str, image_ref: str, image_store) -> None:
-    auth = image_store.auth(image_ref)
-    if auth is not None:
-        login = subprocess.run(
-            ["docker", "login", "--username", auth.username, "--password-stdin", auth.registry],
-            input=auth.password, text=True, capture_output=True,
-        )
-        if login.returncode != 0:
-            raise RuntimeError(f"docker login failed: {login.stderr}")
+def push_context_image(id: str, context_path: str, dockerfile_path: str,
+                       before: Callable[[], None] | None = None) -> tuple[str, str]:
+    """The ref and digest of the image of ``id``'s build context in ``id``'s image store, under the tag of its sources:
+    built for linux/amd64 with this machine's Docker and pushed, calling ``before`` first, unless the store serves the
+    tag already. Raises DockerBuildError when the build fails, RuntimeError when the push does, and ValueError when the
+    registry can't be read."""
+    from agent_env.config import get_config
 
+    context = _context_of(Path(context_path), dockerfile_path)
+    tag = "src-" + context.source_digest(DEFAULT_BUILD_PLATFORM).removeprefix("sha256:")
+    store = get_config().get_image_store_for(id)
+    # ECR, unlike the OCI spec, refuses two separators in a row, which a derived id (``<id>__env_image``) holds.
+    repository = image_repository(id).replace("__", "-")
+    ref = store.image_ref(repository, tag)
+    store.ensure_repository(repository)
+    try:
+        return ref, pin_digest(ref, store.auth(ref)).rpartition("@")[2]
+    except NoSuchImageError:
+        pass
+    if before is not None:
+        before()
+    local = f"{local_image_repository(id)}:{tag}"
+    build_image(Path(context_path) / context.dockerfile, Path(context_path), local, platform=DEFAULT_BUILD_PLATFORM)
+    push_local_image(local, ref, store)
+    return ref, pin_digest(ref, store.auth(ref)).rpartition("@")[2]
+
+
+def push_local_image(local_tag: str, image_ref: str, image_store) -> None:
+    """Push this machine's ``local_tag`` to ``image_ref`` in ``image_store``, signing in with its credentials first."""
+    docker_login(image_store.auth(image_ref))
     for cmd, label in [
         (["docker", "tag", local_tag, image_ref], "tag"),
         (["docker", "push", image_ref], "push"),
@@ -579,6 +603,16 @@ def _push_local_image(local_tag: str, image_ref: str, image_store) -> None:
         if result.returncode != 0:
             raise RuntimeError(f"docker {label} failed: {result.stderr}")
     logger.info(f"Pushed {local_tag} -> {image_ref}")
+
+
+def docker_login(auth) -> None:
+    """Sign this machine's Docker in to ``auth``'s registry, when there are credentials to sign in with."""
+    if auth is None:
+        return
+    login = subprocess.run(["docker", "login", "--username", auth.username, "--password-stdin", auth.registry],
+                           input=auth.password, text=True, capture_output=True)
+    if login.returncode != 0:
+        raise RuntimeError(f"docker login failed: {login.stderr}")
 
 
 def _parse_copy_sources(dockerfile_text: str, dockerfile_rel_path: str | None = None) -> list[str]:

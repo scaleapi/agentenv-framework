@@ -12,8 +12,8 @@ import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers import host_images
-from agent_env.providers.sandbox_providers import local_sandbox
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.utils.docker.build import DockerBuildError
 

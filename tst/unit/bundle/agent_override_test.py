@@ -15,6 +15,7 @@ from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.plan import AgentOverride, plan_bundle, solver_steps
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
+from agent_env.entity.refs import EntityKind
 from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.store.routing import namespace_routing
 from agent_env.task.task import Task
@@ -79,7 +80,8 @@ def test_an_alias_names_the_agent_the_solver_deploys_and_the_task_stays_as_writt
 
     assert plan.agent == AgentOverride("solver-x", SOLVER, {f"{ROOT}/t": ("agent",)})
     assert SOLVER in {write.id for write in plan.writes}
-    assert _step(plan, "agent")["a2a_agent_id"] == "theirs" and plan.aliases["solver-x"].target_id == SOLVER
+    assert _step(plan, "agent")["a2a_agent_id"] == "theirs"
+    assert plan.alias_uses[EntityKind.AGENT]["solver-x"].target_id == SOLVER
 
 
 def test_this_bundles_own_agent_is_named_by_its_folder(bundle_dir):

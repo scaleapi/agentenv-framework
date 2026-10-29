@@ -415,6 +415,11 @@ async def test_snapshot_omits_backup_left_by_failed_cleanup(monkeypatch, tmp_pat
     assert not any(name.startswith("./.opencode-backup-leftover") for name in archive_names)
 
 
+def _snar(args) -> str:
+    """The incremental state file a tar command line names."""
+    return next(a for a in args if a.startswith("--listed-incremental=")).partition("=")[2]
+
+
 @pytest.mark.asyncio
 async def test_changelog_uses_portable_namespace_and_ordered_increments(monkeypatch, tmp_path, oc):
     captures = []
@@ -429,7 +434,8 @@ async def test_changelog_uses_portable_namespace_and_ordered_increments(monkeypa
 
     def fake_run(args, **_kwargs):
         if "-czf" in args:
-            Path(args[1].partition("=")[2]).write_text("advanced")
+            assert "--ignore-failed-read" in args
+            Path(_snar(args)).write_text("advanced")
             Path(args[args.index("-czf") + 1]).write_bytes(b"tar")
         if "-xzf" in args:
             captures.append(("applied", Path(args[args.index("-xzf") + 1]).read_bytes()))
@@ -480,7 +486,7 @@ async def test_failed_changelog_upload_preserves_incremental_baseline(monkeypatc
     starting_states = []
 
     def fake_run(args, **_kwargs):
-        pending = Path(args[1].partition("=")[2])
+        pending = Path(_snar(args))
         starting_states.append(pending.read_text())
         pending.write_text("advanced")
         Path(args[args.index("-czf") + 1]).write_bytes(b"tar")

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_env.env.env import DeployedGatewayEnv
+from agent_env.env.env import DeployedGatewayEnv, Env
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 
@@ -263,14 +263,23 @@ def test_preflight_reports_an_option_a_server_env_would_refuse(options, refused)
     ("other", {"gateway_mode": "consistent", "env_state_type": "remote_postgres"}),
 ], ids=["server-sizing", "gateway-env", "other-env-type"])
 def test_preflight_passes_what_the_env_takes(kind, options):
-    env = MagicMock() if kind == "other" else _mcp_env(kind)
+    env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
     assert _preflight(env, **options) == []
+
+
+@pytest.mark.parametrize("kind, refusal", [
+    ("server", "env 'mcp-email' has env_provider_type 'server', which doesn't take env_params"),
+    ("other", "other envs take no env_params"),
+])
+def test_preflight_refuses_env_params_an_env_doesnt_take(kind, refusal):
+    env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
+    assert _preflight(env, env_params={"form": "container"}) == [f"deploy_env 'd': {refusal}"]
 
 
 @pytest.mark.parametrize("kind", ["server", "gateway", "other"])
 @pytest.mark.parametrize("mode", ["bogus", "Performance", None])
 def test_preflight_reports_an_invalid_gateway_mode_for_every_env(kind, mode):
-    env = MagicMock() if kind == "other" else _mcp_env(kind)
+    env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
     assert _preflight(env, gateway_mode=mode) == [f"deploy_env 'd': {mode!r} is not a valid GatewayMode"]
 
 
@@ -310,6 +319,12 @@ def test_a_task_reports_only_its_refused_deploy_step():
     ])
     with patch("agent_env.env.env.Env.get", return_value=_mcp_env("server")):
         assert task.preflight() == ["deploy_env 'bad': env 'mcp-email' has env_provider_type 'server', which doesn't take gateway_mode"]
+
+
+class _OtherEnv(Env):
+    """An env type that deploys itself, through no provider, and checks none of its options."""
+
+    type = "other"
 
 
 def _mcp_env(env_provider_type: str):

@@ -356,6 +356,12 @@ class Env(ABC):
     async def deploy(self, **kwargs) -> DeployedEnv:
         raise NotImplementedError(f"{type(self).__name__} must implement deploy()")
 
+    def deploy_refusal(self, *, sandbox_type: Optional[str] = None, env_params: Optional[dict] = None,
+                       **options) -> Optional[str]:
+        """Why deploy() would refuse these options before building anything, or None. A type that checks its options
+        overrides this; one that doesn't takes no ``env_params``."""
+        return f"{self.type} envs take no env_params" if env_params else None
+
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> Self:
         """The env a running deployment serves, for its caller to drive. A type that can be
@@ -363,6 +369,11 @@ class Env(ABC):
         An override takes ``deployed: DeployedEnv`` and narrows it with ``isinstance``.
         """
         raise NotImplementedError(f"{cls.__name__} cannot be rebuilt from a deployment")
+
+    async def close(self) -> None:
+        """Release what deploy() made. Teardown calls it on each env a run deployed before it terminates what's left by
+        sandbox id; a type that can't close raises this."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement close()")
 
     async def reset(self, deployed: "DeployedEnv") -> None:
         """Return an already-deployed env to a clean between-tasks state.

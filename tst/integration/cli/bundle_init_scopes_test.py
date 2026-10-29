@@ -17,7 +17,7 @@ from agent_env.artifact.store import get_artifact_store, reset_artifact_store
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     reset_agent_sandbox_provider,
     reset_env_sandbox_provider,

@@ -9,6 +9,7 @@
 """
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -140,12 +141,24 @@ def test_a_turn_with_no_model_of_its_own_runs_the_default(monkeypatch, spawned):
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["model"] == "litellm/provider/fallback"
 
 
-def test_the_system_prompt_and_the_output_format_lead_and_follow_the_message(spawned):
+def test_the_system_prompt_reaches_the_model_as_instructions_and_the_output_format_follows_the_message(spawned):
+    """Prepended to the message, a system prompt read as the user's own words, which a model can refuse as an
+    injection."""
     schema = {"type": "object"}
 
     asyncio.run(opencode_bridge.run_opencode(
         prompt="go", context_id="ctx", system_prompt="be brief", output_format={"type": "json_schema", "schema": schema}))
 
-    ((argv, _env),) = spawned
-    assert argv[-1] == ('be brief\n\ngo\n\nReturn only a JSON object matching this schema, with no Markdown or '
+    ((argv, env),) = spawned
+    assert argv[-1] == ('go\n\nReturn only a JSON object matching this schema, with no Markdown or '
                         'surrounding text: {"type":"object"}')
+    (instructions,) = json.loads(env["OPENCODE_CONFIG_CONTENT"])["instructions"]
+    assert Path(instructions) == opencode_bridge.context_data_dir("ctx") / "system-prompt.md"
+    assert Path(instructions).read_text() == "be brief"
+
+
+def test_a_turn_with_no_system_prompt_names_no_instructions(spawned):
+    asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx"))
+
+    ((_argv, env),) = spawned
+    assert "instructions" not in json.loads(env["OPENCODE_CONFIG_CONTENT"])
