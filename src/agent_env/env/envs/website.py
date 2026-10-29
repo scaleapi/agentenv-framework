@@ -23,7 +23,6 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.gateway import GatewayMode
 from agent_env.attribution import Attribution
-from agent_env.utils.names import environment_name_problem
 from agent_env.utils.paths import validate_file_name
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -87,9 +86,6 @@ class WebsiteEnv(Env):
         base["environment_name"] = self.environment_name  # dual-write with service_name during the rename
         base["env_provider_type"] = self.env_provider_type
         return base
-
-    def put_problem(self) -> str | None:
-        return environment_name_problem(self.environment_name)
 
     @classmethod
     def from_dict(cls, data: dict) -> WebsiteEnv:

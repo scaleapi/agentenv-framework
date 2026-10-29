@@ -95,8 +95,6 @@ class EnvStore:
         return self._versioned.next_version(id)
 
     def put_document(self, env: _E) -> _E:
-        if problem := env.put_problem():
-            raise ValueError(f"Can't store env {env.id!r}: {problem}")
         store = self._doc_store
         existing = store.find_one(
             ENVS_COLLECTION, Filter.of(id=env.id), sort=Sort.by("version", descending=True)

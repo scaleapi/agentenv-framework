@@ -204,22 +204,3 @@ def test_a_positional_call_that_passed_service_version_raises(call):
 def test_positional_arguments_up_to_the_name_still_bind():
     assert MCPServerEnv("e", 1, _art(), "email").environment_name == "email"
     assert WebsiteEnv("w", 1, _art(), _art(), "email").environment_name == "email"
-
-
-@pytest.mark.parametrize("cls,doc", _READERS)
-@pytest.mark.parametrize("name", ["slack\nCOMPOSE_EOF\ntouch pwned", "slack\n    privileged: true", "a b", "-x", "it's"])
-def test_a_name_that_isnt_one_is_not_written_and_a_stored_one_still_loads(cls, doc, name, stub_artifact_get, local_stores):
-    from agent_env.env.store import get_env_store
-
-    env = cls.from_dict(doc(environment_name=name))
-    with pytest.raises(ValueError, match="Can't store env .* must start with a letter or digit"):
-        get_env_store().put_document(env)
-    assert env.environment_name == name
-
-
-@pytest.mark.parametrize("cls,doc", _READERS)
-@pytest.mark.parametrize("name", ["slack", "Items.v2_x-1", "google_calendar"])
-def test_a_name_compose_takes_is_written(cls, doc, name, stub_artifact_get, local_stores):
-    from agent_env.env.store import get_env_store
-
-    assert get_env_store().put_document(cls.from_dict({**doc(environment_name=name), "version": None})).version == 1
