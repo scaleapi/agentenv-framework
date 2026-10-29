@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -42,8 +41,7 @@ class ComputerRuntime:
         self._commands_running: dict[str, asyncio.Task] = {}
         self._commands_finished: OrderedDict = OrderedDict()
         self.recordings = Recordings(self)
-        self.apps = apps.installed()
-        self.started = time.monotonic()
+        self.apps = apps.expected()
 
     def has(self, capability: str) -> bool:
         if capability in GROUPS:
@@ -179,7 +177,7 @@ class ComputerRuntime:
             checks += list(await self.driver.ready_checks())
         except Exception as e:
             checks.append(ReadyCheck("driver", False, f"{type(e).__name__}: {e}"))
-        checks += [await apps.check(self, app, self.started) for app in self.apps if app.counted]
+        checks += [await apps.check(folder) for folder in self.apps]
         if all(c.ok for c in checks):
             self.ready = True
         return checks

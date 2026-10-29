@@ -2,26 +2,42 @@
 computer: the platforms it supports and the permissions it needs (``@computer_app``), how each OS installs it
 (``linux = Linux(...)``), how it launches (``launch``), its install steps and ready checks, its skill, and its typed
 ``Settings``. A ``computer_app`` env's put reads that declaration from the class; its data hooks are the base class's.
-Its name is its env's ``environment_name``."""
+Its name is its env's ``environment_name``. On the computer the class runs as the app's own server (``serve_app``),
+which launches the app, adds its launcher and says whether it's ready (``computer-app/v1``)."""
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
+import shlex
+import time
+from collections.abc import Awaitable
+from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment
+from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment, extension
 from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI
+from . import session
+from .errors import InvalidArgument
 
 #: The environment variable a computer delivers its apps' settings in: JSON of each app's values by its name.
 APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
 _INSTALL_STEP_ATTR = "_aee_install_step"
 _READY_CHECK_ATTR = "_aee_ready_check"
 _DATA_METHODS = {"reset_data": METHOD_RESET, "add_data": METHOD_ADD, "get_data": METHOD_GET}
-#: What a launch's window can be matched by, as a driver's list_windows describes each window.
+#: What a launch's window can be matched by, as the session lists each window.
 WINDOW_KEYS = frozenset({"class", "instance", "title"})
+#: The framework extension an app's own server serves: its launch as params, and its ``launch`` and ``ready`` methods.
+COMPUTER_APP = "urn:agentenv:computer-app/v1"
+#: Where an app's own server listens, in the app's folder.
+SOCKET = Path(".agentenv/server.sock")
+#: Where an app's server marks that it launched the app since the computer booted.
+LAUNCHED = Path("/run/agentenv/apps")
+#: How long one readiness check may take.
+CHECK_TIMEOUT_S = 10.0
 
 
 class Service(BaseModel):
@@ -123,13 +139,6 @@ class AppDeclaration(BaseModel):
     install_steps: list[InstallStep]
     ready_checks: list[str]
 
-    @model_validator(mode="after")
-    def _venv_for_ready_checks(self) -> AppDeclaration:
-        if self.ready_checks and not any(install.python for install in self.install.values()):
-            raise ValueError(f"@ready_check {', '.join(self.ready_checks)} runs in the app's own venv: name its "
-                             "requirements with Linux(python=...)")
-        return self
-
 
 def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[str]] = None) -> Callable:
     """Declare what an app is: the platforms it supports, as a driver names them, and the permissions it needs of the
@@ -174,6 +183,67 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     def __init__(self) -> None:
         values = json.loads(os.environ.get(APP_SETTINGS_ENV) or "{}").get(os.environ.get("ENVIRONMENT_NAME"), {})
         self.settings = self.Settings.model_validate(values)
+        self._computer_app_started_at = time.monotonic()
+        self._computer_app_launched_at: Optional[float] = None
+        self._computer_app_launch_failed: Optional[str] = None
+
+    async def _computer_app_start(self) -> None:
+        """Once the desktop session is up, add the app's menu launcher and launch a boot app, once per boot: a server
+        that restarts leaves the app it launched be."""
+        if self.launch is None:
+            return
+        await session.wait_until_up()
+        session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())
+        marker = LAUNCHED / Path.cwd().name
+        if self.launch.at != "boot":
+            return
+        if marker.exists():
+            self._computer_app_launched_at = time.monotonic()
+            return
+        try:
+            await self._computer_app_launch()
+        except Exception as e:
+            self._computer_app_launch_failed = f"{type(e).__name__}: {e}"
+            return
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+
+    @extension(COMPUTER_APP, op="launch", description=(
+        "The app's own server: launch launches the app from its folder, as its launcher and a boot do; ready says "
+        "whether it's ready, by its launch's ready and its @ready_check methods."))
+    async def _computer_app_launch(self) -> dict:
+        if self.launch is None:
+            raise InvalidArgument(f"{type(self).__name__} declares no launch")
+        pid = await session.launch(self.launch.command, Path.cwd(),
+                                   {"ENVIRONMENT_NAME": os.environ["ENVIRONMENT_NAME"]})
+        self._computer_app_launched_at, self._computer_app_launch_failed = time.monotonic(), None
+        return {"pid": pid}
+
+    @extension(COMPUTER_APP, op="ready", method="GET")
+    async def _computer_app_ready(self) -> dict:
+        ready = self.launch.ready if self.launch is not None else None
+        checks: list[tuple[str, Callable[[], Awaitable[Optional[str]]]]] = []
+        if ready is not None and ready.window:
+            checks.append(("window", lambda: _window(self.launch.window)))
+        if ready is not None and ready.port is not None:
+            checks.append(("port", lambda: _port(ready.port)))
+        if ready is not None and ready.command:
+            checks.append(("command", lambda: _command(ready.command)))
+        checks += [(f"@ready_check {fn.__name__}", lambda fn=fn: _ready_check(fn, self))
+                   for fn in _methods(type(self)) if hasattr(fn, _READY_CHECK_ATTR)]
+        problems = [problem for name, check in checks if (problem := await _bounded(name, check)) is not None]
+        if self.launch is not None and self._computer_app_launched_at is None:
+            problems.insert(0, f"its launch failed: {self._computer_app_launch_failed}"
+                            if self._computer_app_launch_failed else "not launched yet")
+        since = self._computer_app_launched_at or self._computer_app_started_at
+        return {"ready": not problems, "problems": problems, "launched": self._computer_app_launched_at is not None,
+                "waited_s": round(time.monotonic() - since, 1),
+                "timeout_s": ready.timeout_s if ready is not None else Ready.model_fields["timeout_s"].default}
+
+    def extension_params(self, uri: str) -> dict:
+        if uri == COMPUTER_APP:
+            return {"launch": self.launch.model_dump(mode="json", exclude_none=True) if self.launch else None}
+        return super().extension_params(uri)
 
     @classmethod
     def declaration(cls) -> AppDeclaration:
@@ -205,3 +275,48 @@ def _methods(cls: type) -> list[Callable]:
     names = dict.fromkeys(name for klass in reversed(cls.__mro__) for name, member in vars(klass).items()
                           if inspect.isfunction(member))
     return [method for name in names if inspect.isfunction(method := getattr(cls, name))]
+
+
+async def _bounded(name: str, check: Callable[[], Awaitable[Optional[str]]]) -> Optional[str]:
+    """What ``check`` finds wrong, within ``CHECK_TIMEOUT_S``; a check that runs past it or raises says so."""
+    try:
+        return await asyncio.wait_for(check(), CHECK_TIMEOUT_S)
+    except TimeoutError:
+        return f"{name} ran past {CHECK_TIMEOUT_S:.0f} s"
+    except Exception as e:
+        return f"{name}: {type(e).__name__}: {e}"
+
+
+async def _window(match: dict[str, str]) -> Optional[str]:
+    if any(all(window.get(key) == value for key, value in match.items()) for window in await session.windows()):
+        return None
+    return f"no window with {', '.join(f'{key} {value!r}' for key, value in match.items())}"
+
+
+async def _port(port: int) -> Optional[str]:
+    try:
+        _, writer = await asyncio.open_connection("127.0.0.1", port)
+    except OSError:
+        return f"nothing answers on port {port}"
+    writer.close()
+    return None
+
+
+async def _command(argv: list[str]) -> Optional[str]:
+    process = await asyncio.create_subprocess_exec(*argv, cwd=Path.cwd(), stdout=asyncio.subprocess.DEVNULL,
+                                                   stderr=asyncio.subprocess.PIPE)
+    try:
+        _, err = await process.communicate()
+    except asyncio.CancelledError:
+        process.kill()
+        raise
+    if process.returncode == 0:
+        return None
+    reason = (err.decode(errors="replace").strip().splitlines() or [""])[-1]
+    return f"{shlex.join(argv)} exited {process.returncode}" + (f": {reason}" if reason else "")
+
+
+async def _ready_check(fn: Callable, app: ComputerAppEnvironment) -> Optional[str]:
+    """A sync check runs in a thread, so it can't hold up the server."""
+    passed = await fn(app) if inspect.iscoroutinefunction(fn) else await asyncio.to_thread(fn, app)
+    return None if passed else f"@ready_check {fn.__name__} returned {passed!r}"

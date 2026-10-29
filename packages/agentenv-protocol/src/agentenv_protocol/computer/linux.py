@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import re
 import signal
 import tempfile
 from pathlib import Path
@@ -80,28 +79,6 @@ class _Capped:
             if len(chunk) > room:
                 self.cut = True
             self.kept += chunk[:max(room, 0)]
-
-
-async def list_windows() -> list[dict[str, str]]:
-    """The window manager's top-level windows, each as its WM_CLASS ``instance`` and ``class`` and its ``title``, read
-    with ``xprop``; a window that closes while it's read is left out."""
-    listed = await _xprop("-root", "_NET_CLIENT_LIST")
-    windows = []
-    for window in re.findall(r"0x[0-9a-f]+", listed.partition("#")[2]):
-        props = await _xprop("-id", window, "WM_CLASS", "_NET_WM_NAME")
-        names = dict(re.findall(r'^(WM_CLASS|_NET_WM_NAME)[^=]*= (.*)$', props, re.MULTILINE))
-        parts = re.findall(r'"((?:[^"\\]|\\.)*)"', names.get("WM_CLASS", ""))
-        if len(parts) == 2:
-            title = re.findall(r'"((?:[^"\\]|\\.)*)"', names.get("_NET_WM_NAME", ""))
-            windows.append({"instance": parts[0], "class": parts[1], "title": title[0] if title else ""})
-    return windows
-
-
-async def _xprop(*args: str) -> str:
-    process = await asyncio.create_subprocess_exec("xprop", *args, stdout=asyncio.subprocess.PIPE,
-                                                   stderr=asyncio.subprocess.DEVNULL)
-    out, _ = await process.communicate()
-    return out.decode(errors="replace") if process.returncode == 0 else ""
 
 
 def write_files(files: dict[str, bytes]) -> None:

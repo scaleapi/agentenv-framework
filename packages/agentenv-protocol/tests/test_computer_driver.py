@@ -10,20 +10,17 @@ pytest.importorskip("PIL")
 import asyncio  # noqa: E402
 import base64  # noqa: E402
 import io  # noqa: E402
-import json  # noqa: E402
 
 from computer_fake import LINUX, FakeDriver, FakeScreen, MinimalDriver, http_client, mcp_session  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
 from PIL import Image as PILImage  # noqa: E402
 
-from agentenv_protocol.computer import apps, linux  # noqa: E402
 from agentenv_protocol.computer import (  # noqa: E402
     SETTINGS_ENV,
     ComputerDriverEnvironment,
     ComputerSettings,
     Display,
-    ExecResult,
     Image,
     InvalidArgument,
     OutOfBounds,
@@ -34,7 +31,6 @@ from agentenv_protocol.computer import (  # noqa: E402
     computer_driver,
     display,
     drag,
-    list_windows,
     pointer_move,
     press,
     run_in_session,
@@ -280,68 +276,6 @@ async def test_the_drivers_own_ready_checks_count():
     async with http_client(Raising()) as http:
         raised = (await http.get("/agentenv/ext/computer-ready/status")).json()
     assert raised["checks"][-1] == {"name": "driver", "ok": False, "detail": "RuntimeError: probe crashed"}
-
-
-@pytest.mark.asyncio
-async def test_each_app_that_starts_with_the_computer_counts_until_it_is_ready(tmp_path, monkeypatch):
-    listener = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", 0)
-    port = listener.sockets[0].getsockname()[1]
-    for name, launch, checks in [
-        ("mail", {"at": "boot", "command": ["mail"], "window": {"class": "Mail"}, "ready": {"window": True}}, []),
-        ("notes", {"at": "boot", "command": ["notes"], "ready": {"port": port}}, []),
-        ("music", {"at": "demand", "command": ["music"], "window": {"class": "Music"}, "ready": {"window": True}}, []),
-        ("sync", None, ["synced"]),
-    ]:
-        (tmp_path / name / ".agentenv").mkdir(parents=True)
-        (tmp_path / name / ".agentenv/app.json").write_text(json.dumps(
-            {"name": name, "module": "app.py:App", "launch": launch, "ready_checks": checks}))
-    monkeypatch.setattr(apps, "APPS", tmp_path)
-
-    class Desktop(FakeDriver):
-        windows, synced, ran = [], False, []
-
-        @list_windows
-        async def listed(self):
-            return self.windows
-
-        @run_in_session
-        async def run(self, argv, cwd, env, timeout_s):
-            self.ran.append((argv, cwd, env))
-            return ExecResult(0 if self.synced else 1, stderr=b"no sync yet\n")
-
-    driver = Desktop()
-    async with http_client(driver) as http:
-        before = (await http.get("/agentenv/ext/computer-ready/status")).json()
-        driver._computer.started -= 120
-        late = (await http.get("/agentenv/ext/computer-ready/status")).json()
-        driver.windows, driver.synced = [{"instance": "mail", "class": "Mail", "title": "Inbox"}], True
-        after = (await http.get("/agentenv/ext/computer-ready/status")).json()
-    listener.close()
-
-    assert before["ready"] is False and [c for c in before["checks"] if c["name"].startswith("app ")] == [
-        {"name": "app mail", "ok": False, "detail": "not ready yet, 0 s in: no window with class 'Mail'"},
-        {"name": "app notes", "ok": True, "detail": "ready"},
-        {"name": "app sync", "ok": False, "detail": "not ready yet, 0 s in: @ready_check synced exited 1: no sync yet"},
-    ]
-    assert late["checks"][-1]["detail"].startswith("not ready after 60 s: @ready_check synced exited 1")
-    assert after["ready"] is True
-    assert driver.ran[0] == ([str(tmp_path / "sync/venv/bin/python"), "-m", "agentenv_protocol.computer._ready",
-                              str(tmp_path / "sync"), "app.py", "App", "synced"], str(tmp_path / "sync"),
-                             {"ENVIRONMENT_NAME": "sync"})
-
-
-@pytest.mark.asyncio
-async def test_the_linux_default_lists_windows_by_their_class_instance_and_title(monkeypatch):
-    replies = {("-root", "_NET_CLIENT_LIST"): "_NET_CLIENT_LIST(WINDOW): window id # 0x1e00004, 0x2000003\n",
-               ("-id", "0x1e00004", "WM_CLASS", "_NET_WM_NAME"):
-                   '_NET_WM_NAME(UTF8_STRING) = "Inbox \\"work\\""\nWM_CLASS(STRING) = "mail", "Mail"\n',
-               ("-id", "0x2000003", "WM_CLASS", "_NET_WM_NAME"): ""}
-
-    async def xprop(*args):
-        return replies[args]
-
-    monkeypatch.setattr(linux, "_xprop", xprop)
-    assert await linux.list_windows() == [{"instance": "mail", "class": "Mail", "title": 'Inbox \\"work\\"'}]
 
 
 @pytest.mark.asyncio

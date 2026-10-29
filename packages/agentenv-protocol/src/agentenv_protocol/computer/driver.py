@@ -150,10 +150,6 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     async def _computer_linux_write_files(self, files: dict) -> None:
         await asyncio.to_thread(linux.write_files, files)
 
-    @default_for("list_windows", os="linux")
-    async def _computer_linux_list_windows(self) -> list[dict[str, str]]:
-        return await linux.list_windows()
-
 
 def computer_driver(name: str | None = None, *, supports: list | None = None) -> Callable:
     """Name a driver, its card's name unless ENVIRONMENT_NAME gives one, and declare the platforms it supports."""

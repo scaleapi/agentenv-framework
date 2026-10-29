@@ -231,6 +231,10 @@ agent = [
     { name = "regex" },
     { name = "uvicorn" },
 ]
+app = [
+    { name = "mcp" },
+    { name = "uvicorn" },
+]
 computer = [
     { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -260,6 +264,7 @@ requires-dist = [
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=3.4,<4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", marker = "extra == 'agent'", specifier = ">=1.25,<2" },
+    { name = "mcp", marker = "extra == 'app'", specifier = ">=1.25,<2" },
     { name = "mcp", marker = "extra == 'computer'", specifier = ">=1.25,<2" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.25,<2" },
     { name = "pillow", marker = "extra == 'computer'", specifier = ">=10.4" },
@@ -273,9 +278,10 @@ requires-dist = [
     { name = "regex", marker = "extra == 'dev'", specifier = ">=2023.12.25" },
     { name = "starlette", specifier = ">=0.37" },
     { name = "uvicorn", marker = "extra == 'agent'", specifier = ">=0.30" },
+    { name = "uvicorn", marker = "extra == 'app'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'computer'", specifier = ">=0.30" },
 ]
-provides-extras = ["agent", "computer", "dev"]
+provides-extras = ["agent", "app", "computer", "dev"]
 
 [[package]]
 name = "aiofile"

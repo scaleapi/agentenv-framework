@@ -32,10 +32,6 @@ class ConnectionClosedError(Exception):
     pass
 
 
-class BadWindow(Exception):
-    pass
-
-
 class FakeX:
     """An X display: its screen and pointer, a US-like keymap whose capital letters are the second level of their
     keys, the keys down, the XTEST events sent, ``drops`` syncs and the ``fail_at``-th event that fail, and the
@@ -51,25 +47,11 @@ class FakeX:
         self.fail_at = None
         self.spare = {8}
         self.display = types.SimpleNamespace(info=types.SimpleNamespace(min_keycode=8, max_keycode=255))
-        #: The window manager's windows by id, each its WM_CLASS instance and class and its title, or None once closed.
-        self.windows: dict[int, tuple[str, str, str] | None] = {}
 
     def screen(self):
         query = lambda: types.SimpleNamespace(root_x=self.pointer[0], root_y=self.pointer[1])  # noqa: E731
-        listed = lambda atom, kind: types.SimpleNamespace(value=list(self.windows))  # noqa: E731
         return types.SimpleNamespace(width_in_pixels=WIDTH, height_in_pixels=HEIGHT,
-                                     root=types.SimpleNamespace(query_pointer=query, get_full_property=listed))
-
-    def intern_atom(self, name: str) -> str:
-        return name
-
-    def create_resource_object(self, kind: str, wid: int):
-        def named():
-            if self.windows[wid] is None:
-                raise BadWindow(wid)
-            return self.windows[wid][:2]
-        title = lambda atom, kind: types.SimpleNamespace(value=self.windows[wid][2].encode())  # noqa: E731
-        return types.SimpleNamespace(get_wm_class=named, get_full_property=title)
+                                     root=types.SimpleNamespace(query_pointer=query))
 
     def sync(self) -> None:
         if self.drops:
@@ -174,11 +156,10 @@ def x11(monkeypatch):
         return m
 
     X = module("Xlib.X", MotionNotify="move", ButtonPress="button-down", ButtonRelease="button-up",
-               KeyPress="key-down", KeyRelease="key-up", AnyPropertyType=0)
+               KeyPress="key-down", KeyRelease="key-up")
     XK = module("Xlib.XK", string_to_keysym=lambda name: keysyms.setdefault(name, 0xff00 + len(keysyms)))
     display = module("Xlib.display", Display=open_display)
-    module("Xlib.error", ConnectionClosedError=ConnectionClosedError, DisplayConnectionError=ConnectionClosedError,
-           BadWindow=BadWindow)
+    module("Xlib.error", ConnectionClosedError=ConnectionClosedError, DisplayConnectionError=ConnectionClosedError)
     xtest = module("Xlib.ext.xtest", fake_input=fake_input)
     module("Xlib.ext", xtest=xtest)
     module("Xlib", X=X, XK=XK, display=display)
@@ -416,12 +397,3 @@ async def test_the_reference_driver_records_from_its_stream_at_up_to_30_fps(x11)
         card = (await http.get("/.well-known/agent-env.json")).json()
     recording = next(e for e in card["capabilities"]["extensions"] if e["uri"] == COMPUTER_RECORDING)
     assert recording["params"]["source"] == "stream" and recording["params"]["fps"] == {"default": 10, "max": 30}
-
-
-@pytest.mark.asyncio
-async def test_the_desktops_windows_are_listed_by_class_and_title_leaving_out_one_that_closed(x11):
-    driver, fake, _ = x11
-    fake.windows = {0x1e00004: ("notes", "Notes", "Notes"), 0x2000003: None, 0x2200001: ("xfdesktop", "Xfdesktop", "")}
-
-    assert await driver.windows() == [{"instance": "notes", "class": "Notes", "title": "Notes"},
-                                      {"instance": "xfdesktop", "class": "Xfdesktop", "title": ""}]

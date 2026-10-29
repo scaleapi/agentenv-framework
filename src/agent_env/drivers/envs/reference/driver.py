@@ -18,7 +18,7 @@ import av
 import mss
 from Xlib import X, XK
 from Xlib import display as xdisplay
-from Xlib.error import BadWindow, ConnectionClosedError, DisplayConnectionError
+from Xlib.error import ConnectionClosedError, DisplayConnectionError
 from Xlib.ext import xtest
 
 from agentenv_protocol.computer import (
@@ -40,7 +40,6 @@ from agentenv_protocol.computer import (
     frames_in_thread,
     key_down,
     key_up,
-    list_windows,
     pointer_down,
     pointer_move,
     pointer_position,
@@ -186,10 +185,6 @@ class ReferenceDriver(ComputerDriverEnvironment):
     async def up(self, button) -> None:
         await self._send(lambda c: c.button(button, False))
 
-    @list_windows
-    async def windows(self) -> list[dict[str, str]]:
-        return await self._read(_windows)
-
     @pointer_position
     async def where(self) -> tuple[int, int]:
         def read(c):
@@ -270,24 +265,6 @@ class ReferenceDriver(ComputerDriverEnvironment):
                 self._x = None
                 if attempt == 2:
                     raise DeviceUnavailable(f"the X server is unavailable: {type(e).__name__}") from None
-
-
-def _windows(c: _Connection) -> list[dict[str, str]]:
-    """The window manager's top-level windows by WM_CLASS and title; a window that closes while it's read is left
-    out."""
-    listed = c.d.screen().root.get_full_property(c.d.intern_atom("_NET_CLIENT_LIST"), X.AnyPropertyType)
-    windows = []
-    for wid in listed.value if listed is not None else ():
-        window = c.d.create_resource_object("window", wid)
-        try:
-            names = window.get_wm_class()
-            title = window.get_full_property(c.d.intern_atom("_NET_WM_NAME"), c.d.intern_atom("UTF8_STRING"))
-        except BadWindow:
-            continue
-        if names:
-            windows.append({"instance": names[0], "class": names[1],
-                            "title": title.value.decode(errors="replace") if title is not None else ""})
-    return windows
 
 
 class _Connection:
