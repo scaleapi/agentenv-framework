@@ -124,7 +124,7 @@ def _url_downloads(step_id: str, urls: list[UrlEntry]) -> list[tuple[str, str]]:
     return downloads
 
 
-# The Env method that loads each kind of environment artifact, which a type that loads none leaves as Env's.
+# The method an env type defines when it loads each kind of environment artifact.
 _ENVIRONMENT_LOADERS = {EnvironmentArtifact: "load_environment_artifact",
                         EnvironmentUniverseArtifact: "load_environment_universe_artifact"}
 
@@ -230,9 +230,14 @@ class LoadArtifactTaskStep(TaskStep):
             artifacts = [Artifact.get(ref["id"], ref.get("version")) for ref in self.artifacts]
         except NotFoundError:  # what the run reports
             return []
-        return [f"load_artifact '{self.id}': {env.type} env '{self.env_id}' loads no {artifact.type} artifacts, so "
-                f"not '{artifact.id}'" for artifact in artifacts for kind, loader in _ENVIRONMENT_LOADERS.items()
-                if isinstance(artifact, kind) and getattr(type(env), loader) is getattr(Env, loader)]
+        return [refusal for artifact in artifacts if (refusal := self._unloadable(env, self.env_id, artifact))]
+
+    def _unloadable(self, env: Env, env_id: str, artifact: Artifact) -> Optional[str]:
+        """Why ``env`` can't load ``artifact``, an environment artifact its type has no loader for; None when it can."""
+        loader = next((loader for kind, loader in _ENVIRONMENT_LOADERS.items() if isinstance(artifact, kind)), None)
+        if loader is None or hasattr(env, loader):
+            return None
+        return f"load_artifact '{self.id}': {env.type} env '{env_id}' loads no {artifact.type} artifacts, so not '{artifact.id}'"
 
     def _names_a_source(self) -> bool:
         return bool(self.artifacts or self.urls or self.collected_artifacts_step_id or self.artifact_from_step_id)
@@ -610,6 +615,8 @@ class LoadArtifactTaskStep(TaskStep):
                 if env is None:
                     env_obj = Env.get(deployed.env_id, deployed.env_version)
                     env = await type(env_obj).from_deployed_env(deployed)
+                if refusal := self._unloadable(env, deployed.env_id, artifact):
+                    raise RuntimeError(refusal)
                 if isinstance(artifact, EnvironmentArtifact):
                     await env.load_environment_artifact(artifact)
                 else:

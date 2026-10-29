@@ -84,8 +84,10 @@ def deprecated_names(mapping: dict[str, Any], *, kind: str = "symbol") -> Callab
 def deprecated_alias(canonical: Callable, old_qualname: str) -> Callable:
     """A delegating alias for a renamed method or function.
 
-    Must produce a REAL attribute rather than a ``__getattr__`` fallback, so a lookup on the
-    class, as a check whether a type overrides a method makes, finds it.
+    Must produce a REAL attribute rather than a ``__getattr__`` fallback, because
+    ``cli/env/multi.py:107,149`` gate on ``hasattr(env, "load_environment_universe_artifact")``
+    and print a "not supported" message on a miss — so a half-present alias degrades to a
+    silent no-op instead of an AttributeError.
     """
     import functools
     import inspect

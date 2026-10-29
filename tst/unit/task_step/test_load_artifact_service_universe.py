@@ -12,6 +12,8 @@ is the key rubrics_verifier reads to tell its judge which files exist.
 
 from __future__ import annotations
 
+import asyncio
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -212,9 +214,10 @@ async def test_an_env_whose_type_loads_no_environment_artifacts_is_refused_at_sa
                                                                                              env_class, problems):
     env = env_class.__new__(env_class)
     monkeypatch.setattr(Env, "get", classmethod(lambda cls, id, version=None: env))
+    monkeypatch.setattr(env_class, "from_deployed_env", classmethod(lambda cls, deployed: asyncio.sleep(0, result=env)))
     step = LoadArtifactTaskStep(id="load", version=None, env_id="desk", artifact_id=UNIVERSE_ID)
 
     assert step.preflight() == problems
     if problems:
-        with pytest.raises(NotImplementedError, match="computer envs load no environment universe artifacts"):
-            await env.load_environment_universe_artifact(universe)
+        with pytest.raises(RuntimeError, match=re.escape(problems[0])):
+            await step.execute(TaskStepContext(deployed_envs=[_deployed_env("desk")]))
