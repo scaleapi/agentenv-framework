@@ -32,6 +32,8 @@ from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from agent_env.task.teardown import RecordedSandbox
+from tst.util.sandbox_providers import mock_provider
 
 _URL = "https://pods.example"
 SEEN: dict = {}
@@ -127,7 +129,7 @@ def _multi(t: str = "plugin_pods", servers=("slack",), websites=("shop",)) -> Mu
 
 
 async def _deploy(env, **kwargs):
-    with patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value="SANDBOXES")), \
+    with patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value=mock_provider())), \
          patch("agent_env.env.envs._deployment.register_env_instance", side_effect=lambda d, ttl: dataclasses.replace(d, instance_id="inst-1")):
         return await env.deploy(**kwargs)
 
@@ -159,7 +161,7 @@ async def test_deploy_env_deploys_a_stock_multi_env_through_the_plugin_and_the_r
     env = _multi()
     context = TaskStepContext()
     with patch("agent_env.env.env.Env.get", return_value=env), \
-         patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value="SANDBOXES")), \
+         patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value=mock_provider())), \
          patch("agent_env.env.envs._deployment.register_env_instance", side_effect=register):
         await DeployEnvTaskStep(id="deploy", version=None, env_id="crm-suite").execute(context)
 
@@ -290,9 +292,9 @@ async def test_validate_terminates_the_sandboxes_a_plugin_multi_env_record_names
     context = SimpleNamespace(deployed_envs=[record], deployed_agents=[], instance_id="task-inst")
     with patch("agent_env.task.Task.put", return_value=MagicMock(id="t", version=1, run=AsyncMock(return_value=context))), \
          patch("agent_env.env.env.Env.get", return_value=_multi()), \
-         patch("agent_env.task_step.task_steps.teardown_sandboxes._terminate", AsyncMock()) as terminate:
+         patch("agent_env.task.teardown.terminate", AsyncMock()) as terminate:
         assert await _multi().validate() == "task-inst"
-    terminate.assert_awaited_once_with("sb-1", "modal", "env")
+    terminate.assert_awaited_once_with(RecordedSandbox("sb-1", "modal", "env"))
 
 
 @pytest.mark.parametrize("env_class, make", [(MultiEnv, _multi), (WebsiteEnv, lambda t: _site("shop", t))], ids=["multi", "website"])

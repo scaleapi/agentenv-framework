@@ -20,7 +20,7 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers import env_provider as env_provider_module
 from agent_env.store.routing import namespace_routing
-from tst.unit.bundle._support import RefusingStore, layout, local_store, plan_of
+from tst.unit.bundle._support import RefusingStore, layout, local_builds, local_store, plan_of
 
 ROOT = "@local/~/triage"
 
@@ -49,7 +49,8 @@ def _mcp(name, card=None):
 
 
 def _run(root, dry_run=False):
-    return materialize(plan_of(root), dry_run=dry_run)
+    plan = plan_of(root)
+    return materialize(plan, dry_run=dry_run, build_here=local_builds(plan))
 
 
 def _summary(materialization):
@@ -144,18 +145,19 @@ def test_a_website_builds_dockerfile_backend_and_dockerfile_frontend_and_takes_i
 
 def test_a_multi_names_bundle_and_store_envs_and_is_rewritten_when_a_child_is(bundle_dir, builds):
     with namespace_routing():
-        MCPServerEnv.put(id="mail", docker_image_artifact=_store_image("mail-image"), environment_name="mail")
+        MCPServerEnv.put(id="inbox", docker_image_artifact=_store_image("inbox-image"), environment_name="inbox")
     _bundle(bundle_dir, {
         **_mcp("crm"), "envs/shop/Dockerfile.backend": DOCKERFILE, "envs/shop/Dockerfile.frontend": DOCKERFILE,
         "envs/shop/env.toml": 'type = "website"\nenvironment_name = "shop"\n',
-        "envs/suite/env.toml": 'type = "multi"\nmcp_server_envs = ["crm", "mail"]\nwebsite_envs = ["shop"]\nname = "suite"\n',
+        "envs/suite/env.toml": ('type = "multi"\nmcp_server_envs = ["crm", "inbox"]\nwebsite_envs = ["shop"]\n'
+                                'name = "suite"\n'),
     }, "suite")
 
     _run(bundle_dir)
     suite = Env.get(f"{ROOT}/suite")
     assert isinstance(suite, MultiEnv) and suite.name == "suite"
     assert [(env.id, env.version) for env in [*suite.mcp_server_envs, *suite.website_envs]] == [
-        (f"{ROOT}/crm", 1), ("mail", 1), (f"{ROOT}/shop", 1)]
+        (f"{ROOT}/crm", 1), ("inbox", 1), (f"{ROOT}/shop", 1)]
 
     (bundle_dir / "envs/crm/server.py").write_text(CARD.format("crm") + "# edited\n")
     rewritten = _summary(_run(bundle_dir))
@@ -185,6 +187,12 @@ def _website(name, toml=""):
      "envs/x: env.toml: unknown key 'metadata'; a mcp_server env takes image, environment_name, env_provider_type, "
      "type and id"),
     ({**_mcp("x"), "envs/x/env.toml": 'environment_name = ""\n'}, "envs/x: env.toml: environment_name can't be empty"),
+    ({**_mcp("x"), "envs/x/env.toml": 'environment_name = "slack\\nCOMPOSE_EOF\\ntouch pwned"\n'},
+     "envs/x: env.toml: environment name 'slack\\nCOMPOSE_EOF\\ntouch pwned' must start with a letter or digit and "
+     "hold only letters, digits, '_', '.' and '-'"),
+    ({**_mcp("x"), "envs/x/env.toml": 'environment_name = "a b"\n'},
+     "envs/x: env.toml: environment name 'a b' must start with a letter or digit and hold only letters, digits, "
+     "'_', '.' and '-'"),
     ({**_mcp("x"), "envs/x/env.toml": 'environment_name = "gateway"\n'},
      "envs/x: env.toml: environment_name 'gateway' is one a gateway deploy names its own containers (db-mcp, gateway, "
      "pgweb, servicedb, website-browser); choose another"),
@@ -211,7 +219,8 @@ def _website(name, toml=""):
     ({"envs/x/env.toml": 'type = "service_db"\n'},
      "envs/x: a service_db env isn't written from a bundle: config names the one every deploy uses "
      "(default_service_db_env_id), and a run builds it when it's missing"),
-], ids=["no-card", "several-cards", "store-image-unnamed", "metadata", "empty-name", "reserved-name",
+], ids=["no-card", "several-cards", "store-image-unnamed", "metadata", "empty-name", "name-escapes-its-line",
+        "name-with-a-space", "reserved-name",
         "website-on-server", "build-args", "multi-without-envs", "multi-name", "multi-wrong-child", "multi-same-names",
         "multi-same-container",
         "gateway", "service-db"])

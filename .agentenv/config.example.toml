@@ -14,13 +14,46 @@ secret   = "local"   # process env vars, or an optional flat YAML file
 default       = "local"   # envs run as containers on the host Docker daemon
 agent_default = "local"   # agents too
 
-[agents]
-default_a2a_agent_id = "a2a-default"   # what a deploy_agent step that names no agent deploys
+# Optional Vercel Sandboxes (install the 'vercel' extra):
+# [sandbox.providers.vercel.config]
+# image = "vercel/sandbox/universal"
+# region = "iad1"
+# failover_regions = ["cle1", "sfo1"]
+# network_id = "secure-compute-network-id"
+# token = "secret:vercel_token"       # with team_id and project_id; omit all three for SDK OIDC
+# team_id = "your-team"
+# project_id = "your-project"
+
+# Optional boxd machines (install the 'boxd' extra):
+# [sandbox.providers.boxd.config]
+# api_key = "secret:boxd_api_key"     # or "env:BOXD_API_KEY"
+# snapshot = "agentenv-warm"          # boot every machine from this snapshot, see the provider README
+
+# Optional Daytona sandboxes (install the 'daytona' extra):
+# [sandbox.providers.daytona.config]
+# api_key = "secret:daytona_api_key"  # or "env:DAYTONA_API_KEY"
+# snapshot = "agentenv-docker"        # boot every sandbox from this Docker-capable snapshot instead of building
+#                                     # the host image; a request bigger than the snapshot is refused
+
+# Optional boat.dev sandboxes (install the 'boat' extra):
+# [sandbox.providers.boat.config]
+# api_key = "secret:boat_api_key"     # or "env:BOAT_API_KEY"
+
+# [agents]
+# default_a2a_agent_id = "my-agent"   # what a deploy_agent step that names no agent deploys; by default the
+#                                     # agents bundle's Claude Code, @local/agentenv-framework/agents/claude-code
 
 # [model]
 # base_url = "http://localhost:4000"   # a model proxy on this machine; local containers reach it as host.docker.internal
 #                                      # on Linux, bind it to the Docker bridge address and use that: http://172.17.0.1:4000
 # api_key  = "env:MY_PROXY_KEY"
+#
+# Hugging Face Inference Providers instead: a fine-grained token with only "Make calls to Inference
+# Providers", since this key reaches every agent. The headers go with every call to this endpoint.
+# base_url = "https://router.huggingface.co/v1"
+# api_key  = "env:HF_INFERENCE_TOKEN"
+# [model.headers]
+# "X-HF-Bill-To" = "my-org"   # bill an organization instead of the token's account
 
 [runner]
 impl = "agent_env.runner.local_runner:LocalRunner"

@@ -37,6 +37,7 @@ class E2BSandboxProvider(SandboxProvider):
     interpolation in ``[sandbox.providers.e2b.config]``.
     """
 
+
     # AsyncSandbox.get_host(port) returns ``<port>-<sandbox-id>.e2b.app``.
     # Workloads receive those public URLs, so an allowlisted sandbox must be
     # able to reach the E2B ingress domain just as it can reach Modal's.
@@ -380,3 +381,7 @@ class E2BSandboxProvider(SandboxProvider):
             )
             sandbox.network_policy = None
         return sandbox
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        if not await self._get_sandbox_cls().kill(sandbox_id, api_key=self._api_key):
+            logger.info("E2B sandbox %s was already absent during terminate", sandbox_id)

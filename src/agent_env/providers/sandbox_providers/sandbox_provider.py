@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import shlex
-from abc import ABC, abstractmethod
+from abc import ABC
+from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 from urllib.parse import urlparse
 
@@ -14,6 +15,7 @@ from agent_env.attribution import Attribution
 from agent_env.config import runtime
 from agent_env.config import ENV_REF_PREFIX
 from agent_env.config.errors import ConfigError
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicy,
     NetworkPolicyUnsupportedError,
@@ -36,10 +38,30 @@ class SandboxProviderTypeError(ConfigError):
     """A config-registered provider produced a Sandbox whose ``.type`` != its ``[sandbox.providers.<name>]`` key."""
 
 
+class SandboxNotFoundError(LookupError):
+    """The requested sandbox no longer exists; cleanup may treat it as already done."""
+
+
+class Accepts(Enum):
+    """The images a sandbox provider can run, by the form the store keeps an image in."""
+
+    LOADABLE = "loadable"  # any a VM can get: a tar.gz it loads, a registry name it pulls, a build context it builds
+    NAME = "name"  # one it starts by its name, which an image that is only a build context gets only from a build
+    NAME_OR_CONTEXT = "name_or_context"  # one it starts by its name, or builds first from its build context (prepare_image)
+
+    def problem(self, image: DockerImageArtifact, *, on_this_machine: bool) -> str | None:
+        """Why a provider that accepts these, whose sandboxes run ``on_this_machine`` or elsewhere, can't run ``image``,
+        or None when it can: one elsewhere can't pull from a registry on this machine."""
+        if self is Accepts.LOADABLE:
+            return image.load_problem(on_this_machine=on_this_machine)
+        if self is Accepts.NAME_OR_CONTEXT and image.buildable:
+            return None  # the provider builds what it can't pull
+        return image.by_name_problem(on_this_machine=on_this_machine)
+
+
 class SandboxProvider(ABC):
     """Compute backend that provisions sandboxes. Selected via [sandbox] default / build_sandbox_provider(); swap via set_sandbox_provider()."""
 
-    @abstractmethod
     async def create_sandbox(
         self,
         *,
@@ -52,7 +74,8 @@ class SandboxProvider(ABC):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
-    ) -> Sandbox: ...
+    ) -> Sandbox:
+        raise NotImplementedError(f"{type(self).__name__} does not support create_sandbox")
 
     async def create_vm(
         self,
@@ -82,15 +105,27 @@ class SandboxProvider(ABC):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        private_network: bool = False,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
-        Caller still owns readiness polling for the container's own endpoints.
+        Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
+        network this provider's other such containers share, at its ``private_host``.
 
-        Default implementation: create_vm, authenticate Docker to ECR if applicable, docker pull,
-        docker run. Backends that bake the image in at sandbox-creation time (Modal) override.
+        Default implementation: a container-only backend uses create_sandbox; a VM backend creates
+        a VM, pulls the image, and starts it. Backends that bake the image in at creation override.
         """
+        if private_network:
+            raise ValueError(f"{type(self).__name__} runs each container in a VM of its own, so it can't put "
+                             "containers on a private network they share")
+        if (type(self).create_vm is SandboxProvider.create_vm
+                and type(self).create_sandbox is not SandboxProvider.create_sandbox):
+            return await self.create_sandbox(
+                image_name=image_name, port=port, env=env, cpu=cpu, memory=memory,
+                disk_size_gb=disk_size_gb, timeout=timeout, attribution=attribution,
+                network_policy=network_policy,
+            )
         sandbox = await self.create_vm(
             cpu=cpu, memory=memory, disk_size_gb=disk_size_gb,
             exposed_ports=[port], timeout=timeout,
@@ -109,6 +144,16 @@ class SandboxProvider(ABC):
                 pass
             raise
 
+    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+        """Reset the container create_container ran on ``sandbox`` to a fresh one of ``image_name`` with ``env``, reached
+        on ``port`` as before: the sandbox, its id and its URLs stay. A backend whose sandbox is the container itself
+        can't reset it in place."""
+        if not isinstance(sandbox, VmSandbox):
+            raise NotImplementedError(f"{type(self).__name__}'s sandbox is the container itself, so it can't be reset "
+                                      "in place")
+        await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} > /dev/null")
+        await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+
     async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
         """Get ready to run ``image`` by its name, before create_sandbox or create_container is asked for it and outside
         any deadline on creating one, for the deploy ``attribution`` describes, as it describes the sandbox. Does
@@ -123,14 +168,26 @@ class SandboxProvider(ABC):
         """The ``docker run`` / ``docker create`` arguments for the sandbox's container."""
         env_flags = " \\\n    ".join(f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items())
         extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
-        publish = " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
         return (
-            f"--name {shlex.quote(sandbox.container_name)} {publish} {extra_args}\\\n    "
+            f"--name {shlex.quote(sandbox.container_name)} {self._publish_args(sandbox, port)} {extra_args}\\\n    "
             f"{env_flags} \\\n    {shlex.quote(image_name)}"
         )
 
+    def _publish_args(self, sandbox: VmSandbox, port: int) -> str:
+        """How the sandbox's container is reached on ``port``: published on the sandbox's host."""
+        return " ".join(f"-p {spec}" for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port))
+
     async def get_sandbox(self, sandbox_id: str) -> Sandbox:
         raise NotImplementedError(f"{type(self).__name__} does not support get_sandbox")
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Terminate a sandbox this provider made, by id; one that has already finished or is gone is terminated.
+        A backend that can terminate without a live handle overrides this, so teardown doesn't need one."""
+        try:
+            sandbox = await self.get_sandbox(sandbox_id)
+        except SandboxNotFoundError:
+            return
+        await sandbox.terminate()
 
     async def close(self) -> None:
         pass
@@ -142,6 +199,71 @@ class SandboxProvider(ABC):
 
     # Internal→external host rewrites for URLs issued on this platform ({} = none).
     URL_REWRITES: ClassVar[dict[str, str]] = {}
+
+    # What it declares, which nothing outside the providers reads any other way. A provider that declares nothing has
+    # its sandboxes off this machine, runs its containers' images by name on no private network, and gives an agent's
+    # sandbox the images that follow from what it implements (SANDBOX_ACCEPTS).
+    #
+    # Whether its sandboxes run on this machine: an image only this machine holds (in a registry or object store on
+    # it) reaches them, they reach this machine's loopback as ``host.docker.internal`` (resolved by Docker, or by the
+    # provider's ``extra_hosts``), they trust the local transfer CA, and a gateway's infra envs are built here for
+    # them. They are containers on this machine's Docker, or VMs here (``REACHES_HOST_AT``).
+    ON_THIS_MACHINE: ClassVar[bool] = False
+    # For a provider on this machine, the address its sandboxes' requests to this machine's names arrive at: None for
+    # containers on this machine's Docker, which arrive at the address ``host.docker.internal`` maps to, where the
+    # local grant server listens by default; for a VM here whose networking forwards this machine's names to an
+    # address of its own, that address: ``127.0.0.1``, which the server serves as well by default, or another the
+    # server is bound to. From such a VM, this machine's addresses by number aren't reached.
+    REACHES_HOST_AT: ClassVar[str | None] = None
+    # The sandbox modes it creates, derived for each provider class from what it implements (``__init_subclass__``):
+    # SANDBOX_MODE_CONTAINER when it implements create_sandbox, SANDBOX_MODE_VM when it implements create_vm.
+    SUPPORTED_SANDBOX_MODES: ClassVar[frozenset[str]] = frozenset()
+    # The images create_container runs.
+    CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    # The images create_sandbox, an agent's sandbox, runs; derived for a provider class that doesn't declare them
+    # (``__init_subclass__``): those a VM loads when it implements create_vm, since its create_sandbox gives a bare VM
+    # the deploy loads the image into, and else CONTAINER_ACCEPTS, since its create_sandbox is one of its containers.
+    # One whose create_sandbox differs declares them, as the local provider does, and its subclasses keep them.
+    SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.NAME
+    _DECLARES_SANDBOX_ACCEPTS: ClassVar[bool] = False
+    # Whether create_container(private_network=True) puts containers on a network they share.
+    PRIVATE_NETWORK: ClassVar[bool] = False
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.SUPPORTED_SANDBOX_MODES = frozenset(
+            mode for mode, method in ((SANDBOX_MODE_CONTAINER, "create_sandbox"), (SANDBOX_MODE_VM, "create_vm"))
+            if getattr(cls, method) is not getattr(SandboxProvider, method))
+        if "SANDBOX_ACCEPTS" in cls.__dict__:
+            cls._DECLARES_SANDBOX_ACCEPTS = True
+        elif not cls._DECLARES_SANDBOX_ACCEPTS:
+            cls.SANDBOX_ACCEPTS = (Accepts.LOADABLE if SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES
+                                   else cls.CONTAINER_ACCEPTS)
+
+    @property
+    def links(self) -> tuple[SandboxProvider, ...]:
+        """The providers a deploy on this one may run on, in the order it tries them: itself, or a chain's."""
+        return (self,)
+
+    def sandbox_problem(self, sandbox: Sandbox, image: DockerImageArtifact) -> str | None:
+        """Why ``sandbox``, which create_sandbox gave to run ``image``, can't run it, or None when it can: a VM that
+        can't load it, or a container from a provider whose SANDBOX_ACCEPTS takes images as a VM loads them, which runs
+        only the images its containers do (CONTAINER_ACCEPTS). One that declares other images is taken at its word."""
+        name = type(self).__name__
+        if sandbox.mode == SANDBOX_MODE_VM:
+            problems = sandbox.load_problems([image]) if isinstance(sandbox, VmSandbox) else []
+            return f"{name} gave a VM that can't load the image: {'; '.join(problems)}" if problems else None
+        if self.SANDBOX_ACCEPTS is not Accepts.LOADABLE:
+            return None
+        if (problem := self.CONTAINER_ACCEPTS.problem(image, on_this_machine=sandbox.ON_THIS_MACHINE)) is None:
+            return None
+        return (f"{name} gave a container, which can't run the image: {problem}; its SANDBOX_ACCEPTS is LOADABLE, the "
+                "default for a provider that implements create_vm, so declare the images its containers run instead: "
+                f"SANDBOX_ACCEPTS = Accepts.{self.CONTAINER_ACCEPTS.name}")
+
+    def url_from_sandbox(self, url: str) -> str:
+        """``url``, of a service this process reaches, as its sandboxes reach it."""
+        return url
 
     # Extra flags spliced into the agent container's `docker run` in create_container ("" = none).
     # Backends set this for host-specific needs (e.g. local Linux needs --add-host so the
@@ -190,6 +312,11 @@ class SandboxProvider(ABC):
         return not policy.restricts_egress
 
     @classmethod
+    def native_platforms(cls) -> frozenset[str]:
+        """The platforms its containers run without emulation."""
+        return frozenset({DEFAULT_BUILD_PLATFORM})
+
+    @classmethod
     def effective_network_policy(cls, policy: Optional[NetworkPolicy]) -> NetworkPolicy:
         """``policy`` with the platform's own hosts unioned in; identity unless it allowlists."""
         if policy is None:
@@ -207,7 +334,14 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "modal_vm": "agent_env.providers.sandbox_providers.modal_vm_sandbox:ModalVmSandboxProvider",
     "e2b": "agent_env.providers.sandbox_providers.e2b:E2BSandboxProvider",
     "sail_vm": "agent_env.providers.sandbox_providers.sail_vm.provider:SailVmSandboxProvider",
-    "local": "agent_env.providers.sandbox_providers.local_sandbox:LocalSandboxProvider",
+    "smol_vm": "agent_env.providers.sandbox_providers.smol_vm.provider:SmolVmSandboxProvider",
+    "tensorlake": "agent_env.providers.sandbox_providers.tensorlake.provider:TensorlakeSandboxProvider",
+    "vercel": "agent_env.providers.sandbox_providers.vercel.provider:VercelSandboxProvider",
+    "tenki": "agent_env.providers.sandbox_providers.tenki.provider:TenkiSandboxProvider",
+    "boxd": "agent_env.providers.sandbox_providers.boxd.provider:BoxdSandboxProvider",
+    "daytona": "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
+    "boat": "agent_env.providers.sandbox_providers.boat.provider:BoatSandboxProvider",
+    "local": "agent_env.providers.sandbox_providers.local_docker.provider:LocalSandboxProvider",
 }
 
 
@@ -255,9 +389,16 @@ def _build_registry(source: Config | None = None) -> dict[str, dict]:
 
 def _validate_plugin(name: str, loaded: Any) -> type[SandboxProvider]:
     cls = _registration.require_subclass(loaded, SandboxProvider)
-    if problem := _registration.unimplemented(cls, SandboxProvider):
+    if problem := _unimplemented(cls):
         raise TypeError(problem)
     return cls
+
+
+def _unimplemented(cls: type[SandboxProvider]) -> str | None:
+    """What ``cls`` still has to implement to work as a sandbox provider, if anything: a sandbox mode at least,
+    create_sandbox or create_vm."""
+    return _registration.unimplemented(cls, SandboxProvider) or (
+        None if cls.SUPPORTED_SANDBOX_MODES else f"{cls.__qualname__} must implement create_sandbox or create_vm")
 
 
 def _get_sandbox_registry() -> dict[str, dict]:
@@ -311,7 +452,7 @@ def _merge_config_toml_sandbox_providers(
         if not impl:
             raise ConfigError(f"config.toml sandbox provider {name!r} is missing an 'impl' dotted path")
         cls = load_impl(impl, SandboxProvider)
-        if problem := _registration.unimplemented(cls, SandboxProvider):
+        if problem := _unimplemented(cls):
             raise ConfigError(f"{where} impl {impl!r}: {problem}")
         if from_plugins.refuse(name, where):
             continue
@@ -348,6 +489,19 @@ def reachable_url(url: str, *, from_sandbox_type: Optional[str], to_sandbox_type
     if provider_cls.shares_network_with(to_sandbox_type):
         return url
     return provider_cls.get_external_url(url)
+
+
+def on_this_machine_provider(sandbox_type: Optional[str]) -> Optional[type[SandboxProvider]]:
+    """The provider class registered for ``sandbox_type`` when its sandboxes run on this machine (``ON_THIS_MACHINE``),
+    else None: for no type, an unknown one, or one whose provider can't be loaded here, which reaches nothing of
+    this machine's."""
+    if not sandbox_type:
+        return None
+    try:
+        cls = _sandbox_provider_class(sandbox_type)
+    except (ValueError, ConfigError):
+        return None
+    return cls if cls.ON_THIS_MACHINE else None
 
 
 def registered_sandbox_provider_classes() -> list[type[SandboxProvider]]:

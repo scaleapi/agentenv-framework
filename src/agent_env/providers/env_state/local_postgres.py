@@ -38,6 +38,7 @@ from agent_env.providers.env_state.env_state_provider import (
     StateContext,
     LOCAL_POSTGRES_STATE_TYPE,
 )
+from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -57,9 +58,9 @@ _STOCK_POSTGRES_IMAGE = "public.ecr.aws/docker/library/postgres:16-alpine"
 
 @dataclass
 class ContainerSpec:
-    """Declarative spec for a store/sidecar container the compute layer provisions (Modal
-    path). The gateway's ``create_container`` loop consumes these and adds its own sandbox
-    knobs (i6pn, attribution)
+    """Declarative spec for a store/sidecar container the compute layer provisions (container
+    mode). The gateway's ``create_container`` loop consumes these and adds its own sandbox
+    knobs (the private network, attribution)
     """
 
     name: str
@@ -85,7 +86,7 @@ class LocalPostgresStateContext(StateContext):
 
     environment_names: the services this shared store must host, one schema each.
     host: the servicedb address, supplied by the compute layer after it stands the
-        container up — e.g. ``"servicedb"`` (compose) or ``"[fdaa::…]"`` (i6pn container).
+        container up — e.g. ``"servicedb"`` (compose) or ``"[fdaa::…]"`` (a container's private host).
     ttl_seconds: the deploy TTL, used to stamp the record's ``expires_at_utc``.
     """
 
@@ -120,9 +121,9 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         ``service_db_config`` off the same resolve unless one was injected at construction."""
         if self._service_db_env is None:
             from agent_env.env.env import Env
-            from agent_env.config import get_config
+            from agent_env.config import get_config, service_db_env_id
 
-            self._service_db_env = Env.get(get_config().default_service_db_env_id)
+            self._service_db_env = Env.get(service_db_env_id(get_config()))
             if self._service_db_config is None:
                 self._service_db_config = self._service_db_env.to_config()
         return self._service_db_env
@@ -135,15 +136,10 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         return self._service_db_config
 
     def store_images_to_load(self) -> list["DockerImageArtifact"]:
-        """The servicedb image set (servicedb + pgweb + db-mcp) the VM preloads from stored tars — the
-        artifacts (with ``tar_gz_object_url``), which the image-name config can't provide. Reuses the
-        cached default env, so no extra ``Env.get`` beyond ``service_db_config``'s."""
-        env = self._default_service_db_env()
-        return [
-            env.db_docker_image_artifact,
-            env.db_web_docker_image_artifact,
-            env.db_mcp_docker_image_artifact,
-        ]
+        """The servicedb image set (servicedb + pgweb + db-mcp) the VM preloads, as their artifacts, which the
+        image-name config can't provide: each a tar.gz to load, a published image to pull, or a build context. Reuses
+        the cached default env, so no extra ``Env.get`` beyond ``service_db_config``'s."""
+        return self._default_service_db_env().images
 
     @classmethod
     def default_instance(cls) -> EnvStateInstance:
@@ -239,7 +235,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         hc = spec.healthcheck
         return [
             f"  {self.env_state_docker_service_name()}:",
-            f"    image: {cfg.db_image}",
+            f"    image: {_checked_image(cfg.db_image)}",
             "    environment:",
             *[f"      - {key}={value}" for key, value in spec.env.items()],
             "    healthcheck:",
@@ -271,7 +267,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         if cfg.db_web_image:
             lines.extend([
                 f"  {PGWEB_SERVICE_NAME}:",
-                f"    image: {cfg.db_web_image}",
+                f"    image: {_checked_image(cfg.db_web_image)}",
                 "    restart: unless-stopped",
                 "    depends_on:",
                 f"      {DATABASE_SERVICE_NAME}:",
@@ -291,7 +287,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         if cfg.db_mcp_image:
             lines.extend([
                 f"  {DB_MCP_SERVICE_NAME}:",
-                f"    image: {cfg.db_mcp_image}",
+                f"    image: {_checked_image(cfg.db_mcp_image)}",
                 "    restart: unless-stopped",
                 "    depends_on:",
                 f"      {DATABASE_SERVICE_NAME}:",
@@ -334,6 +330,13 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         if db_image != _STOCK_POSTGRES_IMAGE:
             logger.warning(f"servicedb image {db_image} is not in the image store; running {_STOCK_POSTGRES_IMAGE}")
         return _STOCK_POSTGRES_IMAGE
+
+    def container_images(self) -> list[str]:
+        """The images the container path starts by name: the servicedb's, and each sidecar's it provisions (those the
+        image store owns, as ``sidecar_specs`` decides)."""
+        cfg = self.service_db_config
+        return [self.container_store_image(),
+                *(image for image in (cfg.db_web_image, cfg.db_mcp_image) if self._in_image_store(image))]
 
     def sidecar_specs(self, *, instance: EnvStateInstance | None = None) -> list[ContainerSpec]:
         """pgweb + db-mcp container specs (Modal/container path), pointed at the stood-up
@@ -392,3 +395,10 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         exit_code, _out, err = await store_exec(argv)
         if exit_code != 0:
             raise RuntimeError(f"Changelog trigger install failed for '{environment_name}': {err[-500:]}")
+
+
+def _checked_image(ref: str) -> str:
+    """``ref``, refused when it isn't an image reference: the compose file it goes into reads it as YAML."""
+    if problem := image_reference_problem(ref):
+        raise ValueError(f"Can't render the state store's compose services: {problem}")
+    return ref

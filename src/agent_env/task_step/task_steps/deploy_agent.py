@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from typing import ClassVar, Optional
 
 import httpx
@@ -10,6 +11,7 @@ from agentenv_protocol.a2a_agent import (
     NamespaceChangelogEnableResponse,
     ObjectChangelogApplyResponse,
     ObjectSnapshotLoadResponse,
+    card_request_accepts,
 )
 
 from agent_env.a2a_agent import protocol
@@ -25,25 +27,56 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
-from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
-from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url, sandbox_request_headers_for_url
+from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
+from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
+from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT, unwritten_local_agent
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
+    reachable_url,
+    sandbox_request_headers_for_url,
+)
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.mcp_cli_builder.codegen import ROLE_ENV_VAR
 from agent_env.attribution import deploy_attribution
+from agent_env.store.base import NotFoundError
+from agent_env.store.ids import is_local_id
 
 logger = logging.getLogger(__name__)
 
 
-def _mcp_add_body(mcp_ext: dict, url: str, headers: dict | None, card_name: str | None) -> dict:
-    """Body for the agent's mcp-config `add`; the card name is relayed verbatim when the agent's card lists `name` as optional."""
+def linked_sandbox_problem(sandbox_name: str, sandbox_mode: str, ports: Iterable[int | str]) -> str | None:
+    """Why an agent can't be placed on the sandbox ``sandbox_name``, deployed in ``sandbox_mode`` with ``ports``
+    reachable, or None when it can: only a VM can host another container, and the agent is reached on its A2A port."""
+    if sandbox_mode != SANDBOX_MODE_VM:
+        return (f"Cannot link agent to sandbox '{sandbox_name}' (mode={sandbox_mode!r}); only VM-mode sandboxes can "
+                "host an additional agent container")
+    if str(DEFAULT_A2A_PORT) not in {str(port) for port in ports}:
+        return (f"Sandbox '{sandbox_name}' does not expose port {DEFAULT_A2A_PORT}; re-deploy DeploySandboxTaskStep "
+                f"with exposed_ports=[{DEFAULT_A2A_PORT}]")
+    return None
+
+
+def _mcp_add_request(mcp_ext: dict) -> dict:
+    """The request contract the card declares for mcp-config `add`."""
+    request = mcp_ext.get("params", {}).get("methods", {}).get("add", {}).get("request", {})
+    return request if isinstance(request, dict) else {}
+
+
+def _mcp_add_body(mcp_ext: dict, url: str, headers: dict | None, card_name: str | None, role: str | None = None) -> dict:
+    """Body for the agent's mcp-config `add`. The card name and the role header ride along only when the card's `add`
+    takes them, judged on the exact field set sent; what an env does with the role is the env's business."""
+    request = _mcp_add_request(mcp_ext)
     body: dict = {"url": url}
     if headers:
-        body["headers"] = headers
-    add_request = mcp_ext.get("params", {}).get("methods", {}).get("add", {}).get("request", {})
-    if card_name and "name" in (add_request.get("optional") or []):
+        body["headers"] = dict(headers)
+    if card_name and card_request_accepts(request, ("url", "name")):
         body["name"] = card_name
+    if role and card_request_accepts(request, {*body, "headers"}):
+        body.setdefault("headers", {})[AGENT_ENV_ROLE_HEADER] = role
     return body
 
 
@@ -55,7 +88,7 @@ def _choose_mcp_url(agent, env) -> str:
     return reachable_url(env.mcp_url, from_sandbox_type=env.sandbox_type, to_sandbox_type=agent.sandbox_type)
 
 
-def _live_mcp_url(env_id: str) -> str:
+def live_mcp_url(env_id: str) -> str:
     """The MCP URL of an env that is referenced by id but never deployed here.
 
     Such an env is a pointer at a live endpoint: it exposes ``mcp_url`` and has no
@@ -68,6 +101,35 @@ def _live_mcp_url(env_id: str) -> str:
             "for it, or reference an env that exposes a live http(s) 'mcp_url'."
         )
     return url.strip()
+
+
+def _deploy_step_of(deployed_env: DeployedEnv) -> Optional[str]:
+    return (deployed_env.metadata or {}).get("deploy_step_id")
+
+
+def bound_deployment(
+    context: TaskStepContext, env_id: str, *, env_step_id: Optional[str], step_id: str,
+) -> Optional[DeployedEnv]:
+    """The deployment of `env_id` that the agent deployed by step `step_id` is bound to, by `env_step_id`, or None if
+    it isn't deployed here."""
+    matches = [d for d in context.deployed_envs if d.env_id == env_id]
+    if env_step_id is not None:
+        # A filter, not a hint: an unmatched id is an error, never a substitute.
+        # Envs with no deployments fall through to the caller's live-endpoint path.
+        named = [d for d in matches if _deploy_step_of(d) == env_step_id]
+        if matches and not named:
+            raise RuntimeError(
+                f"deploy_agent '{step_id}': env_step_id '{env_step_id}' names no deployment of "
+                f"env '{env_id}' (deployed by: {[_deploy_step_of(d) for d in matches]})"
+            )
+        matches = named
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"deploy_agent '{step_id}': {len(matches)} deployments of env '{env_id}' "
+            f"(deployed by: {[_deploy_step_of(d) for d in matches]}). Set env_step_id "
+            "to the deploy_env step this agent should bind to."
+        )
+    return matches[0] if matches else None
 
 
 def _skill_fields(skill: dict) -> dict:
@@ -95,6 +157,10 @@ class DeployAgentTaskStep(TaskStep):
             artifact_type="file_artifact_universe",
         ),
     )
+    # The agent changelog stays the task's: without it the agent starts fresh instead of from the earlier run's state,
+    # and nothing left in the task says so.
+    field_scopes = {**TaskStep.field_scopes, "a2a_agent_id": FieldScope.USER, "a2a_agent_version": FieldScope.USER,
+                    "env_vars": FieldScope.USER, "sandbox_type": FieldScope.USER, "litellm_base_url": FieldScope.USER}
 
     def __init__(
         self,
@@ -150,7 +216,7 @@ class DeployAgentTaskStep(TaskStep):
         self.agent_snapshot_target_context_id = agent_snapshot_target_context_id
         self.metadata = metadata or {}
         self.network_policy = NetworkPolicy.from_dict(network_policy).to_dict() if network_policy else None
-        self.role = role
+        self.role = role or None
         self.enable_agent_changelog = enable_agent_changelog
         self.agent_changelog_object_url = agent_changelog_object_url
         self.agent_changelog_toolcall_position_exclusive = agent_changelog_toolcall_position_exclusive
@@ -227,6 +293,19 @@ class DeployAgentTaskStep(TaskStep):
             enable_docker=data.get("enable_docker", False),
         )
 
+    def _resolve_agent_ref(self, context: TaskStepContext) -> tuple[str, Optional[int]]:
+        """Agent id and version for this run: this step's ``step_overrides`` win over the run-wide override and the stored values; an overridden id takes the override's version (latest when unset), never the stored agent's pin."""
+        step_overrides = self.step_param_overrides(context)
+        user_overrides = context.metadata.get("user_overrides", {})
+        if "a2a_agent_id" in step_overrides:
+            return step_overrides["a2a_agent_id"], step_overrides.get("a2a_agent_version")
+        agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
+        if "a2a_agent_version" in step_overrides:
+            return agent_id, step_overrides["a2a_agent_version"]
+        if "a2a_agent_version" in user_overrides:
+            return agent_id, user_overrides["a2a_agent_version"]
+        return agent_id, self.a2a_agent_version
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         # An agent is recorded in the context only once it is configured, so one that fails on the way there
         # (a snapshot or changelog that can't be loaded, say) is closed here, or no teardown would find it.
@@ -240,15 +319,16 @@ class DeployAgentTaskStep(TaskStep):
 
     async def _execute(self, context: TaskStepContext, deployed_agents: list) -> TaskStepContext:
         from agent_env.a2a_agent import A2AAgent
-        from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT
         from agent_env.providers.sandbox_providers.sandbox_provider import (
-            SANDBOX_MODE_VM,
             build_sandbox_provider,
             get_sandbox_provider,
         )
 
         # Resolved before anything is provisioned so an unbound env fails before a sandbox exists.
-        env_deployments = {env_id: self._deployed_env(context, env_id) for env_id in self.env_ids}
+        env_deployments = {
+            env_id: bound_deployment(context, env_id, env_step_id=self.env_step_id, step_id=self.id)
+            for env_id in self.env_ids
+        }
 
         existing = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if existing is not None:
@@ -262,16 +342,8 @@ class DeployAgentTaskStep(TaskStep):
                     f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes; "
                     f"deploy it with DeploySandboxTaskStep before this step"
                 )
-            if ds.sandbox_mode != SANDBOX_MODE_VM:
-                raise RuntimeError(
-                    f"Cannot link agent to sandbox '{self.sandbox_name}' (mode={ds.sandbox_mode!r}); "
-                    f"only VM-mode sandboxes can host an additional agent container"
-                )
-            if not ds.tunnel_urls or str(DEFAULT_A2A_PORT) not in ds.tunnel_urls:
-                raise RuntimeError(
-                    f"Sandbox '{self.sandbox_name}' does not expose port {DEFAULT_A2A_PORT}; "
-                    f"re-deploy DeploySandboxTaskStep with exposed_ports=[{DEFAULT_A2A_PORT}]"
-                )
+            if problem := linked_sandbox_problem(self.sandbox_name, ds.sandbox_mode, ds.tunnel_urls or ()):
+                raise RuntimeError(problem)
             provider = (
                 build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
             )
@@ -283,23 +355,25 @@ class DeployAgentTaskStep(TaskStep):
 
         config = get_config()
         user_overrides = context.metadata.get("user_overrides", {})
-        a2a_agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or config.get_default_a2a_agent_id()
-        a2a_agent_version = (
-            user_overrides["a2a_agent_version"]
-            if "a2a_agent_version" in user_overrides
-            else self.a2a_agent_version
-        )
-        agent = A2AAgent.get(a2a_agent_id, a2a_agent_version)
+        a2a_agent_id, a2a_agent_version = self._resolve_agent_ref(context)
+        try:
+            agent = A2AAgent.get(a2a_agent_id, a2a_agent_version)
+        except NotFoundError:
+            if not is_local_id(a2a_agent_id):
+                raise
+            raise NotFoundError(unwritten_local_agent(a2a_agent_id, "a2a_agent_id")) from None
         requested_disk = user_overrides.get("agent_disk_size_gb") or self.disk_size_gb
         min_disk = agent.metadata.get("min_disk_size_gb")
         agent_disk_size_gb = max(requested_disk or 0, min_disk or 0) or None
         env_vars = dict(self.env_vars) if self.env_vars else {}
         override_litellm_key = user_overrides.get("litellm_api_key")
         if override_litellm_key:
-            env_vars["LITELLM_API_KEY"] = override_litellm_key
+            env_vars["LITELLM_API_KEY"] = config.resolve_reference(override_litellm_key)
         resolved_litellm_base_url = user_overrides.get("litellm_base_url") or self.litellm_base_url
         if resolved_litellm_base_url:
             env_vars["LITELLM_BASE_URL"] = resolved_litellm_base_url
+        if self.role is not None:
+            env_vars.setdefault(ROLE_ENV_VAR, self.role)  # the generated MCP CLI sends its role from here
 
         resolved_sandbox_type = user_overrides.get("agent_sandbox") or self.sandbox_type
         deploy_kwargs = {"env_vars": env_vars if env_vars else None}
@@ -328,7 +402,8 @@ class DeployAgentTaskStep(TaskStep):
         card = deployed.agent_card
         logger.info(f"A2A agent '{a2a_agent_id}' deployed at {a2a_url}")
 
-        env_mcp_urls: list[tuple[str, str, dict | None, str | None]] = []  # (env_id, url, headers, card_name)
+        mcp_ext = A2AAgent.find_extension(card, A2AAgent.EXT_MCP_CONFIG)
+        registrations: list[tuple[str, dict]] = []
         for env_id in self.env_ids:
             deployed_env = env_deployments[env_id]
             if deployed_env is not None:
@@ -337,17 +412,38 @@ class DeployAgentTaskStep(TaskStep):
                 if not card_name:
                     logger.warning(f"Env {env_id} has no env card name; the agent will pick its own MCP alias")
             else:
-                url = host_url_for(_live_mcp_url(env_id), deployed.sandbox_type)
+                url = host_url_for(live_mcp_url(env_id), deployed.sandbox_type)
                 card_name = None
-            env_mcp_urls.append((env_id, url, sandbox_request_headers_for_url(url) or None, card_name))
+            if mcp_ext:
+                body = _mcp_add_body(mcp_ext, url, sandbox_request_headers_for_url(url), card_name, self.role)
+                registrations.append((env_id, body))
 
-        mcp_ext = A2AAgent.find_extension(card, A2AAgent.EXT_MCP_CONFIG)
-        if mcp_ext and env_mcp_urls:
+        identity_payload: dict[str, str] = {"name": self.agent_name}
+        if self.agent_description is not None:
+            identity_payload["description"] = self.agent_description
+        if self.role is not None:
+            identity_payload["role"] = self.role
+        identity = A2AAgent.negotiate_agent_config(card, identity_payload)
+        if self.role is not None:
+            carried_by = [via for via, carried in (
+                (f"{AGENT_ENV_ROLE_HEADER} on the MCP registrations",
+                 any(AGENT_ENV_ROLE_HEADER in body.get("headers", {}) for _, body in registrations)),
+                (A2AAgent.EXT_AGENT_CONFIG, identity is not None and "role" in identity.fields),
+            ) if carried]
+            if not carried_by:
+                # Before the first request to the agent, so a role that cannot reach the env is never registered or recorded.
+                raise RuntimeError(
+                    f"Agent '{self.agent_name}' cannot carry role '{self.role}': its card takes neither 'headers' on "
+                    f"{A2AAgent.EXT_MCP_CONFIG} add nor 'role' in {A2AAgent.EXT_AGENT_CONFIG}, "
+                    f"so the role would never reach the env"
+                )
+            logger.info(f"Role '{self.role}' reaches '{self.agent_name}' through {' and '.join(carried_by)}")
+
+        if registrations:
             endpoint = a2a_url + mcp_ext["params"]["endpoint"]
             async with httpx.AsyncClient() as client:
-                for env_id, mcp_url, headers, card_name in env_mcp_urls:
-                    body = _mcp_add_body(mcp_ext, mcp_url, headers, card_name)
-                    logger.info(f"Registering MCP for env {env_id} via {mcp_url}")
+                for env_id, body in registrations:
+                    logger.info(f"Registering MCP for env {env_id} via {body['url']}")
                     resp = await client.post(endpoint, json=body, timeout=180)
                     if resp.status_code >= 400:
                         logger.error(f"Failed to register MCP {env_id}: {resp.status_code} {resp.text}")
@@ -378,20 +474,10 @@ class DeployAgentTaskStep(TaskStep):
                     await protocol.post_agent_config(endpoint, {"system_prompt": system_prompt})
                     logger.info(f"Set system_prompt on agent '{self.agent_name}'")
 
-        identity_payload: dict[str, str] = {"name": self.agent_name}
-        if self.agent_description is not None:
-            identity_payload["description"] = self.agent_description
-        if self.role is not None:
-            identity_payload["role"] = self.role
-        config_ext = A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG)
-        if config_ext is not None:
-            supported = (config_ext.get("params") or {}).get("methods", {}).get("set", {}).get("request", {}).get("supported", [])
-            identity_payload = {k: v for k, v in identity_payload.items() if k in supported}
-            if identity_payload:
-                endpoint = a2a_url + (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
-                await protocol.post_agent_config(endpoint, identity_payload)
-                card.update(identity_payload)
-                logger.info(f"Stamped card identity on '{self.agent_name}': {sorted(identity_payload)}")
+        if identity is not None:
+            await protocol.post_agent_config(a2a_url + identity.endpoint, identity.fields)
+            card.update(identity.fields)
+            logger.info(f"Stamped card identity on '{self.agent_name}': {sorted(identity.fields)}")
 
         default_model = config.get_model_for_role("agent")
         if default_model and not context.default_agent_model:
@@ -419,33 +505,9 @@ class DeployAgentTaskStep(TaskStep):
             instance_id=deployed.instance_id,
             role=self.role,
             network_policy=deployed.network_policy,
+            env_ids=list(self.env_ids),
         ))
         return context
-
-    @staticmethod
-    def _deploy_step_of(deployed_env: DeployedEnv) -> Optional[str]:
-        return (deployed_env.metadata or {}).get("deploy_step_id")
-
-    def _deployed_env(self, context: TaskStepContext, env_id: str) -> Optional[DeployedEnv]:
-        """The deployment of `env_id` this step is bound to, or None if it isn't deployed here."""
-        matches = [d for d in context.deployed_envs if d.env_id == env_id]
-        if self.env_step_id is not None:
-            # A filter, not a hint: an unmatched id is an error, never a substitute.
-            # Envs with no deployments fall through to the caller's live-endpoint path.
-            named = [d for d in matches if self._deploy_step_of(d) == self.env_step_id]
-            if matches and not named:
-                raise RuntimeError(
-                    f"deploy_agent '{self.id}': env_step_id '{self.env_step_id}' names no deployment of "
-                    f"env '{env_id}' (deployed by: {[self._deploy_step_of(d) for d in matches]})"
-                )
-            matches = named
-        if len(matches) > 1:
-            raise RuntimeError(
-                f"deploy_agent '{self.id}': {len(matches)} deployments of env '{env_id}' "
-                f"(deployed by: {[self._deploy_step_of(d) for d in matches]}). Set env_step_id "
-                "to the deploy_env step this agent should bind to."
-            )
-        return matches[0] if matches else None
 
     def _resolved_ttl_seconds(self, context: TaskStepContext) -> int:
         override = context.metadata.get("user_overrides", {}).get("ttl_seconds")

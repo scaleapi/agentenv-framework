@@ -6,21 +6,25 @@ import logging
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar
 
 from agent_env.config import get_config
 from agent_env.plugins import _registration
 
 logger = logging.getLogger(__name__)
 from agent_env.artifact.registry import canonical_type, equivalent_types, get_artifact_registry
-from agent_env.store.base import NotFoundError
+from agent_env.store.base import ConcurrentModificationError, NotFoundError
 from agent_env.store.document_store import (
+    AbsentOrNull,
     DuplicateKeyError,
     Filter,
     In,
+    LteOrAbsent,
+    UnknownDocumentTypeError,
     UpdateSpec,
     VersionedEntityStore,
     VersionedEntityStoreCache,
+    expected_version,
 )
 from agent_env.store.ids import key_segment
 from agent_env.store.query import QueryBuilder, to_document_query
@@ -117,12 +121,15 @@ class ArtifactStore:
             raise NotFoundError(f"Artifact {id}{version_str} not found")
         return artifact
 
-    def next_version(self, id: str) -> int:
-        # Every put asks for its version before writing an object or pushing an image, so an id
-        # the store refuses, or a bare one while an @local task runs, is refused here rather than
-        # after those side effects, in put_document.
+    def check_writable(self, id: str) -> None:
+        """Refuse an id the store won't take, or a bare one while an @local task runs. A put calls this, or
+        ``next_version`` or ``attempt_prefix``, which do, before it writes an object or pushes an image, so the
+        refusal comes before those side effects rather than after them in put_document."""
         self._doc_store.check_id(id)
         get_config().check_local_run_write(id)
+
+    def next_version(self, id: str) -> int:
+        self.check_writable(id)
         return self._versioned.next_version(id)
 
     def attempt_prefix(self, artifact_type: str, id: str) -> str:
@@ -172,11 +179,10 @@ class ArtifactStore:
         return get_config().get_object_store_at(object_url).get(object_url)
 
     def put_document(self, artifact: _A) -> _A:
-        """Insert an artifact document, retrying the version-allocation race.
-
-        Concurrent writers to one id can allocate the same next_version; the
-        unique index rejects the losers, so we re-allocate and retry rather
-        than fail the caller (which drops a pass@k rollout).
+        """Insert an artifact document. One that names a version is stored as exactly that one, which must be the
+        id's next (ConcurrentModificationError otherwise). One at version 0 takes the next free version, and
+        re-allocates when a concurrent writer takes it first rather than fail the caller (which drops a pass@k
+        rollout).
         """
 
         self._doc_store.check_id(artifact.id)
@@ -185,9 +191,15 @@ class ArtifactStore:
 
         store = self._doc_store
         versioned = self._versioned_cache.for_store(store)
-        version = artifact.version if artifact.version > 0 else versioned.next_version(artifact.id)
         doc = artifact.model_dump(by_alias=True)
         doc["created_at_utc"] = datetime.now(timezone.utc)
+        if artifact.version > 0:
+            versioned.insert_next(doc, artifact.version)
+            return artifact.model_copy()
+        if (expected := expected_version(artifact.id)) is not None:
+            versioned.insert_next(doc, expected)
+            return artifact.model_copy(update={"version": expected})
+        version = versioned.next_version(artifact.id)
         last_exc: Optional[DuplicateKeyError] = None
         for attempt in range(_MAX_VERSION_RETRIES):
             doc["version"] = version
@@ -248,6 +260,25 @@ class ArtifactStore:
             UpdateSpec(set={field: value}),
         )
 
+    def update_metadata(self, id: str, version: int, old_metadata: dict[str, Any],
+                        new_metadata: dict[str, Any]) -> dict[str, Any]:
+        """Replace an artifact version's metadata, by compare-and-swap on ``metadata.updated_at``: it goes through when
+        the stored metadata is no newer than ``old_metadata``. Raises NotFoundError for no such version and
+        ConcurrentModificationError when another writer got there first."""
+        new_metadata = {**new_metadata, "updated_at": datetime.now(timezone.utc).isoformat()}
+        old_ts = old_metadata.get("updated_at")
+        matched = self._doc_store.update(
+            ARTIFACTS_COLLECTION,
+            Filter.of(id=id, version=version).where(
+                "metadata.updated_at", LteOrAbsent(old_ts) if old_ts is not None else AbsentOrNull()),
+            UpdateSpec(set={"metadata": new_metadata}),
+        )
+        if matched == 0:
+            if self._doc_store.find_one(ARTIFACTS_COLLECTION, Filter.of(id=id, version=version)) is None:
+                raise NotFoundError(f"Artifact {id} version={version} not found")
+            raise ConcurrentModificationError(f"Artifact {id} version={version} metadata was modified concurrently")
+        return new_metadata
+
     def _deserialize(self, doc: dict) -> "Artifact":
         # Remove MongoDB-specific fields not in Pydantic model
         doc.pop("_id", None)
@@ -258,8 +289,8 @@ class ArtifactStore:
         if cls is None:
             # A plugin that claims the name says why it is missing; the config remedies are for a name none claims.
             if note := _registration.failure_note(_registration.ARTIFACTS, artifact_type):
-                raise ValueError(f"Unknown artifact type {doc['type']!r}{note}")
-            raise ValueError(
+                raise UnknownDocumentTypeError(f"Unknown artifact type {doc['type']!r}{note}")
+            raise UnknownDocumentTypeError(
                 f"Unknown artifact type {doc['type']!r}; register it under [artifacts].impls "
                 f"in .agentenv/config.toml, or map a renamed type to its current spelling "
                 f"under [artifacts].type_aliases"

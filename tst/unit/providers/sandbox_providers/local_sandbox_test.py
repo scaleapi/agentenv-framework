@@ -11,17 +11,17 @@ from types import SimpleNamespace
 
 import pytest
 
-import agent_env.providers.sandbox_providers.local_sandbox as ls
+import agent_env.providers.sandbox_providers.local_docker.provider as ls
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.config import reset_config, set_object_store
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.store import LocalFilesystemObjectStore
 from agent_env.store.object_store.local.tls import local_ca
 from agent_env.store.routing import LocalRunObjectStore
 from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
-from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from tst.unit.store.fakes import FakeObjectStore
 
@@ -589,6 +589,129 @@ async def test_create_container_publishes_the_allocated_host_port(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_relay_publishes_and_is_replaced_with_it(
+        monkeypatch, tmp_path):
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+    monkeypatch.setattr(ls, "_free_host_port", lambda: 41337)
+    monkeypatch.setattr(ls, "relay_image", _relay_image)
+    made: list[LocalSandbox] = []
+
+    class _RecordingProvider(LocalSandboxProvider):
+        async def create_vm(self, **kwargs):
+            sandbox = await LocalSandboxProvider.create_vm(self, **kwargs)
+            sandbox._work_dir = tmp_path
+            sandbox.scripts = []
+
+            async def _record(script, *, max_retries=0):
+                sandbox.scripts.append(script)
+                return "172.30.0.2\n" if script.startswith("docker inspect") else ""
+
+            sandbox.exec_script = _record
+            made.append(sandbox)
+            return sandbox
+
+    sandbox = await _RecordingProvider().create_container(image_name="img:v1", port=8000, env={},
+                                                          network_policy=NetworkPolicy(mode="allowlist"))
+
+    network, label = f"closed-{sandbox.sandbox_id}", f"agentenv.sandbox={sandbox.sandbox_id}"
+    steps = [s.split()[1] for s in sandbox.scripts]
+    create = next(s for s in sandbox.scripts if s.startswith("docker create"))
+    assert steps == ["pull", "network", "create", "start", "inspect", "run"]
+    assert sandbox.scripts[1] == f"docker network create --internal --label {label} {network} >/dev/null"
+    assert f"--network {network} " in create and "-p " not in create
+    assert sandbox.scripts[-1] == (f"docker run -d --name relay-{sandbox.sandbox_id} --label {label} "
+                                   "-p 127.0.0.1:41337:8000 agentenv-relay:test 8000=172.30.0.2:8000 >/dev/null && "
+                                   f"docker network connect {network} relay-{sandbox.sandbox_id}")
+    assert sandbox.mode == SANDBOX_MODE_CONTAINER and sandbox.closed_network == network
+    assert sandbox.network_policy.closed and sandbox.tunnel_urls[8000] == "http://127.0.0.1:41337"
+
+    sandbox.scripts.clear()
+    await _RecordingProvider().reset_container(sandbox, image_name="img:v1", port=8000, env={"A": "1"})
+
+    assert [s.split()[1] for s in sandbox.scripts] == ["rm", "create", "start", "inspect", "run"]
+    assert sandbox.scripts[0] == f"docker rm -f agent-{sandbox.sandbox_id} relay-{sandbox.sandbox_id} > /dev/null"
+    assert f"--network {network} " in sandbox.scripts[1] and "-e A=1 " in sandbox.scripts[1]
+    assert "-p 127.0.0.1:41337:8000 " in sandbox.scripts[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_container_with_no_network_whose_marker_cant_be_written_takes_its_relay_and_network_down(
+        tmp_path: Path, monkeypatch):
+    import agent_env.config as cfg
+
+    monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
+    monkeypatch.setattr(ls, "_free_host_port", lambda: 41337)
+    monkeypatch.setattr(ls, "relay_image", _relay_image)
+    (tmp_path / ls._CONTAINER_MODE_MARKER).mkdir()
+    made: list[LocalSandbox] = []
+
+    class _RecordingProvider(LocalSandboxProvider):
+        async def create_vm(self, **kwargs):
+            sandbox = await LocalSandboxProvider.create_vm(self, **kwargs)
+            sandbox._work_dir = tmp_path
+            sandbox.scripts = []
+
+            async def _record(script, *, max_retries=0):
+                sandbox.scripts.append(script)
+                return "172.30.0.2\n" if script.startswith("docker inspect") else ""
+
+            async def _listed(*args):
+                sandbox.scripts.append(" ".join(args))
+                return 0, "r1\n", ""
+
+            sandbox.exec_script, sandbox.exec_with_output = _record, _listed
+            made.append(sandbox)
+            return sandbox
+
+    with pytest.raises(IsADirectoryError):
+        await _RecordingProvider().create_container(image_name="img:v1", port=8000, env={},
+                                                    network_policy=NetworkPolicy(mode="allowlist"))
+
+    sandbox_id, scripts = made[0].sandbox_id, made[0].scripts
+    assert f"docker rm -f agent-{sandbox_id}" in scripts and "docker rm -f r1 >/dev/null" in scripts
+    assert any(f"docker network ls -q --filter label=agentenv.sandbox={sandbox_id}" in s for s in scripts)
+
+
+@pytest.mark.asyncio
+async def test_a_container_with_no_network_whose_setup_fails_goes_with_its_work_folder(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
+    monkeypatch.setattr(ls, "relay_image", _relay_image)
+
+    class _Unpullable(_RecordingLocalSandbox):
+        async def pull_images(self, image_names):
+            raise RuntimeError("pull access denied")
+
+    class _RefusedPull(LocalSandboxProvider):
+        async def create_vm(self, **kwargs):
+            return _Unpullable(None, sandbox_id="local-closed", exposed_ports=kwargs["exposed_ports"])
+
+    with pytest.raises(RuntimeError, match="pull access denied"):
+        await _RefusedPull().create_container(image_name="img:v1", port=8000, env={},
+                                              network_policy=NetworkPolicy(mode="allowlist"))
+
+    assert LocalSandbox.find_work_dir("local-closed") is None
+
+
+@pytest.mark.asyncio
+async def test_a_container_with_no_network_takes_its_relay_and_network_with_it(tmp_path: Path):
+    sandbox = _RecordingLocalSandbox(tmp_path, sandbox_id="local-abc", listed=(0, "r1\n", ""))
+    sandbox.mode = SANDBOX_MODE_CONTAINER
+    (tmp_path / ls._CLOSED_NETWORK_FILE).write_text("closed-local-abc")
+
+    await sandbox.terminate()
+
+    assert sandbox.scripts[:3] == [f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true",
+                                   "docker ps -aq --filter label=agentenv.sandbox=local-abc", "docker rm -f r1 >/dev/null"]
+    assert "docker network ls -q --filter label=agentenv.sandbox=local-abc" in sandbox.scripts[3]
+
+
+async def _relay_image() -> str:
+    return "agentenv-relay:test"
+
+
+@pytest.mark.asyncio
 async def test_an_agent_placed_on_a_local_vm_publishes_only_on_the_host_ips(monkeypatch, tmp_path):
     monkeypatch.setattr(ls, "_host_ips", lambda: ("127.0.0.1", "172.17.0.1"))
     agent = A2AAgent(id="a", version=None, docker_image_artifact=DockerImageArtifact(id="img", description="d", image_name="img:1"))
@@ -913,6 +1036,7 @@ async def test_teardown_sends_sigterm_then_sigkill_to_what_outlives_it(monkeypat
     sent, running = [], {11: signal.SIGTERM, 12: signal.SIGKILL}  # pid -> the signal that stops it
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: sorted(running) if sandbox_id == "local-a" else [])
+    monkeypatch.setattr(ls, "_started", lambda pid: 1 if pid in running else None)
 
     def kill(pid, sig):
         sent.append((pid, sig))
@@ -929,6 +1053,7 @@ async def test_teardown_sends_sigterm_then_sigkill_to_what_outlives_it(monkeypat
 async def test_teardown_keeps_the_staging_a_surviving_process_runs_from(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
     monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: [13])  # never stops
+    monkeypatch.setattr(ls, "_started", lambda pid: 1)
     monkeypatch.setattr(ls.os, "kill", lambda pid, sig: None)
     sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
     staged = Path(tempfile.mkdtemp(prefix="install-agent-solver-", suffix=f"-{sandbox.sandbox_id}", dir="/tmp"))
@@ -944,7 +1069,7 @@ def _running(pid: int) -> bool:
     """Whether ``pid`` is still running: a killed process another parent hasn't reaped yet is a zombie."""
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in "ZX"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):  # a process that exits mid-read gives ESRCH
         return False
 
 
@@ -1006,6 +1131,29 @@ async def test_teardown_kills_a_process_that_ignores_sigterm(tmp_path: Path, mon
 
     assert not _running(stubborn)
     assert not ls._marked_pids(sandbox.sandbox_id)
+
+
+@linux_only
+@pytest.mark.asyncio
+async def test_teardown_follows_a_process_it_found_until_it_exits_though_its_environment_reads_empty(monkeypatch):
+    """A process's environment reads empty while it execs or is exiting, so the next scan missing it doesn't mean it
+    stopped."""
+    monkeypatch.setattr(ls, "_REAP_SECONDS", 1)
+    stubborn = subprocess.Popen(["bash", "-c", "trap '' TERM; exec sleep 300"])
+    try:
+        for _ in range(500):
+            if Path(f"/proc/{stubborn.pid}/cmdline").read_text().split("\0")[0] == "sleep":  # exec'd, still ignoring SIGTERM
+                break
+            await asyncio.sleep(0.01)
+        scans = iter([[stubborn.pid]])
+        monkeypatch.setattr(ls, "_marked_pids", lambda sandbox_id: next(scans, []))
+
+        assert await ls._stop_marked("local-a")
+
+        assert not _running(stubborn.pid)
+    finally:
+        stubborn.kill()
+        stubborn.wait()
 
 
 @pytest.mark.asyncio
@@ -1165,3 +1313,21 @@ async def test_a_linked_agent_whose_copy_fails_leaves_no_container(tmp_path, mon
 
 
 _HOST_IPS = ls._host_ips
+
+
+@pytest.mark.asyncio
+async def test_the_local_provider_pulls_only_the_published_images_its_docker_doesnt_hold(monkeypatch, tmp_path):
+    """So a run after the first needs no registry."""
+    images = [DockerImageArtifact(id=name, description="d", image_name=f"ghcr.io/team/{name}:src-1",
+                                  image_digest="sha256:" + "9" * 64) for name in ("held", "new")]
+    monkeypatch.setattr(ls, "present", lambda image_name: image_name.startswith("ghcr.io/team/held:"))
+    asked = []
+
+    async def pull_published(self, artifacts):
+        asked.extend(artifact.id for artifact in artifacts)
+        return []
+
+    monkeypatch.setattr(ls.VmSandbox, "pull_published", pull_published)
+
+    assert await LocalSandbox(work_dir=tmp_path).pull_published(images) == []
+    assert asked == ["new"]

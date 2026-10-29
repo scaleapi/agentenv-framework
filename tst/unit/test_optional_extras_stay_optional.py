@@ -26,11 +26,11 @@ class Refuse(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Refuse())
 """
 
-# Not core: the explorer and the sail_vm provider are their extras' own packages, the gateway runs
-# only in its container image, and the code runner is a script that reads its arguments on import.
+# Not core: the Sail and Smol providers and the OpenEnv server need their optional extras, and the gateway runs only
+# in its container image, and the code runner is a script that reads its arguments on import.
 _NOT_CORE = (
-    "agent_env.explorer", "agent_env.providers.sandbox_providers.sail_vm", "agent_env.env.gateway",
-    "agent_env.task_step.task_steps.run_code_runner",
+    "agent_env.providers.sandbox_providers.sail_vm", "agent_env.providers.sandbox_providers.smol_vm",
+    "agent_env.openenv", "agent_env.env.gateway", "agent_env.task_step.task_steps.run_code_runner",
 )
 
 _IMPORT_CORE = _BLOCKING + """
@@ -47,7 +47,10 @@ def imports_blocked(name):
         for alias in node.names
     )
 bad = []
-for module in pkgutil.walk_packages(agent_env.__path__, "agent_env.", onerror=bad.append):
+def unwalkable(name):
+    if not name.startswith(not_core):
+        bad.append(name)
+for module in pkgutil.walk_packages(agent_env.__path__, "agent_env.", onerror=unwalkable):
     if module.name.startswith(not_core):
         continue
     try:
@@ -65,6 +68,13 @@ module, _, name = sys.argv[2].partition(":")
 try:
     load_impl(sys.argv[1], getattr(importlib.import_module(module), name))
 except ConfigError as e:
+    print(e)
+"""
+
+_IMPORT = _BLOCKING + """
+try:
+    importlib.import_module(sys.argv[1])
+except ImportError as e:
     print(e)
 """
 
@@ -121,11 +131,32 @@ def _closure(extras: frozenset[str]) -> set[str]:
 
 
 def _only_in(extra: str) -> list[str]:
-    """Module paths the extra installs and a core install does not."""
-    core = _closure(frozenset())
+    """Module paths the extra installs and neither a core install nor any other extra does, but for an extra that
+    includes it (``trl`` includes ``openenv``): a distribution two extras share (grpcio, for gcp and tensorlake) stays
+    for the other's modules."""
+    mine = _closure(frozenset({extra}))
+    others = [other for other in _optional_requirements()
+              if other != extra and not mine <= _closure(frozenset({other}))]
+    core = _closure(frozenset()) | set().union(*(_closure(frozenset({other})) for other in others))
     provided_by_core = set().union(*(_module_paths(d) for d in core))
     extra_only = _closure(frozenset({extra})) - core
     return sorted(set().union(*(_module_paths(d) for d in extra_only)) - provided_by_core)
+
+
+def _outside(extra: str) -> list[str]:
+    """Module paths some extra installs and neither a core install nor ``extra``, with the extras it includes, does."""
+    installed = _closure(frozenset({extra}))
+    provided = set().union(*(_module_paths(d) for d in installed))
+    others = set().union(*(_closure(frozenset({other})) for other in _optional_requirements())) - installed
+    return sorted(set().union(*(_module_paths(d) for d in others)) - provided)
+
+
+def _not_in_core() -> list[str]:
+    """Module paths some extra installs and a core install does not, including those two extras share."""
+    core = _closure(frozenset())
+    provided_by_core = set().union(*(_module_paths(d) for d in core))
+    optional = set().union(*(_closure(frozenset({extra})) for extra in _optional_requirements())) - core
+    return sorted(set().union(*(_module_paths(d) for d in optional)) - provided_by_core)
 
 
 def _run(script: str, blocked: list[str], *args: str) -> str:
@@ -142,6 +173,10 @@ def test_core_and_every_store_module_import_without_the_extra(extra):
     blocked = _only_in(extra)
     assert blocked, f"the {extra!r} extra installs nothing core lacks, so this test proves nothing"
     assert json.loads(_run(_IMPORT_CORE, blocked, json.dumps(_NOT_CORE))) == []
+
+
+def test_core_and_every_store_module_import_without_any_extra():
+    assert json.loads(_run(_IMPORT_CORE, _not_in_core(), json.dumps(_NOT_CORE))) == []
 
 
 @pytest.mark.parametrize(
@@ -166,8 +201,33 @@ def test_core_and_every_store_module_import_without_the_extra(extra):
             "agent_env.store.document_store:DocumentStore",
         ),
         ("aws", "agent_env.store.document_store:DynamoDbDocumentStore", "agent_env.store.document_store:DocumentStore"),
+        (
+            "tensorlake",
+            "agent_env.providers.sandbox_providers.tensorlake.provider:TensorlakeSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
+        (
+            "tenki",
+            "agent_env.providers.sandbox_providers.tenki.provider:TenkiSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
+        (
+            "boxd",
+            "agent_env.providers.sandbox_providers.boxd.provider:BoxdSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
+        (
+            "daytona",
+            "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
+        (
+            "smol", "agent_env.providers.sandbox_providers.smol_vm.provider:SmolVmSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
     ],
-    ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport", "dynamodb", "dynamodb-reexport"],
+    ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport", "dynamodb", "dynamodb-reexport", "tensorlake",
+         "tenki", "boxd", "daytona", "smol"],
 )
 def test_an_impl_without_its_extra_names_the_extra_to_install(extra, impl, base):
     message = _run(_LOAD_IMPL, _only_in(extra), impl, base)
@@ -200,6 +260,25 @@ def test_the_sail_vm_provider_without_the_extra_names_the_extra_to_install():
     impl = "agent_env.providers.sandbox_providers.sail_vm.provider:SailVmSandboxProvider"
     message = _run(_LOAD_IMPL, _only_in("sail"), impl, "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider")
     assert "pip install 'agentenv-framework[sail]'" in message, message
+
+
+def test_the_explorer_imports_without_any_extra():
+    assert _run(_IMPORT, _not_in_core(), "agent_env.explorer.app") == ""
+
+
+_EXTRA_MODULES = [("agent_env.openenv", "openenv"), ("agent_env.training.trl", "trl")]
+
+
+@pytest.mark.parametrize(("module", "extra"), _EXTRA_MODULES)
+def test_the_openenv_server_and_the_trl_helper_without_their_extra_name_the_extra_to_install(module, extra):
+    message = _run(_IMPORT, _only_in(extra), module)
+    assert message.endswith(f"pip install 'agentenv-framework[{extra}]'"), message
+
+
+@pytest.mark.parametrize(("module", "extra"), _EXTRA_MODULES)
+def test_the_openenv_server_and_the_trl_helper_import_with_their_extra_alone(module, extra):
+    """What `pip install 'agentenv-framework[<extra>]'` gives them is enough: no module only another extra installs."""
+    assert _run(_IMPORT, _outside(extra), module) == ""
 
 
 @pytest.mark.parametrize("package", _STORE_PACKAGES)

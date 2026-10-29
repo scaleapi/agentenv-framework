@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Optional, Self, TypeVar
 from agent_env.plugins import _registration
 from agent_env.store.base import NotFoundError
 from agent_env.config import get_config
-from agent_env.store.document_store import VersionedEntityStore, VersionedEntityStoreCache
+from agent_env.store.document_store import UnknownDocumentTypeError, VersionedEntityStore, VersionedEntityStoreCache
 from agent_env.store.query import QueryBuilder, to_document_query
 
 if TYPE_CHECKING:
@@ -92,7 +92,7 @@ class TaskStepStore:
         registry = get_task_step_registry()
         cls = registry.get(task_step_type)
         if cls is None:
-            raise ValueError(
+            raise UnknownDocumentTypeError(
                 f"Unknown task step type: {task_step_type}"
                 f"{_registration.failure_note(_registration.TASK_STEPS, task_step_type)}"
             )

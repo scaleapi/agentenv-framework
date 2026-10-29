@@ -1,0 +1,3 @@
+# Ids a task can name this bundle's envs by; a store's env of the id wins over an alias.
+[envs]
+mail = ["mail"]

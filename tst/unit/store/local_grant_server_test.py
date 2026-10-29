@@ -15,6 +15,7 @@ from agent_env.a2a_agent import object_transfer
 from agent_env.a2a_agent.object_transfer import TransferCall, invoke_transfer
 from agent_env.config.paths import state_root
 from agent_env.store import LocalFilesystemObjectStore
+from agent_env.store.base import GrantUnavailableError
 from agent_env.store.object_store.local import grant_server as server_module
 from agent_env.store.object_store.local.grant_server import default_bind_host, grant_server, unreachable_hint
 from agent_env.store.object_store.local.tls import local_ca
@@ -277,6 +278,45 @@ def test_grant_urls_name_the_advertised_host(tmp_path, monkeypatch):
     store = LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="127.0.0.1")
     try:
         assert store.issue_read_grant(store.put("k", b"v")).url.startswith("https://host.docker.internal:")
+    finally:
+        for server in server_module._servers.values():
+            server.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="only Linux has the whole 127.0.0.0/8 on its loopback interface")
+def test_the_platform_default_is_served_on_loopback_too_where_a_vm_on_this_machine_reaches_it(tmp_path, monkeypatch):
+    """A second loopback address stands in for the Linux Docker bridge address the default binds."""
+    monkeypatch.setattr(server_module, "_servers", {})
+    monkeypatch.setattr(server_module, "default_bind_host", lambda: "127.0.0.2")
+    monkeypatch.setenv("SSL_CERT_FILE", str(local_ca().bundle_path))
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_advertise_host="localhost")
+    try:
+        grant = store.issue_read_grant(store.put("k", b"both"))
+        assert httpx.get(grant.url).content == b"both"
+        assert httpx.get(grant.url.replace("localhost", "127.0.0.2")).content == b"both"
+    finally:
+        for server in server_module._servers.values():
+            server.close()
+
+
+def test_an_explicit_bind_host_is_served_as_given(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "_servers", {})
+    monkeypatch.setattr(server_module, "default_bind_host", lambda: "127.0.0.2")
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="127.0.0.1")
+    try:
+        store.issue_read_grant(store.put("k", b"v"))
+        assert [server.bind_hosts for server in server_module._servers.values()] == [("127.0.0.1",)]
+    finally:
+        for server in server_module._servers.values():
+            server.close()
+
+
+def test_an_explicit_bind_host_this_machine_doesnt_have_reports_the_bind_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "_servers", {})
+    store = LocalFilesystemObjectStore(str(tmp_path), grant_bind_host="203.0.113.1")  # TEST-NET-3: nobody's
+    try:
+        with pytest.raises(GrantUnavailableError, match="cannot listen on 203.0.113.1"):
+            store.issue_read_grant(store.put("k", b"v"))
     finally:
         for server in server_module._servers.values():
             server.close()

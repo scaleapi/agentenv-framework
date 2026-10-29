@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from agentenv_protocol import DataPart, client as protocol_v1
+from agentenv_protocol import DataPart, ExtensionCallError, client as protocol_v1
 
 _BASE = "http://gw/svc/mcp-items"
 
@@ -221,6 +221,31 @@ async def test_invoke_extension_get_uses_query_params():
         result = await protocol_v1.invoke_extension(_BASE, card, "urn:agentenv:ping/v1")
     assert result == {"pong": True}
     assert client.get.call_args.args[0] == f"{_BASE}/agentenv/ext/ping"
+
+
+def _error_response(status: int, **kwargs) -> httpx.Response:
+    return httpx.Response(status, request=httpx.Request("POST", f"{_BASE}/agentenv/ext/set_errors"), **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response, fields", [
+    (_error_response(429, json={"ok": False, "error": {
+        "code": "limit_exceeded", "message": "3 leases held", "retryable": True, "applied": "no", "hint": "release one"}}),
+     ("limit_exceeded", "3 leases held", True, "no", "release one")),
+    # A server from before the structured fields: its code, and nothing claimed about the effect.
+    (_error_response(500, json={"ok": False, "error": {"code": "extension_failed", "message": "kaboom"}}),
+     ("extension_failed", "kaboom", False, "unknown", None)),
+    # A proxy's own error page.
+    (_error_response(502, text="<html>Bad Gateway</html>"), (None, "Bad Gateway", False, "unknown", None)),
+    (_error_response(404, json=["not", "an", "object"]), (None, "Not Found", False, "unknown", None)),
+])
+async def test_invoke_extension_raises_the_error_fields_it_was_sent(response, fields):
+    with _patch(_client(response)), pytest.raises(ExtensionCallError) as raised:
+        await protocol_v1.invoke_extension(_BASE, _CARD_SET_ERRORS, "urn:agentenv:set-errors/v1", {})
+    error = raised.value
+    assert (error.code, error.detail, error.retryable, error.applied, error.hint) == fields
+    assert isinstance(error, httpx.HTTPStatusError) and error.response is response
+    assert str(error).startswith(f"{response.status_code} {fields[0] or 'error'}: ")
 
 
 @pytest.mark.asyncio

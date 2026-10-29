@@ -59,17 +59,18 @@ async def test_default_stays_on_v2_experimental_create_with_i6pn():
     captured, fake = _capture()
     provider = _provider()  # no gpu
     with _patched("modal.Sandbox._experimental_create", fake), pytest.raises(Exception):
-        await provider.create_container(image_name=_IMAGE, port=8000, env={}, i6pn=True)
+        await provider.create_container(image_name=_IMAGE, port=8000, env={}, private_network=True)
     assert captured["i6pn"] is True
     assert "gpu" not in captured
 
 
 @pytest.mark.asyncio
-async def test_gpu_with_i6pn_raises_before_creating_a_sandbox():
+async def test_gpu_on_the_private_network_raises_before_any_modal_call():
     provider = _provider(gpu="H100")
     never = MagicMock()
     never.aio = AsyncMock(side_effect=AssertionError("create must not be called"))
     with patch("modal.Sandbox.create", never):
-        with pytest.raises(ValueError, match="i6pn"):
-            await provider.create_container(image_name=_IMAGE, port=8000, env={}, i6pn=True)
+        with pytest.raises(ValueError, match="i6pn is unavailable on GPU sandboxes"):
+            await provider.create_container(image_name=_IMAGE, port=8000, env={}, private_network=True)
     never.aio.assert_not_called()
+    provider._get_app.assert_not_called()

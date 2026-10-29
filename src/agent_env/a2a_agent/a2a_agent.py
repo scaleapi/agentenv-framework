@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import posixpath
@@ -12,13 +13,17 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 from agentenv_protocol.a2a_agent import STANDARD_EXTENSIONS
 
 from agent_env.config import get_config
-from agent_env.entity_refs import EntityRef
+from agent_env.config.model import MODEL_HEADERS_ENV
+from agent_env.entity.refs import EntityRef
+from agent_env.plugins._bundles import installed_aliases
+from agent_env.store.base import NotFoundError
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
     NetworkPolicy,
     NetworkPolicyUnsupportedError,
     port_bindings,
 )
+from agent_env.artifact.artifacts.cli import GATEWAY_ENV_FILE
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.a2a_agent.object_transfer import (
     TRANSFER_TIMEOUT_SECONDS,
@@ -26,20 +31,21 @@ from agent_env.a2a_agent.object_transfer import (
     skill_add_call,
 )
 from agent_env.a2a_agent.staging import transfer_store
-from agent_env.providers.sandbox_providers.local_sandbox import (
-    LOCAL_TRUST_ENV,
-    LocalSandbox,
-    LocalSandboxProvider,
-    local_grant_trust,
-    start_trusting,
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
+from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV, local_grant_trust, start_trusting
+from agent_env.providers.sandbox_providers.sandbox_provider import (
+    SANDBOX_MODE_VM,
+    Accepts,
+    SandboxProvider,
+    all_sandbox_container_env,
+    all_sandbox_url_rewrites,
 )
-from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_container_env, all_sandbox_url_rewrites
 from agent_env.attribution import Attribution
 
 if TYPE_CHECKING:
-    from agent_env.a2a_agent.store import A2AAgentQuery
+    from agent_env.a2a_agent.store import A2AAgentQuery, A2AAgentStore
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.artifact import CliArtifact
     from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
     from agent_env.providers.sandbox_providers.sandbox import Sandbox
@@ -59,6 +65,28 @@ _DIND_IMAGE = (
 _DIND_CONTAINER = "agent-dind"
 _DIND_NETWORK = "agent-docker-net"
 _DIND_PORT = 2375
+# Metadata an agent whose commands its player runs sets False: it is given no model endpoint, key or headers, whatever
+# a deploy passes, and none of the object store's shared credentials.
+TAKES_CREDENTIALS = "takes_credentials"
+MODEL_CREDENTIALS_ENV = ("LITELLM_API_KEY", "LITELLM_BASE_URL", MODEL_HEADERS_ENV)
+
+
+def unwritten_local_agent(agent_id: str, field: str) -> str:
+    """Why a step can't deploy ``agent_id``, an ``@local`` agent the store doesn't hold, which its ``field`` names or,
+    left unset, the configured default does: an ``agent-env run`` of a bundle writes one, and a step reads only the
+    store."""
+    return (f"there is no agent {agent_id!r} in the store: an @local agent is written by `agent-env run` of the bundle "
+            f"that defines it or uses it, so run the task through that bundle, or point {field} or [agents] "
+            "default_a2a_agent_id at an agent the store holds")
+
+
+def _holds(store: A2AAgentStore, agent_id: str) -> bool:
+    """Whether ``store`` has an agent of ``agent_id``, at any version."""
+    try:
+        store.get(agent_id)
+    except NotFoundError:
+        return False
+    return True
 
 
 @dataclass
@@ -103,6 +131,7 @@ class A2AAgent:
     # What an agent.toml's [metadata] may set: the types each key takes, and how a problem names them.
     toml_metadata: ClassVar[dict[str, tuple[tuple[type, ...], str]]] = {
         "default_model": ((str,), "a string"), "min_disk_size_gb": ((int, float), "a number"),
+        TAKES_CREDENTIALS: ((bool,), "true or false"),
     }
 
     EXT_MCP_CONFIG: ClassVar[str] = "urn:agentenv:mcp-config/v1"
@@ -120,6 +149,14 @@ class A2AAgent:
     # extension_method() rather than a separate extension.
     SNAPSHOT_METHOD_ENABLE_CHANGELOG: ClassVar[str] = "enable-changelog"
     SNAPSHOT_METHOD_APPLY_CHANGELOG: ClassVar[str] = "apply-changelog"
+
+    @staticmethod
+    def accepts(sandbox_provider: SandboxProvider, *, sandbox_mode: str | None = None) -> Accepts:
+        """The images an agent deploys from on ``sandbox_provider``: those its own sandboxes run (``create_sandbox``),
+        or, placed on a VM sandbox a task deployed there (``sandbox_mode`` "vm"), any that VM loads."""
+        if sandbox_mode == SANDBOX_MODE_VM:
+            return Accepts.LOADABLE
+        return sandbox_provider.SANDBOX_ACCEPTS
 
     @staticmethod
     def find_extension(card: dict, uri: str) -> dict | None:
@@ -235,11 +272,14 @@ class A2AAgent:
         return skill_ext
 
     @staticmethod
-    async def install_cli(deployed: "DeployedA2AAgent", cli_artifact: "CliArtifact", gateway_url: str) -> str:
-        """Install a CliArtifact bundle into the agent's filesystem at /opt/cli/<command>/.
-        Writes a sidecar bin/.env with the gateway URL and chmod +x's the entrypoint.
-        Idempotent. Returns the in-process path to the executable entrypoint."""
-        from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+    async def install_cli(
+        deployed: "DeployedA2AAgent", cli_artifact: "CliArtifact", gateway_url: str, container: str | None = None,
+        on_host: bool = False,
+    ) -> str:
+        """Install a CliArtifact bundle into the agent's filesystem at /opt/cli/<command>/, in ``container`` when
+        install_agent put the agent in one, or on the VM host, ``on_host``, when it put it there. Writes a sidecar
+        bin/.env with the gateway URL and chmod +x's the entrypoint. Idempotent. Returns the path to the entrypoint."""
+        from agent_env.providers.sandbox_providers.sandbox import VmSandbox, into_container, stage_files_into_container
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
         provider = build_sandbox_provider(deployed.sandbox_type) if deployed.sandbox_type else get_agent_sandbox_provider()
         sandbox = await provider.get_sandbox(deployed.sandbox_id)
@@ -247,14 +287,25 @@ class A2AAgent:
         entrypoint_path = f"{target_root}/{cli_artifact.entrypoint}"
         env_dir = posixpath.dirname(entrypoint_path)
 
+        if on_host:
+            await sandbox.write_host_file(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n".encode(), f"{env_dir}/{GATEWAY_ENV_FILE}")
+            await stage_files_into_container(
+                sandbox, cli_artifact.get_cli_files().get_file_artifacts(), target_root, on_host=True)
+            await sandbox.exec_script(f"chmod +x {shlex.quote(entrypoint_path)}")
+            logger.info(f"Installed CliArtifact '{cli_artifact.id}' v{cli_artifact.version} on the host at {entrypoint_path}")
+            return entrypoint_path
+
         # write .env first — write_file_from_text creates the parent dir; write_file_from_object does not.
-        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/.env")
+        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/{GATEWAY_ENV_FILE}",
+                                           **into_container(container))
 
         for rel_path, file_artifact in cli_artifact.get_cli_files().get_file_artifacts().items():
-            await sandbox.write_file_from_object(file_artifact.object_url, f"{target_root}/{rel_path}")
+            await sandbox.write_file_from_object(file_artifact.object_url, f"{target_root}/{rel_path}",
+                                                 **into_container(container))
 
         if isinstance(sandbox, VmSandbox):
-            await sandbox.exec_script(f"docker exec -u 0 {shlex.quote(sandbox.container_name)} chmod +x {entrypoint_path}")
+            await sandbox.exec_script(
+                f"docker exec -u 0 {shlex.quote(container or sandbox.container_name)} chmod +x {entrypoint_path}")
         else:
             await sandbox.exec("chmod", "+x", entrypoint_path)
 
@@ -266,8 +317,11 @@ class A2AAgent:
         deployed: "DeployedA2AAgent",
         universe: "FileArtifactUniverse",
         destination_path: str,
+        container: str | None = None,
+        on_host: bool = False,
     ) -> dict[str, str]:
-        """Stage every FileArtifact in `universe` into the agent sandbox under destination_path."""
+        """Stage every FileArtifact in `universe` into the agent sandbox under destination_path, in ``container`` when
+        install_agent put the agent in one, or on the VM host, ``on_host``, when it put it there."""
         from agent_env.providers.sandbox_providers.sandbox import stage_files_into_container
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
 
@@ -286,7 +340,7 @@ class A2AAgent:
             f"Loading FileArtifactUniverse '{universe.id}' v{universe.version} "
             f"({len(file_artifacts)} file(s)) into agent at {destination}"
         )
-        return await stage_files_into_container(sandbox, file_artifacts, destination)
+        return await stage_files_into_container(sandbox, file_artifacts, destination, container, on_host=on_host)
 
     def __init__(
         self,
@@ -343,6 +397,18 @@ class A2AAgent:
         return cls.put(id=ctx.id, docker_image_artifact=ctx.artifact(fields["image"], DockerImageArtifact),
                        default_env_vars=fields.get("default_env_vars"), metadata=fields.get("metadata"))
 
+    def to_toml(self, out: ExportContext) -> dict[str, Any]:
+        """The agent.toml of a folder this agent is built from, which ``from_toml`` reads back as it."""
+        metadata = {key: value for key, value in self.metadata.items()
+                    if key in self.toml_metadata and self._fits_toml_metadata(key, value)}
+        if dropped := sorted(set(self.metadata) - set(metadata)):
+            out.left_out("metadata", f"an agent.toml's [metadata] takes only {self._toml_metadata_keys()}, not "
+                                     f"{', '.join(dropped)}")
+        toml: dict[str, Any] = {"image": out.image(self.docker_image_artifact)}
+        if self.default_env_vars:
+            toml["default_env_vars"] = dict(self.default_env_vars)
+        return {**toml, **({"metadata": metadata} if metadata else {})}
+
     @classmethod
     def accept_toml(cls, data: dict[str, Any], ctx: AuthoringContext) -> dict[str, Any]:
         """The keys of ``data``, an agent.toml, that an agent takes, each checked the way ``from_toml``
@@ -353,20 +419,56 @@ class A2AAgent:
         for name, value in fields.get("metadata", {}).items():
             if name not in cls.toml_metadata:
                 values.append(f"unknown [metadata] key {name!r}; an agent's [metadata] takes "
-                              f"{' and '.join(cls.toml_metadata)}")
+                              f"{cls._toml_metadata_keys()}")
                 continue
-            kinds, described = cls.toml_metadata[name]
-            if isinstance(value, bool) or not isinstance(value, kinds):
-                values.append(f"metadata.{name} must be {described}, not {value!r}")
+            if not cls._fits_toml_metadata(name, value):
+                values.append(f"metadata.{name} must be {cls.toml_metadata[name][1]}, not {value!r}")
         problems += [ctx.config_problem(problem) for problem in values]
         if problems:
             ctx.refuse(problems)
         return fields
 
     @classmethod
+    def _toml_metadata_keys(cls) -> str:
+        *rest, last = cls.toml_metadata
+        return f"{', '.join(rest)} and {last}"
+
+    @classmethod
+    def _fits_toml_metadata(cls, name: str, value: Any) -> bool:
+        """A bool is an int to ``isinstance``, so it fits only a key that takes one."""
+        kinds = cls.toml_metadata[name][0]
+        return isinstance(value, kinds) and (bool in kinds or not isinstance(value, bool))
+
+    @classmethod
     def get(cls, id: str, version: Optional[int] = None) -> A2AAgent:
+        """The agent ``id`` names: the store's agent of that id, else the agent an installed bundle gives the alias
+        ``id``, which the store holds once a run of a bundle has used it. An alias takes no version, and a version the
+        store's agent of that id lacks is missing. Raises NotFoundError."""
         from .store import get_a2a_agent_store
-        return get_a2a_agent_store().get(id, version)
+        store = get_a2a_agent_store()
+        try:
+            return store.get(id, version)
+        except NotFoundError:
+            if not isinstance(id, str) or id.startswith("@") or "/" in id:  # neither an alias nor close to one
+                raise
+            aliases = installed_aliases()
+            named, refusal = aliases.target(id), aliases.refusal(id)
+            if named is None and refusal is None:
+                if version is None and (hint := aliases.hint(id)):
+                    raise NotFoundError(f"there is no agent {id!r} in the store{hint}") from None
+                raise
+            if version is not None and _holds(store, id):
+                raise
+            if named is None:
+                raise NotFoundError(refusal) from None
+            if version is not None:
+                raise NotFoundError(f"{id!r} is an alias of {named.target_id}, which comes with "
+                                    f"{named.declared_by}, so it has no fixed version; drop the pin") from None
+        try:
+            return store.get(named.target_id)
+        except NotFoundError:
+            raise NotFoundError(f"{id!r} is an alias of {named.target_id}, which comes with {named.declared_by} and "
+                                "isn't in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
 
     @classmethod
     def put(cls, **kwargs) -> A2AAgent:
@@ -380,7 +482,9 @@ class A2AAgent:
         from .store import A2AAgentQuery, get_a2a_agent_store
         return A2AAgentQuery(get_a2a_agent_store())
 
-    VALIDATION_ENV_ID: ClassVar[str] = "multi-caf64d"
+    # The env validate gives the agent it checks: the alias of the mail-mcp example's env, which validate writes when
+    # the store has no env of that id.
+    VALIDATION_ENV_ID: ClassVar[str] = "mail"
 
     def update_metadata(self, new_metadata: dict[str, Any]) -> None:
         """Replace this agent's metadata in the database using compare-and-swap."""
@@ -409,7 +513,6 @@ class A2AAgent:
         attribution: Optional[Attribution] = None,
     ) -> DeployedA2AAgent:
         from agent_env.providers.sandbox_providers.sandbox_provider import (
-            SANDBOX_MODE_VM,
             build_sandbox_provider,
             get_agent_sandbox_provider,
         )
@@ -422,30 +525,26 @@ class A2AAgent:
         provider = None if sandbox is not None else (
             build_sandbox_provider(sandbox_type) if sandbox_type else get_agent_sandbox_provider()
         )
-        resolved_env = dict(env_vars) if env_vars else {}
-        if "LITELLM_API_KEY" not in resolved_env and "LITELLM_API_KEY" not in self.default_env_vars:
-            resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
-        if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
-            resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
-        if "LITELLM_BASE_URL" in resolved_env and isinstance(provider or sandbox, (LocalSandboxProvider, LocalSandbox)):
-            resolved_env["LITELLM_BASE_URL"] = LocalSandboxProvider.get_external_url(resolved_env["LITELLM_BASE_URL"])
+        resolved_env = self._with_model_credentials(env_vars or {}, config)
+        if "LITELLM_BASE_URL" in resolved_env:
+            resolved_env["LITELLM_BASE_URL"] = (provider or sandbox).url_from_sandbox(resolved_env["LITELLM_BASE_URL"])
 
         merged_env = await asyncio.to_thread(self._build_merged_env, resolved_env, a2a_port)
-        image_name = self.docker_image_artifact.image_name
-        if problem := self.docker_image_artifact.by_name_problem():
-            if provider is None and sandbox.mode != SANDBOX_MODE_VM:
+        image = self.docker_image_artifact
+        image_name = image.image_name
+        if provider is None:
+            # A container sandbox pulls nothing, so only an image that has to be built can't be what it runs.
+            if sandbox.mode != SANDBOX_MODE_VM and image.context_only:
                 raise ValueError(f"Can't deploy agent {self.id!r} on the container sandbox {sandbox.sandbox_id!r}, which "
-                                 f"runs its own image, never the agent's: {problem}")
-            links = provider.providers if isinstance(provider, ChainedSandboxProvider) else [provider] if provider else []
-            if by_name := [link for link in links if isinstance(link, LocalSandboxProvider)]:
-                raise ValueError(f"Can't deploy agent {self.id!r} with {type(by_name[0]).__name__}, which runs an "
-                                 f"agent's image by name: {problem}")
+                                 f"runs its own image, never the agent's: {image.id!r} v{image.version} is only a build "
+                                 "context, which has to be built, not pulled")
+        else:
+            provider = skip_refusing(provider, functools.partial(self._refusal, image), what=f"agent {self.id!r}")
 
         try:
             if provider is not None:
                 logger.info(f"Provisioning sandbox for A2A agent '{self.id}' via {type(provider).__name__}...")
-                if self.docker_image_artifact.context_only:
-                    await provider.prepare_image(self.docker_image_artifact, attribution=attribution)
+                await provider.prepare_image(self.docker_image_artifact, attribution=attribution)
                 self._sandbox = await provider.create_sandbox(
                     image_name=image_name, port=a2a_port, env=merged_env,
                     cpu=cpu, memory=memory, disk_size_gb=disk_size_gb, timeout=ttl_seconds,
@@ -454,6 +553,8 @@ class A2AAgent:
                 )
                 self._owns_sandbox = True
                 logger.info(f"Sandbox created: {self._sandbox.sandbox_id} (mode={self._sandbox.mode})")
+                if problem := provider.sandbox_problem(self._sandbox, image):
+                    raise ValueError(problem)
             else:
                 if network_policy is not None and network_policy.restricts_egress:
                     raise NetworkPolicyUnsupportedError(
@@ -497,12 +598,37 @@ class A2AAgent:
             await self.close()
             raise
 
+    def _refusal(self, image: DockerImageArtifact, link: SandboxProvider) -> str | None:
+        """Why ``link`` can't run ``image`` as this agent's own sandbox, as a clause on its name, or None when it can."""
+        accepts = self.accepts(link)
+        if problem := accepts.problem(image, on_this_machine=link.ON_THIS_MACHINE):
+            how = "whose VMs can't run it" if accepts is Accepts.LOADABLE else "which runs an agent's image by name"
+            return f"{how}: {problem}"
+        return None
+
+    def _with_model_credentials(self, env_vars: dict[str, str], config) -> dict[str, str]:
+        """``env_vars`` with the model endpoint, key and headers each taken from config when neither they nor
+        ``default_env_vars`` set it; for an agent that takes no credentials, with none of them, whatever set them."""
+        if not self.metadata.get(TAKES_CREDENTIALS, True):
+            return {name: value for name, value in env_vars.items() if name not in MODEL_CREDENTIALS_ENV}
+        resolved_env = dict(env_vars)
+        if "LITELLM_API_KEY" not in resolved_env and "LITELLM_API_KEY" not in self.default_env_vars:
+            resolved_env["LITELLM_API_KEY"] = config.get_litellm_api_key()
+        if "LITELLM_BASE_URL" not in resolved_env and "LITELLM_BASE_URL" not in self.default_env_vars:
+            resolved_env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
+        if MODEL_HEADERS_ENV not in resolved_env and MODEL_HEADERS_ENV not in self.default_env_vars:
+            headers = config.get_model_headers(
+                resolved_env.get("LITELLM_BASE_URL", self.default_env_vars.get("LITELLM_BASE_URL")))
+            if headers:
+                resolved_env[MODEL_HEADERS_ENV] = json.dumps(headers)
+        return resolved_env
+
     def _build_merged_env(self, resolved_env: dict[str, str], a2a_port: int) -> dict[str, str]:
         merged_env = dict(self.default_env_vars)
         merged_env.update(resolved_env)
         merged_env["A2A_PORT"] = str(a2a_port)
         shared = get_config().get_object_store().shared_credentials_env()
-        if shared.keys().isdisjoint(merged_env):
+        if self.metadata.get(TAKES_CREDENTIALS, True) and shared.keys().isdisjoint(merged_env):
             merged_env.update(shared)
 
         merged_env.update(all_sandbox_container_env())
@@ -521,7 +647,7 @@ class A2AAgent:
 
     async def _run_container(self, image_name: str, a2a_port: int, merged_env: dict[str, str], enable_docker: bool = False) -> None:
         # On a local VM sandbox the container runs on this host, so it is given the local CA as the provider's are.
-        trust_dir = await asyncio.to_thread(local_grant_trust) if isinstance(self._sandbox, LocalSandbox) else None
+        trust_dir = await asyncio.to_thread(local_grant_trust) if self._sandbox.ON_THIS_MACHINE else None
         agent_env = dict(merged_env) if trust_dir is None else {**LOCAL_TRUST_ENV, **merged_env}
         setup_script = ""
         network_flag = "".join(f"--add-host {entry} \\\n    " for entry in self._sandbox.extra_hosts)

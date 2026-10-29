@@ -2,3 +2,7 @@ agent-env
 Copyright 2026 Scale AI
 
 This product includes software developed at Scale AI (https://scale.com).
+
+The Daytona sandbox provider (src/agent_env/providers/sandbox_providers/daytona/) is adapted from
+agentenv-daytona by Daytona Platforms Inc. (https://github.com/daytona/integrations), licensed under the
+Apache License, Version 2.0.

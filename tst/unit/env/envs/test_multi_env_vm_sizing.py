@@ -18,11 +18,15 @@ import pytest
 
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
+from tst.util.sandbox_providers import mock_provider
 
 
 def _env(n_mcp: int = 0, n_web: int = 0) -> MultiEnv:
-    env = MultiEnv(id="e", version=1, mcp_server_envs=[MagicMock() for _ in range(n_mcp)])
-    env.website_envs = [MagicMock() for _ in range(n_web)]
+    env = MultiEnv(id="e", version=1, mcp_server_envs=[
+        MagicMock(environment_name=f"mcp{i}", **{"docker_image_artifact.image_name": f"mcp{i}"}) for i in range(n_mcp)])
+    env.website_envs = [MagicMock(environment_name=f"web{i}", **{"backend_docker_image_artifact.image_name": f"web{i}-be",
+                                                                 "frontend_docker_image_artifact.image_name": f"web{i}-fe"})
+                        for i in range(n_web)]
     return env
 
 
@@ -34,7 +38,7 @@ async def _deployed_kwargs(env: MultiEnv, **deploy_kwargs) -> dict:
     """
     with patch.object(EnvironmentGatewayProvider, "_deploy_gateway", AsyncMock()) as deploy_gateway, \
          patch("agent_env.env.env.Env.get"), \
-         patch("agent_env.providers.get_env_sandbox_provider", MagicMock()), \
+         patch("agent_env.providers.get_env_sandbox_provider", MagicMock(return_value=mock_provider())), \
          patch("agent_env.providers.env_state.acquire_state_for_deploy", AsyncMock(return_value=None)):
         try:
             await env.deploy(**deploy_kwargs)

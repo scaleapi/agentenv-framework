@@ -15,16 +15,19 @@ import stat
 import tomllib
 import unicodedata
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, NoReturn
 
-from agent_env.bundle._fs import Unreadable, fold, home, on_disk, os_reason, read_regular, show
-from agent_env.entity_refs import EntityKind
+from packaging.requirements import InvalidRequirement, Requirement
+
+from agent_env.bundle._fs import Unreadable, fold, home, on_disk, read_regular, show, with_article
+from agent_env.entity.refs import EntityKind
+from agent_env.plugins._bundles import AGENT_ALIASES, ALIASES_FILE, ARTIFACT_ALIASES, ENV_ALIASES, read_aliases
 from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, validate_local_id
-from agent_env.utils.paths import LEAVINGS
+from agent_env.utils.paths import LEAVINGS, os_reason
 
 BUNDLE_TOML = "bundle.toml"
 DOCKERFILE = "Dockerfile"
@@ -83,6 +86,11 @@ class Bundle:
     description: str | None  # README.md's first line of text
     entries: tuple[BundleEntry, ...]
     ignored: tuple[Path, ...]  # root-relative, as on disk: entries that are neither kinds nor entities
+    # The aliases its aliases.toml gives its agents and envs, by table and then folder name, which a reference names
+    # one by once the bundle is installed.
+    aliases: Mapping[str, Mapping[str, tuple[str, ...]]] = field(default_factory=dict)
+    # The plugin packages its bundle.toml requires, each a pip requirement; None when it has no bundle.toml.
+    requires: tuple[str, ...] | None = None
 
 
 class BundleError(ValueError):
@@ -122,6 +130,8 @@ class _Parser:
         self.name = name or unicodedata.normalize("NFC", root.name)
         self.problems: list[str] = []
         self.ignored: list[Path] = []
+        self.aliases_file: Path | None = None
+        self.bundle_toml: Path | None = None
         self.entry_point = id_root is not None
         self.root_ok = True
         if id_root is None:
@@ -139,6 +149,8 @@ class _Parser:
         kinds, description = self._scan_root()
         entries = [entry for kind, path in kinds.items() for entry in self._scan_kind(kind, path)]
         self._check_unique(entries)
+        aliases = self._aliases(entries)
+        requires = self._requires()
         if self.problems:
             raise BundleError(self.problems)
         entries.sort(key=lambda entry: (_ORDER[entry.kind], entry.name))
@@ -149,28 +161,80 @@ class _Parser:
             description=description,
             entries=tuple(entries),
             ignored=tuple(sorted(self.ignored)),
+            aliases=aliases,
+            requires=requires,
         )
 
+    def _aliases(self, entries: list[BundleEntry]) -> dict[str, dict[str, tuple[str, ...]]]:
+        """The aliases the bundle's aliases.toml gives its agents, envs and artifacts. Each names one the bundle has, of
+        its table's kind, by its folder name, so it keeps the id its folder gives it, and none is another one's name or
+        id."""
+        if self.aliases_file is None:
+            return {}
+        declared, problems = read_aliases(self.aliases_file)
+        for problem in problems:
+            self._problem(self.aliases_file, problem)
+        for table, kind, noun in ((AGENT_ALIASES, BundleKind.AGENT, "agent"), (ENV_ALIASES, BundleKind.ENV, "env"),
+                                  (ARTIFACT_ALIASES, BundleKind.ARTIFACT, "artifact")):
+            own = {entry.name: entry for entry in entries if entry.kind is kind}
+            taken = {key: entry for entry in own.values() for key in (entry.name, entry.id)}
+            for name, aliases in declared.get(table, {}).items():
+                entry = own.get(name)
+                if entry is None:
+                    self._problem(self.aliases_file, f"{table}.{name}: this bundle has no {noun} {name!r}")
+                    continue
+                if entry.id != f"{self.id_root}/{name}":
+                    self._problem(self.aliases_file, f"{table}.{name}: the {noun} declares the id {entry.id!r}, and an "
+                                  f"alias names {with_article(noun)} by its folder, so it must keep the id "
+                                  f"{self.id_root}/{name}")
+                for alias in aliases:
+                    if (other := taken.get(alias)) is not None and other is not entry:
+                        what = "name" if alias == other.name else "id"
+                        self._problem(self.aliases_file,
+                                      f"{table}.{name}: {alias!r} is the {noun} {other.name!r}'s {what}")
+        return declared
+
+    def _requires(self) -> tuple[str, ...] | None:
+        """The plugin packages the bundle's bundle.toml requires, each a pip requirement naming a package by name and
+        version, not by URL; None when it has no bundle.toml."""
+        if self.bundle_toml is None:
+            return None
+        try:
+            data = tomllib.loads(self.bundle_toml.read_text(encoding="utf-8"))
+        except OSError as e:
+            self._problem(self.bundle_toml, f"can't be read: {os_reason(e)}")
+            return ()
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            self._problem(self.bundle_toml, f"isn't valid TOML: {e}")
+            return ()
+        for key in sorted(data.keys() - {"requires"}):
+            self._problem(self.bundle_toml, f"{key!r} isn't a key it takes; it takes requires")
+        requires = data.get("requires", [])
+        if not isinstance(requires, list) or not all(isinstance(line, str) for line in requires):
+            self._problem(self.bundle_toml, 'requires must be a list of pip requirements, such as '
+                          '["agentenv-browser>=1.2"]')
+            return ()
+        for line in requires:
+            if not line.isprintable():
+                self._problem(self.bundle_toml, f"requires: {line!r} holds a character that can't be printed, so it "
+                              "can't be shown as written before it's installed")
+                continue
+            try:
+                requirement = Requirement(line)
+            except InvalidRequirement as e:
+                self._problem(self.bundle_toml, f"requires: {line!r} isn't a pip requirement: {e}")
+                continue
+            if requirement.url:
+                self._problem(self.bundle_toml, f"requires: {line!r} names a URL; name the package and the versions "
+                              "it needs, which install from wherever whoever runs the bundle installs from")
+        return tuple(requires)
+
     def _derive_id_root(self) -> str:
-        user_home = home()
-        home_relative = user_home is not None and self.root.is_relative_to(user_home)
-        if home_relative:
-            parts = ["~", *self.root.relative_to(user_home).parts]
-            above = user_home
-        else:
-            parts = list(self.root.parts[1:])
-            above = Path(self.root.anchor)
-            if parts[0] == "~":
-                self._problem(above / "~", "a folder named '~' at the filesystem root would read as home; "
-                              "move the bundle")
-                self.root_ok = False
-        for part in parts[1:] if home_relative else parts:
-            above = above / part
-            reason = _refused(part)
-            if reason:
-                self._problem(above, f"move the bundle, or rename the folder: {reason}")
-                self.root_ok = False
-        return LOCAL_PREFIX + "/".join(unicodedata.normalize("NFC", part) for part in parts)
+        id_root, problems = _id_root(self.root)
+        for path, message in problems:
+            self._problem(path, message)
+            self.root_ok = False
+        return id_root
 
     # Walking the tree
 
@@ -190,9 +254,22 @@ class _Parser:
         for entry in listing:
             if entry.name in misspelled:
                 continue
-            if fold(entry.name) == fold(BUNDLE_TOML):
-                self._problem(entry.path, "reserved: a bundle takes its name from the folder and its "
-                              "description from README.md")
+            if entry.name == BUNDLE_TOML:
+                node = self._node(Path(entry.path), entry)
+                if node == _FILE:
+                    self.bundle_toml = Path(entry.path)
+                elif node == _DIR:
+                    self._problem(entry.path, "must be a file, not a folder")
+            elif fold(entry.name) == fold(BUNDLE_TOML):
+                self._problem(entry.path, f"spell it {BUNDLE_TOML}, the file a bundle declares the plugins it needs in")
+            elif entry.name == ALIASES_FILE:
+                node = self._node(Path(entry.path), entry)
+                if node == _FILE:
+                    self.aliases_file = Path(entry.path)
+                elif node == _DIR:
+                    self._problem(entry.path, "must be a file, not a folder")
+            elif fold(entry.name) == fold(ALIASES_FILE):
+                self._problem(entry.path, f"spell it {ALIASES_FILE}, the file a bundle gives its agents' aliases in")
             elif entry.name in by_dir:
                 node = self._node(Path(entry.path), entry)
                 if node == _DIR:
@@ -299,7 +376,9 @@ class _Parser:
     def _artifact(self, name: str, path: Path) -> BundleEntry:
         children = self._children(path)
         config, config_path, declared = self._config(BundleKind.ARTIFACT, path, children)
-        if declared == "skill" or any(fold(child) == fold(SKILL_MD) for child in children):
+        # An image folder is a build context, which may hold a skill the image ships.
+        image = declared == "docker_image" if declared is not None else DOCKERFILE in children
+        if not image and (declared == "skill" or any(fold(child) == fold(SKILL_MD) for child in children)):
             self._skip(path, "this looks like a skill: skills live in skills/<name>/, not artifacts/")
         # A lone Dockerfile spelled another way decides nothing once a type is declared: then it's content.
         if (declared is None or DOCKERFILE in children) and self._near_miss(path, children, DOCKERFILE):
@@ -379,7 +458,7 @@ class _Parser:
         if declared is not None:
             self._check_declared(declared, declared_in or path, artifact=kind.store == "artifact")
             return declared
-        reason = _refused(name)
+        reason = segment_problem(name)
         if reason:
             self._skip(path, f"rename it: {reason}")
         # The root and the name are each validated, so only the length is left to check.
@@ -536,6 +615,34 @@ class _Parser:
         return show(text)
 
 
+def root_problems(root: Path) -> list[str]:
+    """Why a bundle at ``root``, which needn't exist yet, would have no id; empty when it would have one."""
+    parent = _canonical(Path(root).expanduser().parent)
+    return [f"{show(path)}: {message}" for path, message in _id_root(parent / Path(root).name)[1]]
+
+
+def _id_root(root: Path) -> tuple[str, list[tuple[Path, str]]]:
+    """The ``@local`` id root for the canonical path ``root``, and each part of it that can't be an id segment."""
+    problems = []
+    user_home = home()
+    home_relative = user_home is not None and root.is_relative_to(user_home)
+    if home_relative:
+        parts = ["~", *root.relative_to(user_home).parts]
+        above = user_home
+    else:
+        parts = list(root.parts[1:])
+        above = Path(root.anchor)
+        if parts[0] == "~":
+            problems.append((above / "~", "a folder named '~' at the filesystem root would read as home; "
+                             "move the bundle"))
+    for part in parts[1:] if home_relative else parts:
+        above = above / part
+        reason = segment_problem(part)
+        if reason:
+            problems.append((above, f"move the bundle, or rename the folder: {reason}"))
+    return LOCAL_PREFIX + "/".join(unicodedata.normalize("NFC", part) for part in parts), problems
+
+
 def _canonical(root: Path) -> Path:
     try:
         resolved = root.expanduser().resolve(strict=True)
@@ -550,7 +657,7 @@ def _canonical(root: Path) -> Path:
     return on_disk(resolved)
 
 
-def _refused(segment: str) -> str | None:
+def segment_problem(segment: str) -> str | None:
     """Why ``segment`` can't be one segment of an id, or None; the reason names the segment."""
     try:
         segment.encode("utf-8")

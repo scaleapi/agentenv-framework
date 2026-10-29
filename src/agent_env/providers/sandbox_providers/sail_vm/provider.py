@@ -289,6 +289,8 @@ class SailVmSandboxProvider(SandboxProvider):
             if injection is not None:
                 injection.hold(launch)
                 await sdk.Secret.set.aio(injection.secret, injection.key)
+                for secret, value in injection.header_secrets().items():
+                    await sdk.Secret.set.aio(secret, value)
                 egress = await create_saved_policy(sdk, policy_name(injection), egress_document(effective_policy, injection))
                 injection.policy_id = egress.id
             creating = True
@@ -374,7 +376,8 @@ class SailVmSandboxProvider(SandboxProvider):
         network_policy: NetworkPolicy | None = None,
     ) -> SailVmSandbox:
         """A bare VM the caller loads and starts ``image_name`` in, as on the other VM providers. A model key in
-        ``env`` is injected by Sail rather than passed in (unless ``inject_model_key`` is off)."""
+        ``env``, and the endpoint's headers, are injected by Sail rather than passed in (unless
+        ``inject_model_key`` is off)."""
         del image_name
         injection = ModelKeyInjection.for_env(env) if self._inject_model_key else None
         return await self._create(
@@ -406,9 +409,14 @@ class SailVmSandboxProvider(SandboxProvider):
         applied = getattr(raw, "egress_policy", None)
         injection = ModelKeyInjection.from_document(getattr(applied, "document", None), getattr(applied, "policy_id", None))
         if injection is not None:
+            config = get_config()
             try:
-                injection.recover_key(get_config().get_litellm_api_key())
+                injection.recover_key(config.get_litellm_api_key())
             except Exception:  # noqa: BLE001 - no configured key to recover; the handle just can't scrub it
+                pass
+            try:
+                injection.recover_headers(config.get_model_headers(config.get_litellm_base_url()))
+            except Exception:  # noqa: BLE001 - no configured headers to recover; the handle just can't scrub them
                 pass
         sandbox = SailVmSandbox(
             raw, sdk=sdk, tunnel_urls=tunnel_urls, network_policy=None, injection=injection,
@@ -421,3 +429,14 @@ class SailVmSandboxProvider(SandboxProvider):
                 sandbox_id, applied,
             )
         return sandbox
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Through the handle: terminating also deletes the Sailbox's model-key policy, which only its applied
+        policy names."""
+        sdk, _ = await self._connect()
+        try:
+            sandbox = await self.get_sandbox(sandbox_id)
+        except sdk.NotFoundError:
+            logger.info("Sailbox %s was already gone at terminate", sandbox_id)
+            return
+        await sandbox.terminate()

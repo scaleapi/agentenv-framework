@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.file import FileArtifact
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
 class FileArtifactUniverse(Universe):
@@ -90,10 +91,8 @@ class FileArtifactUniverse(Universe):
             get_config().check_object_url(id, bundle_object_url)
 
         store = get_artifact_store()
-        version = store.next_version(id)
         instance = cls(
             id=id,
-            version=version,
             file_artifact_refs={
                 fname: fa.as_ref() for fname, fa in file_artifacts.items()
             },
@@ -173,8 +172,24 @@ class FileArtifactUniverse(Universe):
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> "FileArtifactUniverse":
         """Write the folder's files, each a file artifact keyed by its path in the folder."""
-        ctx.accept(data, **cls.toml_keys)
+        cls.accept_toml(data, ctx)
         return cls.put_bundled(ctx.id, files=ctx.files())
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The artifact.toml of a folder holding each file at its path, which ``from_toml`` reads back as this."""
+        for path, file in self.get_file_artifacts().items():
+            out.file(path, file.object_url)
+        return {"type": self.type}
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an artifact.toml, a file universe takes, and its folder, which needs a file. Raises
+        BundleError listing every problem."""
+        problems = [ctx.no_files("files to write")] if ctx.try_files(empty_ok=True) == {} else []
+        fields, more = ctx.accepted(data, **cls.toml_keys)
+        if problems + more:
+            ctx.refuse(problems + more)
+        return fields
 
     @classmethod
     def put_existing(

@@ -10,11 +10,13 @@ caps it) for per-service headroom (which is capped).
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.envs.multi_env import _CORE_COUNT_PROBE, MultiEnv
 from agent_env.providers.env_providers import EnvironmentGatewayProvider
 from agent_env.providers.env_state import LocalPostgresStateProvider
 
@@ -46,6 +48,22 @@ def _env(nproc: str | None = "8", *, sandbox: bool = True):
 ])
 async def test_limit_scales_with_cores(cores, total, expected):
     assert await _env(cores)._load_concurrency_limit(total) == expected
+
+
+def _probe(path):
+    out = subprocess.run([shutil.which("bash"), "-c", _CORE_COUNT_PROBE], env={"PATH": path},
+                         capture_output=True, text=True, check=True).stdout
+    return int(out.strip())
+
+
+def test_the_core_count_probe_reads_this_hosts_cores():
+    assert _probe("/usr/bin:/bin") >= 1
+
+
+def test_the_core_count_probe_falls_back_to_getconf_without_nproc(tmp_path):
+    # macOS has no `nproc`; this stands in for it on any host.
+    (tmp_path / "getconf").symlink_to(shutil.which("getconf"))
+    assert _probe(str(tmp_path)) >= 1
 
 
 @pytest.mark.asyncio

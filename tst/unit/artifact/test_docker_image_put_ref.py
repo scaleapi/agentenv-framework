@@ -1,5 +1,6 @@
 """`DockerImageArtifact.put_ref` registers an image already in a registry: a document with no tar.gz, its tag pinned
-to a digest, refused when no sandbox elsewhere could pull it. The registry API is patched out."""
+to a digest, or, given its build context and the digest it's published under, its tag with the digest beside it and the
+context uploaded; refused when no sandbox elsewhere could pull it. The registry API is patched out."""
 
 import pytest
 
@@ -9,6 +10,7 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.store import ImageStore, OciRegistryImageStore, RegistryAuth
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing
+from agent_env.utils.docker.context import BuildContext
 
 DIGEST = "sha256:" + "c" * 64
 
@@ -31,8 +33,21 @@ def test_a_ref_is_registered_with_its_tag_pinned_and_no_tarball(local_stores, re
 
     stored = DockerImageArtifact.get("tool-image", image.version)
     assert (stored.version, stored.image_name, stored.tar_gz_object_url) == (1, f"ghcr.io/org/tool:v1@{DIGEST}", None)
-    assert stored.load_problem() is None
+    assert stored.load_problem(on_this_machine=False) is None
     assert DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:v1").version == 2
+
+
+@pytest.mark.parametrize("pinned, kept", [
+    ("ghcr.io/org/tool:v1@sha256:" + "a" * 64, True),
+    ("ghcr.io/org/tool:v2@sha256:" + "a" * 64, False),
+    ("ghcr.io/org/tool:v1", False),
+], ids=["same ref", "another tag", "no digest"])
+def test_a_pin_an_earlier_version_recorded_is_kept_only_when_it_pins_the_same_ref(local_stores, resolved, pinned, kept):
+    image = DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:v1",
+                                        earlier_pin=pinned)
+
+    assert image.image_name == (pinned if kept else f"ghcr.io/org/tool:v1@{DIGEST}")
+    assert resolved == ([] if kept else [("ghcr.io/org/tool:v1", None)])
 
 
 def test_the_configured_store_lends_its_credentials_only_for_its_own_registry(local_stores, resolved):
@@ -55,6 +70,16 @@ def test_the_configured_store_lends_its_credentials_only_for_its_own_registry(lo
 def test_a_name_without_its_registry_is_refused_before_any_request(local_stores, resolved):
     with pytest.raises(ValueError, match="'tool:v1' doesn't name its registry; spell it out, as in docker.io/library/tool:v1"):
         DockerImageArtifact.put_ref("tool-image", description="d", image_name="tool:v1")
+
+    assert resolved == []
+    with pytest.raises(NotFoundError):
+        DockerImageArtifact.get("tool-image")
+
+
+@pytest.mark.parametrize("ref", ["ghcr.io/org/tool:v1\n    privileged: true", "ghcr.io/org/to ol:v1", "ghcr.io/org/Tool:v1"])
+def test_a_name_that_isnt_an_image_reference_is_refused_before_any_request(local_stores, resolved, ref):
+    with pytest.raises(ValueError, match="isn't an image reference"):
+        DockerImageArtifact.put_ref("tool-image", description="d", image_name=ref)
 
     assert resolved == []
     with pytest.raises(NotFoundError):
@@ -86,4 +111,30 @@ def test_a_ref_the_registry_cant_serve_writes_nothing(local_stores, monkeypatch)
 
     with pytest.raises(ValueError, match="ghcr.io has no such image"):
         DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:v9")
+    assert get_artifact_store().next_version("tool-image") == 1
+
+
+def test_a_ref_given_its_build_context_runs_under_its_tag_pulled_by_the_digest_given(local_stores, resolved, tmp_path):
+    """So a sandbox that can't pull it builds it from the context, under the name its containers start from."""
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+
+    image = DockerImageArtifact.put_ref("tool-image", description="d", image_name="ghcr.io/org/tool:src-1",
+                                        image_digest=DIGEST, context_path=str(tmp_path), dockerfile_path="Dockerfile")
+
+    stored = DockerImageArtifact.get("tool-image", image.version)
+    assert (stored.image_name, stored.image_digest, stored.pinned_name) == (
+        "ghcr.io/org/tool:src-1", DIGEST, f"ghcr.io/org/tool:src-1@{DIGEST}")
+    assert stored.buildable and not stored.context_only and stored.tar_gz_object_url is None
+    assert stored.source_digest == BuildContext.of(tmp_path, tmp_path / "Dockerfile").source_digest(None)
+    assert get_artifact_store().get_object(stored.build_context_object_url)
+    assert stored.load_problem(on_this_machine=False) is None
+    assert resolved == []
+
+
+def test_a_ref_given_its_build_context_must_name_its_registry_too(local_stores, resolved, tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+
+    with pytest.raises(ValueError, match="'tool:src-1' doesn't name its registry"):
+        DockerImageArtifact.put_ref("tool-image", description="d", image_name="tool:src-1", image_digest=DIGEST,
+                                    context_path=str(tmp_path), dockerfile_path="Dockerfile")
     assert get_artifact_store().next_version("tool-image") == 1

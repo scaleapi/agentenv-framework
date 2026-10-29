@@ -77,7 +77,9 @@ def staged(monkeypatch):
     return seen
 
 
-def _context_with_agent(monkeypatch, sandbox) -> TaskStepContext:
+def _context_with_agent(
+    monkeypatch, sandbox, installed_container: str | None = None, on_host: bool = False,
+) -> TaskStepContext:
     async def _get_sandbox(sandbox_id):
         return sandbox
 
@@ -92,7 +94,7 @@ def _context_with_agent(monkeypatch, sandbox) -> TaskStepContext:
     ctx.deployed_agents = [
         DeployedAgent(
             agent_name="solver", api_url="http://agent", sandbox_id=sandbox.sandbox_id,
-            sandbox_type=sandbox.type,
+            sandbox_type=sandbox.type, installed_container=installed_container, on_host=on_host,
         )
     ]
     return ctx
@@ -137,8 +139,10 @@ async def test_vm_backed_agent_container_keeps_its_per_sandbox_name(
 
 
 @pytest.mark.asyncio
-async def test_plain_vm_agent_gets_the_default_container_name(
-    monkeypatch, artifact, staged
+@pytest.mark.parametrize("installed_in,on_host,expected", [
+    (None, False, "agent-api"), ("agent-api", False, "agent-api"), ("task", False, "task"), (None, True, None)])
+async def test_plain_vm_agent_gets_the_default_container_name_the_one_it_was_installed_in_or_its_host(
+    monkeypatch, artifact, staged, installed_in, on_host, expected
 ):
     class _Vm(VmSandbox):
         type = "platform_vm"
@@ -152,11 +156,11 @@ async def test_plain_vm_agent_gets_the_default_container_name(
         async def terminate(self) -> None:  # pragma: no cover - never called here
             pass
 
-    ctx = _context_with_agent(monkeypatch, _Vm())
+    ctx = _context_with_agent(monkeypatch, _Vm(), installed_in, on_host)
     step = LoadArtifactTaskStep(
         id="stage", version=None, agent_name="solver", artifact_id=ARTIFACT_ID,
     )
     await step.execute(ctx)
 
-    assert staged[0]["container"] == "agent-api"
+    assert staged[0]["container"] == expected
     assert staged[0]["destination"] == "/app/files"

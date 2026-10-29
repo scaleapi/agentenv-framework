@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import uuid
 from importlib.metadata import version as pkg_version
-from typing import TYPE_CHECKING, Callable, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 from agentenv_protocol import FilePart, client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifact
-from agent_env.artifact.artifacts.docker_image import GitHubBuildResult, ProgressCallback, refuse_local_github_build
-from agent_env.entity_refs import EntityRef
+from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
@@ -20,11 +21,13 @@ from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
     load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class,
 )
-from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
+from agent_env.env.gateway import GatewayMode
 from agent_env.attribution import Attribution
+from agent_env.utils.paths import validate_file_name
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
-    from agent_env.env.env import DeployedEnv
+    from agent_env.entity.export import ExportContext
+    from agent_env.env.env import DeployedEnv, LoadFileArtifactUniverseResult
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 
 logger = logging.getLogger(__name__)
@@ -110,6 +113,13 @@ class WebsiteEnv(Env):
                        frontend_docker_image_artifact=ctx.artifact(fields["frontend_image"], DockerImageArtifact),
                        environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"])
 
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a folder both of this env's images are built from, which ``from_toml`` reads back as it."""
+        return {"type": self.type, "environment_name": self.environment_name,
+                "backend_image": out.image(self.backend_docker_image_artifact, "backend_image"),
+                "frontend_image": out.image(self.frontend_docker_image_artifact, "frontend_image"),
+                **self.provider_toml(out, self.env_provider_type)}
+
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a website env takes, its environment_name read from the backend image's
@@ -124,8 +134,9 @@ class WebsiteEnv(Env):
             artifact_id=artifact_id, artifact_version=artifact_version,
         )
 
-    def deploy_refusal(self, **options) -> str | None:
-        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find."""
+    def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
+        """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
+        ``sandbox_type`` is deploy()'s own, which no provider takes."""
         return deploy_refusal(self, provider_or_class(self), options)
 
     @classmethod
@@ -179,17 +190,18 @@ class WebsiteEnv(Env):
     async def _copy_artifact_into_container(self, file_artifact) -> str:
         from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_SUFFIX, DOCKER_COMPOSE_PATH
         filename = file_artifact.filename
+        validate_file_name(filename)
         backend_service = f"{self.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}"
         # Random suffix so concurrent loads on a shared sandbox (parallel /load-universe,
         # MCP+website sharing a service_name, repeated loads) don't race on a shared path.
         vm_path = f"/tmp/_artifact_{self.environment_name}-{uuid.uuid4().hex[:8]}-{filename}"
         container_path = f"/tmp/data/{filename}"
-        compose = f"docker compose -f {DOCKER_COMPOSE_PATH}"
+        compose = f"docker compose -f {shlex.quote(DOCKER_COMPOSE_PATH)}"
 
         await self._sandbox.load_object_file(file_artifact.object_url, vm_path)
-        await self._sandbox.exec_script(f"{compose} exec -T {backend_service} mkdir -p /tmp/data")
-        await self._sandbox.exec_script(f"{compose} cp {vm_path} {backend_service}:{container_path}")
-        await self._sandbox.exec_script(f"rm -f {vm_path}")
+        await self._sandbox.exec_script(f"{compose} exec -T {shlex.quote(backend_service)} mkdir -p /tmp/data")
+        await self._sandbox.exec_script(f"{compose} cp {shlex.quote(vm_path)} {shlex.quote(f'{backend_service}:{container_path}')}")
+        await self._sandbox.exec_script(f"rm -f {shlex.quote(vm_path)}")
         return container_path
 
     async def _load_environment_artifact_legacy(self, file_artifact) -> None:

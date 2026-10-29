@@ -1,8 +1,8 @@
 """Human-in-the-loop review: pause the task until an operator continues or aborts.
 
-Registers an ``awaiting`` review and blocks (heartbeating to keep the activity
-alive) until the hub records a decision or the timeout elapses — continue returns
-normally, abort raises so downstream steps don't run. The wait holds no sandbox,
+Registers an ``awaiting`` review and blocks (beating ``context.heartbeat()`` so the
+runner keeps the step alive) until the hub records a decision or the timeout elapses —
+continue returns normally, abort raises so downstream steps don't run. The wait holds no sandbox,
 so place it after the agent's output is persisted and before ``collect_artifacts``
 (an abort then excludes the run's artifacts).
 """
@@ -113,12 +113,11 @@ class ReviewTaskStep(TaskStep):
         """Poll until decided (return the record) or the wall-clock deadline (raise TimeoutError)."""
         from agent_env.task_step.review_store import ABORT, CONTINUE
 
-        heartbeat = context.metadata.get("_heartbeat_fn")
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout_seconds  # wall-clock, so a non-positive interval can't spin forever
         interval = self.poll_interval_seconds if self.poll_interval_seconds > 0 else DEFAULT_POLL_INTERVAL_SECONDS
         while loop.time() < deadline:
-            self._beat(heartbeat)
+            context.heartbeat()
             record = store.get(context.instance_id, self.id) or {}
             if record.get("state") in (CONTINUE, ABORT):
                 return record
@@ -142,11 +141,3 @@ class ReviewTaskStep(TaskStep):
         raise ReviewAbortedError(
             f"review '{self.id}' aborted by operator" + (f" ({decided_by})" if decided_by else "")
         )
-
-    @staticmethod
-    def _beat(heartbeat) -> None:
-        if callable(heartbeat):
-            try:
-                heartbeat()
-            except Exception:  # best-effort; never fail the wait on it
-                pass

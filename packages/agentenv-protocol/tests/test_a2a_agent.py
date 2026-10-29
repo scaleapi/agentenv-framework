@@ -302,6 +302,23 @@ def test_trigger_engine_bounds_persistent_trigger_context_and_log_state() -> Non
         engine.decide(turn=1, context_id="x" * 257)
 
 
+def test_a_decision_where_nothing_fires_can_leave_no_trace() -> None:
+    engine = TriggerEngine()
+    engine.register({"triggers": [{
+        "id": "julia",
+        "when": {"type": "env_trigger", "env_id": "mail", "trigger_id": "school", "status": "fired"},
+        "actions": [{"type": "say", "text": "did you see it?"}],
+    }]})
+    fired = {"mail": {"school": "fired"}}
+
+    assert engine.decide(turn=1, record_unfired=False)["fired"] == []
+    assert engine.decide(turn=1, env_triggers=fired)["fired"] == ["julia"]
+    assert engine.decide(turn=2, env_triggers=fired, record_unfired=False)["fired"] == []
+    # Recorded, turn 2 would now repeat a turn and reset, firing the once-only trigger again.
+    assert engine.decide(turn=2, env_triggers=fired)["fired"] == []
+    assert [entry["kind"] for entry in engine.state()["firing_log"]] == ["registered", "fired"]
+
+
 def test_trigger_engine_bounds_retained_trigger_content() -> None:
     engine = TriggerEngine()
 

@@ -1,4 +1,3 @@
-import asyncio
 import importlib.util
 import subprocess
 import sys
@@ -126,73 +125,3 @@ def test_task_cli_stamp_client_metadata_noops_without_client_id(monkeypatch):
     task_run_module._stamp_agent_env_client_metadata(metadata, None)
 
     assert metadata == {}
-
-
-def test_eval_run_single_passes_client_metadata_to_task(monkeypatch):
-    task_step_package = types.ModuleType("agent_env.task_step")
-    task_step_package.__path__ = []
-    context_module = types.ModuleType("agent_env.task_step.context")
-
-    class FakeTaskStepContext:
-        def __init__(self, metadata=None):
-            self.metadata = metadata or {}
-
-    context_module.TaskStepContext = FakeTaskStepContext
-    task_package = types.ModuleType("agent_env.task")
-    task_package.__path__ = []
-    teardown_module = types.ModuleType("agent_env.task.teardown")
-    torn_down = []
-
-    async def teardown_run(context):
-        torn_down.append(context)
-        return teardown_module.TeardownReport()
-
-    teardown_module.TeardownReport = lambda: types.SimpleNamespace(terminated=(), failed=(), left=())
-    teardown_module.teardown_run = teardown_run
-    teardown_module.kind = lambda sandbox: sandbox.sandbox_type
-    interrupts_module = types.ModuleType("agent_env.task.interrupts")
-    interrupts_module.Interrupts = object
-    monkeypatch.setitem(sys.modules, "agent_env.task_step", task_step_package)
-    monkeypatch.setitem(sys.modules, "agent_env.task_step.context", context_module)
-    monkeypatch.setitem(sys.modules, "agent_env.task", task_package)
-    monkeypatch.setitem(sys.modules, "agent_env.task.teardown", teardown_module)
-    monkeypatch.setitem(sys.modules, "agent_env.task.interrupts", interrupts_module)
-    eval_run_module = _load_cli_run_module(
-        monkeypatch,
-        "src/agent_env/cli/eval/run.py",
-        "_agent_env_eval_run_under_test",
-    )
-
-    class FakeTask:
-        id = "fake-task"
-
-        def __init__(self):
-            self.context = None
-
-        async def run(self, **kwargs):
-            self.context = kwargs["context"]
-            return self.context
-
-    task = FakeTask()
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda args, **kwargs: _completed(args, stdout="Alex Dev\n"),
-    )
-
-    task_id, tag, context = asyncio.run(
-        eval_run_module._run_single(
-            task,
-            "[fake-task]",
-            None,
-            base_metadata={"agent_env_hub": {"caller": get_agent_env_client_id()}},
-        )
-    )
-
-    assert task_id == "fake-task"
-    assert tag == "[fake-task]"
-    assert context is task.context
-    assert context.metadata == {
-        "agent_env_hub": {"caller": "agent-env-cli/alex-dev"}
-    }
-    assert torn_down == [context]

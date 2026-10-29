@@ -7,8 +7,9 @@ step runs (ports are exposed via Modal encrypted_ports)."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import modal
 import pytest
 
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox, ModalVmSandboxProvider
@@ -385,3 +386,29 @@ async def test_host_file_writes_stay_under_modals_exec_command_limit():
         c[-1].split(" ", 2)[2].rsplit(" >> ", 1)[0].strip("'") for c in commands if c[-1].startswith("printf '%s' ")
     )
     assert appended == base64.b64encode(data).decode()
+
+
+@pytest.mark.asyncio
+async def test_apps_are_looked_up_in_the_configured_environment():
+    provider = ModalVmSandboxProvider(environment_name="rl-prod")
+    provider._get_client = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+    with patch("agent_env.providers.sandbox_providers.modal_vm_sandbox.modal.App.lookup") as lookup:
+        lookup.aio = AsyncMock(return_value=MagicMock())
+        await provider._get_app("agent-env-p")
+    assert lookup.aio.call_args.kwargs["environment_name"] == "rl-prod"
+
+
+@pytest.mark.parametrize("found", [True, False], ids=["live or finished", "gone"])
+@pytest.mark.asyncio
+async def test_terminate_sandbox_terminates_a_vm_by_id_and_counts_one_modal_no_longer_knows_as_gone(found):
+    provider = ModalVmSandboxProvider()
+    provider._get_client = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+    sb = MagicMock()
+    sb.terminate.aio = AsyncMock()
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.from_id") as from_id:
+        from_id.aio = (AsyncMock(return_value=sb) if found
+                       else AsyncMock(side_effect=modal.exception.NotFoundError("Sandbox not found")))
+        await provider.terminate_sandbox("sb-vm")
+
+    assert sb.terminate.aio.await_count == (1 if found else 0)
+    sb.tunnels.aio.assert_not_called()

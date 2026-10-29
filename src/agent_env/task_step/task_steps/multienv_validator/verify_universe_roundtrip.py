@@ -13,7 +13,7 @@ from agent_env.env.env_artifact_store import EnvArtifactType, get_env_artifact_s
 from agent_env.artifact.store import artifact_write_lock
 from agent_env.store.ids import derive_id, fs_safe, is_local_id
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 from .universe_comparison import classify_issues, compare_dicts, normalize

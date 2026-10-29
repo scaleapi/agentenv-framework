@@ -16,7 +16,7 @@ from agent_env.cli.utils import (
     resolve_environment_name,
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
 from agent_env.env import Env, MCPServerEnv
 from agent_env.store.ids import derive_id, image_repository
 
@@ -209,10 +209,10 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
                 sys.exit(1)
             click.echo(f"Derived environment_name={environment_name!r} from the environment card.")
         image_tag = image_repository(image_id)
-        click.echo(f"Building MCP server Docker image...")
+        click.echo("Building MCP server Docker image...")
         build_image(dockerfile_path, context, image_tag, platform=build_platform)
 
-        click.echo(f"Creating DockerImageArtifact...")
+        click.echo("Creating DockerImageArtifact...")
         artifact = DockerImageArtifact.put(
             id=image_id,
             description="Created from agent-env CLI",
@@ -227,7 +227,7 @@ def put(env_id: str, dockerfile: str | None, context_path: str | None, dockerfil
         report_dirs = [str(context), str(dockerfile_path.parent)]
     metadata.update(user_metadata)
 
-    click.echo(f"Creating MCPServerEnv...")
+    click.echo("Creating MCPServerEnv...")
     env = MCPServerEnv.put(
         id=env_id,
         docker_image_artifact=artifact,

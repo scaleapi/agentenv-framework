@@ -11,7 +11,7 @@ import logging
 from typing import Optional
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep
 
 logger = logging.getLogger(__name__)

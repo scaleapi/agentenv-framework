@@ -3,8 +3,6 @@
 import asyncio
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities import (
     VerifyA2AModalitiesStep,
