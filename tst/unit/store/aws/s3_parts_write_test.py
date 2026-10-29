@@ -190,9 +190,23 @@ def test_grants_are_signed_against_the_buckets_region(s3, bucket, host):
     assert urlsplit(store.issue_read_grant(f"s3://{bucket}/k.zip", expires_in=900).url).netloc == host
 
 
-@pytest.mark.parametrize("endpoint", ["http://minio:9000", "https://s3.example.internal"])
-def test_an_s3_compatible_endpoint_is_addressed_by_path(s3, monkeypatch, endpoint):
+@pytest.mark.parametrize("endpoint", [
+    "http://minio:9000",
+    "https://s3.example.internal",
+    "https://bucket.vpce-0123-abcd.s3.us-east-1.vpce.amazonaws.com",
+], ids=["s3-compatible", "s3-compatible-https", "privatelink"])
+def test_a_configured_endpoint_is_addressed_by_path(s3, monkeypatch, endpoint):
     monkeypatch.setenv("AWS_ENDPOINT_URL_S3", endpoint)
     store = S3ObjectStore.from_config(bucket=BUCKET, region="us-west-2")
     signed = urlsplit(store.signed_get_url(f"s3://{BUCKET}/k.zip", expires_in=900))
     assert f"{signed.scheme}://{signed.netloc}{signed.path}" == f"{endpoint}/{BUCKET}/k.zip"
+
+
+def test_an_addressing_style_the_aws_profile_sets_is_kept(s3, monkeypatch, tmp_path):
+    (tmp_path / "config").write_text("[default]\ns3 =\n  addressing_style = path\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
+    store = S3ObjectStore.from_config(bucket=BUCKET, region="us-west-2")
+    assert urlsplit(store.issue_read_grant(f"s3://{BUCKET}/k.zip", expires_in=900).url)[1:3] == (
+        "s3.us-west-2.amazonaws.com", f"/{BUCKET}/k.zip")

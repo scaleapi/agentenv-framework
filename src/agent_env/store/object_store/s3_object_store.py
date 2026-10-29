@@ -101,13 +101,13 @@ class S3ObjectStore(ObjectStore):
             max_pool_connections=_MAX_POOL_CONNECTIONS,
         )
         kwargs = {"region_name": region} if region else {}
-        # On AWS, virtual-hosted URLs name the bucket's region, so grants work on a bucket created less than a day ago,
-        # which answers the global endpoint with a redirect; a dotted name can't be a host. An S3-compatible endpoint
-        # set in AWS's place is addressed as boto3 addresses it by default.
-        addressing = BotocoreConfig(s3={"addressing_style": "path" if "." in bucket else "virtual"})
-        client = boto3.client("s3", config=config.merge(addressing), **kwargs)
-        if not _on_aws(client):
-            client = boto3.client("s3", config=config, **kwargs)
+        client = boto3.client("s3", config=config, **kwargs)
+        # On AWS's own S3 hosts, virtual-hosted URLs name the bucket's region, so grants work on a bucket created less
+        # than a day ago, which answers the global endpoint with a redirect; a dotted name can't be a host. An endpoint
+        # configured in their place, or an addressing style the AWS profile sets, is left as boto3 resolves it.
+        if _addressed_by_default_on_aws(client):
+            addressing = BotocoreConfig(s3={"addressing_style": "path" if "." in bucket else "virtual"})
+            client = boto3.client("s3", config=config.merge(addressing), **kwargs)
         return cls(
             client, bucket, region=region, share_credentials=share_credentials,
             grant_lifetime_seconds=grant_lifetime_seconds,
@@ -475,11 +475,15 @@ class _S3PartsWrite(PendingWrite):
         _abort_quietly(self._s3, self._bucket, self._key, self._upload_id)
 
 
-def _on_aws(client) -> bool:
-    """Whether ``client`` sends to AWS itself, not to an S3-compatible endpoint configured in its place."""
-    endpoint = getattr(getattr(client, "meta", None), "endpoint_url", None)
+def _addressed_by_default_on_aws(client) -> bool:
+    """Whether ``client`` sends to one of AWS's own S3 hosts, not an endpoint configured in their place (an
+    S3-compatible store, a PrivateLink endpoint), with no addressing style configured."""
+    meta = getattr(client, "meta", None)
+    endpoint = getattr(meta, "endpoint_url", None)
     host = urlsplit(endpoint).hostname if isinstance(endpoint, str) else None
-    return bool(host) and host.endswith((".amazonaws.com", ".amazonaws.com.cn"))
+    configured = (getattr(getattr(meta, "config", None), "s3", None) or {}).get("addressing_style")
+    return (configured is None and host is not None and host.startswith(("s3.", "s3-"))
+            and host.endswith((".amazonaws.com", ".amazonaws.com.cn")))
 
 
 def _code(e: ClientError | BotoCoreError) -> str:
