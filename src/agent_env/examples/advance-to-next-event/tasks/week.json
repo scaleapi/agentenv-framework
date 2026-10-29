@@ -1,0 +1,24 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "@local/agentenv-framework/next-env-event/inbox", "sandbox_type": "local"},
+  {"id": "clock", "type": "sync_env_clock", "env_id": "@local/agentenv-framework/next-env-event/inbox",
+   "virtual_time": "2026-03-02T08:00:00Z", "virtual_seconds_per_real_second": 0},
+  {"id": "checks", "type": "configure_scheduled_checks", "env_id": "@local/agentenv-framework/next-env-event/inbox",
+   "roles": ["default"]},
+  {"id": "mail", "type": "register_env_triggers", "env_id": "@local/agentenv-framework/next-env-event/inbox",
+   "watch_roles": ["default"], "triggers": [
+    {"id": "school-pickup", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
+     "actions": [{"type": "tool", "tool": "deliver_email", "args": {"sender": "office@school.example",
+       "subject": "Thursday pick-up", "body": "Pick-up moves to 15:00 on Thursday. Please reply to confirm."}},
+      {"type": "notify", "channel": "Mail", "text": "office@school.example: Thursday pick-up"}]},
+    {"id": "dentist", "when": {"type": "time", "at": "P3DT6H"},
+     "actions": [{"type": "tool", "tool": "deliver_email", "args": {"sender": "desk@dentist.example",
+       "subject": "Your appointment", "body": "Your check-up is moved to Friday at 10:00. Reply if that doesn't work."}}]}
+  ]},
+  {"id": "agent", "type": "deploy_agent", "env_ids": ["@local/agentenv-framework/next-env-event/inbox"]},
+  {"id": "week", "type": "prompt_agent", "max_conversation_turns": 8, "time_zone": "Europe/London",
+   "prompt": "You look after my inbox this week. Mail from the school alerts you; nothing else does, so check the inbox yourself when it makes sense. Answer what needs an answer, and tell me in one line what you did.",
+   "post_turn_hooks": [{"file_artifact_id": "advance-to-next-event",
+                        "params": {"end_time": "P5D", "time_zone": "Europe/London",
+                                   "person_messages": [{"at": "2026-03-04T18:00:00Z",
+                                                        "text": "Anything from the dentist yet?"}]}}]}
+]

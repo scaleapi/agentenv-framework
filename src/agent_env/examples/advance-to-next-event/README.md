@@ -34,6 +34,9 @@ lines show:
                       "params": {"end_time": "P5D", "time_zone": "America/Los_Angeles"}}]}
 ```
 
+`tasks/week.json` runs it on `next-env-event`'s inbox: a school email that alerts the agent, a dentist email
+that doesn't, and a message from the person midweek.
+
 Its params, all optional:
 
 - `end_time`: an RFC 3339 instant with an offset, or an ISO 8601 duration from the clock's t0 (`P5D`).
