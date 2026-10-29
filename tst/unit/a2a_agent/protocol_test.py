@@ -340,6 +340,18 @@ async def test_a_poll_woken_for_its_task_asks_at_once_and_again_until_it_shows_a
 
 
 @pytest.mark.asyncio
+async def test_a_wake_before_the_poll_begins_has_it_ask_at_once(monkeypatch):
+    client = httpx.AsyncClient
+    monkeypatch.setattr(protocol.httpx, "AsyncClient",
+                        lambda **kw: client(transport=httpx.MockTransport(lambda request: _task("completed")), **kw))
+
+    wake_poll("t-1")
+
+    assert (await asyncio.wait_for(poll_a2a_task("http://agent", "t-1", 600, 60), 1))["status"]["state"] == "completed"
+    assert "t-1" not in protocol._polls
+
+
+@pytest.mark.asyncio
 async def test_without_a_sandbox_a_silent_agent_is_waited_on_until_the_timeout(monkeypatch):
     agent = _Agent(monkeypatch, lambda method, request, agent: _refused(request, agent))
 

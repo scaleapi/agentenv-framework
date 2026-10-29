@@ -26,9 +26,9 @@ _UNREACHABLE_MIN_POLLS = 3
 # What a proxy in front of the agent answers when it can't reach it; any other status is the agent answering.
 _GATEWAY_STATUSES = frozenset({502, 503, 504})
 _CANCEL_TIMEOUT_SECONDS = 10
-# The A2A tasks ``poll_a2a_task`` is polling in this process, each with the event ``wake_poll`` sets. A task its waker
-# just ended can show as working for a moment longer, so a woken poll asks again every _WOKEN_POLL_SECONDS for up to
-# _WOKEN_FOR_SECONDS before going back to its interval.
+# The A2A tasks ``poll_a2a_task`` is polling in this process, or that ``wake_poll`` woke before their poll began, each
+# with the event ``wake_poll`` sets. A task its waker just ended can show as working for a moment longer, so a woken
+# poll asks again every _WOKEN_POLL_SECONDS for up to _WOKEN_FOR_SECONDS before going back to its interval.
 _polls: dict[str, asyncio.Event] = {}
 _WOKEN_POLL_SECONDS = 0.05
 _WOKEN_FOR_SECONDS = 2.0
@@ -164,7 +164,7 @@ async def poll_a2a_task(
     ``AgentUnreachableError``, naming it, once the agent has gone UNREACHABLE_AFTER_SECONDS without answering,
     rather than waiting out the timeout. Either way it first asks the agent to cancel the task, so an agent still
     working on it stops."""
-    _polls[task_id] = woken = asyncio.Event()
+    woken = _polls.setdefault(task_id, asyncio.Event())
     try:
         return await _poll(a2a_url, task_id, timeout_seconds, poll_interval_seconds, sandbox_id, woken)
     finally:
@@ -173,10 +173,9 @@ async def poll_a2a_task(
 
 
 def wake_poll(task_id: str) -> None:
-    """Have this process's poll of ``task_id``, if any, ask for its state now: for whoever just ended the task here,
-    as an episode ending a turn its proxy holds does, so the step waiting on it goes on without a poll interval."""
-    if (woken := _polls.get(task_id)) is not None:
-        woken.set()
+    """Have this process's poll of ``task_id`` ask for its state now, or as it begins: for whoever just ended the task
+    here, as an episode ending a turn its proxy holds does, so the step waiting on it goes on without a poll interval."""
+    _polls.setdefault(task_id, asyncio.Event()).set()
 
 
 async def _poll(
