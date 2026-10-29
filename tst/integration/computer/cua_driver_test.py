@@ -2,7 +2,7 @@
 an image for each arch this machine's Docker builds, gate 3 makes this machine's ready at full with cua-driver's own tools
 beside the computer_* tools; deployed, an agent's session drives Thunar by element token through cua-driver's tools,
 computer-ready reports the pinned cua-driver, and the skill leads with cua-driver's own pack. Needs Docker and the local
-registry on localhost:5000. It runs cua-driver, so it runs on the Linux test VMs."""
+registry on localhost:5000."""
 
 import asyncio
 import json

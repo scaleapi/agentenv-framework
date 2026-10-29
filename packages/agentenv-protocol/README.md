@@ -240,6 +240,16 @@ at the gateway.
 
 Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
 
+### Tools served on another server's behalf
+
+An environment can serve tools another server defines, each with that server's own schema:
+`forwarded_tools()` returns `ForwardedTool(tool, call, annotations)` entries, where `tool` is an
+`EnvironmentTool` carrying the other server's `inputSchema`, and `call` takes the call's arguments
+as keywords, untouched, and returns that server's `CallToolResult`, which reaches the caller as it
+is. They're listed on the card beside the `@tool` methods, chosen by `served_tools` and under tool
+access like them; one named like another tool is refused. They need mcp's FastMCP. The cua-driver
+driver serves cua-driver's own tools this way.
+
 ### Getting part of the data
 
 A `@get_data` handler that takes a `paths` parameter returns only the data under the paths a caller
@@ -262,9 +272,11 @@ def guide(self):
 The card then declares `urn:agentenv:skill/v1` (`SKILL_EXTENSION_URI`), whose `get {name}`
 answers `{name, description, skill_md}`, the shape `skill-config/v1` takes, with the frontmatter
 written under the name the caller gives; a name that isn't lowercase letters, digits and single
-hyphens, up to 64, is refused `invalid_argument`. agent-env's `add_skills` step installs it on
-an agent through `env_ids`, named after the env's environment name; for an env behind a gateway,
-whose card nests its servers' cards, it installs each server's skill under that server's name.
+hyphens, up to 64, is refused `invalid_argument`. A skill with other files beside its SKILL.md
+returns them as a third value, `{relative path: text}`, and `get` answers them as `files`.
+agent-env's `add_skills` step installs it on an agent through `env_ids`, named after the env's
+environment name, a skill with files as a bundle of them; for an env behind a gateway, whose card
+nests its servers' cards, it installs each server's skill under that server's name.
 
 ### Uploading an export through a grant
 
@@ -426,7 +438,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
   the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
-  class's `notes`, markdown for what its card can't say.
+  class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
+  its own returns it from `bundled_skill()` (its description, body and other files), and the
+  computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
   capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
   own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
