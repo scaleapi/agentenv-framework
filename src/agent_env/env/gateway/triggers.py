@@ -23,7 +23,7 @@ import httpx
 from mcp.types import CallToolResult, TextContent
 
 from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339, _zone
-from .notifications import validate_channel
+from .notifications import validate_channel, validate_recipient
 from .caller import Caller
 from .constants import DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
 
@@ -745,6 +745,8 @@ class TriggerEngine:
             raise TriggerError(f"{w}: 'executor' is only valid on nl actions")
         if "verify" in action and atype == "notify":
             raise TriggerError(f"{w}: a notify action has nothing to verify")
+        if "to" in action and atype != "notify":
+            raise TriggerError(f"{w}: 'to' is only valid on notify actions")
         if action.get("delay") is None:
             action.pop("delay", None)
         else:
@@ -767,6 +769,8 @@ class TriggerEngine:
         elif atype == "notify":
             try:
                 validate_channel(action.get("channel"), w)
+                if "to" in action:  # the recipient role; the solver's (default) when absent
+                    validate_recipient(action["to"], w)
             except ValueError as e:
                 raise TriggerError(str(e))
             if not isinstance(action.get("text"), str) or not action["text"].strip():
@@ -1379,9 +1383,11 @@ class TriggerEngine:
                 except TemplateError as e:
                     self._emit("action_failed", tid, action_index=index, detail=str(e)[:300])
                     return False
-                note = self._gw._notifications.notify(action["channel"], str(text), trigger_id=tid)
+                note = self._gw._notifications.notify(action["channel"], str(text), trigger_id=tid,
+                                                      to=action.get("to", DEFAULT_ROLE).strip())
                 # the text may carry what a person wrote, so the log keeps its size, not its words
-                detail = {"notify": action["channel"], "notification_id": note["id"], "text_len": len(str(text))}
+                detail = {"notify": action["channel"], "to": note["to"], "notification_id": note["id"],
+                          "text_len": len(str(text))}
             else:
                 if not await self._run_nl(tid, trig, index, action, ctx):
                     return False

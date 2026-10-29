@@ -346,7 +346,10 @@ class Gateway:
 
         @self._mcp.custom_route("/notifications/state", methods=["GET"])
         async def notifications_state(request: Request) -> Response:
-            return self._json_response(self._notifications.state(), 200)
+            try:  # ?to=<role> for one recipient's; every recipient's without it
+                return self._json_response(self._notifications.state(request.query_params.get("to")), 200)
+            except NotificationError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
 
         @self._mcp.custom_route("/notifications/take", methods=["POST"])
         async def notifications_take(request: Request) -> Response:
@@ -468,7 +471,10 @@ class Gateway:
 
     def _is_disabled(self, role: str, name: str) -> bool:
         """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False.
-        A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden."""
+        A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden.
+        The scheduled-check tools exist only for the roles the notifications config names, whatever the rules say."""
+        if name in CHECK_TOOL_NAMES and name not in self._tool_server_urls and role not in self._notifications.roles:
+            return True
         hidden = name in self._hidden_by_default
         for r in (role, WILDCARD):
             rules = self._role_rules.get(r, {})
@@ -1130,7 +1136,12 @@ class Gateway:
         })
         try:
             async with self._tool_call_guard():
-                result = await tool.run(arguments)
+                # bound as the MCP path binds it, so a tool that acts for its caller (schedule_check) reads the role
+                token = Caller(role=role, session=Caller.current().session).bind()
+                try:
+                    result = await tool.run(arguments)
+                finally:
+                    Caller.reset(token)
                 changelog_id = self._query_changelog_id()
             if isinstance(result, CallToolResult):
                 response_data = result.model_dump(mode="json", exclude_none=True)

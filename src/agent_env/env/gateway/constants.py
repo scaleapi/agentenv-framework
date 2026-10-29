@@ -249,14 +249,15 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_NOTIFICATIONS_URI,
-        "description": "Notifications (urn:agentenv:notifications/v1): what comes due for an agent between its turns, on the virtual clock: checks it scheduled for itself (schedule_check, which config turns on) and notifications triggers sent it (the notify action). state says when the next is due; take hands out each due one once (harness control path). Unrelated to A2A push notifications.",
+        "description": "Notifications (urn:agentenv:notifications/v1): what comes due for a role between its turns, on the virtual clock, each for one recipient (`to`): checks a role scheduled for itself (schedule_check, which only the roles config names see) and notifications triggers sent (the notify action, to the default role unless it names another). state says when the next is due; take hands a recipient each due one once (harness control path). Unrelated to A2A push notifications.",
         "params": {"endpoint": "/notifications/state", "methods": {
             "config": {"method": "POST", "endpoint": "/notifications/config", "request": {"type": "object", "properties": {
-                "scheduled_checks": {"type": "boolean"}, "max_active": {"type": "integer", "minimum": 1},
+                "roles": {"type": "array", "items": {"type": "string"}}, "max_active": {"type": "integer", "minimum": 1},
                 "min_interval": {"type": "string"}}}},
-            "state": {"method": "GET", "endpoint": "/notifications/state", "request": {"type": "object", "properties": {}}},
+            "state": {"method": "GET", "endpoint": "/notifications/state", "request": {"type": "object", "properties": {
+                "to": {"type": "string"}}}},
             "take": {"method": "POST", "endpoint": "/notifications/take", "request": {"type": "object", "properties": {
-                "until": {"type": "string"}}}},
+                "to": {"type": "string"}, "until": {"type": "string"}}}},
             "clear": {"method": "POST", "endpoint": "/notifications/clear", "request": {"type": "object", "properties": {}}}}},
         "required": False,
     },

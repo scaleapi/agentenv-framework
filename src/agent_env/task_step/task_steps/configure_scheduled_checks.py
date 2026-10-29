@@ -1,9 +1,10 @@
-"""Task step that turns on the checks an agent can schedule for itself on a deployed env's gateway
+"""Task step that turns on the checks the roles it names can schedule for themselves on a deployed env's gateway
 (notifications/v1).
 
-With it the agent gets schedule_check, list_scheduled_checks and cancel_scheduled_check, on the env's virtual clock.
-Place it after sync_env_clock (a check needs the clock) and before prompt_agent (the agent needs the tools on its
-first turn). A harness takes what has come due from the gateway's notifications/v1 and puts it in front of the agent.
+With it each named role gets schedule_check, list_scheduled_checks and cancel_scheduled_check, on the env's virtual
+clock; a check comes due for the role that scheduled it, and no other role sees the tools. Place it after
+sync_env_clock (a check needs the clock) and before prompt_agent (the agent needs the tools on its first turn).
+A harness takes what has come due for a role and puts it in front of that role's agent.
 """
 
 from __future__ import annotations
@@ -31,21 +32,23 @@ class ConfigureScheduledChecksTaskStep(TaskStep):
         id: str,
         version: Optional[int],
         env_id: str,
-        scheduled_checks: bool = True,
+        roles: list[str],
         max_active: int = DEFAULT_MAX_ACTIVE,
         min_interval: str = DEFAULT_MIN_INTERVAL,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         timeout_seconds: int = 30,
     ):
-        """max_active caps the agent's checks still to come; min_interval is the shortest `every` it may ask for."""
+        """roles: the AgentEnv-Roles that get the tools ("default" is the solver's). max_active caps each role's checks
+        still to come; min_interval is the shortest `every` it may ask for."""
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        if not isinstance(scheduled_checks, bool):
-            raise ValueError("scheduled_checks must be a boolean")
+        if (not isinstance(roles, list) or not roles
+                or not all(isinstance(r, str) and r.strip() for r in roles)):
+            raise ValueError('roles must name the roles that get the tools, e.g. ["default"] for the solver')
         if isinstance(max_active, bool) or not isinstance(max_active, int) or max_active < 1:
             raise ValueError("max_active must be a positive integer")
         self.env_id = env_id
-        self.scheduled_checks = scheduled_checks
+        self.roles = roles
         self.max_active = max_active
         self.min_interval = min_interval
         self.timeout_seconds = timeout_seconds
@@ -53,7 +56,7 @@ class ConfigureScheduledChecksTaskStep(TaskStep):
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["env_id"] = self.env_id
-        base["scheduled_checks"] = self.scheduled_checks
+        base["roles"] = self.roles
         base["max_active"] = self.max_active
         base["min_interval"] = self.min_interval
         base["timeout_seconds"] = self.timeout_seconds
@@ -64,7 +67,7 @@ class ConfigureScheduledChecksTaskStep(TaskStep):
         return cls(
             **cls._base_from_dict(data),
             env_id=data["env_id"],
-            scheduled_checks=data.get("scheduled_checks", True),
+            roles=data.get("roles"),
             max_active=data.get("max_active", DEFAULT_MAX_ACTIVE),
             min_interval=data.get("min_interval", DEFAULT_MIN_INTERVAL),
             timeout_seconds=data.get("timeout_seconds", 30),
@@ -75,17 +78,16 @@ class ConfigureScheduledChecksTaskStep(TaskStep):
         if deployed is None:
             raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
         if not deployed.supports(EXT_NOTIFICATIONS_URI, "config"):
-            raise RuntimeError(f"Env '{self.env_id}' runs a gateway without {EXT_NOTIFICATIONS_URI}; redeploy it on a gateway "
-                               "image that has it.")
-        body = {"scheduled_checks": self.scheduled_checks, "max_active": self.max_active,
-                "min_interval": self.min_interval}
+            raise RuntimeError(f"Env '{self.env_id}' runs a gateway without {EXT_NOTIFICATIONS_URI}; redeploy it on a "
+                               "gateway image that has it.")
+        body = {"roles": self.roles, "max_active": self.max_active, "min_interval": self.min_interval}
         try:
             state = await deployed.invoke(EXT_NOTIFICATIONS_URI, "config", body, timeout=self.timeout_seconds)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"notifications config failed (HTTP {e.response.status_code}): {e.response.text}") from e
-        logger.info(f"configure_scheduled_checks completed for env={self.env_id}")
+        logger.info(f"configure_scheduled_checks completed for env={self.env_id} roles={self.roles}")
         context.metadata.setdefault("scheduled_check_configurations", []).append({
             "step_id": self.id, "env_id": self.env_id, **body,
-            "applied": {k: state.get(k) for k in ("scheduled_checks", "max_active", "min_interval")},
+            "applied": {k: state.get(k) for k in ("roles", "max_active", "min_interval")},
         })
         return context

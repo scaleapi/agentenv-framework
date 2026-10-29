@@ -1,9 +1,10 @@
 """Notifications for an agent, due on the gateway's virtual clock (urn:agentenv:notifications/v1).
 
-Two kinds:
-- checks the agent schedules for itself with the schedule_check / list_scheduled_checks / cancel_scheduled_check
-  tools, which exist only once a task turns them on (`configure`);
-- notifications a task's triggers send it with the `notify` action, through a channel the task declares.
+Two kinds, each for one recipient (the AgentEnv-Role it goes to):
+- checks a role schedules for itself with the schedule_check / list_scheduled_checks / cancel_scheduled_check
+  tools, which only the roles a task names in `configure` see;
+- notifications a task's triggers send with the `notify` action, through a channel the task declares, to the
+  solver's role unless the action names another.
 
 Nothing here wakes anyone: a harness reads `state` to learn when the next one is due, may move the clock there, and
 `take`s what has come due to put it in front of the agent. Unrelated to A2A push notifications.
@@ -18,7 +19,9 @@ from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
+from .caller import Caller
 from .clock import Clock, ClockError, _iso, _parse_duration, _parse_rfc3339
+from .constants import DEFAULT_ROLE, WILDCARD
 
 SCHEDULE_CHECK_TOOL_NAME = "schedule_check"
 LIST_SCHEDULED_CHECKS_TOOL_NAME = "list_scheduled_checks"
@@ -29,6 +32,8 @@ DEFAULT_MAX_ACTIVE = 10
 DEFAULT_MIN_INTERVAL = "PT1H"
 _MAX_NOTE_CHARS = 2000
 _MAX_CHANNEL_CHARS = 60
+_MAX_ROLE_CHARS = 100
+_CONFIG_FIELDS = ("roles", "max_active", "min_interval")
 _HISTORY = 50  # finished and cancelled checks state() still shows
 
 SCHEDULE_CHECK_DESCRIPTION = (
@@ -82,7 +87,7 @@ class Notifications:
     def __init__(self, clock: Callable[[], Clock]):
         self._clock_of = clock
         self._lock = threading.Lock()
-        self._enabled = False
+        self._roles: tuple[str, ...] = ()  # who sees the check tools; none until a task names them
         self._max_active = DEFAULT_MAX_ACTIVE
         self._min_interval = _parse_duration(DEFAULT_MIN_INTERVAL)
         self._checks: dict[str, dict] = {}
@@ -90,16 +95,23 @@ class Notifications:
         self._seq = 0
 
     @property
+    def roles(self) -> tuple[str, ...]:
+        return self._roles
+
+    @property
     def enabled(self) -> bool:
-        return self._enabled
+        """Whether any role has the scheduled-check tools."""
+        return bool(self._roles)
 
     def configure(self, body: Any) -> dict:
-        """Turn scheduled checks on or off, with their limits. Notifications need no switch."""
+        """Name the roles that get the scheduled-check tools, with their limits; `roles: []` (the default) turns them
+        off. Notifications need no switch."""
         if not isinstance(body, dict):
             raise NotificationError("body must be a JSON object")
-        enabled = body.get("scheduled_checks", True)
-        if not isinstance(enabled, bool):
-            raise NotificationError("scheduled_checks must be a boolean")
+        unknown = sorted(set(body) - set(_CONFIG_FIELDS))
+        if unknown:
+            raise NotificationError(f"config takes {list(_CONFIG_FIELDS)}, not {unknown}")
+        roles = _roles(body.get("roles", []))
         max_active = body.get("max_active", DEFAULT_MAX_ACTIVE)
         if isinstance(max_active, bool) or not isinstance(max_active, int) or max_active < 1:
             raise NotificationError("max_active must be a positive integer")
@@ -110,17 +122,17 @@ class Notifications:
         if min_interval <= timedelta(0):
             raise NotificationError("min_interval must be a positive duration")
         with self._lock:
-            self._enabled, self._max_active, self._min_interval = enabled, max_active, min_interval
-            if not enabled:  # the agent loses its tools, so the checks it can no longer cancel go too
-                for check in self._checks.values():
-                    if check["status"] == "active":
-                        check["status"] = "cancelled"
-                self._prune()
+            self._roles, self._max_active, self._min_interval = roles, max_active, min_interval
+            # a role left out loses its tools, so the checks it can no longer cancel go too
+            for check in self._checks.values():
+                if check["status"] == "active" and check["to"] not in roles:
+                    check["status"] = "cancelled"
+            self._prune()
         return self.state()
 
     def clear(self) -> dict:
         with self._lock:
-            self._enabled = False
+            self._roles = ()
             self._checks.clear()
             self._queue.clear()
         return {"ok": True}
@@ -141,8 +153,10 @@ class Notifications:
 
     # ---- agent tools ----
 
-    def schedule(self, note: Any, at: Any = None, every: Any = None, until: Any = None) -> dict:
-        if not self._enabled:
+    def schedule(self, note: Any, at: Any = None, every: Any = None, until: Any = None, *,
+                 to: str = DEFAULT_ROLE) -> dict:
+        """A check for the role `to` that schedules it, refused for a role the config doesn't name."""
+        if to not in self._roles:
             raise NotificationError("scheduled checks are not available here")
         if not isinstance(note, str) or not note.strip():
             raise NotificationError("note must say what to do when the check comes due")
@@ -173,22 +187,25 @@ class Notifications:
         if end is not None and end < first:
             raise NotificationError("until is before the first check")
         with self._lock:
-            if sum(c["status"] == "active" for c in self._checks.values()) >= self._max_active:
+            if sum(c["status"] == "active" and c["to"] == to for c in self._checks.values()) >= self._max_active:
                 raise NotificationError(f"you already have {self._max_active} scheduled checks; cancel one first")
             cid = self._next_id("check")
-            self._checks[cid] = {"check_id": cid, "note": note, "next": first, "every": step, "until": end,
+            self._checks[cid] = {"check_id": cid, "to": to, "note": note, "next": first, "every": step, "until": end,
                                  "created_at": now, "status": "active", "fired": 0}
             # only what the gateway decided: the agent wrote the note, and the trajectory already logs it
             return {k: v for k, v in self._public(self._checks[cid]).items() if k != "note"}
 
-    def list(self) -> dict:
+    def list(self, *, to: str = DEFAULT_ROLE) -> dict:
+        """The role's own checks still to come."""
         with self._lock:
-            return {"checks": [self._public(c) for c in self._checks.values() if c["status"] == "active"]}
+            return {"checks": [self._public(c) for c in self._checks.values()
+                               if c["status"] == "active" and c["to"] == to]}
 
-    def cancel(self, check_id: Any) -> dict:
+    def cancel(self, check_id: Any, *, to: str = DEFAULT_ROLE) -> dict:
+        """Cancel one of the role's own checks."""
         with self._lock:
             check = self._checks.get(check_id) if isinstance(check_id, str) else None
-            if check is None or check["status"] != "active":
+            if check is None or check["status"] != "active" or check["to"] != to:
                 raise NotificationError(f"no active scheduled check {check_id!r}")
             check["status"] = "cancelled"
             self._prune()
@@ -205,32 +222,33 @@ class Notifications:
 
     # ---- trigger action ----
 
-    def notify(self, channel: str, text: str, trigger_id: str | None = None) -> dict:
-        """Queue a notification for the agent at the current virtual time (none while the clock is unset: due at
-        once)."""
+    def notify(self, channel: str, text: str, trigger_id: str | None = None, to: str = DEFAULT_ROLE) -> dict:
+        """Queue a notification for the role `to` at the current virtual time (none while the clock is unset: due at
+        once). Receiving one needs no tools, so `to` need not be among the config's roles."""
         now = self._clock.now()
         with self._lock:
-            item = {"id": self._next_id("notification"), "channel": channel, "text": text, "trigger_id": trigger_id,
-                    "at": _iso(now) if now else None, "status": "pending", "_at": now}
+            item = {"id": self._next_id("notification"), "to": to, "channel": channel, "text": text,
+                    "trigger_id": trigger_id, "at": _iso(now) if now else None, "status": "pending", "_at": now}
             self._queue.append(item)
             return _public_note(item)
 
     # ---- harness ----
 
-    def state(self) -> dict:
-        """The config, every check (with its status) and the pending notifications. `next_due_at` is the earliest of
-        the active checks' next time and the pending notifications' time; one queued while the clock was unset is
-        due now."""
+    def state(self, to: Any = None) -> dict:
+        """The config, every check (with its recipient and status) and the pending notifications: those for the
+        recipient `to`, or for every recipient when it is None. `next_due_at` is the earliest of their active checks'
+        next time and pending notifications' time; one queued while the clock was unset is due now."""
+        to = None if to is None else _recipient(to)
         now = self._clock.now()
         with self._lock:
-            active = [c for c in self._checks.values() if c["status"] == "active"]
-            queued = [n for n in self._queue if n["status"] == "pending"]
-            times = [c["next"] for c in active] + [n["_at"] or now for n in queued]
+            checks = [c for c in self._checks.values() if to is None or c["to"] == to]
+            queued = [n for n in self._queue if n["status"] == "pending" and (to is None or n["to"] == to)]
+            times = [c["next"] for c in checks if c["status"] == "active"] + [n["_at"] or now for n in queued]
             nxt = min((t for t in times if t is not None), default=None)
-            return {"scheduled_checks": self._enabled, "max_active": self._max_active,
+            return {"roles": list(self._roles), "max_active": self._max_active,
                     "min_interval": _iso_duration(self._min_interval), "next_due_at": _iso(nxt) if nxt else None,
-                    "checks": [{**self._public(c), "status": c["status"], "fired": c["fired"]}
-                               for c in self._checks.values()],
+                    "checks": [{"check_id": c["check_id"], "to": c["to"], **self._public(c), "status": c["status"],
+                                "fired": c["fired"]} for c in checks],
                     "pending_notifications": [_public_note(n) for n in queued]}
 
     def _prune(self) -> None:
@@ -241,20 +259,22 @@ class Notifications:
         self._queue = [n for n in self._queue if n["status"] == "pending"]
 
     def take(self, body: Any = None) -> dict:
-        """Everything due by `until` (default: now), oldest first; each is handed out once. A repeating check moves to
-        its next time after `until` and says how many times it came due, so a long jump wakes the agent once."""
+        """Everything due for the recipient `to` (default: the solver's role) by `until` (default: now), oldest
+        first; each is handed out once. A repeating check moves to its next time after `until` and says how many
+        times it came due, so a long jump wakes the agent once."""
         body = body if isinstance(body, dict) else {}
+        to = _recipient(body.get("to", DEFAULT_ROLE))
         now = self._clock.now()
         until = _when(body["until"], now, "until") if body.get("until") is not None and now else now
         due: list[tuple[datetime | None, dict]] = []
         with self._lock:
             # work the whole batch out before marking anything handed out
             checks = [(c, *_after(c, until)) for c in self._checks.values()
-                      if c["status"] == "active" and until is not None and c["next"] <= until]
-            notes = [n for n in self._queue
-                     if n["status"] == "pending" and (until is None or n["_at"] is None or n["_at"] <= until)]
+                      if c["status"] == "active" and c["to"] == to and until is not None and c["next"] <= until]
+            notes = [n for n in self._queue if n["status"] == "pending" and n["to"] == to
+                     and (until is None or n["_at"] is None or n["_at"] <= until)]
             for check, times, nxt in checks:
-                due.append((check["next"], {"kind": "scheduled_check", "check_id": check["check_id"],
+                due.append((check["next"], {"kind": "scheduled_check", "check_id": check["check_id"], "to": to,
                                             "note": check["note"], "at": _iso(check["next"]), "times": times}))
                 check["fired"] += 1
                 if nxt is None:
@@ -263,11 +283,11 @@ class Notifications:
                     check["next"] = nxt
             for note in notes:
                 note["status"] = "delivered"
-                due.append((note["_at"], {"kind": "trigger", "id": note["id"], "channel": note["channel"],
+                due.append((note["_at"], {"kind": "trigger", "id": note["id"], "to": to, "channel": note["channel"],
                                           "text": note["text"], "at": note["at"], "trigger_id": note["trigger_id"]}))
             self._prune()
         due.sort(key=lambda d: (d[0] is not None, d[0]))
-        return {"items": [item for _, item in due], "until": _iso(until) if until else None}
+        return {"to": to, "items": [item for _, item in due], "until": _iso(until) if until else None}
 
 
 def _after(check: dict, until: datetime) -> tuple[int, datetime | None]:
@@ -295,6 +315,23 @@ def _iso_duration(td: timedelta) -> str:
     return "P" + (f"{td.days}D" if td.days else "") + (f"T{clock}" if clock else "") if td.days or clock else "PT0S"
 
 
+def _roles(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise NotificationError('roles must be a list of role names, e.g. ["default"]; [] turns scheduled checks off')
+    roles = tuple(dict.fromkeys(_recipient(r, "roles") for r in value))
+    if WILDCARD in roles:
+        raise NotificationError(f"roles names each role; {WILDCARD!r} is not one")
+    return roles
+
+
+def _recipient(value: Any, field: str = "to") -> str:
+    """A role name, as the AgentEnv-Role header gives it."""
+    if not isinstance(value, str) or not value.strip() or len(value) > _MAX_ROLE_CHARS:
+        raise NotificationError(f"{field} must name a role (a non-empty string of at most {_MAX_ROLE_CHARS} "
+                                "characters), e.g. 'default'")
+    return value.strip()
+
+
 def _public_note(note: dict) -> dict:
     return {k: v for k, v in note.items() if not k.startswith("_")}
 
@@ -304,21 +341,22 @@ def _tool_error(text: str) -> CallToolResult:
 
 
 def build_check_tools(notifications: Notifications, make_arg_model: Callable[[str, dict], Any]) -> list[FastMCPTool]:
-    """The agent-facing tools, built by hand like get_time so a backing server's tool can't silently shadow them."""
+    """The agent-facing tools, built by hand like get_time so a backing server's tool can't silently shadow them. Each
+    acts for the calling role (the AgentEnv-Role the call came with): its checks are its own."""
 
     async def schedule_check(note: str, at: str | None = None, every: str | None = None,
                              until: str | None = None) -> dict | CallToolResult:
         try:
-            return notifications.schedule(note, at=at, every=every, until=until)
+            return notifications.schedule(note, at=at, every=every, until=until, to=Caller.current().role)
         except NotificationError as e:
             return _tool_error(str(e))
 
     async def list_scheduled_checks() -> dict:
-        return notifications.list()
+        return notifications.list(to=Caller.current().role)
 
     async def cancel_scheduled_check(check_id: str) -> dict | CallToolResult:
         try:
-            return notifications.cancel(check_id)
+            return notifications.cancel(check_id, to=Caller.current().role)
         except NotificationError as e:
             return _tool_error(str(e))
 
@@ -333,6 +371,14 @@ def build_check_tools(notifications: Notifications, make_arg_model: Callable[[st
                         fn_metadata=FuncMetadata(arg_model=make_arg_model(name, schema)), is_async=True,
                         annotations=ToolAnnotations(readOnlyHint=read_only))
             for name, fn, description, schema, read_only in specs]
+
+
+def validate_recipient(to: Any, where: str) -> None:
+    """A notify action's `to`: the role the notification goes to."""
+    try:
+        _recipient(to)
+    except NotificationError as e:
+        raise ValueError(f"{where}: {e}")
 
 
 def validate_channel(channel: Any, where: str) -> None:

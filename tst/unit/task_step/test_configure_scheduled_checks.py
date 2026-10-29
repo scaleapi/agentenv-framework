@@ -19,13 +19,15 @@ _GATEWAY = "http://gw:18765"
 
 @pytest.mark.asyncio
 async def test_posts_the_config_and_records_what_the_gateway_applied(monkeypatch):
-    sent = _mock_gateway(monkeypatch, {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"})
-    out = await _step(max_active=5).execute(TaskStepContext(deployed_envs=[_record()], metadata={}))
+    applied = {"roles": ["default", "planner"], "max_active": 5, "min_interval": "PT1H"}
+    sent = _mock_gateway(monkeypatch, {**applied, "next_due_at": None, "checks": []})
+    step = _step(roles=["default", "planner"], max_active=5)
+    out = await step.execute(TaskStepContext(deployed_envs=[_record()], metadata={}))
     [request] = sent
     assert (request.method, str(request.url)) == ("POST", f"{_GATEWAY}/notifications/config")
-    assert json.loads(request.content) == {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"}
+    assert json.loads(request.content) == applied
     [entry] = out.metadata["scheduled_check_configurations"]
-    assert entry["applied"] == {"scheduled_checks": True, "max_active": 5, "min_interval": "PT1H"}
+    assert entry == {"step_id": "checks-1", "env_id": "env-x", **applied, "applied": applied}
 
 
 @pytest.mark.asyncio
@@ -48,18 +50,27 @@ async def test_a_refused_config_raises_with_the_gateway_s_reason(monkeypatch):
 def test_round_trips_and_is_registered():
     step = _step(max_active=3, min_interval="PT2H")
     again = ConfigureScheduledChecksTaskStep.from_dict(step.to_dict())
-    assert (again.max_active, again.min_interval, again.scheduled_checks) == (3, "PT2H", True)
+    assert (again.max_active, again.min_interval, again.roles) == (3, "PT2H", ["default"])
     assert get_task_step_registry()["configure_scheduled_checks"] is ConfigureScheduledChecksTaskStep
 
 
-@pytest.mark.parametrize("kwargs", [{"max_active": 0}, {"scheduled_checks": "yes"}])
+@pytest.mark.parametrize("kwargs", [{"max_active": 0}, {"roles": []}, {"roles": None}, {"roles": "default"},
+                                    {"roles": ["default", ""]}])
 def test_bad_settings_are_refused_when_the_step_is_built(kwargs):
     with pytest.raises(ValueError):
         _step(**kwargs)
 
 
+def test_a_step_must_name_the_roles_that_get_the_tools():
+    stored = _step().to_dict()
+    del stored["roles"]
+    with pytest.raises(ValueError, match="roles must name"):
+        ConfigureScheduledChecksTaskStep.from_dict(stored)
+
+
 def _step(**kwargs) -> ConfigureScheduledChecksTaskStep:
-    return ConfigureScheduledChecksTaskStep(id="checks-1", version=None, env_id="env-x", **kwargs)
+    return ConfigureScheduledChecksTaskStep(id="checks-1", version=None, env_id="env-x",
+                                            **{"roles": ["default"], **kwargs})
 
 
 def _record(extensions: list = GATEWAY_EXTENSIONS) -> DeployedEnv:
