@@ -129,7 +129,7 @@ def _seed_value(seed: dict, key: str, step: "TaskStep", field: str) -> str:
     if field in step.shell_fields and shlex.quote(value) != value:
         raise ValueError(
             f"Seed {key!r} can't go into step {step.id!r} field {field!r}: a value substituted into shell text may hold "
-            f"only letters, digits and _.:/@%+=,- (got {value!r})"
+            f"only letters, digits and _.:/@%+=,- (got {value[:80]!r}{'...' if len(value) > 80 else ''})"
         )
     return value
 
