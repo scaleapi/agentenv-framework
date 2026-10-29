@@ -3,6 +3,7 @@
 claude-code = ["claude-code"]
 codex = ["codex"]
 gemini = ["gemini"]
+hermes = ["hermes"]
 opencode = ["opencode"]
 pi = ["pi"]
 openhands = ["openhands"]

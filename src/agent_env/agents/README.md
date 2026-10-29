@@ -89,9 +89,17 @@ its smoke task needs `[model] default` (or the `agent` role) set; a `vllm:` pref
 requests to the model's family as a vLLM server needs. It declares `install/v1` too, for Debian or Ubuntu targets. Its
 folder's `README.md` covers the extensions it implements.
 
-A release publishes Codex's, Gemini's, OpenCode's, pi's, OpenHands' and Pydantic AI's images too, at
+`agents/hermes/` runs Nous Research's [Hermes Agent](https://github.com/NousResearch/hermes-agent) behind the
+protocol's A2A agent framework: each turn is one `hermes agentenv turn`, a command the agent's own Hermes plugin adds,
+which runs the turn in its process, resumed in the context's Hermes session; each context is a Hermes profile of its
+own, the task env's MCP servers go to its `config.yaml`, and Hermes' plugin hook events are the turn's trajectory. Name
+it as `hermes`, its alias, or by its id, `@local/agentenv-framework/agents/hermes`. It calls the `[model]` endpoint as
+an OpenAI-compatible one, `<base>/v1/chat/completions`, and takes its model from the prompt, else
+`anthropic/claude-sonnet-4-6`. Its folder's `README.md` covers the extensions it implements.
+
+A release publishes Codex's, Gemini's, Hermes', OpenCode's, pi's, OpenHands' and Pydantic AI's images too, at
 `ghcr.io/scaleapi/agentenv-codex:src-<hex>`, `ghcr.io/scaleapi/agentenv-gemini:src-<hex>`,
-`ghcr.io/scaleapi/agentenv-opencode:src-<hex>`, `ghcr.io/scaleapi/agentenv-pi:src-<hex>`,
+`ghcr.io/scaleapi/agentenv-hermes:src-<hex>`, `ghcr.io/scaleapi/agentenv-opencode:src-<hex>`, `ghcr.io/scaleapi/agentenv-pi:src-<hex>`,
 `ghcr.io/scaleapi/agentenv-openhands:src-<hex>` and `ghcr.io/scaleapi/agentenv-pydantic-ai:src-<hex>`, each built again only when its folder changes, and a run deploys
 them as it does Claude Code's: it pulls the image
 published for the sources installed, by its digest, and builds it from the agent's folder only when it can't.
@@ -107,5 +115,5 @@ store credentials. A release publishes its image at `ghcr.io/scaleapi/agentenv-p
 others'. It has no alias and no smoke task: with nobody driving it, a prompt only waits out its deadline.
 
 `agent-env run agents` runs every agent's smoke task, pulling or building each image; `--task claude-code-smoke` runs
-Claude Code's alone, `--task codex-smoke` Codex's, `--task gemini-smoke` Gemini's, `--task opencode-smoke` OpenCode's,
+Claude Code's alone, `--task codex-smoke` Codex's, `--task gemini-smoke` Gemini's, `--task hermes-smoke` Hermes', `--task opencode-smoke` OpenCode's,
 `--task pi-smoke` pi's, `--task openhands-smoke` OpenHands', `--task pydantic-ai-smoke` Pydantic AI's.
