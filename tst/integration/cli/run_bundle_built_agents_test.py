@@ -4,6 +4,7 @@ nothing, an edit that rebuilds only its own agent, and a build that fails. Needs
 
 import json
 import logging
+import re
 import shutil
 
 import pytest
@@ -13,6 +14,8 @@ from agent_env.artifact.store import reset_artifact_store
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
 from agent_env.store.object_store.local.grant_server import grant_server
+from agent_env.store.routing import namespace_routing
+from agent_env.task.store import get_task_instance_store
 from tst.util.a2a_test_agent import AGENT_DIR, PROTOCOL_DIR
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -146,8 +149,15 @@ def state(monkeypatch, tmp_path):
         reset_config()
 
 
-def _run(root):
-    return CliRunner().invoke(cli, ["run", str(root)])
+def _run(root, *args):
+    return CliRunner().invoke(cli, ["run", str(root), *args])
+
+
+def _reply(output):
+    """What the agent of the run ``output`` reports replied, read from its instance."""
+    instance_id = re.search(r"instance (@local/\S+)", output).group(1)
+    with namespace_routing():
+        return get_task_instance_store().get(instance_id).context["prompt_responses"][0]["response"]
 
 
 def test_each_shape_of_agent_dockerfile_builds_runs_and_is_rebuilt_only_when_its_folder_changes(state):
@@ -191,7 +201,7 @@ def test_each_shape_of_agent_dockerfile_builds_runs_and_is_rebuilt_only_when_its
 
 def test_a_dockerfile_that_fails_to_build_is_one_problem_with_dockers_output_and_writes_no_agent(state):
     root = state / "broken-bundle"
-    _agent_folder(root, "broken", {"Dockerfile": f"{BASE}\nRUN echo about to fail && exit 3\n"})
+    _agent_folder(root, "broken", {"Dockerfile": f"{BASE}\nRUN echo about to fail && exit 3\n", "agent.toml": _toml()})
     (root / "tasks").mkdir()
     (root / "tasks/broken.json").write_text(_task("broken", "never"))
 
@@ -202,3 +212,24 @@ def test_a_dockerfile_that_fails_to_build_is_one_problem_with_dockers_output_and
     assert "about to fail" in result.output, result.output
     assert "Traceback" not in result.output, result.output
     assert "agents/broken: v1" not in result.output, result.output
+
+
+def test_agent_runs_the_solver_as_another_agent_for_one_run_and_leaves_the_task_as_written(state):
+    root = state / "swap-bundle"
+    for name in ("plain", "subdir"):
+        _agent_folder(root, name, AGENTS[name])
+    (root / "tasks").mkdir()
+    (root / "tasks/ask.json").write_text(_task("plain", "sees []"))
+
+    swapped = _run(root, "--agent", "subdir")
+
+    assert swapped.exit_code == 0, swapped.output
+    assert re.search(r"--agent subdir: the solver deploys @local/\S+/subdir, in 1 of 1 task", swapped.output), swapped.output
+    assert "tasks/ask.json v1: passed" in swapped.output, swapped.output
+    assert _reply(swapped.output) == REPLIES["subdir"]
+
+    written = _run(root)
+
+    assert written.exit_code == 0, written.output
+    assert "tasks/ask.json: v1, unchanged" in written.output, written.output
+    assert _reply(written.output) == REPLIES["plain"]

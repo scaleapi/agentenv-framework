@@ -13,9 +13,9 @@ import pytest
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.env.env import DeployedEnv
-from agent_env.providers.sandbox_providers import local_sandbox as local_sandbox_module
+from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox_module
 from agent_env.providers.sandbox_providers import sandbox_provider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.deploy_agent import _choose_mcp_url

@@ -7,7 +7,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import DockerImageArtifact
 from agent_env.cli.utils import build_platform_option, detect_env_metadata, refuse_unwritable_ids
 from agent_env.store.ids import derive_id, image_repository
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM, build_image
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
 
 
 @click.command()
@@ -63,10 +63,10 @@ def put(agent_id: str, dockerfile: str | None, context_path: str | None, image_r
         context = Path(context_path) if context_path else dockerfile_path.parent
         image_tag = image_repository(image_id)
 
-        click.echo(f"Building Docker image...")
+        click.echo("Building Docker image...")
         build_image(dockerfile_path, context, image_tag, platform=build_platform)
 
-        click.echo(f"Creating DockerImageArtifact...")
+        click.echo("Creating DockerImageArtifact...")
         artifact = DockerImageArtifact.put(
             id=image_id,
             description=f"A2A agent image for {agent_id}",
@@ -83,7 +83,7 @@ def put(agent_id: str, dockerfile: str | None, context_path: str | None, image_r
     if default_model is not None:
         metadata["default_model"] = default_model
 
-    click.echo(f"Registering A2A agent...")
+    click.echo("Registering A2A agent...")
     agent = A2AAgent.put(
         id=agent_id,
         docker_image_artifact=artifact,

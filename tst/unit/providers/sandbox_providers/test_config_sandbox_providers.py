@@ -9,8 +9,11 @@ import pytest
 from agent_env.config import ConfigError
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.config import reset_config
+from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
+from agent_env.providers.sandbox_providers.daytona.config import Settings as DaytonaSettings
+from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -18,6 +21,8 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProviderTypeError,
     build_sandbox_provider,
 )
+from agent_env.providers.sandbox_providers.tenki.provider import TenkiSandboxProvider
+from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 
 
 class _RecordingProvider(SandboxProvider):
@@ -187,6 +192,16 @@ def test_builtin_accepts_a_config_only_table(monkeypatch, tmp_path):
     assert provider._ecr_pull_secret_name == "my-ecr-reader"
 
 
+@pytest.mark.parametrize("name", ["modal", "modal_vm"])
+def test_modal_builtins_accept_an_environment_name(monkeypatch, tmp_path, name):
+    cfg = _write_config(tmp_path, f"""
+        [sandbox.providers.{name}.config]
+        environment_name = "rl-prod"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    assert build_sandbox_provider(name)._environment_name == "rl-prod"
+
+
 def test_e2b_builtin_receives_interpolated_key_and_versioned_base(monkeypatch, tmp_path):
     cfg = _write_config(tmp_path, """
         [sandbox.providers.e2b.config]
@@ -245,6 +260,119 @@ def test_sail_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
         build_sandbox_provider("sail_vm")
+
+
+def test_tensorlake_builtin_receives_interpolated_key_and_image(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.tensorlake.config]
+        api_key = "env:TL_TEST_API_KEY"
+        image = "team-docker-host"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("TL_TEST_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("tensorlake")
+
+    assert isinstance(provider, TensorlakeSandboxProvider)
+    assert provider._api_key == "resolved-test-key"
+    assert provider._image == "team-docker-host"
+
+
+def test_tensorlake_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.tensorlake.config]
+        image = "team-docker-host"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("tensorlake")
+
+
+def test_tenki_builtin_receives_interpolated_key_and_snapshot(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.tenki.config]
+        api_key = "env:TENKI_TEST_API_KEY"
+        snapshot_id = "snap-docker"
+        min_disk_gb = 40
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("TENKI_TEST_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("tenki")
+
+    assert isinstance(provider, TenkiSandboxProvider)
+    assert provider._api_key == "resolved-test-key"
+    assert provider._snapshot_id == "snap-docker"
+    assert provider._min_disk_gb == 40
+
+
+def test_tenki_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.tenki.config]
+        snapshot_id = "snap-docker"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("tenki")
+
+
+def test_boxd_builtin_receives_interpolated_key_and_org(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.boxd.config]
+        api_key = "env:BOXD_TEST_API_KEY"
+        org = "research"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("BOXD_TEST_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("boxd")
+
+    assert isinstance(provider, BoxdSandboxProvider)
+    assert provider._api_key == "resolved-test-key"
+    assert provider._org == "research"
+
+
+def test_boxd_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.boxd.config]
+        org = "research"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("boxd")
+
+
+def test_daytona_builtin_receives_interpolated_key_and_settings(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.daytona.config]
+        api_key = "env:DAYTONA_TEST_API_KEY"
+        target = "eu"
+        snapshot = "agentenv-docker"
+        egress_hosts = ["registry.example.com"]
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("DAYTONA_TEST_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("daytona")
+
+    assert isinstance(provider, DaytonaSandboxProvider)
+    assert provider._settings == DaytonaSettings(
+        api_key="resolved-test-key", target="eu", snapshot="agentenv-docker", egress_hosts=("registry.example.com",),
+    )
+
+
+def test_daytona_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.daytona.config]
+        snapshot = "agentenv-docker"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
+        build_sandbox_provider("daytona")
 
 
 def test_builtin_config_reaches_chain_members(monkeypatch, tmp_path):

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import subprocess
 import uuid
 import dataclasses
 from dataclasses import dataclass
@@ -22,7 +21,7 @@ from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.config import get_config
 from agent_env.task import Task, TaskStepStatus
-from agent_env.task_step import AddSkillsTaskStep, BuildMcpCliTaskStep, DeployAgentTaskStep, DeployEnvTaskStep, EnvOutcomeVerifierTaskStep, LoadArtifactTaskStep, PromptAgentTaskStep, RubricsVerifierTaskStep, TaskStep, TaskStepContext, VerifyMCPToolSchemaTaskStep
+from agent_env.task_step import AddSkillsTaskStep, BuildMcpCliTaskStep, DeployAgentTaskStep, DeployEnvTaskStep, EnvOutcomeVerifierTaskStep, LoadArtifactTaskStep, PromptAgentTaskStep, RubricsVerifierTaskStep, TaskStep, TaskStepContext
 from agent_env.task_step.task_step import TaskStepDependency
 from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.a2a_agent.object_transfer import trajectory_mode
@@ -64,7 +63,7 @@ GATEWAY_IMAGE = DockerImageConfig(
     name="gateway",
     dockerfile=ENV_DIR / "gateway" / "Dockerfile",
     tag="env-gateway",
-    context=ENV_DIR,
+    context=ENV_DIR / "gateway",
     service_name="gateway",
 )
 
@@ -279,6 +278,30 @@ def echo_agent() -> A2AAgent:
         id="sail_vm",
         marks=skip_without_remote_sandbox("sail_vm"),
     ),
+    pytest.param(
+        "tensorlake",
+        id="tensorlake",
+        marks=skip_without_remote_sandbox("tensorlake"),
+    ),
+    pytest.param(
+        "tenki",
+        id="tenki",
+        marks=skip_without_remote_sandbox("tenki"),
+    ),
+    pytest.param(
+        "boxd",
+        id="boxd",
+        marks=skip_without_remote_sandbox("boxd"),
+    ),
+    pytest.param(
+        "daytona",
+        id="daytona",
+        marks=skip_without_remote_sandbox("daytona"),
+    ),    pytest.param(
+        "boat",
+        id="boat",
+        marks=skip_without_remote_sandbox("boat"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -305,6 +328,26 @@ def sandbox_provider(request):
         set_sandbox_provider(build_sandbox_provider("sail_vm"))
         set_env_sandbox_provider(build_sandbox_provider("sail_vm"))
         set_agent_sandbox_provider(build_sandbox_provider("sail_vm"))
+    elif request.param == "tensorlake":
+        set_sandbox_provider(build_sandbox_provider("tensorlake"))
+        set_env_sandbox_provider(build_sandbox_provider("tensorlake"))
+        set_agent_sandbox_provider(build_sandbox_provider("tensorlake"))
+    elif request.param == "tenki":
+        set_sandbox_provider(build_sandbox_provider("tenki"))
+        set_env_sandbox_provider(build_sandbox_provider("tenki"))
+        set_agent_sandbox_provider(build_sandbox_provider("tenki"))
+    elif request.param == "boxd":
+        set_sandbox_provider(build_sandbox_provider("boxd"))
+        set_env_sandbox_provider(build_sandbox_provider("boxd"))
+        set_agent_sandbox_provider(build_sandbox_provider("boxd"))
+    elif request.param == "daytona":
+        set_sandbox_provider(build_sandbox_provider("daytona"))
+        set_env_sandbox_provider(build_sandbox_provider("daytona"))
+        set_agent_sandbox_provider(build_sandbox_provider("daytona"))
+    elif request.param == "boat":
+        set_sandbox_provider(build_sandbox_provider("boat"))
+        set_env_sandbox_provider(build_sandbox_provider("boat"))
+        set_agent_sandbox_provider(build_sandbox_provider("boat"))
     try:
         yield request.param
     finally:
@@ -1140,7 +1183,7 @@ async def _verify_list_tools(mcp_url: str, tool_verifier_callback: callable):
             if assertion_errors:
                 raise
             if verified:
-                logger.info(f"  Verified (ignoring cleanup error)")
+                logger.info("  Verified (ignoring cleanup error)")
                 break
             logger.info(f"  Attempt {attempt + 1} failed: {type(eg).__name__}")
             if attempt < max_retries - 1:
@@ -1510,12 +1553,12 @@ async def test_task_dag_parallel_e2e(
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_task_external_cancel_marks_failed():
+async def test_task_external_cancel_marks_cancelled():
     """Cancel-path: external cancel of Task.run() (a runner's timeout,
     worker SIGTERM, etc.) should:
 
       1. Cancel any in-flight steps.
-      2. Mark the Mongo task instance as failed (not stuck `running`).
+      2. Mark the Mongo task instance as cancelled (not stuck `running`).
       3. Re-raise the original CancelledError so the runner sees a cancel,
          not a generic step failure.
 
@@ -1561,10 +1604,10 @@ async def test_task_external_cancel_marks_failed():
     # a moment to drain. The cancel handler also writes to Mongo, so allow time.
     await asyncio.sleep(0.5)
 
-    # Mongo assertions: the instance should be marked failed, NOT still running.
+    # Mongo assertions: the instance should be marked cancelled, NOT still running.
     inst = Task.get_instance(instance_id)
-    assert inst.status == "failed", (
-        f"Expected status=failed after external cancel, got {inst.status!r}. "
+    assert inst.status == "cancelled", (
+        f"Expected status=cancelled after external cancel, got {inst.status!r}. "
         "The new try/except in Task.run() didn't fire — in-flight tasks were "
         "GC'd silently and the Mongo doc stayed `running`."
     )
@@ -1577,7 +1620,7 @@ async def test_task_external_cancel_marks_failed():
         f"Pre-cancel completed step's data missing from Mongo: {persisted}"
     )
 
-    logger.info(f"Cancel-path test passed: instance {instance_id} correctly marked failed")
+    logger.info(f"Cancel-path test passed: instance {instance_id} correctly marked cancelled")
 
 
 # ---------- Multi-turn PromptAgentTaskStep integration tests ----------

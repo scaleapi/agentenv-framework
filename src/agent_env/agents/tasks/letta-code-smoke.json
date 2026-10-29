@@ -1,0 +1,7 @@
+[
+  {"id": "deploy", "type": "deploy_agent", "a2a_agent_id": "letta-code", "env_ids": [], "sandbox_type": "local"},
+  {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "depends_on": ["deploy"],
+   "prompt": "Run the shell command `echo $((6 * 7))` and reply with only the number it prints."},
+  {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "ask", "verifier_id": "answer",
+   "criteria": [{"type": "response_contains", "needles": ["42"]}], "depends_on": ["ask"]}
+]

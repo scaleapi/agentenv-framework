@@ -3,6 +3,7 @@ the client call, and the answer that says what was uploaded."""
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -62,11 +63,23 @@ def _grant(*, max_object_bytes: int = 1024) -> WriteNamespaceGrant:
 class _FakeMCP:
     def __init__(self) -> None:
         self.routes: list[Route] = []
+        self.tools: dict[str, tuple] = {}
         self.settings = SimpleNamespace(streamable_http_path="/mcp")
+        self._tool_manager = SimpleNamespace(get_tool=self.tools.get, call_tool=self._call_tool)
+
+    async def _call_tool(self, name: str, arguments: dict, *_: object, **__: object):
+        result = self.tools[name][1](**arguments)
+        return await result if inspect.isawaitable(result) else result
 
     def custom_route(self, path: str, methods: list[str]):
         def deco(fn):
             self.routes.append(Route(path, fn, methods=methods))
+            return fn
+        return deco
+
+    def tool(self, name: str | None = None, description: str | None = None):
+        def deco(fn):
+            self.tools[name or fn.__name__] = (description, fn)
             return fn
         return deco
 
@@ -221,7 +234,7 @@ async def test_params_given_by_position_are_refused():
 
 
 @pytest.mark.asyncio
-async def test_get_data_sends_no_params_without_a_grant_and_the_grant_with_one(monkeypatch):
+async def test_get_data_sends_no_params_without_a_grant_or_paths_and_each_it_is_given(monkeypatch):
     sent: list[dict] = []
     real = httpx.AsyncClient
 
@@ -234,9 +247,11 @@ async def test_get_data_sends_no_params_without_a_grant_and_the_grant_with_one(m
     grant = _grant()
     await protocol_v1.get_data("http://env")
     await protocol_v1.get_data("http://env", write_namespace=grant)
+    await protocol_v1.get_data("http://env", paths=["Documents"])
 
     assert sent[0]["params"] == {}
     assert WriteNamespaceGrant.model_validate(sent[1]["params"]["write_namespace"]) == grant
+    assert sent[2]["params"] == {"paths": ["Documents"]}
 
 
 @pytest.mark.asyncio

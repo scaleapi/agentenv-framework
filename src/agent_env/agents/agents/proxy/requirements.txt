@@ -1,0 +1,3 @@
+# The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
+# image is built again only when this folder changes. The floor is the first that ships ProxyAgent and proxy/v1.
+agentenv-framework-protocol[agent]>=0.1.370

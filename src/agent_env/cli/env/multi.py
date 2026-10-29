@@ -74,7 +74,7 @@ def put(env_id: str, mcp_servers: tuple[str, ...], websites: tuple[str, ...], me
     if refusal:
         click.echo(f"Error: {refusal}", err=True)
         raise SystemExit(1)
-    click.echo(f"Creating MultiEnv...")
+    click.echo("Creating MultiEnv...")
     multi_env = MultiEnv.put(id=env_id, mcp_server_envs=mcp_server_envs, website_envs=website_envs, metadata=metadata if metadata else None, name=name,
                              env_provider_type=env_provider_type)
     click.echo(f"Created MultiEnv: id={multi_env.id} version={multi_env.version} env_provider_type={multi_env.env_provider_type}")
@@ -243,7 +243,6 @@ def validate_universe_compatibility(env_id: str, env_version: int | None, univer
     instance_id = asyncio.run(env.validate_universe_compatibility(universe_artifact_id=universe_artifact_id, on_progress=click.echo))
     click.echo(f"Task instance: {instance_id}")
 
-    from agent_env.env.env_artifact_store import get_env_artifact_store
     from agent_env.env.env_artifact_store import EnvArtifactType, get_env_artifact_store
     results = get_env_artifact_store().get_by_env(env_id, env_version=env.version, type=EnvArtifactType.UNIVERSE_COMPATIBILITY)
     doc = next((r for r in results if r["artifact_id"] == universe_artifact_id), None)

@@ -109,11 +109,20 @@ def find_by_a2a_task_id(a2a_task_id: str) -> Optional[dict]:
     )
 
 
+def _message(role: str, parts: list[dict], now: datetime, env_clock: Optional[list[dict]]) -> dict:
+    """A conversation message; ``env_clock`` holds each armed env clock's virtual time when it was recorded."""
+    message = {"role": role, "parts": parts, "ts": now.isoformat()}
+    if env_clock is not None:
+        message["env_clock"] = env_clock
+    return message
+
+
 def add_a2a_task(
     conversation_id: str,
     parts: list[dict],
     a2a_task_id: str,
     role: str,
+    env_clock: Optional[list[dict]] = None,
 ) -> Optional[dict]:
     """Append a caller-side message and create a new working a2a_task.
 
@@ -133,7 +142,7 @@ def add_a2a_task(
     doesn't exist.
     """
     now = datetime.now(timezone.utc)
-    new_message = {"role": role, "parts": parts, "ts": now.isoformat()}
+    new_message = _message(role, parts, now, env_clock)
 
     def _mutate(doc: dict) -> UpdateSpec:
         idx = len(doc.get("messages", []))
@@ -161,6 +170,7 @@ def complete_a2a_task(
     conversation_id: str,
     parts: list[dict],
     role: str,
+    env_clock: Optional[list[dict]] = None,
 ) -> Optional[dict]:
     """Append a responder-side message and complete the oldest working a2a_task.
 
@@ -185,7 +195,7 @@ def complete_a2a_task(
     doesn't exist (or the target task lost the state race).
     """
     now = datetime.now(timezone.utc)
-    new_message = {"role": role, "parts": parts, "ts": now.isoformat()}
+    new_message = _message(role, parts, now, env_clock)
     # One backend for the whole retry loop: a reset between the read and the CAS would
     # decide against one database and write to another.
     docs = _doc_store()

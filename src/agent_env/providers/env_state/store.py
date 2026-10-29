@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-import random
+import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -38,7 +38,7 @@ class EnvStateInstanceStore:
     def create_instance(self, instance: EnvStateInstance, ttl_seconds: int) -> EnvStateInstance:
         now = datetime.now(timezone.utc)
         if not instance.instance_id:
-            suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
             instance.instance_id = f"esi-{suffix}"
         instance.created_at_utc = now.strftime(_TS_FMT)
         instance.expires_at_utc = (now + timedelta(seconds=ttl_seconds)).strftime(_TS_FMT)

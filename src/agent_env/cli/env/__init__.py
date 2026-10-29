@@ -1,5 +1,6 @@
 import click
 
+from .build import build
 from .deploy import deploy
 from .gateway import gateway
 from .get_instance import get_instance
@@ -18,6 +19,7 @@ def env():
     pass
 
 
+env.add_command(build)
 env.add_command(deploy)
 env.add_command(gateway)
 env.add_command(get_instance)

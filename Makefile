@@ -1,4 +1,4 @@
-.PHONY: help install unit-test int-test int-test-fast int-test-slow installer-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -22,6 +22,9 @@ install: ## Create .venv and install the package with dev dependencies
 	$(PIP) install -e ./packages/agentenv-protocol
 	$(PIP) install -e ".[dev]"
 
+lint: ## Lint with ruff, the check the unit job runs
+	$(VENV_BIN)/ruff check
+
 unit-test: ## Run the unit test suite in parallel (no external services)
 	$(PYTHON) -m pytest tst/unit/ packages/agentenv-protocol/tests/ -n auto
 
@@ -40,7 +43,10 @@ unit-test: ## Run the unit test suite in parallel (no external services)
 #   "task-step-test-deploy-multi"), producing ERROR-at-setup cascades that
 #   look like real bugs but are pure concurrency. Running serial costs wall
 #   clock but is the only way to keep slow runs reliable without rewriting
-#   every module's fixtures with worker-unique tags.
+#   every module's fixtures with worker-unique tags. CI splits the slow tier
+#   across runners instead (tst/util/shards.py). To run one runner's share:
+#     AGENTENV_TEST_SHARD=2/8 make int-test-slow PYTEST_ARGS=--ignore=tst/integration/env/gateway/gateway_test.py
+#     AGENTENV_TEST_SHARD=1/3 .venv/bin/python -m pytest -m int_test_slow tst/integration/env/gateway/gateway_test.py
 INT_PYTEST_ARGS_FAST ?= --dist=loadscope --tb=short --durations=20 -p no:cacheprovider
 INT_PYTEST_ARGS_SLOW ?= --tb=short --durations=20 -p no:cacheprovider
 INT_FAST_WORKERS ?= auto
@@ -57,6 +63,11 @@ int-test-slow: ## Run only the @int_test_slow integration tests (serial to avoid
 # and installs offline; only the first run for a uv.lock downloads the dependencies, into .cache/.
 installer-test: ## Run plugin add/remove through the real pip, uv and pipx, and the container journey (needs uv, pipx, Docker)
 	$(PYTHON) -m pytest tst/installer -n auto --timeout=900 $(PYTEST_ARGS)
+
+# The TRL contract tier trains one GRPOTrainer step on CPU through agent_env.training.trl, with a tiny model from the
+# Hub. trl and torch aren't in the dev extra: install them first, as .github/workflows/trl.yml does.
+trl-test: ## Run one GRPOTrainer step on CPU through the TRL helper (needs trl and CPU torch, and the Hub)
+	$(PYTHON) -m pytest tst/trl --timeout=900 $(PYTEST_ARGS)
 
 # The clean-install gate CI runs, on the same Python. The script gives every step an allowlisted
 # environment, so nothing in this shell reaches the install it checks. A failed run keeps its folder.

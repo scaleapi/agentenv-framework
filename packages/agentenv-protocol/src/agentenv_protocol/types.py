@@ -1,15 +1,15 @@
 """Wire types for the v1 data-plane protocol."""
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from .transfers import RelativePath, Uploaded
 
 
-def error_body(code: str, message: str) -> dict:
-    return {"ok": False, "error": {"code": code, "message": message}}
+def error_body(code: str, message: str, **fields: Any) -> dict:
+    return {"ok": False, "error": {"code": code, "message": message, **fields}}
 
 
 PROTOCOL_VERSION = "1.0"
@@ -38,10 +38,16 @@ INTAKE_EXTENSION_URI = "urn:agentenv:intake/v1"
 # is never sent one.
 DATA_OBJECTS_EXTENSION_URI = "urn:agentenv:data-objects/v1"
 
+# `get {name}` answers with the env's skill for agents, `{name, description, skill_md}` as
+# skill-config/v1 takes one: a SKILL.md an agent reads before it uses the env, written under the
+# name the caller gives. A server serves it through an `@agent_skill` handler.
+SKILL_EXTENSION_URI = "urn:agentenv:skill/v1"
+
 # A declaration-only extension: the write grant kinds this server's library uploads through, as
 # `params = {"write": [kind, ...]}`. A `data/get` handler that takes a `write_object` param (a
 # `transfers.WriteObject`) lists `http-put` and `http-put-parts`; one that takes `write_namespace`
-# lists `http-post-policy`. A card without it is taken to accept `http-post-policy` alone.
+# lists `http-post-policy`. A card without it takes `http-post-policy` alone when it advertises
+# `DATA_OBJECTS_EXTENSION_URI`, and no write grant otherwise.
 TRANSFERS_EXTENSION_URI = "urn:agentenv:transfers/v1"
 _RELATIVE_PATH = TypeAdapter(RelativePath)
 

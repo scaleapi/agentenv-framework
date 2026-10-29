@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import posixpath
 import shlex
@@ -9,7 +10,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
+from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
+from agent_env.store.base import NotFoundError
+from agent_env.store.routing import namespace_routing_enabled
 from agent_env.utils.paths import validate_relative_filename
 
 from .gateway import GatewayMode
@@ -23,6 +27,7 @@ _EXTENSION_CALL_TIMEOUT_S = 30
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from .store import EnvQuery
 
 
@@ -57,6 +62,15 @@ class EnvNeedsSandbox(RuntimeError):
         self.what = what
         self.env_id = env_id
         super().__init__(f"{what} needs a sandbox; env '{env_id}' runs outside agent-env's sandboxes")
+
+
+def _holds(env_id: str) -> bool:
+    """Whether the store has an env of ``env_id``, at any version."""
+    try:
+        get_env_store().get(env_id)
+    except NotFoundError:
+        return False
+    return True
 
 
 @dataclass(kw_only=True)
@@ -226,8 +240,43 @@ class Env(ABC):
 
     @classmethod
     def get(cls, id: str, version: Optional[int] = None) -> "Env":
-        from .store import get_env_store
-        return get_env_store().get(id, version)
+        """The env ``id`` names: the store's env of that id, else the env an installed bundle gives the alias ``id``,
+        which the store holds once a run of a bundle has used it. The alias's env answers to the alias's id, as the
+        store's env of that id would, so a run's records name the env its task names; ``version`` is its env's. An alias
+        names its env only where namespace routing is on, as in the CLI. Raises NotFoundError."""
+        store = get_env_store()
+        try:
+            return store.get(id, version)
+        except NotFoundError:
+            if not isinstance(id, str) or id.startswith("@") or "/" in id:  # neither an alias nor close to one
+                raise
+            aliases = installed_aliases(table=ENV_ALIASES)
+            named, refusal = aliases.target(id), aliases.refusal(id)
+            if named is None and refusal is None:
+                if version is None and (hint := aliases.hint(id)):
+                    raise NotFoundError(f"there is no env {id!r} in the store{hint}") from None
+                raise
+            if version is not None and _holds(id):
+                raise
+            if named is None:
+                raise NotFoundError(refusal) from None
+        if not namespace_routing_enabled():
+            raise NotFoundError(f"{id!r} is an alias of {named.target_id}, which comes with {named.declared_by}, and "
+                                "an alias names its env only with namespace routing on, as the CLI and "
+                                "A2AAgent.validate turn it on")
+        try:
+            env = store.get(named.target_id, version)
+        except NotFoundError:
+            raise NotFoundError(f"{id!r} is an alias of {named.target_id}, which comes with {named.declared_by} and "
+                                "isn't in the store yet: an `agent-env run` of a bundle that uses it writes it") from None
+        env = copy.copy(env)
+        env._stored_id, env.id = env.id, id
+        return env
+
+    @property
+    def stored_id(self) -> str:
+        """The id the store holds this env under: its own, or for an env ``get`` gave by an alias, the aliased env's."""
+        return getattr(self, "_stored_id", None) or self.id
 
     @classmethod
     async def from_instance_id(cls, instance_id: str) -> "Env":
@@ -261,7 +310,7 @@ class Env(ABC):
         from .store import get_env_store
         if self.version is None:
             raise ValueError("Cannot update metadata on an unsaved env (version is None)")
-        self.metadata = get_env_store().update_metadata(self.id, self.version, self.metadata, new_metadata)
+        self.metadata = get_env_store().update_metadata(self.stored_id, self.version, self.metadata, new_metadata)
 
     def merge_metadata(self, updates: dict[str, Any], retries: int = 3) -> None:
         """Merge ``updates`` into this env's metadata, re-reading and retrying on a
@@ -276,13 +325,13 @@ class Env(ABC):
         for attempt in range(retries + 1):
             try:
                 self.metadata = get_env_store().update_metadata(
-                    self.id, self.version, metadata, {**metadata, **updates}
+                    self.stored_id, self.version, metadata, {**metadata, **updates}
                 )
                 return
             except ConcurrentModificationError:
                 if attempt == retries:
                     raise
-                metadata = Env.get(self.id, self.version).metadata
+                metadata = Env.get(self.stored_id, self.version).metadata
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "type": self.type, "version": self.version, "metadata": self.metadata}
@@ -298,8 +347,20 @@ class Env(ABC):
         stored document; a type whose toml differs overrides this."""
         return get_env_store().put_document(cls.from_dict({**data, "id": ctx.id, "version": None}))
 
+    def provider_toml(self, out: ExportContext, env_provider_type: str) -> dict:
+        """The env.toml keys every env type writes: its provider, unless it's the gateway a toml defaults to."""
+        if self.metadata:
+            out.left_out("metadata", "an env.toml carries no metadata")
+        return {} if env_provider_type == "gateway" else {"env_provider_type": env_provider_type}
+
     async def deploy(self, **kwargs) -> DeployedEnv:
         raise NotImplementedError(f"{type(self).__name__} must implement deploy()")
+
+    def deploy_refusal(self, *, sandbox_type: Optional[str] = None, env_params: Optional[dict] = None,
+                       **options) -> Optional[str]:
+        """Why deploy() would refuse these options before building anything, or None. A type that checks its options
+        overrides this; one that doesn't takes no ``env_params``."""
+        return f"{self.type} envs take no env_params" if env_params else None
 
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> Self:
@@ -308,6 +369,11 @@ class Env(ABC):
         An override takes ``deployed: DeployedEnv`` and narrows it with ``isinstance``.
         """
         raise NotImplementedError(f"{cls.__name__} cannot be rebuilt from a deployment")
+
+    async def close(self) -> None:
+        """Release what deploy() made. Teardown calls it on each env a run deployed before it terminates what's left by
+        sandbox id; a type that can't close raises this."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement close()")
 
     async def reset(self, deployed: "DeployedEnv") -> None:
         """Return an already-deployed env to a clean between-tasks state.

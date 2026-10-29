@@ -91,7 +91,8 @@ class GrantingStore:
 
 def _use_store(monkeypatch, store, *, key_prefix=""):
     config = type(
-        "Config", (), {"get_object_store": lambda self: store, "get_artifact_key_prefix": lambda self: key_prefix}
+        "Config", (), {"get_object_store": lambda self: store, "get_artifact_key_prefix": lambda self: key_prefix,
+                       "get_model_for_role": lambda self, role: None}
     )()
     monkeypatch.setattr(f"{RV}.get_config", lambda: config)
     monkeypatch.setattr(

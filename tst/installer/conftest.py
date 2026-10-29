@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
+from packaging.utils import canonicalize_name
 
 from tst.util.capabilities import missing_capability_reason
 
@@ -128,7 +129,7 @@ def simple_index(tmp_path_factory, dependencies, checkout_wheels) -> Iterator[st
     root = tmp_path_factory.mktemp("simple-index")
     projects: dict[str, list[Path]] = {}
     for wheel in [*dependencies.glob("*.whl"), *checkout_wheels.glob("*.whl")]:
-        projects.setdefault(wheel.name.split("-", 1)[0].lower().replace("_", "-"), []).append(wheel)
+        projects.setdefault(canonicalize_name(wheel.name.split("-", 1)[0]), []).append(wheel)
     for project, wheels in projects.items():
         page = root / "simple" / project
         page.mkdir(parents=True)

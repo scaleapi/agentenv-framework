@@ -6,7 +6,6 @@ handling common functionality like health checks, data reset, and time utilities
 """
 
 import os
-from datetime import datetime
 from typing import Annotated, Any, Optional, TYPE_CHECKING
 
 from mcp.server.fastmcp import FastMCP

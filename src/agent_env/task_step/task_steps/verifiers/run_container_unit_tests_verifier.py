@@ -33,7 +33,8 @@ import time
 import uuid
 from typing import Any, ClassVar, Optional
 
-from agent_env.providers.sandbox_providers.local_sandbox import host_url_for
+from agent_env.config.model import MODEL_HEADERS_ENV
+from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,
     registered_sandbox_provider_classes,
@@ -65,6 +66,7 @@ _SAFE_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 _RESERVED_ENV_KEYS = frozenset({
     "LITELLM_API_KEY", "ANTHROPIC_API_KEY",
     "LITELLM_BASE_URL", "ANTHROPIC_BASE_URL",
+    MODEL_HEADERS_ENV,
     "PATH", "HOME",
 })
 _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
@@ -201,7 +203,6 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         return command, extra_env
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        from agent_env.artifact.artifacts.file import FileArtifact
         from agent_env.providers.sandbox_providers.sandbox_provider import (
             build_sandbox_provider,
             get_sandbox_provider,
@@ -255,6 +256,11 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         command, extra_env = self._resolve_command(context)
         merged_env.update(self.env_vars)
         merged_env.update(extra_env)
+        # Unlike a missing key or URL, configured headers that don't resolve fail the step: a verifier that ran
+        # without them would grade against an endpoint that answers differently, or bills someone else.
+        if MODEL_HEADERS_ENV not in merged_env:
+            if headers := config.get_model_headers(merged_env.get("LITELLM_BASE_URL")):
+                merged_env[MODEL_HEADERS_ENV] = json.dumps(headers)
         for key in _MODEL_URL_KEYS & merged_env.keys():
             merged_env[key] = host_url_for(merged_env[key], sandbox.type)
         env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in merged_env.items())
@@ -270,7 +276,18 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
                 f"{shlex.quote(sandbox.scoped_name(self.container_name))} bash -c {shlex.quote(setup_cmd)}"
             )
 
-        # 4. Run main command, bounded by in-container timeout(1)
+        # 4. Clear the reward file the score is read from, so one the agent left in this container
+        # isn't graded; a process the agent left running can still write it. Other result files
+        # stay: a step can extract what an earlier step's job wrote. `-w /` resolves a relative
+        # path as `docker cp` does, and uid 0 needs no passwd entry.
+        if self.reward_path:
+            await sandbox.exec_script(
+                f"docker exec -u 0 -w / "
+                f"{shlex.quote(sandbox.scoped_name(self.container_name))} "
+                f"rm -f -- {shlex.quote(self.reward_path)}"
+            )
+
+        # 5. Run main command, bounded by in-container timeout(1)
         logger.info(
             f"[{self.verifier_id}] running verifier (timeout={self.timeout_sec}s) "
             f"in container '{self.container_name}': {command[:160]}"
@@ -291,7 +308,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         if stderr:
             logger.info(f"[{self.verifier_id}] stderr:\n{stderr}")
 
-        # 5. Extract result files (docker cp + cat + try JSON parse)
+        # 6. Extract result files (docker cp + cat + try JSON parse)
         extracted_files: dict[str, Any] = {}
         for result_path in self.result_paths:
             try:
@@ -379,8 +396,9 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         }
 
         # 9. Raise on timeout / non-zero exit AFTER recording. In reward mode a
-        # non-zero exit is a graded failure (already recorded as score 0), not a
-        # step error — only an unfinished (timed-out) run is unreliable.
+        # non-zero exit is graded by the reward file this run wrote (score 0 when
+        # it wrote none), not a step error — only an unfinished (timed-out) run is
+        # unreliable.
         if timed_out:
             raise RuntimeError(
                 f"Verifier '{self.verifier_id}' timed out after {self.timeout_sec}s"

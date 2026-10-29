@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import click
 
 from agent_env.artifact import FileArtifact, FileArtifactUniverse
+from agent_env.cli.utils import write_out
 from agent_env.store.ids import fs_safe, is_local_id, key_segment
 
 
@@ -121,19 +122,7 @@ def get(universe_id: str, universe_version: Optional[int], output_dir: str):
         f"file_count={len(universe.file_artifact_ids)}"
     )
 
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    file_artifacts = universe.get_file_artifacts()
-    click.echo(f"Downloading {len(file_artifacts)} file(s)...")
-    for filename, fa in file_artifacts.items():
-        data = fa.load()
-        # Preserve subdirectories if the filename contains '/'.
-        dest = out / filename
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-        click.echo(f"  {filename} -> {dest} ({len(data)} bytes)")
-
+    out = write_out(universe, Path(output_dir))
     click.echo(f"Done. Files written to {out}")
 
 

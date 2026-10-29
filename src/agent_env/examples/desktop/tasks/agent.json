@@ -1,0 +1,11 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop"},
+  {"id": "agent", "type": "deploy_agent", "env_ids": ["desktop"]},
+  {"id": "skills", "type": "add_skills", "env_ids": ["desktop"]},
+  {"id": "record", "type": "start_computer_recording", "env_id": "desktop", "name": "agent", "depends_on": ["env"]},
+  {"id": "task", "type": "prompt_agent", "depends_on": ["skills", "record"],
+   "prompt": "Open the file manager on this computer and make a new folder named Reports in the Documents folder. Use only the computer_* tools, and reply DONE once the folder is there."},
+  {"id": "check", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_folder",
+   "verifier_id": "folder", "depends_on": ["task"]},
+  {"id": "end", "type": "end_computer_recording", "name": "agent", "depends_on": ["task"]}
+]

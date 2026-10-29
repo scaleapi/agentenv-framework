@@ -18,7 +18,7 @@ from agent_env.env.env import DeployedGatewayEnv, Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from tst.integration.env.envs.server_env_local_test import _put_items_image
-from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs, local_stack  # noqa: F401  (fixture)
+from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs, local_stack as local_stack
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 

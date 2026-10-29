@@ -185,22 +185,26 @@ async def test_single_turn_does_not_take_multiturn_path(monkeypatch):
 # --- _load_per_turn_trajectories: container delivery call-sequence -------------
 
 @pytest.mark.asyncio
-async def test_load_per_turn_trajectories_no_filter_writes_each_turn():
+@pytest.mark.parametrize("judge_container", [None, "task"])
+async def test_load_per_turn_trajectories_no_filter_writes_each_turn(judge_container):
     v = _verifier()
     sandbox = MagicMock()
     sandbox.write_file_from_object = AsyncMock()
     sandbox.write_file_from_text = AsyncMock()
 
     await v._load_per_turn_trajectories(
-        sandbox, ["s3://a/1.json", "s3://a/2.json"], "/tmp/d", None)
+        sandbox, ["s3://a/1.json", "s3://a/2.json"], "/tmp/d", None, judge_container)
 
     dests = [call.args[1] for call in sandbox.write_file_from_object.call_args_list]
     assert dests == ["/tmp/d/turn_01.json", "/tmp/d/turn_02.json"]
+    into = {"container": judge_container} if judge_container else {}
+    assert [call.kwargs for call in sandbox.write_file_from_object.call_args_list] == [into, into]
     sandbox.write_file_from_text.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_load_per_turn_trajectories_default_filter_compacts_and_namespaces(monkeypatch):
+@pytest.mark.parametrize("judge_container", [None, "task"])
+async def test_load_per_turn_trajectories_default_filter_compacts_and_namespaces(monkeypatch, judge_container):
     spans = json.dumps([_tool_span("t", {"result": "x" * 2000})])
     v = _verifier()
     monkeypatch.setattr(v, "_read_trajectory_text", lambda uri: spans)
@@ -208,7 +212,7 @@ async def test_load_per_turn_trajectories_default_filter_compacts_and_namespaces
     sandbox.write_file_from_object = AsyncMock()
     sandbox.write_file_from_text = AsyncMock()
 
-    await v._load_per_turn_trajectories(sandbox, ["u1", "u2"], "/tmp/d", TrajectoryFilter())
+    await v._load_per_turn_trajectories(sandbox, ["u1", "u2"], "/tmp/d", TrajectoryFilter(), judge_container)
 
     sandbox.write_file_from_object.assert_not_called()          # compacted -> written as text
     dests = [call.args[1] for call in sandbox.write_file_from_text.call_args_list]
@@ -217,6 +221,8 @@ async def test_load_per_turn_trajectories_default_filter_compacts_and_namespaces
     assert any("turn_01_tool_call_result" in d for d in tool_dests)
     assert any("turn_02_tool_call_result" in d for d in tool_dests)
     assert len(set(tool_dests)) == len(tool_dests)          # no cross-turn collisions
+    into = {"container": judge_container} if judge_container else {}
+    assert all(call.kwargs == into for call in sandbox.write_file_from_text.call_args_list)
 
 
 # --- trajectory reads and writes run off the event loop -----------------------

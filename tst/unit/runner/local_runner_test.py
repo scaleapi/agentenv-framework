@@ -5,14 +5,20 @@ bookkeeping, bounded concurrency, real cancellation, and orphan reconciliation o
 """
 
 import asyncio
+import socket
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from agent_env.config import configure, reset_config, set_document_store
+from agent_env.config.runtime import Config
 from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
-from agent_env.runner.runner import RunRecord, RunStatus
+from agent_env.runner.runner import KEEP_KEY, RunRecord, RunStatus
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
+from tst.runner import conformance
 
 
 @pytest.fixture
@@ -213,7 +219,7 @@ async def test_cancel_a_queued_run_before_it_starts(docs, monkeypatch):
     _install_task(monkeypatch, task)
     runner = LocalRunner(workers=1)
     await runner.start()
-    blocker = await runner.submit("t1", 1)
+    await runner.submit("t1", 1)
     await asyncio.wait_for(started.wait(), 2)        # blocker holds the one slot
     waiting = await runner.submit("t1", 1)           # no free slot → QUEUED
 
@@ -264,6 +270,120 @@ async def test_start_fails_a_run_left_running_by_a_previous_process(docs):
     rec = run_store.get_run("orphan")
     assert rec.status is RunStatus.FAILED
     assert "restart" in rec.error
+
+
+@pytest.mark.asyncio
+async def test_start_spares_the_runs_a_live_runner_owns_and_fails_a_dead_processes(docs, monkeypatch):
+    started = asyncio.Event()
+
+    async def on_run(_):
+        started.set()
+        await asyncio.sleep(30)
+
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    orphan = RunRecord(run_id="orphan", runner="local", task_id="t", task_version=1, instance_id="i",
+                       status=RunStatus.RUNNING)
+    docs.insert(run_store.RUNS_COLLECTION, {**orphan.to_dict(), "owner": {"host": socket.gethostname(), "pid": gone.pid}})
+    owner = LocalRunner(workers=1)
+    handle = await owner.submit("t1", 1)
+    await asyncio.wait_for(started.wait(), 5)
+    explorer = LocalRunner(workers=1)
+    try:
+        await explorer.start()
+        assert (await explorer.status(handle.run_id)).status is RunStatus.RUNNING
+        assert run_store.get_run("orphan").status is RunStatus.FAILED
+    finally:
+        await explorer.stop()
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_only_the_runner_running_a_run_can_cancel_it(docs, monkeypatch):
+    from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
+
+    torn_down, started, release, cancelled = [], asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def teardown_run(context):
+        torn_down.append(context.metadata["workflow_id"])
+        return TeardownReport()
+
+    async def on_run(kwargs):
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    owner, other = LocalRunner(workers=2), LocalRunner(workers=1)
+    finishes, stopped = await owner.submit("t1", 1), await owner.submit("t1", 1)
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        assert await other.cancel(finishes.run_id) is False
+        assert run_store.get_run(finishes.run_id).status is RunStatus.RUNNING and not cancelled.is_set()
+        assert await owner.cancel(stopped.run_id) is True
+        assert (await _drain(owner, stopped.run_id)).status is RunStatus.CANCELED and cancelled.is_set()
+        release.set()
+        assert (await _drain(owner, finishes.run_id)).status is RunStatus.COMPLETED
+        await _settled(owner, finishes.run_id)
+    finally:
+        await other.stop()
+        await owner.stop()
+
+    assert sorted(torn_down) == sorted([finishes.run_id, stopped.run_id])
+
+
+async def _until(condition, timeout=5.0):
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not condition():
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError("condition never held")
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_run_owned_on_another_host_is_failed_once_its_owner_stops_seeing_it(docs, monkeypatch):
+    monkeypatch.setattr(LocalRunner, "OWNER_SEEN_SECONDS", 0.01)
+    monkeypatch.setattr(LocalRunner, "OWNER_LEASE_SECONDS", 0.5)
+    now = datetime.now(timezone.utc)
+    for run_id, seen in (("gone", now - timedelta(seconds=10)), ("going", now)):
+        record = RunRecord(run_id=run_id, runner="local", task_id="t", task_version=1, instance_id=run_id,
+                           status=RunStatus.RUNNING)
+        docs.insert(run_store.RUNS_COLLECTION, {**record.to_dict(), "owner": {"host": "elsewhere", "pid": 1,
+                                                                             "seen": seen.isoformat()}})
+    runner = LocalRunner(workers=1)
+    try:
+        await runner.start()
+        assert (run_store.get_run("gone").status, run_store.get_run("going").status) == (RunStatus.FAILED,
+                                                                                        RunStatus.RUNNING)
+        await _until(lambda: run_store.get_run("going").status is RunStatus.FAILED)
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_runner_keeps_seeing_the_runs_it_is_running(docs, monkeypatch):
+    monkeypatch.setattr(LocalRunner, "OWNER_SEEN_SECONDS", 0.01)
+    started = asyncio.Event()
+
+    async def on_run(_):
+        started.set()
+        await asyncio.sleep(30)
+
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 1)
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        first_seen = run_store.get_run(handle.run_id).owner["seen"]
+        await _until(lambda: run_store.get_run(handle.run_id).owner["seen"] > first_seen)
+    finally:
+        await runner.stop()
 
 
 @pytest.mark.asyncio
@@ -326,6 +446,81 @@ async def test_what_a_run_deployed_is_torn_down_however_it_ends(docs, monkeypatc
         await runner.stop()
 
     assert torn_down == [handle.run_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("ending", "torn_down_count"), [("completes", 0), ("is cancelled", 1)])
+async def test_a_kept_run_is_left_up_unless_it_is_cancelled(docs, monkeypatch, ending, torn_down_count):
+    from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
+
+    torn_down = []
+
+    async def teardown_run(context):
+        torn_down.append(context)
+        return TeardownReport()
+
+    async def on_run(_):
+        started.set()
+        if ending == "is cancelled":
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    started = asyncio.Event()
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 1, metadata={KEEP_KEY: True})
+    try:
+        if ending == "is cancelled":
+            await asyncio.wait_for(started.wait(), 5)
+            await runner.cancel(handle.run_id)
+        await _drain(runner, handle.run_id)
+        await _settled(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    assert len(torn_down) == torn_down_count
+
+
+@pytest.mark.asyncio
+async def test_a_run_given_an_instance_continues_it_from_its_stored_context(docs, monkeypatch):
+    from agent_env.task.store import register_task_instance, seed_task_instance_context
+    from agent_env.task_step.context import TaskStepContext
+
+    from agent_env.task import Task
+
+    register_task_instance("t1", 3, 2, 1, instance_id="inst-1")
+    seed_task_instance_context("inst-1", TaskStepContext(metadata={"done": "s0"}))
+    task, versions = _FakeTask(), []
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, tid, ver=None: versions.append(ver) or task))
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", metadata={"start_step": 1}, instance_id="inst-1")
+    try:
+        await _drain(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    [call] = task.calls
+    assert handle.instance_id == call["instance_id"] == "inst-1"
+    assert (call["start_step"], call["context"].metadata["done"], versions) == (1, "s0", [3])
+
+
+@pytest.mark.asyncio
+async def test_a_run_given_an_instance_of_another_version_fails_without_running(docs, monkeypatch):
+    from agent_env.task.store import register_task_instance
+
+    register_task_instance("t1", 3, 2, 1, instance_id="inst-1")
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 4, instance_id="inst-1")
+    try:
+        record = await _drain(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    assert record.status is RunStatus.FAILED and "is a run of t1 v3, not of t1 v4" in record.error
+    assert task.calls == []
 
 
 @pytest.mark.asyncio
@@ -487,3 +682,15 @@ async def test_a_shutdown_teardown_that_runs_out_of_time_is_reported(docs, monke
 
     assert f"Gave up tearing down {handle.run_id}" in caplog.text
     await asyncio.sleep(1.1)  # let the abandoned run end before the loop closes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", conformance.CASES, ids=lambda case: case.__name__)
+async def test_conformance(case, local_stores, monkeypatch):
+    steps = {**Config().task_step_registry(), conformance.Step.type: conformance.Step}
+    monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    runner = LocalRunner()
+    try:
+        await case(runner)
+    finally:
+        await runner.stop()

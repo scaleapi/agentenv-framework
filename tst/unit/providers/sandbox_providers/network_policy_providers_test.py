@@ -4,7 +4,7 @@ create_container forward, and the chained pre-filter."""
 import pytest
 
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import (
@@ -13,9 +13,11 @@ from agent_env.providers.sandbox_providers.sandbox import (
     NetworkPolicyUnsupportedError,
     Sandbox,
 )
+from agent_env.providers.sandbox_providers.vercel.provider import VercelSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 RESTRICTIVE = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("only-this.example.com",))
+CLOSED = NetworkPolicy(mode=NetworkMode.ALLOWLIST)
 ALLOWLIST = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("llm-proxy.example.com",))
 ALLOW_ALL = NetworkPolicy()
 
@@ -41,7 +43,9 @@ def test_backends_without_enforcement_refuse_restrictive_policies(provider_cls, 
     assert provider_cls.supports_network_policy(ALLOW_ALL) is True
 
 
-@pytest.mark.parametrize("provider_cls", [ModalSandboxProvider, ModalVmSandboxProvider])
+@pytest.mark.parametrize(
+    "provider_cls", [ModalSandboxProvider, ModalVmSandboxProvider, VercelSandboxProvider]
+)
 @pytest.mark.parametrize("policy", [RESTRICTIVE, ALLOWLIST, ALLOW_ALL])
 def test_modal_backends_advertise_full_support(provider_cls, policy):
     assert provider_cls.supports_network_policy(policy) is True
@@ -66,6 +70,14 @@ async def test_a_backend_refuses_before_provisioning_rather_than_ignoring_the_po
     isolated look valid. Each entry point refuses before it provisions anything."""
     with pytest.raises(NetworkPolicyUnsupportedError, match="cannot enforce network policy mode"):
         await getattr(provider, method)(network_policy=RESTRICTIVE, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_local_takes_a_containers_network_away_but_not_a_vms():
+    assert CLOSED.closed and not RESTRICTIVE.closed and not ALLOW_ALL.closed
+    assert LocalSandboxProvider.supports_network_policy(CLOSED) is True
+    with pytest.raises(NetworkPolicyUnsupportedError, match="takes a container's network away, not a VM's"):
+        await LocalSandboxProvider().create_vm(network_policy=CLOSED)
 
 
 @pytest.mark.asyncio

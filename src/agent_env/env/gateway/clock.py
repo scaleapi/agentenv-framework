@@ -10,6 +10,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ClockError(ValueError):
@@ -74,6 +75,16 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _zone(name) -> ZoneInfo | None:
+    """The IANA time zone `name` names, or None if it names none."""
+    if not isinstance(name, str):
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
 # Calendar Y/M are absent on purpose: a month is not a fixed span. Empty ("P"/"PT") is caught by the
 # any-group check in _parse_duration, not here.
 _ISO8601_DURATION_RE = re.compile(
@@ -119,13 +130,20 @@ class Clock:
         self._lock = threading.Lock()
         self._armed = False
         self._t0: datetime | None = None
-        self._anchor: float | None = None
+        self._anchor = now_fn()  # real time the current arm (or unarmed stretch) began
         self._rate = 1.0
         self._generation = 0
+        self._lived = 0.0  # virtual seconds run before the current arm/clear
+        self._ahead = 0.0  # virtual seconds the current arm was advanced by
 
     @property
     def armed(self) -> bool:
         return self._armed
+
+    @property
+    def rate(self) -> float:
+        """Virtual seconds per real second; 1.0 while unarmed."""
+        return self._rate
 
     @property
     def generation(self) -> int:
@@ -144,29 +162,59 @@ class Clock:
         if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
             raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
         with self._lock:
+            self._bank(t0)
             self._t0 = t0
-            self._anchor = self._now()
             self._rate = r
+            self._ahead = 0.0
             self._armed = True
             self._generation += 1
+        return self.state()
+
+    def advance(self, virtual_time: str) -> dict:
+        """Jump forward to virtual_time on the current arm, keeping t0, rate and generation, so marks stay put."""
+        target = _parse_rfc3339(virtual_time)
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                raise ClockError("clock is not armed")
+            if target > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * self._rate):
+                raise ClockError(f"virtual_time {virtual_time!r} at rate {self._rate:g} would overflow datetime near the max")
+            current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+            jump = (target - current).total_seconds()
+            if jump < 0:
+                raise ClockError(f"advance only moves forward: {virtual_time!r} is before the current {_iso(current)}")
+            self._ahead += jump
+            self._lived += jump
         return self.state()
 
     def clear(self) -> dict:
         """Disarm (idempotent). Afterwards reads 404."""
         with self._lock:
+            self._bank()
             self._armed = False
             self._t0 = None
-            self._anchor = None
             self._rate = 1.0
+            self._ahead = 0.0
             self._generation += 1
         return {"ok": True, "armed": False}
+
+    def elapsed(self) -> float:
+        """Virtual seconds run so far: real time at each arm's rate (1 unarmed), plus each forward re-arm or advance."""
+        with self._lock:
+            return self._lived + (self._now() - self._anchor) * self._rate
 
     def now(self) -> datetime | None:
         with self._lock:
             if not self._armed or self._t0 is None:
                 return None
             elapsed = self._now() - self._anchor
-            return _advance(self._t0, elapsed * self._rate)
+            return _advance(self._t0, elapsed * self._rate + self._ahead)
+
+    def at_elapsed(self, elapsed: float) -> datetime | None:
+        """The virtual time at which elapsed() reaches `elapsed` on the current arm; None while unarmed."""
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                return None
+            return _advance(self._t0, elapsed - self._lived + self._ahead)
 
     def read(self) -> dict:
         """The frozen consumer contract: {"virtual_time": "<RFC3339>"} — pure read, never advances."""
@@ -181,4 +229,13 @@ class Clock:
                 return {"armed": False}
             elapsed = self._now() - self._anchor
             return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
-                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate))}
+                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead))}
+
+    def _bank(self, t0: datetime | None = None) -> None:
+        """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
+        now = self._now()
+        ran = (now - self._anchor) * self._rate
+        self._lived += ran
+        if t0 is not None and self._armed:  # a re-arm forward is time the world lived through; one back adds nothing
+            self._lived += max(0.0, (t0 - _advance(self._t0, ran + self._ahead)).total_seconds())
+        self._anchor = now

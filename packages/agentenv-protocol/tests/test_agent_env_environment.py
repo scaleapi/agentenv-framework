@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import enum
+import inspect
 import json
 import sys
 import uuid
@@ -18,6 +19,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 
 from agentenv_protocol import (
+    HIDDEN_BY_DEFAULT_META_KEY,
+    SKILL_EXTENSION_URI,
     AgentEnvEnvironment,
     AgentEnvFastMCPApplication,
     AgentEnvStarletteApplication,
@@ -28,6 +31,7 @@ from agentenv_protocol import (
     EnvironmentInterface,
     EnvironmentTool,
     add_data,
+    agent_skill,
     create_fastmcp_app,
     environment_card,
     extension,
@@ -47,6 +51,11 @@ class _FakeMCP:
         self.routes: list[Route] = []
         self.tools: dict[str, tuple] = {}
         self.settings = SimpleNamespace(streamable_http_path="/mcp")
+        self._tool_manager = SimpleNamespace(get_tool=self.tools.get, call_tool=self._call_tool)
+
+    async def _call_tool(self, name: str, arguments: dict, *_: object, **__: object):
+        result = self.tools[name][1](**arguments)
+        return await result if inspect.isawaitable(result) else result
 
     def custom_route(self, path: str, methods: list[str]):
         def deco(fn):
@@ -135,6 +144,44 @@ async def test_add_invalid_params_returns_error():
 
         r = await client.post("/agentenv", json=_rpc("data/add", {"parts": [{"kind": "bogus"}]}))
         assert r.json()["error"]["code"] == -32602
+
+        r = await client.post("/agentenv", json=_rpc("data/get", {"paths": ["items"]}))
+        assert r.json()["error"]["code"] == -32602 and "takes no paths" in r.json()["error"]["data"]["detail"]
+
+
+class _PathsHandler:
+    @get_data
+    async def _export(self, paths):
+        return [{"kind": "data", "data": {"paths": paths}}]
+
+
+@pytest.mark.asyncio
+async def test_a_get_hook_that_takes_paths_gets_none_when_the_call_names_none():
+    async with _client(_PathsHandler) as client:
+        named = await client.post("/agentenv", json=_rpc("data/get", {"paths": ["a"]}))
+        unnamed = await client.post("/agentenv", json=_rpc("data/get"))
+    assert named.json()["result"]["parts"][0]["data"] == {"paths": ["a"]}
+    assert unnamed.json()["result"]["parts"][0]["data"] == {"paths": None}
+
+
+class _SkillHandler:
+    @agent_skill
+    def _guide(self):
+        return "How to use the shop's API.", "# The shop\n\nOrders are placed with `place_order`.\n"
+
+
+@pytest.mark.asyncio
+async def test_an_env_serves_its_skill_under_the_name_its_asked_for_and_refuses_one_that_isnt_a_skill_name():
+    async with _client(_SkillHandler) as client:
+        card = (await client.get("/.well-known/agent-env.json")).json()
+        answer = (await client.get("/agentenv/ext/skill/get", params={"name": "shop"})).json()
+        refused = await client.get("/agentenv/ext/skill/get", params={"name": "The Shop"})
+    extensions = {e["uri"]: e for e in card["capabilities"]["extensions"]}
+    assert extensions[SKILL_EXTENSION_URI]["params"]["methods"]["get"]["method"] == "GET"
+    assert answer == {"name": "shop", "description": "How to use the shop's API.", "skill_md":
+                      '---\nname: shop\ndescription: "How to use the shop\'s API."\n---\n\n# The shop\n\n'
+                      "Orders are placed with `place_order`.\n"}
+    assert refused.status_code == 400 and "lowercase letters, digits and single hyphens" in refused.text
 
 
 @pytest.mark.asyncio
@@ -291,6 +338,28 @@ async def test_partial_data_ops_construct_and_unregistered_op_answers_method_not
         assert (await client.post("/agentenv", json=_rpc("data/add", {"parts": [{"kind": "data", "data": {}}]}))).json()["error"]["code"] == -32601
         card = (await client.get("/.well-known/agent-env.json")).json()
         assert card["capabilities"]["operations"] == ["data/reset"]
+
+
+@pytest.mark.asyncio
+async def test_served_operations_chooses_the_data_plane_methods_served():
+    class _ReadOnlyItems(_ItemsHandler):
+        def served_operations(self, operations: list[str]) -> list[str]:
+            return [op for op in operations if op != "data/add"]
+
+    async with _client(_ReadOnlyItems) as client:
+        added = await client.post("/agentenv", json=_rpc("data/add", {"parts": [{"kind": "data", "data": {"items": ["a"]}}]}))
+        card = (await client.get("/.well-known/agent-env.json")).json()
+    assert added.json()["error"]["code"] == -32601
+    assert card["capabilities"]["operations"] == ["data/reset", "data/get"]
+
+
+def test_served_operations_naming_an_unmarked_method_is_refused():
+    class _Bad(_ItemsHandler):
+        def served_operations(self, operations: list[str]) -> list[str]:
+            return [*operations, "data/snapshot"]
+
+    with pytest.raises(ValueError, match=r"no handler: \['data/snapshot'\]"):
+        AgentEnvFastMCPApplication(environment_card=EnvironmentCard(name="x"), handler=_Bad())
 
 
 @pytest.mark.asyncio
@@ -1135,6 +1204,49 @@ async def test_create_fastmcp_app_encodes_deploy_contract(monkeypatch):
         assert r.json()["result"]["parts"][0]["data"] == {"items": []}
     await app.call_tool("items_add_item", {"item": "x", "times": 2})
     assert handler.store == ["x", "x"]
+
+
+class _PlumbingHandler(_ToolHandler):
+    @tool(name="{environment_name}_insert_item", hidden_by_default=True)
+    async def insert_item(self, item: str) -> dict:
+        """Put an item in the store as if it had arrived."""
+        self.store.append(item)
+        return {"count": len(self.store)}
+
+
+def test_hidden_by_default_meta_key_is_the_literal_the_gateway_mirrors():
+    assert HIDDEN_BY_DEFAULT_META_KEY == "agentenv.io/hiddenByDefault"
+
+
+@pytest.mark.asyncio
+async def test_hidden_by_default_tool_is_listed_with_the_meta_flag_and_others_without(monkeypatch):
+    pytest.importorskip("mcp.server.fastmcp")
+    monkeypatch.delenv("SERVICE_NAME", raising=False)
+    handler = _PlumbingHandler()
+    app = create_fastmcp_app(handler, card=EnvironmentCard(name="items"))
+    listed = {t.name: t for t in await app.list_tools()}
+    assert listed["items_insert_item"].meta == {HIDDEN_BY_DEFAULT_META_KEY: True}
+    assert listed["items_add_item"].meta is None and listed["count_items"].meta is None
+    wire = listed["items_insert_item"].model_dump(by_alias=True, exclude_none=True)
+    assert wire["_meta"] == {"agentenv.io/hiddenByDefault": True}
+    await app.call_tool("items_insert_item", {"item": "x"})
+    assert handler.store == ["x"]
+
+
+@pytest.mark.asyncio
+async def test_hidden_by_default_reaches_tools_list_on_standalone_fastmcp():
+    fastmcp = pytest.importorskip("fastmcp")
+    app = fastmcp.FastMCP("items")
+    AgentEnvFastMCPApplication(environment_card=EnvironmentCard(name="items"), handler=_PlumbingHandler()).add_routes_to_app(app)
+    async with fastmcp.Client(app) as client:
+        listed = {t.name: t for t in await client.list_tools()}
+    assert (listed["items_insert_item"].meta or {}).get(HIDDEN_BY_DEFAULT_META_KEY) is True
+    assert not (listed["items_add_item"].meta or {}).get(HIDDEN_BY_DEFAULT_META_KEY)
+
+
+def test_an_unflagged_tool_mounts_on_a_target_without_the_meta_parameter():
+    """FastMCP-shaped targets that predate `meta` (this file's _FakeMCP) still mount every unflagged tool."""
+    assert set(_mounted(_ToolHandler()).tools) == {"count_items", "items_add_item"}
 
 
 def test_create_fastmcp_app_uses_card_verbatim(monkeypatch):

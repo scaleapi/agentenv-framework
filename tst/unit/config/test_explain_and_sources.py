@@ -162,7 +162,8 @@ def test_sources_says_how_the_file_was_found(config_file, tmp_path, monkeypatch)
 
 # Read for identity (USER), or set from [sandbox.providers.sail_vm.config] for the Sail SDK to read
 # (SAIL_*), never configuration agent-env takes, so none is a layer.
-_NOT_CONFIGURATION = {"USER", "SAIL_API_KEY", "SAIL_RUNTIME_THREADS"}
+# AGENT_ENV_INSTALLED_REQUIRES marks a command run again after installing what a bundle requires, so it never asks twice.
+_NOT_CONFIGURATION = {"USER", "SAIL_API_KEY", "SAIL_RUNTIME_THREADS", "AGENT_ENV_INSTALLED_REQUIRES"}
 
 
 def _env_vars_read_by(root):
@@ -175,7 +176,7 @@ def _env_vars_read_by(root):
     found = set()
     for module in root.rglob("*.py"):
         tree = ast.parse(module.read_text())
-        # `os.getenv(_ENV_API_KEY)` is as much a read as the literal; resolving the
+        # `os.getenv(ENV_API_KEY)` is as much a read as the literal; resolving the
         # constant is what stops a new variable hiding behind a name.
         consts = {t.id: n.value.value
                   for n in ast.walk(tree)
@@ -208,7 +209,7 @@ def test_every_env_var_agent_env_reads_is_declared():
 
 
 def test_the_guard_resolves_a_variable_hidden_behind_a_module_constant():
-    # LITELLM_API_KEY is only ever read as `os.getenv(_ENV_API_KEY)`, so a guard that
+    # LITELLM_API_KEY is only ever read as `os.getenv(ENV_API_KEY)`, so a guard that
     # matched literals alone would never have seen it.
     assert "LITELLM_API_KEY" in _env_vars_read_by(pathlib.Path(agent_env.__file__).parent)
 

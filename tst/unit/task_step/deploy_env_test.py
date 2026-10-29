@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_env.env.env import DeployedGatewayEnv
+from agent_env.env.env import DeployedGatewayEnv, Env
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 
@@ -263,14 +263,23 @@ def test_preflight_reports_an_option_a_server_env_would_refuse(options, refused)
     ("other", {"gateway_mode": "consistent", "env_state_type": "remote_postgres"}),
 ], ids=["server-sizing", "gateway-env", "other-env-type"])
 def test_preflight_passes_what_the_env_takes(kind, options):
-    env = MagicMock() if kind == "other" else _mcp_env(kind)
+    env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
     assert _preflight(env, **options) == []
+
+
+@pytest.mark.parametrize("kind, refusal", [
+    ("server", "env 'mcp-email' has env_provider_type 'server', which doesn't take env_params"),
+    ("other", "other envs take no env_params"),
+])
+def test_preflight_refuses_env_params_an_env_doesnt_take(kind, refusal):
+    env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
+    assert _preflight(env, env_params={"form": "container"}) == [f"deploy_env 'd': {refusal}"]
 
 
 @pytest.mark.parametrize("kind", ["server", "gateway", "other"])
 @pytest.mark.parametrize("mode", ["bogus", "Performance", None])
 def test_preflight_reports_an_invalid_gateway_mode_for_every_env(kind, mode):
-    env = MagicMock() if kind == "other" else _mcp_env(kind)
+    env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
     assert _preflight(env, gateway_mode=mode) == [f"deploy_env 'd': {mode!r} is not a valid GatewayMode"]
 
 
@@ -312,6 +321,12 @@ def test_a_task_reports_only_its_refused_deploy_step():
         assert task.preflight() == ["deploy_env 'bad': env 'mcp-email' has env_provider_type 'server', which doesn't take gateway_mode"]
 
 
+class _OtherEnv(Env):
+    """An env type that deploys itself, through no provider, and checks none of its options."""
+
+    type = "other"
+
+
 def _mcp_env(env_provider_type: str):
     from agent_env.env.envs.mcp_server import MCPServerEnv
 
@@ -322,3 +337,114 @@ def _mcp_env(env_provider_type: str):
 def _preflight(env, **options) -> list[str]:
     with patch("agent_env.env.env.Env.get", return_value=env):
         return DeployEnvTaskStep(id="d", version=None, env_id="mcp-email", **options).preflight()
+
+
+def _env_with_fixed_deploy(deployed_env):
+    """An env whose deploy() takes a fixed param list, like every built-in env."""
+    env = MagicMock()
+
+    async def deploy(ttl_seconds=10800, disk_size_gb=10, gateway_mode=None, cpu=None,
+                     memory_mb=None, sandbox_type=None, priority=None, env_state_type=None,
+                     env_state_instance_id=None, *, attribution=None):
+        return deployed_env
+
+    env.deploy = deploy
+    return env
+
+
+@pytest.mark.asyncio
+async def test_artifact_is_forwarded_to_an_env_that_accepts_it():
+    deployed_env = _deployed_env(None)
+    env = _fake_env(deployed_env)  # AsyncMock: accepts **kwargs
+    step = DeployEnvTaskStep(
+        id="t-1.deploy_env", version=None, env_id="art-1", env_version=2,
+        artifact_id="hg4_real", artifact_version=5,
+    )
+
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = env
+        await step.execute(TaskStepContext())
+
+    kwargs = env.deploy.await_args.kwargs
+    assert kwargs["artifact_id"] == "hg4_real"
+    assert kwargs["artifact_version"] == 5
+
+
+@pytest.mark.asyncio
+async def test_artifact_is_omitted_for_an_env_that_does_not_accept_it():
+    """Built-in envs take a fixed param list and would TypeError on an unexpected kwarg."""
+    deployed_env = _deployed_env(None)
+    env = _env_with_fixed_deploy(deployed_env)
+    step = DeployEnvTaskStep(
+        id="t-1.deploy_env", version=None, env_id="art-1", env_version=2,
+        artifact_id="hg4_real", artifact_version=5,
+    )
+
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = env
+        result = await step.execute(TaskStepContext())  # must not raise
+
+    assert len(result.deployed_envs) == 1
+
+
+@pytest.mark.asyncio
+async def test_artifact_defaults_to_absent():
+    """A step that names no artifact passes none, so existing taxonomies are unaffected."""
+    deployed_env = _deployed_env(None)
+    env = _fake_env(deployed_env)
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = env
+        await step.execute(TaskStepContext())
+
+    assert "artifact_id" not in env.deploy.await_args.kwargs
+
+
+def test_artifact_survives_a_dict_round_trip():
+    step = DeployEnvTaskStep(
+        id="t-1.deploy_env", version=None, env_id="art-1", env_version=2,
+        artifact_id="hg4_real", artifact_version=5,
+    )
+    restored = DeployEnvTaskStep.from_dict(step.to_dict())
+    assert restored.artifact_id == "hg4_real"
+    assert restored.artifact_version == 5
+
+
+@pytest.mark.asyncio
+async def test_an_env_taking_only_the_id_is_not_sent_the_version():
+    """Each field is gated on its own name: an env that declares one and not the other
+    would otherwise get an unexpected keyword."""
+    deployed_env = _deployed_env(None)
+    env = MagicMock()
+    seen = {}
+
+    async def deploy(artifact_id=None, **kw):  # declares the id, not the version
+        seen["artifact_id"] = artifact_id
+        return deployed_env
+
+    # a fixed list that names artifact_id only, so accepts_kwargs is False
+    async def fixed_deploy(ttl_seconds=10800, disk_size_gb=10, gateway_mode=None, cpu=None,
+                           memory_mb=None, sandbox_type=None, env_state_type=None,
+                           env_state_instance_id=None, artifact_id=None, *, attribution=None):
+        seen["artifact_id"] = artifact_id
+        return deployed_env
+
+    env.deploy = fixed_deploy
+    step = DeployEnvTaskStep(
+        id="t-1.deploy_env", version=None, env_id="art-1", env_version=2,
+        artifact_id="hg4_real", artifact_version=5,
+    )
+
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = env
+        result = await step.execute(TaskStepContext())  # must not raise
+
+    assert seen["artifact_id"] == "hg4_real" and len(result.deployed_envs) == 1
+
+
+def test_deployment_settings_keep_their_positions():
+    """The artifact params are appended, so a positional caller's values still mean what
+    they did: the fifth positional is still ttl_seconds."""
+    step = DeployEnvTaskStep("t-1.deploy_env", None, "art-1", 2, 60)
+    assert (step.ttl_seconds, step.artifact_id, step.artifact_version) == (60, None, None)

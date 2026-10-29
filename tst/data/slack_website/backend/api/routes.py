@@ -5,7 +5,7 @@ API route definitions for Slack Workspace Manager.
 import os
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
-from typing import Optional, List
+from typing import Optional
 
 from schemas import (
     # User schemas
@@ -36,8 +36,6 @@ from schemas import (
     # Health schemas
     HealthResponse,
     StatsResponse,
-    # Error schemas
-    ErrorResponse,
 )
 from db_extensions import ExtendedDatabase, CURRENT_USER_ID
 

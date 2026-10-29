@@ -1,0 +1,5 @@
+# What a composed computer installs into the driver's venv. A release pins agentenv-framework-protocol to the version
+# it ships, which serves the driver with agentenv_protocol.computer.serve.
+agentenv-framework-protocol[computer]>=0.1.381
+mss>=9,<11
+python-xlib>=0.33,<0.34

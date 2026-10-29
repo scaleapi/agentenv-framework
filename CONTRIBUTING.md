@@ -22,39 +22,41 @@ Docker.
 ```bash
 git clone https://github.com/scaleapi/agentenv-framework.git
 cd agentenv-framework
-uv venv .venv
-uv pip install --python .venv/bin/python -e ./packages/agentenv-protocol -e '.[dev]'
+uv sync --locked --extra dev
+```
+
+This is the same install CI performs. `make install` installs the same packages with pip, but
+resolves them afresh instead of from `uv.lock`.
 
 The distribution is `agentenv-framework` (import `agent_env`, command `agent-env`). A virtualenv created
 when the distribution was still called `agent-env` holds both after a reinstall, because the two
 write the same files; run `uv pip uninstall --python .venv/bin/python agent-env` once before
 reinstalling.
-```
-
-This is the same install CI performs. `make install` is equivalent.
 
 ## Running the tests
 
 | Command | What it runs | Needs |
 |---|---|---|
+| `make lint` | `ruff check`, with the rules in `pyproject.toml`; the `unit` job runs it too | nothing external |
 | `make unit-test` | unit suite for `agentenv-framework` and `agentenv-framework-protocol` | nothing external |
 | `make int-test-fast` | integration tests against the local backends | Docker |
 | `make int-test-slow` | tests that build images or deploy sandboxes, minutes each | Docker, and a sandbox backend for some |
 | `make clean-install-test` | both distributions built as the release builds them, installed into a fresh venv from public PyPI, and `agent-env run hello` run twice by name | Python 3.11, uv and git |
 | `make installer-test` | `plugin add` and `remove` through the real pip, uv and pipx, offline against wheels built from the checkout, and the new-user journey in containers with no network | uv, pipx and Docker; the first run downloads the dependencies once |
+| `make trl-test` | one TRL `GRPOTrainer` step on CPU through the training helper, with a tiny model | trl and CPU torch installed, and the Hugging Face Hub |
 
-CI runs the same tiers as the `unit`, `integration-local` and `integration-local-slow` jobs;
-all three must pass, and so must `plugin-api` (see "Making changes"). The `installer` job runs
+CI runs the same tiers as the `unit`, `integration-local`, `integration-local-slow` and
+`integration-local-gateway` jobs (the last runs the slow tier's gateway tests beside the rest);
+all four must pass, and so must `plugin-api` (see "Making changes"). The `installer` job runs
 `make installer-test` too, on pull requests that touch the plugin code, the installer tier or
-the lockfile, and must pass when it runs. One exception: the public jobs exclude
-`tst/integration/env/gateway/gateway_test.py`, which needs an x86 Chromium build that the
-hosted runners do not have; its virtual-clock tests also build MCP servers from sources outside
-this repository, found through `AGENT_ENV_TEST_MCP_SERVERS_DIR` (one `<server>/Dockerfile` per
-server), and skip without them. `make int-test-slow` does run it, so run that locally when your
-change touches the gateway, and say so in the pull request. A test may skip only when a capability is genuinely unavailable, and the skip reason
+the lockfile, and must pass when it runs. The gateway's virtual-clock tests build MCP servers
+from sources outside this repository, found through `AGENT_ENV_TEST_MCP_SERVERS_DIR` (one
+`<server>/Dockerfile` per server), and skip without them; when your change touches the virtual
+clock, run `make int-test-slow` with it set, and say so in the pull request. A test may skip only when a capability is genuinely unavailable, and the skip reason
 must name it (`agentenv-capability-missing: <name>`, see `tst/util/capabilities.py`); the
 `check_skip_policy` step fails the run otherwise. The `clean-install` job runs the same script as
-`make clean-install-test` on every pull request, and is one of the required checks.
+`make clean-install-test` on every pull request, and must pass too, as must the `ui` job, which
+type-checks, lints and smoke-tests the explorer UI.
 
 ## Making changes
 
@@ -74,7 +76,8 @@ must name it (`agentenv-capability-missing: <name>`, see `tst/util/capabilities.
 - Commit with an email address you are comfortable publishing; the history of this repository is
   public. GitHub's `noreply` address is a good default.
 
-Every pull request needs an approving review from a code owner (see `CODEOWNERS`) and green CI.
+Every pull request needs an approving review from a code owner (see `CODEOWNERS`), every review
+thread resolved, and green CI.
 
 ## Releases
 
@@ -83,7 +86,27 @@ contributors should not edit `version` in `pyproject.toml`. Each release publish
 `agentenv-framework` and `agentenv-framework-protocol` to PyPI (`.github/workflows/publish-pypi.yml`, trusted publishing
 on the release tag); the import package `agent_env` and the command `agent-env` keep their names. Once both are
 on PyPI, the same workflow creates the GitHub release, whose notes are the titles of the pull requests merged since
-the previous tag, so a clear pull request title is also the release note.
+the previous release, so a clear pull request title is also the release note. A tag whose commit does not pass
+`main`'s CI is not published and gets no release; its pull requests are in the next release's notes.
+
+A release also publishes the infra images agent-env ships, once the `PUBLISH_INFRA_IMAGES` repository variable is
+`true`: one per Dockerfile under `src/agent_env/env`, and one per shipped agent (`agentenv-claude-code`, its CLI
+included, `agentenv-codex`, `agentenv-gemini`, `agentenv-opencode`, `agentenv-pi`, `agentenv-openhands` and `agentenv-pydantic-ai`), at `ghcr.io/scaleapi/agentenv-<name>:src-<hex>` for linux/amd64
+and linux/arm64, where the tag is the build context's source digest, so an unchanged Dockerfile is not built again.
+The agents' images install the newest `agentenv-framework-protocol` at or above the floor in their
+`requirements.txt`, which a release doesn't pin, so each is built again only when its folder changes: once the protocol
+is on PyPI, as a raised floor may name it, and before `agentenv-framework` is published.
+Each of them pins its base images by digest, and Dependabot bumps those pins within each base's major and minor
+version (an upgrade, such as postgres 16 to 18, is made by hand), so a base's fixes reach the published
+image: a bump changes the sources, and the next release builds it again.
+Installs pull them instead of building the infra images: a run on local stores registers a kind's images when GHCR has
+every one for the sources installed, by the digest the wheel records or, with no record, the one GHCR serves, and
+builds them otherwise; a sandbox that can't pull one builds it from its build context. A run that deploys a shipped
+agent, or the `mail-mcp` example's env, registers its published image the same way, in place of its folder's build
+context. The wheel and the release notes
+record each image's digest. A failed image job keeps `agentenv-framework` off PyPI. Maintainers can publish the images
+alone by running the workflow by hand on `main`. GHCR keeps a new package private until a package admin makes it
+public, and the workflow warns about each one until then.
 
 ## Getting help
 

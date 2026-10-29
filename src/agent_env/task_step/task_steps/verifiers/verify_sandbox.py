@@ -120,12 +120,18 @@ class VerifySandboxTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         on_agent = self.sandbox_name is None
         if on_agent:
-            sandbox = await self._agent_sandbox(context)
+            agent, sandbox = await self._agent_sandbox(context)
         else:
             deployed, sandbox = await self._deployed_sandbox(context)
         logger.info(f"Connected to sandbox {sandbox.sandbox_id} (mode={sandbox.mode})")
         if on_agent:
-            container = await find_agent_container(sandbox) if sandbox.mode == SANDBOX_MODE_VM else None
+            # An agent installed on a VM's host has no container: its files are on the host. One installed into a
+            # container works in that one.
+            container = (
+                agent.installed_container or await find_agent_container(sandbox)
+                if sandbox.mode == SANDBOX_MODE_VM and not agent.on_host
+                else None
+            )
         else:
             # A container-mode sandbox on a VM-backed provider runs its image beside the host, and reattaches as a VM:
             # its files are reached in the container, decided by the mode deploy_sandbox recorded.
@@ -196,7 +202,7 @@ class VerifySandboxTaskStep(TaskStep):
             if agent.sandbox_type
             else get_agent_sandbox_provider()
         )
-        return await provider.get_sandbox(agent.sandbox_id)
+        return agent, await provider.get_sandbox(agent.sandbox_id)
 
     async def _deployed_sandbox(self, context: TaskStepContext):
         deployed = next(

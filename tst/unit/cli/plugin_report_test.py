@@ -308,6 +308,8 @@ def test_every_code_is_produced_by_some_scenario(monkeypatch, tmp_path):
     # From test_a_config_problem_is_a_group_error_with_its_code, and one the inventory cannot reach
     # while every registry records what it did (plugin_inventory_test covers it by forcing it).
     produced |= {"config-unreadable", "config-invalid", "group-build-failed", "status-unknown"}
+    # From bundle/installed_test's test_the_cli_lists_each_bundles_aliases_and_the_plugin_report_says_which_a_bundle_is_refused.
+    produced |= {"alias-refused"}
 
     assert produced - {None} == set(CODES)
 

@@ -997,6 +997,60 @@ function main(): void {
     );
   }
 
+  // A website request names the cause of website and state-trigger detections alike.
+  {
+    const request = {
+      source: 'website',
+      app: 'mail',
+      method: 'POST',
+      path: '/api/messages',
+      status: 201,
+      role: 'default',
+    };
+    const t = parseTriggerTimeline({
+      state: {
+        'env-x': {
+          triggers: [
+            { id: 'w', type: 'website' },
+            { id: 's', type: 'state' },
+          ],
+          events: ['w', 's'].flatMap((tid, i) => [
+            {
+              seq: 2 * i + 1,
+              ts: `2026-08-06T10:00:0${2 * i}+00:00`,
+              kind: 'detected',
+              trigger_id: tid,
+              provoking: request,
+            },
+            {
+              seq: 2 * i + 2,
+              ts: `2026-08-06T10:00:0${2 * i + 1}+00:00`,
+              kind: 'fired',
+              trigger_id: tid,
+              fire_count: 1,
+            },
+          ]),
+        },
+      },
+    });
+    const row = (tid: string, kind: string) =>
+      t?.rows.find(r => r.kind === kind && r.triggerId === tid);
+    const call = 'POST mail /api/messages → 201 (default)';
+    assert(
+      row('w', 'detected')?.summary === `condition matched on ${call}`,
+      `a website detection names the request (got ${row('w', 'detected')?.summary})`,
+    );
+    assert(
+      row('w', 'fired')?.reason === `the agent requested ${call}`,
+      `a website firing cites the request (got ${row('w', 'fired')?.reason})`,
+    );
+    assert(
+      row('s', 'fired')?.reason ===
+        `its check matched, re-evaluated after ${call}`,
+      `a state firing after a request stays a re-evaluation (got ${row('s', 'fired')?.reason})`,
+    );
+  }
+
   // An unknown trigger type must not fall through to the causal wording. The
   // spec comes from a different part of the payload than the events, so absence
   // is reachable — and "the agent called X" would be wrong for a state trigger.

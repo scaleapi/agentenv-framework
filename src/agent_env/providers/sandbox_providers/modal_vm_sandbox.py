@@ -32,6 +32,7 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
     _attribution_tags,
     _log_sandbox_started,
     _resolve_app_base_name,
+    _terminate_by_id,
     _tunnel_url,
     _modal_network_kwargs,
 )
@@ -281,8 +282,9 @@ class ModalVmSandboxProvider(SandboxProvider):
 
     """Provisions a single Modal VM sandbox per env (the VM-mode Modal backend)."""
 
-    def __init__(self, app_name: Optional[str] = None):
+    def __init__(self, app_name: Optional[str] = None, environment_name: Optional[str] = None):
         self._app_name = _resolve_app_base_name(app_name)
+        self._environment_name = environment_name
         self._client: Optional[modal.Client] = None
         # Per-attribution-scope Modal App, looked up on demand (billing aggregates per App).
         # Self-contained copy of ModalSandboxProvider's client/app handling — intentionally
@@ -300,7 +302,9 @@ class ModalVmSandboxProvider(SandboxProvider):
         app = self._apps.get(app_name)
         if app is None:
             client = await self._get_client()
-            app = await modal.App.lookup.aio(app_name, create_if_missing=True, client=client)
+            app = await modal.App.lookup.aio(
+                app_name, create_if_missing=True, client=client, environment_name=self._environment_name,
+            )
             if app_tags:
                 try:
                     await app.set_tags.aio(app_tags)
@@ -408,6 +412,9 @@ class ModalVmSandboxProvider(SandboxProvider):
         tunnel_urls = {p: _tunnel_url(t) for p, t in tunnels.items()}
         # dockerd is already running on a live sandbox; do not re-run setup here.
         return ModalVmSandbox(sb, tunnel_urls)
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        await _terminate_by_id(await self._get_client(), sandbox_id)
 
 
 # ── Object downloads (internal) ────────────────────────────────────────────────────

@@ -1,0 +1,5 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "mail"},
+  {"id": "finds-the-invoice", "type": "env_outcome_verifier", "env_id": "mail", "file_artifact_id": "check_mail",
+   "verifier_id": "finds-the-invoice"}
+]

@@ -30,7 +30,7 @@ Or install it with pip, into a virtualenv:
 pip install agentenv-framework
 ```
 
-To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs the `explorer` extra (`uv tool install 'agentenv-framework[explorer]'`, or the same extra with uvx or pip) and an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default.
+To use the SDK in your own project, add it as a dependency with `uv add agentenv-framework`. The explorer, `agent-env up`, needs an `.agentenv/config.toml` in the current folder or above it; an empty one keeps every local default. Environments and agents run as containers on the local Docker daemon by default; the [sandbox docs](https://www.agentenvframework.com/docs/sandboxes) cover the other sandbox providers and the extra each needs.
 
 A plain install runs on local stores and needs no cloud SDK. The cloud store backends are extras: `aws` for S3, Secrets Manager, DynamoDB and ECR (`pip install 'agentenv-framework[aws]'`), and `gcp` for Cloud Storage, Secret Manager, Firestore and Artifact Registry (`pip install 'agentenv-framework[gcp]'`). A config that names a backend without its extra fails, naming the extra to install.
 
@@ -47,6 +47,14 @@ source .venv/bin/activate
 ## Plugins
 
 A package of your own can add env types, providers, task steps and stores to agent-env, and `agent-env plugin` lists, checks, adds and removes installed plugins. The [plugin docs](https://www.agentenvframework.com/docs/plugins) show how.
+
+## OpenEnv
+
+Every task in a bundle is an [OpenEnv](https://github.com/openenv/OpenEnv) env, with the `openenv` extra installed (`pip install 'agentenv-framework[openenv]'`). `agent_env.openenv.build_app(bundle)` returns the OpenEnv server for a bundle, a folder or an installed bundle's name, or for a mapping of split names to bundles. Any OpenEnv client resets it to a task, which deploys the task's envs and opens its agent's turn, acts through the envs' tools and an added `end_turn` tool, and gets the task's verifier score as its reward.
+
+## Time zones
+
+Servers and the env clock work in UTC. To run an agent in a user's time zone, the task sets it on the agent's `deploy_agent` step as `env_vars: {"TZ": "America/New_York"}`, which reaches the agent's sandbox, and names the zone in the agent's prompt. While the env clock is armed, the gateway's `get_time` tool takes that IANA name as `time_zone` and adds the `local_time` in that zone, and a trigger executor's working `hours` can take a `time_zone` instead of a fixed `utc_offset`, so they keep their local hours across daylight-saving changes.
 
 ## Contribute, release, license
 

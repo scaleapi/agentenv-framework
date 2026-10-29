@@ -319,8 +319,9 @@ def test_the_run_routes_address_a_task_whose_id_ends_in_a_route_name(client, mon
             "total_steps": 1, "current_step": 1, "completed_steps": [{"step_id": "s", "status": "success"}],
         })
     assert single["instance_id"] in {i["instance_id"] for i in client.get(f"{base}/instances").json()["items"]}
-    assert client.get(f"{base}/instances/{single['instance_id']}").json()["task_id"] == task_id
-    assert client.get(f"{base}/instances/{single['instance_id']}/progress").json()["instance_id"] == single["instance_id"]
+    instance = f"{base}/instances/{quote(single['instance_id'], safe='')}"
+    assert client.get(instance).json()["task_id"] == task_id
+    assert client.get(f"{instance}/progress").json()["instance_id"] == single["instance_id"]
     assert group["run_group_id"] in {g["run_group_id"] for g in client.get(f"{base}/run-groups").json()["items"]}
     assert client.get(f"{base}/run-groups/{group['run_group_id']}").json()["task_id"] == task_id
     assert "event: complete" in client.get(f"{base}/run-groups/{group['run_group_id']}/stream").text

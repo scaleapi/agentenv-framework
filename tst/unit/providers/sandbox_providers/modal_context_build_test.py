@@ -13,7 +13,7 @@ import modal
 import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.providers.sandbox_providers import modal_sandbox
+from agent_env.providers.sandbox_providers import modal_image_build, modal_sandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 
 SERVER = {"Dockerfile": "FROM python:3.12\nCOPY . /app\n", "src/app.py": "print(1)\n", ".dockerignore": "*.log\n",
@@ -44,7 +44,7 @@ class _Builds:
 
 @pytest.fixture(autouse=True)
 def _no_built_images(monkeypatch):
-    monkeypatch.setattr(modal_sandbox, "_built_image_ids", {})
+    monkeypatch.setattr(modal_image_build, "_built_image_ids", {})
 
 
 @pytest.fixture
@@ -64,8 +64,8 @@ def builds(monkeypatch):
     return builds
 
 
-def _provider() -> ModalSandboxProvider:
-    provider = ModalSandboxProvider(app_name="agent-env-test")
+def _provider(environment_name: str | None = None) -> ModalSandboxProvider:
+    provider = ModalSandboxProvider(app_name="agent-env-test", environment_name=environment_name)
     provider._get_client = AsyncMock(return_value=MagicMock())
     provider._get_app = AsyncMock(return_value="app")
     return provider
@@ -111,6 +111,17 @@ async def test_deploys_of_the_same_sources_at_once_share_one_build_and_later_one
 
 
 @pytest.mark.asyncio
+async def test_each_modal_environment_builds_its_own_image_of_the_same_sources(local_stores, context, builds):
+    image = _context_image("solver-image", context)
+
+    await _provider().prepare_image(image)
+    await _provider("rl-prod").prepare_image(image)
+    await _provider("rl-prod").prepare_image(image)
+
+    assert len(builds.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_a_failed_build_names_the_image_and_the_next_deploy_builds_it_again(local_stores, context, builds):
     image = _context_image("solver-image", context)
     builds.fail = RuntimeError("step 2/2 COPY failed")
@@ -135,42 +146,92 @@ async def test_a_failed_modal_build_keeps_modals_pointer_to_its_build_log(local_
 
 @pytest.mark.parametrize("line, built", [
     ('COPY ["a.txt", "/x/a.txt"]', "COPY a.txt /x/a.txt"),
+    ('COPY\t["a.txt", "/t/"]', "COPY a.txt /t/"),
     ('copy --chown=1:1 ["a.txt", "sub", "/y/"]', "COPY --chown=1:1 a.txt sub /y/"),
     ("ADD a.txt /added/", "COPY a.txt /added/"),
     ("ADD sub \\\n    /added/sub/", "COPY sub /added/sub/"),
     ("ADD *.txt /globbed/", "COPY *.txt /globbed/"),
     ('ADD ["a.txt", "/j/"]', "COPY a.txt /j/"),
     ("ADD --chmod=755 a.txt /c", "COPY --chmod=755 a.txt /c"),
-], ids=["json-copy", "json-copy-flags", "add-file", "add-folder-continued", "add-glob", "json-add", "add-chmod"])
+], ids=["json-copy", "json-copy-tab", "json-copy-flags", "add-file", "add-folder-continued", "add-glob", "json-add", "add-chmod"])
 def test_what_modal_cant_take_is_written_as_its_docker_equivalent(tmp_path, line, built):
     (tmp_path / "a.txt").write_text("a")
     (tmp_path / "sub").mkdir()
 
-    assert modal_sandbox.modal_dockerfile(f"FROM python\n{line}\nRUN true\n", tmp_path) == \
+    assert modal_image_build.modal_dockerfile(f"FROM python\n{line}\nRUN true\n", tmp_path) == \
         f"FROM python\n{built}\nRUN true\n"
+
+
+def test_a_comment_among_the_lines_of_a_rewritten_instruction_is_kept_above_it(tmp_path):
+    (tmp_path / "sub").mkdir()
+
+    assert modal_image_build.modal_dockerfile("FROM python\nADD sub \\\n    # the vendored copy\n    /added/\n",
+                                              tmp_path) == "FROM python\n    # the vendored copy\nCOPY sub /added/\n"
 
 
 @pytest.mark.parametrize("line", [
     'COPY ["with space.txt", "/z/"]', "ADD archive.tar.gz /unpacked/", "ADD https://example.com/f /f",
     "ADD --checksum=sha256:abc a.txt /c", "ADD missing.txt /m", "COPY --from=build /out /out", "COPY a.txt /x/",
-    'ADD "a.txt" /q/', "ADD <<EOF /h\nhi\nEOF",
+    'ADD "a.txt" /q/', "ADD <<EOF /h\nhi\nEOF", 'COPY ["<<EOF", "/out"]',
 ], ids=["json-with-space", "add-archive", "add-url", "add-checksum", "add-missing", "copy-from", "shell-copy",
-        "add-quoted", "add-heredoc"])
+        "add-quoted", "add-heredoc", "json-heredoc-like-path"])
 def test_everything_else_is_left_as_written(tmp_path, line):
     (tmp_path / "a.txt").write_text("a")
     with tarfile.open(tmp_path / "archive.tar.gz", "w:gz") as tar:
         tar.add(tmp_path / "a.txt", "a.txt")
     dockerfile = f"FROM python\n{line}\n"
 
-    assert modal_sandbox.modal_dockerfile(dockerfile, tmp_path) == dockerfile
+    assert modal_image_build.modal_dockerfile(dockerfile, tmp_path) == dockerfile
 
 
 @pytest.mark.asyncio
-async def test_an_image_that_is_not_only_a_build_context_is_not_built(local_stores, builds):
+async def test_an_image_with_no_build_context_is_not_built(local_stores, builds):
     await _provider().prepare_image(DockerImageArtifact(id="solver-image", description="d",
                                                         image_name="registry.example/solver:v2"))
 
     assert builds.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_name, platform, built", [
+    ("localhost:5000/local/gateway:v1", "linux/amd64", True),
+    ("registry.example/gateway:v1", "linux/arm64", True),
+    ("registry.example/gateway:v1", "linux/amd64", False),
+    ("mcp-server-gateway", "linux/amd64", True),
+], ids=["in-this-machines-registry", "for-another-platform", "pulled", "under-a-tag-of-the-machine-that-built-it"])
+async def test_an_image_with_a_build_context_beside_its_tar_gz_is_built_when_modal_cant_run_it_by_name(
+        local_stores, context, builds, image_name, platform, built):
+    """As the infra bootstrap writes its images: a tar.gz, which Modal can't load, and the context it was built from."""
+    image = _context_image("gateway-image", context).model_copy(update={
+        "image_name": image_name, "tar_gz_object_url": "file:///state/gateway.tar.gz", "platform": platform})
+
+    await _provider().prepare_image(image)
+
+    assert len(builds.calls) == int(built)
+
+
+@pytest.mark.asyncio
+async def test_an_image_whose_context_records_no_dockerfile_is_not_built(local_stores, context, builds):
+    """Old and GitHub contexts record no Dockerfile."""
+    image = _context_image("server-image", context).model_copy(update={
+        "image_name": "mcp-server-email", "tar_gz_object_url": "file:///state/server.tar.gz", "dockerfile_path": None})
+
+    await _provider().prepare_image(image)
+
+    assert builds.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_image_modal_pulls_drops_one_prepared_earlier_under_its_name(local_stores, context, builds):
+    provider = _provider()
+    built = _context_image("gateway-image", context).model_copy(update={
+        "image_name": "registry.example/gateway:v1", "tar_gz_object_url": "file:///state/gateway.tar.gz",
+        "platform": "linux/arm64"})
+    await provider.prepare_image(built)
+
+    await provider.prepare_image(built.model_copy(update={"platform": "linux/amd64"}))
+
+    assert provider._context_images == {}
 
 
 def _fake_create():
@@ -185,7 +246,7 @@ async def test_a_container_runs_the_built_image_and_builds_it_on_a_miss(local_st
     image = _context_image("solver-image", context)
     provider = _provider()
     await provider.prepare_image(image)
-    modal_sandbox._built_image_ids.clear()
+    modal_image_build._built_image_ids.clear()
 
     with _fake_create() as create, pytest.raises(RuntimeError, match="Modal sandbox create failed"):
         await provider.create_container(image_name=image.image_name, port=8000, env={})
@@ -239,3 +300,23 @@ async def test_a_container_of_an_image_it_wasnt_told_of_is_pulled(local_stores, 
 
     assert create.aio.call_args.kwargs["image"] == (pulled, "registry.example/solver:v2")
     assert builds.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_published_image_is_pulled_by_its_digest_not_built(local_stores, context, builds, monkeypatch):
+    pulled = MagicMock()
+    monkeypatch.setattr(modal.Image, "from_registry", lambda name, **kwargs: (pulled, name))
+    image = _context_image("gateway-image", context).model_copy(
+        update={"image_name": "ghcr.io/team/gateway:src-1", "image_digest": "sha256:" + "8" * 64})
+    provider = _provider()
+    await provider.prepare_image(image)
+
+    with _fake_create() as create, pytest.raises(RuntimeError, match="Modal sandbox create failed"):
+        await provider.create_container(image_name=image.image_name, port=8000, env={})
+
+    assert create.aio.call_args.kwargs["image"] == (pulled, image.pinned_name)
+    assert builds.calls == []
+    await provider.prepare_image(image.model_copy(update={"image_digest": None}))
+    with _fake_create() as create, pytest.raises(RuntimeError, match="Modal sandbox create failed"):
+        await provider.create_container(image_name=image.image_name, port=8000, env={})
+    assert create.aio.call_args.kwargs["image"] == (pulled, image.image_name)

@@ -5,9 +5,12 @@ and S3 reads; `_real_run` swaps in a sandbox that actually executes the script."
 
 from __future__ import annotations
 
+import ast
 import json
+import signal
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,8 +19,9 @@ import pytest
 
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvNeedsSandbox
-from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, EnvNeedsSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
+from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import run_code as _run_code_module
 from tst.unit.event_loop_probe import on_event_loop
@@ -99,6 +103,20 @@ def _get_member(artifact_id, version=None):
     return _file_artifact(artifact_id.removeprefix("fa-"), _BODIES[artifact_id.removeprefix("fa-")])
 
 
+def _vm_sandbox_mock():
+    """A VM sandbox at the boundary; tunnels and host ports are plain attributes of a real one, which reaches its own
+    URLs as the base class does."""
+    sandbox = AsyncMock(spec=VmSandbox)
+    sandbox.mode = "vm"
+    sandbox.container_name = "agent-api"
+    sandbox.tunnel_urls = {}
+    sandbox.host_ips = ()
+    sandbox.host_port = MagicMock(side_effect=lambda port: port)
+    sandbox.scoped_name = MagicMock(side_effect=lambda name: name)
+    sandbox.url_on_host = MagicMock(side_effect=lambda url: Sandbox.url_on_host(sandbox, url))
+    return sandbox
+
+
 @contextmanager
 def _sandbox(exec_results, *, artifact="single", agent_mode=True):
     """Mock only the external boundary: the Sandbox (VMs/docker), the sandbox
@@ -109,9 +127,7 @@ def _sandbox(exec_results, *, artifact="single", agent_mode=True):
 
     `artifact` is "single", "wrong-type", or a prebuilt artifact.
     """
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
-    sandbox.container_name = "agent-api"
+    sandbox = _vm_sandbox_mock()
     # Before the script runs: reset_dir's `rm -rf` + `mkdir -p` (agent mode only;
     # host mode clears via exec_script).
     prefix = [(0, "", ""), (0, "", "")] if agent_mode else []
@@ -171,8 +187,6 @@ class _RealSandbox:
 
     async def exec_with_output(self, *args):
         args = [a for a in args if a != "sudo"]
-        if args[0] == "timeout":  # macOS has no coreutils `timeout`
-            args = args[2:]
         proc = subprocess.run(args, capture_output=True)
         return proc.returncode, proc.stdout.decode(), proc.stderr.decode()
 
@@ -247,6 +261,144 @@ async def test_host_target_on_an_env_outside_our_sandboxes_says_it_needs_one():
         await _step(env_id="env-x", result_id="filter")._host_target(ctx)
 
 
+class _ContainerEnvSandbox(Sandbox):
+    """A container sandbox, as Modal's is, whose commands really run here; it has no host to stage on or run on."""
+
+    type = "modal"
+    mode = "container"
+
+    def __init__(self, tunnel_urls):
+        self.sandbox_id = "sb-env"
+        self.tunnel_urls = tunnel_urls
+        self.vnc_url = None
+        self.commands = []
+
+    async def terminate(self):
+        pass
+
+    async def write_file_from_text(self, content, path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(content)
+
+    async def exec_with_output(self, *args):
+        self.commands.append(args)
+        proc = subprocess.run(list(args), capture_output=True)
+        return proc.returncode, proc.stdout.decode(), proc.stderr.decode()
+
+
+_CARD_URL = "https://abc.modal.host/.well-known/agent-env.json"
+
+
+@pytest.mark.parametrize("deployed,expected", [
+    (DeployedGatewayEnv(env_id="gw", env_version=1, sandbox_id="sb", gateway_url="https://abc.modal.host",
+                        environment_card_url=_CARD_URL, environment_card={"name": "gw"}),
+     {"id": "gw", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp"}),
+    (DeployedSandboxEnv(env_id="srv", env_version=1, sandbox_id="sb", env_provider_type="server",
+                        environment_card_url=_CARD_URL, environment_card={"name": "srv"}),
+     {"id": "srv", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp"}),
+    # a plugin's env, whose card puts its MCP endpoint elsewhere
+    (DeployedSandboxEnv(env_id="plug", env_version=1, sandbox_id="sb", env_provider_type="a-plugins",
+                        environment_card_url=_CARD_URL,
+                        environment_card={"name": "plug",
+                                          "additionalInterfaces": [{"transport": "mcp", "url": "/v2/mcp"}]}),
+     {"id": "plug", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/v2/mcp"}),
+    # a record from before the card, which kept only its MCP URL
+    (DeployedSandboxEnv(env_id="old", env_version=1, sandbox_id="sb", mcp_url="https://abc.modal.host/mcp"),
+     {"id": "old", "url": None, "mcp_url": "http://127.0.0.1:18765/mcp"}),
+])
+def test_an_envs_address_and_mcp_endpoint_come_from_its_card_whatever_deployed_it(deployed, expected):
+    sandbox = _ContainerEnvSandbox({18765: "https://abc.modal.host"})
+
+    assert _run_code_module._env_on_host(deployed, sandbox) == expected
+
+
+def _written_input(sandbox):
+    """The input.json the step staged, through whichever writer its target uses."""
+    for call in sandbox.write_host_file.await_args_list:
+        if str(call.args[1]).endswith("/input.json"):
+            return json.loads(call.args[0].decode())
+    for call in sandbox.write_file_from_text.await_args_list:
+        if str(call.args[1]).endswith("/input.json"):
+            return json.loads(call.args[0])
+    raise AssertionError("no input.json was staged")
+
+
+@pytest.mark.asyncio
+async def test_a_script_on_an_envs_host_gets_the_envs_address_and_mcp_endpoint_as_that_host_reaches_them():
+    ctx = _make_context(with_agent=False)
+    ctx.deployed_envs[0] = DeployedGatewayEnv(
+        env_id="env-x", env_version=1, sandbox_id="sb-env", gateway_url="https://abc.modal.host",
+        environment_card_url=_CARD_URL, environment_card={"name": "env-x"},
+    )
+    with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")], agent_mode=False) as sandbox:
+        sandbox.tunnel_urls = {18765: "https://abc.modal.host"}
+        await _step(env_id="env-x").execute(ctx)
+
+    assert _written_input(sandbox)["env"] == {
+        "id": "env-x", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_script_for_an_env_in_a_container_sandbox_runs_in_that_container_and_reaches_the_env_there(tmp_path):
+    sandbox = _ContainerEnvSandbox({18765: "https://abc.modal.host"})
+    provider = MagicMock()
+    provider.get_sandbox = AsyncMock(return_value=sandbox)
+    ctx = _make_context(with_agent=False)
+    ctx.deployed_envs = [DeployedSandboxEnv(
+        env_id="env-x", env_version=1, sandbox_id="sb-env", env_provider_type="server",
+        environment_card_url=_CARD_URL, environment_card={"name": "srv"},
+    )]
+    artifact = _file_artifact(body=b"def run(inp):\n    return inp['env']\n")
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.get_env_sandbox_provider", return_value=provider,
+    ), patch("agent_env.artifact.Artifact.get", return_value=artifact), patch.object(
+        FileArtifact, "load", _load_body
+    ), patch.object(_run_code_module, "_RUN_DIR", str(tmp_path)):
+        ctx = await _step(env_id="env-x").execute(ctx)
+
+    assert ctx.metadata["script_results"]["run-code-1"] == {
+        "id": "env-x", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
+    }
+    assert not any(command[0] in ("sudo", "docker") for command in sandbox.commands)
+
+
+@pytest.mark.asyncio
+async def test_a_script_in_an_agent_gets_no_env():
+    with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")]) as sandbox:
+        await _step().execute(_make_context())
+
+    assert set(_written_input(sandbox)) == {"args", "results"}
+
+
+@pytest.mark.asyncio
+async def test_runs_of_one_step_on_this_machine_stage_into_dirs_of_their_own(tmp_path):
+    """Local sandboxes share this machine's /tmp: a run of the same step on another must not clear this one's files."""
+    sandboxes = {}
+    for sid in ("local-aaaa1111", "local-bbbb2222"):
+        (tmp_path / sid).mkdir()
+        sandboxes[sid] = LocalSandbox(sandbox_id=sid, work_dir=tmp_path / sid)
+    provider = MagicMock()
+    provider.get_sandbox = AsyncMock(side_effect=lambda sid: sandboxes[sid])
+    artifact = _file_artifact(body=b"def run(inp):\n    return inp['args']\n")
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", return_value=provider,
+    ), patch("agent_env.artifact.Artifact.get", return_value=artifact), patch.object(
+        FileArtifact, "load", _load_body
+    ), patch.object(_run_code_module, "_RUN_DIR", str(tmp_path / "run")):
+        for sid in sandboxes:
+            ctx = _make_context(with_agent=False)
+            ctx.deployed_sandboxes = [
+                DeployedSandbox(sandbox_name="box", sandbox_id=sid, sandbox_mode="vm", sandbox_type="local")
+            ]
+            await _step(sandbox_name="box", args={"who": sid}).execute(ctx)
+            assert ctx.metadata["script_results"]["run-code-1"] == {"who": sid}
+
+    for sid in sandboxes:
+        staged = json.loads((tmp_path / f"run-{sid}" / "run-code-1" / "input.json").read_text())
+        assert staged["args"] == {"who": sid}
+
+
 @pytest.mark.asyncio
 async def test_host_target_honors_custom_env_sandbox_type():
     # custom sandbox_type must resolve via build_sandbox_provider, not the default provider
@@ -254,9 +406,7 @@ async def test_host_target_honors_custom_env_sandbox_type():
     ctx = _make_context(with_agent=False)
     ctx.deployed_envs[0].sandbox_type = "arp"
 
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
-    sandbox.container_name = "agent-api"
+    sandbox = _vm_sandbox_mock()
     sandbox.exec_with_output = AsyncMock(
         # leading entry is the `env` read execute() does for redaction
         # host mode clears via exec_script, so exec_with_output sees only:
@@ -287,8 +437,7 @@ def _sandbox_context(*, sandbox_type=None):
 
 
 def _host_sandbox():
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
+    sandbox = _vm_sandbox_mock()
     sandbox.exec_with_output = AsyncMock(
         side_effect=[(0, "", ""), (0, "13", ""), (0, '{"keep": true}', "")]
     )
@@ -444,9 +593,7 @@ async def test_agent_target_honors_the_agents_sandbox_type():
     ctx = _make_context()
     ctx.deployed_agents[0].sandbox_type = "modal"
 
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
-    sandbox.container_name = "agent-api"
+    sandbox = _vm_sandbox_mock()
     sandbox.exec_with_output = AsyncMock(
         # the `env` read execute() does for redaction, the clear, the script run, `wc -c`, then `cat`
         side_effect=[(0, "", ""), (0, "", ""), (0, "", ""), (0, "13", ""), (0, '{"keep": true}', "")]
@@ -488,9 +635,7 @@ async def test_host_installed_agent_on_a_vm_runs_on_the_host():
     ctx.deployed_agents[0].sandbox_type = "modal_vm"
     ctx.deployed_agents[0].on_host = True
 
-    sandbox = AsyncMock()
-    sandbox.mode = "vm"
-    sandbox.container_name = "agent-api"
+    sandbox = _vm_sandbox_mock()
     sandbox.exec_with_output = AsyncMock(
         side_effect=[(0, "", ""), (0, "13", ""), (0, '{"keep": true}', "")]
     )
@@ -514,8 +659,29 @@ async def test_host_installed_agent_on_a_vm_runs_on_the_host():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("installed_in,expected", [(None, "agent-api"), ("agent-api", "agent-api"), ("task", "task")])
+async def test_an_agent_on_a_vm_runs_the_script_in_the_container_it_was_installed_in(installed_in, expected):
+    ctx = _make_context()
+    ctx.deployed_agents[0].sandbox_type = "modal_vm"
+    ctx.deployed_agents[0].installed_container = installed_in
+    sandbox = _vm_sandbox_mock()
+    provider = MagicMock()
+    provider.get_sandbox = AsyncMock(return_value=sandbox)
+    with patch(
+        "agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider",
+        return_value=provider,
+    ):
+        target = await _step()._agent_target(ctx)
+    await target.write_file("/tmp/run/input.json", "{}")
+
+    assert target.prefix == ("sudo", "docker", "exec", "-u", "0", expected)
+    sandbox.write_file_from_text.assert_awaited_once_with(
+        "{}", "/tmp/run/input.json", **({"container": installed_in} if installed_in else {}))
+
+
+@pytest.mark.asyncio
 async def test_timeout_is_reported():
-    with _sandbox([(124, "", "")]):  # `timeout` coreutil exit code
+    with _sandbox([(124, "", "")]):  # the runner's status at the limit
         with pytest.raises(RunCodeExecutionError, match="timed out"):
             await _step(timeout_seconds=5).execute(_make_context())
 
@@ -525,6 +691,44 @@ async def test_script_crash_surfaces_stderr():
     with _sandbox([(1, "", "Traceback: boom")]):
         with pytest.raises(RunCodeExecutionError, match="boom"):
             await _step().execute(_make_context())
+
+
+@pytest.mark.asyncio
+async def test_a_long_stderr_keeps_its_end_and_says_how_much_was_cut():
+    stderr = "x" * 500 + "\nValueError: the cause\n"
+    step = _step()
+    step._STDERR_TAIL_BYTES = 100
+    with _sandbox([(1, "", stderr)]):
+        with pytest.raises(RunCodeExecutionError) as exc:
+            await step.execute(_make_context())
+    assert str(exc.value).endswith(f"[first {len(stderr) - 100:,} bytes of stderr cut]\n{stderr[-100:]}")
+
+
+def test_a_cut_inside_a_character_drops_the_rest_of_it_and_counts_it():
+    step = _step()
+    step._STDERR_TAIL_BYTES = 5  # the last 5 bytes of "éééé" start inside its second é
+    assert step._stderr_tail("éééé") == "[first 4 bytes of stderr cut]\néé"
+    assert step._stderr_tail("éé") == "éé"
+
+
+@pytest.mark.asyncio
+async def test_a_script_past_its_timeout_is_stopped_and_reported(tmp_path):
+    artifact = _file_artifact(body=b"import time\ndef run(inp):\n    time.sleep(300)\n")
+    started = time.monotonic()
+    with _real_run(tmp_path, artifact):
+        with pytest.raises(RunCodeExecutionError, match="timed out after 1s"):
+            await _step(timeout_seconds=1).execute(_make_context())
+    assert time.monotonic() - started < 30
+
+
+@pytest.mark.asyncio
+async def test_a_crash_reports_all_of_stderr_through_to_the_exception(tmp_path):
+    body = b"import sys\ndef run(inp):\n    print('x' * 5000, file=sys.stderr)\n    raise ValueError('the cause')\n"
+    with _real_run(tmp_path, _file_artifact(body=body)):
+        with pytest.raises(RunCodeExecutionError) as exc:
+            await _step().execute(_make_context())
+    assert "x" * 5000 in str(exc.value)
+    assert str(exc.value).rstrip().endswith("ValueError: the cause")
 
 
 class _LocalExec:
@@ -624,6 +828,144 @@ def test_runner_imports_sibling_modules_from_the_run_dir(tmp_path):
         [sys.executable, str(_RUNNER), str(tmp_path), "run", "run.py"], check=True
     )
     assert json.loads((tmp_path / "output.json").read_text()) == {"from": "helper"}
+
+
+def test_runner_parses_as_python_3_9():
+    # macOS's /usr/bin/python3 is 3.9, and the runner runs on whatever python3 a host has.
+    ast.parse(_RUNNER.read_text(), feature_version=(3, 9))
+
+
+def _runner_args(run_dir, body, timeout):
+    """Stage the runner, script and input as run_code does, the runner inside the run dir."""
+    (run_dir / "runner.py").write_text(_RUNNER.read_text())
+    (run_dir / "script.py").write_text(body)
+    (run_dir / "input.json").write_text(json.dumps({"args": {}, "results": {}}))
+    return [sys.executable, str(run_dir / "runner.py"), str(run_dir), "run", "script.py", str(timeout)]
+
+
+def _supervised(run_dir, body, timeout=60):
+    return subprocess.run(_runner_args(run_dir, body, timeout), capture_output=True, text=True, timeout=60)
+
+
+def _running(pid):
+    """True while `pid` is a live process; a zombie awaiting its reaper counts as gone."""
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(stat) and not stat.startswith("Z")
+
+
+def _gone_within(pid, seconds=5.0):
+    deadline = time.monotonic() + seconds
+    while _running(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _running(pid)
+
+
+# Writes the pid of a `sleep` it starts, so a test can check the whole group was stopped.
+_STARTS_A_CHILD = """\
+import os, subprocess, time
+def run(inp):
+    child = subprocess.Popen(["sleep", "300"])
+    with open(os.path.join(os.path.dirname(__file__), "pid.tmp"), "w") as f:
+        f.write(str(child.pid))
+    os.rename(f.name, f.name[:-len(".tmp")])
+    time.sleep(300)
+"""
+
+
+def _wait_for_pid(run_dir):
+    deadline = time.monotonic() + 30
+    while not (run_dir / "pid").exists():
+        assert time.monotonic() < deadline, "the script never started its child"
+        time.sleep(0.05)
+    return int((run_dir / "pid").read_text())
+
+
+def test_a_supervised_script_writes_its_result(tmp_path):
+    result = _supervised(tmp_path, "def run(inp):\n    return {'ok': True}\n")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / "output.json").read_text()) == {"ok": True}
+
+
+def test_a_supervised_scripts_exit_status_and_stderr_pass_through(tmp_path):
+    result = _supervised(tmp_path, "import sys\ndef run(inp):\n    print('boom', file=sys.stderr)\n    sys.exit(3)\n")
+    assert (result.returncode, result.stderr) == (3, "boom\n")
+
+
+def test_a_script_killed_by_a_signal_exits_128_plus_its_number(tmp_path):
+    result = _supervised(tmp_path, "import os, signal\ndef run(inp):\n    os.kill(os.getpid(), signal.SIGKILL)\n")
+    assert result.returncode == 128 + signal.SIGKILL
+
+
+def test_the_limit_stops_the_script_and_everything_it_started(tmp_path):
+    started = time.monotonic()
+    proc = subprocess.Popen(_runner_args(tmp_path, _STARTS_A_CHILD, 1))
+    child = _wait_for_pid(tmp_path)
+    assert proc.wait(timeout=30) == 124
+    assert time.monotonic() - started < 30
+    assert _gone_within(child)
+
+
+def test_a_script_that_ignores_sigterm_is_killed_after_the_grace_period(tmp_path):
+    body = (
+        "import signal, time\ndef run(inp):\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n    time.sleep(300)\n"
+    )
+    started = time.monotonic()
+    result = _supervised(tmp_path, body, timeout=1)
+    elapsed = time.monotonic() - started
+    assert result.returncode == 124
+    assert 5 <= elapsed < 30
+
+
+# Starts the runner with SIGINT and SIGHUP ignored, as a background job is (CI runs the tier as one). The script must
+# still get their defaults, as it does under GNU timeout.
+_WITH_SIGNALS_IGNORED = (
+    "import os, signal, sys\n"
+    "for s in (signal.SIGINT, signal.SIGHUP):\n    signal.signal(s, signal.SIG_IGN)\n"
+    "os.execv(sys.executable, [sys.executable] + sys.argv[1:])\n"
+)
+
+
+def _start_runner(run_dir, body, timeout):
+    return subprocess.Popen([sys.executable, "-c", _WITH_SIGNALS_IGNORED, *_runner_args(run_dir, body, timeout)[1:]])
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
+def test_a_signal_to_the_runner_stops_the_script_and_everything_it_started(tmp_path, signum):
+    proc = _start_runner(tmp_path, _STARTS_A_CHILD, 60)
+    child = _wait_for_pid(tmp_path)
+    proc.send_signal(signum)
+    assert proc.wait(timeout=30) == 128 + signum
+    assert _gone_within(child)
+
+
+def test_a_forwarded_signal_the_script_ignores_is_followed_by_sigkill(tmp_path):
+    ignore_term = "def run(inp):\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    body = _STARTS_A_CHILD.replace("def run(inp):\n", ignore_term)
+    proc = _start_runner(tmp_path, "import signal\n" + body, 60)
+    child = _wait_for_pid(tmp_path)
+    started = time.monotonic()
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 128 + signal.SIGKILL
+    assert 5 <= time.monotonic() - started < 30
+    assert _gone_within(child)
+
+
+def test_artifact_files_named_after_the_supervisors_imports_never_run_in_it(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (tmp_path / "link").symlink_to(run_dir)  # reached through a symlink, as macOS's /tmp is
+    for name in ("signal", "subprocess", "time"):
+        (run_dir / f"{name}.py").write_text("raise SystemExit('ran in the supervisor')\n")
+    result = _supervised(tmp_path / "link", "def run(inp):\n    return {'ok': True}\n")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((run_dir / "output.json").read_text()) == {"ok": True}
+
+
+def test_the_script_still_imports_its_own_module_named_like_one_the_supervisor_uses(tmp_path):
+    (tmp_path / "signal.py").write_text("VALUE = 'mine'\n")
+    result = _supervised(tmp_path, "import signal\ndef run(inp):\n    return {'from': signal.VALUE}\n")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / "output.json").read_text()) == {"from": "mine"}
 
 
 def test_config_round_trips_through_to_dict_from_dict():

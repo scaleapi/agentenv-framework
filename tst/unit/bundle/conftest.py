@@ -1,35 +1,53 @@
 """Fixtures the bundle tests share."""
 
-from pathlib import Path
+
+import shutil
 
 import pytest
 
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.artifact.store import get_artifact_store
-from agent_env.bundle import materialize as materialize_module
-from tst.unit.bundle._support import listing
+from agent_env.artifact.artifacts import docker_image as docker_image_module
+from agent_env.env.published_images import AGENT_IMAGES
+from agent_env.providers.sandbox_providers import host_images
+from tst.unit.bundle._support import DIGEST, listing
 
 
 @pytest.fixture
 def docker_on_path(monkeypatch):
-    monkeypatch.setattr(materialize_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
 
 
 @pytest.fixture
 def builds(monkeypatch, docker_on_path):
-    """Stands in for docker: each build is recorded with the files of its context, a link marked with a
-    trailing ``@``, and the image written as a docker_image document."""
-    calls = []
+    """Stands in for this machine's Docker: each build is recorded with its Dockerfile, the files of its context, a
+    link marked with a trailing ``@``, its tag and its platform, and Docker then holds the tag, labeled with its
+    sources."""
+    calls, held = [], {}
 
-    def build(dockerfile, context, tag, *, platform):
+    def build(dockerfile, context, tag, *, platform, labels=None):
         calls.append({"build": (dockerfile.relative_to(context).as_posix(), listing(context), tag, platform)})
+        held[tag] = (labels or {}).get(host_images._SOURCES_LABEL)
 
-    def put(id, *, description, image_name, build_context_path=None, dockerfile_path=None, platform=None):
-        dockerfile = Path(dockerfile_path).relative_to(build_context_path).as_posix() if dockerfile_path else None
-        calls[-1]["put"] = (id, image_name, listing(build_context_path), dockerfile)
-        return get_artifact_store().put_document(DockerImageArtifact(
-            id=id, description=description, image_name=image_name, tar_gz_s3_url=f"file:///{id}.tar.gz"))
-
-    monkeypatch.setattr(materialize_module, "build_image", build)
-    monkeypatch.setattr(materialize_module.DockerImageArtifact, "put", put)
+    monkeypatch.setattr(host_images, "build_image", build)
+    monkeypatch.setattr(host_images, "_built_from", held.get)
     return calls
+
+
+@pytest.fixture
+def registry(monkeypatch):
+    """Each ref the registry is asked to pin; every tag pins to DIGEST."""
+    asked = []
+
+    def pin(ref, auth):
+        asked.append(ref)
+        return ref if "@" in ref else f"{ref}@{DIGEST}"
+
+    monkeypatch.setattr(docker_image_module, "pin_digest", pin)
+    return asked
+
+
+@pytest.fixture
+def agents_published(monkeypatch):
+    """The registry serves each shipped agent's image, under DIGEST, and nothing else."""
+    refs = {image.ref() for image in AGENT_IMAGES}
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in refs else None)
+    return AGENT_IMAGES[0].ref()

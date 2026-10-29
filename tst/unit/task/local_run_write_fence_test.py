@@ -22,7 +22,7 @@ from agent_env.store import Filter, LocalSqliteDocumentStore
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store import OciRegistryImageStore
 from agent_env.store.object_store import LocalFilesystemObjectStore
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.store.routing import LocalRunWriteError, run_scope
 from agent_env.task.task import Task
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext

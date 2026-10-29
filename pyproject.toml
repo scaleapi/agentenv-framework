@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1305"
+version = "0.9.1381"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -29,14 +29,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "agentenv-framework-protocol>=0.1.0",
+    "agentenv-framework-protocol[computer]>=0.1.0",  # a computer_driver env's put reads the driver class with it
     "certifi>=2024.2.2",  # the public roots the local transfer CA's trust bundle carries
     "click>=8.0.0",
     "cryptography>=42",  # the local transfer CA
     "httpx>=0.27.0",
     "litellm>=1.96.0,<1.97",
-    "mcp>=1.0.0,<2",  # 2.0.0 removed mcp.server.fastmcp, imported at module scope by env/gateway
-    "packaging>=22",  # evaluates a plugin's requirement markers with no extra
+    "mcp>=1.25,<2",  # same floor as env/gateway/requirements.txt and agentenv-protocol; 2.0.0 removed mcp.server.fastmcp, imported at module scope by env/gateway
+    "packaging>=22",  # parses a bundle.toml's requires; evaluates a plugin's requirement markers with no extra
     "a2a-sdk==0.3.26",
     "pydantic>=2.12",  # model_validate(extra=...) reads agent responses tolerantly
     "pymongo>=4.7",
@@ -46,19 +46,23 @@ dependencies = [
     "uvicorn>=0.47",  # 0.47 adds ssl_context_factory, how the local grant server gets its TLS context
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
+    "fastapi>=0.110",  # the explorer, agent-env up
 ]
 
 [project.optional-dependencies]
+# agent_env.openenv: bundle tasks served as OpenEnv envs. No cap: OpenEnv ships a minor release a week.
+openenv = [
+    "openenv>=0.9",
+]
+# agent_env.training.trl: TRL's trainers on a bundle served as an OpenEnv env. TRL itself is the trainer's to pin.
+trl = [
+    "agentenv-framework[openenv]",
+    "datasets>=3",
+]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
     "boto3>=1.35.0",
     "botocore>=1.35.0",
-]
-# The local explorer / `agent-env up` (Part 5). Optional so a library or worker install
-# stays lean; `agent-env up` fails fast with an install hint when it is absent.
-explorer = [
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
 ]
 # The Google Cloud store backends, selected by impl pointer in config.toml.
 gcp = [
@@ -72,9 +76,40 @@ gcp = [
 sail = [
     "sail~=0.12.8",  # Sailbox exec/fs/listener/egress APIs validated against the 0.12 line
 ]
+vercel = [
+    "anyio>=4,<5",
+    "httpx2>=2.13.1,<3",
+    "vercel-sandbox>=0.7.0,<0.8",  # provides the vercel.sandbox namespace without the full vercel bundle
+]
+# The Tensorlake sandbox provider, selected as the built-in `tensorlake` backend.
+tensorlake = [
+    "tensorlake~=0.5.140",  # AsyncSandbox APIs validated against 0.5.140 to 0.5.149
+]
+# The Tenki Sandbox VM provider, selected as the built-in `tenki` backend.
+tenki = [
+    "tenki[async]~=1.4.1",  # AsyncClient/AsyncSandbox exec, stdin, ports and egress APIs validated against the 1.4 line
+]
+# The boxd machine provider, selected as the built-in `boxd` backend.
+boxd = [
+    "boxd~=0.2.17",  # AsyncBoxd machines, exec, proxies, egress allowlist and delete-after validated against 0.2.17
+]
+# The Daytona sandbox provider, selected as the built-in `daytona` backend.
+daytona = [
+    "daytona~=0.224.0",  # AsyncDaytona sandboxes, sessions, file API, preview links and egress lists validated against 0.224
+]
+# The boat.dev sandbox provider, selected as the built-in `boat` backend.
+boat = [
+    "boat-sdk~=1.13.0",  # sandboxes, labels, hosted ports, detached commands and their output stream validated against 1.13
+    "urllib3>=2.1.0,<3",  # the SDK's transport, whose errors are what a dropped connection raises
+]
 dev = [
-    "agentenv-framework[aws,explorer,gcp,sail]",  # so the AWS, explorer, GCP backend and Sail provider tests run in CI
+    "agentenv-framework[aws,boat,boxd,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel]",  # exercise portable optional providers and stores in CI
+    "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
+    "transformers>=5.2",  # get_json_schema, which reads agent_env.training's tool methods as TRL shows them to a model
+    "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
+    "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
+    "tomli-w==1.2.0",  # the Codex agent's config writer, which only its image installs; its tests import it
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
     "pytest>=9.0",
@@ -83,13 +118,24 @@ dev = [
     "pytest-socket>=0.7.0",
     "pytest-timeout>=2.3.0",
     "pytest-xdist>=3.0.0",
+    "ruff==0.16.10",  # the lint gate; exact, since what it reports changes between releases
+]
+smol = [
+    "smolmachines>=1.27.0",
 ]
 
 [project.scripts]
 agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
+agents = "agent_env"
+computers = "agent_env"
+drivers = "agent_env"
+desktop = "agent_env.examples"
 hello = "agent_env.examples"
+echo-mcp = "agent_env.examples"
+mail-mcp = "agent_env.examples"
+next-env-event = "agent_env.examples"
 
 [project.urls]
 Homepage = "https://www.agentenvframework.com"
@@ -104,9 +150,12 @@ packages = ["src/agent_env"]
 # Keep it out of the wheel — only its built output ships, copied to explorer/static/
 # by the UI build step. node_modules/out/.next are already .gitignore-excluded.
 exclude = ["src/agent_env/explorer/ui"]
+# The release workflow writes it and git ignores it; a build ships it when it's there.
+artifacts = ["src/agent_env/env/published_images.json"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tst", "packages/agentenv-protocol", ".github/scripts"]
+artifacts = ["src/agent_env/env/published_images.json"]
 
 [tool.uv.workspace]
 members = ["packages/agentenv-protocol"]
@@ -129,3 +178,6 @@ markers = [
 log_cli = true
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+[tool.ruff.lint]
+select = ["F"]

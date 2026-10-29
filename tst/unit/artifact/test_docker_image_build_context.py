@@ -12,7 +12,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.utils.build_context import BuildContext
+from agent_env.utils.docker.context import BuildContext
 
 SERVER = {"Dockerfile": "FROM python:3.12\nCOPY . /app\n", "src/app.py": "print(1)\n", ".dockerignore": "*.log\n",
           "debug.log": "noise"}
@@ -41,9 +41,14 @@ def test_a_context_is_registered_with_no_image_and_a_name_that_names_no_registry
 
     stored = DockerImageArtifact.get("solver-image", image.version)
     assert (stored.tar_gz_object_url, stored.dockerfile_path, stored.platform) == (None, "Dockerfile", "linux/amd64")
-    assert stored.image_name.startswith("local/solver-image-") and stored.image_name.endswith(":v1")
+    sources = BuildContext.of(context, context / "Dockerfile").source_digest("linux/amd64")
+    assert stored.image_name.startswith("local/solver-image-")
+    assert stored.image_name.endswith(f":{sources.removeprefix('sha256:')[:16]}")
     assert not names_registry(stored.image_name)
-    assert stored.source_digest == BuildContext.of(context, context / "Dockerfile").source_digest("linux/amd64")
+    assert stored.source_digest == sources
+    again = DockerImageArtifact.put_context("solver-image", description="d", context_path=str(context),
+                                            dockerfile_path=str(context / "Dockerfile"))
+    assert (again.version, again.image_name) == (image.version + 1, stored.image_name)
     assert _names(stored) == [".dockerignore", "Dockerfile", "src", "src/app.py"]
 
 
@@ -69,8 +74,8 @@ def test_equal_sources_give_equal_digests_and_bytes(local_stores, context):
 def test_a_context_only_image_is_built_and_refused_where_run_by_name(local_stores, context):
     image = DockerImageArtifact.put_context("a", description="d", context_path=str(context), dockerfile_path="Dockerfile")
 
-    assert image.context_only and image.load_problem() is None
-    assert image.by_name_problem() == "'a' v1 is only a build context, which has to be built, not pulled"
+    assert image.context_only and image.load_problem(on_this_machine=False) is None
+    assert image.by_name_problem(on_this_machine=False) == "'a' v1 is only a build context, which has to be built, not pulled"
     with pytest.raises(ValueError, match="has no tar.gz; its image is built from its build context"):
         image.load()
 
@@ -117,7 +122,7 @@ class _DockerSave:
 
 def test_put_keeps_the_whole_context_and_records_how_to_build_it(local_stores, context, monkeypatch):
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: None)
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
@@ -132,7 +137,7 @@ def test_put_keeps_the_whole_context_and_records_how_to_build_it(local_stores, c
 
 def test_put_refuses_a_context_it_cant_take_before_pushing_anything(local_stores, context, monkeypatch):
     pushed = []
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: pushed.append(ref))
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: pushed.append(ref))
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: None)
     os.mkfifo(context / "pipe")
 
@@ -153,7 +158,7 @@ def test_the_platform_of_an_image_is_named_as_docker_build_takes_it(monkeypatch,
 
 def test_put_records_the_platform_it_built_for_when_none_is_given(local_stores, context, monkeypatch):
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
-    monkeypatch.setattr(docker_image, "_push_local_image", lambda src, ref, store: None)
+    monkeypatch.setattr(docker_image, "push_local_image", lambda src, ref, store: None)
     monkeypatch.setattr(docker_image, "_image_platform", lambda ref: "linux/arm64")
     monkeypatch.setattr(docker_image.subprocess, "Popen", _DockerSave)
 
@@ -165,3 +170,36 @@ def test_put_records_the_platform_it_built_for_when_none_is_given(local_stores, 
 
     assert (native.platform, explicit.platform) == ("linux/arm64", "linux/amd64")
     assert native.source_digest != explicit.source_digest
+
+
+
+def test_a_put_records_the_platform_as_docker_build_names_it(local_stores, context):
+    image = DockerImageArtifact.put_context("a", description="d", context_path=str(context), dockerfile_path="Dockerfile",
+                                            platform="linux/arm64/v8")
+    named = DockerImageArtifact.put_context("b", description="d", context_path=str(context), dockerfile_path="Dockerfile",
+                                            platform="linux/arm64")
+
+    assert image.platform == "linux/arm64" and image.source_digest == named.source_digest
+
+
+OTHER_PLATFORM = "'img' v1 is a linux/arm64 image, and the sandbox runs linux/amd64"
+
+
+@pytest.mark.parametrize("context_url, dockerfile, platform, rebuilt, problem", [
+    ("s3://bucket/ctx.tar.gz", "Dockerfile", "linux/amd64", True, None),
+    ("s3://bucket/ctx.tar.gz", "Dockerfile", "linux/arm64", False, None),
+    ("s3://bucket/ctx.tar.gz", "Dockerfile", None, False, None),
+    (None, None, "linux/amd64", False, OTHER_PLATFORM),
+    ("s3://bucket/ctx.tar.gz", None, "linux/amd64", False, OTHER_PLATFORM),
+], ids=["context-another-platform", "context-same-platform", "vm-runs-any", "no-context",
+        "context-naming-no-dockerfile"])
+def test_a_vm_of_another_platform_builds_an_image_from_the_context_beside_its_tar_gz(context_url, dockerfile, platform,
+                                                                                    rebuilt, problem):
+    """Only from a context that records its Dockerfile."""
+    image = DockerImageArtifact(id="img", version=1, description="d", image_name="localhost:5000/img:v1",
+                                tar_gz_object_url="file:///state/img.tar.gz", build_context_object_url=context_url,
+                                dockerfile_path=dockerfile, platform="linux/arm64")
+
+    assert image.rebuilt_for(platform) is rebuilt
+    assert (image.load_problem(on_this_machine=False, platform=platform) or "").startswith(problem or "")
+    assert (image.load_problem(on_this_machine=False, platform=platform) is None) is (problem is None)

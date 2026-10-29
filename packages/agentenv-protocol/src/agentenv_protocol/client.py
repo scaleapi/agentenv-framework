@@ -12,6 +12,29 @@ from .types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI, MCP_PATH, M
 logger = logging.getLogger(__name__)
 
 
+class ExtensionCallError(httpx.HTTPStatusError):
+    """A non-2xx answer from an extension method, with the error fields the server sent. A body without them
+    (a proxy's own error page, an older server) leaves ``code`` None and ``applied`` ``"unknown"``."""
+
+    def __init__(self, response: httpx.Response) -> None:
+        error = _error_fields(response)
+        self.code: str | None = error.get("code")
+        self.detail: str = error.get("message") or response.reason_phrase
+        self.retryable: bool = bool(error.get("retryable", False))
+        self.applied: str = error.get("applied", "unknown")
+        self.hint: str | None = error.get("hint")
+        super().__init__(f"{response.status_code} {self.code or 'error'}: {self.detail}", request=response.request, response=response)
+
+
+def _error_fields(response: httpx.Response) -> dict:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    error = body.get("error") if isinstance(body, dict) else None
+    return error if isinstance(error, dict) else {}
+
+
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool) -> dict:
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     async with httpx.AsyncClient(verify=verify) as client:
@@ -40,15 +63,19 @@ async def get_data(
     *,
     write_namespace: WriteNamespaceGrant | None = None,
     write_object: WriteObject | None = None,
+    paths: list[str] | None = None,
 ) -> GetDataResponse:
     """`data/get`. A server advertising `DATA_OBJECTS_EXTENSION_URI` may be handed `write_namespace` to upload
     its export under, and one whose `TRANSFERS_EXTENSION_URI` lists the grant's kind `write_object` to upload
-    it to; `uploaded_object_path` and `uploaded_object` read from the answer what it uploaded."""
+    it to; `uploaded_object_path` and `uploaded_object` read from the answer what it uploaded. `paths` names what
+    a computer returns, relative to its user's home; an env that returns all of its data refuses them."""
     params = {}
     if write_namespace is not None:
         params["write_namespace"] = write_namespace.model_dump(mode="json", exclude_none=True)
     if write_object is not None:
         params["write_object"] = write_object.model_dump(mode="json", exclude_none=True)
+    if paths is not None:
+        params["paths"] = paths
     return GetDataResponse.model_validate(await _rpc(base_url, METHOD_GET, params, timeout, verify))
 
 
@@ -188,7 +215,7 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
 
     Reads the endpoint and HTTP verb of the extension method named `method` from the card, so the
     card alone is enough to invoke; without `method`, the first method listed. Returns the parsed
-    JSON result; raises on a non-2xx response.
+    JSON result; a non-2xx response raises `ExtensionCallError`.
     """
     ext = find_extension(card, uri)
     if ext is None:
@@ -207,5 +234,6 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
             response = await client.get(url, params=params or {}, timeout=timeout)
         else:
             response = await client.request(op["method"], url, json=params or {}, timeout=timeout)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise ExtensionCallError(response)
         return response.json()

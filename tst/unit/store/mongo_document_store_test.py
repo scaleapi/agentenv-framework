@@ -130,8 +130,8 @@ def test_a_slow_build_is_left_to_finish_without_the_caller(short_wait, caplog):
 
 def test_a_unique_index_is_awaited_however_long_it_builds(short_wait):
     coll = _Indexing()
-    threading.Timer(0.3, coll.release.set).start()
     started = time.monotonic()
+    threading.Timer(0.3, coll.release.set).start()
     MongoDocumentStore({"c": coll}).ensure_index("c", ["instance_id"], unique=True)
     assert time.monotonic() - started >= 0.3
     assert coll.built == ["instance_id_unique"]

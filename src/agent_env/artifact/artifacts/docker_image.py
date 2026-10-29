@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import gzip
 import logging
-import os
 import posixpath
 import re
 import shlex
@@ -13,7 +12,6 @@ import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
-from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal
 from urllib.parse import urlparse
@@ -23,14 +21,16 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id, local_image_repository
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
-from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, names_registry, registry_host_from_ref
-from agent_env.store.image_store.registry_api import pin_digest
-from agent_env.utils.build_context import BuildContext
-from agent_env.utils.docker_build import DEFAULT_BUILD_PLATFORM
+from agent_env.store.image_store.oci_registry_credentials import image_reference_problem, is_loopback_host, names_registry, registry_host_from_ref
+from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
+from agent_env.utils.docker.context import BuildContext
+from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image, normalize_platform
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str, str, int], None]
+
+PUT_AGAIN = "put the image again in an image store whose registry the sandbox can reach"
 
 _SAFE_GIT_NAME = re.compile(r"^[a-zA-Z0-9._-]+$")
 
@@ -64,9 +64,13 @@ def _git_clone_commands(owner: str, repo: str, ref: str | None, token: str | Non
         f"trap 'rm -f /tmp/git-askpass.sh' EXIT; GIT_ASKPASS=/tmp/git-askpass.sh git clone --depth 1 {ref_flag} {clone_url} /tmp/repo",
     ]
 
+# How much of a build context's source digest its image's tag holds.
+_SOURCES_TAG_CHARS = 16
+
 class DockerImageArtifact(Artifact):
     """A Docker image artifact: a tar.gz of the image in the object store; without one, a registry reference a
-    sandbox pulls; or, with neither, only its build context."""
+    sandbox pulls, by its ``image_digest`` when it records one, or builds from the build context beside it when it can't; or,
+    with neither, only its build context."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -83,6 +87,10 @@ class DockerImageArtifact(Artifact):
     platform: str | None = Field(default=None, description="The platform the image is built for, as `docker build --platform` names it")
     source_digest: str | None = Field(
         default=None, description="sha256 over the build context's files and modes, the Dockerfile's path and the platform"
+    )
+    image_digest: str | None = Field(
+        default=None, description="The registry's digest of the built image, not of its sources (source_digest): a "
+                                  "sandbox pulls the image by it and runs it as image_name"
     )
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
@@ -124,8 +132,8 @@ class DockerImageArtifact(Artifact):
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
         image_store.ensure_repository(repository)
-        _push_local_image(image_name, image_ref, image_store)
-        platform = platform or _image_platform(image_ref)
+        push_local_image(image_name, image_ref, image_store)
+        platform = normalize_platform(platform) if platform else _image_platform(image_ref)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             tmp_path = Path(tmp.name)
@@ -185,36 +193,40 @@ class DockerImageArtifact(Artifact):
         owner = "DockerImageArtifact.put_tar"
         if not tar_gz_object_url:
             raise ValueError(f"{owner}(): tar_gz_object_url is empty")
+        if problem := image_reference_problem(image_name):
+            raise ValueError(f"{owner}(): {problem}")
         for url in (tar_gz_object_url, build_context_object_url):
             if url:
                 get_config().check_object_url(id, url)
         store = get_artifact_store()
-        version = store.next_version(id)
         instance = cls(
             id=id,
-            version=version,
             description=description,
             image_name=image_name,
             tar_gz_object_url=tar_gz_object_url,
             build_context_object_url=build_context_object_url,
             dockerfile_path=dockerfile_path,
-            platform=platform,
+            platform=normalize_platform(platform) if platform else None,
             source_digest=source_digest,
         )
         return store.put_document(instance)
 
     @classmethod
-    def put_ref(cls, id: str, *, description: str, image_name: str) -> "DockerImageArtifact":
-        """Register ``image_name``, an image already in a registry, writing this document only: nothing is pushed,
-        saved or uploaded, and a sandbox pulls the image. A tag is pinned to the digest the registry serves for it
-        now, recorded as ``name:tag@sha256:...``, so every run gets the same image; a digest is checked to exist.
+    def put_ref(cls, id: str, *, description: str, image_name: str, earlier_pin: str | None = None,
+                image_digest: str | None = None, context_path: str | None = None,
+                dockerfile_path: str | None = None) -> "DockerImageArtifact":
+        """Register ``image_name``, an image already in a registry, which a sandbox pulls; nothing is built, pushed or
+        saved. A tag is pinned to the digest the registry serves now, as ``name:tag@sha256:...`` (``earlier_pin`` kept
+        when it pins the same ref). Given the image's build context and ``image_digest``, the tag stays the name, the
+        digest is recorded beside it, and the context is uploaded for a sandbox that can't pull the image to build it.
 
-        ``image_name`` must name its registry. The registry is read with the configured image store's credentials
-        where it holds that registry, anonymously otherwise. One on this machine is refused unless ``id``'s image
-        store is the local registry, since nothing else could pull from it."""
+        ``image_name`` must name its registry, read with the configured image store's credentials where it holds them;
+        one on this machine is refused unless ``id``'s image store is the local registry."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
+        if problem := image_reference_problem(image_name):
+            raise ValueError(problem)
         if not names_registry(image_name):
             raise ValueError(f"{image_name!r} doesn't name its registry; spell it out, as in "
                              f"docker.io/library/{image_name}")
@@ -223,43 +235,61 @@ class DockerImageArtifact(Artifact):
                 and not isinstance(config.get_image_store_for(id), LocalRegistryImageStore)):
             raise ValueError(f"{image_name} is in a registry on this machine, which only an image in the local "
                              "registry's store, such as an @local one, can name")
-        pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
+        if context_path is not None:
+            context = _context_of(Path(context_path), dockerfile_path)
+            store = get_artifact_store()
+            prefix = store.attempt_prefix("docker_image", id)
+            return store.put_document(cls(
+                id=id,
+                description=description,
+                image_name=image_name,
+                image_digest=image_digest,
+                build_context_object_url=_upload_context(config.get_object_store_to_write(prefix, id), prefix, context),
+                dockerfile_path=context.dockerfile,
+                source_digest=context.source_digest(None),
+            ))
+        if earlier_pin is not None and pinned_from(earlier_pin, image_name):
+            pinned = earlier_pin
+        else:
+            pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
         store = get_artifact_store()
-        version = store.next_version(id)
-        return store.put_document(cls(id=id, version=version, description=description, image_name=pinned))
+        return store.put_document(cls(id=id, description=description, image_name=pinned))
 
     @classmethod
     def put_context(cls, id: str, *, description: str, context_path: str, dockerfile_path: str,
-                    platform: str = DEFAULT_BUILD_PLATFORM) -> "DockerImageArtifact":
-        """Register an image by its build context alone, to be built where it runs: the context is uploaded and
-        nothing is built, pushed or saved, so no Docker is needed here. Its ``image_name``,
-        ``local/<slug>-<hash>:v<version>``, names no registry: it's the tag the build gives the image.
-        ``source_digest`` is equal for equal sources, so one build can serve both."""
+                    platform: str | None = DEFAULT_BUILD_PLATFORM) -> "DockerImageArtifact":
+        """Register an image by its build context alone, to be built where it runs, for ``platform``, or for each
+        sandbox's own when None: the context is uploaded and nothing is built, pushed or saved, so no Docker is needed
+        here. Its ``image_name``, ``local/<slug>-<hash>:<sources>``, names no registry: it's the tag the build gives the
+        image, the same for the same sources, so a build of one version serves another. ``source_digest`` is equal for
+        equal sources."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
-        root = Path(context_path)
-        dockerfile = _resolve_dockerfile(root, dockerfile_path)
-        if not dockerfile.is_file():
-            raise ValueError(f"no Dockerfile at {dockerfile}")
-        context = BuildContext.of(root, dockerfile)
-        if context.dockerfile is None:
-            raise ValueError(f"{dockerfile} is outside the build context {root}; the image is built from the context "
-                             "alone, so the Dockerfile must be in it")
+        platform = normalize_platform(platform) if platform else None
+        context = _context_of(Path(context_path), dockerfile_path)
         store = get_artifact_store()
-        version = store.next_version(id)
         prefix = store.attempt_prefix("docker_image", id)
         build_context_object_url = _upload_context(get_config().get_object_store_to_write(prefix, id), prefix, context)
+        source_digest = context.source_digest(platform)
         return store.put_document(cls(
             id=id,
-            version=version,
             description=description,
-            image_name=f"{local_image_repository(id)}:v{version}",
+            image_name=_context_image_name(id, source_digest),
             build_context_object_url=build_context_object_url,
             dockerfile_path=context.dockerfile,
             platform=platform,
-            source_digest=context.source_digest(platform),
+            source_digest=source_digest,
         ))
+
+    @staticmethod
+    def context_identity(id: str, context_path: str, dockerfile_path: str,
+                         platform: str | None = DEFAULT_BUILD_PLATFORM) -> tuple[str, str]:
+        """The ``source_digest`` and ``image_name`` ``put_context`` gives ``id`` for this build context, found without
+        writing anything."""
+        platform = normalize_platform(platform) if platform else None
+        source_digest = _context_of(Path(context_path), dockerfile_path).source_digest(platform)
+        return source_digest, _context_image_name(id, source_digest)
 
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store
@@ -269,26 +299,67 @@ class DockerImageArtifact(Artifact):
         return get_artifact_store().get_object(self.tar_gz_object_url)
 
     @property
+    def pinned_name(self) -> str:
+        """What a sandbox pulls: ``image_name`` pinned to the ``image_digest`` when it records one."""
+        return f"{self.image_name}@{self.image_digest}" if self.image_digest else self.image_name
+
+    @property
     def context_only(self) -> bool:
         """Whether only the image's build context is stored: no tar.gz, and an image name that names no registry, the
         tag the image's build gives it."""
         return bool(self.build_context_object_url) and not self.tar_gz_object_url and not names_registry(self.image_name)
 
-    def load_problem(self) -> str | None:
-        """Why no VM sandbox can get this image, or None when one can: a tar.gz is loaded, an image with none is pulled
-        when its name names a registry, and built from its build context when it has only that."""
-        if self.tar_gz_object_url or names_registry(self.image_name) or self.context_only:
-            return None
+    @property
+    def buildable(self) -> bool:
+        """Whether the context records its Dockerfile, so a sandbox can build it; old and GitHub contexts don't."""
+        return bool(self.build_context_object_url and self.dockerfile_path)
+
+    @property
+    def stored_under_build_tag(self) -> bool:
+        """Whether the image is a tar.gz under a bare tag, which only the machine that built it has."""
+        return bool(self.tar_gz_object_url) and not names_registry(self.image_name)
+
+    def build_tag_reason(self) -> str:
+        """Why a sandbox elsewhere can't pull an image ``stored_under_build_tag``."""
+        return (f"{self.id!r} v{self.version} is stored as a tar.gz under {self.image_name!r}, which names no registry: "
+                "it's the tag the machine that built it gave it, which a sandbox elsewhere can't pull")
+
+    def rebuilt_for(self, platform: str | None) -> bool:
+        """Whether a VM sandbox of ``platform`` builds this image from its build context rather than load its tar.gz,
+        which is built for another platform: the image runs, though not byte for byte the one stored."""
+        return bool(self.tar_gz_object_url) and self.buildable and self.platform_problem(platform) is not None
+
+    def load_problem(self, *, on_this_machine: bool, platform: str | None = None) -> str | None:
+        """Why a VM sandbox can't get this image, or None when it can: a tar.gz is loaded, an image with none is pulled
+        when its name names a registry, one that a VM ``on_this_machine`` or not reaches, and built from its build
+        context when it has only that; and a VM of ``platform`` runs only an image built for it, or one it rebuilds
+        from the build context beside a tar.gz of another platform."""
+        if self.context_only and not self.buildable:
+            return f"{self.id!r} v{self.version} is only a build context, which records no Dockerfile to build it with"
+        if self.tar_gz_object_url or self.context_only:
+            return None if self.rebuilt_for(platform) else self.platform_problem(platform)
+        if names_registry(self.image_name):
+            return pull_problem(self.image_name, on_this_machine=on_this_machine) or self.platform_problem(platform)
         return (f"{self.id!r} v{self.version} has no tar.gz, and its image name {self.image_name!r} doesn't name a "
                 "registry to pull it from")
 
-    def by_name_problem(self) -> str | None:
-        """Why a sandbox that runs an image by pulling its name can't run this one, or None when it can: a context-only
-        image's name is a tag only its build gives it, a VM sandbox's or Modal's, and pulled, it would be looked up on
-        Docker Hub."""
+    def by_name_problem(self, *, on_this_machine: bool) -> str | None:
+        """Why a sandbox that pulls images by name can't run this one, or None: a context-only image must be built,
+        and a sandbox elsewhere can't pull from this machine's registry or an image ``stored_under_build_tag``."""
         if self.context_only:
             return f"{self.id!r} v{self.version} is only a build context, which has to be built, not pulled"
-        return None
+        if self.stored_under_build_tag and not on_this_machine:
+            return f"{self.build_tag_reason()}; run it on a provider whose VMs load its tar.gz, or {PUT_AGAIN}"
+        return pull_problem(self.image_name, on_this_machine=on_this_machine)
+
+    def platform_problem(self, platform: str | None) -> str | None:
+        """Why a sandbox that runs images of ``platform`` can't run this one, or None when it can: an image runs on the
+        platform it records, the one it's built for, however either is spelled (``normalize_platform``). One that
+        records none, or a sandbox that runs any (None), isn't checked."""
+        if platform is None or self.platform is None or normalize_platform(self.platform) == normalize_platform(platform):
+            return None
+        return (f"{self.id!r} v{self.version} is a {self.platform} image, and the sandbox runs {platform}; rebuild it for "
+                f"{platform}, which a Linux host of another platform does only with QEMU emulation set up")
 
     @classmethod
     async def put_from_github(
@@ -310,7 +381,6 @@ class DockerImageArtifact(Artifact):
         without slashes, or the default branch.
         """
         from agent_env.providers import get_sandbox_provider
-        from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
         from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
         from agent_env.config import get_config
 
@@ -345,7 +415,7 @@ class DockerImageArtifact(Artifact):
         repository = image_repository(id)
         image_ref = image_store.image_ref(repository, f"v{version}")
         provider = get_sandbox_provider()
-        if is_loopback_host(registry_host_from_ref(image_ref)) and not isinstance(provider, LocalSandboxProvider):
+        if is_loopback_host(registry_host_from_ref(image_ref)) and not provider.ON_THIS_MACHINE:
             raise ValueError(
                 f"{image_ref} is in a registry on this machine, which a {type(provider).__name__} build VM can't push to; "
                 "build on the local sandbox provider, or configure an image store a remote VM can reach"
@@ -467,6 +537,14 @@ class DockerImageArtifact(Artifact):
         return DockerImageArtifact._GitHubURLParts(owner=owner, repo=repo, ref=ref, path=path)
 
 
+def pull_problem(image_name: str, *, on_this_machine: bool) -> str | None:
+    """Why a sandbox pulling ``image_name`` can't, or None when it can: one that isn't ``on_this_machine`` can't reach a
+    registry on this machine."""
+    if on_this_machine or not is_loopback_host(registry_host_from_ref(image_name)):
+        return None
+    return f"{image_name} is in a registry on this machine, which a sandbox elsewhere can't pull from"
+
+
 def refuse_local_github_build(entity_id: str) -> None:
     """A GitHub build publishes to the configured registry, so it takes a registry id; an ``@local``
     image is built from its own Dockerfile."""
@@ -487,16 +565,36 @@ class GitHubBuildResult:
     docker_context_github_url: str | None
 
 
-def _push_local_image(local_tag: str, image_ref: str, image_store) -> None:
-    auth = image_store.auth(image_ref)
-    if auth is not None:
-        login = subprocess.run(
-            ["docker", "login", "--username", auth.username, "--password-stdin", auth.registry],
-            input=auth.password, text=True, capture_output=True,
-        )
-        if login.returncode != 0:
-            raise RuntimeError(f"docker login failed: {login.stderr}")
+def push_context_image(id: str, context_path: str, dockerfile_path: str,
+                       before: Callable[[], None] | None = None) -> tuple[str, str]:
+    """The ref and digest of the image of ``id``'s build context in ``id``'s image store, under the tag of its sources:
+    built for linux/amd64 with this machine's Docker and pushed, calling ``before`` first, unless the store serves the
+    tag already. Raises DockerBuildError when the build fails, RuntimeError when the push does, and ValueError when the
+    registry can't be read."""
+    from agent_env.config import get_config
 
+    context = _context_of(Path(context_path), dockerfile_path)
+    tag = "src-" + context.source_digest(DEFAULT_BUILD_PLATFORM).removeprefix("sha256:")
+    store = get_config().get_image_store_for(id)
+    # ECR, unlike the OCI spec, refuses two separators in a row, which a derived id (``<id>__env_image``) holds.
+    repository = image_repository(id).replace("__", "-")
+    ref = store.image_ref(repository, tag)
+    store.ensure_repository(repository)
+    try:
+        return ref, pin_digest(ref, store.auth(ref)).rpartition("@")[2]
+    except NoSuchImageError:
+        pass
+    if before is not None:
+        before()
+    local = f"{local_image_repository(id)}:{tag}"
+    build_image(Path(context_path) / context.dockerfile, Path(context_path), local, platform=DEFAULT_BUILD_PLATFORM)
+    push_local_image(local, ref, store)
+    return ref, pin_digest(ref, store.auth(ref)).rpartition("@")[2]
+
+
+def push_local_image(local_tag: str, image_ref: str, image_store) -> None:
+    """Push this machine's ``local_tag`` to ``image_ref`` in ``image_store``, signing in with its credentials first."""
+    docker_login(image_store.auth(image_ref))
     for cmd, label in [
         (["docker", "tag", local_tag, image_ref], "tag"),
         (["docker", "push", image_ref], "push"),
@@ -505,6 +603,16 @@ def _push_local_image(local_tag: str, image_ref: str, image_store) -> None:
         if result.returncode != 0:
             raise RuntimeError(f"docker {label} failed: {result.stderr}")
     logger.info(f"Pushed {local_tag} -> {image_ref}")
+
+
+def docker_login(auth) -> None:
+    """Sign this machine's Docker in to ``auth``'s registry, when there are credentials to sign in with."""
+    if auth is None:
+        return
+    login = subprocess.run(["docker", "login", "--username", auth.username, "--password-stdin", auth.registry],
+                           input=auth.password, text=True, capture_output=True)
+    if login.returncode != 0:
+        raise RuntimeError(f"docker login failed: {login.stderr}")
 
 
 def _parse_copy_sources(dockerfile_text: str, dockerfile_rel_path: str | None = None) -> list[str]:
@@ -539,9 +647,7 @@ def _image_platform(image_ref: str) -> str | None:
                             capture_output=True, text=True)
     if result.returncode != 0 or result.stdout.count("/") != 2:
         return None
-    os_name, architecture, variant = result.stdout.strip().split("/")
-    # arm64 has one variant, so it goes unnamed as in `--platform linux/arm64`; 32-bit arm's v6 and v7 differ.
-    return f"{os_name}/{architecture}/{variant}" if architecture == "arm" and variant else f"{os_name}/{architecture}"
+    return normalize_platform(result.stdout)
 
 
 def _resolve_dockerfile(context_dir: Path, dockerfile_path: str | None) -> Path | None:
@@ -550,6 +656,22 @@ def _resolve_dockerfile(context_dir: Path, dockerfile_path: str | None) -> Path 
         return None
     dockerfile = Path(dockerfile_path)
     return dockerfile if dockerfile.is_absolute() or dockerfile.exists() else context_dir / dockerfile
+
+
+def _context_of(root: Path, dockerfile_path: str) -> BuildContext:
+    dockerfile = _resolve_dockerfile(root, dockerfile_path)
+    if not dockerfile.is_file():
+        raise ValueError(f"no Dockerfile at {dockerfile}")
+    context = BuildContext.of(root, dockerfile)
+    if context.dockerfile is None:
+        raise ValueError(f"{dockerfile} is outside the build context {root}; the image is built from the context "
+                         "alone, so the Dockerfile must be in it")
+    return context
+
+
+def _context_image_name(id: str, source_digest: str) -> str:
+    """The tag a build gives a context-only image: the same for the same sources."""
+    return f"{local_image_repository(id)}:{source_digest.removeprefix('sha256:')[:_SOURCES_TAG_CHARS]}"
 
 
 def _upload_context(objects, prefix: str, context: BuildContext) -> str:

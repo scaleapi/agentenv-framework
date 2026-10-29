@@ -8,7 +8,7 @@ import httpx
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class VerifyA2APeerAgentsStep(TaskStep):
             raise RuntimeError(f"VerifyA2APeerAgentsStep: no deployed agent named '{TaskStep.DEFAULT_AGENT_NAME}' in context")
         a2a_url = deployed.a2a_url or deployed.api_url
         if not a2a_url:
-            raise RuntimeError(f"VerifyA2APeerAgentsStep: deployed agent has no a2a_url")
+            raise RuntimeError("VerifyA2APeerAgentsStep: deployed agent has no a2a_url")
 
         extension = A2AAgent.find_extension(deployed.a2a_card or {}, A2AAgent.EXT_PEER_AGENTS)
         extension_advertised = extension is not None

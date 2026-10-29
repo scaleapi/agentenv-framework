@@ -3,8 +3,13 @@
 No backend / network: these exercise Filter, UpdateSpec, and Sort only.
 """
 
+import logging
+
+import pydantic
 import pytest
 
+from agent_env.artifact.store import ArtifactStore
+from agent_env.env.store import EnvStore
 from agent_env.store.document_store import (
     AbsentOrNull,
     DuplicateKeyError,
@@ -17,12 +22,16 @@ from agent_env.store.document_store import (
     Ne,
     Sort,
     SortKey,
+    UnknownDocumentTypeError,
     UpdateSpec,
     VersionedEntityStore,
     VersionedEntityStoreCache,
 )
 from agent_env.store.document_store.mongo_document_store import _to_mongo_filter
 from agent_env.store.query import QueryBuilder, to_document_query
+from agent_env.task.store import TaskStore
+from agent_env.task.task import Task
+from agent_env.task_step.store import TaskStepStore
 from agent_env.task_step.context_ops import ContextUpdateOps
 from tst.unit.store.fakes import FakeDocumentStore
 
@@ -226,6 +235,60 @@ class TestVersionedEntityStore:
         store = _versioned(FakeDocumentStore(fail_inserts=99))
         with pytest.raises(DuplicateKeyError, match="after"):
             store.put({"id": "e"}, max_retries=3)
+
+    def test_query_skips_a_document_of_an_unknown_type(self, caplog):
+        def deserialize(doc):
+            if doc["type"] == "gone":
+                raise UnknownDocumentTypeError("Unknown task step type: gone")
+            return doc
+
+        store = VersionedEntityStore(
+            _Page([{"id": "kept", "version": 1, "type": "known"}, {"id": "stale", "version": 3, "type": "gone"}]),
+            "c", serialize=dict, deserialize=deserialize,
+        )
+        with caplog.at_level(logging.WARNING):
+            assert [d["id"] for d in store.query(Filter.of())] == ["kept"]
+        assert "id='stale' version=3 type='gone'" in caplog.text
+
+    def test_get_raises_on_a_document_of_an_unknown_type(self):
+        def deserialize(doc):
+            raise UnknownDocumentTypeError("Unknown task step type: gone")
+
+        store = VersionedEntityStore(FakeDocumentStore(), "c", serialize=dict, deserialize=deserialize)
+        store.put({"id": "stale"})
+        with pytest.raises(UnknownDocumentTypeError):
+            store.get("stale")
+
+    def test_query_raises_on_a_malformed_document_of_a_known_type(self):
+        class Doc(pydantic.BaseModel):
+            n: int
+
+        store = VersionedEntityStore(
+            _Page([{"id": "bad", "n": "not-an-int"}]), "c", serialize=dict, deserialize=Doc.model_validate,
+        )
+        with pytest.raises(pydantic.ValidationError):
+            store.query(Filter.of())
+
+
+@pytest.mark.parametrize("load", [
+    lambda doc: ArtifactStore()._deserialize(doc),
+    lambda doc: EnvStore()._deserialize(doc),
+    lambda doc: TaskStore()._deserialize(doc),
+    lambda doc: TaskStepStore()._deserialize(doc),
+    lambda doc: Task.from_dict({"id": "t", "steps": [doc]}),
+], ids=["artifact", "env", "task", "task_step", "task_from_dict"])
+def test_every_registry_miss_raises_unknown_document_type(load):
+    with pytest.raises(UnknownDocumentTypeError):
+        load({"id": "x", "version": 1, "type": "never_registered"})
+
+
+class _Page(FakeDocumentStore):
+    def __init__(self, docs):
+        super().__init__()
+        self._page = docs
+
+    def query(self, *a, **k):
+        return [dict(d) for d in self._page]
 
 
 class _Q(QueryBuilder):

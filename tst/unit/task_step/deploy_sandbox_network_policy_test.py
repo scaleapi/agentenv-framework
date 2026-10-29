@@ -46,7 +46,7 @@ def test_an_unknown_mode_is_rejected_when_the_task_is_built():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode, create_call, extra", [
     ("vm", "create_vm", {}),
-    ("container", "create_sandbox", {"port": 8000}),  # container mode requires image + port
+    ("container", "create_container", {"port": 8000}),  # container mode requires image + port
 ])
 async def test_the_policy_reaches_both_create_paths(mode, create_call, extra):
     step = _step(sandbox_mode=mode, image="img", network_policy=ALLOWLIST, **extra)
