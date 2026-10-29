@@ -8,7 +8,7 @@ import importlib
 import json
 import os
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import distribution, packages_distributions
@@ -19,12 +19,19 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_artifact_registry
+from agent_env.entity.refs import EntityKind, RefRole, ref_sites
 from agent_env.env import registry as env_registry
+from agent_env.env.env import Env
 from agent_env.env.registry import get_env_registry
 from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, _requirements, inventory, load_failures
+from agent_env.store.base import NotFoundError
+from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.task_step.task_step import TaskStep
 
 from . import _toml
 from ._fs import relative
@@ -36,6 +43,8 @@ if TYPE_CHECKING:
 # What core ships, per plugin group: anything else a bundle uses is provided by a plugin, or by configuration.
 _BUILTINS = {TASK_STEPS: task_step_registry._builtin_registry, ENVS: env_registry._builtin_registry,
              ARTIFACTS: lambda: ARTIFACT_REGISTRY}
+# The entities a step reads that hold, or are, a type a plugin may register.
+_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.ARTIFACT: Artifact.get}
 
 
 class UnmetRequirements(BundleError):
@@ -178,6 +187,67 @@ def detected(found: Iterable[Use], declared: Iterable[str] = ()) -> list[str]:
         if (requirement := use.provider.requirement()) is not None:
             requires.update(by_name.get(canonicalize_name(use.provider.distribution), [requirement]))
     return sorted(requires)
+
+
+def task_requires(steps: Iterable[TaskStep], declared: Iterable[str] = ()) -> list[str]:
+    """What a stored task made of ``steps`` requires, by the rule registering a bundle's task records: the plugin
+    packages behind its own step types and the types of the envs and artifacts its steps read, as the store holds them,
+    with those they and the agents its steps deploy hold. A package ``declared`` (what the task required before) names keeps its range there; one used
+    anew is at least the version installed here; one no longer used is dropped, unless a reference can't be read here
+    (an id the run fills in, one the store doesn't hold, a type nothing here registers), when every one is kept."""
+    declared = list(declared)
+    providers = Providers()
+    found, read, unread = [], set(), False
+    for step in steps:
+        if (provider := providers.of(TASK_STEPS, step.type, get_task_step_registry().get(step.type))) is not None:
+            found.append(Use(f"step {step.id!r}", "step type", step.type, provider))
+        for site in ref_sites(type(step).entity_refs or (), step.to_dict()):
+            if site.ref.role is RefRole.OUTPUT or site.ref.kind not in _GETTERS:
+                continue
+            key = (site.ref.kind, site.value, site.version if isinstance(site.version, int) else None)
+            if key in read:
+                continue
+            read.add(key)
+            try:
+                entity = _GETTERS[site.ref.kind](key[1], key[2]) if isinstance(key[1], str) else None
+            except (NotFoundError, UnknownDocumentTypeError, ValueError):
+                entity = None
+            if entity is None:
+                unread = True
+                continue
+            found += [use for held in _held(entity) if (use := _entity_use(f"step {step.id!r}: {site.path}", held,
+                                                                           providers)) is not None]
+    requires = detected(found, declared)
+    if unread:
+        requires = sorted({*requires, *(line for line in declared if _requirements.parsed(line) is not None)})
+    return requires
+
+
+
+def _held(entity: Env | A2AAgent | Artifact) -> Iterator[Env | A2AAgent | Artifact]:
+    """``entity``, then each env and artifact loading it loaded with it, and theirs in turn."""
+    seen, queue = set(), [entity]
+    while queue:
+        held = queue.pop()
+        if id(held) in seen:
+            continue
+        seen.add(id(held))
+        yield held
+        for value in vars(held).values():
+            items = value.values() if isinstance(value, dict) else value if isinstance(value, (list, tuple)) else (value,)
+            queue.extend(item for item in items if isinstance(item, (Env, Artifact)))
+
+
+def _entity_use(where: str, entity: Env | A2AAgent | Artifact, providers: Providers) -> Use | None:
+    """The use of ``entity``'s type, when core doesn't ship it; an agent's has no plugin group."""
+    if isinstance(entity, Env):
+        provider = providers.of(ENVS, entity.type, get_env_registry().get(entity.type))
+        return Use(where, "env type", entity.type, provider) if provider is not None else None
+    if not isinstance(entity, Artifact):
+        return None
+    name = canonical_type(entity.type)
+    provider = providers.of(ARTIFACTS, name, get_artifact_registry().get(name))
+    return Use(where, "artifact type", name, provider) if provider is not None else None
 
 
 def declare(resolved: ResolvedBundle, declaring: Declaring) -> list[str]:

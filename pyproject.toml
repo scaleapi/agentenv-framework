@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1382"
+version = "0.9.1384"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -149,14 +149,14 @@ Changelog = "https://github.com/scaleapi/agentenv-framework/releases"
 packages = ["src/agent_env"]
 # The explorer UI *source* lives at src/agent_env/explorer/ui/ (a Next.js project).
 # Keep it out of the wheel — only its built output ships, copied to explorer/static/
-# by the UI build step. node_modules/out/.next are already .gitignore-excluded.
+# by the release workflow. node_modules/out/.next are already .gitignore-excluded.
 exclude = ["src/agent_env/explorer/ui"]
-# The release workflow writes it and git ignores it; a build ships it when it's there.
-artifacts = ["src/agent_env/env/published_images.json"]
+# The release workflow writes these and git ignores them; a build ships them when they're there.
+artifacts = ["src/agent_env/env/published_images.json", "src/agent_env/explorer/static"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tst", "packages/agentenv-protocol", ".github/scripts"]
-artifacts = ["src/agent_env/env/published_images.json"]
+artifacts = ["src/agent_env/env/published_images.json", "src/agent_env/explorer/static"]
 
 [tool.uv.workspace]
 members = ["packages/agentenv-protocol"]

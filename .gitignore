@@ -170,3 +170,4 @@ cython_debug/
 
 # Written by the release workflow into the wheels it publishes
 src/agent_env/env/published_images.json
+src/agent_env/explorer/static/
