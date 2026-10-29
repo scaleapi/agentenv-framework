@@ -433,10 +433,12 @@ class RunCodeTaskStep(TaskStep):
             raise self._validation_error(f"env '{self.env_id}' serves computer-exec/v1 but not {', '.join(missing)}, "
                                          "which running code in it needs")
         limit = inside.max_timeout_s(deployed)
-        if self.timeout_seconds > limit:
-            raise self._validation_error(f"timeout_seconds {self.timeout_seconds} is above the {limit} s env "
-                                         f"'{self.env_id}' lets a command run")
-        return _DriverTarget(deployed, min(self.timeout_seconds + _RUNNER_SLACK_S, limit))
+        if self.timeout_seconds > limit - _RUNNER_SLACK_S:
+            raise self._validation_error(f"timeout_seconds {self.timeout_seconds} is above the "
+                                         f"{limit - _RUNNER_SLACK_S} s a script in env '{self.env_id}' may run: it "
+                                         f"runs a command for at most {limit} s, and the runner keeps "
+                                         f"{_RUNNER_SLACK_S} s of that to stop the script")
+        return _DriverTarget(deployed, self.timeout_seconds + _RUNNER_SLACK_S)
 
     async def _sandbox_target(self, context: TaskStepContext) -> _ExecTarget:
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox

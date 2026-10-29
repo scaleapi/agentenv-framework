@@ -459,7 +459,10 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
                 raise RuntimeError(f"Verifier '{self.verifier_id}' setup command {i} exited {exit_code}: "
                                    f"{stderr[-1500:]}")
         if self.reward_path:
-            await target.run("rm", "-f", "--", self.reward_path)
+            exit_code, _, stderr = await target.run("rm", "-f", "--", self.reward_path)
+            if exit_code != 0:
+                raise RuntimeError(f"Verifier '{self.verifier_id}' couldn't clear the reward file {self.reward_path!r} "
+                                   f"before the tests, so one left there would be graded: {stderr.strip()}")
         logger.info(f"[{self.verifier_id}] running verifier (timeout={self.timeout_sec}s) in env '{self.env_id}': "
                     f"{command[:160]}")
         exit_code, stdout, stderr = await target.run("bash", "-c", command)

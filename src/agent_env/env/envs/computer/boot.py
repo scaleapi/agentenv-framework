@@ -70,12 +70,8 @@ def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str,
     if not given:
         return {}
     return {APP_SETTINGS_ENV: json.dumps({app.environment_name: {
-        name: get_config().resolve_reference(value) if _secret(app, name) else value for name, value in values.items()}
-        for app, values in given})}
-
-
-def _secret(app: ComputerAppEnv, name: str) -> bool:
-    return bool(app.declaration["settings"].get("properties", {}).get(name, {}).get("writeOnly"))
+        name: get_config().resolve_reference(value) if name in app.secret_settings() else value
+        for name, value in values.items()} for app, values in given})}
 
 
 def recorded_settings(computer: ComputerArtifact, values: dict[str, Any]) -> dict[str, Any]:

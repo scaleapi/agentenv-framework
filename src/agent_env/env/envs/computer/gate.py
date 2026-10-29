@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer.platform import Platform, supported
+from jsonschema import Draft202012Validator
 
 from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
@@ -66,21 +67,18 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
     return problems
 
 
-def check_app_settings(app: ComputerAppEnv, values: dict[str, Any]) -> list[str]:
-    """The problems with ``values``, of ``app``'s settings by name, as its ``Settings`` declares them: a setting it
-    doesn't declare, a value of another JSON type, or a secret's (a ``SecretStr``) given as anything but a bare
-    reference."""
-    declared, problems = app.declaration["settings"].get("properties", {}), []
-    for name, value in values.items():
-        if (setting := declared.get(name)) is None:
-            problems.append(f"{name}: {app.id} declares no setting {name!r}")
-        elif setting.get("writeOnly"):
-            if not _names_a_secret(value):
-                problems.append(f"{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME "
-                                "reference with no ?default, not its value")
-        elif "type" in setting and not _of_json_type(value, setting["type"]):
-            problems.append(f"{name} must be a JSON {setting['type']}, as its Settings declares it, not {value!r}")
-    return problems
+def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str) -> list[str]:
+    """The problems with ``values``, of ``app``'s settings by name, against the schema of its ``Settings``, each named
+    from ``at``: a setting it doesn't declare, a value or a missing one the schema refuses, or a secret's given as
+    anything but a bare reference."""
+    schema, secrets = app.declaration["settings"], app.secret_settings()
+    problems = [f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values
+                if name not in schema.get("properties", {})]
+    problems += [f"{at}.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME reference "
+                 "with no ?default, not its value" for name in values if name in secrets
+                 and not _names_a_secret(values[name])]
+    return problems + [f"{'.'.join([at, *map(str, error.absolute_path)])}: {error.message}"
+                       for error in Draft202012Validator(schema).iter_errors(values)]
 
 
 def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
@@ -105,13 +103,6 @@ def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[s
         else:
             checked[name] = value
     return checked, problems
-
-
-def _of_json_type(value: Any, kind: str) -> bool:
-    if isinstance(value, bool):
-        return kind == "boolean"
-    return isinstance(value, {"string": str, "integer": int, "number": (int, float), "boolean": bool, "array": list,
-                              "object": dict, "null": type(None)}.get(kind, object))
 
 
 def _names_a_secret(value: Any) -> bool:

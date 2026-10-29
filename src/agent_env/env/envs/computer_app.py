@@ -47,6 +47,12 @@ class ComputerAppEnv(ComputerEnv):
     def composed_apps(self) -> list[ComputerAppEnv]:
         return [self]
 
+    def secret_settings(self) -> set[str]:
+        """The names of its settings that are secrets: a ``SecretStr``, optional or not, which its schema marks
+        ``writeOnly``."""
+        return {name for name, schema in self.declaration["settings"].get("properties", {}).items()
+                if any(option.get("writeOnly") for option in [schema, *schema.get("anyOf", [])])}
+
     def to_dict(self) -> dict:
         return {**Env.to_dict(self), "service_name": self.environment_name,
                 "environment_name": self.environment_name,  # dual-write with service_name during the rename

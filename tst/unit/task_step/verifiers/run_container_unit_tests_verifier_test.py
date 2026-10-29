@@ -420,6 +420,25 @@ def test_a_verifier_for_a_computer_runs_in_it_and_grades_only_the_reward_this_ru
     assert {params["timeout_s"] for params in runs} == {300} and runs[-1]["env"]["ANSWER"] == answer
 
 
+def test_a_verifier_for_a_computer_that_cant_clear_the_reward_file_grades_nothing(local_stores, monkeypatch,
+                                                                                   tmp_path):
+    computer = Computer(tmp_path).install(monkeypatch)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "reward.txt").write_text("1\n")
+    (tmp_path / "logs").chmod(0o555)
+    step = Step(id="scrape", version=None, env_id="desk", reward_path="logs/reward.txt", command="exit 1")
+    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
+
+    try:
+        with pytest.raises(RuntimeError, match="couldn't clear the reward file 'logs/reward.txt' before the tests"):
+            asyncio.run(step.execute(ctx))
+    finally:
+        (tmp_path / "logs").chmod(0o755)
+
+    assert "verifications" not in ctx.metadata
+    assert [call[1]["argv"][:2] for call in computer.calls if call[0] == "run"] == [["rm", "-f"]]
+
+
 @pytest.mark.parametrize("fields, problem", [
     ({"env_id": "desk", "sandbox_name": "h", "container_name": "c"}, "set env_id, or sandbox_name and container_name"),
     ({"sandbox_name": "h"}, "set env_id, or sandbox_name and container_name"),

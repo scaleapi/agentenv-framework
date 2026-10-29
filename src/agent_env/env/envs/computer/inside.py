@@ -1,7 +1,7 @@
 """What reaches inside a deployed computer through its driver, as its session user, at paths relative to the home:
 ``data/add`` writes files, in batches the driver holds in memory one at a time, each file's bytes coming through a read
-grant when the object store's grants reach the computer and it has a network, else inline; ``data/get`` reads one
-back; computer-exec/v1 ``run`` runs a command."""
+grant when the object store's grants reach the computer and its network allows everything, else inline; ``data/get``
+reads one back; computer-exec/v1 ``run`` runs a command."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def loopback(deployed: DeployedSandboxEnv) -> dict:
 async def add_artifacts(deployed: DeployedSandboxEnv, files: dict[str, FileArtifact]) -> None:
     """Write each file artifact at its path."""
     network = (deployed.metadata or {}).get("computer", {}).get("network")
-    granted = not (network and NetworkPolicy.from_dict(network).closed)
+    granted = not (network and NetworkPolicy.from_dict(network).restricts_egress)
     batch: list[FilePart] = []
     size = 0
     for path, artifact in files.items():

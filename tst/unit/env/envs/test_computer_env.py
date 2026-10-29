@@ -7,6 +7,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 import subprocess
 import tarfile
 from types import SimpleNamespace
@@ -892,7 +893,7 @@ async def test_a_load_writes_each_file_into_the_computers_downloads_through_its_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("network, granted", [
-    (None, True), ({"mode": "allowlist", "allow_hosts": ["example.com"]}, True), ({"mode": "allowlist"}, False),
+    (None, True), ({"mode": "allowlist", "allow_hosts": ["example.com"]}, False), ({"mode": "allowlist"}, False),
 ], ids=["open", "allowlist", "closed"])
 async def test_a_load_reads_through_a_grant_that_reaches_the_computer_unless_it_has_no_network(
         base, driver, docker, computer, tmp_path, monkeypatch, network, granted):
@@ -925,9 +926,11 @@ async def test_a_load_outside_the_home_is_refused_before_anything_is_sent(base, 
     assert computer.calls == []
 
 
-MAIL_SETTINGS = {"properties": {"signature": {"default": "", "type": "string"},
-                                "password": {"default": "", "type": "string", "format": "password", "writeOnly": True}},
-                 "type": "object"}
+MAIL_SETTINGS = {"properties": {
+    "signature": {"default": "", "type": "string"},
+    "password": {"default": "", "type": "string", "format": "password", "writeOnly": True},
+    "token": {"anyOf": [{"type": "string", "format": "password", "writeOnly": True}, {"type": "null"}], "default": None},
+    "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
 
 
 def _app(base, driver, folder, compose=True, supports=None, install=None, **changes):
@@ -999,31 +1002,35 @@ def test_an_app_that_doesnt_fit_its_computer_and_driver_is_refused_before_anythi
 async def test_an_app_deployed_alone_is_named_after_it_and_handed_its_settings_a_secret_resolved(
         base, driver, docker, boots, tmp_path, monkeypatch):
     monkeypatch.setenv("MAIL_PASSWORD", "s3cret")
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
     boots.display = (1280, 800)
     app = _app(base, driver, tmp_path / "mail")
-    settings = {"mail": {"signature": "-- Ada", "password": "env:MAIL_PASSWORD"}}
+    settings = {"mail": {"signature": "-- Ada", "password": "env:MAIL_PASSWORD", "token": "env:MAIL_TOKEN"}}
 
     deployed = await Env.get(app.id).deploy(env_params={"app_settings": settings})
 
     environment = boots.boots[0]["environment"]
     assert environment["ENVIRONMENT_NAME"] == "mail" and deployed.environment_card["name"] == "mail"
-    assert json.loads(environment["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada", "password": "s3cret"}}
+    assert json.loads(environment["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada", "password": "s3cret",
+                                                                         "token": "t0ken"}}
     assert deployed.env_id == app.id and deployed.metadata["computer"]["env_params"] == {"app_settings": settings}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("values, problem", [
     ({"colour": "blue"}, "env_params.app_settings.mail.colour: @local/~/kit/mail declares no setting 'colour'"),
-    ({"signature": 3}, "env_params.app_settings.mail.signature must be a JSON string"),
+    ({"signature": 3}, "env_params.app_settings.mail.signature: 3 is not of type 'string'"),
+    ({"theme": "blue"}, "env_params.app_settings.mail.theme: 'blue' is not one of ['light', 'dark']"),
     ({"password": "hunter2"}, "env_params.app_settings.mail.password is a secret, so it takes a secret:KEY"),
-], ids=["unknown", "type", "secret-value"])
+    ({"token": "hunter2"}, "env_params.app_settings.mail.token is a secret, so it takes a secret:KEY"),
+], ids=["unknown", "type", "enum", "secret-value", "optional-secret-value"])
 async def test_app_settings_an_app_doesnt_declare_are_refused_at_save_and_at_deploy(base, driver, docker, boots,
                                                                                    tmp_path, values, problem):
     app = _app(base, driver, tmp_path / "mail")
     env_params = {"app_settings": {"mail": values}}
 
     saved = DeployEnvTaskStep(id="d", version=None, env_id=app.id, env_params=env_params).preflight()
-    with pytest.raises(DeployRefused, match=problem.replace(".", "[.]")):
+    with pytest.raises(DeployRefused, match=re.escape(problem)):
         await Env.get(app.id).deploy(env_params=env_params)
 
     assert len(saved) == 1 and problem in saved[0] and boots.boots == []

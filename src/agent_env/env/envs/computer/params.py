@@ -50,12 +50,10 @@ def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParam
     except ValidationError as e:
         problems += _problems("env_params.driver_settings", e)
     apps = {app.environment_name: app for app in env.composed_apps()}
-    for name, app_values in params.app_settings.items():
-        if (app := apps.get(name)) is None:
-            problems.append(f"env_params.app_settings.{name}: {env.id} has no app {name!r}"
-                            + (f"; its apps are {', '.join(apps)}" if apps else ""))
-        else:
-            problems += [f"env_params.app_settings.{name}.{problem}" for problem in gate.check_app_settings(app, app_values)]
+    problems += [f"env_params.app_settings.{name}: {env.id} has no app {name!r}"
+                 + (f"; its apps are {', '.join(apps)}" if apps else "") for name in params.app_settings if name not in apps]
+    for name, app in apps.items():
+        problems += gate.check_app_settings(app, params.app_settings.get(name, {}), f"env_params.app_settings.{name}")
     return params, values, problems
 
 

@@ -1366,7 +1366,8 @@ async def test_each_run_has_a_request_id_of_its_own_which_only_a_dropped_call_se
 @pytest.mark.parametrize("card, step, problem", [
     ({**CARD, "capabilities": {**CARD["capabilities"], "operations": ["data/get"]}}, {},
      "env 'desk' serves computer-exec/v1 but not data/add, which running code in it needs"),
-    (CARD, {"timeout_seconds": 3601}, "timeout_seconds 3601 is above the 3600 s env 'desk' lets a command run"),
+    (CARD, {"timeout_seconds": 3591}, "timeout_seconds 3591 is above the 3590 s a script in env 'desk' may run: it "
+                                      "runs a command for at most 3600 s"),
 ], ids=["no-data-add", "timeout"])
 async def test_a_computer_run_its_driver_cant_carry_out_is_refused_before_anything_is_staged(computer, card, step,
                                                                                           problem):
