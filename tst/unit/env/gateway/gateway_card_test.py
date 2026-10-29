@@ -206,7 +206,7 @@ def test_gateway_card_lists_its_nine_extensions():
     assert [e["uri"] for e in _gateway({})._gateway_extensions()] == [
         "urn:agentenv:disable-tool/v1", "urn:agentenv:enable-tool/v1", "urn:agentenv:triggers/v1",
         "urn:agentenv:clock/v1", "urn:agentenv:trajectory/v1", "urn:agentenv:step/v1", "urn:agentenv:state/v1",
-        "urn:agentenv:changes/v1", "urn:agentenv:wakeups/v1",
+        "urn:agentenv:changes/v1", "urn:agentenv:notifications/v1",
     ]
 
 

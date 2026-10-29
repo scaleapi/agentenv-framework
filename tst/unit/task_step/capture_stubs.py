@@ -196,6 +196,7 @@ class _StubAgent:
         self.a2a_card = card if card is not None else agent_card()
         self.sandbox_id = "sb-agent"
         self.sandbox_type = None
+        self.role = None
 
 
 def context(*, agent: Optional[_StubAgent] = None, env_id: Optional[str] = None) -> TaskStepContext:

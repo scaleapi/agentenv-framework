@@ -24,9 +24,9 @@ from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import (
     AGENT_ENV_ROLE_HEADER,
     EXT_CLOCK_URI,
+    EXT_NOTIFICATIONS_URI,
     EXT_STEP_URI,
     EXT_TRIGGERS_URI,
-    EXT_WAKEUPS_URI,
     STEP_SOURCE,
     STEP_SOURCE_POST_TURN_HOOK,
 )
@@ -34,7 +34,7 @@ from agent_env.task_step.context import TaskStepContext, _strip_redacted_keys
 
 _SPEC_KEYS = ("file_artifact_id", "file_artifact_version", "params")
 _RECORD_TAGS = ("hook", "turn")
-_INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI, EXT_WAKEUPS_URI)
+_INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI, EXT_NOTIFICATIONS_URI)
 _TOOL_CALL_TIMEOUT_S = 600
 
 Answer = dict[str, Any]
@@ -119,7 +119,8 @@ class PostTurnHooks:
 
 
 class HookEnv:
-    """A deployed env as a hook reaches it: clock, triggers and wakeups calls, and tool calls recorded as the hook's."""
+    """A deployed env as a hook reaches it: clock, triggers and notifications calls, and tool calls recorded as the
+    hook's."""
 
     def __init__(self, deployed: DeployedEnv, hook_artifact_id: str) -> None:
         self.env_id = deployed.env_id
@@ -222,25 +223,29 @@ class Turn:
 
 
 def _decision(value: Any, hook: PostTurnHook) -> Optional[Answer]:
-    """A hook's return as an answer: ``{"message": parts}`` or ``{"end": reason}`` with an optional closing message."""
+    """A hook's return as an answer: ``{"message": parts}`` or ``{"end": reason}`` with an optional closing message.
+    ``{"message": []}`` says nothing: the agent's next message is then only what came due for it on its envs'
+    notifications/v1, and the conversation ends (``nothing_to_send``) when nothing has."""
     if value is None:
         return None
-    shape = "None, {'message': text or parts}, or {'end': reason} with an optional closing 'message'"
+    shape = "None, {'message': text or parts ([] for none)}, or {'end': reason} with an optional closing 'message'"
     if not isinstance(value, dict) or not value or set(value) - {"message", "end"}:
         raise RuntimeError(f"post-turn hook '{hook.artifact_id}' returned {value!r}; expected {shape}")
     if "end" in value and (not isinstance(value["end"], str) or not value["end"]):
         raise RuntimeError(f"post-turn hook '{hook.artifact_id}' ended with {value['end']!r}; the reason is a string")
     answer: Answer = {"end": value["end"]} if "end" in value else {}
     if "message" in value:
-        answer["message"] = _parts(value["message"], hook)
+        parts = _parts(value["message"], hook)
+        if parts or "end" not in answer:  # an empty closing message records nothing
+            answer["message"] = parts
     return answer
 
 
 def _parts(message: Any, hook: PostTurnHook) -> list[dict]:
     if isinstance(message, str):
         return [{"kind": "text", "text": message}]
-    if not isinstance(message, list) or not message:
-        raise RuntimeError(f"post-turn hook '{hook.artifact_id}': a message is text or a non-empty list of A2A parts")
+    if not isinstance(message, list):
+        raise RuntimeError(f"post-turn hook '{hook.artifact_id}': a message is text or a list of A2A parts")
     for i, part in enumerate(message):
         try:
             Part.model_validate(part)

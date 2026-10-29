@@ -23,7 +23,7 @@ import httpx
 from mcp.types import CallToolResult, TextContent
 
 from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339, _zone
-from .wakeups import validate_channel
+from .notifications import validate_channel, validate_recipient
 from .caller import Caller
 from .constants import DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSES
 
@@ -35,7 +35,7 @@ _WHEN_TYPES = ("action", "state", "time", "website")
 _CTX_ROOTS = {"action": ("args", "result"), "website": ("args",)}
 # RFC 9110's safe methods: a request using one asks for no change, so it prompts no state re-evaluation.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
-_ACTION_TYPES = ("nl", "tool", "permission", "notify_agent")
+_ACTION_TYPES = ("nl", "tool", "permission", "notify")
 _TERMINAL_A2A_STATES = ("completed", "failed", "canceled", "rejected")
 # Bounds the per-evaluation catch-up burst; the backlog drains on later evaluations.
 _MAX_CATCHUP = 1000
@@ -743,8 +743,10 @@ class TriggerEngine:
             raise TriggerError(f"{w}: 'as' is only valid on tool actions")
         if "executor" in action and atype != "nl":
             raise TriggerError(f"{w}: 'executor' is only valid on nl actions")
-        if "verify" in action and atype == "notify_agent":
-            raise TriggerError(f"{w}: a notify_agent action has nothing to verify")
+        if "verify" in action and atype == "notify":
+            raise TriggerError(f"{w}: a notify action has nothing to verify")
+        if "to" in action and atype != "notify":
+            raise TriggerError(f"{w}: 'to' is only valid on notify actions")
         if action.get("delay") is None:
             action.pop("delay", None)
         else:
@@ -764,9 +766,11 @@ class TriggerEngine:
             elif not isinstance(named, str) or named not in executors:
                 raise TriggerError(f"{w}: executor {named!r} is not a registered executor name "
                                    f"(registered: {sorted(n for n in executors if n is not None)})")
-        elif atype == "notify_agent":
+        elif atype == "notify":
             try:
                 validate_channel(action.get("channel"), w)
+                if "to" in action:  # the recipient role; the solver's (default) when absent
+                    validate_recipient(action["to"], w)
             except ValueError as e:
                 raise TriggerError(str(e))
             if not isinstance(action.get("text"), str) or not action["text"].strip():
@@ -1373,15 +1377,17 @@ class TriggerEngine:
                                tool=action["tool"], args=_echo_args(args), **acting)
                     return False
                 detail = {"tool": action["tool"], "args": _echo_args(args), **acting}
-            elif action["type"] == "notify_agent":
+            elif action["type"] == "notify":
                 try:
                     text = _template(action["text"], {}, ctx)
                 except TemplateError as e:
                     self._emit("action_failed", tid, action_index=index, detail=str(e)[:300])
                     return False
-                note = self._gw._wakeups.notify(action["channel"], str(text), trigger_id=tid)
+                note = self._gw._notifications.notify(action["channel"], str(text), trigger_id=tid,
+                                                      to=action.get("to", DEFAULT_ROLE).strip())
                 # the text may carry what a person wrote, so the log keeps its size, not its words
-                detail = {"notify_agent": action["channel"], "notification_id": note["id"], "text_len": len(str(text))}
+                detail = {"notify": action["channel"], "to": note["to"], "notification_id": note["id"],
+                          "text_len": len(str(text))}
             else:
                 if not await self._run_nl(tid, trig, index, action, ctx):
                     return False
