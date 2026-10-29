@@ -51,8 +51,8 @@ if TYPE_CHECKING:
 
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
     from agent_env.env.envs.computer.env import ComputerEnv
-    from agent_env.env.envs.computer_app import ComputerAppEnv
-    from agent_env.env.envs.computer_driver import ComputerDriverEnv
+    from agent_env.env.envs.computer.app import ComputerAppEnv
+    from agent_env.env.envs.computer.driver import ComputerDriverEnv
 
 logger = logging.getLogger(__name__)
 

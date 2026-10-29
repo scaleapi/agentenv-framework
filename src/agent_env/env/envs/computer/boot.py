@@ -21,7 +21,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import remove_l
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.computer import ComputerArtifact
     from agent_env.attribution import Attribution
-    from agent_env.env.envs.computer_app import ComputerAppEnv
+    from agent_env.env.envs.computer.app import ComputerAppEnv
     from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 

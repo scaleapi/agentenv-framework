@@ -15,8 +15,8 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle.run import dry_run_bundle
 from agent_env.bundle import parse_bundle
 from agent_env.env import Env
-from agent_env.env.envs import computer_driver
-from agent_env.env.envs.computer_driver import ComputerDriverEnv
+from agent_env.env.envs.computer import driver as computer_driver
+from agent_env.env.envs.computer.driver import ComputerDriverEnv
 from tst.unit.bundle._support import layout, plan_of
 
 ROOT = "@local/~/desks"

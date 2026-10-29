@@ -15,8 +15,8 @@ from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 
 if TYPE_CHECKING:
-    from agent_env.env.envs.computer_app import ComputerAppEnv
-    from agent_env.env.envs.computer_driver import ComputerDriverEnv
+    from agent_env.env.envs.computer.app import ComputerAppEnv
+    from agent_env.env.envs.computer.driver import ComputerDriverEnv
 
 #: The largest screen side X can address: its coordinates are signed 16-bit.
 MAX_SIDE = 32767

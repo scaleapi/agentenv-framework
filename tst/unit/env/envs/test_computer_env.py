@@ -32,9 +32,9 @@ from agent_env.env import env as env_module
 from agent_env.env.envs.computer import boot, composer, gate, inside
 from agent_env.env.envs.computer.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer_app import ComputerAppEnv
+from agent_env.env.envs.computer.app import ComputerAppEnv
 from agent_env.env.envs.computer.install import Install, Service
-from agent_env.env.envs.computer_driver import ComputerDriverEnv
+from agent_env.env.envs.computer.driver import ComputerDriverEnv
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.env_providers.env_provider import DeployRefused
