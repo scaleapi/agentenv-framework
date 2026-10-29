@@ -251,9 +251,26 @@ here, so `call` answers every result, its errors too, in a shape that schema adm
 on the card beside the `@tool` methods, chosen by `served_tools` and under tool access like them;
 one named like another tool is refused. In the same way `forwarded_resources()` returns
 `ForwardedResource(uri, name, description, mime_type, read)` entries, MCP resources whose `read`
-returns their text, and `instructions()` returns what the MCP server tells an agent when it
-connects, which clients may put in its context. All of them need mcp's FastMCP. The cua-driver
-driver serves cua-driver's own instructions, tools and skill resources this way.
+returns their text. Both need mcp's FastMCP. The cua-driver driver serves cua-driver's own tools
+and skill resources this way, and its instructions with `@server_instructions`.
+
+### Instructions at connect
+
+An MCP server may answer `initialize` with `instructions`: how to use it, which a client may put in
+the agent's context, as Claude Code does. Mark the plain method that returns them with
+`@server_instructions`:
+
+```python
+@environment_card(name="orders")
+class Orders(AgentEnvEnvironment):
+    @server_instructions
+    def how_to(self) -> str:
+        return "Look an order up with get_order before refunding it; refunds can't be undone."
+```
+
+They're read once, when the SDK builds the app (`create_app`, `serve`, `create_fastmcp_app`), and
+every session gets the same text. An env has at most one such method. An app you build yourself
+and pass to `mount` keeps its own instructions: set them when you construct it.
 
 ### Getting part of the data
 

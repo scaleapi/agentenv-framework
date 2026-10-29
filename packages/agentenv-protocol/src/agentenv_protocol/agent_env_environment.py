@@ -39,6 +39,7 @@ _TOOL_ATTR = "_aee_tool"
 _HIDDEN_BY_DEFAULT_ATTR = "_aee_hidden_by_default"
 _TOOL_OPTIONS_ATTR = "_aee_tool_options"
 _FORWARDED_ATTR = "_aee_forwarded"
+_INSTRUCTIONS_ATTR = "_aee_instructions"
 _CARD_CONFIG_ATTR = "_aee_card_config"
 #: Set on the tool dispatch installed by ``_bind_tool_calls``; a guard downstream checks it at boot.
 _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
@@ -127,6 +128,16 @@ def extension(uri: str, *, op: str | None = None, description: str | None = None
         return fn
 
     return deco
+
+
+def server_instructions(fn: Callable) -> Callable:
+    """Mark the plain method that returns what this env's MCP server tells an agent when it connects, the
+    ``instructions`` of its initialize result, which clients may put in the agent's context. It's read once, when the
+    SDK builds the app (``create_app``, ``serve``, ``create_fastmcp_app``); an app passed to ``mount`` keeps its own."""
+    if inspect.iscoroutinefunction(fn):
+        raise TypeError(f"@server_instructions marks a plain method, not the coroutine {fn.__name__!r}")
+    setattr(fn, _INSTRUCTIONS_ATTR, True)
+    return fn
 
 
 def agent_skill(fn: Callable) -> Callable:
@@ -544,7 +555,7 @@ def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs:
         from mcp.server.fastmcp import FastMCP
     except ImportError as e:
         raise ImportError("create_fastmcp_app requires the 'mcp' package: pip install 'mcp>=1.25,<2'") from e
-    app = FastMCP(card.name, **fastmcp_kwargs)
+    app = FastMCP(card.name, **{"instructions": _instructions(handler), **fastmcp_kwargs})
     app.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
     app.settings.port = int(os.environ.get("MCP_PORT", "18765"))
     app.settings.transport_security.enable_dns_rebinding_protection = False
@@ -575,7 +586,7 @@ class AgentEnvEnvironment:
     def create_app(self) -> Any:
         if self._mounted:
             raise RuntimeError(f"{type(self).__name__} is already mounted")
-        self.mcp = create_fastmcp_app(self, card=self._build_card(), instructions=self.instructions())
+        self.mcp = create_fastmcp_app(self, card=self._build_card())
         self._mounted = True
         return self.mcp
 
@@ -636,10 +647,6 @@ class AgentEnvEnvironment:
     def forwarded_resources(self) -> list[ForwardedResource]:
         """MCP resources served on another server's behalf. Needs mcp's FastMCP."""
         return []
-
-    def instructions(self) -> str | None:
-        """What this environment's MCP server tells an agent when it connects, which clients may put in its context."""
-        return None
 
     def on_tool_call(self, context: ToolContext) -> Any:
         """Runs before every tools/call on this environment's app, under the bound ``context``.
@@ -1007,6 +1014,14 @@ def _marked_members(handler: Any, marker_attr: str):
         marker = getattr(attr, marker_attr, None)
         if marker is not None:
             yield attr, marker
+
+
+def _instructions(handler: Any) -> str | None:
+    """What the handler's @server_instructions method returns; None without one."""
+    marked = [method for method, _marker in _marked_members(handler, _INSTRUCTIONS_ATTR)]
+    if len(marked) > 1:
+        raise ValueError(f"an environment has one @server_instructions method, not {sorted(m.__name__ for m in marked)}")
+    return marked[0]() if marked else None
 
 
 def _discover_methods(handler: Any) -> dict:

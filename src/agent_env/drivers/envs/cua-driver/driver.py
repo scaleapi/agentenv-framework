@@ -28,7 +28,7 @@ from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
 from pydantic import AnyUrl
 
-from agentenv_protocol import EnvironmentTool, ForwardedResource, ForwardedTool, ToolContext
+from agentenv_protocol import EnvironmentTool, ForwardedResource, ForwardedTool, ToolContext, server_instructions
 from agentenv_protocol.computer import (
     PRINTABLE_KEYS,
     ComputerDriverEnvironment,
@@ -100,7 +100,8 @@ class CuaDriver(ComputerDriverEnvironment):
                                   functools.partial(self._resource, r["uri"]))
                 for r in _manifest()["resources"]]
 
-    def instructions(self) -> str:
+    @server_instructions
+    def cua_driver_instructions(self) -> str:
         return _manifest()["instructions"]
 
     async def ready_checks(self) -> list[ReadyCheck]:

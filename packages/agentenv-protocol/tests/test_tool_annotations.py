@@ -22,7 +22,9 @@ from agentenv_protocol import (  # noqa: E402
     EnvironmentTool,
     ForwardedResource,
     ForwardedTool,
+    create_fastmcp_app,
     environment_card,
+    server_instructions,
     tool,
 )
 
@@ -247,7 +249,8 @@ class _Forwarding(AgentEnvEnvironment):
 
         return [ForwardedResource("skill://other/SKILL.md", "other", "How to use it.", "text/markdown", read)]
 
-    def instructions(self) -> str:
+    @server_instructions
+    def guide_first(self) -> str:
         return "Read the guide first."
 
 
@@ -280,6 +283,21 @@ async def test_forwarded_resources_and_the_instructions_are_served_as_the_other_
     assert [(str(r.uri), r.name, r.description, r.mimeType) for r in listed] == [
         ("skill://other/SKILL.md", "other", "How to use it.", "text/markdown")]
     assert read.contents[0].text == "# Guide" and app.instructions == "Read the guide first."
+
+
+def test_server_instructions_are_one_plain_method_and_reach_an_app_built_from_the_handler():
+    class Twice(_Forwarding):
+        @server_instructions
+        def again(self) -> str:
+            return "Or this."
+
+    with pytest.raises(ValueError, match="one @server_instructions method, not \\['again', 'guide_first'\\]"):
+        Twice([]).create_app()
+    with pytest.raises(TypeError, match="a plain method, not the coroutine 'later'"):
+        @server_instructions
+        async def later(self) -> str:
+            return "Later."
+    assert create_fastmcp_app(_Forwarding([]), card=EnvironmentCard(name="forwarding")).instructions == "Read the guide first."
 
 
 def test_a_forwarded_tool_named_like_a_tool_is_refused():
