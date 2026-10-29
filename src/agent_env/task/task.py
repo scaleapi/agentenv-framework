@@ -106,29 +106,29 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
         return list(steps)
     placeholders = re.compile("|".join(re.escape(f"<{key}>") for key in seed))
 
-    def _sub(value, step, field):
+    def _sub(value, step, path):
         if isinstance(value, str):
-            return placeholders.sub(lambda match: _seed_value(seed, match.group(0)[1:-1], step, field), value)
+            return placeholders.sub(lambda match: _seed_value(seed, match.group(0)[1:-1], step, path), value)
         if isinstance(value, list):
-            return [_sub(x, step, field) for x in value]
+            return [_sub(x, step, path) for x in value]
         if isinstance(value, dict):
-            return {k: _sub(v, step, field) for k, v in value.items()}
+            return {k: _sub(v, step, f"{path}.{k}" if path else k) for k, v in value.items()}
         return value
 
     from agent_env.task_step.task_step import attach_retry_config
 
     out: list["TaskStep"] = []
     for step in steps:
-        data = {field: _sub(value, step, field) for field, value in step.to_dict().items()}
+        data = _sub(step.to_dict(), step, "")
         out.append(attach_retry_config(type(step).from_dict(data), data))
     return out
 
 
-def _seed_value(seed: dict, key: str, step: "TaskStep", field: str) -> str:
+def _seed_value(seed: dict, key: str, step: "TaskStep", path: str) -> str:
     value = str(seed[key])
-    if field in step.shell_fields and shlex.quote(value) != value:
+    if path in step.shell_fields and shlex.quote(value) != value:
         raise ValueError(
-            f"Seed {key!r} can't go into step {step.id!r} field {field!r}: a value substituted into shell text may hold "
+            f"Seed {key!r} can't go into step {step.id!r} field {path!r}: a value substituted into shell text may hold "
             f"only letters, digits and _.:/@%+=,- (got {value[:80]!r}{'...' if len(value) > 80 else ''})"
         )
     return value

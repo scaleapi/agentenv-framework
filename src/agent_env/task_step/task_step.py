@@ -94,8 +94,8 @@ class TaskStep(ABC):
     # Each field of a scope other than the task's, by its path in the stored step; any other field is task-scoped. A
     # subclass merges its parent's. Such a field is optional, so a step written out without it still builds and runs.
     field_scopes: ClassVar[Mapping[str, FieldScope]] = {"metadata.attribution": FieldScope.USER}
-    # Fields holding shell text, by their key in the stored step: a seed value substituted into one must be text the
-    # shell reads literally.
+    # Fields holding shell text, by their path in the stored step (a list's items share its path): a seed value
+    # substituted into one must be text the shell reads literally.
     shell_fields: ClassVar[frozenset[str]] = frozenset()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:

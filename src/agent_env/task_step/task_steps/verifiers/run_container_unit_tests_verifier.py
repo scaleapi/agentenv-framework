@@ -433,7 +433,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         )
         wrapped = (
             f"docker exec -u {user} {env_flags} {container} "
-            f"timeout --kill-after=10 {self.timeout_sec} bash -c {shlex.quote(command)}"
+            f"timeout --kill-after=10 {shlex.quote(str(self.timeout_sec))} bash -c {shlex.quote(command)}"
         )
         exit_code, stdout, stderr = await sandbox.exec_with_output("sudo", "bash", "-c", wrapped)
         return exit_code, stdout, stderr, await self._extracted(lambda path: self._extract_file(sandbox, path))

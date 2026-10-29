@@ -22,7 +22,7 @@ _SHELL_TEXT = [
     (_verifier(command="scrape <url>"), "command"),
     (_verifier(setup_commands=["pip install <url>"]), "setup_commands"),
     (VerifySandboxTaskStep(id="check", version=None, base_dir="/app", verifier_id="v",
-                           criteria=[{"type": "bash_cmd_succeeds", "bash_cmd": "test -e <url>"}]), "criteria"),
+                           criteria=[{"type": "bash_cmd_succeeds", "bash_cmd": "test -e <url>"}]), "criteria.bash_cmd"),
     (RunDockerContainerTaskStep(id="box", version=None, sandbox_name="h", docker_context_artifact_id="u",
                                 command_override="serve <url>"), "command_override"),
     (RunDockerContainerTaskStep(id="box", version=None, sandbox_name="h", docker_context_artifact_id="u",
@@ -51,6 +51,18 @@ def test_any_value_fills_a_field_that_isnt_shell_text():
     seeded, = substitute_seed_in_steps([step], {"url": "https://x/a?b=1&c=$(id)"})
 
     assert seeded.env_vars == {"URL": "https://x/a?b=1&c=$(id)"}
+
+
+def test_a_criterion_that_isnt_a_shell_command_takes_any_value():
+    step = VerifySandboxTaskStep(id="check", version=None, base_dir="/app", verifier_id="v", criteria=[
+        {"type": "probe_file_contains", "paths": ["<report>"], "expected": "<pattern>"},
+        {"type": "bash_cmd_succeeds", "bash_cmd": "test -s <name>"}])
+
+    seeded, = substitute_seed_in_steps([step], {"report": "out dir/report.txt", "pattern": "[0-9]+ passed", "name": "ok"})
+
+    assert seeded.criteria == [
+        {"type": "probe_file_contains", "paths": ["out dir/report.txt"], "expected": "[0-9]+ passed"},
+        {"type": "bash_cmd_succeeds", "bash_cmd": "test -s ok"}]
 
 
 def test_substituted_text_is_never_rescanned():

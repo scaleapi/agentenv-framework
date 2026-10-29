@@ -197,7 +197,8 @@ class RunDockerContainerTaskStep(TaskStep):
         dockerfile_abs = posixpath.join(work_dir, self.dockerfile_path)
         await sandbox.exec_script(
             f"test -f {shlex.quote(dockerfile_abs)} "
-            f"|| (echo 'Dockerfile not found at {self.dockerfile_path} inside the build context' >&2; exit 1)"
+            f"|| (echo {shlex.quote(f'Dockerfile not found at {self.dockerfile_path} inside the build context')} >&2; "
+            f"exit 1)"
         )
 
         build_arg_flags = ""
@@ -287,7 +288,7 @@ class RunDockerContainerTaskStep(TaskStep):
                 f"for i in $(seq 1 60); do "
                 f"if docker exec {shlex.quote(container)} sh -c {ready} >/dev/null 2>&1; then exit 0; fi; "
                 f"sleep 2; done; "
-                f"echo 'container {self.container_name} failed readiness check within 120s' >&2; exit 1"
+                f"echo {shlex.quote(f'container {self.container_name} failed readiness check within 120s')} >&2; exit 1"
             )
 
         context.metadata.setdefault("deployed_docker_containers", []).append({
