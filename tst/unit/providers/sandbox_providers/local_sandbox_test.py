@@ -24,6 +24,7 @@ from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from tst.unit.store.fakes import FakeObjectStore
+from tst.util.exec_scripts import run_with_stubs
 
 
 def _image(tar_gz_object_url: str | None, image_name: str = "img:1") -> DockerImageArtifact:
@@ -1290,6 +1291,20 @@ async def test_an_agent_placed_on_a_local_vm_sandbox_maps_the_host_alias(tmp_pat
     await agent._run_container("img:v1", 8000, {"K": "v"})
 
     assert "--add-host host.docker.internal:host-gateway" in sandbox.scripts[0]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_env_var_whose_name_holds_shell_syntax_reaches_docker_as_it_is(tmp_path, monkeypatch):
+    monkeypatch.setattr(a2a_agent_module, "local_grant_trust", lambda: None)
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path / "work")
+    agent = A2AAgent.__new__(A2AAgent)
+    agent._sandbox = sandbox
+
+    await agent._run_container("img:v1", 8000, {"$(touch pwned)": "x';touch pwned;'"})
+
+    docker, = run_with_stubs(sandbox.scripts[0], tmp_path, "docker", "sleep")["docker"]
+    assert "$(touch pwned)=x';touch pwned;'" in docker and docker[-1] == "img:v1"
+    assert not (tmp_path / "pwned").exists()
 
 
 async def _no_sleep(_seconds):

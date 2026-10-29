@@ -305,7 +305,7 @@ class A2AAgent:
 
         if isinstance(sandbox, VmSandbox):
             await sandbox.exec_script(
-                f"docker exec -u 0 {shlex.quote(container or sandbox.container_name)} chmod +x {entrypoint_path}")
+                f"docker exec -u 0 {shlex.quote(container or sandbox.container_name)} chmod +x {shlex.quote(entrypoint_path)}")
         else:
             await sandbox.exec("chmod", "+x", entrypoint_path)
 
@@ -661,7 +661,7 @@ class A2AAgent:
         env_flags = []
         for key, value in agent_env.items():
             escaped_value = value.replace("'", "'\\''")
-            env_flags.append(f"-e {key}='{escaped_value}'")
+            env_flags.append(f"-e {shlex.quote(key)}='{escaped_value}'")
         env_str = " \\\n    ".join(env_flags)
         publish = " ".join(
             f"-p {spec}" for spec in port_bindings(self._sandbox.host_ips, self._sandbox.host_port(a2a_port), a2a_port)
@@ -670,11 +670,11 @@ class A2AAgent:
         run_script = f"""#!/bin/bash
 set -e
 {setup_script}docker {"run -d" if trust_dir is None else "create"} \\
-    --name {self._sandbox.container_name} \\
+    --name {shlex.quote(self._sandbox.container_name)} \\
     --label {shlex.quote(f"{SANDBOX_LABEL}={self._sandbox.sandbox_id}")} \\
     {publish} \\
     {network_flag}{env_str} \\
-    {image_name} > /dev/null
+    {shlex.quote(image_name)} > /dev/null
 {"sleep 2" if trust_dir is None else ""}
 """
         await self._sandbox.exec_script(run_script)
