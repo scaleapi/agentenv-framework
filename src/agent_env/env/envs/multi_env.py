@@ -44,7 +44,6 @@ from agent_env.env.envs.website_browser import WEBSITE_BROWSER_RECORDER_PORT
 from agent_env.store.ids import derive_id
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
-from agent_env.utils.shell import write_file_script
 
 
 class MultiEnv(Env):
@@ -637,7 +636,7 @@ class MultiEnv(Env):
         compose_content = compose_content.replace(
             "    volumes:\n      - ./init-schemas.sql:/docker-entrypoint-initdb.d/init-schemas.sql\n", "",
         )
-        await self._sandbox.exec_script(write_file_script(DOCKER_COMPOSE_PATH, compose_content))
+        await gw._write_file(self._sandbox, DOCKER_COMPOSE_PATH, compose_content)
 
         # Remove old servicedb container and its anonymous volume, then start fresh from snapshot image
         logger.info("Recreating servicedb container with snapshot image...")

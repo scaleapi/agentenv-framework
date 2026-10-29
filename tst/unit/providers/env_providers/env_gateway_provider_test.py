@@ -8,6 +8,7 @@ import dataclasses
 import json
 import logging
 import re
+import shlex
 import socket
 import subprocess
 from datetime import datetime
@@ -46,7 +47,6 @@ from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.config import get_config, set_document_store
 from agent_env.store import EcrImageStore, NotFoundError
-from agent_env.utils.shell import write_file_script
 from tst.unit.providers.env_state.fakes import (
     EXTERNAL_READINESS_SERVICE,
     EXTERNAL_STATE_TYPE,
@@ -1684,10 +1684,13 @@ async def test_a_gateway_deploy_refuses_a_name_that_isnt_one_before_anything_sta
     launch.assert_not_awaited()
 
 
-def test_a_written_file_holds_its_content_as_it_is_and_runs_none_of_it(tmp_path):
+@pytest.mark.asyncio
+async def test_a_written_file_holds_its_content_as_it_is_and_runs_none_of_it(tmp_path):
     content = "services:\nCOMPOSE_EOF\ntouch pwned\nINIT_EOF\n$(touch pwned) `touch pwned` 'it''s' %s \\n"
     target = tmp_path / "docker-compose.yml"
-    subprocess.run(["bash", "-c", write_file_script(str(target), content)], cwd=tmp_path, check=True)
+    host = MagicMock(exec_script=AsyncMock(side_effect=lambda script, **_: subprocess.run(
+        ["bash", "-c", script], cwd=tmp_path, check=True)))
+    await EnvironmentGatewayProvider._write_file(host, str(target), content)
     assert target.read_text() == content + "\n"
     assert not (tmp_path / "pwned").exists()
 
@@ -1719,7 +1722,7 @@ async def test_a_vm_deploy_writes_its_compose_file_as_one_quoted_argument():
             )
 
     scripts = [call.args[0] for call in sandbox.exec_script.await_args_list]
-    assert write_file_script(f"{GATEWAY_APP_DIR}/docker-compose.yml", compose) in scripts
+    assert ["printf", "%s\\n", compose, ">", f"{GATEWAY_APP_DIR}/docker-compose.yml"] in map(shlex.split, scripts)
     assert not any("<<" in script for script in scripts)
 
 

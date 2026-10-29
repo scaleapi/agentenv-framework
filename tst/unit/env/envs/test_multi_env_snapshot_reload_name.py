@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,7 +12,6 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
 from agent_env.providers.env_providers import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH
-from agent_env.utils.shell import write_file_script
 
 
 class _Stop(Exception):
@@ -81,6 +81,6 @@ async def test_snapshot_reload_writes_its_compose_as_one_argument_and_names_each
             await env._load_from_snapshot(snapshot)
 
     scripts = [call.args[0] for call in env._sandbox.exec_script.await_args_list]
-    assert write_file_script(DOCKER_COMPOSE_PATH, compose) in scripts
+    assert ["printf", "%s\\n", compose, ">", DOCKER_COMPOSE_PATH] in map(shlex.split, scripts)
     assert not any("<<" in script for script in scripts)
     assert any(script.endswith("--force-recreate 'a b' gateway pgweb db-mcp") for script in scripts)

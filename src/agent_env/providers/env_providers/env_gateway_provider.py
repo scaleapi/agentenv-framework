@@ -58,7 +58,6 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
 )
 from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
-from agent_env.utils.shell import write_file_script
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -825,9 +824,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if self._needs_local_postgres:
             init_script = local_store_spec.init_sql
             logger.info(f"Generated init-schemas.sql:\n{init_script}")
-            await sandbox.exec_script(write_file_script(f"{GATEWAY_APP_DIR}/init-schemas.sql", init_script), max_retries=2)
+            await self._write_file(sandbox, f"{GATEWAY_APP_DIR}/init-schemas.sql", init_script)
 
-        await sandbox.exec_script(write_file_script(DOCKER_COMPOSE_PATH, compose_content), max_retries=2)
+        await self._write_file(sandbox, DOCKER_COMPOSE_PATH, compose_content)
 
         # Start MCP services with docker compose
         logger.info("Starting MCP services...")
@@ -1121,6 +1120,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if line:
                 events.append(json.loads(line))
         return events
+
+    @staticmethod
+    async def _write_file(sandbox: VmSandbox, path: str, content: str) -> None:
+        """Write ``content`` and a newline to ``path`` on the sandbox host, the content one quoted argument so no byte
+        of it is shell."""
+        await sandbox.exec_script(f"printf '%s\\n' {shlex.quote(content)} > {shlex.quote(path)}", max_retries=2)
 
     async def _compose_up(self, sandbox: VmSandbox, args: str = "") -> None:
         """``docker compose up -d`` the stack, whose failure names each service that went down and ends with its
