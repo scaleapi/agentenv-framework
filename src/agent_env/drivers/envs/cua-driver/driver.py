@@ -1,10 +1,11 @@
-"""cua-driver as a computer driver, for an X11 desktop on Linux: trycua's cua-driver runs on the computer as a daemon
-(``daemon.sh``), agents get its own tools as its pinned version lists them (``tools.json``), beside the ``computer_*``
-tools, and the computer/v1 operations are its desktop-scope calls. The daemon takes line-delimited JSON on a Unix
-socket; the framework's calls and each caller's run on connections of their own, the framework's in a session of its
-own. When a connection drops, as when the daemon restarts, a read is sent once more on a new one; input is not, and
-input whose reply is lost fails with its outcome unknown, since it may have arrived. It needs
-``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs."""
+"""cua-driver as a computer driver, for an X11 desktop on Linux: trycua's cua-driver runs on the computer as a daemon,
+which this file starts when run as a script, agents get its own tools as its pinned version lists them (``tools.json``),
+beside the ``computer_*`` tools, and the computer/v1 operations are its desktop-scope calls. The daemon takes
+line-delimited JSON on a Unix socket, and each call goes on a connection of its own, as cua-driver's own MCP server sends
+them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
+cua-driver starts again after ending it for idling, where a named one stays ended. A call the daemon can't take, as
+while it restarts, fails as unavailable; input whose reply is lost fails with its outcome unknown, since it may have
+arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs."""
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +17,8 @@ import json
 import os
 import subprocess
 import tempfile
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +26,7 @@ from mcp.types import CallToolResult, TextContent
 
 from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext
 from agentenv_protocol.computer import (
+    PRINTABLE_KEYS,
     ComputerDriverEnvironment,
     DeliveryFailed,
     DeviceUnavailable,
@@ -40,7 +44,7 @@ from agentenv_protocol.computer import (
     type_text,
 )
 
-#: Where ``daemon.sh`` serves cua-driver's daemon.
+#: Where cua-driver's daemon listens.
 SOCKET = Path("/run/agentenv/cua-driver.sock")
 #: cua-driver's tools as its pinned version lists them, which the running daemon must list the same.
 MANIFEST = Path(__file__).with_name("tools.json")
@@ -49,8 +53,8 @@ EXECUTABLES = {
     "amd64": "bf57b2f3778a0a7daa9388e241f20ce948b32a7a2f4dd102e497f34e54137934",
     "arm64": "26e9eee8165e9ce7b614b5e3d68e5d963231385a82b65236406718b5ce1ff936",
 }
-#: The session the framework's own calls run in, apart from every caller's.
-FRAMEWORK_SESSION = "agentenv"
+#: What keeps cua-driver from reaching trycua: no telemetry and no update checks.
+QUIET = {"DO_NOT_TRACK": "1", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false", "CUA_DRIVER_RS_UPDATE_CHECK": "false"}
 #: W3C modifier keys and the names cua-driver holds them by.
 MODIFIERS = {"Control": "ctrl", "Shift": "shift", "Alt": "alt", "Meta": "super", "Super": "super"}
 #: W3C key values and the names cua-driver presses them by; any printable ASCII character is pressed as itself.
@@ -59,7 +63,6 @@ NAMED = {
     "Insert": "insert", "Home": "home", "End": "end", "PageUp": "pageup", "PageDown": "pagedown", "ArrowUp": "up",
     "ArrowDown": "down", "ArrowLeft": "left", "ArrowRight": "right", **{f"F{n}": f"f{n}" for n in range(1, 13)},
 }
-PRINTABLE = tuple(chr(code) for code in range(0x21, 0x7F))
 #: How long the skill pack's writing may take.
 SKILL_TIMEOUT_S = 60
 #: The largest reply the daemon sends: a screenshot of a large display, base64.
@@ -72,12 +75,12 @@ class CuaDriver(ComputerDriverEnvironment):
     buttons = ("left", "right", "middle")
     max_click_count = 3
     max_scroll_amount = 50
-    keys = (*MODIFIERS, *NAMED, *PRINTABLE)
+    keys = (*MODIFIERS, *NAMED, *PRINTABLE_KEYS)
 
     def __init__(self) -> None:
         super().__init__()
-        self._framework = _Connection()
-        self._callers: dict[str, _Connection] = {}
+        self._session = uuid.uuid4().hex
+        self._callers: dict[str | None, str] = {}
         self._pinned: list[ReadyCheck] | None = None
         self._skill: tuple[str, str, dict[str, str]] | None = None
 
@@ -135,11 +138,10 @@ class CuaDriver(ComputerDriverEnvironment):
         await self._send("press_key", modifiers=_modifiers(held), key=MODIFIERS.get(key) or NAMED.get(key, key))
 
     async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
-        """A call to one of cua-driver's own tools, on its caller's connection, answered as cua-driver answers it."""
-        connection = self._callers.setdefault(self.caller_identity(ToolContext.current()), _Connection())
+        """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it."""
+        session = self._callers.setdefault(ToolContext.current().caller.session, uuid.uuid4().hex)
         try:
-            reply = await connection.request({"method": "call", "name": tool, "args": arguments},
-                                             retry=tool in _read_only())
+            reply = await _request({"method": "call", "name": tool, "args": arguments, "session_id": session})
         except DeviceUnavailable as e:
             return _refused(e.message)
         if not reply.get("ok"):
@@ -150,13 +152,10 @@ class CuaDriver(ComputerDriverEnvironment):
         await self._call(name, DeliveryFailed, scope="desktop", **args)
 
     async def _call(self, name: str, failure: type[Exception], **args: Any) -> dict:
-        """The result of one of cua-driver's tools called in the framework's session, a read (``DeviceUnavailable``
-        when it fails) sent again on a new connection when this one dropped; ``failure`` names what went wrong when
-        it fails, refuses or loses its reply after it was sent."""
+        """The result of one of cua-driver's tools called in the framework's session; ``failure`` names what went wrong
+        when it fails, refuses or loses its reply after it was sent."""
         try:
-            reply = await self._framework.request({"method": "call", "name": name,
-                                                   "args": {**args, "session": FRAMEWORK_SESSION}},
-                                                  retry=failure is DeviceUnavailable)
+            reply = await _request({"method": "call", "name": name, "args": args, "session_id": self._session})
         except _ReplyLost as e:
             raise failure(e.message) from None
         if not reply.get("ok"):
@@ -168,7 +167,7 @@ class CuaDriver(ComputerDriverEnvironment):
 
     async def _pinned_checks(self) -> list[ReadyCheck]:
         try:
-            listed = (await self._framework.request({"method": "list"}, retry=True))["result"]["tools"]
+            listed = (await _request({"method": "list"}))["result"]["tools"]
         except DeviceUnavailable:
             return [ReadyCheck("cua-driver", False, "its daemon isn't answering yet")]
         digest, expected = await asyncio.to_thread(_executable_sha256), EXECUTABLES.get(self.platform.arch or "")
@@ -185,65 +184,30 @@ class _ReplyLost(DeviceUnavailable):
     """The connection dropped after a request was sent, so the daemon may have acted on it."""
 
 
-class _Connection:
-    """One connection to cua-driver's daemon, opened on first use and again after it drops, taking one request at a
-    time."""
-
-    def __init__(self) -> None:
-        self._stream: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None
-        self._lock = asyncio.Lock()
-
-    async def request(self, payload: dict, *, retry: bool = False) -> dict:
-        """The daemon's reply to ``payload``; with ``retry``, sent once more on a new connection when an open one has
-        dropped."""
-        async with self._lock:
-            was_open = self._stream is not None
-            try:
-                return await self._exchange(payload)
-            except DeviceUnavailable:
-                if not (retry and was_open):
-                    raise
-            return await self._exchange(payload)
-
-    async def _exchange(self, payload: dict) -> dict:
-        """One request and its reply; a request cancelled in flight closes the connection, so its reply can't be read
-        as the next one's."""
-        sent = False
-        try:
-            if self._stream is None:
-                self._stream = await asyncio.open_unix_connection(str(SOCKET), limit=REPLY_LIMIT)
-            reader, writer = self._stream
-            sent = True
-            writer.write((json.dumps(payload) + "\n").encode())
-            await writer.drain()
-            line = await reader.readline()
-            if not line:
-                raise ConnectionError("the daemon closed the connection")
-        except (OSError, ValueError) as e:
-            self._close()
-            if sent:
-                raise _ReplyLost(f"cua-driver's daemon stopped answering after the request was sent, which it may "
-                                 f"have acted on: {e}") from None
-            raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
-        except asyncio.CancelledError:
-            self._close()
-            raise
+async def _request(payload: dict) -> dict:
+    """The daemon's reply to ``payload``, sent on a connection of its own; a cancelled request closes it, so nothing is
+    left to read its reply."""
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(SOCKET), limit=REPLY_LIMIT)
+    except OSError as e:
+        raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
+    try:
+        writer.write((json.dumps(payload) + "\n").encode())
+        await writer.drain()
+        line = await reader.readline()
+        if not line:
+            raise ConnectionError("the daemon closed the connection")
         return json.loads(line)
-
-    def _close(self) -> None:
-        if self._stream is not None:
-            self._stream[1].close()
-        self._stream = None
+    except (OSError, ValueError) as e:
+        raise _ReplyLost(f"cua-driver's daemon stopped answering after the request was sent, which it may have acted "
+                         f"on: {e}") from None
+    finally:
+        writer.close()
 
 
 @functools.cache
 def _manifest() -> list[dict]:
     return json.loads(MANIFEST.read_text())
-
-
-@functools.cache
-def _read_only() -> frozenset[str]:
-    return frozenset(t["name"] for t in _manifest() if (t["annotations"] or {}).get("readOnlyHint"))
 
 
 def _modifiers(keys) -> list[str]:
@@ -275,12 +239,27 @@ def _skill_pack() -> tuple[str, str, dict[str, str]]:
     with tempfile.TemporaryDirectory(prefix="cua-driver-skill-") as home:
         (Path(home) / ".claude").mkdir()
         subprocess.run([str(_executable()), "mcp-config", "--client", "claude"], capture_output=True, check=True,
-                       timeout=SKILL_TIMEOUT_S, env={**os.environ, "HOME": home, "DO_NOT_TRACK": "1",
-                                                     "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false",
-                                                     "CUA_DRIVER_RS_UPDATE_CHECK": "false"})
+                       timeout=SKILL_TIMEOUT_S, env={**os.environ, "HOME": home, **QUIET})
         folder = Path(home) / ".cua-driver" / "skills" / "cua-driver"
         files = {path.name: path.read_text() for path in sorted(folder.iterdir()) if path.is_file()}
     _, frontmatter, body = files.pop("SKILL.md").split("---\n", 2)
     description = next(line.partition(":")[2].strip() for line in frontmatter.splitlines()
                        if line.startswith("description:"))
     return description, body.lstrip("\n"), files
+
+
+def _daemon() -> None:
+    """Run cua-driver's daemon once X answers: from the session user's home, where the apps it launches start too, on
+    the socket the driver reaches it at, with approvals off, since nobody is at the computer to give them, and nothing
+    sent to trycua."""
+    display = os.environ["DISPLAY"].lstrip(":").partition(".")[0]
+    while not Path(f"/tmp/.X11-unix/X{display}").is_socket():
+        time.sleep(0.2)
+    os.chdir(Path.home())
+    executable = str(_executable())
+    os.execve(executable, [executable, "serve", "--socket", str(SOCKET), "--dangerously-bypass-approvals", "--no-overlay"],
+              {**os.environ, **QUIET})
+
+
+if __name__ == "__main__":
+    _daemon()

@@ -1,6 +1,6 @@
 """The cua-driver driver against a fake cua-driver daemon on a Unix socket: the computer/v1 operations become its
-desktop-scope calls in the framework's session, its own tools are listed as pinned and forwarded on their caller's
-connection as they came, readiness checks the pinned executable and tools, and the skill leads with cua-driver's pack."""
+desktop-scope calls in the framework's own session, its own tools are listed as pinned and forwarded in their caller's
+own session as they came, readiness checks the pinned executable and tools, and the skill leads with cua-driver's pack."""
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +20,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from PIL import Image as PILImage
 
 import agent_env
+from agentenv_protocol import SESSION_META_KEY
 from agentenv_protocol.computer import DeliveryFailed, DeviceUnavailable, Unsupported
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "cua-driver" / "driver.py"
@@ -91,9 +92,9 @@ class FakeDaemon:
         return {"ok": True, "result": {"content": [{"type": "text", "text": f"did {name}"}],
                                        "structuredContent": {"tool": name}}}
 
-    def calls(self, connection: int | None = None) -> list[tuple[str, dict]]:
-        return [(r["name"], r["args"]) for c, r in self.requests if r["method"] == "call"
-                and (connection is None or c == connection)]
+    def calls(self, session: str | None = None) -> list[tuple[str, dict]]:
+        return [(r["name"], r["args"]) for _, r in self.requests if r["method"] == "call"
+                and (session is None or r["session_id"] == session)]
 
 
 @pytest.fixture
@@ -124,7 +125,7 @@ async def mcp_session(driver):
 
 
 @pytest.mark.asyncio
-async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_session(module, daemon):
+async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_session(module, daemon):
     driver = module.CuaDriver()
 
     size, shot = await driver.screen(), await driver.grab()
@@ -136,18 +137,17 @@ async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_sessi
     await driver.press_keys(["Enter"])
 
     assert (size.width, size.height, shot.width, shot.height, shot.mode) == (1280, 800, 1280, 800, "png")
-    framework = {"session": "agentenv"}
     assert daemon.calls() == [
-        ("get_screen_size", framework), ("get_desktop_state", framework),
-        ("click", {"scope": "desktop", "x": 100, "y": 200, "button": "right", "count": 2, "modifier": ["ctrl"], **framework}),
+        ("get_screen_size", {}), ("get_desktop_state", {}),
+        ("click", {"scope": "desktop", "x": 100, "y": 200, "button": "right", "count": 2, "modifier": ["ctrl"]}),
         ("drag", {"scope": "desktop", "from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40, "button": "left",
-                  "duration_ms": 300, "modifier": ["shift"], **framework}),
-        ("scroll", {"scope": "desktop", "x": 5, "y": 6, "direction": "down", "amount": 3, **framework}),
-        ("type_text", {"scope": "desktop", "text": "Hello, Wörld! 東京", **framework}),
-        ("press_key", {"scope": "desktop", "key": "/", "modifiers": ["ctrl"], **framework}),
-        ("press_key", {"scope": "desktop", "key": "enter", "modifiers": [], **framework}),
+                  "duration_ms": 300, "modifier": ["shift"]}),
+        ("scroll", {"scope": "desktop", "x": 5, "y": 6, "direction": "down", "amount": 3}),
+        ("type_text", {"scope": "desktop", "text": "Hello, Wörld! 東京"}),
+        ("press_key", {"scope": "desktop", "key": "/", "modifiers": ["ctrl"]}),
+        ("press_key", {"scope": "desktop", "key": "enter", "modifiers": []}),
     ]
-    assert daemon.connections == 1
+    assert len({r["session_id"] for _, r in daemon.requests}) == 1
 
 
 @pytest.mark.asyncio
@@ -167,7 +167,7 @@ async def test_what_cua_driver_cant_do_or_refuses_fails_naming_it(module, daemon
 
 
 @pytest.mark.asyncio
-async def test_cua_drivers_tools_are_listed_as_pinned_and_forwarded_on_their_callers_connection(module, daemon):
+async def test_cua_drivers_tools_are_listed_as_pinned_and_forwarded_in_their_callers_session(module, daemon):
     driver = module.CuaDriver()
     async with mcp_session(driver) as session:
         listed = {t.name: t for t in (await session.list_tools()).tools}
@@ -179,11 +179,22 @@ async def test_cua_drivers_tools_are_listed_as_pinned_and_forwarded_on_their_cal
     assert set(manifest) <= set(listed) and {"computer_click", "computer_screenshot"} <= set(listed)
     assert listed["get_window_state"].inputSchema == manifest["get_window_state"]["inputSchema"]
     assert listed["get_window_state"].annotations.readOnlyHint == manifest["get_window_state"]["annotations"]["readOnlyHint"]
-    framework, caller = 1, max(c for c, _ in daemon.requests)
+    framework, *_, caller = [r["session_id"] for _, r in daemon.requests if r["method"] == "call"]
     assert caller != framework and daemon.calls(caller) == [
         ("get_window_state", {"pid": 42, "window_id": 7, "query": "OK"}), ("launch_app", {"name": "thunar"})]
     assert not launched.isError
     assert answered.structuredContent == {"tool": "get_window_state"} and answered.content[0].text == "did get_window_state"
+
+
+@pytest.mark.asyncio
+async def test_each_caller_gets_a_cua_driver_session_of_its_own(module, daemon):
+    async with mcp_session(module.CuaDriver()) as session:
+        for caller in ("a", "b", "a"):
+            await session.call_tool("list_windows", {}, meta={SESSION_META_KEY: caller})
+        await session.call_tool("get_session", {"session": "mine"}, meta={SESSION_META_KEY: "b"})
+
+    a, b, again, named = [(r["session_id"], r["args"]) for _, r in daemon.requests if r["method"] == "call"]
+    assert a[0] != b[0] and again == a and named == (b[0], {"session": "mine"})
 
 
 @pytest.mark.asyncio
@@ -225,23 +236,19 @@ async def test_readiness_waits_for_a_daemon_that_isnt_answering(module, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_a_read_is_sent_again_after_the_daemon_restarts_but_input_is_not(module, daemon):
+async def test_while_the_daemon_restarts_calls_fail_as_unavailable_and_reach_it_once_it_is_back(module, daemon):
     driver = module.CuaDriver()
     await driver.screen()
     await daemon.stop()
     with pytest.raises(DeviceUnavailable, match="cua-driver's daemon isn't answering"):
         await driver.screen()
-    await daemon.start()
-    assert (await driver.screen()).width == 1280
-
-    await daemon.stop()
-    await daemon.start()
-    assert (await driver.screen()).width == 1280
-    await daemon.stop()
-    await daemon.start()
-    with pytest.raises(DeliveryFailed, match="may have acted on"):
+    with pytest.raises(DeviceUnavailable) as unsent:
         await driver.click_at(1, 1, "left", 1, [])
+    await daemon.start()
+
+    assert (await driver.screen()).width == 1280
     await driver.click_at(2, 2, "left", 1, [])
+    assert type(unsent.value) is DeviceUnavailable and unsent.value.applied == "no"
     assert [args["x"] for name, args in daemon.calls() if name == "click"] == [2]
 
 
@@ -266,21 +273,6 @@ async def test_a_request_cancelled_in_flight_leaves_no_reply_for_the_next_one(mo
 
     shot = await driver.grab()
     assert (shot.width, shot.mode) == (1280, "png") and daemon.connections == 2
-
-
-@pytest.mark.asyncio
-async def test_one_of_cua_drivers_read_only_tools_is_sent_again_after_a_restart_and_its_input_tools_are_not(module,
-                                                                                                         daemon):
-    async with mcp_session(module.CuaDriver()) as session:
-        await session.call_tool("list_windows", {})
-        await daemon.stop()
-        await daemon.start()
-        read = await session.call_tool("list_windows", {})
-        await daemon.stop()
-        await daemon.start()
-        clicked = await session.call_tool("click", {"element_token": "s1:1"})
-    assert not read.isError and clicked.isError and "may have acted on" in clicked.content[0].text
-    assert [name for name, _ in daemon.calls()] == ["list_windows", "list_windows"]
 
 
 def test_the_skill_pack_is_written_offline_from_the_executable(module, monkeypatch, tmp_path):

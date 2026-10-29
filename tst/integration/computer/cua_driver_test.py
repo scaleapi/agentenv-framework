@@ -1,7 +1,7 @@
 """The cua-driver driver on the ubuntu-24.04 base, as the cua-driver test bundle's desktop names it: its put composes
 an image for each arch this machine's Docker builds, gate 3 makes this machine's ready at full with cua-driver's own tools
 beside the computer_* tools; deployed, an agent's session drives Thunar by element token through cua-driver's tools,
-computer-ready reports the pinned cua-driver, and the skill leads with cua-driver's own pack. Needs Docker and the local
+in a cua-driver session another agent's doesn't see, computer-ready reports the pinned cua-driver, and the skill leads with cua-driver's own pack. Needs Docker and the local
 registry on localhost:5000."""
 
 import asyncio
@@ -45,7 +45,8 @@ def test_gate_3_makes_this_machines_arch_ready_with_cua_drivers_tools_beside_the
 
 
 @pytest.mark.asyncio
-async def test_an_agent_drives_thunar_by_element_token_and_its_skill_leads_with_cua_drivers_pack(cua_desktop):
+async def test_an_agent_drives_thunar_by_element_token_in_its_own_session_and_its_skill_leads_with_cua_drivers_pack(
+        cua_desktop):
     with namespace_routing():
         deployed = await Env.get(cua_desktop.id).deploy()
         context = TaskStepContext(deployed_envs=[deployed])
@@ -53,6 +54,8 @@ async def test_an_agent_drives_thunar_by_element_token_and_its_skill_leads_with_
             async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
+                    started = await session.call_tool("start_session", {"session": "agent"})
+                    mine = await session.call_tool("list_sessions", {})
                     launched = await session.call_tool("launch_app", {"name": "thunar"})
                     window = await _window(session, "user - Thunar")
                     state = await session.call_tool("get_window_state", {"pid": window["pid"],
@@ -61,17 +64,26 @@ async def test_an_agent_drives_thunar_by_element_token_and_its_skill_leads_with_
                     row = re.search(r'\[(\d+)\] push button "Open Parent"', tree).group(1)
                     clicked = await session.call_tool("click", {"element_token": f"{snapshot}:{row}"})
                     parent = await _window(session, "home - Thunar")
+            async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
+                async with ClientSession(read, write) as other:
+                    await other.initialize()
+                    others = await other.call_tool("list_sessions", {})
             ready = await deployed.invoke(COMPUTER_READY, "status", None)
             skill = await deployed.invoke(SKILL_EXTENSION_URI, "get", {"name": "desktop"})
         finally:
             report = await teardown_run(context)
 
     assert not launched.isError and not clicked.isError and parent["window_id"] == window["window_id"]
+    assert not started.isError and "agent" in _named(mine) and "agent" not in _named(others)
     checks = {check["name"]: check for check in ready["checks"]}
     assert ready["ready"] and checks["cua-driver"]["ok"] and checks["cua-driver tools"]["detail"] == "66 tools, as pinned"
     assert {"LINUX.md", "WORKFLOW.md", "RUNTIME.md"} <= set(skill["files"])
     assert "# This computer" in skill["skill_md"] and skill["description"].startswith("Drive a native GUI app")
     assert not report.failed
+
+
+def _named(listed) -> set[str]:
+    return {session["session"] for session in listed.structuredContent["sessions"]}
 
 
 async def _window(session: ClientSession, title: str) -> dict:

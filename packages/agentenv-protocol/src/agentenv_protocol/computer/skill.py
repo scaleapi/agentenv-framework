@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .keys import PRINTABLE_KEYS
+
 if TYPE_CHECKING:
     from .driver import ComputerDriverEnvironment
 
@@ -23,7 +25,6 @@ SHORTCUTS = {
 """,
 }
 _SESSIONS = {"x11": "an X11 session", "wayland": "a Wayland session"}
-_PRINTABLE = tuple(chr(code) for code in range(0x21, 0x7F))
 
 
 async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, str]]:
@@ -37,10 +38,18 @@ async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, 
         session += f" ({desktop})"
     description = (f"How to use this computer through its computer_* tools: {system}, {display.width}x{display.height}, "
                    "what its input takes, and its shortcuts.")
-    sections = [
+    bundled = await driver.bundled_skill()
+    opening = ([
         "# Using this computer",
         "You see this computer through `computer_screenshot` and drive it through the other `computer_*` tools, as a "
         "person at its screen would: look, then click, type and press keys on what the screen shows.",
+    ] if bundled is None else [
+        "# This computer",
+        "Beside the tools above, this computer serves its `computer_*` tools: `computer_screenshot` shows the screen, "
+        "and the others click, type and press keys on what it shows.",
+    ])
+    sections = [
+        *opening,
         "## The computer",
         "\n".join([f"- {system}, {session}.", f"- You act as `{getpass.getuser()}`, whose home is `{Path.home()}`.",
                    f"- The screen is {display.width}x{display.height}."]),
@@ -51,13 +60,12 @@ async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, 
         sections += ["## Shortcuts", shortcuts.rstrip()]
     if notes := driver.notes.strip():
         sections += ["## Notes", notes]
-    if (bundled := await driver.bundled_skill()) is None:
-        return description, "\n\n".join(sections) + "\n", {}
+    body = "\n\n".join(sections) + "\n"
+    if bundled is None:
+        return description, body, {}
     own_description, own_body, files = bundled
-    sections[:2] = ["# This computer", "Beside the tools above, this computer serves its `computer_*` tools: "
-                    "`computer_screenshot` shows the screen, and the others click, type and press keys on what it shows."]
     return (f"{own_description} This computer: {system}, {display.width}x{display.height}, and its computer_* tools.",
-            own_body.rstrip() + "\n\n" + "\n\n".join(sections) + "\n", files)
+            own_body.rstrip() + "\n\n" + body, files)
 
 
 def _input(driver: ComputerDriverEnvironment) -> str:
@@ -78,6 +86,6 @@ def _input(driver: ComputerDriverEnvironment) -> str:
 
 def _keys(keys) -> str:
     """The keys a driver takes, every printable ASCII character said once when it takes them all."""
-    every = set(_PRINTABLE) <= set(keys)
-    named = [key for key in keys if not (every and key in _PRINTABLE)]
+    every = set(PRINTABLE_KEYS) <= set(keys)
+    named = [key for key in keys if not (every and key in PRINTABLE_KEYS)]
     return "only " + ", ".join(f"`{key!r}`" for key in named) + (", and any printable ASCII character" if every else "")
