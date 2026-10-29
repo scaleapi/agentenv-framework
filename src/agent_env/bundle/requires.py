@@ -19,6 +19,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_artifact_registry
 from agent_env.entity.refs import EntityKind, RefRole, ref_sites
@@ -42,8 +43,8 @@ if TYPE_CHECKING:
 # What core ships, per plugin group: anything else a bundle uses is provided by a plugin, or by configuration.
 _BUILTINS = {TASK_STEPS: task_step_registry._builtin_registry, ENVS: env_registry._builtin_registry,
              ARTIFACTS: lambda: ARTIFACT_REGISTRY}
-# The entities a step reads whose type a plugin may register.
-_GETTERS = {EntityKind.ENV: Env.get, EntityKind.ARTIFACT: Artifact.get}
+# The entities a step reads that hold, or are, a type a plugin may register.
+_GETTERS = {EntityKind.ENV: Env.get, EntityKind.AGENT: A2AAgent.get, EntityKind.ARTIFACT: Artifact.get}
 
 
 class UnmetRequirements(BundleError):
@@ -191,7 +192,7 @@ def detected(found: Iterable[Use], declared: Iterable[str] = ()) -> list[str]:
 def task_requires(steps: Iterable[TaskStep], declared: Iterable[str] = ()) -> list[str]:
     """What a stored task made of ``steps`` requires, by the rule registering a bundle's task records: the plugin
     packages behind its own step types and the types of the envs and artifacts its steps read, as the store holds them,
-    with those they hold. A package ``declared`` (what the task required before) names keeps its range there; one used
+    with those they and the agents its steps deploy hold. A package ``declared`` (what the task required before) names keeps its range there; one used
     anew is at least the version installed here; one no longer used is dropped, unless a reference can't be read here
     (an id the run fills in, one the store doesn't hold, a type nothing here registers), when every one is kept."""
     declared = list(declared)
@@ -223,7 +224,7 @@ def task_requires(steps: Iterable[TaskStep], declared: Iterable[str] = ()) -> li
 
 
 
-def _held(entity: Env | Artifact) -> Iterator[Env | Artifact]:
+def _held(entity: Env | A2AAgent | Artifact) -> Iterator[Env | A2AAgent | Artifact]:
     """``entity``, then each env and artifact loading it loaded with it, and theirs in turn."""
     seen, queue = set(), [entity]
     while queue:
@@ -237,11 +238,13 @@ def _held(entity: Env | Artifact) -> Iterator[Env | Artifact]:
             queue.extend(item for item in items if isinstance(item, (Env, Artifact)))
 
 
-def _entity_use(where: str, entity: Env | Artifact, providers: Providers) -> Use | None:
-    """The use of ``entity``'s type, when core doesn't ship it."""
+def _entity_use(where: str, entity: Env | A2AAgent | Artifact, providers: Providers) -> Use | None:
+    """The use of ``entity``'s type, when core doesn't ship it; an agent's has no plugin group."""
     if isinstance(entity, Env):
         provider = providers.of(ENVS, entity.type, get_env_registry().get(entity.type))
         return Use(where, "env type", entity.type, provider) if provider is not None else None
+    if not isinstance(entity, Artifact):
+        return None
     name = canonical_type(entity.type)
     provider = providers.of(ARTIFACTS, name, get_artifact_registry().get(name))
     return Use(where, "artifact type", name, provider) if provider is not None else None

@@ -15,6 +15,7 @@ import pytest
 from click.testing import CliRunner
 from packaging.requirements import Requirement
 
+from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
@@ -705,14 +706,17 @@ class TestStoredTasks:
     def test_a_type_only_configuration_registers_is_never_required(self, stores):
         assert task_requires(_steps([{"id": "s", "type": _Configured.type}])) == []
 
-    def test_a_type_an_env_it_reads_holds_is_required(self, stores):
+    @pytest.mark.parametrize("step", [{"id": "env", "type": "deploy_env", "env_id": "crm"},
+                                      {"id": "agent", "type": "deploy_agent", "a2a_agent_id": "coder"}],
+                             ids=["env", "agent"])
+    def test_a_type_an_env_or_agent_it_reads_holds_is_required(self, stores, step):
         with namespace_routing():
             image = get_artifact_store().put_document(_AcmeImage(
-                id="crm-image", description="crm", image_name="crm:latest", tar_gz_s3_url=None, platform=None))
+                id="acme-image", description="acme", image_name="acme:latest", tar_gz_s3_url=None, platform=None))
             MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
+            A2AAgent.put(id="coder", docker_image_artifact=image)
 
-        assert task_requires(_steps([{"id": "env", "type": "deploy_env", "env_id": "crm"}])) == [
-            "agentenv-acme-images>=3.0"]
+        assert task_requires(_steps([step])) == ["agentenv-acme-images>=3.0"]
 
     @pytest.mark.parametrize("artifact_id", ["absent", "{{seed.artifact}}", "unknown"])
     def test_a_reference_it_cant_read_keeps_every_package_it_required(self, stores, artifact_id):

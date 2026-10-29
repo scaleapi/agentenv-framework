@@ -197,10 +197,10 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   it requires (`cli/task/_checks.py`), then set up in local stores the infra envs its gateway deploys run on
   (`preflight.stored_infra`). A step type nothing registers names the task's unmet requirements in the load error
   (`UnknownStepTypeError`). A task stored without `requires` loads and runs as before. A service that saves tasks
-  computes it by the same rule with `task_requires(steps, declared)` (`bundle/requires.py`), reading the envs and
-  artifacts the steps reference, and those they hold, from the store: a package the previous version required keeps its
-  range, one used anew is at least the installed version, and one no longer used is dropped unless a reference can't be
-  read.
+  computes it by the same rule with `task_requires(steps, declared)` (`bundle/requires.py`), reading the envs, agents
+  and artifacts the steps reference, and those they hold, from the store: a package the previous version required
+  keeps its range, one used anew is at least the installed version, and one no longer used is dropped unless a
+  reference can't be read.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with
