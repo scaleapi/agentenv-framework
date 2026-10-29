@@ -19,17 +19,18 @@ from agent_env.bundle import register as register_module
 from agent_env.bundle import requires as requires_module
 from agent_env.bundle.register import register_bundle
 from agent_env.bundle.requires import (
-    Provider, Providers, UnmetRequirements, _create, declare, install_command, unmet, unmet_problems,
+    Declaring, Provider, Providers, UnmetRequirements, _create, declare, declaring_for, install_command, unmet_problems,
 )
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle.run import _write_bundle
 from agent_env.cli import _install_prompt, cli
 from agent_env.cli._installers import InstallerError
 from agent_env.config.runtime import Config
-from agent_env.plugins import TASK_STEPS, Contribution, Distribution, Inventory
+from agent_env.plugins import TASK_STEPS, Contribution, Distribution
+from agent_env.plugins._requirements import unmet
 from agent_env.store.routing import namespace_routing
 from agent_env.task_step.task_step import TaskStep
-from tst.unit.bundle._support import layout
+from tst.unit.bundle._support import fake_plugins, layout
 
 ACME = "agentenv-acme"
 WROTE = ('wrote bundle.toml: requires = ["agentenv-acme>=1.2.0"]; commit it so whoever you share the bundle with knows '
@@ -85,14 +86,16 @@ def acme(monkeypatch):
     configuration registers and one configuration registers over agentenv-acme's."""
     steps = {**Config().task_step_registry(), **{cls.type: cls for cls in (_Acme, _Configured, _Replaced)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    _plugins(monkeypatch)
+
+
+def _plugins(monkeypatch, *, versions=None, **more):
+    """agentenv-acme 1.2.0 installed, as the plugin providing ``_Acme`` and the one a config file replaces
+    ``_Replaced`` of, with ``versions`` of other packages beside it."""
     contributions = (Contribution(TASK_STEPS, _Acme.type, _value(_Acme), "active"),
                      Contribution(TASK_STEPS, _Replaced.type, _value(_Acme), "replaced"))
-    monkeypatch.setattr(requires_module, "inventory", lambda load: Inventory(
-        distributions=(Distribution(ACME, "1.2.0", contributions),), group_errors={}, discovery_errors={},
-        config_path=None, config_error=None, loaded=load))
-    monkeypatch.setattr(requires_module, "load_failures", dict)
-    monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0"}.get)
-    monkeypatch.setattr(requires_module, "packages_distributions", dict)
+    fake_plugins(monkeypatch, [Distribution(ACME, "1.2.0", contributions)], versions={ACME: "1.2.0", **(versions or {})},
+                 **more)
 
 
 def _bundle(root, *types, toml=None):
@@ -102,8 +105,8 @@ def _bundle(root, *types, toml=None):
     return layout(root, files)
 
 
-def _declared(root, *, own=True, dry_run=False):
-    return declare(resolve_bundle(parse_bundle(root)), own=own, dry_run=dry_run)
+def _declared(root, declaring=Declaring.WRITE):
+    return declare(resolve_bundle(parse_bundle(root)), declaring)
 
 
 class TestProviders:
@@ -129,22 +132,19 @@ class TestProviders:
         assert Provider(None, None).requirement() is None
 
     def test_configuration_names_the_installed_package_its_class_comes_from(self, monkeypatch):
-        monkeypatch.setattr(requires_module, "packages_distributions", lambda: {"tst": ["agentenv-shipper"]})
-        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-shipper": "2.0"}.get)
+        _plugins(monkeypatch, versions={"agentenv-shipper": "2.0"}, packages={"tst": ["agentenv-shipper"]})
 
         assert Providers().of(TASK_STEPS, _Configured.type, _Configured) == Provider(None, None, "agentenv-shipper 2.0")
 
     def test_of_a_namespace_packages_distributions_the_one_holding_the_module_ships_it(self, monkeypatch):
         files = {"shipper-a": ["tst/other.py"], "shipper-b": [f"{__name__.replace('.', '/')}.py"]}
-        monkeypatch.setattr(requires_module, "packages_distributions", lambda: {"tst": ["shipper-a", "shipper-b"]})
-        monkeypatch.setattr(requires_module, "distribution",
-                            lambda name: SimpleNamespace(files=[PurePosixPath(f) for f in files[name]]))
-        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "shipper-b": "3.1"}.get)
+        _plugins(monkeypatch, versions={"shipper-b": "3.1"}, packages={"tst": ["shipper-a", "shipper-b"]},
+                 metadata={name: SimpleNamespace(files=[PurePosixPath(f) for f in paths]) for name, paths in files.items()})
 
         assert Providers().of(TASK_STEPS, _Configured.type, _Configured).shipped_by == "shipper-b 3.1"
 
     def test_a_plugin_that_failed_to_load_provides_nothing(self, monkeypatch):
-        monkeypatch.setattr(requires_module, "load_failures", lambda: {TASK_STEPS: {_Acme.type: "failed to load"}})
+        _plugins(monkeypatch, failures={TASK_STEPS: {_Acme.type: "failed to load"}})
         assert Providers().of(TASK_STEPS, _Acme.type, _Acme) == Provider(None, None)
 
 
@@ -159,7 +159,7 @@ class TestUnmet:
             ("agentenv-missing", "which isn't installed"), ("agentenv-acme>=2", "and agentenv-acme 1.2.0 is installed")]
 
     def test_a_version_pip_cant_compare_meets_only_a_requirement_naming_no_versions(self, monkeypatch):
-        monkeypatch.setattr(requires_module, "installed", {ACME: "not a version"}.get)
+        _plugins(monkeypatch, versions={ACME: "not a version"})
 
         assert unmet(["agentenv-acme", "agentenv-acme>=1"]) == [
             ("agentenv-acme>=1", "and agentenv-acme not a version is installed")]
@@ -170,16 +170,14 @@ class TestUnmet:
         ("agentenv-acme[browser,all]", "torch, playwright>=1.40"),
     ])
     def test_an_extra_is_unmet_without_what_it_needs(self, monkeypatch, line, missing):
-        monkeypatch.setattr(requires_module, "distribution", lambda name: _AcmeMetadata)
+        _plugins(monkeypatch, metadata={ACME: _AcmeMetadata})
 
         assert unmet([line]) == [(line, f"and agentenv-acme 1.2.0 is installed without {missing}, which its extras "
                                         f"need")]
 
     @pytest.mark.parametrize("line", ["agentenv-acme[browser]", "agentenv-acme[gpu]", "agentenv-acme[undeclared]"])
     def test_an_extra_whose_needs_are_installed_or_that_needs_nothing_is_met(self, monkeypatch, line):
-        monkeypatch.setattr(requires_module, "distribution", lambda name: _AcmeMetadata)
-        monkeypatch.setattr(requires_module, "installed",
-                            {ACME: "1.2.0", "playwright": "1.41", "torch": "2.5"}.get)
+        _plugins(monkeypatch, versions={"playwright": "1.41", "torch": "2.5"}, metadata={ACME: _AcmeMetadata})
 
         assert unmet([line]) == []
 
@@ -187,7 +185,7 @@ class TestUnmet:
         assert unmet_problems(["agentenv-missing>=1", "agentenv-acme"]) == ([MISSING], ["agentenv-missing>=1"])
 
     def test_agent_env_itself_is_upgraded_not_added(self, monkeypatch):
-        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-framework": "0.9.1375"}.get)
+        _plugins(monkeypatch, versions={"agentenv-framework": "0.9.1375"})
 
         assert unmet_problems(["agentenv-framework>=0.9.1400", "agentenv-missing>=1"]) == ([
             "bundle.toml: requires 'agentenv-framework>=0.9.1400', and agentenv-framework 0.9.1375 is installed; "
@@ -196,7 +194,7 @@ class TestUnmet:
         ], ["agentenv-missing>=1"])
 
     def test_a_bundle_needing_a_newer_agent_env_is_refused_without_an_install_to_offer(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-framework": "0.9.1375"}.get)
+        _plugins(monkeypatch, versions={"agentenv-framework": "0.9.1375"})
         root = _bundle(tmp_path / "b", _Acme.type, toml='requires = ["agentenv-framework>=0.9.1400"]\n')
 
         with pytest.raises(BundleError) as caught:
@@ -239,10 +237,28 @@ class TestDeclare:
         assert parse_bundle(root).requires == ("agentenv-acme>=1.2.0",)
         assert _declared(root) == []
 
+    @pytest.mark.parametrize("installed, writable, dry_run, declaring", [
+        (True, True, False, Declaring.QUIET),
+        (False, False, False, Declaring.HINT),
+        (False, False, True, Declaring.HINT),
+        (False, True, True, Declaring.WOULD_WRITE),
+        (False, True, False, Declaring.WRITE),
+    ])
+    def test_a_command_declares_as_its_bundle_and_folder_allow(self, tmp_path, monkeypatch, installed, writable,
+                                                               dry_run, declaring):
+        monkeypatch.setattr(requires_module.os, "access", lambda path, mode: writable)
+        assert declaring_for(tmp_path, installed=installed, dry_run=dry_run) is declaring
+
+    def test_quiet_says_and_writes_nothing(self, tmp_path):
+        root = _bundle(tmp_path / "b", _Acme.type, _Configured.type)
+
+        assert _declared(root, Declaring.QUIET) == []
+        assert not (root / "bundle.toml").exists()
+
     def test_a_dry_run_says_what_it_would_write(self, tmp_path):
         root = _bundle(tmp_path / "b", _Acme.type)
 
-        assert _declared(root, dry_run=True) == ['would write bundle.toml: requires = ["agentenv-acme>=1.2.0"]']
+        assert _declared(root, Declaring.WOULD_WRITE) == ['would write bundle.toml: requires = ["agentenv-acme>=1.2.0"]']
         assert not (root / "bundle.toml").exists()
 
     def test_a_bundle_using_only_what_core_ships_is_given_none(self, tmp_path):
@@ -257,7 +273,7 @@ class TestDeclare:
     ], ids=["opted-out", "requires-another"])
     def test_an_existing_bundle_toml_is_never_edited_but_told_what_to_declare(self, tmp_path, monkeypatch, toml,
                                                                             requires):
-        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-other": "1"}.get)
+        _plugins(monkeypatch, versions={"agentenv-other": "1"})
         root = _bundle(tmp_path / "b", _Acme.type, toml=toml)
 
         assert _declared(root) == [
@@ -269,7 +285,7 @@ class TestDeclare:
     def test_a_folder_not_its_own_is_told_what_to_declare(self, tmp_path):
         root = _bundle(tmp_path / "b", _Acme.type, _Acme.type)
 
-        assert _declared(root, own=False) == [
+        assert _declared(root, Declaring.HINT) == [
             "this bundle uses agentenv-acme 1.2.0 (tasks/t.json: step 's0', and 1 more), which bundle.toml doesn't "
             "require",
             'declare them in bundle.toml, so whoever it\'s shared with knows what to install: requires = '
@@ -295,8 +311,7 @@ class TestDeclare:
         assert sorted(os.listdir(root)) == ["tasks"]
 
     def test_a_type_configuration_registers_from_an_installed_package_names_it(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(requires_module, "packages_distributions", lambda: {"tst": ["agentenv-shipper"]})
-        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-shipper": "2.0"}.get)
+        _plugins(monkeypatch, versions={"agentenv-shipper": "2.0"}, packages={"tst": ["agentenv-shipper"]})
         root = _bundle(tmp_path / "b", _Configured.type, _Replaced.type)
 
         assert _declared(root) == [
@@ -310,7 +325,7 @@ class TestDeclare:
         resolved = resolve_bundle(parse_bundle(root))
         (root / "bundle.toml").write_text("requires = []\n")
 
-        assert declare(resolved, own=True, dry_run=False)[0].startswith("this bundle uses agentenv-acme 1.2.0")
+        assert declare(resolved, Declaring.WRITE)[0].startswith("this bundle uses agentenv-acme 1.2.0")
         assert (root / "bundle.toml").read_text() == "requires = []\n"
 
 
@@ -413,7 +428,7 @@ class TestCommands:
 
         dry = register_bundle(root, dry_run=True).requires
         assert not (root / "bundle.toml").exists()
-        registered = register_bundle(root, dry_run=True, write_requires=True).requires
+        registered = register_bundle(root, dry_run=True, declaring=Declaring.WRITE).requires
 
         assert dry == ('would write bundle.toml: requires = ["agentenv-acme>=1.2.0"]',)
         assert registered == (WROTE,)
@@ -560,7 +575,7 @@ class TestInstallPrompt:
     def test_a_refusal_for_agent_env_itself_never_asks(self, terminal, monkeypatch):
         root, calls = terminal
         (root / "bundle.toml").write_text('requires = ["agentenv-framework>=0.9.1400"]\n')
-        monkeypatch.setattr(requires_module, "installed", {ACME: "1.2.0", "agentenv-framework": "0.9.1375"}.get)
+        _plugins(monkeypatch, versions={"agentenv-framework": "0.9.1375"})
 
         result = CliRunner().invoke(cli, ["run", str(root)], input="y\n")
 

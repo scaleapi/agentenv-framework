@@ -29,7 +29,6 @@ from agent_env.bundle._import_report import (
     Floating,
     ImportedEval,
     ImportedTask,
-    Need,
     Pinned,
     Pulled,
     Written,
@@ -51,7 +50,7 @@ from agent_env.bundle.parse import (
     segment_problem,
 )
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
-from agent_env.bundle.requires import Provider, Providers
+from agent_env.bundle.requires import Providers, Use, detected
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
 from agent_env.entity.export import ExportContext, Unwritable, checked_path
@@ -170,7 +169,7 @@ class _Importer:
         self.pinned: list[Pinned] = []
         self.floating: list[Floating] = []
         self.dropped: list[Dropped] = []
-        self.needs: list[Need] = []
+        self.needs: list[Use] = []
         self.undeclared: list[str] = []
         self.duplicates: list[str] = []
         self.problems: list[str] = []
@@ -287,8 +286,7 @@ class _Importer:
             if self.problems:
                 raise BundleError(self.problems)
             shutil.rmtree(scratch)
-            if requires := sorted({requirement for need in self.needs if need.by != "configuration"
-                                   and (requirement := Provider(need.by, need.version).requirement())}):
+            if requires := detected(self.needs):
                 self.files[BUNDLE_TOML] = _toml.dumps({"requires": requires})
             files = sorted([*self.files, PROVENANCE, "README.md"])
             imported = BundleImport(
@@ -482,7 +480,7 @@ class _Importer:
         """``name``, of the plugin ``group``, is a need when core doesn't ship it, with what provides ``cls``, the class
         it resolves to here (``Providers.of``)."""
         if (provider := self.providers.of(group, name, cls)) is not None:
-            self.needs.append(Need(where, what, name, provider.distribution or "configuration", provider.version))
+            self.needs.append(Use(where, what, name, provider))
 
     def _default_agents(self, step: dict, refs: tuple[EntityRef, ...], where: str) -> None:
         """A step that leaves an agent field unset falls back to the configured default, which no field pins."""

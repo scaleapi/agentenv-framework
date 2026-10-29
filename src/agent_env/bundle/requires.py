@@ -11,19 +11,19 @@ import shlex
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, distribution, packages_distributions
+from enum import Enum
+from importlib.metadata import distribution, packages_distributions
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from packaging.requirements import InvalidRequirement, Requirement
+from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_artifact_registry
 from agent_env.env import registry as env_registry
 from agent_env.env.registry import get_env_registry
-from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, inventory, load_failures
-from agent_env.plugins._requirements import CORE, installed
+from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, _requirements, inventory, load_failures
 from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
 
@@ -46,6 +46,25 @@ class UnmetRequirements(BundleError):
     def __init__(self, problems: Iterable[str], requirements: Sequence[str]):
         super().__init__(problems)
         self.requirements = tuple(requirements)
+
+
+class Declaring(Enum):
+    """What a command says, and does, of the plugin packages a bundle uses that its ``bundle.toml`` doesn't require."""
+
+    WRITE = "write"  # give a bundle without a bundle.toml one; tell one that has one what to add
+    WOULD_WRITE = "would write"  # a dry run's: say what WRITE would write
+    HINT = "hint"  # tell it what to declare, writing nothing: a folder that isn't the bundle's own
+    QUIET = "quiet"  # say nothing: an installed bundle, which whoever runs it can't edit
+
+
+def declaring_for(root: Path, *, installed: bool, dry_run: bool) -> Declaring:
+    """How a command run on the bundle at ``root`` declares its plugins: nothing for an ``installed`` bundle, a hint
+    for a folder no file can be created in, and otherwise the file, or in a ``dry_run`` what it would hold."""
+    if installed:
+        return Declaring.QUIET
+    if not os.access(root, os.W_OK | os.X_OK):
+        return Declaring.HINT
+    return Declaring.WOULD_WRITE if dry_run else Declaring.WRITE
 
 
 @dataclass(frozen=True)
@@ -116,72 +135,16 @@ class Providers:
             names = [name for name in names if files & {str(file) for file in distribution(name).files or ()}]
         if len(names) != 1:
             return None
-        version = installed(canonicalize_name(names[0]))
+        version = _requirements.installed(canonicalize_name(names[0]))
         return f"{names[0]} {version}" if version else names[0]
-
-
-def unmet(requires: Iterable[str]) -> list[tuple[str, str]]:
-    """Each of ``requires`` that isn't met here, with why: its package isn't installed, is at a version it excludes, or
-    is without what the extras it names need. One whose marker is false here doesn't apply."""
-    found = []
-    for line in requires:
-        requirement = Requirement(line)
-        if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""}):
-            continue
-        have = installed(canonicalize_name(requirement.name))
-        if have is None:
-            found.append((line, "which isn't installed"))
-        elif not _allows(requirement, have):
-            found.append((line, f"and {requirement.name} {have} is installed"))
-        elif missing := _missing_for_extras(requirement, set()):
-            found.append((line, f"and {requirement.name} {have} is installed without {', '.join(missing)}, which its "
-                                f"extras need"))
-    return found
-
-
-def _allows(requirement: Requirement, version: str) -> bool:
-    """Whether ``requirement`` admits ``version``; one pip can't compare it admits only when it names no versions."""
-    try:
-        return requirement.specifier.contains(version, prereleases=True)
-    except InvalidVersion:
-        return not requirement.specifier
-
-
-def _missing_for_extras(requirement: Requirement, seen: set[tuple[str, str]]) -> list[str]:
-    """What the extras ``requirement`` names need of its installed package that isn't installed, or not at a version
-    it allows, following an extra that names another of the package's own."""
-    name = canonicalize_name(requirement.name)
-    missing = []
-    for extra in sorted(requirement.extras):
-        if (name, extra) in seen:
-            continue
-        seen.add((name, extra))
-        try:
-            lines = distribution(name).requires or ()
-        except PackageNotFoundError:
-            return []
-        for line in lines:
-            try:
-                needed = Requirement(line)
-            except InvalidRequirement:
-                continue
-            if needed.marker is None or not needed.marker.evaluate({"extra": extra}) \
-                    or needed.marker.evaluate({"extra": ""}):
-                continue
-            have = installed(canonicalize_name(needed.name))
-            if have is None or not _allows(needed, have):
-                missing.append(f"{needed.name}{needed.specifier}")
-            else:
-                missing.extend(_missing_for_extras(needed, seen))
-    return list(dict.fromkeys(missing))
 
 
 def unmet_problems(requires: Iterable[str]) -> tuple[list[str], list[str]]:
     """The problems ``bundle.toml``'s unmet ``requires`` raise, naming the one command that installs every plugin
     package among them, and those requirements. One on agent-env itself, which ``plugin add`` doesn't change, says to
     upgrade it instead."""
-    found = unmet(requires)
-    core = [(line, why) for line, why in found if canonicalize_name(Requirement(line).name) in CORE]
+    found = _requirements.unmet(requires)
+    core = [(line, why) for line, why in found if canonicalize_name(Requirement(line).name) in _requirements.CORE]
     plugins = [(line, why) for line, why in found if (line, why) not in core]
     problems = [f"{BUNDLE_TOML}: requires {line!r}, {why}; upgrade agent-env with the installer that installed it"
                 for line, why in core]
@@ -229,12 +192,13 @@ def detected(found: Iterable[Use]) -> list[str]:
     return sorted({requirement for use in found if (requirement := use.provider.requirement()) is not None})
 
 
-def declare(resolved: ResolvedBundle, *, own: bool, dry_run: bool) -> list[str]:
+def declare(resolved: ResolvedBundle, declaring: Declaring) -> list[str]:
     """What to say of the plugin packages the bundle uses that its ``bundle.toml`` doesn't require, and of each type
-    only this machine's configuration registers. A bundle with no ``bundle.toml`` in a folder of its ``own`` (run by
-    path, and writable) is given one listing them, created whole or not at all and never over one that appeared
-    meanwhile; a ``dry_run`` says what it would write instead. Any other bundle is told what to declare: an existing
-    ``bundle.toml`` is never edited."""
+    only this machine's configuration registers, as ``declaring`` says. Writing, a bundle with no ``bundle.toml`` is
+    given one listing them, created whole or not at all and never over one that appeared meanwhile. Otherwise it's
+    told what to declare: an existing ``bundle.toml`` is never edited."""
+    if declaring is Declaring.QUIET:
+        return []
     found = uses(resolved)
     declared = {canonicalize_name(Requirement(line).name) for line in resolved.bundle.requires or ()}
     undeclared = [use for use in found if use.provider.distribution is not None
@@ -244,9 +208,9 @@ def declare(resolved: ResolvedBundle, *, own: bool, dry_run: bool) -> list[str]:
         return lines
     requires = detected(undeclared)
     path = resolved.bundle.root / BUNDLE_TOML
-    if resolved.bundle.requires is None and own:
-        if dry_run:
-            return [f"would write {BUNDLE_TOML}: requires = {json.dumps(requires)}", *lines]
+    if resolved.bundle.requires is None and declaring is Declaring.WOULD_WRITE:
+        return [f"would write {BUNDLE_TOML}: requires = {json.dumps(requires)}", *lines]
+    if resolved.bundle.requires is None and declaring is Declaring.WRITE:
         if _create(path, _toml.dumps({"requires": requires})):
             return [f"wrote {BUNDLE_TOML}: requires = {json.dumps(requires)}; commit it so whoever you share the "
                     "bundle with knows what to install", *lines]
@@ -259,11 +223,6 @@ def declare(resolved: ResolvedBundle, *, own: bool, dry_run: bool) -> list[str]:
     hints.append(f"declare them in {BUNDLE_TOML}, so whoever it's shared with knows what to install: "
                  f"requires = {json.dumps(everything)}")
     return [*hints, *lines]
-
-
-def writable(root: Path) -> bool:
-    """Whether a file can be created in the folder ``root``."""
-    return os.access(root, os.W_OK | os.X_OK)
 
 
 def _create(path: Path, text: str) -> bool:

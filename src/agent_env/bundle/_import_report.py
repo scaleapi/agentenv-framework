@@ -17,6 +17,8 @@ from agent_env.utils.docker.build import DOCKER_PLUGINS
 from agent_env.utils.docker.lock import IN_IMAGE, Locked
 from agent_env.utils.docker.prune import Pruned
 
+from .requires import Use
+
 # The file an import records what it wrote in, and from where, for publishing the folder back.
 PROVENANCE = "provenance.json"
 
@@ -48,17 +50,6 @@ class Dropped:
 
     where: str
     why: str
-
-
-@dataclass(frozen=True)
-class Need:
-    """Something a task uses that core doesn't ship, and what registers it here."""
-
-    where: str
-    what: str  # step type, env type or artifact type
-    name: str
-    by: str  # the installed distribution that registers it, or "configuration" for a config file's impls
-    version: str | None = None  # the distribution's, installed here
 
 
 @dataclass(frozen=True)
@@ -125,7 +116,7 @@ class BundleImport:
     pinned: tuple[Pinned, ...]
     floating: tuple[Floating, ...]
     dropped: tuple[Dropped, ...]
-    needs: tuple[Need, ...]
+    needs: tuple[Use, ...]  # what the task uses that core doesn't ship
     undeclared: tuple[str, ...]  # the steps whose type declares no references, so any they make float
     duplicates: tuple[str, ...]  # the eval's entries that named a task it already named
     downloaded: int  # bytes, of what the store said its objects' sizes are
@@ -135,7 +126,7 @@ class BundleImport:
         secret and scoped field was treated, as titled lists of lines; an empty section is left out."""
         needed: dict[tuple[str, str, str], list[str]] = {}
         for need in self.needs:
-            needed.setdefault((need.by, need.name, need.what), []).append(need.where)
+            needed.setdefault((_by(need), need.name, need.what), []).append(need.where)
         return _sections([
             ("Still needs the store", [f"{pin.kind.value} {pin.id} v{pin.version}: {pin.where}: {pin.why}"
                                        for pin in self.pinned]),
@@ -245,9 +236,14 @@ _SHARE_IT = [
 ]
 
 
+def _by(need: Use) -> str:
+    """What registers ``need`` here, as the report names it: the installed distribution, or configuration."""
+    return need.provider.distribution or "configuration"
+
+
 def _needs_lines(imported: BundleImport) -> list[str]:
-    plugins = sorted({need.by for need in imported.needs if need.by != "configuration"})
-    configured = any(need.by == "configuration" for need in imported.needs)
+    plugins = sorted({need.provider.distribution for need in imported.needs if need.provider.distribution})
+    configured = any(need.provider.distribution is None for need in imported.needs)
     lines = [f"- The plugins it uses: `{'`, `'.join(plugins)}`."] if plugins else []
     if configured:
         lines.append("- The configuration that registers what *Needs beyond core* says configuration registers.")

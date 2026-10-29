@@ -9,7 +9,7 @@ import click
 from agent_env.bundle.importer import BundleImport, import_eval, import_task
 from agent_env.bundle.parse import BundleKind
 from agent_env.bundle.register import describe_target, register_bundle
-from agent_env.bundle.requires import UnmetRequirements
+from agent_env.bundle.requires import Declaring, UnmetRequirements, declaring_for
 from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.utils import interruptible
 from agent_env.entity.scopes import FieldScope
@@ -100,8 +100,8 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
     click.echo("Checking:")
     with interruptible():
         try:
-            planned = register_bundle(folder, dry_run=True, write_requires=not dry_run, on_progress=click.echo,
-                                      **options)
+            planned = register_bundle(folder, dry_run=True, on_progress=click.echo, **options,
+                                      declaring=declaring_for(folder, installed=False, dry_run=dry_run))
         except UnmetRequirements as e:
             if not dry_run:
                 offer_to_install(e)
@@ -120,7 +120,7 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
         click.confirm("Write these to the stores above?", abort=True)
     click.echo("Writing:")
     with interruptible():
-        registered = register_bundle(folder, on_progress=click.echo, **options)
+        registered = register_bundle(folder, on_progress=click.echo, **options, declaring=Declaring.QUIET)
     tasks_written = [done for done in registered.materialization.writes if done.write.kind is BundleKind.TASK]
     if tasks_written:
         first = tasks_written[0]

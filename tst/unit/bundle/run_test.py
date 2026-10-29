@@ -9,7 +9,6 @@ import re
 import pytest
 from click.testing import CliRunner
 
-import agent_env.bundle.requires as requires_module
 import agent_env.bundle.run as run_module
 from agent_env.providers.sandbox_providers import host_images
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -28,7 +27,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
-from tst.unit.bundle._support import layout, local_store, plan_of
+from tst.unit.bundle._support import fake_plugins, layout, local_store, plan_of
 
 ROOT = "@local/~/triage"
 DRY_RUN = "Dry run: nothing is written or run.\n"
@@ -140,7 +139,7 @@ def registries(monkeypatch):
     steps = {**Config().task_step_registry(),
              **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
-    monkeypatch.setattr(requires_module, "packages_distributions", dict)  # no installed package ships these classes
+    fake_plugins(monkeypatch)  # no installed package ships these classes
     monkeypatch.setattr(_Scored, "seen", [])
     monkeypatch.setattr(_Scored, "peak", 0)
 
