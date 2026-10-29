@@ -179,8 +179,9 @@ async def _materialize_and_render(part: FilePart, task_id: str) -> list[str]:
     if (part.mime_type or "").lower() != "application/pdf" and target.suffix.lower() != ".pdf":
         return [str(target)]
     # Hermes looks at images with its vision tool, so a PDF goes as its pages' images too: in a folder of their own, so
-    # two PDFs whose names share a stem (report.pdf, report.PDF) never mix their pages.
-    pages_dir = Path(tempfile.mkdtemp(prefix=f"{target.name}-pages-", dir=directory))
+    # two PDFs whose names share a stem (report.pdf, report.PDF) never mix their pages. The folder's name is short, as a
+    # name derived from the file's could pass the filesystem's 255-byte limit.
+    pages_dir = Path(tempfile.mkdtemp(prefix="pdf-pages-", dir=directory))
     if not await _render_pdf(target, str(pages_dir / "page")):
         logger.warning("PDF rendering failed for %s; passing the PDF alone", target)
         return [str(target)]

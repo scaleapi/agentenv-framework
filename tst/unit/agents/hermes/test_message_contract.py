@@ -135,6 +135,24 @@ async def test_two_pdfs_whose_names_share_a_stem_keep_their_own_pages(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_a_pdf_with_a_name_near_the_filesystems_limit_renders(monkeypatch, tmp_path, hermes, turns):
+    fake = tmp_path / "pdfbin" / "pdftoppm"
+    fake.parent.mkdir()
+    fake.write_text(f"#!{sys.executable}\nimport pathlib, sys\npathlib.Path(sys.argv[-1] + '-1.png').write_text('p')\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+    name = "r" * 238 + ".pdf"
+    parts = [{"kind": "text", "text": "read"},
+             {"kind": "file", "file": {"name": name, "mimeType": "application/pdf", "bytes": "MQ=="}}]
+    async with hermes.client() as client:
+        task = await hermes.send(client, parts)
+
+    assert task["status"]["state"] == "completed"
+    (call,) = turns.calls
+    assert sum(line.endswith(".png") for line in call["prompt"].splitlines()) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_failed_turn_is_a_failed_task_that_keeps_its_session(hermes, turns):
     turns.answer = lambda kwargs: (
         result(response="", error="HTTP 401: invalid key", error_code="401", session_id="s-started")
