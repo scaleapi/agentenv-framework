@@ -42,6 +42,26 @@ async def test_snapshot_reload_keeps_the_env_name(declared, deployed_as, expecte
 
 
 @pytest.mark.asyncio
+async def test_snapshot_reload_keeps_its_services_trusting_the_local_transfer_ca():
+    env = MultiEnv(id="crm-suite", version=1, mcp_server_envs=[], name="crm")
+    env._sandbox = MagicMock(mode="vm", load_docker_images=AsyncMock(), host_ips=("127.0.0.1",))
+    db_image = MagicMock(spec=DockerImageArtifact, image_name="snap:1")
+    snapshot = MagicMock(db_image_artifact_id="snap", db_image_artifact_version=1)
+
+    with patch("agent_env.artifact.Artifact.get", return_value=db_image), \
+         patch("agent_env.env.env.Env.get", return_value=MagicMock()), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id", default_service_db_env_id="db-id")), \
+         patch("agent_env.providers.env_state.LocalPostgresStateProvider"), \
+         patch.object(EnvironmentGatewayProvider, "_stage_trust_files", AsyncMock(return_value="./trust")) as stage, \
+         patch.object(EnvironmentGatewayProvider, "create_docker_compose", side_effect=_Stop) as compose:
+        with pytest.raises(_Stop):
+            await env._load_from_snapshot(snapshot)
+
+    stage.assert_awaited_once_with(env._sandbox)
+    assert compose.call_args.kwargs["trust_files"] == "./trust"
+
+
+@pytest.mark.asyncio
 async def test_snapshot_reload_waits_for_the_gateway_where_it_is_published():
     env = MultiEnv(id="crm-suite", version=1, mcp_server_envs=[], name="crm")
     env._sandbox = MagicMock(mode="vm", load_docker_images=AsyncMock(), exec_script=AsyncMock(return_value=""),

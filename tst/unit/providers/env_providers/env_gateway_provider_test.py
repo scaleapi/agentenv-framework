@@ -41,7 +41,7 @@ from agent_env.providers.env_providers.env_gateway_provider import (
 )
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_DIR, LOCAL_TRUST_ENV
+from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_DIR, LOCAL_TRUST_ENV, LocalSandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import Accepts
@@ -1122,6 +1122,75 @@ def test_compose_hands_each_mcp_server_the_local_transfer_ca_when_there_is_one(t
         assert trusted == (LOCAL_TRUST_ENV if trust_files else dict.fromkeys(LOCAL_TRUST_ENV))
         assert services[name].get("volumes") == ([f"{trust_files}:{LOCAL_TRUST_DIR}:ro"] if trust_files else None)
         assert services[name].get("extra_hosts") == (["host.docker.internal:host-gateway"] if trust_files else None)
+
+
+def test_a_servers_own_variables_win_over_the_local_transfer_ca():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-items", environment_name="items",
+                                     extra_env_vars={"SSL_CERT_FILE": "/srv/own-roots.pem"})],
+        gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        trust_files="./trust",
+    )
+
+    keys = [entry.split("=", 1)[0] for entry in yaml.safe_load(compose)["services"]["items"]["environment"]]
+    env = dict(entry.split("=", 1) for entry in yaml.safe_load(compose)["services"]["items"]["environment"])
+    assert len(keys) == len(set(keys))
+    assert env["SSL_CERT_FILE"] == "/srv/own-roots.pem"
+    assert env["NODE_EXTRA_CA_CERTS"] == LOCAL_TRUST_ENV["NODE_EXTRA_CA_CERTS"]
+
+
+class _HostSandbox:
+    """Records what a deploy writes on its host."""
+
+    def __init__(self, on_this_machine: bool) -> None:
+        self.ON_THIS_MACHINE = on_this_machine
+        self.scripts: list[str] = []
+        self.files: dict[str, bytes] = {}
+
+    async def exec_script(self, script: str, **_) -> str:
+        self.scripts.append(script)
+        return ""
+
+    async def write_host_file(self, data: bytes, vm_path: str) -> None:
+        self.files[vm_path] = data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("on_this_machine", "local_grants", "staged"), [
+    (True, True, "./trust"),
+    (True, False, None),
+    (False, True, None),
+], ids=["on-this-machine", "no-local-grants", "elsewhere"])
+async def test_a_deploy_on_this_machine_writes_the_trust_files_beside_its_compose(
+    tmp_path, monkeypatch, on_this_machine, local_grants, staged
+):
+    """Any sandbox on this machine, a local VM's as well as local Docker's, gets them through its own host, which its
+    compose mounts from; a sandbox elsewhere is handed no local grants, so it gets none."""
+    (tmp_path / "ca.pem").write_bytes(b"ca")
+    (tmp_path / "ca-bundle.pem").write_bytes(b"roots+ca")
+    monkeypatch.setattr(env_gateway_provider, "local_grant_trust", lambda: tmp_path if local_grants else None)
+    sandbox = _HostSandbox(on_this_machine)
+
+    assert await EnvironmentGatewayProvider._stage_trust_files(sandbox) == staged
+
+    expected = {"/app/trust/ca-bundle.pem": b"roots+ca", "/app/trust/ca.pem": b"ca"} if staged else {}
+    assert sandbox.files == expected
+    assert sandbox.scripts == (["mkdir -p /app/trust"] if staged else [])
+
+
+@pytest.mark.asyncio
+async def test_a_local_sandbox_keeps_the_trust_files_in_its_work_dir(tmp_path, monkeypatch):
+    """The CA's own folder may sit outside what Docker shares; the work dir, where the compose runs, is shared."""
+    (tmp_path / "ca").mkdir()
+    (tmp_path / "ca" / "ca.pem").write_bytes(b"ca")
+    monkeypatch.setattr(env_gateway_provider, "local_grant_trust", lambda: tmp_path / "ca")
+
+    assert await EnvironmentGatewayProvider._stage_trust_files(LocalSandbox(work_dir=tmp_path / "work")) == "./trust"
+    assert (tmp_path / "work" / "trust" / "ca.pem").read_bytes() == b"ca"
 
 
 # --- sidecar rendering --------------------------------------------------------

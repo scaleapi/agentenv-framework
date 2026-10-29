@@ -25,7 +25,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import snapshot_env as snapshot_mod
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 from tst.integration.env.envs.server_env_local_test import _put_items_image
-from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs, local_stack  # noqa: F401  (fixture)
+from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs, local_stack as local_stack
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
