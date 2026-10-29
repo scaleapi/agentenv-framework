@@ -221,25 +221,29 @@ class Turn:
 
 
 def _decision(value: Any, hook: PostTurnHook) -> Optional[Answer]:
-    """A hook's return as an answer: ``{"message": parts}`` or ``{"end": reason}`` with an optional closing message."""
+    """A hook's return as an answer: ``{"message": parts}`` or ``{"end": reason}`` with an optional closing message.
+    ``{"message": []}`` says nothing: the agent's next message is then only what came due for it on its envs'
+    notifications/v1, and the conversation ends (``nothing_to_send``) when nothing has."""
     if value is None:
         return None
-    shape = "None, {'message': text or parts}, or {'end': reason} with an optional closing 'message'"
+    shape = "None, {'message': text or parts ([] for none)}, or {'end': reason} with an optional closing 'message'"
     if not isinstance(value, dict) or not value or set(value) - {"message", "end"}:
         raise RuntimeError(f"post-turn hook '{hook.artifact_id}' returned {value!r}; expected {shape}")
     if "end" in value and (not isinstance(value["end"], str) or not value["end"]):
         raise RuntimeError(f"post-turn hook '{hook.artifact_id}' ended with {value['end']!r}; the reason is a string")
     answer: Answer = {"end": value["end"]} if "end" in value else {}
     if "message" in value:
-        answer["message"] = _parts(value["message"], hook)
+        parts = _parts(value["message"], hook)
+        if parts or "end" not in answer:  # an empty closing message records nothing
+            answer["message"] = parts
     return answer
 
 
 def _parts(message: Any, hook: PostTurnHook) -> list[dict]:
     if isinstance(message, str):
         return [{"kind": "text", "text": message}]
-    if not isinstance(message, list) or not message:
-        raise RuntimeError(f"post-turn hook '{hook.artifact_id}': a message is text or a non-empty list of A2A parts")
+    if not isinstance(message, list):
+        raise RuntimeError(f"post-turn hook '{hook.artifact_id}': a message is text or a list of A2A parts")
     for i, part in enumerate(message):
         try:
             Part.model_validate(part)

@@ -4,7 +4,7 @@
 With it each named role gets schedule_check, list_scheduled_checks and cancel_scheduled_check, on the env's virtual
 clock; a check comes due for the role that scheduled it, and no other role sees the tools. Place it after
 sync_env_clock (a check needs the clock) and before prompt_agent (the agent needs the tools on its first turn).
-A harness takes what has come due for a role and puts it in front of that role's agent.
+prompt_agent puts what has come due for its agent's role at the start of the agent's next message.
 """
 
 from __future__ import annotations

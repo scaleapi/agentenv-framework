@@ -39,7 +39,8 @@ _QUIET_TRIGGERS_CARD["capabilities"]["extensions"][1]["params"]["methods"]["deci
 
 
 class EnvPeers(Peers):
-    """``Peers`` plus the env's clock and /step, so hooks and the env clock stamp have a gateway to read."""
+    """``Peers`` plus the env's clock, /step and notifications take (nothing due), so hooks, the env clock stamp and
+    delivery have a gateway to read."""
 
     def __init__(self, monkeypatch, replies, *, clock: dict | None = None, engine: TriggerEngine | None = None, **kw):
         super().__init__(monkeypatch, replies, **kw)
@@ -55,6 +56,10 @@ class EnvPeers(Peers):
         if origin == ENV and request.url.path == "/clock/state":
             self.raw.append((request.method, str(request.url), None, request.extensions["timeout"]["read"]))
             return httpx.Response(200, json=self.clock)
+        if origin == ENV and request.url.path == "/notifications/take":
+            body = json.loads(request.content)
+            self.raw.append((request.method, str(request.url), body, request.extensions["timeout"]["read"]))
+            return httpx.Response(200, json={"to": body.get("to", "default"), "items": [], "until": None})
         if origin == ENV and request.url.path == "/step":
             self.steps.append((request.headers.get("AgentEnv-Role"), json.loads(request.content)))
             return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}], "changelog_id": 7})
@@ -264,7 +269,7 @@ async def test_a_hook_that_asks_the_user_reaches_the_configured_human_peer(monke
     ("'wake'", "returned 'wake'"),
     ("{'message': 'x', 'mood': 'calm'}", "returned {'message': 'x', 'mood': 'calm'}"),
     ("{'end': ''}", "the reason is a string"),
-    ("{'message': []}", "a message is text or a non-empty list of A2A parts"),
+    ("{'message': {}}", "a message is text or a list of A2A parts"),
     ("{'message': [{'kind': 'nope'}]}", "message part 0 is not an A2A Part"),
 ])
 async def test_a_hook_returning_something_else_fails_the_step(monkeypatch, returned, fragment):
@@ -522,7 +527,7 @@ async def test_every_stored_message_carries_each_armed_env_clock(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("armed", [False, True])
-async def test_without_hooks_an_env_offering_a_clock_adds_clock_reads_and_nothing_else(monkeypatch, armed):
+async def test_without_hooks_a_full_gateway_card_adds_clock_reads_and_empty_takes_and_nothing_else(monkeypatch, armed):
     real_client = httpx.AsyncClient
 
     def run(full_card: bool):
@@ -544,8 +549,12 @@ async def test_without_hooks_an_env_offering_a_clock_adds_clock_reads_and_nothin
                               poll_interval_seconds=0, max_conversation_turns=4).execute(ctx)
 
     requests = peers.requests(ctx)
-    assert [r for r in requests if r[1] != f"{ENV}/clock/state"] == base_peers.requests(base_ctx)
+    added = (f"{ENV}/clock/state", f"{ENV}/notifications/take")
+    assert [r for r in requests if r[1] not in added] == base_peers.requests(base_ctx)
     assert [r for r in requests if r[1] == f"{ENV}/clock/state"] == [("GET", f"{ENV}/clock/state", None, 5)] * 4
+    # one take, after the turn the conversation went on from; the user sim's done ended the next one
+    assert [r for r in requests if r[1] == f"{ENV}/notifications/take"] == [
+        ("POST", f"{ENV}/notifications/take", {"to": "default"}, 30)]
     stored, base = _stored(ctx, peers)["messages"], _stored(base_ctx, base_peers)["messages"]
     stamp = [{"env_id": "env", "env_step_id": None, "virtual_time": TUESDAY}]
     assert [{k: v for k, v in m.items() if k != "env_clock"} for m in stored] == base

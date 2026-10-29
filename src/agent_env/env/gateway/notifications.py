@@ -6,8 +6,9 @@ Two kinds, each for one recipient (the AgentEnv-Role it goes to):
 - notifications a task's triggers send with the `notify` action, through a channel the task declares, to the
   solver's role unless the action names another.
 
-Nothing here wakes anyone: a harness reads `state` to learn when the next one is due, may move the clock there, and
-`take`s what has come due to put it in front of the agent. Unrelated to A2A push notifications.
+Nothing here wakes anyone: prompt_agent `take`s what has come due for its agent's role after each turn and opens the
+agent's next message with it, and a harness (a post-turn hook) may read `state` to learn when the next one is due and
+move the clock there. Unrelated to A2A push notifications.
 """
 from __future__ import annotations
 
