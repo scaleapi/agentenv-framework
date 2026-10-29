@@ -180,6 +180,18 @@ def test_take_until_looks_ahead_without_moving_the_clock():
     assert [i["note"] for i in w.take({"until": "PT3H"})["items"]] == ["later"]
 
 
+def test_a_take_retried_with_its_take_id_gets_the_same_batch_back():
+    clock = _frozen_clock()
+    n = Notifications(lambda: clock)
+    n.notify("Messages", "Jamie: did the rug thing get sorted?")
+    first = n.take({"take_id": "t-1"})
+    assert [i["text"] for i in first["items"]] == ["Jamie: did the rug thing get sorted?"]
+    assert n.take({"take_id": "t-1"}) == first          # the response was lost; the retry still gets the item
+    assert n.take({"take_id": "t-2"})["items"] == []    # a new take hands nothing out twice
+    with pytest.raises(NotificationError, match="take_id"):
+        n.take({"take_id": ""})
+
+
 def test_notifications_queue_at_the_virtual_time_and_are_taken_once():
     clock = _frozen_clock()
     w = Notifications(lambda: clock)  # notifications need no switch

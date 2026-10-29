@@ -34,6 +34,8 @@ DEFAULT_MIN_INTERVAL = "PT1H"
 _MAX_NOTE_CHARS = 2000
 _MAX_CHANNEL_CHARS = 60
 _MAX_ROLE_CHARS = 100
+_MAX_TAKE_ID_CHARS = 128
+_KEPT_TAKES = 64  # take results kept for retries, oldest dropped first
 _CONFIG_FIELDS = ("roles", "max_active", "min_interval")
 _HISTORY = 50  # finished and cancelled checks state() still shows
 
@@ -93,6 +95,7 @@ class Notifications:
         self._min_interval = _parse_duration(DEFAULT_MIN_INTERVAL)
         self._checks: dict[str, dict] = {}
         self._queue: list[dict] = []  # what triggers sent, pending until taken
+        self._takes: dict[tuple[str, str], dict] = {}  # recent take results by (to, take_id), so a retry gets the same batch
         self._seq = 0
 
     @property
@@ -136,6 +139,7 @@ class Notifications:
             self._roles = ()
             self._checks.clear()
             self._queue.clear()
+            self._takes.clear()
         return {"ok": True}
 
     @property
@@ -262,9 +266,18 @@ class Notifications:
     def take(self, body: Any = None) -> dict:
         """Everything due for the recipient `to` (default: the solver's role) by `until` (default: now), oldest
         first; each is handed out once. A repeating check moves to its next time after `until` and says how many
-        times it came due, so a long jump wakes the agent once."""
+        times it came due, so a long jump wakes the agent once. A `take_id` makes it safe to retry: the same id for
+        the same recipient gets the same batch back instead of an empty one."""
         body = body if isinstance(body, dict) else {}
         to = _recipient(body.get("to", DEFAULT_ROLE))
+        take_id = body.get("take_id")
+        if take_id is not None and (not isinstance(take_id, str) or not take_id or len(take_id) > _MAX_TAKE_ID_CHARS):
+            raise NotificationError(f"take_id must be a non-empty string of at most {_MAX_TAKE_ID_CHARS} characters")
+        if take_id is not None:
+            with self._lock:
+                seen = self._takes.get((to, take_id))
+            if seen is not None:
+                return seen
         now = self._clock.now()
         until = _when(body["until"], now, "until") if body.get("until") is not None and now else now
         due: list[tuple[datetime | None, dict]] = []
@@ -287,8 +300,13 @@ class Notifications:
                 due.append((note["_at"], {"kind": "trigger", "id": note["id"], "to": to, "channel": note["channel"],
                                           "text": note["text"], "at": note["at"], "trigger_id": note["trigger_id"]}))
             self._prune()
-        due.sort(key=lambda d: (d[0] is not None, d[0]))
-        return {"to": to, "items": [item for _, item in due], "until": _iso(until) if until else None}
+            due.sort(key=lambda d: (d[0] is not None, d[0]))
+            result = {"to": to, "items": [item for _, item in due], "until": _iso(until) if until else None}
+            if take_id is not None:
+                self._takes[(to, take_id)] = result
+                while len(self._takes) > _KEPT_TAKES:
+                    del self._takes[next(iter(self._takes))]
+        return result
 
 
 def _after(check: dict, until: datetime) -> tuple[int, datetime | None]:

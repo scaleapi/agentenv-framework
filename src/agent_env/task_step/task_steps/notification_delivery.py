@@ -23,6 +23,7 @@ How prompt_agent delivers, after each agent turn:
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo
@@ -31,6 +32,7 @@ from agent_env.env.gateway.constants import EXT_NOTIFICATIONS_URI
 
 DEFAULT_TIME_ZONE = "UTC"
 _TAKE_ATTEMPTS = 3
+_TAKE_RETRY_BASE_DELAY_S = 0.5  # seconds; the nth retry waits n times this
 _EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
 
 
@@ -91,22 +93,28 @@ def says_nothing(parts: list[dict]) -> bool:
 async def take_due(envs: Iterable[Any], to: str) -> list[dict]:
     """Take what has come due for the role ``to`` from each env offering notifications/v1 ``take``, oldest first,
     each item tagged with its ``env_id``. ``take`` hands each item out once, so a caller that takes first (a hook)
-    leaves nothing here to repeat. An env that keeps failing raises: a due item silently dropped is worse."""
+    leaves nothing here to repeat. Each env's take carries one take_id across its retries, so a retry after a lost
+    response gets the same batch back. An env that keeps failing raises, after every env has been asked: the step
+    fails rather than carry on with a due item silently dropped."""
     envs = [env for env in envs if env.supports(EXT_NOTIFICATIONS_URI, "take")]
-    taken = await asyncio.gather(*(_take(env, to) for env in envs))
+    taken = await asyncio.gather(*(_take(env, to) for env in envs), return_exceptions=True)
+    failed = [(env, error) for env, error in zip(envs, taken) if isinstance(error, BaseException)]
+    if failed:
+        raise RuntimeError("; ".join(str(error) for _, error in failed)) from failed[0][1]
     items = [{**item, "env_id": env.env_id} for env, answer in zip(envs, taken) for item in answer.get("items") or []]
     return sorted(items, key=_oldest_first)
 
 
 async def _take(env: Any, to: str) -> dict:
     last: Optional[Exception] = None
+    body = {"to": to, "take_id": uuid.uuid4().hex}
     for attempt in range(_TAKE_ATTEMPTS):
         try:
-            return await env.invoke(EXT_NOTIFICATIONS_URI, "take", {"to": to})
+            return await env.invoke(EXT_NOTIFICATIONS_URI, "take", body)
         except Exception as e:
             last = e
             if attempt + 1 < _TAKE_ATTEMPTS:
-                await asyncio.sleep(0.5 * (attempt + 1))
+                await asyncio.sleep(_TAKE_RETRY_BASE_DELAY_S * (attempt + 1))
     raise RuntimeError(f"could not take what came due for role '{to}' from env '{env.env_id}': {last}")
 
 

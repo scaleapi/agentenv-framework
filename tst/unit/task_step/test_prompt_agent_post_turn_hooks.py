@@ -554,7 +554,7 @@ async def test_without_hooks_a_full_gateway_card_adds_clock_reads_and_empty_take
     assert [r for r in requests if r[1] == f"{ENV}/clock/state"] == [("GET", f"{ENV}/clock/state", None, 5)] * 4
     # one take, after the turn the conversation went on from; the user sim's done ended the next one
     assert [r for r in requests if r[1] == f"{ENV}/notifications/take"] == [
-        ("POST", f"{ENV}/notifications/take", {"to": "default"}, 30)]
+        ("POST", f"{ENV}/notifications/take", {"to": "default", "take_id": "<take_id>"}, 30)]
     stored, base = _stored(ctx, peers)["messages"], _stored(base_ctx, base_peers)["messages"]
     stamp = [{"env_id": "env", "env_step_id": None, "virtual_time": TUESDAY}]
     assert [{k: v for k, v in m.items() if k != "env_clock"} for m in stored] == base

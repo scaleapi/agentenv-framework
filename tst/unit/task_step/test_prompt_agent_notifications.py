@@ -42,6 +42,7 @@ class GatewayQueue(EnvPeers):
         origin = f"{request.url.scheme}://{request.url.host}"
         if origin == ENV and request.url.path == "/notifications/take":
             body = json.loads(request.content)
+            assert body.pop("take_id")  # fresh per take, reused only by its own retries
             self.takes.append(body)
             if self.fail_take:
                 return httpx.Response(503, json={"ok": False, "error": "gateway restarting"})
@@ -238,3 +239,36 @@ def test_a_blank_reply_adds_nothing_to_delivered_lines_and_without_them_is_sent_
     assert next_message(delivered, [{"kind": "text", "text": "  "}]) == delivered
     assert next_message([], [{"kind": "text", "text": "  "}]) == [{"kind": "text", "text": "  "}]
     assert next_message(delivered, text("and me")) == [*delivered, *text("and me")]
+
+
+class _FlakyEnv:
+    """An env whose first take is applied but its response lost, as a dropped connection would."""
+
+    env_id = "flaky"
+
+    def __init__(self, notifications):
+        self.notifications = notifications
+        self.bodies = []
+
+    def supports(self, extension, method):
+        return extension == EXT_NOTIFICATIONS_URI
+
+    async def invoke(self, extension, method, body):
+        self.bodies.append(dict(body))
+        answer = self.notifications.take(body)
+        if len(self.bodies) == 1:
+            raise RuntimeError("connection reset")
+        return answer
+
+
+@pytest.mark.asyncio
+async def test_a_take_retried_after_a_lost_response_still_delivers_the_item(monkeypatch):
+    monkeypatch.setattr(notification_delivery, "_TAKE_RETRY_BASE_DELAY_S", 0)
+    clock = Clock()
+    clock.set_time("2027-02-01T15:00:00Z", rate=0)
+    n = Notifications(lambda: clock)
+    n.notify("Messages", "Jamie: did the rug thing get sorted?")
+    env = _FlakyEnv(n)
+    items = await notification_delivery.take_due([env], "default")
+    assert [i["text"] for i in items] == ["Jamie: did the rug thing get sorted?"]
+    assert env.bodies[0]["take_id"] == env.bodies[1]["take_id"]
