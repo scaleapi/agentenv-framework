@@ -54,7 +54,7 @@ from agent_env.a2a_agent.object_transfer import (
 )
 from agent_env.a2a_agent.staging import StagedObjectStore, StagingError, transfer_store
 from agent_env.config import reset_config, set_object_store
-from agent_env.store import LocalFilesystemObjectStore
+from agent_env.store import GrantUnavailableError, LocalFilesystemObjectStore
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from tst.util.granting_object_store import GrantingObjectStore
@@ -466,3 +466,10 @@ async def test_a_drain_that_keeps_failing_is_reported_once(monkeypatch, caplog, 
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 2  # once while the prompt runs, once for the last drain
     assert "the agent could not be reached" in warnings[0].getMessage()
+
+
+def test_a_staged_store_does_not_forward_begin_write_to_the_store_it_wraps(tmp_path):
+    staged = StagedObjectStore(LocalFilesystemObjectStore(str(tmp_path)), "https://agent.example.test")
+    with pytest.raises(GrantUnavailableError):
+        staged.begin_write(staged.object_url("t.zip"), media_type="application/zip", max_bytes=8,
+                           kinds=frozenset({"http-put-parts"}))

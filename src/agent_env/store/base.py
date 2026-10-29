@@ -25,6 +25,11 @@ class GrantUnavailableError(RuntimeError):
     """Raised when an object store cannot issue a transfer grant for the requested lifetime."""
 
 
+class UploadFailedError(ValueError):
+    """Raised when a write a remote party made through a grant cannot be made into the object: the stored
+    bytes are not what it reported, or the store refused to finish it. The upload is discarded."""
+
+
 class ConcurrentModificationError(Exception):
     """Raised when an update fails due to a concurrent modification."""
 

@@ -54,6 +54,7 @@ from agent_env.store.object_store.object_store import (
     HttpGetGrant,
     HttpPutGrant,
     ObjectMetadata,
+    PendingWrite,
     UploadPolicy,
 )
 
@@ -633,6 +634,13 @@ class LocalRunObjectStore(ObjectStore):
     ) -> HttpPutGrant:
         return self._writing(object_url).issue_write_grant(
             object_url, media_type=media_type, max_bytes=max_bytes, **_lifetime(expires_in)
+        )
+
+    def begin_write(
+        self, object_url: str, *, media_type: str, max_bytes: int, kinds: frozenset[str], expires_in: int | None = None
+    ) -> PendingWrite:
+        return self._writing(object_url).begin_write(
+            object_url, media_type=media_type, max_bytes=max_bytes, kinds=kinds, **_lifetime(expires_in)
         )
 
     def issue_upload_policy(self, prefix_url: str, *, max_object_bytes: int, expires_in: int) -> UploadPolicy:

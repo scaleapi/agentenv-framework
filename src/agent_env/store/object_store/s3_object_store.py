@@ -4,27 +4,35 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import BinaryIO, NamedTuple
+from urllib.parse import urlsplit
 
 import boto3
 from agentenv_protocol.transfers import (
     HttpGetGrant,
+    HttpPartsPutGrant,
     HttpPostPolicyGrant,
+    MAX_PARTS,
     HttpPutGrant,
+    Uploaded,
+    WriteObject,
+    part_ranges,
 )
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BotocoreConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
-from agent_env.store.base import GrantUnavailableError, ObjectAlreadyExistsError, ObjectNotFoundError
+from agent_env.store.base import GrantUnavailableError, ObjectAlreadyExistsError, ObjectNotFoundError, UploadFailedError
 from agent_env.store.object_store.object_store import (
     DEFAULT_CONTENT_TYPE,
     DEFAULT_GRANT_LIFETIME_SECONDS,
     ObjectMetadata,
     ObjectStore,
+    PendingWrite,
     UploadPolicy,
     grant_lifetime,
 )
@@ -32,6 +40,10 @@ from agent_env.store.object_store.object_store import (
 logger = logging.getLogger(__name__)
 
 _MAX_SIGV4_EXPIRY_SECONDS = 7 * 24 * 60 * 60
+# A parts grant's parts: big enough to keep a large object's grant to a few hundred URLs, small enough
+# that a part retried alone costs little. S3 takes parts of at least 5 MiB, all but the last, and as many
+# as a grant may name (MAX_PARTS).
+PART_BYTES = 64 * 1024 * 1024
 # GET answers NoSuchKey; HEAD (and download_file, which starts with one) answers a bare 404.
 _MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
@@ -83,17 +95,21 @@ class S3ObjectStore(ObjectStore):
         grant_lifetime_seconds: int = DEFAULT_GRANT_LIFETIME_SECONDS,
     ) -> S3ObjectStore:
         """Build an adaptive-retry boto3 S3 client for ``bucket``."""
-        kwargs = {
-            "config": BotocoreConfig(
-                signature_version="s3v4",
-                retries={"max_attempts": 10, "mode": "adaptive"},
-                max_pool_connections=_MAX_POOL_CONNECTIONS,
-            )
-        }
-        if region:
-            kwargs["region_name"] = region
+        config = BotocoreConfig(
+            signature_version="s3v4",
+            retries={"max_attempts": 10, "mode": "adaptive"},
+            max_pool_connections=_MAX_POOL_CONNECTIONS,
+        )
+        kwargs = {"region_name": region} if region else {}
+        client = boto3.client("s3", config=config, **kwargs)
+        # On AWS's own S3 hosts, virtual-hosted URLs name the bucket's region, so grants work on a bucket created less
+        # than a day ago, which answers the global endpoint with a redirect; a dotted name can't be a host. An endpoint
+        # configured in their place, or an addressing style the AWS profile sets, is left as boto3 resolves it.
+        if _addressed_by_default_on_aws(client):
+            addressing = BotocoreConfig(s3={"addressing_style": "path" if "." in bucket else "virtual"})
+            client = boto3.client("s3", config=config.merge(addressing), **kwargs)
         return cls(
-            boto3.client("s3", **kwargs), bucket, region=region, share_credentials=share_credentials,
+            client, bucket, region=region, share_credentials=share_credentials,
             grant_lifetime_seconds=grant_lifetime_seconds,
         )
 
@@ -208,6 +224,49 @@ class S3ObjectStore(ObjectStore):
             expires_at=self._grant_expiry(expires_in),
             headers={"Content-Type": media_type},
         )
+
+    def begin_write(
+        self,
+        object_url: str,
+        *,
+        media_type: str,
+        max_bytes: int,
+        kinds: frozenset[str],
+        expires_in: int | None = None,
+    ) -> PendingWrite:
+        """A multipart upload whose parts the grant presigns, when the party takes ``http-put-parts``."""
+        if "http-put-parts" not in kinds:
+            return super().begin_write(
+                object_url, media_type=media_type, max_bytes=max_bytes, kinds=kinds, expires_in=expires_in
+            )
+        expires_in = self.grant_lifetime_seconds if expires_in is None else expires_in
+        self._check_sigv4_expiry(expires_in)
+        part_bytes = max(PART_BYTES, math.ceil(max_bytes / MAX_PARTS))
+        bucket, key = self._split(object_url)
+        try:
+            upload_id = self._s3.create_multipart_upload(Bucket=bucket, Key=key, ContentType=media_type)["UploadId"]
+        except (ClientError, BotoCoreError) as e:
+            raise GrantUnavailableError(f"S3 could not start an upload to {object_url} ({_code(e)})") from e
+        try:
+            urls = [
+                self._s3.generate_presigned_url(
+                    "upload_part",
+                    Params={"Bucket": bucket, "Key": key, "UploadId": upload_id, "PartNumber": number},
+                    ExpiresIn=expires_in,
+                )
+                for number in range(1, len(part_ranges(max_bytes, part_bytes)) + 1)
+            ]
+            grant = WriteObject(
+                media_type=media_type,
+                max_bytes=max_bytes,
+                write=HttpPartsPutGrant(
+                    kind="http-put-parts", part_bytes=part_bytes, urls=urls, expires_at=self._grant_expiry(expires_in)
+                ),
+            )
+        except BaseException:
+            _abort_quietly(self._s3, bucket, key, upload_id)
+            raise
+        return _S3PartsWrite(self._s3, object_url, grant, bucket=bucket, key=key, upload_id=upload_id)
 
     def issue_upload_policy(
         self, prefix_url: str, *, max_object_bytes: int, expires_in: int
@@ -371,3 +430,73 @@ def _missing_as_not_found(bucket: str, key: str) -> Iterator[None]:
         if e.response["Error"]["Code"] in _MISSING_CODES:
             raise ObjectNotFoundError(f"No object at s3://{bucket}/{key}.") from e
         raise
+
+
+class _S3PartsWrite(PendingWrite):
+    """A multipart upload a party fills through a parts grant; completing it makes the object."""
+
+    def __init__(self, s3, object_url: str, grant: WriteObject, *, bucket: str, key: str, upload_id: str) -> None:
+        super().__init__(object_url, grant)
+        self._s3 = s3
+        self._bucket = bucket
+        self._key = key
+        self._upload_id = upload_id
+
+    def _complete(self, uploaded: Uploaded) -> None:
+        ranges = part_ranges(uploaded.size_bytes, self.grant.write.part_bytes)
+        expected = [(number, length) for number, (_, length) in enumerate(ranges, start=1)]
+        try:
+            parts = [
+                part
+                for page in self._s3.get_paginator("list_parts").paginate(
+                    Bucket=self._bucket, Key=self._key, UploadId=self._upload_id
+                )
+                for part in page.get("Parts", [])
+            ]
+        except (ClientError, BotoCoreError) as e:
+            raise UploadFailedError(f"S3 could not list the parts uploaded to {self.object_url} ({_code(e)})") from e
+        parts.sort(key=lambda part: part["PartNumber"])
+        if [(part["PartNumber"], part["Size"]) for part in parts] != expected:
+            raise UploadFailedError(
+                f"the {len(parts)} parts uploaded to {self.object_url} do not make up the "
+                f"{uploaded.size_bytes}-byte object reported"
+            )
+        try:
+            self._s3.complete_multipart_upload(
+                Bucket=self._bucket,
+                Key=self._key,
+                UploadId=self._upload_id,
+                MultipartUpload={"Parts": [{"PartNumber": part["PartNumber"], "ETag": part["ETag"]} for part in parts]},
+            )
+        except (ClientError, BotoCoreError) as e:
+            raise UploadFailedError(f"S3 could not complete the upload to {self.object_url} ({_code(e)})") from e
+
+    def _abort(self) -> None:
+        _abort_quietly(self._s3, self._bucket, self._key, self._upload_id)
+
+
+def _addressed_by_default_on_aws(client) -> bool:
+    """Whether ``client`` sends to one of AWS's own S3 hosts, not an endpoint configured in their place (an
+    S3-compatible store, a PrivateLink endpoint), with no addressing style configured."""
+    meta = getattr(client, "meta", None)
+    endpoint = getattr(meta, "endpoint_url", None)
+    host = urlsplit(endpoint).hostname if isinstance(endpoint, str) else None
+    configured = (getattr(getattr(meta, "config", None), "s3", None) or {}).get("addressing_style")
+    return (configured is None and host is not None and host.startswith(("s3.", "s3-"))
+            and host.endswith((".amazonaws.com", ".amazonaws.com.cn")))
+
+
+def _code(e: ClientError | BotoCoreError) -> str:
+    if isinstance(e, ClientError):
+        return e.response.get("Error", {}).get("Code", "unknown")
+    return type(e).__name__
+
+
+def _abort_quietly(s3, bucket: str, key: str, upload_id: str) -> None:
+    """Abort an upload, logging rather than raising a failure: it runs while another error is unwinding,
+    and the bucket's abandoned-upload lifecycle rule is the backstop."""
+    try:
+        s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+    except (ClientError, BotoCoreError) as e:
+        if _code(e) != "NoSuchUpload":
+            logger.warning("Could not abort the upload to s3://%s/%s (%s)", bucket, key, _code(e))
