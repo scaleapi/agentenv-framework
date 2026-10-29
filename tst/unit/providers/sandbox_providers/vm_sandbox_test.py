@@ -14,7 +14,7 @@ from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.store import ImageStore, RegistryAuth, set_object_store
 from agent_env.config import get_config, reset_config
 from tst.unit.store.fakes import ConfiguredObjectStore
-from tst.util.exec_scripts import script_run
+from tst.util.exec_scripts import run_with_stubs, script_run
 
 
 def _image(tar_gz_object_url: str | None, image_name: str = "img:1") -> DockerImageArtifact:
@@ -131,11 +131,23 @@ async def test_a_load_of_tarballs_runs_the_script_it_always_has(signing_store):
 
     flags = "--retry 5 --retry-all-errors --retry-delay 1"
     assert sandbox.scripts == [
-        f'(curl -fsSL {flags} "https://signed/a.tar.gz" -o /tmp/_docker_image_vm-test_0.tar.gz '
+        f"(curl -fsSL {flags} https://signed/a.tar.gz -o /tmp/_docker_image_vm-test_0.tar.gz "
         "&& gunzip -c /tmp/_docker_image_vm-test_0.tar.gz | docker load && rm -f /tmp/_docker_image_vm-test_0.tar.gz) & "
-        f'(curl -fsSL {flags} "https://signed/b.tar.gz" -o /tmp/_docker_image_vm-test_1.tar.gz '
+        f"(curl -fsSL {flags} https://signed/b.tar.gz -o /tmp/_docker_image_vm-test_1.tar.gz "
         "&& gunzip -c /tmp/_docker_image_vm-test_1.tar.gz | docker load && rm -f /tmp/_docker_image_vm-test_1.tar.gz) & wait"
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_signed_url_with_shell_syntax_reaches_curl_as_it_is(signing_store, tmp_path):
+    name = "a$(touch pwned)`touch pwned`;touch pwned;&.tar.gz"
+    sandbox = _RecordingVmSandbox(images_stdout="a\n")
+
+    await sandbox.load_docker_images([_image(f"s3://bucket/{name}", "a:1")])
+
+    curl, = run_with_stubs(sandbox.scripts[0], tmp_path, "curl", "gunzip", "docker")["curl"]
+    assert curl[-3:] == [f"https://signed/{name}", "-o", "/tmp/_docker_image_vm-test_0.tar.gz"]
+    assert not (tmp_path / "pwned").exists()
 
 
 class _Registry(ImageStore):
@@ -177,7 +189,7 @@ async def test_tarballs_are_loaded_and_the_rest_pulled(signing_store, registry):
     await sandbox.load_docker_images([_image(None, PUBLIC), _image("s3://bucket/a.tar.gz", "a:1")])
 
     load, pull = sandbox.scripts
-    assert '"https://signed/a.tar.gz"' in load and PUBLIC not in load
+    assert " https://signed/a.tar.gz " in load and PUBLIC not in load
     assert pull == f"docker pull {PUBLIC}"
 
 
@@ -972,7 +984,7 @@ async def test_tarballs_are_loaded_registry_images_pulled_and_contexts_built(sig
     await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz", "a:1"), _image(None, PUBLIC),
                                       _context_image("c", "sha256:" + "3" * 64)])
 
-    assert '"https://signed/a.tar.gz"' in sandbox.scripts[0]
+    assert " https://signed/a.tar.gz " in sandbox.scripts[0]
     assert sandbox.scripts[1] == f"docker pull {PUBLIC}"
     assert not any("local/c-0123456789ab" in script for script in sandbox.scripts if script.startswith("docker pull"))
     assert sandbox.scripts[-2].endswith("-t local/c-0123456789ab:v1 .")

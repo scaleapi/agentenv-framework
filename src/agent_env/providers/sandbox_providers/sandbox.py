@@ -476,7 +476,7 @@ class VmSandbox(Sandbox):
                 # Download to a file first (retry-safe with -o); a `curl | ... docker load`
                 # pipe can't be retried without corrupting the stream (curl won't rewind).
                 load_commands.append(
-                    f'(curl -fsSL {CURL_RETRY_FLAGS} "{signed}" -o {shlex.quote(tmp_tar)} '
+                    f"(curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(signed)} -o {shlex.quote(tmp_tar)} "
                     f"&& gunzip -c {shlex.quote(tmp_tar)} | docker load && rm -f {shlex.quote(tmp_tar)})"
                 )
             else:
@@ -757,7 +757,7 @@ async def upload_vm_file(sandbox: VmSandbox, vm_path: str, store: ObjectStore, o
     machine."""
     put_url = await asyncio.to_thread(store.signed_put_url, object_url)
     if put_url is not None:
-        await sandbox.exec_script(f'curl -fsSL -X PUT --upload-file {shlex.quote(vm_path)} "{put_url}"')
+        await sandbox.exec_script(f"curl -fsSL -X PUT --upload-file {shlex.quote(vm_path)} {shlex.quote(put_url)}")
         return
     with tempfile.TemporaryDirectory(prefix="agentenv-vm-file-") as directory:
         local_path = os.path.join(directory, posixpath.basename(vm_path))
