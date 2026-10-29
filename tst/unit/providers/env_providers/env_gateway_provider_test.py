@@ -1184,13 +1184,16 @@ async def test_a_deploy_on_this_machine_writes_the_trust_files_beside_its_compos
 
 @pytest.mark.asyncio
 async def test_a_local_sandbox_keeps_the_trust_files_in_its_work_dir(tmp_path, monkeypatch):
-    """The CA's own folder may sit outside what Docker shares; the work dir, where the compose runs, is shared."""
+    """The CA's own folder may sit outside what Docker shares; the work dir, where the compose runs, is shared. The bundle
+    of public roots and the CA is a few hundred KB, so it is written in chunks."""
     (tmp_path / "ca").mkdir()
-    (tmp_path / "ca" / "ca.pem").write_bytes(b"ca")
+    trust = {"ca.pem": b"ca", "ca-bundle.pem": b"r" * (300 * 1024)}
+    for name, content in trust.items():
+        (tmp_path / "ca" / name).write_bytes(content)
     monkeypatch.setattr(env_gateway_provider, "local_grant_trust", lambda: tmp_path / "ca")
 
     assert await EnvironmentGatewayProvider._stage_trust_files(LocalSandbox(work_dir=tmp_path / "work")) == "./trust"
-    assert (tmp_path / "work" / "trust" / "ca.pem").read_bytes() == b"ca"
+    assert {p.name: p.read_bytes() for p in (tmp_path / "work" / "trust").iterdir()} == trust
 
 
 # --- sidecar rendering --------------------------------------------------------
