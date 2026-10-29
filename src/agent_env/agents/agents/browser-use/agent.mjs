@@ -24,6 +24,14 @@ models.setProvider(createProvider({
   api: openAICompletionsApi(),
 }));
 
+// A cancelled turn stops its browser before it goes, one it is still opening included.
+let agent;
+let cancelled = false;
+process.once('SIGTERM', () => {
+  cancelled = true;
+  if (agent) agent.close().finally(() => process.exit(143));
+});
+
 // Each env's MCP tools become the agent's tools, named <server>__<tool>.
 const clients = [];
 const tools = [];
@@ -53,7 +61,8 @@ function addTool(client, server, tool) {
   });
 }
 
-const agent = await BrowserUse.create({
+if (cancelled) process.exit(143);
+agent = await BrowserUse.create({
   model: `agentenv/${turn.model}`,
   models,
   reasoning: turn.effort,
@@ -64,8 +73,7 @@ const agent = await BrowserUse.create({
   historyFile: existsSync(turn.historyFile) ? turn.historyFile : undefined,
   telemetry: false,
 });
-// A cancelled turn stops its browser before it goes.
-process.once('SIGTERM', () => agent.close().finally(() => process.exit(143)));
+if (cancelled) await agent.close().finally(() => process.exit(143));
 try {
   const options = { maxSteps: turn.maxSteps, timeoutMs: turn.timeoutMs, onEvent: (event) => print({ type: 'event', event }) };
   const result = existsSync(turn.historyFile) ? await agent.followUp(turn.prompt, options) : await agent.run(turn.prompt, options);

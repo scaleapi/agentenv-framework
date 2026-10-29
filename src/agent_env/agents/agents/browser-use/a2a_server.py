@@ -98,12 +98,15 @@ class BrowserUseAgent(AgentEnvAgent):
                 process.stdin.write(json.dumps(turn).encode())
                 process.stdin.close()
                 async for line in process.stdout:
-                    if not line.startswith(b"{"):
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue  # output of agent.mjs' libraries, not one of its own lines
+                    if not isinstance(message, dict):
                         continue
-                    message = json.loads(line)
-                    if message["type"] == "result":
+                    if message.get("type") == "result":
                         result = message["result"]
-                    elif message["event"]["type"] not in _UNRECORDED_EVENTS:
+                    elif message.get("type") == "event" and message["event"]["type"] not in _UNRECORDED_EVENTS:
                         request.trajectory.append(message["event"])
                         tool_calls += message["event"]["type"] == "tool_execution_end"
                 await process.wait()

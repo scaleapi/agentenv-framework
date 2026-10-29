@@ -15,6 +15,9 @@ if scenario == "hang":
 if scenario == "crash":
     sys.stderr.write("Error: Browser Use Cloud POST failed (401).")
     sys.exit(1)
+# A library's own stdout, between agent.mjs' lines.
+print("{ not json")
+print(json.dumps({"level": "info", "msg": "connected"}))
 for event in ({"type": "agent_start"}, {"type": "message_update"}, {"type": "tool_execution_end"}, {"type": "agent_end"}):
     print(json.dumps({"type": "event", "event": event}))
 print(json.dumps({"type": "result", "result": {
