@@ -19,7 +19,7 @@ import httpx
 
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object, uploaded_object_path
 from agentenv_protocol.client import find_extension, find_extension_method, write_kinds
-from agentenv_protocol.transfers import WriteNamespaceGrant, part_ranges
+from agentenv_protocol.transfers import HttpPartsPutGrant, WriteNamespaceGrant, part_ranges
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
 from agent_env.env.gateway.constants import CHANGES_PAGE_MAX, EXT_CHANGES_URI, EXT_TRAJECTORY_URI
@@ -553,7 +553,9 @@ class SnapshotEnvTaskStep(TaskStep):
                 part = resp.parts[0] if resp.parts else None
                 if write is not None and (uploaded := uploaded_object(part)) is not None:
                     await _finish_in_thread(write.complete, uploaded)
-                    parts = len(part_ranges(uploaded.size_bytes, write.grant.write.part_bytes))
+                    if not isinstance(grant := write.grant.write, HttpPartsPutGrant):
+                        return exported("object", write.object_url, f" ({uploaded.size_bytes} bytes)")
+                    parts = len(part_ranges(uploaded.size_bytes, grant.part_bytes))
                     return exported("parts", write.object_url, f" ({uploaded.size_bytes} bytes in {parts} parts)")
             finally:
                 if write is not None:

@@ -1140,13 +1140,15 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
     @staticmethod
     async def _stage_trust_files(sandbox: VmSandbox) -> str | None:
         """Write the local transfer CA's trust files beside the compose file and return where it finds them, on a sandbox
-        on this machine when the store hands out local grants, which its services are given; None otherwise."""
+        on this machine when the store hands out local grants, which its services are given; None otherwise. They are
+        made readable by any user a service runs as, whatever the umask they were written under."""
         if not sandbox.ON_THIS_MACHINE or (trust_dir := await asyncio.to_thread(local_grant_trust)) is None:
             return None
-        directory = f"{GATEWAY_APP_DIR}/{_TRUST_FILES_DIR}"
+        directory = shlex.quote(f"{GATEWAY_APP_DIR}/{_TRUST_FILES_DIR}")
         await sandbox.exec_script(f"mkdir -p {directory}", max_retries=2)
         for path in sorted(trust_dir.iterdir()):
-            await sandbox.write_host_file(await asyncio.to_thread(path.read_bytes), f"{directory}/{path.name}")
+            await sandbox.write_host_file(await asyncio.to_thread(path.read_bytes), f"{GATEWAY_APP_DIR}/{_TRUST_FILES_DIR}/{path.name}")
+        await sandbox.exec_script(f"chmod 755 {directory} && chmod 644 {directory}/*", max_retries=2)
         return f"./{_TRUST_FILES_DIR}"
 
     @staticmethod

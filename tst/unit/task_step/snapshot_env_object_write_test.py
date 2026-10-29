@@ -50,6 +50,13 @@ class _WatchedStore(GrantingObjectStore):
         return write
 
 
+class _PutOnlyStore(_WatchedStore):
+    """Answers a service that takes parts with one PUT, as a store may."""
+
+    def begin_write(self, object_url, *, kinds, **kwargs):
+        return super().begin_write(object_url, kinds=kinds - {"http-put-parts"}, **kwargs)
+
+
 class _GatedStore(_WatchedStore):
     """Holds the export at ``at`` (beginning the write, pushing creds, completing it) until released."""
 
@@ -148,6 +155,33 @@ async def test_a_service_taking_parts_uploads_to_an_object_of_its_own_and_is_reg
     assert bundle.object_url == store.object_url(key)
     assert (bundle.filename, bundle.content_type, bundle.load()) == ("gdrive.zip", "application/zip", _BUNDLE)
     assert f"gdrive exported through parts ({len(_BUNDLE)} bytes in 1 parts)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_service_taking_parts_that_is_handed_one_put_is_registered_there_too(
+    local_stores, tmp_path, pushes, monkeypatch, caplog
+):
+    store = _PutOnlyStore(str(tmp_path / "objects"))
+    set_object_store(store)
+    record = await _record({"mcp-gdrive": [_PARTS]})
+
+    def answer(params):
+        grant = params["write_object"]["write"]
+        assert grant["kind"] == "http-put"
+        store.put(unquote(urlsplit(grant["url"]).path.lstrip("/")), _BUNDLE, content_type="application/zip")
+        part = uploaded_object_part(Uploaded(size_bytes=len(_BUNDLE)), name="gdrive.zip", mime_type="application/zip")
+        return {"parts": [part.model_dump(mode="json", exclude_none=True)]}
+
+    _serve(monkeypatch, {"gdrive": answer})
+    with caplog.at_level(logging.INFO, logger=snapshot_mod.logger.name):
+        result = await SnapshotEnvTaskStep.snapshot_env_state(
+            env=_FakeMultiEnv(["gdrive"]), gateway_url="https://gw-1", snapshot_id="snap-put", deployed=record,
+        )
+
+    assert store.ended == ["completed"]
+    (bundle,) = EnvironmentUniverseArtifact.get(result.environment_universe_artifact_id).get_file_artifacts().values()
+    assert bundle.load() == _BUNDLE
+    assert f"gdrive exported through object ({len(_BUNDLE)} bytes)" in caplog.text
 
 
 @pytest.mark.asyncio

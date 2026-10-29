@@ -7,9 +7,11 @@ import contextlib
 import dataclasses
 import json
 import logging
+import os
 import re
 import shlex
 import socket
+import stat
 import subprocess
 from datetime import datetime
 from types import SimpleNamespace
@@ -1179,21 +1181,29 @@ async def test_a_deploy_on_this_machine_writes_the_trust_files_beside_its_compos
 
     expected = {"/app/trust/ca-bundle.pem": b"roots+ca", "/app/trust/ca.pem": b"ca"} if staged else {}
     assert sandbox.files == expected
-    assert sandbox.scripts == (["mkdir -p /app/trust"] if staged else [])
+    assert sandbox.scripts == (["mkdir -p /app/trust", "chmod 755 /app/trust && chmod 644 /app/trust/*"] if staged else [])
 
 
 @pytest.mark.asyncio
 async def test_a_local_sandbox_keeps_the_trust_files_in_its_work_dir(tmp_path, monkeypatch):
     """The CA's own folder may sit outside what Docker shares; the work dir, where the compose runs, is shared. The bundle
-    of public roots and the CA is a few hundred KB, so it is written in chunks."""
+    of public roots and the CA is a few hundred KB, so it is written in chunks, and a service running as any user reads
+    the files, whatever the deploy's umask."""
     (tmp_path / "ca").mkdir()
     trust = {"ca.pem": b"ca", "ca-bundle.pem": b"r" * (300 * 1024)}
     for name, content in trust.items():
         (tmp_path / "ca" / name).write_bytes(content)
     monkeypatch.setattr(env_gateway_provider, "local_grant_trust", lambda: tmp_path / "ca")
 
-    assert await EnvironmentGatewayProvider._stage_trust_files(LocalSandbox(work_dir=tmp_path / "work")) == "./trust"
-    assert {p.name: p.read_bytes() for p in (tmp_path / "work" / "trust").iterdir()} == trust
+    umask = os.umask(0o077)
+    try:
+        assert await EnvironmentGatewayProvider._stage_trust_files(LocalSandbox(work_dir=tmp_path / "work")) == "./trust"
+    finally:
+        os.umask(umask)
+    staged = tmp_path / "work" / "trust"
+    assert {p.name: p.read_bytes() for p in staged.iterdir()} == trust
+    assert {p.name: stat.S_IMODE(p.stat().st_mode) for p in [staged, *staged.iterdir()]} == {
+        "trust": 0o755, "ca.pem": 0o644, "ca-bundle.pem": 0o644}
 
 
 # --- sidecar rendering --------------------------------------------------------
@@ -1451,6 +1461,41 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser():
     assert compose.call_args.kwargs["mcp_server_name"] == "crm"
     browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == "website-browser")
     assert browser.card_port == 18766  # its card is the recorder's
+
+
+@pytest.mark.asyncio
+async def test_deploy_via_vm_mounts_the_trust_files_it_staged_on_its_sandbox():
+    from agent_env.env.gateway import GatewayMode
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock())
+    gp._state_instance = MagicMock()
+    sandbox = AsyncMock()
+    sandbox_provider = MagicMock(create_vm=AsyncMock(return_value=sandbox))
+
+    class _Stop(Exception):
+        """Abort once the compose is rendered."""
+
+    with patch("agent_env.env.env.Env.get", side_effect=lambda env_id, *a, **k: MagicMock(docker_image_artifact=_loadable(env_id))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(EnvironmentGatewayProvider, "_stage_trust_files", AsyncMock(return_value="./trust")) as stage, \
+         patch.object(gp, "create_docker_compose", side_effect=_Stop) as compose:
+        with pytest.raises(_Stop):
+            await gp._deploy_via_vm(
+                sandbox_provider=sandbox_provider,
+                mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+                mcp_server_images=[_loadable("mcp-slack")],
+                gateway_port=18765,
+                website_configs=None,
+                website_images=None,
+                gateway_mode=GatewayMode.PERFORMANCE,
+                ttl_seconds=60,
+                disk_size_gb=10,
+            )
+
+    stage.assert_awaited_once_with(sandbox)
+    assert compose.call_args.kwargs["trust_files"] == "./trust"
 
 
 @pytest.mark.asyncio
