@@ -133,6 +133,16 @@ class _ObjectHandler:
         return [uploaded_object_part(uploaded, name="slack.zip", mime_type="application/zip")]
 
 
+class _PathsObjectHandler:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str] | None, WriteObject | None]] = []
+
+    @get_data
+    async def _state(self, paths: list[str] | None = None, write_object: WriteObject | None = None) -> list:
+        self.calls.append((paths, write_object))
+        return [DataPart(data={"rows": 1})]
+
+
 class _BothHandler:
     @get_data
     async def _state(
@@ -163,11 +173,9 @@ def _uris(card: EnvironmentCard) -> list[str]:
 
 def test_a_handler_that_takes_a_write_namespace_is_advertised():
     application, _ = _app(_UploadingHandler())
-    data_objects, transfers = application.environment_card.capabilities.extensions
-    assert data_objects.uri == DATA_OBJECTS_EXTENSION_URI
-    assert data_objects.params is None
-    assert transfers.uri == TRANSFERS_EXTENSION_URI
-    assert transfers.params == {"write": ["http-post-policy"]}
+    (extension,) = application.environment_card.capabilities.extensions
+    assert extension.uri == DATA_OBJECTS_EXTENSION_URI
+    assert extension.params is None
 
 
 def test_a_handler_that_takes_none_is_not():
@@ -179,8 +187,7 @@ def test_a_card_declared_data_objects_extension_wins():
     declared = EnvironmentExtension(uri=DATA_OBJECTS_EXTENSION_URI, description="declared")
     card = EnvironmentCard(name="slack", capabilities=EnvironmentCapabilities(extensions=[declared]))
     application, _ = _app(_UploadingHandler(), card)
-    assert application.environment_card.capabilities.extensions[0] == declared
-    assert _uris(application.environment_card) == [DATA_OBJECTS_EXTENSION_URI, TRANSFERS_EXTENSION_URI]
+    assert application.environment_card.capabilities.extensions == [declared]
 
 
 @pytest.mark.asyncio
@@ -382,11 +389,39 @@ async def test_get_data_sends_the_object_grant(monkeypatch):
 
     monkeypatch.setattr(protocol_v1.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handle)))
 
-    grant = _object_grant()
+    grant, namespace = _object_grant(), _grant()
     await protocol_v1.get_data("http://env", write_object=grant)
+    await protocol_v1.get_data("http://env", write_namespace=namespace, write_object=grant, paths=["Documents"])
 
     assert list(sent[0]["params"]) == ["write_object"]
     assert WriteObject.model_validate(sent[0]["params"]["write_object"]) == grant
+    assert list(sent[1]["params"]) == ["write_namespace", "write_object", "paths"]
+    assert sent[1]["params"]["paths"] == ["Documents"]
+
+
+@pytest.mark.asyncio
+async def test_a_handler_that_takes_paths_and_an_object_grant_is_handed_both():
+    handler = _PathsObjectHandler()
+    _, app = _app(handler)
+    grant = _object_grant()
+
+    body = await _post(app, _rpc({"paths": ["Documents"], "write_object": grant.model_dump(mode="json")}))
+
+    assert body["result"]["parts"] == [{"kind": "data", "data": {"rows": 1}}]
+    assert handler.calls == [(["Documents"], grant)]
+
+
+@pytest.mark.asyncio
+async def test_paths_sent_to_a_handler_that_takes_none_are_refused_before_its_object_grant_is_used():
+    handler = _ObjectHandler()
+    _, app = _app(handler)
+
+    body = await _post(app, _rpc({"paths": ["Documents"], "write_object": _object_grant().model_dump(mode="json")}))
+
+    assert body["error"]["code"] == -32602
+    assert "takes no paths" in body["error"]["data"]["detail"]
+    assert _SIGNATURE not in json.dumps(body)
+    assert handler.grants == []
 
 
 @pytest.mark.asyncio
@@ -448,3 +483,15 @@ def test_an_explicit_declaration_wins_over_the_data_objects_default(declared):
         EnvironmentExtension(uri=TRANSFERS_EXTENSION_URI, description="declared", params={"write": declared}),
     ]))
     assert protocol_v1.write_kinds(card.model_dump(mode="json", exclude_none=True)) == frozenset(declared)
+
+
+@pytest.mark.parametrize(("declared", "expected"), [
+    ("http-put-parts", frozenset()),
+    ([{"kind": "http-put-parts"}, "http-put"], frozenset({"http-put"})),
+    (None, frozenset()),
+], ids=["a-string", "non-string-entries", "none"])
+def test_a_malformed_declaration_reads_as_the_kinds_it_names_by_name(declared, expected):
+    card = {"name": "slack", "capabilities": {"extensions": [
+        {"uri": TRANSFERS_EXTENSION_URI, "description": "declared", "params": {"write": declared}},
+    ]}}
+    assert protocol_v1.write_kinds(card) == expected

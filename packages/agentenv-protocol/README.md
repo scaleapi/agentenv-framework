@@ -298,13 +298,12 @@ class SlackEnv(AgentEnvEnvironment):
 A handler that takes a `write_object` parameter (a `transfers.WriteObject`) is handed one object to
 upload its export to, named by the caller; it uploads with `transfers.upload(write_object, path)`,
 which sends a parts grant's ranges in parallel, and answers with `uploaded_object_part(uploaded,
-name=..., mime_type=...)`, read back with `uploaded_object(part)`. Each grant parameter a handler
-takes is declared under `urn:agentenv:transfers/v1` (`TRANSFERS_EXTENSION_URI`) as the write grant
-kinds it uploads through, `{"write": [...]}`: `write_namespace` adds `http-post-policy`, and
-`write_object` adds `http-put` and `http-put-parts`. `client.write_kinds(card)` reads them, taking a
-card without the declaration to accept `http-post-policy` alone when it advertises
-`DATA_OBJECTS_EXTENSION_URI`, and nothing otherwise; a caller sends only a grant whose kind the card
-lists.
+name=..., mime_type=...)`, read back with `uploaded_object(part)`. Such a handler is declared under
+`urn:agentenv:transfers/v1` (`TRANSFERS_EXTENSION_URI`) with the write grant kinds it uploads
+through, `{"write": [...]}`: `http-put` and `http-put-parts`, after `http-post-policy` when it also
+takes `write_namespace`. `client.write_kinds(card)` reads them, taking a card without the declaration
+to accept `http-post-policy` alone when it advertises `DATA_OBJECTS_EXTENSION_URI`, and nothing
+otherwise; a caller sends only a grant whose kind the card lists.
 
 ```python
 from agentenv_protocol import AgentEnvEnvironment, DataPart, environment_card, get_data, uploaded_object_part

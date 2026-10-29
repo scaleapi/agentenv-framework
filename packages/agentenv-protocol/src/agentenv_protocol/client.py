@@ -80,10 +80,11 @@ async def get_data(
 
 
 def write_kinds(card: dict) -> frozenset[str]:
-    """The write grant kinds a server's `data/get` takes: what its `TRANSFERS_EXTENSION_URI` declares, else
+    """The write grant kinds a server's `data/get` takes: the names its `TRANSFERS_EXTENSION_URI` lists, else
     `http-post-policy` alone for a server advertising `DATA_OBJECTS_EXTENSION_URI`, else none."""
     if find_extension(card, TRANSFERS_EXTENSION_URI) is not None:
-        return frozenset(extension_params(card, TRANSFERS_EXTENSION_URI).get("write") or ())
+        kinds = extension_params(card, TRANSFERS_EXTENSION_URI).get("write")
+        return frozenset(kind for kind in kinds if isinstance(kind, str)) if isinstance(kinds, list) else frozenset()
     if find_extension(card, DATA_OBJECTS_EXTENSION_URI) is not None:
         return frozenset({"http-post-policy"})
     return frozenset()

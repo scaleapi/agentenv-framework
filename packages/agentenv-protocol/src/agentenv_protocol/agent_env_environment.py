@@ -1134,8 +1134,10 @@ def _takes_write_object(fn: Callable) -> bool:
 
 
 def _merge_data_objects(card: EnvironmentCard, methods: dict) -> EnvironmentCard:
-    """Advertise the data-objects extension when the ``data/get`` handler takes a ``write_namespace``, and
-    the transfers extension with the write grant kinds its grant parameters take."""
+    """Advertise the data-objects extension when the ``data/get`` handler takes a ``write_namespace``, and the
+    transfers extension with the write grant kinds it uploads through when it takes a ``write_object``. A card
+    without the transfers extension reads as taking the namespace grant alone, so a handler that takes only that
+    keeps the card it had."""
     entry = methods.get(METHOD_GET)
     if entry is None:
         return card
@@ -1146,7 +1148,6 @@ def _merge_data_objects(card: EnvironmentCard, methods: dict) -> EnvironmentCard
         kinds.append("http-post-policy")
     if _takes_write_object(entry[1]):
         kinds.extend(["http-put", "http-put-parts"])
-    if kinds:
         declared.append((EnvironmentExtension(
             uri=TRANSFERS_EXTENSION_URI,
             description="The write grant kinds this server uploads through.",

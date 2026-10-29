@@ -45,8 +45,8 @@ SKILL_EXTENSION_URI = "urn:agentenv:skill/v1"
 
 # A declaration-only extension: the write grant kinds this server's library uploads through, as
 # `params = {"write": [kind, ...]}`. A `data/get` handler that takes a `write_object` param (a
-# `transfers.WriteObject`) lists `http-put` and `http-put-parts`; one that takes `write_namespace`
-# lists `http-post-policy`. A card without it takes `http-post-policy` alone when it advertises
+# `transfers.WriteObject`) lists `http-put` and `http-put-parts`, after `http-post-policy` when it also takes
+# `write_namespace`. A card without it takes `http-post-policy` alone when it advertises
 # `DATA_OBJECTS_EXTENSION_URI`, and no write grant otherwise.
 TRANSFERS_EXTENSION_URI = "urn:agentenv:transfers/v1"
 _RELATIVE_PATH = TypeAdapter(RelativePath)
