@@ -215,6 +215,10 @@ class _Parser:
                           '["agentenv-browser>=1.2"]')
             return ()
         for line in requires:
+            if not line.isprintable():
+                self._problem(self.bundle_toml, f"requires: {line!r} holds a character that can't be printed, so it "
+                              "can't be shown as written before it's installed")
+                continue
             try:
                 requirement = Requirement(line)
             except InvalidRequirement as e:

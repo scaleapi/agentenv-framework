@@ -290,7 +290,7 @@ def _write_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, (), (), id_root, None, None)
-        _say_plan(plan, say, own=False, dry_run=False)
+        _say_plan(plan, say, own=False, dry_run=False, installed=id_root is not None)
         return _written_with_infra(plan, preflight, say)
 
 
@@ -331,7 +331,7 @@ def dry_run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
-        _say_plan(plan, say, own=_own(root, id_root), dry_run=True)
+        _say_plan(plan, say, own=_own(root, id_root), dry_run=True, installed=id_root is not None)
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
@@ -362,7 +362,7 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandbox: str | None, id_root: str | None,
              agent: str | None, played: bool, say: Callable[[str], None], *, own: bool) -> PreparedBundle:
     plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played)
-    _say_plan(plan, say, own=own, dry_run=False)
+    _say_plan(plan, say, own=own, dry_run=False, installed=id_root is not None)
     materialization = _written_with_infra(plan, preflight, say)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
     return PreparedBundle(plan, materialization, to_run)
@@ -407,10 +407,10 @@ def refuse_store_tasks(plan: Plan) -> None:
         raise BundleError(problems)
 
 
-def _say_plan(plan: Plan, say: Callable[[str], None], *, own: bool, dry_run: bool) -> None:
-    """Say what each agent, env and artifact alias names, what the solver deploys in place of the tasks' agents, and
-    what plugin packages the bundle uses that its bundle.toml doesn't require, giving a folder of its ``own`` one
-    (``declare``)."""
+def _say_plan(plan: Plan, say: Callable[[str], None], *, own: bool, dry_run: bool, installed: bool) -> None:
+    """Say what each agent, env and artifact alias names, what the solver deploys in place of the tasks' agents, and,
+    unless the bundle is ``installed`` (whoever runs it can't edit it), what plugin packages it uses that its
+    bundle.toml doesn't require, giving a folder of its ``own`` one (``declare``)."""
     for use in (use for uses in plan.alias_uses.values() for use in uses.values()):
         say(_aliased(use))
     if plan.agent is not None:
@@ -418,8 +418,9 @@ def _say_plan(plan: Plan, say: Callable[[str], None], *, own: bool, dry_run: boo
         solved = sum(entry.id in plan.agent.steps for entry in runs)
         say(f"--agent {plan.agent.name}: the solver deploys {plan.agent.agent_id}, in {solved} of {len(runs)} "
             f"task{'s' if len(runs) != 1 else ''}")
-    for line in declare(plan.bundle, own=own, dry_run=dry_run):
-        say(line)
+    if not installed:
+        for line in declare(plan.bundle, own=own, dry_run=dry_run):
+            say(line)
 
 
 def _own(root: Path | str, id_root: str | None) -> bool:

@@ -22,6 +22,7 @@ from agent_env.bundle.requires import (
     Provider, Providers, UnmetRequirements, _create, declare, install_command, unmet, unmet_problems,
 )
 from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle.run import _write_bundle
 from agent_env.cli import _install_prompt, cli
 from agent_env.cli._installers import InstallerError
 from agent_env.config.runtime import Config
@@ -418,6 +419,23 @@ class TestCommands:
         assert registered == (WROTE,)
         assert parse_bundle(root).requires == ("agentenv-acme>=1.2.0",)
         assert register_bundle(root).requires == ()
+
+    def test_an_installed_bundle_is_never_told_what_to_declare_but_is_still_checked(self, stores):
+        root = _bundle(stores / "b", _Acme.type, _Configured.type)
+        installed = "@local/agentenv-acme/b"
+        lines = []
+
+        run_bundle(root, id_root=installed, on_progress=lines.append)
+        dry_run_bundle(root, id_root=installed, on_progress=lines.append)
+        _write_bundle(root, id_root=installed, on_progress=lines.append)
+        with namespace_routing():
+            prepare_bundle(root, id_root=installed, on_progress=lines.append)
+
+        assert not any("bundle.toml" in line or "configuration" in line for line in lines), lines
+        assert not (root / "bundle.toml").exists()
+        (root / "bundle.toml").write_text('requires = ["agentenv-missing>=1"]\n')
+        with pytest.raises(UnmetRequirements):
+            run_bundle(root, id_root=installed)
 
     def test_the_cli_registration_writes_it_unless_a_dry_run_and_says_so_once(self, stores, monkeypatch):
         monkeypatch.setattr(register_module, "_git", lambda root, *args: None)

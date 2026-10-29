@@ -250,6 +250,16 @@ class TestFolderRules:
         root = build(tmp_path / "b", {"bundle.toml": text, "tasks/t.json": "[]"})
         assert problems(root)[0].startswith(expected), problems(root)
 
+    @pytest.mark.parametrize("escape, shown", [("\\u001b[2K\\r", r"\x1b[2K\r"), ("\\u202e", r"\u202e")],
+                             ids=["terminal-escape", "right-to-left-override"])
+    def test_a_requirement_that_cant_be_shown_as_written_is_a_problem(self, tmp_path, escape, shown):
+        text = f'requires = ["evil; os_name != \\"{escape}agentenv-browser\\""]\n'
+        root = build(tmp_path / "b", {"bundle.toml": text, "tasks/t.json": "[]"})
+
+        assert problems(root) == (
+            f"bundle.toml: requires: 'evil; os_name != \"{shown}agentenv-browser\"' holds a character that can't be "
+            "printed, so it can't be shown as written before it's installed",)
+
     def test_bundle_toml_that_isnt_utf8_is_a_problem(self, tmp_path):
         root = build(tmp_path / "b", {"bundle.toml": b"requires = ['\xff']\n", "tasks/t.json": "[]"})
         assert problems(root)[0].startswith("bundle.toml: isn't valid TOML: ")
