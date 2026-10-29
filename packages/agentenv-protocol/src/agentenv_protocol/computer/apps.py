@@ -9,8 +9,9 @@ from pathlib import Path
 import httpx
 
 from .. import client
-from ..types import RPC_PATH, WELL_KNOWN_PATH
-from .app import CHECK_TIMEOUT_S, COMPUTER_APP, FAILURE, SOCKET
+from ..types import WELL_KNOWN_PATH
+from .app import COMPUTER_APP, FAILURE, SOCKET
+from .app_runtime import CHECK_TIMEOUT_S, AppReadiness
 from .operations import ReadyCheck
 
 #: Where a composed computer installs its apps, a folder each.
@@ -33,16 +34,21 @@ async def check(folder: Path) -> ReadyCheck:
             card = (await http.get(WELL_KNOWN_PATH)).raise_for_status().json()
             name = card["name"]
             launch = client.extension_params(card, COMPUTER_APP).get("launch")
-            answer = (await http.get(f"{RPC_PATH}/ext/computer-app/ready")).raise_for_status().json()
+            answer = AppReadiness.model_validate((await http.get(endpoint(card, "ready"))).raise_for_status().json())
     except (httpx.HTTPError, OSError):
         return ReadyCheck(f"app {name}", False, _unanswered(folder))
-    if launch is not None and launch["at"] == "demand" and not answer["launched"]:
+    if launch is not None and launch["at"] == "demand" and not answer.launched:
         return ReadyCheck(f"app {name}", True, "its server answers; it launches on demand")
-    if answer["ready"]:
+    if answer.ready:
         return ReadyCheck(f"app {name}", True, "ready")
-    when = (f"not ready after {answer['timeout_s']:.0f} s" if answer["waited_s"] > answer["timeout_s"]
-            else f"not ready yet, {answer['waited_s']:.0f} s in")
-    return ReadyCheck(f"app {name}", False, f"{when}: {'; '.join(answer['problems'])}")
+    when = (f"not ready after {answer.timeout_s:.0f} s" if answer.waited_s > answer.timeout_s
+            else f"not ready yet, {answer.waited_s:.0f} s in")
+    return ReadyCheck(f"app {name}", False, f"{when}: {'; '.join(answer.problems)}")
+
+
+def endpoint(card: dict, method: str) -> str:
+    """The path of a ``computer-app/v1`` method, as the app's card advertises it."""
+    return client.find_extension_method(card, COMPUTER_APP, method)["endpoint"]
 
 
 def _unanswered(folder: Path) -> str:

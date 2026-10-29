@@ -6,13 +6,9 @@ Its name is its env's ``environment_name``. On the computer the class runs as th
 which launches the app, adds its launcher and says whether it's ready (``computer-app/v1``)."""
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import os
-import shlex
-import time
-from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -20,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment, extension
 from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI
-from . import session
+from .app_runtime import AppRuntime
 from .errors import InvalidArgument
 
 #: The environment variable a computer delivers its apps' settings in: JSON of each app's values by its name.
@@ -35,10 +31,8 @@ COMPUTER_APP = "urn:agentenv:computer-app/v1"
 #: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
 SOCKET = Path(".agentenv/server.sock")
 FAILURE = Path(".agentenv/server.failure")
-#: Where an app's server marks that it launched the app since the computer booted, at boot or on demand.
-LAUNCHED = Path("/run/agentenv/apps")
-#: How long one readiness check may take; an app's checks run at once.
-CHECK_TIMEOUT_S = 10.0
+#: How long an app may take to be ready when its launch doesn't say.
+DEFAULT_TIMEOUT_S = 60.0
 
 
 class Service(BaseModel):
@@ -70,7 +64,7 @@ class Ready(BaseModel):
     window: bool = False
     port: Optional[int] = None
     command: Optional[list[str]] = None
-    timeout_s: float = 60
+    timeout_s: float = DEFAULT_TIMEOUT_S
 
     @model_validator(mode="after")
     def _waits_on_something(self) -> Ready:
@@ -173,6 +167,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     supports: ClassVar[list] = []
     permissions: ClassVar[list[str]] = []
+    _computer_app: Optional[AppRuntime] = None
     linux: ClassVar[Optional[Linux]] = None
     launch: ClassVar[Optional[Launch]] = None
     #: A file of the app's folder holding its skill for agents, when no ``@agent_skill`` method writes it.
@@ -184,26 +179,11 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     def __init__(self) -> None:
         values = json.loads(os.environ.get(APP_SETTINGS_ENV) or "{}").get(os.environ.get("ENVIRONMENT_NAME"), {})
         self.settings = self.Settings.model_validate(values)
-        self._computer_app_started_at = time.monotonic()
-        self._computer_app_launched_at: Optional[float] = None
-        self._computer_app_launch_failed: Optional[str] = None
-        #: Each sync ``@ready_check`` still running in its thread, by name, which a later poll waits on.
-        self._computer_app_checking: dict[str, asyncio.Future] = {}
-
-    async def _computer_app_start(self) -> None:
-        """Once the desktop session is up, add the app's menu launcher and launch a boot app, once per boot: a server
-        that restarts finds the app launched, at boot or on demand, and leaves it be."""
-        if self.launch is None:
-            return
-        await session.wait_until_up()
-        session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())
-        if _launched().exists():
-            self._computer_app_launched_at = time.monotonic()
-        elif self.launch.at == "boot":
-            try:
-                await self._computer_app_launch()
-            except Exception as e:
-                self._computer_app_launch_failed = f"{type(e).__name__}: {e}"
+        ready = self.launch.ready if self.launch is not None else None
+        self._computer_app = AppRuntime(
+            self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(type(self))
+                          if hasattr(fn, _READY_CHECK_ATTR)},
+            ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S)
 
     @extension(COMPUTER_APP, op="launch", description=(
         "The app's own server: launch launches the app from its folder, as its launcher and a boot do; ready says "
@@ -211,34 +191,16 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     async def _computer_app_launch(self) -> dict:
         if self.launch is None:
             raise InvalidArgument(f"{type(self).__name__} declares no launch")
-        pid = await session.launch(self.launch.command, Path.cwd(),
-                                   {"ENVIRONMENT_NAME": os.environ["ENVIRONMENT_NAME"]})
-        self._computer_app_launched_at, self._computer_app_launch_failed = time.monotonic(), None
-        _launched().parent.mkdir(parents=True, exist_ok=True)
-        _launched().touch()
-        return {"pid": pid}
+        return {"pid": await self._computer_app_runtime().launch_app()}
 
     @extension(COMPUTER_APP, op="ready", method="GET")
     async def _computer_app_ready(self) -> dict:
-        ready = self.launch.ready if self.launch is not None else None
-        checks: list[tuple[str, Callable[[], Awaitable[Optional[str]]]]] = []
-        if ready is not None and ready.window:
-            checks.append(("window", lambda: _window(self.launch.window)))
-        if ready is not None and ready.port is not None:
-            checks.append(("port", lambda: _port(ready.port)))
-        if ready is not None and ready.command:
-            checks.append(("command", lambda: _command(ready.command)))
-        checks += [(f"@ready_check {fn.__name__}", lambda fn=fn: _ready_check(fn, self))
-                   for fn in _methods(type(self)) if hasattr(fn, _READY_CHECK_ATTR)]
-        found = await asyncio.gather(*(_bounded(name, check) for name, check in checks))
-        problems = [problem for problem in found if problem is not None]
-        if self.launch is not None and self._computer_app_launched_at is None:
-            problems.insert(0, f"its launch failed: {self._computer_app_launch_failed}"
-                            if self._computer_app_launch_failed else "not launched yet")
-        since = self._computer_app_launched_at or self._computer_app_started_at
-        return {"ready": not problems, "problems": problems, "launched": self._computer_app_launched_at is not None,
-                "waited_s": round(time.monotonic() - since, 1),
-                "timeout_s": ready.timeout_s if ready is not None else Ready.model_fields["timeout_s"].default}
+        return (await self._computer_app_runtime().readiness()).model_dump()
+
+    def _computer_app_runtime(self) -> AppRuntime:
+        if self._computer_app is None:
+            raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")
+        return self._computer_app
 
     def extension_params(self, uri: str) -> dict:
         if uri == COMPUTER_APP:
@@ -270,65 +232,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         )
 
 
-def _launched() -> Path:
-    return LAUNCHED / Path.cwd().name
-
-
 def _methods(cls: type) -> list[Callable]:
     """The class's methods, each as the class resolves its name, in the order they were first defined."""
     names = dict.fromkeys(name for klass in reversed(cls.__mro__) for name, member in vars(klass).items()
                           if inspect.isfunction(member))
     return [method for name in names if inspect.isfunction(method := getattr(cls, name))]
 
-
-async def _bounded(name: str, check: Callable[[], Awaitable[Optional[str]]]) -> Optional[str]:
-    """What ``check`` finds wrong, within ``CHECK_TIMEOUT_S``; a check that runs past it or raises says so."""
-    try:
-        return await asyncio.wait_for(check(), CHECK_TIMEOUT_S)
-    except TimeoutError:
-        return f"{name} ran past {CHECK_TIMEOUT_S:g} s"
-    except Exception as e:
-        return f"{name}: {type(e).__name__}: {e}"
-
-
-async def _window(match: dict[str, str]) -> Optional[str]:
-    if any(all(window.get(key) == value for key, value in match.items()) for window in await session.windows()):
-        return None
-    return f"no window with {', '.join(f'{key} {value!r}' for key, value in match.items())}"
-
-
-async def _port(port: int) -> Optional[str]:
-    try:
-        _, writer = await asyncio.open_connection("127.0.0.1", port)
-    except OSError:
-        return f"nothing answers on port {port}"
-    writer.close()
-    return None
-
-
-async def _command(argv: list[str]) -> Optional[str]:
-    process = await asyncio.create_subprocess_exec(*argv, cwd=Path.cwd(), stdout=asyncio.subprocess.DEVNULL,
-                                                   stderr=asyncio.subprocess.PIPE)
-    try:
-        _, err = await process.communicate()
-    except asyncio.CancelledError:
-        process.kill()
-        raise
-    if process.returncode == 0:
-        return None
-    reason = (err.decode(errors="replace").strip().splitlines() or [""])[-1]
-    return f"{shlex.join(argv)} exited {process.returncode}" + (f": {reason}" if reason else "")
-
-
-async def _ready_check(fn: Callable, app: ComputerAppEnvironment) -> Optional[str]:
-    """A sync check runs in a thread, so it can't hold up the server, and once at a time: a thread can't be stopped, so
-    a poll while one runs past its bound waits on that same call."""
-    if inspect.iscoroutinefunction(fn):
-        passed = await fn(app)
-    else:
-        running = app._computer_app_checking.get(fn.__name__)
-        if running is None or running.done():
-            running = app._computer_app_checking[fn.__name__] = asyncio.ensure_future(asyncio.to_thread(fn, app))
-            running.add_done_callback(lambda done: done.cancelled() or done.exception())
-        passed = await asyncio.shield(running)
-    return None if passed else f"@ready_check {fn.__name__} returned {passed!r}"

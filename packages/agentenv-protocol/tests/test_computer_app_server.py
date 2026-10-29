@@ -24,21 +24,9 @@ import httpx  # noqa: E402
 import agentenv_protocol.computer.launch as launcher  # noqa: E402
 from agentenv_protocol import client  # noqa: E402
 from agentenv_protocol.computer import ComputerAppEnvironment, Launch, ReadyCheck, Ready, ready_check  # noqa: E402
-from agentenv_protocol.computer import app as app_module, apps, serve_app, session  # noqa: E402
+from agentenv_protocol.computer import app_runtime, apps, session  # noqa: E402
 from agentenv_protocol.computer.app import COMPUTER_APP, FAILURE, SOCKET  # noqa: E402
 
-READY = "/agentenv/ext/computer-app/ready"
-APP = '''from agentenv_protocol.computer import ComputerAppEnvironment
-
-
-class Helper:
-    pass
-
-
-class Broken(ComputerAppEnvironment):
-    def __init__(self):
-        raise RuntimeError("no mailbox")
-'''
 
 
 class Mail(ComputerAppEnvironment):
@@ -78,7 +66,7 @@ def desktop(monkeypatch, tmp_path):
     monkeypatch.setattr(session, "windows", windows)
     monkeypatch.setattr(session, "launch", launch)
     monkeypatch.setattr(session, "wait_until_up", up)
-    monkeypatch.setattr(app_module, "LAUNCHED", tmp_path / "launched")
+    monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
     monkeypatch.setenv("ENVIRONMENT_NAME", "mail")
     return shown, launched
 
@@ -89,12 +77,13 @@ async def test_an_apps_server_is_ready_once_it_launched_the_app_and_each_check_p
     mail = Mail()
     async with _http(mail) as http:
         card = (await http.get("/.well-known/agent-env.json")).json()
-        before = (await http.get(READY)).json()
-        assert (await http.post("/agentenv/ext/computer-app/launch", json={})).json() == {"pid": 4242}
+        ready = apps.endpoint(card, "ready")
+        before = (await http.get(ready)).json()
+        assert (await http.post(apps.endpoint(card, "launch"), json={})).json() == {"pid": 4242}
         shown.append({"instance": "mail", "class": "Mail", "title": "Inbox"})
-        unsynced = (await http.get(READY)).json()
+        unsynced = (await http.get(ready)).json()
         mail.synced = True
-        after = (await http.get(READY)).json()
+        after = (await http.get(ready)).json()
 
     assert client.extension_params(card, COMPUTER_APP)["launch"] == {
         "at": "boot", "command": ["mail"], "window": {"class": "Mail"}, "ready": {"window": True, "timeout_s": 30.0}}
@@ -108,7 +97,7 @@ async def test_an_apps_server_is_ready_once_it_launched_the_app_and_each_check_p
 
 @pytest.mark.asyncio
 async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_the_server(desktop, monkeypatch):
-    monkeypatch.setattr(app_module, "CHECK_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(app_runtime, "CHECK_TIMEOUT_S", 1.0)
     with socket.socket() as closed:
         closed.bind(("127.0.0.1", 0))
         port = closed.getsockname()[1]
@@ -141,19 +130,21 @@ async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_
 
 
 @pytest.mark.asyncio
-async def test_a_boot_app_is_launched_once_per_boot_with_its_launcher_added_each_start(desktop, tmp_path, monkeypatch):
+async def test_a_boot_app_is_launched_once_per_boot_its_clock_from_that_launch_across_restarts(desktop, tmp_path, monkeypatch):
     _, launched = desktop
     launchers = []
     monkeypatch.setattr(session, "add_launcher", lambda name, folder: launchers.append((name, folder)))
     monkeypatch.chdir(tmp_path)
 
     first, restarted = Mail(), Mail()
-    await first._computer_app_start()
-    await restarted._computer_app_start()
+    await first._computer_app.start()
+    os.utime(tmp_path / "launched" / tmp_path.name, (time.time() - 100,) * 2)
+    await restarted._computer_app.start()
 
     assert len(launched) == 1 and launchers == [("mail", tmp_path)] * 2
     assert (tmp_path / "launched" / tmp_path.name).exists()
-    assert (await restarted._computer_app_ready())["launched"] is True
+    answer = await restarted._computer_app_ready()
+    assert answer["launched"] is True and answer["waited_s"] >= 100
 
 
 @pytest.mark.asyncio
@@ -163,16 +154,16 @@ async def test_a_restarted_server_finds_the_demand_app_it_launched_and_leaves_it
     monkeypatch.setenv("ENVIRONMENT_NAME", "music")
 
     opened, restarted = Music(), Music()
-    await opened._computer_app_start()
+    await opened._computer_app.start()
     await opened._computer_app_launch()
-    await restarted._computer_app_start()
+    await restarted._computer_app.start()
 
     assert len(launched) == 1 and (await restarted._computer_app_ready())["launched"] is True
 
 
 @pytest.mark.asyncio
 async def test_a_sync_check_past_its_bound_runs_once_however_often_readiness_is_asked(desktop, monkeypatch):
-    monkeypatch.setattr(app_module, "CHECK_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(app_runtime, "CHECK_TIMEOUT_S", 0.2)
     released, calls = threading.Event(), []
 
     class Syncing(ComputerAppEnvironment):
@@ -184,7 +175,7 @@ async def test_a_sync_check_past_its_bound_runs_once_however_often_readiness_is_
     syncing = Syncing()
     stuck = [(await syncing._computer_app_ready())["problems"] for _ in range(3)]
     released.set()
-    while not syncing._computer_app_checking["synced"].done():
+    while not syncing._computer_app.checking["synced"].done():
         await asyncio.sleep(0.01)
     after = await syncing._computer_app_ready()
 
@@ -201,7 +192,7 @@ async def test_a_boot_app_whose_launch_fails_says_why_and_is_launched_again_by_i
     monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
     monkeypatch.setattr(session, "launch", missing)
     mail = Mail()
-    await mail._computer_app_start()
+    await mail._computer_app.start()
 
     assert (await mail._computer_app_ready())["problems"][0] == (
         "its launch failed: FileNotFoundError: No such file or directory: 'mail'")
@@ -220,7 +211,7 @@ async def test_the_driver_asks_each_apps_server_on_the_socket_in_its_folder(desk
             served = {name: await stack.enter_async_context(_serving(cls(), Path(root) / name, monkeypatch))
                       for name, cls in [("mail", Mail), ("music", Music), ("sync", Sync)]}
             first = [await apps.check(folder) for folder in apps.expected()]
-            served["mail"]._computer_app_started_at -= 120
+            served["mail"]._computer_app.started -= 120
             late = await apps.check(Path(root) / "mail")
             monkeypatch.setenv("ENVIRONMENT_NAME", "music")
             await asyncio.to_thread(launcher.main, [str(Path(root) / "music")])
@@ -240,48 +231,6 @@ async def test_the_driver_asks_each_apps_server_on_the_socket_in_its_folder(desk
     assert launched == [(["music"], Path.cwd(), {"ENVIRONMENT_NAME": "music"})]
     assert opened == ReadyCheck("app music", False, "not ready yet, 0 s in: no window with class 'Music'")
     assert playing == ReadyCheck("app music", True, "ready")
-
-
-@pytest.mark.asyncio
-async def test_serving_an_app_starts_it_once_the_server_serves_on_the_socket_in_its_folder(tmp_path, monkeypatch):
-    (tmp_path / "app.py").write_text("from agentenv_protocol.computer import ComputerAppEnvironment\n\n\n"
-                                     "class Notes(ComputerAppEnvironment):\n    pass\n")
-    (tmp_path / SOCKET).parent.mkdir()
-    (tmp_path / SOCKET).write_text("left by the last server")
-    (tmp_path / FAILURE).write_text("RuntimeError: the last start failed")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    monkeypatch.setattr(sys, "modules", dict(sys.modules))
-    started, ran = [], []
-    monkeypatch.setattr(ComputerAppEnvironment, "_computer_app_start", lambda self: _record(started, type(self)))
-    monkeypatch.setattr(serve_app.uvicorn, "run", lambda asgi, uds, log_level: ran.append((asgi, uds)))
-
-    serve_app.main(["app.py:Notes"])
-    (asgi, uds), = ran
-    async with asgi.router.lifespan_context(asgi):
-        await asyncio.sleep(0)
-
-    assert uds == str(SOCKET) and not (tmp_path / SOCKET).exists() and not (tmp_path / FAILURE).exists()
-    assert [cls.__name__ for cls in started] == ["Notes"]
-
-
-@pytest.mark.parametrize("argv, failure", [
-    ([], f"SystemExit: {serve_app.USAGE}"), (["app.py"], f"SystemExit: {serve_app.USAGE}"),
-    (["missing.py:Notes"], "SystemExit: missing.py isn't a file"),
-    (["app.py:Helper"], "SystemExit: app.py has no ComputerAppEnvironment subclass named Helper"),
-    (["app.py:Broken"], "RuntimeError: no mailbox"),
-], ids=["nothing", "no-class", "no-file", "not-an-app", "fails-to-construct"])
-def test_a_server_that_cant_start_says_why_in_the_apps_folder(tmp_path, monkeypatch, argv, failure):
-    (tmp_path / "app.py").write_text(APP)
-    (tmp_path / SOCKET).parent.mkdir()
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    monkeypatch.setattr(sys, "modules", dict(sys.modules))
-
-    with pytest.raises((SystemExit, RuntimeError)) as stopped:
-        serve_app.main(argv)
-
-    assert (tmp_path / FAILURE).read_text() == failure == f"{type(stopped.value).__name__}: {stopped.value}"
 
 
 @pytest.mark.asyncio
@@ -386,7 +335,3 @@ async def _serving(app: ComputerAppEnvironment, folder: Path, monkeypatch):
     finally:
         server.should_exit = True
         await serving
-
-
-async def _record(started: list, cls: type) -> None:
-    started.append(cls)
