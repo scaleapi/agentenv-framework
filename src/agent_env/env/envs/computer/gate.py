@@ -68,17 +68,25 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
 
 
 def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str) -> list[str]:
-    """The problems with ``values``, of ``app``'s settings by name, against the schema of its ``Settings``, each named
-    from ``at``: a setting it doesn't declare, a value or a missing one the schema refuses, or a secret's given as
-    anything but a bare reference."""
+    """The problems with ``values``, of ``app``'s settings by name, each named from ``at``: a setting it doesn't declare,
+    a secret's given as anything but a bare reference (or null, where it's optional), a required one missing, and what
+    the schema of its ``Settings`` refuses of the rest. A secret's reference never meets the constraints on its value,
+    and its value never reaches a message."""
     schema, secrets = app.declaration["settings"], app.secret_settings()
-    problems = [f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values
-                if name not in schema.get("properties", {})]
+    properties, required = schema.get("properties", {}), schema.get("required", [])
+    problems = [f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]
     problems += [f"{at}.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME reference "
                  "with no ?default, not its value" for name in values if name in secrets
-                 and not _names_a_secret(values[name])]
-    return problems + [f"{'.'.join([at, *map(str, error.absolute_path)])}: {error.message}"
-                       for error in Draft202012Validator(schema).iter_errors(values)]
+                 and not (_names_a_secret(values[name]) or values[name] is None and _optional(properties[name]))]
+    problems += [f"{at}: {name!r} is a required property" for name in required if name in secrets and name not in values]
+    plain = {**schema, "properties": {name: setting for name, setting in properties.items() if name not in secrets},
+             "required": [name for name in required if name not in secrets]}
+    return problems + [f"{'.'.join([at, *map(str, error.absolute_path)])}: {error.message}" for error in
+                       Draft202012Validator(plain).iter_errors({k: v for k, v in values.items() if k not in secrets})]
+
+
+def _optional(setting: dict) -> bool:
+    return any(option.get("type") == "null" for option in setting.get("anyOf", []))
 
 
 def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:

@@ -77,7 +77,10 @@ async def add_files(deployed: DeployedSandboxEnv, files: dict[str, bytes]) -> No
 
 async def read_file(deployed: DeployedSandboxEnv, path: str) -> bytes:
     """The bytes of the file at ``path``; FileNotFoundError when there is none."""
-    answer = await protocol_v1.get_data(deployed.environment_url, timeout=_READ_TIMEOUT_S, paths=[path])
+    try:
+        answer = await protocol_v1.get_data(deployed.environment_url, timeout=_READ_TIMEOUT_S, paths=[path])
+    except httpx.TransportError as e:
+        raise _broken(deployed, "data/get", e) from e
     for part in answer.parts:
         if (part.metadata or {}).get(DATA_OBJECTS_EXTENSION_URI, {}).get("path") == path:
             return base64.b64decode(part.file.bytes)
@@ -92,14 +95,23 @@ async def run(deployed: DeployedSandboxEnv, argv: list[str], *, timeout_s: float
     for attempt in range(_TRIES):
         try:
             return await deployed.invoke(COMPUTER_EXEC, "run", params, timeout=timeout_s + CALL_MARGIN_S)
-        except httpx.TransportError:
+        except httpx.TransportError as e:
             if attempt == _TRIES - 1:
-                raise
+                raise _broken(deployed, f"computer-exec/v1 run, {_TRIES} times", e) from e
             await asyncio.sleep(2 ** attempt)
 
 
 async def _add(deployed: DeployedSandboxEnv, parts: list[FilePart], size: int) -> None:
-    await protocol_v1.add_data(deployed.environment_url, parts, timeout=data_plane_load_timeout_s(size))
+    try:
+        await protocol_v1.add_data(deployed.environment_url, parts, timeout=data_plane_load_timeout_s(size))
+    except httpx.TransportError as e:
+        raise _broken(deployed, "data/add, so some of the files it carried may be written, each whole", e) from e
+
+
+def _broken(deployed: DeployedSandboxEnv, during: str, error: httpx.TransportError) -> RuntimeError:
+    """What a call to the computer's driver failed by when its connection broke, which httpx often says nothing of."""
+    return RuntimeError(f"env '{deployed.env_id}': the connection to its driver broke during {during} "
+                        f"({type(error).__name__}{f': {error}' if str(error) else ''})")
 
 
 def _part(path: str, artifact: FileArtifact, sandbox_type: Optional[str], granted: bool) -> tuple[FilePart, int]:

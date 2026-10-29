@@ -13,6 +13,7 @@ import tarfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
@@ -928,12 +929,12 @@ async def test_a_load_outside_the_home_is_refused_before_anything_is_sent(base, 
 
 MAIL_SETTINGS = {"properties": {
     "signature": {"default": "", "type": "string"},
-    "password": {"default": "", "type": "string", "format": "password", "writeOnly": True},
+    "password": {"default": "", "type": "string", "format": "password", "writeOnly": True, "minLength": 32},
     "token": {"anyOf": [{"type": "string", "format": "password", "writeOnly": True}, {"type": "null"}], "default": None},
     "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
 
 
-def _app(base, driver, folder, compose=True, supports=None, install=None, **changes):
+def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
@@ -942,7 +943,7 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, **chan
         name: folder / name for name in ("app.py", "requirements.txt")})
     declaration = {
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
-        "permissions": [], "computer": None, "driver": None, "launch": None, "settings": MAIL_SETTINGS, "skill": None,
+        "permissions": [], "computer": None, "driver": None, "launch": None, "settings": settings, "skill": None,
         "data": [], "install_steps": [], "ready_checks": [],
         "install": {"linux": install or {"python": "requirements.txt", "services": [
             {"name": "imap", "command": "venv/bin/python imap.py"}]}}}
@@ -1014,6 +1015,41 @@ async def test_an_app_deployed_alone_is_named_after_it_and_handed_its_settings_a
     assert json.loads(environment["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada", "password": "s3cret",
                                                                          "token": "t0ken"}}
     assert deployed.env_id == app.id and deployed.metadata["computer"]["env_params"] == {"app_settings": settings}
+
+
+def test_a_secrets_reference_meets_no_constraint_on_its_value_and_an_optional_one_may_be_null(base, driver, docker,
+                                                                                            tmp_path):
+    app = _app(base, driver, tmp_path / "mail")
+    env_params = {"app_settings": {"mail": {"password": "env:MAIL_PASSWORD", "token": None}}}
+
+    assert DeployEnvTaskStep(id="d", version=None, env_id=app.id, env_params=env_params).preflight() == []
+
+
+def test_a_required_secret_left_out_is_named_and_a_secrets_value_never_reaches_a_message(base, driver, docker,
+                                                                                         tmp_path):
+    settings = {**MAIL_SETTINGS, "required": ["password", "signature"]}
+    app = _app(base, driver, tmp_path / "mail", settings=settings)
+
+    left_out = DeployEnvTaskStep(id="d", version=None, env_id=app.id,
+                                 env_params={"app_settings": {"mail": {"signature": "-- Ada"}}}).preflight()
+    given = DeployEnvTaskStep(id="d", version=None, env_id=app.id, env_params={"app_settings": {"mail": {
+        "signature": "-- Ada", "password": "hunter2"}}}).preflight()
+
+    assert len(left_out) == 1 and "env_params.app_settings.mail: 'password' is a required property" in left_out[0]
+    assert len(given) == 1 and "password is a secret" in given[0] and "hunter2" not in given[0]
+
+
+@pytest.mark.asyncio
+async def test_a_load_whose_connection_to_the_driver_breaks_says_so(base, driver, docker, computer, tmp_path,
+                                                                     monkeypatch):
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: False)
+    computer.add_fails = httpx.ReadError("")
+    env = _deployed_env(base, driver, computer)
+
+    with pytest.raises(RuntimeError, match=re.escape(
+            f"env '{env.id}': the connection to its driver broke during data/add, so some of the files it carried "
+            "may be written, each whole (ReadError)")):
+        await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}))
 
 
 @pytest.mark.asyncio
