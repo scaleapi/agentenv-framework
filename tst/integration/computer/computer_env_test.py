@@ -2,8 +2,8 @@
 builds an image for each arch this machine's Docker can build, pushed to the local registry and written as the env's
 computer, and gate 3 makes the image of this machine's arch ready; that image boots with everything running as the
 session user and passes the conformance probe at full three times in a row; another env that changes only what doesn't
-change the image reuses it; one with no network, deployed, is reached but reaches nothing, comes back from a reset
-fresh, and leaves nothing once torn down; and a recording open when the computer resets or is torn down is ended by
+change the image reuses it; one with no network, deployed, is reached but reaches nothing, takes a file and runs
+code that reaches its driver on loopback, comes back from a reset fresh, and leaves nothing once torn down; and a recording open when the computer resets or is torn down is ended by
 the computer and registered whole. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
@@ -18,6 +18,7 @@ from agentenv_protocol.computer import COMPUTER_READY
 from agentenv_protocol.computer.conformance import run_probe
 from agentenv_protocol.computer.conformance.client import Driver
 
+from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -31,13 +32,20 @@ from agent_env.task_step.task_steps.computer_recording import (
     EndComputerRecordingTaskStep,
     StartComputerRecordingTaskStep,
 )
+from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from tst.integration.computer.conftest import docker
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 PORT = 18765
+READ_NOTE = b"""import json, urllib.request
+def run(input):
+    with urllib.request.urlopen(input["env"]["url"] + "/.well-known/agent-env.json", timeout=10) as response:
+        return {"note": open("Downloads/note.txt").read(), "card": json.load(response)["name"]}
+"""
 
 
 def test_each_arch_this_machine_builds_is_composed_pushed_and_written_as_the_envs_computer(desktop):
@@ -99,6 +107,14 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
         deployed = await Env.get(closed.id).deploy()
         context = TaskStepContext(deployed_envs=[deployed])
         try:
+            note = FileArtifact.put_bytes(f"{closed.id}-note", description="", filename="note.txt", content=b"inside\n",
+                                          content_type="text/plain")
+            script = FileArtifact.put_bytes(f"{closed.id}-read", description="", filename="run.py", content=READ_NOTE,
+                                            content_type="text/x-python")
+            context = await LoadArtifactTaskStep(id="load", version=None, env_id=closed.id,
+                                                 artifact_id=note.id).execute(context)
+            context = await RunCodeTaskStep(id="read", version=None, env_id=closed.id,
+                                            script_artifact_id=script.id).execute(context)
             driver = await Driver.connect(deployed.environment_url, 30)
             egress = await driver.run("python3", "-c", "import urllib.request; urllib.request.urlopen('http://1.1.1.1', timeout=5)")
             await driver.run("sh", "-c", "echo x > Desktop/left.txt")
@@ -108,6 +124,7 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
             report = await teardown_run(context)
     sandbox = deployed.sandbox_id
 
+    assert context.metadata["script_results"]["read"] == {"note": "inside\n", "card": "closed"}
     assert egress["exit_code"] != 0 and "Network is unreachable" in egress["stderr"], egress
     assert left["exit_code"] != 0
     assert [s.sandbox_id for s in report.terminated] == [sandbox] and not report.failed

@@ -1,15 +1,17 @@
-"""Whether Documents/Reports is a folder in the session user's home, asked through the driver's computer-exec."""
+"""Whether the figures moved from Downloads into a Reports folder in Documents, asked through the driver's
+computer-exec."""
 import uuid
 
 from agentenv_protocol import client as protocol
 
 EXEC = "urn:agentenv:computer-exec/v1"
+MOVED = "test -f Documents/Reports/figures.csv && test ! -e Downloads/figures.csv"
 
 
-async def verify(mcp_url):
-    base = mcp_url.rsplit("/mcp", 1)[0]
-    card = await protocol.get_card(base)
-    out = await protocol.invoke_extension(base, card, EXEC, {"argv": ["test", "-d", "Documents/Reports"],
-                                                             "request_id": uuid.uuid4().hex}, method="run")
-    return [{"id": "folder", "result": out["exit_code"] == 0,
-             "description": "Documents/Reports is a folder" if out["exit_code"] == 0 else "no folder Documents/Reports"}]
+async def verify(mcp_url, env_url):
+    card = await protocol.get_card(env_url)
+    out = await protocol.invoke_extension(env_url, card, EXEC, {"argv": ["sh", "-c", MOVED],
+                                                                "request_id": uuid.uuid4().hex}, method="run")
+    moved = out["exit_code"] == 0
+    return [{"id": "folder", "result": moved, "description": "the figures are in Documents/Reports" if moved else
+             "the figures aren't in Documents/Reports, or are still in Downloads"}]

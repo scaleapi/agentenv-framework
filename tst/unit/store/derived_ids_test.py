@@ -238,6 +238,8 @@ def test_an_env_snapshot_step_and_a_capture_series_in_one_run_snapshot_one_env_i
 
 
 class _VerifierSandbox:
+    type = None
+
     def scoped_name(self, name):
         return name
 

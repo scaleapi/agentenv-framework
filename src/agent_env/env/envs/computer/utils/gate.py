@@ -1,11 +1,13 @@
-"""Gate 1, run at a computer env's put before anything is stored or built: its base and driver are matched against each
-other and against what the env declares, and every mismatch is named."""
+"""Gate 1, run at a computer env's put before anything is stored or built: its base, driver and apps are matched against
+each other and against what the env declares, and every mismatch is named."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer.platform import Platform, supported
+from jsonschema import Draft202012Validator
 
 from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
@@ -13,7 +15,8 @@ from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 
 if TYPE_CHECKING:
-    from agent_env.env.envs.computer_driver import ComputerDriverEnv
+    from agent_env.env.envs.computer.app_env import ComputerAppEnv
+    from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 
 #: The largest screen side X can address: its coordinates are signed 16-bit.
 MAX_SIDE = 32767
@@ -39,11 +42,51 @@ def forms(base: ComputerArtifact) -> list[str]:
     return [form for form in FORMS if getattr(base.forms, form, None)]
 
 
-def arches(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
-    """The architectures a composition of ``base`` and ``driver`` runs on: the base's that a platform of the driver's
-    matching the base's OS names, in the base's order."""
-    matching = {platform.arch for platform in _matching(base, driver)}
+def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[ComputerAppEnv] = ()) -> list[str]:
+    """The architectures a composition of ``base``, ``driver`` and ``apps`` runs on: the base's that a platform of the
+    driver's and of each app's matching the base's OS names, in the base's order."""
+    matching = {platform.arch for platform in _matching(base, driver.declaration.supports)}
+    for app in apps:
+        matching &= {platform.arch for platform in _matching(base, app.declaration.supports)}
     return [arch for arch in base.arch if arch in matching]
+
+
+def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv) -> list[str]:
+    """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``: a platform it doesn't support, no
+    architecture in common, or no install for the base's OS."""
+    os = base.os
+    if not _matching(base, app.declaration.supports):
+        named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
+        return [f"app: {app.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
+                f"{os.display}); it supports {named or 'none'}"]
+    problems = []
+    if not arches(base, driver, [app]):
+        problems.append(f"app: no architecture {base.id}, {driver.id} and {app.id} all run")
+    if os.type not in app.install:
+        problems.append(f"app: {app.id} declares no install for {os.type}")
+    return problems
+
+
+def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str) -> list[str]:
+    """The problems with ``values``, of ``app``'s settings by name, each named from ``at``: a setting it doesn't declare,
+    a secret's given as anything but a bare reference (or null, where it's optional), a required one missing, and what
+    the schema of its ``Settings`` refuses of the rest. A secret's reference never meets the constraints on its value,
+    and its value never reaches a message."""
+    schema, secrets = app.declaration.settings, app.secret_settings()
+    properties, required = schema.get("properties", {}), schema.get("required", [])
+    problems = [f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]
+    problems += [f"{at}.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME reference "
+                 "with no ?default, not its value" for name in values if name in secrets
+                 and not (_names_a_secret(values[name]) or values[name] is None and _optional(properties[name]))]
+    problems += [f"{at}: {name!r} is a required property" for name in required if name in secrets and name not in values]
+    plain = {**schema, "properties": {name: setting for name, setting in properties.items() if name not in secrets},
+             "required": [name for name in required if name not in secrets]}
+    return problems + [f"{'.'.join([at, *map(str, error.absolute_path)])}: {error.message}" for error in
+                       Draft202012Validator(plain).iter_errors({k: v for k, v in values.items() if k not in secrets})]
+
+
+def _optional(setting: dict) -> bool:
+    return any(option.get("type") == "null" for option in setting.get("anyOf", []))
 
 
 def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
@@ -78,14 +121,14 @@ def _names_a_secret(value: Any) -> bool:
 
 def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     os = base.os
-    if not _matching(base, driver):
-        named = ", ".join(_shown(platform) for entry in driver.declaration["supports"] for platform in supported(entry))
+    if not _matching(base, driver.declaration.supports):
+        named = ", ".join(_shown(platform) for entry in driver.declaration.supports for platform in supported(entry))
         return [f"driver: {driver.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
                 f"{os.display}); it supports {named}"]
     problems = []
     if not arches(base, driver):
         problems.append(f"driver: no architecture both run: {base.id} runs {', '.join(base.arch)}, and {driver.id} "
-                        f"{', '.join(sorted({platform.arch for platform in _matching(base, driver)}))}")
+                        f"{', '.join(sorted({p.arch for p in _matching(base, driver.declaration.supports)}))}")
     if (install := driver.install.get(os.type)) is None:
         problems.append(f"driver: {driver.id} declares no install for {os.type}")
     else:
@@ -95,9 +138,10 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     return problems
 
 
-def _matching(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[Platform]:
+def _matching(base: ComputerArtifact, supports: list) -> list[Platform]:
+    """The platforms of ``supports``, as a driver or app declares them, that the base's OS is."""
     os = base.os
-    return [platform for entry in driver.declaration["supports"] for platform in supported(entry)
+    return [platform for entry in supports for platform in supported(entry)
             if platform.os == os.type and platform.display == os.display
             and platform.distribution in (None, os.distribution) and platform.version in (None, os.version)]
 

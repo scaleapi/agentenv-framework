@@ -13,7 +13,7 @@ from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle, plan_entities
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.env import Env
-from agent_env.env.envs.computer import composer
+from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.env import ComputerEnv
 from tst.unit.bundle._support import layout, local_builds
 

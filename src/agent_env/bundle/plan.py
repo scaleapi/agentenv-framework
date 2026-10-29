@@ -35,7 +35,8 @@ from agent_env.entity.refs import EntityKind, RefRole, default_agent_refs, ref_s
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer_driver import ComputerDriverEnv
+from agent_env.env.envs.computer.app_env import ComputerAppEnv
+from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -98,9 +99,9 @@ _ENVIRONMENT = EnvironmentArtifact.model_fields["type"].default
 _FOLDER_HOOKS = {"written_besides": Artifact, "seeded_environments": SeedsEnvironments}
 # The env types whose from_toml reads only the toml and what it names, so a type built by one of them is written from
 # its env.toml and the ledger can list what it's made from.
-_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv, ComputerDriverEnv, ComputerEnv)
+_ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv, ComputerDriverEnv, ComputerEnv, ComputerAppEnv)
 # The env types whose from_toml also reads every file in the env's folder, which the ledger hashes as an artifact's.
-_ENV_FROM_FOLDERS = (ComputerDriverEnv,)
+_ENV_FROM_FOLDERS = (ComputerDriverEnv, ComputerAppEnv)
 
 _NOTHING_TO_RUN = "this bundle has no tasks or evals to run"
 

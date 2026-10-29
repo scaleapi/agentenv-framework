@@ -7,13 +7,15 @@ import asyncio
 import io
 import json
 import logging
+import re
 import subprocess
 import tarfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, AppDeclaration, DriverDeclaration
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
@@ -27,11 +29,12 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.envs.computer import boot, composer, gate
-from agent_env.env.envs.computer.composer import _probe
+from agent_env.env.envs.computer.utils import boot, composer, gate, inside
+from agent_env.env.envs.computer.utils.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer.install import Install, Service
-from agent_env.env.envs.computer_driver import ComputerDriverEnv
+from agent_env.env.envs.computer.app_env import ComputerAppEnv
+from agent_env.env.envs.computer.utils.install import Install, Service
+from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.env_providers.env_provider import DeployRefused
@@ -45,6 +48,7 @@ from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.utils.docker.build import DockerBuildError
+from tst.unit.computer_home import Computer
 from tst.util.oci_registry import UBUNTU_LAYER, Registry
 
 OS = {"type": "linux", "distribution": "ubuntu", "version": "24.04", "display": "x11"}
@@ -79,7 +83,8 @@ class FakeDocker:
             raise DockerBuildError(self.fail[platform])
         self.builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
                             "files": sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()),
-                            "conf": next(context.glob("agentenv-*.conf")).read_text()})
+                            "conf": next(context.glob("agentenv-*.conf")).read_text(),
+                            "confs": {conf.name: conf.read_text() for conf in context.glob("agentenv-*.conf")}})
 
     def label(self, local, platform, extra):
         self.labels[local] = extra
@@ -154,7 +159,7 @@ def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, i
     services = services or [Service(name="driver", command=SERVE)]
     return ComputerDriverEnv.put(
         id="@local/~/kit/desk", module="driver.py:Desk", files=files,
-        declaration={"name": "desk", "supports": supports, "platforms": platforms},
+        declaration=DriverDeclaration.model_validate({"name": "desk", "supports": supports, "platforms": platforms}),
         install={"linux": Install(python="requirements.txt", services=services)} if install else {}, port=18765)
 
 
@@ -431,10 +436,13 @@ def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, doc
     assert ComputerArtifact.get(Env.get(env.id).metadata["computer"]["id"]).arch == ["amd64", "arm64"]
 
 
-def test_env_build_refuses_an_env_that_isnt_a_computer_env(base, driver, docker):
+def test_env_build_refuses_an_env_that_isnt_a_computer_env_or_an_app_naming_no_computer(base, driver, docker,
+                                                                                        tmp_path):
     refused = CliRunner().invoke(cli, ["env", "build", "--id", driver.id])
+    alone = CliRunner().invoke(cli, ["env", "build", "--id", _app(None, None, tmp_path / "mail").id])
 
     assert refused.exit_code == 1 and "is a computer_driver env; only a computer env is built" in refused.output
+    assert alone.exit_code == 1 and "names no computer and driver, so it has nothing to build alone" in alone.output
 
 
 @pytest.mark.asyncio
@@ -651,7 +659,8 @@ def boots(monkeypatch):
 
         sandbox.terminate = terminate
         made.sandboxes.append(sandbox)
-        return boot.Booted(sandbox, "http://127.0.0.1:20001", DRIVER_CARD)
+        return boot.Booted(sandbox, "http://127.0.0.1:20001",
+                           {**DRIVER_CARD, "name": kwargs["environment"]["ENVIRONMENT_NAME"]})
 
     async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
         made.calls.append((uri, method, params))
@@ -764,8 +773,9 @@ async def test_teardown_closes_a_computer_env_ending_its_recordings_before_its_c
     ({"driver_settings": {"default_space": "polar"}}, "env_params.driver_settings.default_space"),
     ({"driver_settings": {"colour": "blue"}}, "env_params.driver_settings.colour: Extra inputs are not permitted"),
     ({"colour": "blue"}, "env_params.colour"),
+    ({"app_settings": {"mail": {}}}, "env_params.app_settings.mail: @local/~/kit/desktop has no app 'mail'"),
 ], ids=["form", "build-setting", "resolution-over-display", "setting-type", "driver-setting", "driver-unknown",
-        "unknown"])
+        "unknown", "app"])
 async def test_env_params_a_computer_env_cant_take_are_refused_at_save_and_at_deploy(base, driver, docker, boots,
                                                                                      env_params, problem):
     env = _put(base, driver, display={"width": 1600, "height": 900})
@@ -843,3 +853,220 @@ def test_a_deploy_its_sandbox_provider_cant_carry_out_is_refused_at_save(base, d
     (refusal,) = DeployEnvTaskStep(id="d", version=None, env_id=env.id).preflight()
 
     assert problem in refusal
+
+
+@pytest.fixture
+def computer(tmp_path, monkeypatch):
+    (tmp_path / "home").mkdir()
+    return Computer(tmp_path / "home").install(monkeypatch)
+
+
+def _deployed_env(base, driver, computer, **record):
+    env = _put(base, driver, compose=False)
+    env._deployed = computer.deployed(env_id=env.id, **record)
+    return env
+
+
+def _files(tmp_path, **contents):
+    for name, data in contents.items():
+        (tmp_path / "files" / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "files" / name).write_bytes(data)
+    return FileArtifactUniverse.put_bundled("@local/~/kit/files", files={
+        name: tmp_path / "files" / name for name in contents})
+
+
+@pytest.mark.asyncio
+async def test_a_load_writes_each_file_into_the_computers_downloads_through_its_driver_in_batches(
+        base, driver, docker, computer, tmp_path, monkeypatch):
+    monkeypatch.setattr(inside, "BATCH_BYTES", 10)
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: False)
+    env = _deployed_env(base, driver, computer)
+
+    result = await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa", "b.txt": b"bbbb",
+                                                                       "sub/big.bin": b"x" * 20}))
+
+    assert result.destination_path == "Downloads"
+    assert result.files == {"a.txt": "Downloads/a.txt", "b.txt": "Downloads/b.txt", "sub/big.bin": "Downloads/sub/big.bin"}
+    batches = [sorted(marker["path"] for marker in markers) for kind, markers, _ in computer.calls]
+    assert sorted(batches) == [["Downloads/a.txt", "Downloads/b.txt"], ["Downloads/sub/big.bin"]]
+    assert (computer.home / "Downloads/sub/big.bin").read_bytes() == b"x" * 20
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("network, granted", [
+    (None, True), ({"mode": "allowlist", "allow_hosts": ["example.com"]}, False), ({"mode": "allowlist"}, False),
+], ids=["open", "allowlist", "closed"])
+async def test_a_load_reads_through_a_grant_that_reaches_the_computer_unless_it_has_no_network(
+        base, driver, docker, computer, tmp_path, monkeypatch, network, granted):
+    grants = []
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: sandbox_type == "local")
+    monkeypatch.setattr(inside, "read_object", lambda store, url: grants.append(url) or SimpleNamespace(
+        size_bytes=4, model_dump=lambda mode: {"read": {"url": f"https://store.test/{len(grants)}"}}))
+    env = _deployed_env(base, driver, computer, network=network)
+
+    await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}), destination_path="Documents/in")
+
+    ((_, (marker,), _),) = computer.calls
+    assert marker["path"] == "Documents/in/a.txt"
+    assert ("read" in marker, len(grants)) == ((True, 1) if granted else (False, 0))
+    assert (computer.home / "Documents/in/a.txt").exists() is not granted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("destination, problem", [
+    ("/home/user/Documents", "a computer's destination_path is relative to its session user's home"),
+    ("Documents/../..", "must not contain '..' segments"),
+])
+async def test_a_load_outside_the_home_is_refused_before_anything_is_sent(base, driver, docker, computer, tmp_path,
+                                                                          destination, problem):
+    env = _deployed_env(base, driver, computer)
+
+    with pytest.raises(ValueError, match=problem):
+        await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}), destination_path=destination)
+
+    assert computer.calls == []
+
+
+MAIL_SETTINGS = {"properties": {
+    "signature": {"default": "", "type": "string"},
+    "password": {"default": "", "type": "string", "format": "password", "writeOnly": True, "minLength": 32},
+    "token": {"anyOf": [{"type": "string", "format": "password", "writeOnly": True}, {"type": "null"}], "default": None},
+    "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
+
+
+def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, **changes):
+    """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "app.py").write_text("class Mail: ...\n")
+    (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
+    files = FileArtifactUniverse.put_bundled("@local/~/kit/mail__files", files={
+        name: folder / name for name in ("app.py", "requirements.txt")})
+    declaration = AppDeclaration.model_validate({
+        "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
+        "permissions": [], "launch": None, "settings": settings, "skill": None,
+        "data": [], "install_steps": [], "ready_checks": [],
+        "install": {"linux": install or {"python": "requirements.txt", "services": [
+            {"name": "imap", "command": "venv/bin/python imap.py"}]}}})
+    return ComputerAppEnv.put(**{"id": "@local/~/kit/mail", "environment_name": "mail", "module": "app.py:Mail",
+                                 "files": files, "declaration": declaration, "computer": base, "driver": driver,
+                                 "compose": compose, **changes})
+
+
+def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_under_its_prefix(base, driver, docker,
+                                                                                            tmp_path):
+    app = _app(base, driver, tmp_path / "mail")
+
+    assert sorted(build["platform"] for build in docker.builds) == ["linux/amd64", "linux/arm64"]
+    build = docker.builds[0]
+    assert "apps/mail/app.py" in build["files"] and "apps/mail/requirements.txt" in build["files"]
+    dockerfile = build["dockerfile"]
+    for line in ("COPY apps/mail/ /opt/agentenv/apps/mail/",
+                 "RUN python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip install "
+                 "--no-cache-dir -r /opt/agentenv/apps/mail/requirements.txt",
+                 "COPY agentenv-app-mail.conf /etc/supervisor/conf.d/agentenv-app-mail.conf"):
+        assert line in dockerfile
+    assert dockerfile.index("COPY driver/") < dockerfile.index("COPY apps/mail/") < dockerfile.index("USER user")
+    assert build["confs"]["agentenv-app-mail.conf"] == (
+        "[program:app-mail-imap]\ncommand=/opt/agentenv/apps/mail/venv/bin/python imap.py\n"
+        "directory=/opt/agentenv/apps/mail\nenvironment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\n"
+        "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/app-mail-imap.log\n")
+    stored = Env.get(app.id)
+    assert isinstance(stored, ComputerAppEnv) and stored.build_statuses() == {"container/amd64": "unverified",
+                                                                              "container/arm64": "ready"}
+
+
+def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):
+    _app(base, driver, tmp_path / "mail", supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["arm64"]}])
+
+    assert [build["platform"] for build in docker.builds] == ["linux/arm64"]
+
+
+@pytest.mark.parametrize("changes, problem", [
+    ({"supports": [{"os": {"type": "windows"}, "arch": ["amd64"]}]}, "app: @local/~/kit/mail supports no platform"),
+    ({"supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["riscv64"]}]},
+     "app: no architecture @local/~/kit/ubuntu-24.04, @local/~/kit/desk and @local/~/kit/mail all run"),
+    ({"install": {"services": [{"name": "imap", "command": "a"}, {"name": "imap", "command": "b"}]}},
+     "install.linux.services: Value error, names a service twice"),
+    ({"driver": None}, "a computer app deploys alone on a computer and a driver; name both or neither"),
+], ids=["platform", "arch", "install", "no-driver"])
+def test_an_app_that_doesnt_fit_its_computer_and_driver_is_refused_before_anything_is_stored(base, driver, docker,
+                                                                                            tmp_path, changes, problem):
+    with pytest.raises(ValueError, match=problem.replace(".", "[.]")):
+        _app(base, changes.pop("driver", driver), tmp_path / "mail", **changes)
+
+    with pytest.raises(NotFoundError):
+        Env.get("@local/~/kit/mail")
+    assert docker.builds == []
+
+
+@pytest.mark.asyncio
+async def test_an_app_deployed_alone_is_named_after_it_and_handed_its_settings_a_secret_resolved(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAIL_PASSWORD", "s3cret")
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    boots.display = (1280, 800)
+    app = _app(base, driver, tmp_path / "mail")
+    settings = {"mail": {"signature": "-- Ada", "password": "env:MAIL_PASSWORD", "token": "env:MAIL_TOKEN"}}
+
+    deployed = await Env.get(app.id).deploy(env_params={"app_settings": settings})
+
+    environment = boots.boots[0]["environment"]
+    assert environment["ENVIRONMENT_NAME"] == "mail" and deployed.environment_card["name"] == "mail"
+    assert json.loads(environment["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada", "password": "s3cret",
+                                                                         "token": "t0ken"}}
+    assert deployed.env_id == app.id and deployed.metadata["computer"]["env_params"] == {"app_settings": settings}
+
+
+def test_a_secrets_reference_meets_no_constraint_on_its_value_and_an_optional_one_may_be_null(base, driver, docker,
+                                                                                            tmp_path):
+    app = _app(base, driver, tmp_path / "mail")
+    env_params = {"app_settings": {"mail": {"password": "env:MAIL_PASSWORD", "token": None}}}
+
+    assert DeployEnvTaskStep(id="d", version=None, env_id=app.id, env_params=env_params).preflight() == []
+
+
+def test_a_required_secret_left_out_is_named_and_a_secrets_value_never_reaches_a_message(base, driver, docker,
+                                                                                         tmp_path):
+    settings = {**MAIL_SETTINGS, "required": ["password", "signature"]}
+    app = _app(base, driver, tmp_path / "mail", settings=settings)
+
+    left_out = DeployEnvTaskStep(id="d", version=None, env_id=app.id,
+                                 env_params={"app_settings": {"mail": {"signature": "-- Ada"}}}).preflight()
+    given = DeployEnvTaskStep(id="d", version=None, env_id=app.id, env_params={"app_settings": {"mail": {
+        "signature": "-- Ada", "password": "hunter2"}}}).preflight()
+
+    assert len(left_out) == 1 and "env_params.app_settings.mail: 'password' is a required property" in left_out[0]
+    assert len(given) == 1 and "password is a secret" in given[0] and "hunter2" not in given[0]
+
+
+@pytest.mark.asyncio
+async def test_a_load_whose_connection_to_the_driver_breaks_says_so(base, driver, docker, computer, tmp_path,
+                                                                     monkeypatch):
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: False)
+    computer.add_fails = httpx.ReadError("")
+    env = _deployed_env(base, driver, computer)
+
+    with pytest.raises(RuntimeError, match=re.escape(
+            f"env '{env.id}': the connection to its driver broke during data/add, so some of the files it carried "
+            "may be written, each whole (ReadError)")):
+        await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("values, problem", [
+    ({"colour": "blue"}, "env_params.app_settings.mail.colour: @local/~/kit/mail declares no setting 'colour'"),
+    ({"signature": 3}, "env_params.app_settings.mail.signature: 3 is not of type 'string'"),
+    ({"theme": "blue"}, "env_params.app_settings.mail.theme: 'blue' is not one of ['light', 'dark']"),
+    ({"password": "hunter2"}, "env_params.app_settings.mail.password is a secret, so it takes a secret:KEY"),
+    ({"token": "hunter2"}, "env_params.app_settings.mail.token is a secret, so it takes a secret:KEY"),
+], ids=["unknown", "type", "enum", "secret-value", "optional-secret-value"])
+async def test_app_settings_an_app_doesnt_declare_are_refused_at_save_and_at_deploy(base, driver, docker, boots,
+                                                                                   tmp_path, values, problem):
+    app = _app(base, driver, tmp_path / "mail")
+    env_params = {"app_settings": {"mail": values}}
+
+    saved = DeployEnvTaskStep(id="d", version=None, env_id=app.id, env_params=env_params).preflight()
+    with pytest.raises(DeployRefused, match=re.escape(problem)):
+        await Env.get(app.id).deploy(env_params=env_params)
+
+    assert len(saved) == 1 and problem in saved[0] and boots.boots == []

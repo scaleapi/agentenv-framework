@@ -94,7 +94,8 @@ import importlib.util
 import json
 import os
 
-run_dir, entrypoint, script_file = sys.argv[1], sys.argv[2], sys.argv[3]
+# Absolute, as a computer's is not: the script may change directory before the runner writes its result.
+run_dir, entrypoint, script_file = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3]
 
 script_path = os.path.join(run_dir, script_file)
 # The entry's own directory first: a nested entry (`src/run.py`) imports siblings by

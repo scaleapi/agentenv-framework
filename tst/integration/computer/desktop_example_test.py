@@ -1,11 +1,10 @@
 """The shipped desktop example through ``agent-env run``: its computer env, deployed on local Docker, passes the
-conformance probe at full; a scripted drive of the conformance fixture on it is recorded on the clock its screenshots
-carry; and an agent given the computer's skill makes a folder through the computer_* tools under a recording. Needs
-Docker and the local registry; the agent's task, a model endpoint too."""
+conformance probe at full; a file loaded into it is read by code run inside it and checked by a command there; a
+scripted drive of the conformance fixture on it is recorded on the clock its screenshots carry; and an agent given the
+computer's skill files a loaded file in a new folder through the computer_* tools under a recording. Needs Docker and
+the local registry; the agent's task, a model endpoint too."""
 
 import json
-import logging
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -15,12 +14,10 @@ from click.testing import CliRunner
 from PIL import Image
 
 from agent_env.artifact import Artifact
-from agent_env.artifact.store import reset_artifact_store
 from agent_env.cli import cli
-from agent_env.config import configure, get_config, reset_config
-from agent_env.store.object_store.local.grant_server import grant_server
+from agent_env.config import get_config
 from agent_env.store.routing import namespace_routing
-from agent_env.task.store import get_task_instance_store
+from tst.integration.computer.conftest import run_context
 from tst.util.capabilities import skip_without_model_endpoint
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -28,33 +25,22 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 RECORDING = Path(__file__).parent / "recording"
 
 
-@pytest.fixture
-def state(monkeypatch, tmp_path):
-    """Local stores under this test's folder. Whatever ran, no sandbox work folder may be left behind."""
-    sandboxes = tmp_path / "sandboxes"
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setenv("AGENT_ENV_DOCUMENT_STORE", "local")
-    monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "local")
-    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(sandboxes))
-    configure()
-    reset_artifact_store()
-    logging.disable(logging.CRITICAL)
-    try:
-        yield tmp_path
-        assert not sandboxes.exists() or not any(sandboxes.iterdir()), "a run left a sandbox work folder"
-    finally:
-        logging.disable(logging.NOTSET)
-        grant_server(None, None).close()
-        reset_artifact_store()
-        reset_config()
-
-
 def test_the_desktop_examples_computer_passes_the_probe_at_full(state):
     ran = _run("desktop", "probe")
 
     assert ran.exit_code == 0, ran.output
     assert "passed (probe: 1)" in ran.output, ran.output
+
+
+def test_a_file_loaded_into_the_desktop_is_read_by_code_inside_it_and_checked_there(state):
+    ran = _run("desktop", "files")
+
+    assert ran.exit_code == 0, ran.output
+    assert "passed (tests: 1)" in ran.output, ran.output
+    context = run_context(ran.output)
+    (loaded,) = context["metadata"]["loaded_file_artifact_universes"]
+    assert (loaded["destination_path"], loaded["files"]) == ("Documents", {"figures.csv": "Documents/figures.csv"})
+    assert context["metadata"]["script_results"]["inside"] == {"header": "quarter,revenue", "card": "desktop"}
 
 
 def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state):
@@ -87,7 +73,7 @@ def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state):
 
 
 @skip_without_model_endpoint()
-def test_an_agent_given_the_computers_skill_makes_a_folder_under_a_recording(state):
+def test_an_agent_given_the_computers_skill_files_a_loaded_file_in_a_new_folder_under_a_recording(state):
     ran = _run("desktop", "agent")
 
     assert ran.exit_code == 0, ran.output
@@ -105,10 +91,9 @@ def _run(bundle: str, task: str):
 def _recorded(output: str, name: str, tmp: Path) -> tuple[dict, dict, list]:
     """The run's context, the manifest of its recording ``name``, and every frame of the video with its time on the
     computer's clock."""
-    instance_id = re.search(r"instance (@local/\S+)", output).group(1)
+    context = run_context(output)
+    entry = context["metadata"]["computer_recordings"][name]
     with namespace_routing():
-        context = get_task_instance_store().get(instance_id).context
-        entry = context["metadata"]["computer_recordings"][name]
         universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
         objects = get_config().get_object_store()
         files = {name: objects.get(Artifact.get(ref).object_url) for name, ref in universe.file_artifact_ids.items()}

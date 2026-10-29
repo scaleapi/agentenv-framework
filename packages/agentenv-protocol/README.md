@@ -537,6 +537,49 @@ leasing, and unverified for one with it until the probe has lease checks. The pr
 default role; the tool-access check hides a tool from a role of its own, `agentenv-probe-<random>`,
 and gives it back.
 
+## Computer apps
+
+A computer app is software an agent uses on a computer, beside the driver: a desktop app, a service
+or both. Write one as a `ComputerAppEnvironment` subclass from `agentenv_protocol.computer`, an
+`AgentEnvEnvironment` whose class also says what it is to a computer. It needs only the plain
+package: `agentenv_protocol.computer` imports what a driver needs (mcp, uvicorn, Pillow, PyAV) only
+when a driver's names are used.
+
+```python
+from pydantic import BaseModel, SecretStr
+from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Linux, Service, computer_app
+
+@computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+class MailApp(ComputerAppEnvironment):
+    linux = Linux(python="requirements.txt", services=[Service(name="imap", command="venv/bin/python imap.py")])
+    launch = Launch(command=["thunderbird"], window={"class": "thunderbird"})
+    skill = "skill.md"
+
+    class Settings(BaseModel):
+        signature: str = ""
+        password: SecretStr = SecretStr("")
+```
+
+- **`@computer_app`** names the platforms the app supports, as a driver names them, and the
+  `permissions` it needs of the computer. Its env.toml names the rest: the app itself
+  (`environment_name`) and the `computer` and `driver` it deploys alone on.
+- **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
+  copied under its prefix; `python`, a requirements file there installed into a venv beside them;
+  `services`, programs the computer's init runs from the prefix as the session user.
+- **`launch = Launch(...)`** says how it starts in the desktop session, with it (`at="boot"`) or when
+  the agent opens it (`"demand"`), and `ready=Ready(...)` when it's ready; `@ready_check` marks a
+  method for readiness that needs logic, and `@install_step(scope=...)` one a computer runs as it
+  installs the app.
+- **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
+  its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
+- **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
+  in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
+  its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+
+`MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
+env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
+JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
+
 ## A2A agent framework
 
 The distribution exposes two unrelated decorators named `extension`:

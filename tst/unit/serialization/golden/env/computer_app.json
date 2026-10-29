@@ -1,0 +1,78 @@
+{
+  "computer": {
+    "id": "ubuntu-24.04",
+    "version": 1
+  },
+  "declaration": {
+    "data": [
+      "data/add",
+      "data/get"
+    ],
+    "install": {
+      "linux": {
+        "files": ".",
+        "python": "requirements.txt",
+        "services": [
+          {
+            "command": "venv/bin/python serve.py",
+            "name": "notes"
+          }
+        ]
+      }
+    },
+    "install_steps": [],
+    "launch": {
+      "at": "demand",
+      "command": [
+        "notes"
+      ]
+    },
+    "permissions": [],
+    "ready_checks": [],
+    "settings": {
+      "properties": {
+        "signature": {
+          "default": "",
+          "title": "Signature",
+          "type": "string"
+        }
+      },
+      "title": "Settings",
+      "type": "object"
+    },
+    "skill": {
+      "file": "skill.md"
+    },
+    "supports": [
+      {
+        "arch": [
+          "amd64"
+        ],
+        "os": {
+          "display": [
+            "x11"
+          ],
+          "type": "linux"
+        }
+      }
+    ]
+  },
+  "driver": {
+    "id": "reference-driver",
+    "version": 4
+  },
+  "environment_name": "notes",
+  "files": {
+    "id": "tutorial-files",
+    "type": "file_artifact_universe",
+    "version": 4
+  },
+  "id": "notes",
+  "metadata": {
+    "owner": "example-team"
+  },
+  "module": "app.py:Notes",
+  "service_name": "notes",
+  "type": "computer_app",
+  "version": 3
+}
