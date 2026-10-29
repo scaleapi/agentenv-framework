@@ -110,6 +110,9 @@ def test_missing_only_sets_up_what_the_store_lacks_and_leaves_what_it_holds_as_i
     ensure_default_envs([GATEWAY])
     monkeypatch.setattr(bootstrap, "build_inputs_digest", lambda kind: "this release's")
 
+    # Before what an env it holds is built from is weighed: its files hashed, the registry read for its images.
+    monkeypatch.setattr(bootstrap, "_built_from_stock", lambda env, kind: pytest.fail("weighed the env it holds"))
+
     builds = ensure_default_envs([GATEWAY, SERVICE_DB], missing_only=True)
 
     assert [str(build) for build in builds] == ["service-db env 'default-db' (missing)"]

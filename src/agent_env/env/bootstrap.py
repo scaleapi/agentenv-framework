@@ -254,10 +254,11 @@ def put_command(kind: str) -> str:
     return f"agent-env env {kind} put --id {default_env_id(kind)}"
 
 
-def infra_to_set_up(kinds: Iterable[str]) -> list[InfraSetup]:
+def infra_to_set_up(kinds: Iterable[str], *, missing_only: bool = False) -> list[InfraSetup]:
     """The infra envs of ``kinds`` a run sets up, in local stores only: stock ones missing or built from other inputs,
     pulled when their images are published for these sources and built otherwise, and stock ones built here switched
-    once they're published. Raises InfraError naming the put command for each one missing from stores not all local."""
+    once they're published; with ``missing_only``, only those the store doesn't hold, one it holds read no further.
+    Raises InfraError naming the put command for each one missing from stores not all local."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
@@ -274,7 +275,7 @@ def infra_to_set_up(kinds: Iterable[str]) -> list[InfraSetup]:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
                                 f"local stores; put it with `{put_command(kind)}`")
             continue
-        if not (local and _built_from_stock(env, kind)):
+        if missing_only or not (local and _built_from_stock(env, kind)):
             continue
         recorded = (env.metadata or {}).get(BUILD_INPUTS_KEY)
         kept = {key: value for key, value in (env.metadata or {}).items() if not detected(key) and key != BUILD_INPUTS_KEY}
@@ -310,7 +311,7 @@ def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _q
         return []
     ids = [default_env_id(kind) for kind in kinds]
     with holding_locks(ids, on_wait=lambda: say("waiting for another agent-env run to finish setting up the infra envs")):
-        setups = [setup for setup in infra_to_set_up(kinds) if not missing_only or setup.reason == MISSING]
+        setups = infra_to_set_up(kinds, missing_only=missing_only)
         if (built := [setup for setup in setups if setup.builds]) and (reason := docker_unreachable()):
             raise InfraError([needs_docker(built, reason)])
         for setup in setups:
