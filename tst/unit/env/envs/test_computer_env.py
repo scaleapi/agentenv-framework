@@ -30,6 +30,7 @@ from agent_env.env import env as env_module
 from agent_env.env.envs.computer import boot, composer, gate, inside
 from agent_env.env.envs.computer.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer_app import ComputerAppEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
@@ -80,7 +81,8 @@ class FakeDocker:
             raise DockerBuildError(self.fail[platform])
         self.builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
                             "files": sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()),
-                            "conf": next(context.glob("agentenv-*.conf")).read_text()})
+                            "conf": next(context.glob("agentenv-*.conf")).read_text(),
+                            "confs": {conf.name: conf.read_text() for conf in context.glob("agentenv-*.conf")}})
 
     def label(self, local, platform, extra):
         self.labels[local] = extra
@@ -652,7 +654,8 @@ def boots(monkeypatch):
 
         sandbox.terminate = terminate
         made.sandboxes.append(sandbox)
-        return boot.Booted(sandbox, "http://127.0.0.1:20001", DRIVER_CARD)
+        return boot.Booted(sandbox, "http://127.0.0.1:20001",
+                           {**DRIVER_CARD, "name": kwargs["environment"]["ENVIRONMENT_NAME"]})
 
     async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
         made.calls.append((uri, method, params))
@@ -765,8 +768,9 @@ async def test_teardown_closes_a_computer_env_ending_its_recordings_before_its_c
     ({"driver_settings": {"default_space": "polar"}}, "env_params.driver_settings.default_space"),
     ({"driver_settings": {"colour": "blue"}}, "env_params.driver_settings.colour: Extra inputs are not permitted"),
     ({"colour": "blue"}, "env_params.colour"),
+    ({"app_settings": {"mail": {}}}, "env_params.app_settings.mail: @local/~/kit/desktop has no app 'mail'"),
 ], ids=["form", "build-setting", "resolution-over-display", "setting-type", "driver-setting", "driver-unknown",
-        "unknown"])
+        "unknown", "app"])
 async def test_env_params_a_computer_env_cant_take_are_refused_at_save_and_at_deploy(base, driver, docker, boots,
                                                                                      env_params, problem):
     env = _put(base, driver, display={"width": 1600, "height": 900})
@@ -916,3 +920,107 @@ async def test_a_load_outside_the_home_is_refused_before_anything_is_sent(base, 
         await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}), destination_path=destination)
 
     assert computer.calls == []
+
+
+MAIL_SETTINGS = {"properties": {"signature": {"default": "", "type": "string"},
+                                "password": {"default": "", "type": "string", "format": "password", "writeOnly": True}},
+                 "type": "object"}
+
+
+def _app(base, driver, folder, compose=True, supports=None, install=None, **changes):
+    """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "app.py").write_text("class Mail: ...\n")
+    (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
+    files = FileArtifactUniverse.put_bundled("@local/~/kit/mail__files", files={
+        name: folder / name for name in ("app.py", "requirements.txt")})
+    declaration = {
+        "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
+        "permissions": [], "computer": None, "driver": None, "launch": None, "settings": MAIL_SETTINGS, "skill": None,
+        "data": [], "install_steps": [], "ready_checks": [],
+        "install": {"linux": install or {"python": "requirements.txt", "services": [
+            {"name": "imap", "command": "venv/bin/python imap.py"}]}}}
+    return ComputerAppEnv.put(**{"id": "@local/~/kit/mail", "environment_name": "mail", "module": "app.py:Mail",
+                                 "files": files, "declaration": declaration, "computer": base, "driver": driver,
+                                 "compose": compose, **changes})
+
+
+def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_under_its_prefix(base, driver, docker,
+                                                                                            tmp_path):
+    app = _app(base, driver, tmp_path / "mail")
+
+    assert sorted(build["platform"] for build in docker.builds) == ["linux/amd64", "linux/arm64"]
+    build = docker.builds[0]
+    assert "apps/mail/app.py" in build["files"] and "apps/mail/requirements.txt" in build["files"]
+    dockerfile = build["dockerfile"]
+    for line in ("COPY apps/mail/ /opt/agentenv/apps/mail/",
+                 "RUN python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip install "
+                 "--no-cache-dir -r /opt/agentenv/apps/mail/requirements.txt",
+                 "COPY agentenv-app-mail.conf /etc/supervisor/conf.d/agentenv-app-mail.conf"):
+        assert line in dockerfile
+    assert dockerfile.index("COPY driver/") < dockerfile.index("COPY apps/mail/") < dockerfile.index("USER user")
+    assert build["confs"]["agentenv-app-mail.conf"] == (
+        "[program:app-mail-imap]\ncommand=/opt/agentenv/apps/mail/venv/bin/python imap.py\n"
+        "directory=/opt/agentenv/apps/mail\nenvironment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\n"
+        "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/app-mail-imap.log\n")
+    stored = Env.get(app.id)
+    assert isinstance(stored, ComputerAppEnv) and stored.build_statuses() == {"container/amd64": "unverified",
+                                                                              "container/arm64": "ready"}
+
+
+def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):
+    _app(base, driver, tmp_path / "mail", supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["arm64"]}])
+
+    assert [build["platform"] for build in docker.builds] == ["linux/arm64"]
+
+
+@pytest.mark.parametrize("changes, problem", [
+    ({"supports": [{"os": {"type": "windows"}, "arch": ["amd64"]}]}, "app: @local/~/kit/mail supports no platform"),
+    ({"supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["riscv64"]}]},
+     "app: no architecture @local/~/kit/ubuntu-24.04, @local/~/kit/desk and @local/~/kit/mail all run"),
+    ({"install": {"services": [{"name": "imap", "command": "a"}, {"name": "imap", "command": "b"}]}},
+     "install.linux.services: Value error, names a service twice"),
+    ({"driver": None}, "a computer app deploys alone on a computer and a driver; name both or neither"),
+], ids=["platform", "arch", "install", "no-driver"])
+def test_an_app_that_doesnt_fit_its_computer_and_driver_is_refused_before_anything_is_stored(base, driver, docker,
+                                                                                            tmp_path, changes, problem):
+    with pytest.raises(ValueError, match=problem.replace(".", "[.]")):
+        _app(base, changes.pop("driver", driver), tmp_path / "mail", **changes)
+
+    with pytest.raises(NotFoundError):
+        Env.get("@local/~/kit/mail")
+    assert docker.builds == []
+
+
+@pytest.mark.asyncio
+async def test_an_app_deployed_alone_is_named_after_it_and_handed_its_settings_a_secret_resolved(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAIL_PASSWORD", "s3cret")
+    boots.display = (1280, 800)
+    app = _app(base, driver, tmp_path / "mail")
+    settings = {"mail": {"signature": "-- Ada", "password": "env:MAIL_PASSWORD"}}
+
+    deployed = await Env.get(app.id).deploy(env_params={"app_settings": settings})
+
+    environment = boots.boots[0]["environment"]
+    assert environment["ENVIRONMENT_NAME"] == "mail" and deployed.environment_card["name"] == "mail"
+    assert json.loads(environment["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada", "password": "s3cret"}}
+    assert deployed.env_id == app.id and deployed.metadata["computer"]["env_params"] == {"app_settings": settings}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("values, problem", [
+    ({"colour": "blue"}, "env_params.app_settings.mail.colour: @local/~/kit/mail declares no setting 'colour'"),
+    ({"signature": 3}, "env_params.app_settings.mail.signature must be a JSON string"),
+    ({"password": "hunter2"}, "env_params.app_settings.mail.password is a secret, so it takes a secret:KEY"),
+], ids=["unknown", "type", "secret-value"])
+async def test_app_settings_an_app_doesnt_declare_are_refused_at_save_and_at_deploy(base, driver, docker, boots,
+                                                                                   tmp_path, values, problem):
+    app = _app(base, driver, tmp_path / "mail")
+    env_params = {"app_settings": {"mail": values}}
+
+    saved = DeployEnvTaskStep(id="d", version=None, env_id=app.id, env_params=env_params).preflight()
+    with pytest.raises(DeployRefused, match=problem.replace(".", "[.]")):
+        await Env.get(app.id).deploy(env_params=env_params)
+
+    assert len(saved) == 1 and problem in saved[0] and boots.boots == []

@@ -1,6 +1,7 @@
 """What a deploy of a computer env takes as ``deploy_env`` ``env_params``: the form to boot, ``computer_settings``,
-values of the base's deploy-phase settings, and ``driver_settings``, the driver's ``ComputerSettings``, such as the
-default coordinate space its tools describe. The env's display and network are its own, which no deploy overrides."""
+values of the base's deploy-phase settings, ``driver_settings``, the driver's ``ComputerSettings``, such as the default
+coordinate space its tools describe, and ``app_settings``, values of each app's ``Settings`` by its name. The env's
+display and network are its own, which no deploy overrides."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ class ComputerParams(BaseModel):
     form: Optional[str] = None
     computer_settings: dict[str, Any] = Field(default_factory=dict)
     driver_settings: dict[str, Any] = Field(default_factory=dict)
+    app_settings: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParams, dict[str, SettingValue], list[str]]:
@@ -47,6 +49,13 @@ def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParam
         ComputerSettings.model_validate(params.driver_settings)
     except ValidationError as e:
         problems += _problems("env_params.driver_settings", e)
+    apps = {app.environment_name: app for app in env.composed_apps()}
+    for name, app_values in params.app_settings.items():
+        if (app := apps.get(name)) is None:
+            problems.append(f"env_params.app_settings.{name}: {env.id} has no app {name!r}"
+                            + (f"; its apps are {', '.join(apps)}" if apps else ""))
+        else:
+            problems += [f"env_params.app_settings.{name}.{problem}" for problem in gate.check_app_settings(app, app_values)]
     return params, values, problems
 
 

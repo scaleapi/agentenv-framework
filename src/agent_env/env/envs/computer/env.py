@@ -115,6 +115,10 @@ class ComputerEnv(Env):
         except ValueError as e:
             ctx.refuse([str(e)])
 
+    def composed_apps(self) -> list:
+        """The computer app envs composed into the env's computer, each installed under its prefix."""
+        return []
+
     def computer_artifact(self) -> ComputerArtifact:
         """The env's computer: its base composed with its driver, over the images built."""
         return ComputerArtifact.get(self.metadata["computer"]["id"], self.metadata["computer"]["version"])
@@ -153,7 +157,7 @@ class ComputerEnv(Env):
             return refusal
         _, _, problems = computer_params.checked(self, env_params)
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
-        links, arches = sandbox_provider.links, gate.arches(self.computer, self.driver)
+        links, arches = sandbox_provider.links, gate.arches(self.computer, self.driver, self.composed_apps())
         if not any(f"linux/{arch}" in link.native_platforms() for link in links for arch in arches):
             problems.append(f"{', '.join(type(link).__name__ for link in links)} runs none of its arches "
                             f"({', '.join(arches)}) natively")

@@ -132,7 +132,7 @@ def test_a_driver_is_written_again_only_when_one_of_its_files_changes(bundle_dir
     ('type = "computer_driver"\nmodule = "server.py:Desk"\n', LINUX, ("left",),
      "module 'server.py:Desk' names no \"<file>:<class>\" in this folder; it has driver.py"),
     ('type = "computer_driver"\nmodule = "driver.py:Missing"\n', LINUX, ("left",),
-     "driver.py has no ComputerDriverEnvironment subclass named Missing"),
+     "driver.py has no ComputerDriverEnvironment or ComputerAppEnvironment subclass named Missing"),
     (TOML, LINUX, ("thumb",), "buttons include left"),
     (TOML, [], ("left",), "Desk declares no platform: name them with @computer_driver(supports=[...])"),
     ('type = "computer_driver"\nmodule = "driver.py:Desk"\nimage = "x"\n', LINUX, ("left",), "unknown key 'image'"),

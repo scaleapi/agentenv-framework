@@ -14,7 +14,15 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer import params as computer_params
-from agent_env.env.envs.computer.boot import READY_TIMEOUT_S, boot, discard, ready, recorded_settings, settings_environment
+from agent_env.env.envs.computer.boot import (
+    READY_TIMEOUT_S,
+    app_settings_environment,
+    boot,
+    discard,
+    ready,
+    recorded_settings,
+    settings_environment,
+)
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
@@ -149,8 +157,9 @@ def _values(computer: ComputerArtifact, values: dict) -> dict:
 
 def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
                  params: computer_params.ComputerParams) -> dict[str, str]:
-    return settings_environment(computer, values, environment_name=env.environment_name,
-                                driver_settings=params.driver_settings)
+    return {**settings_environment(computer, values, environment_name=env.environment_name,
+                                   driver_settings=params.driver_settings),
+            **app_settings_environment(env.composed_apps(), params.app_settings)}
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:

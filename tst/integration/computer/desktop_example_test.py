@@ -5,8 +5,6 @@ computer's skill files a loaded file in a new folder through the computer_* tool
 the local registry; the agent's task, a model endpoint too."""
 
 import json
-import logging
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -16,39 +14,15 @@ from click.testing import CliRunner
 from PIL import Image
 
 from agent_env.artifact import Artifact
-from agent_env.artifact.store import reset_artifact_store
 from agent_env.cli import cli
-from agent_env.config import configure, get_config, reset_config
-from agent_env.store.object_store.local.grant_server import grant_server
+from agent_env.config import get_config
 from agent_env.store.routing import namespace_routing
-from agent_env.task.store import get_task_instance_store
+from tst.integration.computer.conftest import run_context
 from tst.util.capabilities import skip_without_model_endpoint
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 RECORDING = Path(__file__).parent / "recording"
-
-
-@pytest.fixture
-def state(monkeypatch, tmp_path):
-    """Local stores under this test's folder. Whatever ran, no sandbox work folder may be left behind."""
-    sandboxes = tmp_path / "sandboxes"
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setenv("AGENT_ENV_DOCUMENT_STORE", "local")
-    monkeypatch.setenv("AGENT_ENV_OBJECT_STORE", "local")
-    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(sandboxes))
-    configure()
-    reset_artifact_store()
-    logging.disable(logging.CRITICAL)
-    try:
-        yield tmp_path
-        assert not sandboxes.exists() or not any(sandboxes.iterdir()), "a run left a sandbox work folder"
-    finally:
-        logging.disable(logging.NOTSET)
-        grant_server(None, None).close()
-        reset_artifact_store()
-        reset_config()
 
 
 def test_the_desktop_examples_computer_passes_the_probe_at_full(state):
@@ -62,8 +36,8 @@ def test_a_file_loaded_into_the_desktop_is_read_by_code_inside_it_and_checked_th
     ran = _run("desktop", "files")
 
     assert ran.exit_code == 0, ran.output
-    assert "passed (figures: 1)" in ran.output, ran.output
-    context = _context(ran.output)
+    assert "passed (tests: 1)" in ran.output, ran.output
+    context = run_context(ran.output)
     (loaded,) = context["metadata"]["loaded_file_artifact_universes"]
     assert (loaded["destination_path"], loaded["files"]) == ("Documents", {"figures.csv": "Documents/figures.csv"})
     assert context["metadata"]["script_results"]["inside"] == {"header": "quarter,revenue", "card": "desktop"}
@@ -114,16 +88,10 @@ def _run(bundle: str, task: str):
     return CliRunner().invoke(cli, ["run", bundle, "--task", task])
 
 
-def _context(output: str) -> dict:
-    """The context of the run whose output ``output`` is."""
-    with namespace_routing():
-        return get_task_instance_store().get(re.search(r"instance (@local/\S+)", output).group(1)).context
-
-
 def _recorded(output: str, name: str, tmp: Path) -> tuple[dict, dict, list]:
     """The run's context, the manifest of its recording ``name``, and every frame of the video with its time on the
     computer's clock."""
-    context = _context(output)
+    context = run_context(output)
     entry = context["metadata"]["computer_recordings"][name]
     with namespace_routing():
         universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])

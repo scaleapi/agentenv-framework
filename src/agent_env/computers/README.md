@@ -25,5 +25,13 @@ A computer env composes a driver onto it at put: an `envs/<name>/env.toml` of `t
 machine's Docker can build, then boots the one this machine runs natively and probes it. The shipped `desktop` example
 is that env, and `agent-env run desktop` deploys it.
 
+A computer app env (`type = "computer_app"`) deployed alone is composed onto it the same way, with the app's files
+under `/opt/agentenv/apps/<name>/` and its services as programs beside the driver's, run as `user` like everything else.
+
+Everything in a computer runs as that one user, so any code in it, an app's, a driver's, a `run_code` script or a
+command run through `computer-exec`, can read the environment of any other process there, settings included. A secret
+setting, the base's or an app's, is kept out of the stored env, the task and the run's record, which hold only its
+`secret:` or `env:` reference, but not from code in the computer: give a computer only secrets its own code may see.
+
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

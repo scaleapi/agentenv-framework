@@ -22,6 +22,7 @@ def _get_type(cls: type["Env"]) -> str:
 def _builtin_registry() -> dict[str, type["Env"]]:
     """The built-in env types, by type."""
     from agent_env.env.envs.computer.env import ComputerEnv
+    from agent_env.env.envs.computer_app import ComputerAppEnv
     from agent_env.env.envs.computer_driver import ComputerDriverEnv
     from agent_env.env.envs.gateway_server import GatewayEnv
     from agent_env.env.envs.mcp_server import MCPServerEnv
@@ -31,6 +32,7 @@ def _builtin_registry() -> dict[str, type["Env"]]:
 
     return {
         _get_type(ComputerEnv): ComputerEnv,
+        _get_type(ComputerAppEnv): ComputerAppEnv,
         _get_type(ComputerDriverEnv): ComputerDriverEnv,
         _get_type(GatewayEnv): GatewayEnv,
         _get_type(MCPServerEnv): MCPServerEnv,

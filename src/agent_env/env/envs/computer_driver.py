@@ -7,13 +7,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Optional
 
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.install import Install, installs
+from agent_env.env.envs.computer.install import Install, installs, missing
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
@@ -59,11 +58,9 @@ class ComputerDriverEnv(Env):
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> ComputerDriverEnv:
-        """The driver's class is read in a process of its own (``agentenv_protocol.computer._declare``), so the
-        driver's own dependencies need not be installed here."""
+        """The driver's class is read in a process of its own (``declared``)."""
         fields = cls.accept_toml(data, ctx)
-        file, _, name = fields["module"].partition(":")
-        declaration = _declare(ctx, file, name)
+        declaration = declared(ctx, fields["module"], cls.type)
         universe = FileArtifactUniverse.put_bundled(derive_id(ctx.id, "files"), files=ctx.files())
         return cls.put(id=ctx.id, module=fields["module"], files=universe, declaration=declaration,
                        install=fields["install"], port=fields.get("port", DEFAULT_PORT))
@@ -85,7 +82,7 @@ class ComputerDriverEnv(Env):
             problems.append(f"port must be 1 to {MAX_PORT}, not {fields['port']}")
         fields["install"], invalid = installs(fields.get("install", {}))
         problems += invalid + [problem for os_type, install in fields["install"].items()
-                               for problem in _missing(os_type, install, files)]
+                               for problem in missing(os_type, install, files)]
         if refused or problems:
             ctx.refuse([*refused, *map(ctx.config_problem, problems)])
         return fields
@@ -95,26 +92,22 @@ class ComputerDriverEnv(Env):
                                   "own: name it as a computer env's driver and deploy that")
 
 
-def _missing(os_type: str, install: Install, files: dict) -> list[str]:
-    """What ``install`` names that the driver's folder, ``files`` by path, doesn't hold."""
-    folder = PurePosixPath(install.files)
-    problems = []
-    if folder != PurePosixPath(".") and not any(PurePosixPath(path).is_relative_to(folder) for path in files):
-        problems.append(f"install.{os_type}.files: this folder has no {install.files!r} folder")
-    if install.python is not None and (folder / install.python).as_posix() not in files:
-        problems.append(f"install.{os_type}.python: {(folder / install.python).as_posix()!r} isn't in this folder")
-    return problems
-
-
-def _declare(ctx: AuthoringContext, file: str, name: str) -> dict:
+def declared(ctx: AuthoringContext, module: str, env_type: str) -> dict:
+    """What the class ``module`` names in the folder declares, read in a process of its own
+    (``agentenv_protocol.computer._declare``), so its own dependencies need not be installed here; refused unless an
+    env of ``env_type`` stores it."""
+    file, _, name = module.partition(":")
     try:
         done = subprocess.run([sys.executable, "-m", "agentenv_protocol.computer._declare", str(ctx.dir), file, name],
                               capture_output=True, text=True, timeout=DECLARE_TIMEOUT_S, check=False)
     except subprocess.TimeoutExpired:
-        _refuse(ctx, f"reading {file}:{name} took over {DECLARE_TIMEOUT_S} s")
+        _refuse(ctx, f"reading {module} took over {DECLARE_TIMEOUT_S} s")
     if done.returncode != 0:
-        _refuse(ctx, f"{file}:{name} can't be read: {(done.stderr.strip().splitlines() or ['no output'])[-1]}")
-    return json.loads(done.stdout)
+        _refuse(ctx, f"{module} can't be read: {(done.stderr.strip().splitlines() or ['no output'])[-1]}")
+    declaration = json.loads(done.stdout)
+    if (declares := declaration.pop("type")) != env_type:
+        _refuse(ctx, f"{module} is a class a {declares} env declares, not a {env_type} env")
+    return declaration
 
 
 def _refuse(ctx: AuthoringContext, problem: str) -> NoReturn:

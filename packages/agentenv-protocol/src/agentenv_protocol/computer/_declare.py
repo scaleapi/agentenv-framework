@@ -1,8 +1,8 @@
-"""Read a computer driver class where its own dependencies may not be installed, as a ``computer_driver`` env's put
-does: ``python -m agentenv_protocol.computer._declare <folder> <file> <class>`` imports the file with every module
-not installed here standing in as an inert stub, and prints what the class declares for each platform it supports as
-JSON. Nothing runs beyond defining the module and its classes, and a class that can't be defined even so exits 1
-with why."""
+"""Read a computer driver or app class where its own dependencies may not be installed, as a ``computer_driver`` or
+``computer_app`` env's put does: ``python -m agentenv_protocol.computer._declare <folder> <file> <class>`` imports the
+file with every module not installed here standing in as an inert stub, and prints what the class declares as JSON,
+as its base class says. Nothing runs beyond defining the module and its classes, and a class that can't be defined
+even so exits 1 with why."""
 from __future__ import annotations
 
 import contextlib
@@ -14,6 +14,7 @@ import sys
 import types
 from pathlib import Path
 
+from .app import ComputerAppEnvironment
 from .card import COMPUTER
 from .driver import ComputerDriverEnvironment
 from .platform import supported
@@ -59,22 +60,25 @@ class _Stubs(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 
 
 def declare(folder: Path, file: str, name: str) -> dict:
-    """What the class ``name`` in ``folder/file`` declares: its card's name, its ``supports``, and for each platform
-    those name, the extensions it provides, its tools and the computer/v1 features. Raises ValueError for a class
-    that isn't a driver or declares no platform."""
+    """What the class ``name`` in ``folder/file`` declares, under ``type``, the env type that stores it: an app's
+    ``ComputerAppEnvironment.declaration()``; a driver's card name, its ``supports``, and for each platform those name,
+    the extensions it provides, its tools and the computer/v1 features. Raises ValueError for a class that is neither,
+    or a driver that declares no platform."""
     sys.path.insert(0, str(folder))
     sys.meta_path.append(_Stubs())
     spec = importlib.util.spec_from_file_location("computer_driver_module", folder / file)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     cls = getattr(module, name, None)
+    if isinstance(cls, type) and issubclass(cls, ComputerAppEnvironment):
+        return {"type": "computer_app", **cls.declaration()}
     if not (isinstance(cls, type) and issubclass(cls, ComputerDriverEnvironment)):
-        raise ValueError(f"{file} has no ComputerDriverEnvironment subclass named {name}")
+        raise ValueError(f"{file} has no ComputerDriverEnvironment or ComputerAppEnvironment subclass named {name}")
     platforms = [platform for entry in cls.supports for platform in supported(entry)]
     if not platforms:
         raise ValueError(f"{name} declares no platform: name them with @computer_driver(supports=[...])")
     cards = [(platform, cls.declaration(platform)) for platform in platforms]
-    return {"name": cards[0][1].name, "supports": list(cls.supports), "platforms": [
+    return {"type": "computer_driver", "name": cards[0][1].name, "supports": list(cls.supports), "platforms": [
         {"platform": platform.as_dict(), "provides": [e.uri for e in card.capabilities.extensions],
          "tools": [t.name for t in card.capabilities.tools],
          "features": next({k: v for k, v in e.params.items() if k not in ("endpoint", "methods")}

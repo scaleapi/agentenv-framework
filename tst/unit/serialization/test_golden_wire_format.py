@@ -39,6 +39,7 @@ from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.registry import get_artifact_registry
 from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer_app import ComputerAppEnv
 from agent_env.env.envs.computer.install import Install, Service
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.envs.gateway_server import GatewayEnv
@@ -172,6 +173,25 @@ ENV_FIXTURES = {
             "image": "localhost:5000/agentenv-computers:" + "a" * 64 + "@sha256:" + "b" * 64,
             "installed": {"mss": "10.1.0"}, "built_at": "2026-10-28T10:02:11+00:00"}}},
             "computer": {"id": "desktop__computer", "version": 1}},
+    ),
+    "computer_app": lambda: ComputerAppEnv(
+        id="notes",
+        version=3,
+        environment_name="notes",
+        module="app.py:Notes",
+        files=ARTIFACT_FIXTURES["file_artifact_universe"](),
+        declaration={"supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}], "permissions": [],
+                     "computer": None, "driver": None,
+                     "install": {"linux": {"files": ".", "python": "requirements.txt",
+                                           "services": [{"name": "notes", "command": "venv/bin/python serve.py"}]}},
+                     "launch": {"at": "demand", "command": ["notes"]},
+                     "settings": {"properties": {"signature": {"default": "", "title": "Signature", "type": "string"}},
+                                  "title": "Settings", "type": "object"},
+                     "skill": {"file": "skill.md"}, "data": ["data/add", "data/get"], "install_steps": [],
+                     "ready_checks": []},
+        computer=ARTIFACT_FIXTURES["computer"]().model_copy(update={"version": 1}),
+        driver=ENV_FIXTURES["computer_driver"](),
+        metadata={"owner": "example-team"},
     ),
     "computer_driver": lambda: ComputerDriverEnv(
         id="reference-driver",
