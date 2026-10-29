@@ -85,3 +85,9 @@ def test_one_with_no_tar_gz_has_no_bytes_to_load():
 def test_put_tar_refuses_an_empty_tar_gz():
     with pytest.raises(ValueError, match="tar_gz_object_url is empty"):
         DockerImageArtifact.put_tar("img", description="d", image_name="img:1", tar_gz_object_url="")
+
+
+@pytest.mark.parametrize("name", ["img:1\n    privileged: true", "img 1", ""])
+def test_put_tar_refuses_a_name_that_isnt_an_image_reference(name):
+    with pytest.raises(ValueError, match="isn't an image reference"):
+        DockerImageArtifact.put_tar("img", description="d", image_name=name, tar_gz_object_url="s3://bucket/img.tar.gz")

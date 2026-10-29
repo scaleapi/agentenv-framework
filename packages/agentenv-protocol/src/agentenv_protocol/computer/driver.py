@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable, ClassVar
 
+from pydantic import BaseModel, ConfigDict
+
 from ..agent_env_environment import _CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication, environment_card
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
@@ -21,6 +23,29 @@ from .tools import Tools
 
 #: The caller every call comes from until agents carry an identity of their own.
 DEFAULT_IDENTITY = "default"
+
+
+class DriverPlatform(BaseModel):
+    """What a driver serves on one platform its ``supports`` names: the extensions it ``provides``, its ``tools`` and
+    its computer/v1 ``features``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform: Platform
+    provides: list[str]
+    tools: list[str]
+    features: dict[str, Any]
+
+
+class DriverDeclaration(BaseModel):
+    """What a ComputerDriverEnvironment class declares, as a ``computer_driver`` env stores it: its card's ``name``, the
+    platforms it ``supports``, as predicates, and what it serves on each of them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    supports: list[dict[str, Any]]
+    platforms: list[DriverPlatform]
 
 
 class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironment):

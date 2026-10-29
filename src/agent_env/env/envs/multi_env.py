@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 logger = logging.getLogger(__name__)
@@ -635,10 +636,7 @@ class MultiEnv(Env):
         compose_content = compose_content.replace(
             "    volumes:\n      - ./init-schemas.sql:/docker-entrypoint-initdb.d/init-schemas.sql\n", "",
         )
-        write_script = f'''cat > {DOCKER_COMPOSE_PATH} << 'COMPOSE_EOF'
-{compose_content}
-COMPOSE_EOF'''
-        await self._sandbox.exec_script(write_script)
+        await gw._write_file(self._sandbox, DOCKER_COMPOSE_PATH, compose_content)
 
         # Remove old servicedb container and its anonymous volume, then start fresh from snapshot image
         logger.info("Recreating servicedb container with snapshot image...")
@@ -668,7 +666,7 @@ COMPOSE_EOF'''
         environment_names = list(dict.fromkeys(
             [env.environment_name for env in self.mcp_server_envs] + [env.environment_name for env in self.website_envs]
         ))
-        svc_list = " ".join(environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME])
+        svc_list = " ".join(map(shlex.quote, environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME]))
         logger.info(f"Recreating services: {svc_list}")
         await gw._compose_up(self._sandbox, f"--force-recreate {svc_list}")
         await gw._wait_for_gateway(self._sandbox, self._sandbox.host_port(AGENT_ENV_GATEWAY_MCP_PORT))

@@ -13,8 +13,16 @@ from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
-from agent_env.env.envs.computer import params as computer_params
-from agent_env.env.envs.computer.boot import READY_TIMEOUT_S, boot, discard, ready, recorded_settings, settings_environment
+from agent_env.env.envs.computer.utils import params as computer_params
+from agent_env.env.envs.computer.utils.boot import (
+    READY_TIMEOUT_S,
+    app_settings_environment,
+    boot,
+    discard,
+    ready,
+    recorded_settings,
+    settings_environment,
+)
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
@@ -55,6 +63,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
 
         if not isinstance(env, ComputerEnv):
             raise TypeError(f"env_provider_type '{self.type}' deploys a computer env, not a {env.type} env")
+        if env.computer is None:  # an app that names no computer to deploy alone on
+            raise DeployRefused(env.deploy_refusal())
         params, values, problems = computer_params.checked(env, env_params)
         if problems:
             raise DeployRefused(f"{env.id}: " + "; ".join(problems))
@@ -100,7 +110,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                 metadata={"computer": {
                     "form": form, "arch": arch, "provider": type(sandbox_provider).__name__, "image": build["image"],
                     "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
-                    "display": values.get("resolution"), "network": env.network,
+                    "port": env.driver.port, "display": values.get("resolution"), "network": env.network,
                     "computer_settings": recorded_settings(computer, values),
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )
@@ -149,8 +159,9 @@ def _values(computer: ComputerArtifact, values: dict) -> dict:
 
 def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
                  params: computer_params.ComputerParams) -> dict[str, str]:
-    return settings_environment(computer, values, environment_name=env.environment_name,
-                                driver_settings=params.driver_settings)
+    return {**settings_environment(computer, values, environment_name=env.environment_name,
+                                   driver_settings=params.driver_settings),
+            **app_settings_environment(env.composed_apps(), params.app_settings)}
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:

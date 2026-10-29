@@ -140,6 +140,8 @@ class Ledger:
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
         if (published := self._plan.published.get(write.id)) is not None:
             inputs["published"] = published.pinned
+        if write.requires:
+            inputs["requires"] = list(write.requires)
         if self.pins_references or write.kind not in (BundleKind.TASK, BundleKind.EVAL):
             # A document records the versions of what it references (an env its images, a universe its
             # environments), so one written anew means it must be written again. A task or eval a run writes names
@@ -280,6 +282,8 @@ def _changes(row: Mapping[str, Any], digest: Digest) -> list[str]:
         reasons.append(f"type changed: {before['type']} → {after['type']}")
     if before.get("config") != after["config"]:
         reasons.append("config changed")
+    if before.get("requires") != after.get("requires"):
+        reasons.append(f"requires {', '.join(after['requires'])}" if after.get("requires") else "requires nothing")
     if before.get("published") != after.get("published"):
         reasons.append(f"published as {after['published'].partition('@')[0]}" if after.get("published")
                        else "not found published")

@@ -187,6 +187,12 @@ def _website(name, toml=""):
      "envs/x: env.toml: unknown key 'metadata'; a mcp_server env takes image, environment_name, env_provider_type, "
      "type and id"),
     ({**_mcp("x"), "envs/x/env.toml": 'environment_name = ""\n'}, "envs/x: env.toml: environment_name can't be empty"),
+    ({**_mcp("x"), "envs/x/env.toml": 'environment_name = "slack\\nCOMPOSE_EOF\\ntouch pwned"\n'},
+     "envs/x: env.toml: environment name 'slack\\nCOMPOSE_EOF\\ntouch pwned' must start with a letter or digit and "
+     "hold only letters, digits, '_', '.' and '-'"),
+    ({**_mcp("x"), "envs/x/env.toml": 'environment_name = "a b"\n'},
+     "envs/x: env.toml: environment name 'a b' must start with a letter or digit and hold only letters, digits, "
+     "'_', '.' and '-'"),
     ({**_mcp("x"), "envs/x/env.toml": 'environment_name = "gateway"\n'},
      "envs/x: env.toml: environment_name 'gateway' is one a gateway deploy names its own containers (db-mcp, gateway, "
      "pgweb, servicedb, website-browser); choose another"),
@@ -213,7 +219,8 @@ def _website(name, toml=""):
     ({"envs/x/env.toml": 'type = "service_db"\n'},
      "envs/x: a service_db env isn't written from a bundle: config names the one every deploy uses "
      "(default_service_db_env_id), and a run builds it when it's missing"),
-], ids=["no-card", "several-cards", "store-image-unnamed", "metadata", "empty-name", "reserved-name",
+], ids=["no-card", "several-cards", "store-image-unnamed", "metadata", "empty-name", "name-escapes-its-line",
+        "name-with-a-space", "reserved-name",
         "website-on-server", "build-args", "multi-without-envs", "multi-name", "multi-wrong-child", "multi-same-names",
         "multi-same-container",
         "gateway", "service-db"])

@@ -248,6 +248,7 @@ class CollectingVm:
     otherwise."""
 
     mode = "vm"
+    type = None
 
     def scoped_name(self, name):
         return name

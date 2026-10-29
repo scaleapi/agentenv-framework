@@ -44,7 +44,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1380"
+version = "0.9.1383"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -55,6 +55,7 @@ dependencies = [
     { name = "e2b" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "litellm" },
     { name = "mcp" },
     { name = "modal" },
@@ -178,6 +179,7 @@ requires-dist = [
     { name = "griffelib", marker = "extra == 'dev'", specifier = "==2.3.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "httpx2", marker = "extra == 'vercel'", specifier = ">=2.13.1,<3" },
+    { name = "jsonschema", specifier = ">=4.20" },
     { name = "litellm", specifier = ">=1.96.0,<1.97" },
     { name = "mcp", specifier = ">=1.25,<2" },
     { name = "modal", specifier = ">=1.5.2.dev22" },
@@ -213,7 +215,7 @@ provides-extras = ["openenv", "trl", "aws", "gcp", "sail", "vercel", "tensorlake
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.395"
+version = "0.1.398"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },

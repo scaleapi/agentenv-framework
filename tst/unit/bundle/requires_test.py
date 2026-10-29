@@ -9,27 +9,32 @@ import threading
 import tomllib
 from pathlib import PurePosixPath
 from types import SimpleNamespace
+from typing import ClassVar, Literal
 
 import pytest
 from click.testing import CliRunner
 from packaging.requirements import Requirement
 
+from agent_env.artifact import Artifact
 from agent_env.bundle import BundleError, dry_run_bundle, parse_bundle, prepare_bundle, run_bundle
 from agent_env.bundle import register as register_module
 from agent_env.bundle import requires as requires_module
+from agent_env.bundle.importer import import_task
 from agent_env.bundle.register import register_bundle
 from agent_env.bundle.requires import (
-    Declaring, Provider, Providers, UnmetRequirements, _create, declare, declaring_for, install_command, unmet_problems,
+    Declaring, Provider, Providers, UnmetRequirements, _create, declare, declaring_for,
 )
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle.run import _write_bundle
 from agent_env.cli import _install_prompt, cli
 from agent_env.cli._installers import InstallerError
 from agent_env.config.runtime import Config
-from agent_env.plugins import TASK_STEPS, Contribution, Distribution
-from agent_env.plugins._requirements import unmet
+from agent_env.plugins import ARTIFACTS, TASK_STEPS, Contribution, Distribution
+from agent_env.plugins._requirements import install_command, unmet, unmet_problems
 from agent_env.store.routing import namespace_routing
+from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
+from tst.unit._terminal import at_a_terminal
 from tst.unit.bundle._support import fake_plugins, layout
 
 ACME = "agentenv-acme"
@@ -96,6 +101,10 @@ def _plugins(monkeypatch, *, versions=None, **more):
                      Contribution(TASK_STEPS, _Replaced.type, _value(_Acme), "replaced"))
     fake_plugins(monkeypatch, [Distribution(ACME, "1.2.0", contributions)], versions={ACME: "1.2.0", **(versions or {})},
                  **more)
+
+
+def _bundle_problems(requires):
+    return unmet_problems(requires, "bundle.toml")
 
 
 def _bundle(root, *types, toml=None):
@@ -182,12 +191,12 @@ class TestUnmet:
         assert unmet([line]) == []
 
     def test_one_unmet_requirement_names_the_command_that_installs_it(self):
-        assert unmet_problems(["agentenv-missing>=1", "agentenv-acme"]) == ([MISSING], ["agentenv-missing>=1"])
+        assert _bundle_problems(["agentenv-missing>=1", "agentenv-acme"]) == ([MISSING], ["agentenv-missing>=1"])
 
     def test_agent_env_itself_is_upgraded_not_added(self, monkeypatch):
         _plugins(monkeypatch, versions={"agentenv-framework": "0.9.1375"})
 
-        assert unmet_problems(["agentenv-framework>=0.9.1400", "agentenv-missing>=1"]) == ([
+        assert _bundle_problems(["agentenv-framework>=0.9.1400", "agentenv-missing>=1"]) == ([
             "bundle.toml: requires 'agentenv-framework>=0.9.1400', and agentenv-framework 0.9.1375 is installed; "
             "upgrade agent-env with the installer that installed it",
             MISSING,
@@ -204,7 +213,7 @@ class TestUnmet:
         assert caught.value.problems[0].endswith("upgrade agent-env with the installer that installed it")
 
     def test_several_name_one_command_that_installs_them_all(self):
-        assert unmet_problems(["agentenv-missing>=1", "agentenv-acme>=2"]) == ([
+        assert _bundle_problems(["agentenv-missing>=1", "agentenv-acme>=2"]) == ([
             "bundle.toml: requires 'agentenv-missing>=1', which isn't installed",
             "bundle.toml: requires 'agentenv-acme>=2', and agentenv-acme 1.2.0 is installed",
             "bundle.toml: install what it requires with: agent-env plugin add 'agentenv-missing>=1' 'agentenv-acme>=2'",
@@ -488,21 +497,8 @@ class TestCommands:
 
 @pytest.fixture
 def terminal(stores, monkeypatch):
-    """A person at a terminal, an install that records what it's asked for, and a re-exec that stops the test."""
-    calls = {"added": [], "exec": []}
-
-    def add(specs, **kwargs):
-        calls["added"].append((specs, kwargs["yes"]))
-        return calls.get("code", 0)
-
-    def execv(path, argv):
-        calls["exec"].append((path, argv, os.environ.get(_install_prompt._ASKED)))
-        raise SystemExit(0)
-
-    monkeypatch.setattr(_install_prompt, "_interactive", lambda: True)
-    monkeypatch.setattr(_install_prompt._plugin_changes, "add", add)
-    monkeypatch.setattr(_install_prompt.os, "execv", execv)
-    monkeypatch.setenv(_install_prompt._ASKED, "")
+    """At a terminal, a bundle requiring what isn't installed, run by its path."""
+    calls = at_a_terminal(monkeypatch)
     root = _bundle(stores / "b", _Acme.type, toml='requires = ["agentenv-missing>=1"]\n')
     monkeypatch.setattr(sys, "argv", ["agent-env", "run", str(root)])
     return root, calls
@@ -591,6 +587,76 @@ class TestInstallPrompt:
         assert result.exit_code == 0, result.output
         assert calls["added"] == [(["agentenv-missing>=1"], True)]
         assert len(calls["exec"]) == 1
+
+
+class _AcmeSetting(Artifact):
+    """An artifact type the plugin agentenv-acme-settings ships, made only of its artifact.toml's values."""
+
+    type: Literal["acme_setting_requires_test"] = "acme_setting_requires_test"
+    toml_keys: ClassVar[dict[str, type]] = {"value": str}
+    value: str = ""
+
+    @classmethod
+    def from_toml(cls, data, ctx):
+        return cls.put(id=ctx.id, value=ctx.accept(data, **cls.toml_keys).get("value", ""))
+
+
+SETTINGS = "agentenv-acme-settings"
+SANDBOX = {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"}
+REGISTERED = {
+    "tasks/plugin.json": json.dumps([{"id": "s0", "type": _Acme.type}]),
+    "tasks/loads.json": json.dumps([SANDBOX, {"id": "load", "type": "load_artifact", "sandbox_name": "box",
+                                              "artifact_id": "cfg", "depends_on": ["box"]}]),
+    "tasks/core.json": json.dumps([SANDBOX]),
+    "artifacts/cfg/artifact.toml": 'type = "acme_setting_requires_test"\nvalue = "x"\n',
+}
+
+
+class TestRegisteredTasks:
+    @pytest.fixture(autouse=True)
+    def two_plugins(self, stores, monkeypatch):
+        """agentenv-acme's step type, and agentenv-acme-settings's artifact type, which a task references."""
+        monkeypatch.setattr(register_module, "_git", lambda root, *args: None)
+        artifacts = {**Config().artifact_registry(), _AcmeSetting.model_fields["type"].default: _AcmeSetting}
+        monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
+        fake_plugins(monkeypatch, [
+            Distribution(ACME, "1.2.0", (Contribution(TASK_STEPS, _Acme.type, _value(_Acme), "active"),)),
+            Distribution(SETTINGS, "2.0", (Contribution(ARTIFACTS, _AcmeSetting.model_fields["type"].default,
+                                                         _value(_AcmeSetting), "active"),)),
+        ], versions={ACME: "1.2.0", SETTINGS: "2.0"})
+
+    def test_each_task_requires_what_it_and_the_bundle_entities_it_references_use(self, stores):
+        root = layout(stores / "b", REGISTERED)
+
+        register_bundle(root)
+
+        assert {name: Task.get(f"b-{name}").requires for name in ("plugin", "loads", "core")} == {
+            "plugin": ["agentenv-acme>=1.2.0"], "loads": ["agentenv-acme-settings>=2.0"], "core": None}
+        assert "requires" not in Task.get("b-core").to_dict()
+
+    def test_a_package_bundle_toml_requires_keeps_its_range_and_a_new_range_writes_the_task_anew(self, stores):
+        root = layout(stores / "b", {**REGISTERED,
+                                     "bundle.toml": 'requires = ["agentenv-acme>=1.0,<2", "agentenv-acme-settings"]\n'})
+
+        register_bundle(root)
+        again = register_bundle(root)
+        (root / "bundle.toml").write_text('requires = ["agentenv-acme>=1.1,<2", "agentenv-acme-settings"]\n')
+        changed = [done for done in register_bundle(root).materialization.writes if not done.reused]
+
+        assert (Task.get("b-plugin", 1).requires, Task.get("b-loads").requires) == (
+            ["agentenv-acme>=1.0,<2"], ["agentenv-acme-settings"])
+        assert all(done.reused for done in again.materialization.writes)
+        assert [(done.write.id, done.version, done.reasons) for done in changed] == [
+            ("b-plugin", 2, ("requires agentenv-acme>=1.1,<2",))]
+        assert Task.get("b-plugin").requires == ["agentenv-acme>=1.1,<2"]
+
+    def test_an_import_of_a_registered_task_keeps_the_range_it_records(self, stores):
+        root = layout(stores / "b", {**REGISTERED, "bundle.toml": 'requires = ["agentenv-acme>=1.0,<2"]\n'})
+        register_bundle(root)
+
+        imported = import_task("b-plugin", stores / "imported")
+
+        assert parse_bundle(imported.root).requires == ("agentenv-acme>=1.0,<2",)
 
 
 def test_unmet_requirements_are_a_bundle_error():

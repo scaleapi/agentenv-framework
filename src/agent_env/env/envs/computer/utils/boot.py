@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer import COMPUTER_READY, SETTINGS_ENV
+from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV
 
 from agent_env.config import get_config
 from agent_env.providers.env_providers.env_provider import _size_kwargs
@@ -21,6 +21,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import remove_l
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.computer import ComputerArtifact
     from agent_env.attribution import Attribution
+    from agent_env.env.envs.computer.app_env import ComputerAppEnv
     from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
@@ -60,6 +61,17 @@ def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, 
     if driver_settings:
         environment[SETTINGS_ENV] = json.dumps(driver_settings)
     return environment
+
+
+def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str, dict]) -> dict[str, str]:
+    """The environment that hands each of ``apps`` the values ``app_settings`` gives it, by its name, in
+    ``APP_SETTINGS_ENV``, a secret's resolved through the secret store; nothing when none has any."""
+    given = [(app, app_settings[app.environment_name]) for app in apps if app_settings.get(app.environment_name)]
+    if not given:
+        return {}
+    return {APP_SETTINGS_ENV: json.dumps({app.environment_name: {
+        name: get_config().resolve_reference(value) if name in app.secret_settings() and value is not None else value
+        for name, value in values.items()} for app, values in given})}
 
 
 def recorded_settings(computer: ComputerArtifact, values: dict[str, Any]) -> dict[str, Any]:

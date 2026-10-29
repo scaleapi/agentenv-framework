@@ -43,7 +43,7 @@ from .ledger import Ledger
 from .materialize import Materialization, Materialized, materialize
 from .parse import Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle, plan_entities
-from .requires import Declaring, declare, declaring_for
+from .requires import Declaring, Providers, declare, declaring_for, detected, entry_uses
 from .run import _label
 from .resolve import BundleImage, Reference, ResolvedBundle, ResolvedEntry, resolve_bundle
 
@@ -94,7 +94,7 @@ def register_bundle(
         ids, problems = registry_ids(plan, _prefix(bundle, prefix))
         if problems:
             raise BundleError(problems)
-        registered = translated(plan, ids)
+        registered = with_task_requires(translated(plan, ids))
         target = configured_store(get_config().get_document_store())
         shared = shared_store(target)
         identity, commit, dirty = bundle_identity(bundle.root)
@@ -380,6 +380,32 @@ def _local_url(text: str) -> str | None:
         if url.lower().startswith("file:") or is_loopback_host(urlsplit(url).hostname or ""):
             return url
     return None
+
+
+def with_task_requires(plan: Plan) -> Plan:
+    """``plan`` with each task it writes requiring the plugin packages behind its own step types and the types of the
+    bundle entities it references (``Write.requires``): as bundle.toml writes a package when it requires it, else at
+    least the version installed here. A task using only what core ships requires nothing."""
+    providers = Providers()
+    writes = {(write.kind.store, write.id): write for write in plan.writes}
+
+    def reached(task: Write) -> Iterator[Write]:
+        seen, queue = set(), [task]
+        while queue:
+            write = queue.pop()
+            if (key := (write.kind.store, write.id)) in seen:
+                continue
+            seen.add(key)
+            yield write
+            queue.extend(writes[need] for need in write.needs if need in writes)
+
+    def requires(task: Write) -> tuple[str, ...] | None:
+        found = [use for write in reached(task) if isinstance(write.source, ResolvedEntry)
+                 for use in entry_uses(plan.bundle_of(write.source.entry).root, write.source, providers)]
+        return tuple(detected(found, plan.bundle.bundle.requires or ())) or None
+
+    return replace(plan, writes=tuple(replace(write, requires=requires(write)) if write.kind is BundleKind.TASK
+                                      else write for write in plan.writes))
 
 
 def _floating(plan: Plan) -> Iterator[str]:

@@ -49,6 +49,7 @@ WEBSITE_BROWSER_DOCKERFILE = _ENV_PACKAGE / "envs" / "website_browser" / "Docker
 WEBSITE_BROWSER_CONTEXT = WEBSITE_BROWSER_DOCKERFILE.parent
 
 GATEWAY, SERVICE_DB, WEBSITE_BROWSER = "gateway", "service-db", "website-browser"  # the kinds, named as their commands
+MISSING = "missing"  # the reason an infra env the store doesn't hold is set up
 
 
 def _quiet(line: str) -> None:
@@ -253,10 +254,11 @@ def put_command(kind: str) -> str:
     return f"agent-env env {kind} put --id {default_env_id(kind)}"
 
 
-def infra_to_set_up(kinds: Iterable[str]) -> list[InfraSetup]:
+def infra_to_set_up(kinds: Iterable[str], *, missing_only: bool = False) -> list[InfraSetup]:
     """The infra envs of ``kinds`` a run sets up, in local stores only: stock ones missing or built from other inputs,
     pulled when their images are published for these sources and built otherwise, and stock ones built here switched
-    once they're published. Raises InfraError naming the put command for each one missing from stores not all local."""
+    once they're published; with ``missing_only``, only those the store doesn't hold, one it holds read no further.
+    Raises InfraError naming the put command for each one missing from stores not all local."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
@@ -268,12 +270,12 @@ def infra_to_set_up(kinds: Iterable[str]) -> list[InfraSetup]:
             env = Env.get(env_id)
         except NotFoundError:
             if local:
-                setups.append(_pulled_or_built(kind, env_id, "missing"))
+                setups.append(_pulled_or_built(kind, env_id, MISSING))
             else:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
                                 f"local stores; put it with `{put_command(kind)}`")
             continue
-        if not (local and _built_from_stock(env, kind)):
+        if missing_only or not (local and _built_from_stock(env, kind)):
             continue
         recorded = (env.metadata or {}).get(BUILD_INPUTS_KEY)
         kept = {key: value for key, value in (env.metadata or {}).items() if not detected(key) and key != BUILD_INPUTS_KEY}
@@ -298,16 +300,18 @@ def needs_docker(builds: Iterable[InfraSetup], reason: str) -> str:
     return f"building the {', '.join(build.kind for build in builds)} env needs docker, and {reason}"
 
 
-def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet) -> list[InfraSetup]:
-    """Set up the infra envs of ``kinds`` that ``infra_to_set_up`` names, each id locked so concurrent runs set it up
-    once, and return them. Raises InfraError before setting any up when one can't be: missing from stores that aren't
-    local, or to be built with docker unreachable."""
+def ensure_default_envs(kinds: Iterable[str], *, say: Callable[[str], None] = _quiet,
+                        missing_only: bool = False) -> list[InfraSetup]:
+    """Set up the infra envs of ``kinds`` that ``infra_to_set_up`` names, or with ``missing_only`` those of them the
+    store doesn't hold, leaving one it holds as it is, each id locked so concurrent runs set it up once, and return
+    them. Raises InfraError before setting any up when one can't be: missing from stores that aren't local, or to be
+    built with docker unreachable."""
     kinds = _in_order(kinds)
     if not kinds:
         return []
     ids = [default_env_id(kind) for kind in kinds]
     with holding_locks(ids, on_wait=lambda: say("waiting for another agent-env run to finish setting up the infra envs")):
-        setups = infra_to_set_up(kinds)
+        setups = infra_to_set_up(kinds, missing_only=missing_only)
         if (built := [setup for setup in setups if setup.builds]) and (reason := docker_unreachable()):
             raise InfraError([needs_docker(built, reason)])
         for setup in setups:

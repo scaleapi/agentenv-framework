@@ -16,6 +16,7 @@ from agent_env.task_step.task_steps.verifiers import run_container_unit_tests_ve
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
     RunContainerUnitTestsVerifierTaskStep as Step,
 )
+from tst.unit.computer_home import Computer
 from tst.unit.event_loop_probe import on_event_loop
 
 
@@ -61,6 +62,11 @@ def test_reward_path_roundtrips():
     )
     restored = Step.from_dict(step.to_dict())
     assert restored.reward_path == "/logs/verifier/reward.txt"
+
+
+def test_a_verifier_writes_its_user_only_when_set_so_an_older_release_reads_root():
+    assert "user" not in _step().to_dict()
+    assert Step.from_dict(_step(user="tester").to_dict()).to_dict()["user"] == "tester"
 
 
 def test_default_reward_path_none():
@@ -208,6 +214,8 @@ def test_posix_override_and_stored_env_keys_are_accepted():
 
 
 class _Sandbox:
+    type = None
+
     def scoped_name(self, name):
         return name
 
@@ -390,3 +398,58 @@ def test_only_the_reward_file_is_cleared(local_stores, monkeypatch, reward_path)
 
     assert recorded["extracted_files"]["/work/events.tail.json"] == {"seq": 7}
     assert ("/logs/verifier/reward.txt" in sandbox.files) is (reward_path is None)
+
+
+@pytest.mark.parametrize(("answer", "expected_score"), [("42", 1.0), ("41", 0.0)], ids=["correct", "wrong"])
+def test_a_verifier_for_a_computer_runs_in_it_and_grades_only_the_reward_this_run_wrote(local_stores, monkeypatch,
+                                                                                        tmp_path, answer,
+                                                                                        expected_score):
+    computer = Computer(tmp_path).install(monkeypatch)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "reward.txt").write_text("1\n")
+    monkeypatch.setattr(Step, "_upload_text_artifact", staticmethod(
+        lambda text, artifact_id, description, object_url: SimpleNamespace(id=artifact_id, version=1,
+                                                                           object_url=object_url)))
+    step = Step(id="scrape", version=None, env_id="desk", setup_commands=["touch setup-ran"],
+                env_vars={"ANSWER": answer}, reward_path="logs/reward.txt", result_paths=["out.json"],
+                command='echo \'{"n": 1}\' > out.json; [ "$ANSWER" = 42 ] && echo 1 > logs/reward.txt; true')
+    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
+
+    asyncio.run(step.execute(ctx))
+
+    recorded = ctx.metadata["verifications"]["scrape"]
+    assert (recorded["score"], recorded["exit_code"]) == (expected_score, 0)
+    assert recorded["extracted_files"]["out.json"] == {"n": 1} and (tmp_path / "setup-ran").exists()
+    runs = [call[1] for call in computer.calls if call[0] == "run"]
+    assert [params["argv"][:2] for params in runs] == [["bash", "-c"], ["rm", "-f"], ["bash", "-c"]]
+    assert {params["timeout_s"] for params in runs} == {300} and runs[-1]["env"]["ANSWER"] == answer
+
+
+def test_a_verifier_for_a_computer_that_cant_clear_the_reward_file_grades_nothing(local_stores, monkeypatch,
+                                                                                   tmp_path):
+    computer = Computer(tmp_path).install(monkeypatch)
+    denied = {"exit_code": 1, "stdout": "", "stderr": "rm: cannot remove 'logs/reward.txt': Permission denied",
+              "truncated": False, "timed_out": False}
+    monkeypatch.setattr(computer, "_run", lambda params: denied if params["argv"][0] == "rm" else Computer._run(
+        computer, params))
+    step = Step(id="scrape", version=None, env_id="desk", reward_path="logs/reward.txt", command="exit 1")
+    ctx = TaskStepContext(deployed_envs=[computer.deployed()])
+
+    with pytest.raises(RuntimeError, match="couldn't clear the reward file 'logs/reward.txt' before the tests, so one "
+                                           "left there would be graded: rm: cannot remove"):
+        asyncio.run(step.execute(ctx))
+
+    assert "verifications" not in ctx.metadata
+    assert [call[1]["argv"][:2] for call in computer.calls if call[0] == "run"] == [["rm", "-f"]]
+
+
+@pytest.mark.parametrize("fields, problem", [
+    ({"env_id": "desk", "sandbox_name": "h", "container_name": "c"}, "set env_id, or sandbox_name and container_name"),
+    ({"sandbox_name": "h"}, "set env_id, or sandbox_name and container_name"),
+    ({"env_id": "desk", "user": "root"}, "commands in env 'desk' run as its computer's session user; leave user unset"),
+    ({"env_id": "desk", "reward_path": "/logs/reward.txt"}, "relative to its session user's home, not "
+                                                            "\\['/logs/reward.txt'\\]"),
+], ids=["both-targets", "half-a-container", "user", "absolute-path"])
+def test_a_verifier_naming_its_target_wrong_is_refused(fields, problem):
+    with pytest.raises(ValueError, match=problem):
+        Step(id="scrape", version=None, command="true", **fields)

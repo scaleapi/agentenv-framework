@@ -1032,6 +1032,8 @@ def get_runner():
 
 
 _RUN_ENV_IDS: ContextVar[Mapping[str, str]] = ContextVar("agent_env_run_env_ids", default={})
+# The user_overrides keys naming the gateway and service-db envs a run deploys on, over the configured defaults.
+GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE = "gateway_env_id", "service_db_env_id"
 
 
 @contextlib.contextmanager
@@ -1039,7 +1041,7 @@ def run_env_ids(user_overrides: Mapping[str, Any]) -> Iterator[None]:
     """Within a run, the ``gateway_env_id`` and ``service_db_env_id`` its ``user_overrides`` name win over the
     configured defaults, in whichever process runs it."""
     token = _RUN_ENV_IDS.set(
-        {key: user_overrides[key] for key in ("gateway_env_id", "service_db_env_id") if user_overrides.get(key)})
+        {key: user_overrides[key] for key in (GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE) if user_overrides.get(key)})
     try:
         yield
     finally:
@@ -1048,12 +1050,12 @@ def run_env_ids(user_overrides: Mapping[str, Any]) -> Iterator[None]:
 
 def gateway_env_id(config: Config) -> str:
     """The gateway env a deploy uses: the run's override, else ``config.default_gateway_env_id``."""
-    return _RUN_ENV_IDS.get().get("gateway_env_id") or config.default_gateway_env_id
+    return _RUN_ENV_IDS.get().get(GATEWAY_OVERRIDE) or config.default_gateway_env_id
 
 
 def service_db_env_id(config: Config) -> str:
     """The service-db env a deploy uses: the run's override, else ``config.default_service_db_env_id``."""
-    return _RUN_ENV_IDS.get().get("service_db_env_id") or config.default_service_db_env_id
+    return _RUN_ENV_IDS.get().get(SERVICE_DB_OVERRIDE) or config.default_service_db_env_id
 
 
 def get_config() -> Config:

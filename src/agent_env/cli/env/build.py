@@ -4,7 +4,7 @@ building."""
 import click
 
 from agent_env.env import Env
-from agent_env.env.envs.computer import composer
+from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.store.base import NotFoundError
 
@@ -21,6 +21,8 @@ def build(env_id: str, version: int | None):
         raise click.ClickException(str(e)) from None
     if not isinstance(env, ComputerEnv):
         raise click.ClickException(f"{env_id} is a {env.type} env; only a computer env is built")
+    if env.computer is None:
+        raise click.ClickException(f"{env_id} names no computer and driver, so it has nothing to build alone")
     if (pairs := composer.pending(env)) or not composer.current(env):
         composer.compose(env, pairs)
     failed = False

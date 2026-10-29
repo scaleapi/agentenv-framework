@@ -1,6 +1,7 @@
-"""What a computer's layer installs on one OS, as a driver's env.toml declares it under ``[install.<os>]``: ``files``, a
-folder of its own copied under the layer's prefix; ``python``, a requirements file in that folder installed into a
-venv beside them; and ``services``, the programs the base's init runs from the prefix."""
+"""What a computer's layer installs on one OS, as a driver's env.toml declares it under ``[install.<os>]`` or an app's
+class as ``linux = Linux(...)``: ``files``, a folder of its own copied under the layer's prefix; ``python``, a
+requirements file in that folder installed into a venv beside them; and ``services``, the programs the base's init
+runs from the prefix."""
 
 from __future__ import annotations
 
@@ -46,9 +47,15 @@ class Install(BaseModel):
         return value
 
 
-def installs(data: Any) -> tuple[dict[str, Install], list[str]]:
-    """The installs ``data``, an env.toml's ``install`` table, declares by OS type, and the problems with it, each
-    named by its key."""
+class AppInstall(Install):
+    """An app's install, which may run no service: a desktop app runs when it's launched."""
+
+    services: list[Service] = Field(default_factory=list)
+
+
+def installs(data: Any, model: type[Install] = Install) -> tuple[dict[str, Install], list[str]]:
+    """The installs ``data``, an ``install`` table, declares by OS type, each a ``model``, and the problems with it,
+    each named by its key."""
     if not isinstance(data, dict):
         return {}, [f"install must be a table of OS types ({', '.join(OS_TYPES)}), not {data!r}"]
     found, problems = {}, []
@@ -57,8 +64,19 @@ def installs(data: Any) -> tuple[dict[str, Install], list[str]]:
             problems.append(f"install.{os_type}: an install is for an OS type agent-env composes: {', '.join(OS_TYPES)}")
             continue
         try:
-            found[os_type] = Install.model_validate(table)
+            found[os_type] = model.model_validate(table)
         except ValidationError as e:
             problems.extend(f"install.{'.'.join(map(str, (os_type, *error['loc'])))}: {error['msg']}"
                             for error in e.errors())
     return found, problems
+
+
+def missing(os_type: str, install: Install, files: dict) -> list[str]:
+    """What ``install`` names that the layer's folder, ``files`` by path, doesn't hold."""
+    folder = PurePosixPath(install.files)
+    problems = []
+    if folder != PurePosixPath(".") and not any(PurePosixPath(path).is_relative_to(folder) for path in files):
+        problems.append(f"install.{os_type}.files: this folder has no {install.files!r} folder")
+    if install.python is not None and (folder / install.python).as_posix() not in files:
+        problems.append(f"install.{os_type}.python: {(folder / install.python).as_posix()!r} isn't in this folder")
+    return problems

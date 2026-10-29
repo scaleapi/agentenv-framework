@@ -1,6 +1,6 @@
-"""The composer: a computer env's base and driver built into one image for each form and arch with this machine's Docker,
-tagged in the env's image store by a key of everything that goes into it, so an image of that key, built for any env, is
-reused.
+"""The composer: a computer env's base, driver and apps built into one image for each form and arch with this machine's
+Docker, tagged in the env's image store by a key of everything that goes into it, so an image of that key, built for any
+env, is reused.
 Each result is recorded in the env's metadata as it finishes (``composed``), and the arches that built are written as
 the env's computer, a ``computer`` artifact over an index of their images."""
 
@@ -21,6 +21,7 @@ import tempfile
 import threading
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from collections.abc import Callable
@@ -31,11 +32,12 @@ from agentenv_protocol.computer.conformance import run_probe
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, docker_login, push_local_image
 from agent_env.artifact.artifacts.file import FileArtifact
+from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.env import Env
-from agent_env.env.envs.computer import boot, gate
-from agent_env.env.envs.computer.install import Install
+from agent_env.env.envs.computer.utils import boot, gate
+from agent_env.env.envs.computer.utils.install import Install
 from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
 from agent_env.store.base import ConcurrentModificationError
 from agent_env.store.ids import derive_id
@@ -49,14 +51,16 @@ if TYPE_CHECKING:
 
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
     from agent_env.env.envs.computer.env import ComputerEnv
-    from agent_env.env.envs.computer_driver import ComputerDriverEnv
+    from agent_env.env.envs.computer.app_env import ComputerAppEnv
+    from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 
 logger = logging.getLogger(__name__)
 
 #: The image store repository composed computers are pushed to, tagged by their keys.
 REPOSITORY = "agentenv-computers"
-#: Where a driver's files go in a composed computer, in a folder named for the driver.
+#: Where a driver's files go in a composed computer, in a folder named for the driver; an app's, under APPS.
 DRIVERS = "/opt/agentenv/drivers"
+APPS = "/opt/agentenv/apps"
 KEY_LABEL = "dev.agentenv.computer-key"
 # What a build installed and whether it was emulated, kept on its image for an env that reuses it.
 INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
@@ -84,7 +88,8 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
     here; reusing them all calls it never."""
     base, driver = env.computer, env.driver
     building = _once(on_build)
-    pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base) for arch in gate.arches(base, driver)]
+    pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base)
+                                             for arch in gate.arches(base, driver, env.composed_apps())]
     record = _Record(env)
     record.started(pairs)
     with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
@@ -114,7 +119,8 @@ def pending(env: ComputerEnv) -> list[tuple[str, str]]:
 
     composed, provider = env.metadata.get("composed", {}), get_env_sandbox_provider()
     statuses = {(form, arch): composed.get(form, {}).get(arch, {}).get("status")
-                for form in gate.forms(env.computer) for arch in gate.arches(env.computer, env.driver)}
+                for form in gate.forms(env.computer)
+                for arch in gate.arches(env.computer, env.driver, env.composed_apps())}
     return [(form, arch) for (form, arch), status in statuses.items()
             if status not in _BUILT or (status == "unverified" and boot.native_links(provider, arch))]
 
@@ -184,8 +190,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             context = Path(work)
             source, base_identity = _base(base, arch)
             layer = _stage_driver(context, driver, base)
-            dockerfile = _dockerfile(source, layer, driver.install[base.os.type], base, _build_settings(env, base),
-                                     _stage_protocol(context))
+            apps = [_stage_app(context, app, base) for app in env.composed_apps()]
+            dockerfile = _dockerfile(source, [layer, *apps], base, _build_settings(env, base), _stage_protocol(context))
             key = "sha256:" + hashlib.sha256(json.dumps({
                 "base": base_identity, "dockerfile": dockerfile, "context": _digest(context), "form": form,
                 "arch": arch, "composer": _composer_digest(),
@@ -208,7 +214,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             (context / "Dockerfile").write_text(f"{dockerfile}LABEL {KEY_LABEL}={key}\n")
             local = f"agentenv-computer:{key[7:23]}-{arch}"
             build_image(context / "Dockerfile", context, local, platform=platform, labels={KEY_LABEL: key})
-            installed = _installed(local, layer)
+            installed = _installed(local, layer.prefix)
             _label(local, platform, {INSTALLED_LABEL: json.dumps(installed, sort_keys=True),
                                      EMULATED_LABEL: "true" if emulated else "false"})
             stage = "push"
@@ -260,38 +266,69 @@ def _ready_base(base: ComputerArtifact, arch: str) -> None:
         build_for(image, f"linux/{arch}")
 
 
-def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact) -> str:
-    """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them; the name
-    of its folder under ``DRIVERS``, its id's last part."""
-    install = driver.install[base.os.type]
-    layer = re.sub(r"[^a-z0-9-]+", "-", driver.id.rsplit("/", 1)[-1].lower()).strip("-") or "driver"
-    folder = PurePosixPath(install.files)
-    for name, artifact in driver.files.get_file_artifacts().items():
+@dataclass(frozen=True)
+class _Layer:
+    """A driver's or an app's part of a build: its folder in the build context, its prefix in the image, what it
+    installs, and the file of its supervisord programs."""
+
+    folder: str
+    prefix: str
+    install: Install
+    conf: str
+
+
+def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact) -> _Layer:
+    """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
+    its port, its folder under ``DRIVERS`` named for its id's last part."""
+    install, name = driver.install[base.os.type], _name(driver.id, "driver")
+    layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-{name}.conf")
+    _stage(context, layer, f"driver {driver.id}", driver.files, name, {"MCP_PORT": driver.port})
+    return layer
+
+
+def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact) -> _Layer:
+    """Write the app's install files under ``context/apps/<name>/`` and its supervisord programs beside them, run under
+    its name, its folder under ``APPS`` named for its id's last part."""
+    install, name = app.install[base.os.type], _name(app.id, "app")
+    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf")
+    _stage(context, layer, f"app {app.id}", app.files, f"app-{name}", {"ENVIRONMENT_NAME": app.environment_name})
+    return layer
+
+
+def _name(env_id: str, fallback: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", env_id.rsplit("/", 1)[-1].lower()).strip("-") or fallback
+
+
+def _stage(context: Path, layer: _Layer, what: str, files: FileArtifactUniverse, programs: str,
+           environment: dict[str, Any]) -> None:
+    """Write the ``files`` of ``what``'s folder its install names to ``layer``'s folder, a script or binary executable,
+    and its services as supervisord programs named for ``programs``, with ``environment``."""
+    folder = PurePosixPath(layer.install.files)
+    for name, artifact in files.get_file_artifacts().items():
         try:
             path = PurePosixPath(checked_path(name))
         except Unwritable as e:
-            raise ValueError(f"driver {driver.id}: {e}") from None
+            raise ValueError(f"{what}: {e}") from None
         if folder == PurePosixPath(".") or path.is_relative_to(folder):
-            target = context / "driver" / path.relative_to(folder)
+            target = context / layer.folder / path.relative_to(folder)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data := artifact.load())
             if data.startswith(_RUN_ONLY):
                 target.chmod(_EXECUTABLE)
-    (context / "driver").mkdir(exist_ok=True)
-    (context / f"agentenv-{layer}.conf").write_text(_programs(layer, install, driver.port))
-    return layer
+    (context / layer.folder).mkdir(parents=True, exist_ok=True)
+    (context / layer.conf).write_text(_programs(programs, layer.prefix, layer.install, environment))
 
 
-def _programs(layer: str, install: Install, port: int) -> str:
-    prefix = f"{DRIVERS}/{layer}"
+def _programs(name: str, prefix: str, install: Install, environment: dict[str, Any]) -> str:
+    variables = ",".join(f'{key}="{value}"' for key, value in environment.items())
     programs = []
     for service in install.services:
         program, _, rest = service.command.partition(" ")
         if "/" in program and not program.startswith("/"):
             program = f"{prefix}/{program}"
-        programs.append(f"[program:{layer}-{service.name}]\ncommand={program} {rest}".rstrip() + "\n"
-                        f"directory={prefix}\nenvironment=MCP_PORT=\"{port}\"\nautorestart=true\nredirect_stderr=true\n"
-                        f"stdout_logfile=/var/log/agentenv/{layer}-{service.name}.log\n")
+        programs.append(f"[program:{name}-{service.name}]\ncommand={program} {rest}".rstrip() + "\n"
+                        f"directory={prefix}\nenvironment={variables}\nautorestart=true\nredirect_stderr=true\n"
+                        f"stdout_logfile=/var/log/agentenv/{name}-{service.name}.log\n")
     return "\n".join(programs)
 
 
@@ -328,34 +365,36 @@ def _values(env: ComputerEnv) -> dict[str, Any]:
     return {**env.computer_settings, **({"resolution": f"{display['width']}x{display['height']}"} if display else {})}
 
 
-def _dockerfile(source: str, layer: str, install: Install, base: ComputerArtifact, build_settings: dict,
-                protocol: bool) -> str:
-    """The composed image's Dockerfile but its key's label, which the key is a digest of."""
-    prefix = f"{DRIVERS}/{layer}"
-    lines = [f"FROM {source}", "USER root", f"COPY driver/ {prefix}/"]
-    if install.python is not None:
-        packages = f"/tmp/agentenv-protocol -r {prefix}/{install.python}" if protocol else f"-r {prefix}/{install.python}"
-        if protocol:
-            lines.append("COPY protocol /tmp/agentenv-protocol")
-        lines.append(f"RUN python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-cache-dir {packages} "
-                     f"&& {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json"
-                     + (" && rm -rf /tmp/agentenv-protocol" if protocol else ""))
-    lines.append(f"COPY agentenv-{layer}.conf /etc/supervisor/conf.d/agentenv-{layer}.conf")
-    checks = [f"test -d {prefix}", f"test -f /etc/supervisor/conf.d/agentenv-{layer}.conf"]
-    if install.python is not None:
-        checks.append(f"test -x {prefix}/venv/bin/python")
-    lines.append(f"RUN {' && '.join(checks)}")
+def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict, protocol: bool) -> str:
+    """The composed image's Dockerfile but its key's label, which the key is a digest of: each layer's files under its
+    prefix, its venv beside them, with this checkout's protocol when ``protocol``, and its programs."""
+    venvs = [layer for layer in layers if layer.install.python is not None]
+    lines = [f"FROM {source}", "USER root", *(["COPY protocol /tmp/agentenv-protocol"] if protocol and venvs else [])]
+    for layer in layers:
+        prefix, install = layer.prefix, layer.install
+        lines.append(f"COPY {layer.folder}/ {prefix}/")
+        if install.python is not None:
+            packages = f"/tmp/agentenv-protocol -r {prefix}/{install.python}" if protocol else f"-r {prefix}/{install.python}"
+            lines.append(f"RUN python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-cache-dir {packages} "
+                         f"&& {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json")
+        lines.append(f"COPY {layer.conf} /etc/supervisor/conf.d/{layer.conf}")
+        checks = [f"test -d {prefix}", f"test -f /etc/supervisor/conf.d/{layer.conf}"]
+        if install.python is not None:
+            checks.append(f"test -x {prefix}/venv/bin/python")
+        lines.append(f"RUN {' && '.join(checks)}")
+    if protocol and venvs:
+        lines.append("RUN rm -rf /tmp/agentenv-protocol")
     lines += [f"ENV AGENTENV_SETTING_{name.upper()}={json.dumps(str(value))}" for name, value in build_settings.items()]
     lines.append(f"USER {base.session.user}")
     return "\n".join(lines) + "\n"
 
 
-def _installed(local: str, layer: str) -> dict[str, str]:
-    """The packages ``local``'s build installed into the driver's venv, by name, read from the image without running it,
-    so on any arch; none for a driver with no venv."""
+def _installed(local: str, prefix: str) -> dict[str, str]:
+    """The packages ``local``'s build installed into the venv of the driver at ``prefix``, by name, read from the image
+    without running it, so on any arch; none for a driver with no venv."""
     created = subprocess.run(["docker", "create", local], capture_output=True, text=True, check=True).stdout.strip()
     try:
-        copied = subprocess.run(["docker", "cp", f"{created}:{DRIVERS}/{layer}/installed.json", "-"],
+        copied = subprocess.run(["docker", "cp", f"{created}:{prefix}/installed.json", "-"],
                                 capture_output=True)
     finally:
         subprocess.run(["docker", "rm", created], capture_output=True)

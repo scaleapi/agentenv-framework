@@ -27,6 +27,7 @@ import json
 from pathlib import Path
 
 import pytest
+from agentenv_protocol.computer import AppDeclaration, DriverDeclaration
 
 from agent_env.artifact.artifacts.cli import CliArtifact
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -39,8 +40,9 @@ from agent_env.artifact.artifacts.skill import SkillArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.registry import get_artifact_registry
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer.install import Install, Service
-from agent_env.env.envs.computer_driver import ComputerDriverEnv
+from agent_env.env.envs.computer.app_env import ComputerAppEnv
+from agent_env.env.envs.computer.utils.install import Install, Service
+from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.gateway_server import GatewayEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
@@ -173,16 +175,35 @@ ENV_FIXTURES = {
             "installed": {"mss": "10.1.0"}, "built_at": "2026-10-28T10:02:11+00:00"}}},
             "computer": {"id": "desktop__computer", "version": 1}},
     ),
+    "computer_app": lambda: ComputerAppEnv(
+        id="notes",
+        version=3,
+        environment_name="notes",
+        module="app.py:Notes",
+        files=ARTIFACT_FIXTURES["file_artifact_universe"](),
+        declaration=AppDeclaration.model_validate({
+            "supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}], "permissions": [],
+            "install": {"linux": {"files": ".", "python": "requirements.txt",
+                                  "services": [{"name": "notes", "command": "venv/bin/python serve.py"}]}},
+            "launch": {"at": "demand", "command": ["notes"]},
+            "settings": {"properties": {"signature": {"default": "", "title": "Signature", "type": "string"}},
+                         "title": "Settings", "type": "object"},
+            "skill": {"file": "skill.md"}, "data": ["data/add", "data/get"], "install_steps": [], "ready_checks": []}),
+        computer=ARTIFACT_FIXTURES["computer"]().model_copy(update={"version": 1}),
+        driver=ENV_FIXTURES["computer_driver"](),
+        metadata={"owner": "example-team"},
+    ),
     "computer_driver": lambda: ComputerDriverEnv(
         id="reference-driver",
         version=4,
         module="driver.py:ReferenceDriver",
         files=ARTIFACT_FIXTURES["file_artifact_universe"](),
-        declaration={"name": "reference", "supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}],
-                     "platforms": [{"platform": {"os": "linux", "arch": "amd64", "display": "x11"},
-                                    "provides": ["urn:agentenv:computer/v1", "urn:agentenv:computer-ready/v1"],
-                                    "tools": ["computer_screenshot", "computer_click"],
-                                    "features": {"buttons": ["left"], "max_click_count": 1}}]},
+        declaration=DriverDeclaration.model_validate({
+            "name": "reference", "supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}],
+            "platforms": [{"platform": {"os": "linux", "arch": "amd64", "display": "x11"},
+                           "provides": ["urn:agentenv:computer/v1", "urn:agentenv:computer-ready/v1"],
+                           "tools": ["computer_screenshot", "computer_click"],
+                           "features": {"buttons": ["left"], "max_click_count": 1}}]}),
         install={"linux": Install(python="requirements.txt", services=[Service(
             name="driver", command="venv/bin/python -m agentenv_protocol.computer.serve driver.py:ReferenceDriver")])},
         port=18765,

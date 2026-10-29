@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import ClassVar, Optional
+from collections.abc import Mapping
+from typing import Any, ClassVar, Optional
 
 from agent_env.config import get_config
 from agent_env.env.gateway import GatewayMode
@@ -65,6 +66,12 @@ class DeployEnvTaskStep(TaskStep):
         self.metadata = metadata or {}
         # The env type's own deploy options, which this step passes to its deploy() without reading them.
         self.env_params = env_params
+
+    def run_state(self, user_overrides: Mapping[str, Any]) -> tuple[str | None, str | None]:
+        """The env state type and attached state instance a run with ``user_overrides`` deploys on: each the run's,
+        over this step's own."""
+        return (user_overrides.get("env_state_type") or self.env_state_type,
+                user_overrides.get("env_state_instance_id") or self.env_state_instance_id)
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -138,10 +145,7 @@ class DeployEnvTaskStep(TaskStep):
         env = Env.get(self.env_id, self.env_version)
         user_overrides = context.metadata.get("user_overrides", {})
         resolved_sandbox_type = user_overrides.get("env_sandbox") or self.sandbox_type
-        resolved_env_state_type = user_overrides.get("env_state_type") or self.env_state_type
-        resolved_env_state_instance_id = (
-            user_overrides.get("env_state_instance_id") or self.env_state_instance_id
-        )
+        resolved_env_state_type, resolved_env_state_instance_id = self.run_state(user_overrides)
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
         attribution = deploy_attribution(self, context)

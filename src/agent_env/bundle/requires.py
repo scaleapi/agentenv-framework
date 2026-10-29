@@ -7,7 +7,6 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import shlex
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -32,7 +31,7 @@ from ._fs import relative
 from .parse import BUNDLE_TOML, BundleError, BundleKind
 
 if TYPE_CHECKING:
-    from .resolve import ResolvedBundle
+    from .resolve import ResolvedBundle, ResolvedEntry
 
 # What core ships, per plugin group: anything else a bundle uses is provided by a plugin, or by configuration.
 _BUILTINS = {TASK_STEPS: task_step_registry._builtin_registry, ENVS: env_registry._builtin_registry,
@@ -40,8 +39,8 @@ _BUILTINS = {TASK_STEPS: task_step_registry._builtin_registry, ENVS: env_registr
 
 
 class UnmetRequirements(BundleError):
-    """A bundle whose ``bundle.toml`` requires packages that aren't installed, or not at a version it allows, with
-    every other problem resolving it found; ``requirements`` are the unmet ones, as it writes them."""
+    """A bundle whose ``bundle.toml``, or a stored task whose ``requires``, names packages that aren't installed, or
+    not at a version it allows, with every other problem found; ``requirements`` are the unmet ones, as written."""
 
     def __init__(self, problems: Iterable[str], requirements: Sequence[str]):
         super().__init__(problems)
@@ -139,57 +138,46 @@ class Providers:
         return f"{names[0]} {version}" if version else names[0]
 
 
-def unmet_problems(requires: Iterable[str]) -> tuple[list[str], list[str]]:
-    """The problems ``bundle.toml``'s unmet ``requires`` raise, naming the one command that installs every plugin
-    package among them, and those requirements. One on agent-env itself, which ``plugin add`` doesn't change, says to
-    upgrade it instead."""
-    found = _requirements.unmet(requires)
-    core = [(line, why) for line, why in found if canonicalize_name(Requirement(line).name) in _requirements.CORE]
-    plugins = [(line, why) for line, why in found if (line, why) not in core]
-    problems = [f"{BUNDLE_TOML}: requires {line!r}, {why}; upgrade agent-env with the installer that installed it"
-                for line, why in core]
-    lines = [line for line, _ in plugins]
-    if len(plugins) == 1:
-        (line, why), = plugins
-        problems.append(f"{BUNDLE_TOML}: requires {line!r}, {why}; install it with: {install_command(lines)}")
-    elif plugins:
-        problems += [f"{BUNDLE_TOML}: requires {line!r}, {why}" for line, why in plugins]
-        problems.append(f"{BUNDLE_TOML}: install what it requires with: {install_command(lines)}")
-    return problems, lines
-
-
-def install_command(requirements: Sequence[str]) -> str:
-    """The command that installs ``requirements`` into this environment, through the installer that owns it."""
-    return shlex.join(["agent-env", "plugin", "add", *requirements])
-
-
 def uses(resolved: ResolvedBundle, providers: Providers | None = None) -> list[Use]:
     """Each type the bundle's own tasks, envs and artifacts use that core doesn't ship."""
     providers = providers or Providers()
-    steps, envs, artifacts = get_task_step_registry(), get_env_registry(), get_artifact_registry()
+    return [use for entry in resolved.entries for use in entry_uses(resolved.bundle.root, entry, providers)]
+
+
+def entry_uses(root: Path, entry: ResolvedEntry, providers: Providers) -> list[Use]:
+    """Each type ``entry``, of the bundle at ``root``, uses that core doesn't ship."""
+    where = relative(root, entry.entry.path)
+    kind = entry.entry.kind
     found = []
-    for entry in resolved.entries:
-        where = relative(resolved.bundle.root, entry.entry.path)
-        kind = entry.entry.kind
-        if kind is BundleKind.TASK:
-            for step in entry.config:
-                step_type = step.get("type")
-                if isinstance(step_type, str) and (provider := providers.of(TASK_STEPS, step_type,
-                                                                            steps.get(step_type))) is not None:
-                    found.append(Use(f"{where}: step {step.get('id')!r}", "step type", step_type, provider))
-        elif kind is BundleKind.ENV and (provider := providers.of(ENVS, entry.entry.type,
-                                                                  envs.get(entry.entry.type))) is not None:
-            found.append(Use(where, "env type", entry.entry.type, provider))
-        elif kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
-            name = canonical_type(entry.entry.type)
-            if (provider := providers.of(ARTIFACTS, name, artifacts.get(name))) is not None:
-                found.append(Use(where, "artifact type", name, provider))
+    if kind is BundleKind.TASK:
+        steps = get_task_step_registry()
+        for step in entry.config:
+            step_type = step.get("type")
+            if isinstance(step_type, str) and (provider := providers.of(TASK_STEPS, step_type,
+                                                                        steps.get(step_type))) is not None:
+                found.append(Use(f"{where}: step {step.get('id')!r}", "step type", step_type, provider))
+    elif kind is BundleKind.ENV and (provider := providers.of(ENVS, entry.entry.type,
+                                                              get_env_registry().get(entry.entry.type))) is not None:
+        found.append(Use(where, "env type", entry.entry.type, provider))
+    elif kind in (BundleKind.ARTIFACT, BundleKind.SKILL):
+        name = canonical_type(entry.entry.type)
+        if (provider := providers.of(ARTIFACTS, name, get_artifact_registry().get(name))) is not None:
+            found.append(Use(where, "artifact type", name, provider))
     return found
 
 
-def detected(found: Iterable[Use]) -> list[str]:
-    """The requirement for each distinct plugin distribution ``found`` names, at least the version installed here."""
-    return sorted({requirement for use in found if (requirement := use.provider.requirement()) is not None})
+def detected(found: Iterable[Use], declared: Iterable[str] = ()) -> list[str]:
+    """The requirement for each distinct plugin distribution ``found`` names: as ``declared`` writes it when it names
+    that distribution, else at least the version installed here."""
+    by_name: dict[str, list[str]] = {}
+    for line in declared:
+        if (requirement := _requirements.parsed(line)) is not None:
+            by_name.setdefault(canonicalize_name(requirement.name), []).append(line)
+    requires: set[str] = set()
+    for use in found:
+        if (requirement := use.provider.requirement()) is not None:
+            requires.update(by_name.get(canonicalize_name(use.provider.distribution), [requirement]))
+    return sorted(requires)
 
 
 def declare(resolved: ResolvedBundle, declaring: Declaring) -> list[str]:

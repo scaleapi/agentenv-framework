@@ -308,7 +308,7 @@ async def test_validation_deploys_a_server_env_as_declared_on_the_default_sandbo
 
 
 def _env(env_provider_type: str = "gateway") -> MCPServerEnv:
-    return MCPServerEnv(id="mcp-email", version=1, docker_image_artifact=MagicMock(), environment_name="email",
+    return MCPServerEnv(id="mcp-email", version=1, docker_image_artifact=MagicMock(image_name="mcp-email"), environment_name="email",
                         env_provider_type=env_provider_type)
 
 
