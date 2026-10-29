@@ -178,7 +178,8 @@ class Notifications:
             cid = self._next_id("check")
             self._checks[cid] = {"check_id": cid, "note": note, "next": first, "every": step, "until": end,
                                  "created_at": now, "status": "active", "fired": 0}
-            return self._public(self._checks[cid])
+            # only what the gateway decided: the agent wrote the note, and the trajectory already logs it
+            return {k: v for k, v in self._public(self._checks[cid]).items() if k != "note"}
 
     def list(self) -> dict:
         with self._lock:

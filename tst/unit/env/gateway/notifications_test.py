@@ -59,6 +59,16 @@ def test_a_check_takes_a_duration_from_now_or_a_time_with_its_offset():
     assert [c["note"] for c in w.list()["checks"]] == ["in six hours", "tonight"]
 
 
+def test_schedule_returns_what_the_gateway_decided_and_list_still_shows_the_note():
+    n = _notifications()
+    made = n.schedule("Check the saved search for 2BRs on Alder St", at="PT2H", every="P1D", until="P4D")
+    assert made == {"check_id": "check-1", "next": "2027-02-01T17:00:00Z", "every": "P1D",
+                    "until": "2027-02-05T15:00:00Z"}
+    assert n.schedule("once", at="PT3H") == {"check_id": "check-2", "next": "2027-02-01T18:00:00Z"}
+    assert [c["note"] for c in n.list()["checks"]] == ["Check the saved search for 2BRs on Alder St", "once"]
+    assert [c["note"] for c in n.state()["checks"]] == ["Check the saved search for 2BRs on Alder St", "once"]
+
+
 @pytest.mark.parametrize("kwargs, error", [
     ({"note": "x"}, "give at"),
     ({"note": " ", "at": "PT1H"}, "note must say"),
@@ -316,7 +326,7 @@ def test_the_agent_schedules_through_the_tool_and_the_harness_takes_it(gateway):
     _request(gateway, "POST", "/notifications/config", {})
     tool = gateway._mcp._tool_manager._tools["schedule_check"]
     made = asyncio.run(tool.fn(note="check rugs", at="PT2H"))
-    assert made["next"] == "2027-02-01T17:00:00Z"
+    assert made == {"check_id": "check-1", "next": "2027-02-01T17:00:00Z"}
     refused = asyncio.run(tool.fn(note="check", every="PT5M"))
     assert isinstance(refused, CallToolResult) and refused.isError
     state = _request(gateway, "GET", "/notifications/state").json()
