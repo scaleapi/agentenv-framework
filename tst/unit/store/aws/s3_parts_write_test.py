@@ -188,3 +188,11 @@ def test_an_abort_that_cannot_reach_s3_does_not_hide_why_the_write_failed(s3, st
 def test_grants_are_signed_against_the_buckets_region(s3, bucket, host):
     store = S3ObjectStore.from_config(bucket=bucket, region="us-west-2")
     assert urlsplit(store.issue_read_grant(f"s3://{bucket}/k.zip", expires_in=900).url).netloc == host
+
+
+@pytest.mark.parametrize("endpoint", ["http://minio:9000", "https://s3.example.internal"])
+def test_an_s3_compatible_endpoint_is_addressed_by_path(s3, monkeypatch, endpoint):
+    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", endpoint)
+    store = S3ObjectStore.from_config(bucket=BUCKET, region="us-west-2")
+    signed = urlsplit(store.signed_get_url(f"s3://{BUCKET}/k.zip", expires_in=900))
+    assert f"{signed.scheme}://{signed.netloc}{signed.path}" == f"{endpoint}/{BUCKET}/k.zip"
