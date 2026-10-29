@@ -27,6 +27,8 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
+from hermes_kit import in_thread_to_its_end
+
 logger = logging.getLogger(__name__)
 
 # The model a run uses when neither the task nor the agent-config names one, sent to the endpoint as named.
@@ -311,7 +313,8 @@ async def run_hermes(
             + json.dumps(schema, separators=(",", ":"))
         )
     config = build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, skills_dir)
-    home = await asyncio.to_thread(prepare_profile, context_id, config, system_prompt)
+    # To its end even for a cancelled turn: a snapshot may archive the profile as soon as the turn lets go.
+    home = await in_thread_to_its_end(prepare_profile, context_id, config, system_prompt)
 
     with tempfile.TemporaryDirectory(prefix="hermes-turn-") as scratch:
         prompt_file, usage_file = Path(scratch) / "prompt.txt", Path(scratch) / "usage.json"

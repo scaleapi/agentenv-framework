@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
+import functools
 import json
 import logging
 import os
@@ -19,7 +21,7 @@ import subprocess
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -69,7 +71,7 @@ from hermes_bridge import (
     run_hermes,
     validate_output_format,
 )
-from hermes_kit import DurableSessionRefs, install_skill, json_error_bodies
+from hermes_kit import DurableSessionRefs, in_thread_to_its_end, install_skill, json_error_bodies, to_its_end
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -116,21 +118,51 @@ def _safe_name(candidate: str | None, fallback_ext: str = "") -> str:
     return candidate or f"{uuid.uuid4().hex}{fallback_ext}"
 
 
-def _download_uri_to(uri: str, target: Path) -> None:
+async def _download_uri_to(uri: str, target: Path) -> None:
+    """Write an http(s) file to target as it arrives, so a large one never sits whole in memory; a cancelled turn's
+    download stops with it."""
     parsed = urlparse(uri)
-    if parsed.scheme in ("http", "https"):
-        try:
-            with httpx.Client(timeout=_FILE_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as client:
-                response = client.get(uri)
-                response.raise_for_status()
-                target.write_bytes(response.content)
-        except httpx.HTTPError as exc:
-            raise FilePartMaterializeError("HTTP file download failed") from exc
-    else:
+    if parsed.scheme not in ("http", "https"):
         raise FilePartMaterializeError(f"unsupported file URI scheme {parsed.scheme!r}")
+    try:
+        async with httpx.AsyncClient(timeout=_FILE_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as client:
+            async with client.stream("GET", uri) as response:
+                response.raise_for_status()
+                with target.open("wb") as out:
+                    async for chunk in response.aiter_bytes():
+                        out.write(chunk)
+    except httpx.HTTPError as exc:
+        raise FilePartMaterializeError("HTTP file download failed") from exc
 
 
-def _materialize_and_render(part: FilePart, task_id: str) -> list[str]:
+def _write_base64(target: Path, data: str) -> None:
+    target.write_bytes(base64.b64decode(data, validate=True))
+
+
+async def _render_pdf(target: Path, prefix: str) -> bool:
+    """Whether pdftoppm rendered the PDF's pages beside it; one that outlives its timeout, or a cancelled turn, is
+    killed and reaped before this returns."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pdftoppm", "-png", "-r", str(_PDF_RENDER_DPI), str(target), prefix,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return False
+    try:
+        return await asyncio.wait_for(proc.wait(), _PDF_RENDER_TIMEOUT_S) == 0
+    except TimeoutError:
+        return False
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await to_its_end(proc.wait())
+
+
+async def _materialize_and_render(part: FilePart, task_id: str) -> list[str]:
+    """A file part's path under the task's inputs, and a PDF's page images; each write ends before this returns, even
+    for a cancelled turn."""
     directory = INPUTS_DIR / task_id
     directory.mkdir(parents=True, exist_ok=True)
     name = _safe_name(part.name)
@@ -139,21 +171,16 @@ def _materialize_and_render(part: FilePart, task_id: str) -> list[str]:
         target = directory / f"{uuid.uuid4().hex[:8]}-{name}"
     if part.bytes is not None:
         try:
-            target.write_bytes(base64.b64decode(part.bytes, validate=True))
+            await in_thread_to_its_end(_write_base64, target, part.bytes)
         except (binascii.Error, ValueError, OSError) as exc:
             raise FilePartMaterializeError(f"invalid file attachment {name!r}") from exc
     else:
-        _download_uri_to(part.uri, target)
+        await _download_uri_to(part.uri, target)
     if (part.mime_type or "").lower() != "application/pdf" and target.suffix.lower() != ".pdf":
         return [str(target)]
     # Hermes looks at images with its vision tool, so a PDF goes as its pages' images too.
     prefix = str(target.with_suffix("")) + "_page"
-    try:
-        subprocess.run(
-            ["pdftoppm", "-png", "-r", str(_PDF_RENDER_DPI), str(target), prefix],
-            check=True, capture_output=True, timeout=_PDF_RENDER_TIMEOUT_S,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+    if not await _render_pdf(target, prefix):
         logger.warning("PDF rendering failed for %s; passing the PDF alone", target)
         return [str(target)]
     pages = sorted(directory.glob(f"{Path(prefix).name}*.png"))
@@ -259,8 +286,9 @@ def _archive_profile(home: Path, session_id: str, archive: Path) -> None:
         (home / _SNAPSHOT_SESSION).unlink(missing_ok=True)
 
 
-def _restore_profile(archive: Path, home: Path) -> str:
-    """Replace the context's profile with an archived one; the archived session id."""
+def _stage_profile(archive: Path, home: Path) -> tuple[Path, str]:
+    """An archived profile extracted beside the context's, which stays untouched; the staged folder and the archived
+    session id."""
     staged = Path(tempfile.mkdtemp(prefix=".restore-", dir=home.parent))
     try:
         with tarfile.open(archive, "r:gz") as tar:
@@ -269,12 +297,31 @@ def _restore_profile(archive: Path, home: Path) -> str:
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("the snapshot names no Hermes session")
         (staged / _SNAPSHOT_SESSION).unlink()
-        shutil.rmtree(home, ignore_errors=True)
-        staged.rename(home)
-        return session_id
+        return staged, session_id
     except BaseException:
         shutil.rmtree(staged, ignore_errors=True)
         raise
+
+
+def _commit_profile(staged: Path, home: Path) -> None:
+    """Swap a staged profile in for the context's; the previous profile comes back if the move fails."""
+    previous = home.with_name(home.name + ".previous")
+    shutil.rmtree(previous, ignore_errors=True)
+    if home.exists():
+        home.rename(previous)
+    try:
+        staged.rename(home)
+    except BaseException:
+        shutil.rmtree(home, ignore_errors=True)
+        if previous.exists():
+            previous.rename(home)
+        raise
+    # The swap has succeeded; removing the old profile is cleanup and must not undo it.
+    shutil.rmtree(previous, ignore_errors=True)
+
+
+def _tar(*args: str) -> None:
+    subprocess.run(["tar", *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
 @a2a_agent(
@@ -330,15 +377,17 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
                 started = event.get("session_id")
                 if self.session_ref_for_context(context_id) is None and isinstance(started, str) and started:
                     self.set_session_ref_for_context(context_id, started)
-            try:
-                attachments = []
-                for part in request.parts:
-                    if isinstance(part, FilePart):
-                        attachments.extend(await asyncio.to_thread(_materialize_and_render, part, request.task_id))
-            except FilePartMaterializeError as exc:
-                return TaskResult.failure("filepart_error", str(exc), error_type="infra_error")
-            try:
-                async with self._turn_slots:
+
+            # Attachments count against the turn limit too: their downloads and PDF renders take memory and processes.
+            async with self._turn_slots:
+                try:
+                    attachments = []
+                    for part in request.parts:
+                        if isinstance(part, FilePart):
+                            attachments.extend(await _materialize_and_render(part, request.task_id))
+                except FilePartMaterializeError as exc:
+                    return TaskResult.failure("filepart_error", str(exc), error_type="infra_error")
+                try:
                     result = await run_hermes(
                         prompt=_with_attachments(prompt, attachments),
                         context_id=context_id,
@@ -356,10 +405,10 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
                         event_callback=record,
                         workspace=str(WORKSPACE_DIR),
                     )
-            except Exception:
-                logger.exception("Hermes invocation failed")
-                return TaskResult.failure("hermes_invocation_error", "Hermes invocation failed",
-                                          error_type="infra_error")
+                except Exception:
+                    logger.exception("Hermes invocation failed")
+                    return TaskResult.failure("hermes_invocation_error", "Hermes invocation failed",
+                                              error_type="infra_error")
             if result.session_id:
                 self.set_session_ref_for_context(context_id, result.session_id)
 
@@ -418,12 +467,10 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
                 session_id = self.session_ref_for_context(request.context_id)
                 if not session_id:
                     raise HTTPException(status_code=404, detail="No active session for context_id")
-                await asyncio.to_thread(_archive_profile, profile_dir(request.context_id), session_id, conversation)
+                # Each to its end even for a cancelled save, so neither writes past the exclusive hold.
+                await in_thread_to_its_end(_archive_profile, profile_dir(request.context_id), session_id, conversation)
                 if request.objects.workspace is not None:
-                    await asyncio.to_thread(
-                        subprocess.run, ["tar", "-czf", str(workspace), "-C", str(WORKSPACE_DIR), "."],
-                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                    )
+                    await in_thread_to_its_end(_tar, "-czf", str(workspace), "-C", str(WORKSPACE_DIR), ".")
             objects = {"trajectory": (await upload(request.objects.trajectory, conversation)).model_dump(mode="json")}
             if request.objects.workspace is not None:
                 objects["workspace"] = (await upload(request.objects.workspace, workspace)).model_dump(mode="json")
@@ -441,20 +488,31 @@ class HermesAgent(DurableSessionRefs, AgentEnvAgent):
                 staged = Path(directory) / "workspace"
                 staged.mkdir()
                 await download(request.objects.workspace, archive)
-                await asyncio.to_thread(
-                    subprocess.run, ["tar", "-xzf", str(archive), "-C", str(staged)],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                )
+                await in_thread_to_its_end(_tar, "-xzf", str(archive), "-C", str(staged))
             async with self._workspace.exclusive(), self._turn_lock(target_context_id):
                 home = profile_dir(target_context_id)
                 home.parent.mkdir(parents=True, exist_ok=True)
+                # Stage the conversation first, so a bad snapshot changes nothing. The workspace and conversation swaps
+                # then run in one thread, and the context is bound to the restored session, in one step a cancel can't
+                # abandon: a failed conversation swap puts the workspace back, and the context's previous profile stays
+                # in place until both succeed.
                 try:
-                    session_id = await asyncio.to_thread(_restore_profile, conversation, home)
+                    staged_home, session_id = await in_thread_to_its_end(_stage_profile, conversation, home)
                 except (tarfile.TarError, OSError, ValueError) as exc:
                     raise HTTPException(status_code=400, detail=f"Unreadable Hermes snapshot: {exc}") from exc
-                if staged is not None:
-                    await asyncio.to_thread(_replace_workspace, staged)
-                self.set_session_ref_for_context(target_context_id, session_id)
+                commit = functools.partial(_commit_profile, staged_home, home)
+
+                async def swap() -> None:
+                    try:
+                        if staged is not None:
+                            await asyncio.to_thread(_replace_workspace, staged, commit)
+                        else:
+                            await asyncio.to_thread(commit)
+                    finally:
+                        await asyncio.to_thread(shutil.rmtree, staged_home, True)
+                    self.set_session_ref_for_context(target_context_id, session_id)
+
+                await to_its_end(swap())
         return {"context_id": target_context_id}
 
 
@@ -479,7 +537,9 @@ def _usage(result) -> Usage:
     )
 
 
-def _replace_workspace(staged: Path) -> None:
+def _replace_workspace(staged: Path, then: Callable[[], None] | None = None) -> None:
+    """Swap staged in for the workspace's contents. When then() raises after the swap, the previous contents come
+    back."""
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     backup = Path(tempfile.mkdtemp(prefix=".hermes-backup-", dir=WORKSPACE_DIR))
     saved = backup / "saved"
@@ -497,6 +557,8 @@ def _replace_workspace(staged: Path) -> None:
         try:
             for child in staged.iterdir():
                 shutil.move(str(child), str(WORKSPACE_DIR / child.name))
+            if then is not None:
+                then()
             committed = True
         except Exception:
             for child in WORKSPACE_DIR.iterdir():

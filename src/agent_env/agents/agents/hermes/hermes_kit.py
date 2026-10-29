@@ -1,11 +1,14 @@
 """The pieces of agent plumbing this agent shares in shape with other CLI agents, copied from the Claude Code agent's
-``kit.py``: durable session references, skill installs and FastAPI-style error bodies."""
+``kit.py``: durable session references, skill installs, FastAPI-style error bodies and work a cancel can't abandon."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TypeVar
 
 from agentenv_protocol.a2a_agent import BundleSkillRequest, InlineSkillRequest, SkillAddResponse
 from agentenv_protocol.transfers import download
@@ -17,6 +20,29 @@ from starlette.responses import JSONResponse, Response
 logger = logging.getLogger(__name__)
 
 _REFS_ATTR = "_durable_session_refs"
+_T = TypeVar("_T")
+
+
+async def to_its_end(work: Awaitable[_T]) -> _T:
+    """``work`` awaited to its end even when the caller is cancelled, so nothing it does outlives the locks the caller
+    holds; the cancel is raised once it has ended."""
+    task = asyncio.ensure_future(work)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        raise asyncio.CancelledError from (None if task.cancelled() else task.exception())
+    return task.result()
+
+
+async def in_thread_to_its_end(func: Callable[..., _T], /, *args: object) -> _T:
+    """``func(*args)`` in a thread, off the event loop, awaited to its end as :func:`to_its_end` awaits work."""
+    return await to_its_end(asyncio.to_thread(func, *args))
 
 
 class DurableSessionRefs:
