@@ -3,15 +3,20 @@ of the envs and artifacts its steps read, and, in local stores, the infra envs i
 
 import logging
 
+import click
 import pytest
 from click.testing import CliRunner
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import _install_prompt, cli, submitted_runs
 from agent_env.cli.task import _checks
 from agent_env.config import get_config
+from agent_env.env import MCPServerEnv
 from agent_env.env.bootstrap import GATEWAY, SERVICE_DB
 from agent_env.env.store import ENVS_COLLECTION
 from agent_env.plugins import _requirements
+from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.store import TASKS_COLLECTION
 
@@ -92,13 +97,13 @@ def test_one_the_store_doesnt_hold_or_the_run_fills_in_is_left_to_its_step(store
              {"id": "seeded", "type": "deploy_env", "env_id": "{{seed.env}}"}])
     monkeypatch.setattr(_checks, "stores_are_local", lambda: False)
 
-    assert _checks.runnable_task("t", None, say=print).id == "t"
+    assert _checks.runnable_task("t", None, {}, say=print).id == "t"
 
 
 def test_a_task_whose_requirements_are_met_is_run(stores, monkeypatch):
     Task.put(id="t", steps=[], requires=["agentenv-e2e-acme>=1"])
 
-    assert _checks.runnable_task("t", None, say=print).requires == ["agentenv-e2e-acme>=1"]
+    assert _checks.runnable_task("t", None, {}, say=print).requires == ["agentenv-e2e-acme>=1"]
 
 
 @pytest.fixture
@@ -146,16 +151,50 @@ def test_a_task_needing_a_newer_agent_env_says_to_upgrade_it_and_never_asks(term
     (True, {}, {GATEWAY, SERVICE_DB}),
     (True, {"gateway_env_id": "mine"}, {SERVICE_DB}),
     (True, {"gateway_env_id": "mine", "service_db_env_id": "mine-db"}, None),
+    (True, {"env_state_type": "external_db"}, {GATEWAY}),
     (False, {}, None),
-], ids=["local", "own-gateway", "own-both", "shared"])
+], ids=["local", "own-gateway", "own-both", "external-state", "shared"])
 def test_the_infra_envs_its_deploys_run_on_are_set_up_in_local_stores_but_for_those_it_is_given(
         stores, monkeypatch, local, overrides, kinds):
-    Task.put(id="t", steps=[])
+    _mcp_env("crm")
+    _stored([{"id": "env", "type": "deploy_env", "env_id": "crm"}])
     set_up = []
     monkeypatch.setattr(_checks, "stores_are_local", lambda: local)
-    monkeypatch.setattr(_checks, "stored_infra", lambda steps: frozenset({GATEWAY, SERVICE_DB}))
     monkeypatch.setattr(_checks, "ensure_default_envs", lambda kinds, say: set_up.append(set(kinds)))
 
-    _checks.runnable_task("t", None, say=print, **overrides)
+    _checks.runnable_task("t", None, {"user_overrides": overrides}, say=print)
 
     assert set_up == ([kinds] if kinds else [])
+
+
+def _mcp_env(id):
+    with namespace_routing():
+        image = get_artifact_store().put_document(DockerImageArtifact(
+            id=f"{id}-image", description=id, image_name=f"{id}:latest", tar_gz_s3_url=None, platform=None))
+        MCPServerEnv.put(id=id, docker_image_artifact=image, environment_name=id)
+
+
+_UNKNOWN_ENV = [{"id": "env", "type": "deploy_env", "env_id": "acme-env"},
+                {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"},
+                {"id": "load", "type": "load_artifact", "sandbox_name": "box", "artifact_id": "acme-data",
+                 "depends_on": [{"task_step_id": "box"}]}]
+
+
+@pytest.mark.parametrize("metadata", [
+    {"start_step": 3},
+    {"start_step": 1, "user_overrides": {"step_params": {"load": {"artifact_id": "absent"}}}},
+], ids=["resumed-past-them", "overridden"])
+def test_what_only_the_steps_a_run_skips_or_overrides_read_is_left_alone(stores, monkeypatch, metadata):
+    store = get_config().get_document_store()
+    store.insert(ENVS_COLLECTION, {"id": "acme-env", "type": "acme_env_task_run_test", "version": 1})
+    store.insert("artifacts", {"id": "acme-data", "type": "acme_artifact_task_run_test", "version": 1})
+    _stored(_UNKNOWN_ENV)
+    monkeypatch.setattr(_checks, "stores_are_local", lambda: False)
+
+    with pytest.raises(click.ClickException) as caught:
+        _checks.runnable_task("t", None, {}, say=print)
+    assert _checks.runnable_task("t", None, metadata, say=print).id == "t"
+    env, load = caught.value.message.splitlines()
+    assert env == "task t v1: step 'env': env_id 'acme-env': Unknown env type: acme_env_task_run_test"
+    assert load.startswith("task t v1: step 'load': artifacts[0].id 'acme-data': Unknown artifact type "
+                           "'acme_artifact_task_run_test'")

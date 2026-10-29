@@ -420,7 +420,7 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     initial_context.metadata["task_id"] = task_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
-    task = _runnable(task_id, task_version, gateway_env_id, service_db_env_id)
+    task = _runnable(task_id, task_version, initial_context.metadata)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
 
     print_banner()
@@ -465,13 +465,11 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         raise SystemExit(1)
 
 
-def _runnable(task_id: str, task_version: int | None, gateway_env_id: str | None = None,
-              service_db_env_id: str | None = None):
-    """The stored task, checked before its first step (``runnable_task``); a refusal for what it requires offers, in a
-    terminal, to install it and run the command again."""
+def _runnable(task_id: str, task_version: int | None, metadata: dict):
+    """The stored task, checked before the first step a run with ``metadata`` runs (``runnable_task``); a refusal for
+    what it requires offers, in a terminal, to install it and run the command again."""
     try:
-        return runnable_task(task_id, task_version, say=click.echo, gateway_env_id=gateway_env_id,
-                             service_db_env_id=service_db_env_id)
+        return runnable_task(task_id, task_version, metadata, say=click.echo)
     except UnmetRequirements as e:
         offer_to_install(e)
         raise
@@ -532,7 +530,8 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
         raise click.ClickException("No seeds found in CSV")
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
-    task = _runnable(task_id, task_version)
+    task = _runnable(task_id, task_version, {"user_overrides": {"env_state_type": env_state_type,
+                                                                "env_state_instance_id": env_state_instance_id}})
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
     suffixes = {step.universe_id_suffix or "" for step in task.steps if isinstance(step, CollectArtifactsTaskStep)}
     if is_local_id(task.id) and suffixes:
