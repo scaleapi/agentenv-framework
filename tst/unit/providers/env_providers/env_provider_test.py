@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
-from agent_env.providers.env_providers.env_provider import EnvironmentProvider, _SandboxEnvironmentProvider
+from agent_env.providers.env_providers.env_provider import DeployRefused, EnvironmentProvider, _SandboxEnvironmentProvider
 
 _ATTEMPT = r"env_deploy_provider_attempt env_id=e1 provider={} status={} duration_s=\d+\.\d"
 _ENV = SimpleNamespace(id="e1")
@@ -20,11 +20,15 @@ _RECORD = SimpleNamespace(env_id="e1")
 
 
 class ProviderA(MagicMock):
-    pass
+    @property
+    def links(self):
+        return (self,)
 
 
 class ProviderB(MagicMock):
-    pass
+    @property
+    def links(self):
+        return (self,)
 
 
 class _Topology(_SandboxEnvironmentProvider):
@@ -105,30 +109,26 @@ async def test_a_chain_that_fails_everywhere_names_every_member():
 
 
 @pytest.mark.asyncio
-async def test_a_chain_narrowed_to_one_member_raises_that_members_error_unwrapped():
-    topology = _Topology(ValueError("no card"))
-    first = ProviderA()
-    topology._sandbox_providers = lambda sandbox_provider, env_id: [first]
+async def test_a_chain_stops_at_a_refused_deploy_which_the_next_member_would_refuse_too():
+    topology = _Topology(DeployRefused("duplicate tool names"), _RECORD)
 
-    with pytest.raises(ValueError, match="no card"):
-        await topology.deploy(_ENV, ChainedSandboxProvider([first, ProviderB()]))
+    with patch.object(topology, "close", wraps=topology.close) as close, \
+            pytest.raises(DeployRefused, match="duplicate tool names"):
+        await topology.deploy(_ENV, ChainedSandboxProvider([ProviderA(), ProviderB()]))
 
-    assert [s.sandbox_provider for s in topology.seen] == [first]
+    assert [type(s.sandbox_provider).__name__ for s in topology.seen] == ["ProviderA"]
+    close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_a_refused_spec_closes_the_provider_and_deploys_nothing():
-    topology = _Topology()
+async def test_a_chain_of_one_member_raises_that_members_error_unwrapped():
+    topology = _Topology(ValueError("no card"))
+    first = ProviderA()
 
-    def refuse(sandbox_provider, env_id):
-        raise ValueError(f"env '{env_id}' can't deploy here")
+    with pytest.raises(ValueError, match="no card"):
+        await topology.deploy(_ENV, ChainedSandboxProvider([first]))
 
-    topology._sandbox_providers = refuse
-    with patch.object(topology, "close", wraps=topology.close) as close, pytest.raises(ValueError, match="can't deploy here"):
-        await topology.deploy(_ENV, ProviderA())
-
-    close.assert_awaited_once()
-    assert topology.seen == []
+    assert [s.sandbox_provider for s in topology.seen] == [first]
 
 
 def test_a_built_in_provider_type_names_the_record_class_it_writes_and_any_other_type_loads_by_shape():

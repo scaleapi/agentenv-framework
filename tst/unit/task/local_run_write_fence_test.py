@@ -22,7 +22,7 @@ from agent_env.store import Filter, LocalSqliteDocumentStore
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store import OciRegistryImageStore
 from agent_env.store.object_store import LocalFilesystemObjectStore
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.store.routing import LocalRunWriteError, run_scope
 from agent_env.task.task import Task
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
@@ -36,7 +36,7 @@ from tst.unit.store.fakes import CollectingVm
 LOCAL_TASK = "@local/~/bundle/tasks/t"
 LOCAL_ENV = "@local/~/bundle/envs/tickets"
 _DOCUMENT_WRITES = ("insert", "update", "update_one_and_get", "replace", "delete")
-_OBJECT_WRITES = ("put", "put_file", "put_file_at", "signed_put_url", "issue_write_grant", "issue_upload_policy")
+_OBJECT_WRITES = ("put", "put_file", "put_file_at", "signed_put_url", "issue_write_grant", "begin_write", "issue_upload_policy")
 
 
 def _refusing(cls, methods):

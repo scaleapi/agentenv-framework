@@ -10,7 +10,8 @@ from typing import ClassVar, Optional
 from urllib.parse import urlparse
 
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, port_bindings
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.utils.paths import validate_relative_filename
@@ -27,6 +28,7 @@ class RunDockerContainerTaskStep(TaskStep):
             artifact_type="file_artifact_universe",
         ),
     )
+    field_scopes = {**TaskStep.field_scopes, "docker_context_url": FieldScope.USER}
 
     def __init__(
         self,
@@ -56,11 +58,8 @@ class RunDockerContainerTaskStep(TaskStep):
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        modes = sum(x is not None for x in (docker_context_artifact_id, docker_context_url))
-        if modes != 1:
-            raise ValueError(
-                "Must pass exactly one of `docker_context_artifact_id` or `docker_context_url`"
-            )
+        if docker_context_artifact_id is not None and docker_context_url is not None:
+            raise ValueError("Pass either `docker_context_artifact_id` or `docker_context_url`, not both")
         if command_override and keep_alive_with_base_command:
             raise ValueError(
                 "Pass either `command_override` or `keep_alive_with_base_command`, not both"
@@ -140,12 +139,26 @@ class RunDockerContainerTaskStep(TaskStep):
             shm_size=data.get("shm_size"),
         )
 
+    def config_problems(self) -> list[str]:
+        """A step naming no build context to run."""
+        return [] if self._names_a_context() else [self._no_context()]
+
+    def _names_a_context(self) -> bool:
+        return self.docker_context_artifact_id is not None or self.docker_context_url is not None
+
+    def _no_context(self) -> str:
+        return (f"run_docker_container '{self.id}': names no build context; set docker_context_artifact_id or "
+                "docker_context_url (docker_context_url is user scope, so an import leaves it out)")
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.providers.sandbox_providers.sandbox_provider import (
             SANDBOX_MODE_VM,
             build_sandbox_provider,
             get_sandbox_provider,
         )
+
+        if problems := self.config_problems():
+            raise ValueError(problems[0])
 
         ds = next(
             (s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name),

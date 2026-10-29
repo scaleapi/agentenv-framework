@@ -85,7 +85,7 @@ class SnapshotConfig:
         )
 
 
-def _rollout_base(step_id: str, instance_id: Optional[str]) -> str:
+def rollout_base(step_id: str, instance_id: Optional[str]) -> str:
     """The id every artifact id in one series is derived from: the rollout's instance id.
 
     Instance-scoped, so concurrent rollouts never contend on one id and retries
@@ -132,7 +132,7 @@ class SnapshotSeries:
         self.a2a_context_id = a2a_context_id
         self.config = config
         self.trajectory_output_prefix = trajectory_output_prefix
-        self._base = _rollout_base(step_id, instance_id)
+        self._base = rollout_base(step_id, instance_id)
         self.workspace_artifact_id = derive_id(self._base, f"{step_id}-workspace")
         if is_local_id(self._base):
             validate_local_id(derive_id(self._base, f"snapshot-{step_id}-workspace"))

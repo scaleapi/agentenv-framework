@@ -8,6 +8,7 @@ Note the explicit ``depends_on=[]``: a missing ``depends_on`` means "depends on 
 prior step", which would serialise the branches and prove nothing.
 """
 
+import contextlib
 import json
 import socket
 import subprocess
@@ -58,6 +59,14 @@ def _wait_ready(url: str, codes: tuple[int, ...], timeout: int = 60) -> bool:
 
 @pytest.fixture
 def local_stack(monkeypatch, tmp_path):
+    with local_stack_at(monkeypatch, tmp_path) as host:
+        yield host
+
+
+@contextlib.contextmanager
+def local_stack_at(monkeypatch: pytest.MonkeyPatch, path: Path):
+    """A throwaway ``registry:2`` and the local stores in ``path`` for as long as the block runs: ``local_stack`` for one
+    test, or under a module's own MonkeyPatch for a stack its tests share. Yields the registry's host."""
     if _docker("info").returncode != 0:
         pytest.skip("docker daemon not available")
 
@@ -71,7 +80,7 @@ def local_stack(monkeypatch, tmp_path):
         _docker("rm", "-f", reg_name)
         pytest.skip("local registry did not become ready")
 
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(path)
     for var in ("DOCUMENT", "OBJECT", "IMAGE"):
         monkeypatch.setenv(f"AGENT_ENV_{var}_STORE", "local")
     configure()

@@ -8,11 +8,19 @@ import re
 from dataclasses import dataclass
 from typing import ClassVar, Optional
 
-from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agentenv_protocol import SKILL_EXTENSION_URI
+from agentenv_protocol.client import find_extension_method
+
+from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.entity.refs import EntityRef
+from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
+
+#: ``context.metadata[ENV_SKILLS_KEY][agent_name][env_id][skill_name]``: the SKILL.md add_skills installed from an env, as
+#: the env, or one of its child envs, wrote it for that deploy.
+ENV_SKILLS_KEY = "env_skills"
 
 
 @dataclass
@@ -21,7 +29,7 @@ class Skill:
 
     See https://agentskills.io/specification for the full spec.
 
-    A skill can come from three mutually-exclusive sources:
+    A skill can come from three mutually-exclusive sources, and names none when an import left its object_url out:
     - **inline**: body + frontmatter fields, rendered into SKILL.md at send time
     - **object_url**: object-store prefix containing a skill directory with its own SKILL.md,
       sent as a bundle of read grants
@@ -41,8 +49,8 @@ class Skill:
 
     def __post_init__(self):
         modes = [bool(self.body), bool(self.object_url), bool(self.skill_artifact_id)]
-        if sum(modes) != 1:
-            raise ValueError("Skill must have exactly one of: body (inline), object_url, skill_artifact_id")
+        if sum(modes) > 1:
+            raise ValueError("Skill must have at most one of: body (inline), object_url, skill_artifact_id")
         if self.skill_artifact_id is not None:
             if any([self.body, self.object_url, self.license, self.compatibility, self.metadata, self.allowed_tools]):
                 raise ValueError(
@@ -65,7 +73,16 @@ class Skill:
         if self.object_url is not None:
             SkillArtifact.validate(object_url=self.object_url, expected_name=self.name)
             return
+        if not self.body:
+            raise ValueError(self.no_source())
         SkillArtifact.validate(skill_md=self.to_skill_md().encode("utf-8"), expected_name=self.name)
+
+    def names_a_source(self) -> bool:
+        return bool(self.body or self.object_url or self.skill_artifact_id)
+
+    def no_source(self) -> str:
+        return (f"skill {self.name!r} names no source; set body, object_url or skill_artifact_id (object_url is user "
+                "scope, so an import leaves it out)")
 
     def to_skill_md(self) -> str:
         """Render the full SKILL.md content with YAML frontmatter + body."""
@@ -156,6 +173,16 @@ def _files_skill_name(universe_id: str) -> str:
     return f"{slug}-{digest}-files" if slug else f"{digest}-files"
 
 
+def _env_skill_name(environment_name: str, env_id: str) -> str:
+    """The env's environment name, as the agent's MCP alias for it is; for a name that isn't a skill name as it stands,
+    a slug of it and a hash of the env's id, so two envs' names never come out the same."""
+    if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", environment_name) and len(environment_name) <= 64:
+        return environment_name
+    slug = re.sub(r"[^a-z0-9]+", "-", environment_name.lower()).strip("-")[:51].rstrip("-")
+    digest = hashlib.sha256(env_id.encode("utf-8")).hexdigest()[:12]
+    return f"{slug}-{digest}" if slug else digest
+
+
 def _build_skill_for_loaded_file_artifact_universe(universe_id: str, entry: dict) -> Skill:
     destination_path = entry["destination_path"]
     return Skill(
@@ -171,7 +198,9 @@ class AddSkillsTaskStep(TaskStep):
         EntityRef.artifact("skills[].skill_artifact_id", version_field="skill_artifact_version", artifact_type="skill"),
         EntityRef.artifact("cli_artifact_ids[]", artifact_type="cli"),
         EntityRef.artifact("file_artifact_universe_ids[]"),
+        EntityRef.env("env_ids[]"),
     )
+    field_scopes = {**TaskStep.field_scopes, "skills[].object_url": FieldScope.USER, "skills[].s3_url": FieldScope.USER}
 
     def __init__(
         self,
@@ -183,11 +212,13 @@ class AddSkillsTaskStep(TaskStep):
         agent_name: Optional[str] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        env_ids: Optional[list[str]] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.skills = [s if isinstance(s, Skill) else Skill.from_dict(s) for s in (skills or [])]
         self.cli_artifact_ids = list(cli_artifact_ids or [])
         self.file_artifact_universe_ids = list(file_artifact_universe_ids or [])
+        self.env_ids = list(env_ids or [])
         self.agent_name = agent_name or TaskStep.DEFAULT_AGENT_NAME
 
     def to_dict(self) -> dict:
@@ -195,6 +226,8 @@ class AddSkillsTaskStep(TaskStep):
         base["skills"] = [s.to_dict() for s in self.skills]
         base["cli_artifact_ids"] = self.cli_artifact_ids
         base["file_artifact_universe_ids"] = self.file_artifact_universe_ids
+        if self.env_ids:  # left out otherwise, so a step without one serializes as before
+            base["env_ids"] = self.env_ids
         base["agent_name"] = self.agent_name
         return base
 
@@ -206,12 +239,19 @@ class AddSkillsTaskStep(TaskStep):
             cli_artifact_ids=data.get("cli_artifact_ids"),
             file_artifact_universe_ids=data.get("file_artifact_universe_ids"),
             agent_name=data.get("agent_name"),
+            env_ids=data.get("env_ids"),
         )
+
+    def config_problems(self) -> list[str]:
+        """Each skill naming no source."""
+        return [f"add_skills '{self.id}': {skill.no_source()}" for skill in self.skills if not skill.names_a_source()]
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 
+        if problems := self.config_problems():
+            raise ValueError("; ".join(problems))
         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if agent is None:
             raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
@@ -243,9 +283,42 @@ class AddSkillsTaskStep(TaskStep):
                 )
             skills_to_add.append(_build_skill_for_loaded_file_artifact_universe(fau_id, entry))
 
+        env_skills = {env_id: await _env_skills(context, agent, env_id) for env_id in self.env_ids}
+
         deployed = get_a2a_agent_instance_store().get(agent.instance_id)
         for skill in skills_to_add:
             result = await A2AAgent.add_skill(deployed, skill)
             logger.info(f"Registered skill: {result}")
+        for env_id, skills in env_skills.items():
+            for skill in skills:
+                result = await A2AAgent.register_skill(deployed, name=skill["name"], description=skill["description"],
+                                                       skill_md=skill["skill_md"])
+                installed = context.metadata.setdefault(ENV_SKILLS_KEY, {}).setdefault(self.agent_name, {})
+                installed.setdefault(env_id, {})[skill["name"]] = skill["skill_md"]
+                logger.info(f"Registered the skill {skill['name']} of env {env_id}: {result}")
 
         return context
+
+
+async def _env_skills(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> list[dict]:
+    """The skills the env ``env_id`` serves, each under its card's environment name: its own card's, or else each of its
+    child envs' (a gateway's servers); refused for an env this run didn't deploy or bind to ``agent``, or that serves
+    none."""
+    deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
+    if deployed is None:
+        raise RuntimeError(f"env '{env_id}' isn't deployed in this run")
+    if env_id not in agent.env_ids:
+        raise RuntimeError(f"env '{env_id}' isn't bound to agent '{agent.agent_name}': name it in the env_ids of its "
+                           "deploy_agent")
+    card = deployed.environment_card or {}
+    if find_extension_method(card, SKILL_EXTENSION_URI, "get") is not None:
+        serving = [(None, _env_skill_name(card.get("name") or env_id, env_id))]
+    else:
+        serving = [(child["name"], _env_skill_name(child["name"], f"{env_id}/{child['name']}"))
+                   for child in card.get("children_environments") or []
+                   if find_extension_method(child, SKILL_EXTENSION_URI, "get") is not None]
+    if not serving:
+        raise RuntimeError(f"env '{env_id}' serves no skill: neither its card nor a child env's declares "
+                           f"{SKILL_EXTENSION_URI}")
+    return [await deployed.invoke(SKILL_EXTENSION_URI, "get", {"name": name}, environment_name=child)
+            for child, name in serving]

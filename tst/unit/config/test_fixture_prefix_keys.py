@@ -1,8 +1,8 @@
 """The fixture prefix reaches every key core builds by hand for artifacts and validator fixtures,
 not only the ones ArtifactStore builds, so a control plane sharing a bucket keeps to its prefix."""
 
-import re
 import asyncio
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -38,8 +38,9 @@ def test_a_skill_bundle_is_written_under_the_prefix(prefixed, tmp_path):
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("---\nname: review\ndescription: Reviews code.\n---\nBody\n")
     skill = SkillArtifact.put("review", skill_dir=skill_dir)
-    assert skill.skill_object_url.startswith(_prefixed_url(prefixed, "artifacts/skill/review/1"))
-    assert prefixed.get_object_store().exists("fx/artifacts/skill/review/1/SKILL.md")
+    key = prefixed.get_object_store().get_object_key(skill.skill_object_url)
+    assert re.fullmatch(r"fx/artifacts/skill/review/1-[0-9a-f]+", key), key
+    assert prefixed.get_object_store().exists(f"{key}/SKILL.md")
 
 
 def test_a_cli_bundle_is_written_under_the_prefix(prefixed, tmp_path):

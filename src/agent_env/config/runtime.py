@@ -28,14 +28,15 @@ backend can write without colliding with existing objects in a shared store. Emp
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
+from collections.abc import Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
-
-import yaml
 
 from agent_env.config import loader as config_loader
 from agent_env.config import model as model_config
@@ -77,7 +78,7 @@ _HUMAN_A2A_CONFIG_SECTION = "conversations"
 _HUMAN_A2A_CONFIG_KEY = "default_human_a2a_url"
 _AGENTS_CONFIG_SECTION = "agents"
 _AGENTS_CONFIG_KEY = "default_a2a_agent_id"
-_DEFAULT_A2A_AGENT_ID = "a2a-default"
+_DEFAULT_A2A_AGENT_ID = "@local/agentenv-framework/agents/claude-code"  # the agents bundle's Claude Code
 
 
 def _validated_human_a2a_url(value: object, source: str) -> str:
@@ -138,8 +139,8 @@ class ResolvedKey:
 
 
 RESOLVED_KEYS: tuple[ResolvedKey, ...] = (
-    ResolvedKey(("model", "api_key"), env_var="LITELLM_API_KEY"),
-    ResolvedKey(("model", "base_url"), env_var="LITELLM_BASE_URL"),
+    ResolvedKey(("model", "api_key"), env_var=model_config.ENV_API_KEY),
+    ResolvedKey(("model", "base_url"), env_var=model_config.ENV_BASE_URL),
     ResolvedKey(("conversations", "default_human_a2a_url"),
                 env_var="AGENT_ENV_HUMAN_A2A_URL", field="default_human_a2a_url"),
     ResolvedKey(("agents", "default_a2a_agent_id"), field="default_a2a_agent_id",
@@ -317,6 +318,11 @@ class Config:
             self._secret = bundle
         return self._secret
 
+    def resolve_reference(self, value: Any) -> Any:
+        """``value`` with an ``env:NAME`` / ``secret:KEY`` reference resolved, the latter through ``[stores.secret]``;
+        any other value as it is."""
+        return config_loader.interpolate(value, secret_resolver=self._resolve_secret)
+
     def get_litellm_api_key(self) -> str:
         return self._model_config().resolve_api_key(secret_resolver=self._resolve_secret)
 
@@ -380,7 +386,7 @@ class Config:
 
     def get_default_a2a_agent_id(self) -> str:
         """The agent a ``deploy_agent`` step without an id deploys:
-        ``configure(default_a2a_agent_id=...)`` > ``[agents] default_a2a_agent_id`` > ``a2a-default``."""
+        ``configure(default_a2a_agent_id=...)`` > ``[agents] default_a2a_agent_id`` > the agents bundle's Claude Code."""
         key = _KEY_BY_NAME[f"{_AGENTS_CONFIG_SECTION}.{_AGENTS_CONFIG_KEY}"]
         for layer in self.key_candidates(key):
             if layer.kind == KIND_INSTALLED:
@@ -398,14 +404,17 @@ class Config:
     def get_default_model(self) -> str | None:
         return self._model_config().default
 
-    def get_model_for_role(self, role: str) -> str | None:
-        return self._model_config().model_for_role(role)
+    def get_model_for_role(self, role: str, *, or_default: bool = True) -> str | None:
+        return self._model_config().model_for_role(role, or_default=or_default)
 
     def get_model_params(self, overrides: dict | None = None) -> dict:
         params = dict(self._model_config().params)
         if overrides:
             params.update(config_loader.interpolate(overrides, secret_resolver=self._resolve_secret))
         return params
+
+    def get_model_headers(self, base_url: str | None) -> dict[str, str]:
+        return self._model_config().headers_for(base_url, secret_resolver=self._resolve_secret)
 
     def resolve_model_call(
         self,
@@ -1020,6 +1029,31 @@ def set_runner(runner) -> None:
 def get_runner():
     """The configured Runner (see ``[runner]`` in .agentenv/config.toml)."""
     return get_config().get_runner()
+
+
+_RUN_ENV_IDS: ContextVar[Mapping[str, str]] = ContextVar("agent_env_run_env_ids", default={})
+
+
+@contextlib.contextmanager
+def run_env_ids(user_overrides: Mapping[str, Any]) -> Iterator[None]:
+    """Within a run, the ``gateway_env_id`` and ``service_db_env_id`` its ``user_overrides`` name win over the
+    configured defaults, in whichever process runs it."""
+    token = _RUN_ENV_IDS.set(
+        {key: user_overrides[key] for key in ("gateway_env_id", "service_db_env_id") if user_overrides.get(key)})
+    try:
+        yield
+    finally:
+        _RUN_ENV_IDS.reset(token)
+
+
+def gateway_env_id(config: Config) -> str:
+    """The gateway env a deploy uses: the run's override, else ``config.default_gateway_env_id``."""
+    return _RUN_ENV_IDS.get().get("gateway_env_id") or config.default_gateway_env_id
+
+
+def service_db_env_id(config: Config) -> str:
+    """The service-db env a deploy uses: the run's override, else ``config.default_service_db_env_id``."""
+    return _RUN_ENV_IDS.get().get("service_db_env_id") or config.default_service_db_env_id
 
 
 def get_config() -> Config:

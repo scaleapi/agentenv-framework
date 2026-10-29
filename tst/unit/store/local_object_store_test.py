@@ -5,7 +5,6 @@ assertions that prove S3 parity also give quick backend-neutral coverage.
 """
 
 import errno
-import hashlib
 import os
 import shutil
 import subprocess

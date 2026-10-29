@@ -46,6 +46,10 @@ def test_union_covers_every_registered_platforms_tunnel_hosts(platform_registry)
     assert _EXTERNAL in hosts                          # ...and its rewritten value
     assert "*.modal.host" in hosts                     # a Modal EGRESS_HOSTS entry
     assert "*.e2b.app" in hosts                        # E2B's <port>-<sandbox-id> ingress URL
+    assert "*.sandbox.tensorlake.ai" in hosts
+    assert "*.sb.tenki.sh" in hosts
+    assert "*.boxd.sh" in hosts                        # boxd's p<port>.<machine> subdomain proxies
+    assert "*.daytonaproxy01.net" in hosts             # Daytona's <port>-<sandbox-id> preview URLs
 
 
 def test_union_holds_only_platform_hosts():
@@ -95,4 +99,8 @@ def test_the_builtin_floor_is_pinned(builtin_registry):
     """Every restricted sandbox gets these, so an empty allowlist is not total denial.
     Pinned rather than counted: a new entry should be argued for in review. Platforms
     registered from config add theirs on top."""
-    assert set(all_sandbox_egress_hosts()) == {"*.modal.host", "*.w.modal.host", "*.e2b.app", "*.sail.box"}
+    assert set(all_sandbox_egress_hosts()) == {
+        "*.modal.host", "*.w.modal.host", "*.e2b.app", "*.sail.box", "*.sandbox.tensorlake.ai", "*.sb.tenki.sh",
+        "*.us.sb.tenki.sh", "*.vercel.run", "*.boxd.sh", "*.daytonaproxy01.net", "*.daytonaproxy01.eu",
+        "*.on.boat.dev",
+    }

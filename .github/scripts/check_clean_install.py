@@ -3,9 +3,10 @@
 ``snapshot PATH`` records the ``@local`` writes after the first run. ``verify`` fails unless agent-env was imported
 from this interpreter's environment rather than a checkout, both packages byte-compile on this interpreter's Python
 (an install skips a file that doesn't), no config file was found, no other distribution registers an agent-env
-plugin, each run of each of the bundle's tasks completed every step and scored 1 on every
-verifier, every instance sits under the bundle's id root, the runs left no sandbox work folder, and the later runs
-changed no artifact, task, ledger row or stored object.
+plugin, each published infra image's tag is the same from the installed sources as from the checkout, each run of
+each of the bundle's tasks completed every step and scored 1 on every verifier, every instance sits under the bundle's
+id root, the runs left no sandbox work folder, and the later runs changed no artifact, task, ledger row or stored
+object.
 
 Run by the clean venv's interpreter; see ``clean_install.py``.
 """
@@ -29,10 +30,13 @@ from agent_env.bundle.ledger import LEDGER_COLLECTION
 from agent_env.config import get_config
 from agent_env.config.loader import discover_config_path
 from agent_env.config.paths import state_root
+from agent_env.env.bootstrap import PUBLISHED_IMAGES
+from agent_env.env.published_images import PublishedImage
 from agent_env.store import Filter
 from agent_env.task.store import TASK_INSTANCES_COLLECTION, TASKS_COLLECTION, TaskInstance, TaskStepStatus
 
 REUSED = (ARTIFACTS_COLLECTION, TASKS_COLLECTION, LEDGER_COLLECTION)
+CHECKOUT_SRC = Path(__file__).resolve().parents[2] / "src"
 OWN_DISTRIBUTIONS = {"agentenv-framework", "agentenv-framework-protocol"}
 
 
@@ -81,6 +85,12 @@ def problems(name: str, runs: int, before: dict[str, list[str]]) -> list[str]:
         found.append(f"agent-env found the config file {config}; the gate runs with none")
     for plugin in plugins():
         found.append(f"{plugin} is installed; the gate tests agent-env without plugins")
+    installed_src = Path(agent_env.__file__).parent.parent
+    for image in PUBLISHED_IMAGES:
+        checkout = PublishedImage(image.name, CHECKOUT_SRC / image.dockerfile.relative_to(installed_src))
+        if (tag := image.tag()) != (expected := checkout.tag()):
+            found.append(f"{image.name}: the installed sources tag it {tag}, the checkout's {expected}; an install "
+                         "wouldn't find the image published for its sources")
     bundle = find_bundle(name)
     store = get_config().local_namespace_document_store()
     for task in [entry for entry in checked(bundle).entries if entry.kind is BundleKind.TASK]:

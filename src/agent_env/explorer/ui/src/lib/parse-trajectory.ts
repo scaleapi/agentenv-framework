@@ -46,7 +46,7 @@ export interface OtelSpan {
   parent_id: string | null;
   start_time: string;
   end_time: string;
-  status: { status_code: string };
+  status?: { status_code: string };
   attributes: Record<string, string>;
   events: unknown[];
   links: unknown[];
@@ -410,7 +410,7 @@ export function parseOtelTrajectory(
       startTime: ts.start_time,
       endTime: ts.end_time,
       durationMs: durationMs(ts.start_time, ts.end_time),
-      isError: ts.status.status_code === 'ERROR' || detectOutputError(output),
+      isError: ts.status?.status_code === 'ERROR' || detectOutputError(output),
     });
   }
 
@@ -622,7 +622,7 @@ function parseScreenshotTrajectory(spans: OtelSpan[]): ParsedTrajectory {
       startTime: ts.start_time,
       endTime: ts.end_time,
       durationMs: durationMs(ts.start_time, ts.end_time),
-      isError: ts.status.status_code === 'ERROR' || detectOutputError(output),
+      isError: ts.status?.status_code === 'ERROR' || detectOutputError(output),
       screenshot,
     };
   });

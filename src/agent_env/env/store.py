@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import random
+import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar
 
 from agent_env.plugins import _registration
+from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
 from agent_env.store.base import ConcurrentModificationError, NotFoundError
 from agent_env.config import get_config
 from agent_env.store.document_store import (
@@ -18,6 +19,7 @@ from agent_env.store.document_store import (
     Filter,
     LteOrAbsent,
     Sort,
+    UnknownDocumentTypeError,
     UpdateSpec,
     VersionedEntityStore,
     VersionedEntityStoreCache,
@@ -99,6 +101,10 @@ class EnvStore:
         )
         if existing and existing.get("type") != env.type:
             raise ValueError(f"Env id '{env.id}' already exists as type '{existing.get('type')}'; cannot put as type '{env.type}'.")
+        # A deployment recorded under an alias reloads the alias's env, so no env of the store's own starts on its id.
+        if not existing and (named := installed_aliases(table=ENV_ALIASES).target(env.id)) is not None:
+            raise ValueError(f"env id {env.id!r} is an alias of {named.target_id}, which comes with "
+                             f"{named.declared_by}, and a task naming it deploys that env; give this env another id")
         env.version = self._versioned_cache.for_store(store).put(env)
         return env
 
@@ -156,7 +162,7 @@ class EnvStore:
         registry = get_env_registry()
         cls = registry.get(env_type)
         if cls is None:
-            raise ValueError(f"Unknown env type: {env_type}{_registration.failure_note(_registration.ENVS, env_type)}")
+            raise UnknownDocumentTypeError(f"Unknown env type: {env_type}{_registration.failure_note(_registration.ENVS, env_type)}")
         return cls.from_dict(doc)
 
     def execute_query(self, query: EnvQuery) -> list[Env]:
@@ -209,7 +215,7 @@ class EnvInstanceStore:
         """Persist a deployed env as an instance record. Returns a new DeployedEnv with instance_id set."""
         from agent_env.env.env import DeployedEnv as DeployedEnvCls
 
-        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
         instance_id = f"{deployed_env.env_id}-{suffix}"
         now = datetime.now(timezone.utc)
         created_at_utc = now.strftime("%Y-%m-%d %H:%M UTC")

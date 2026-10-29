@@ -215,6 +215,7 @@ class GcsObjectStore(ObjectStore):
             size=blob.size,
             last_modified=blob.updated,
             content_encoding=blob.content_encoding,
+            etag=blob.md5_hash,  # the content's MD5; a composite object has none, and blob.etag changes with metadata
         )
 
     def list(self, prefix: str) -> list[str]:

@@ -77,11 +77,82 @@ under the card's `capabilities.tools` (name, description, signature-derived `inp
 `Annotated[..., Field(description=...)]` param descriptions included). `{environment_name}` in a
 tool name is resolved to the card's name at mount, so a shared mixin or base class can declare
 environment-prefixed tools without knowing the name at class-definition time; any other unresolved
-`{...}` token raises. Duplicate tool names raise at construction.
+`{...}` token raises. Duplicate tool names raise at construction. Names must also differ across the
+servers an env deploys behind one gateway: if two serve a name, the gateway serves none of their
+tools and the deploy fails naming it, so prefix with `{environment_name}` when servers may share one.
+
+`@tool(..., hidden_by_default=True)` makes being hidden a fixed property of the tool, for plumbing a
+task drives (a trigger's tool action, a simulated party) that the agent under test must not see. The
+tool is listed with `_meta` `{"agentenv.io/hiddenByDefault": true}` (`HIDDEN_BY_DEFAULT_META_KEY`),
+and the gateway hides it from every role, in its MCP `tools/list` and `/step`, until a tool-access
+step names it. Steps that name it show and hide it as they do any tool. Steps for every tool
+(`tools: "*"`) never show it, but as with any tool they replace earlier steps: one for a role clears
+that role's earlier named steps, and a full reset (`role: "*", tools: "*"`) clears all of them, so
+grant a hidden tool after such steps. Trigger tool actions call it as usual.
+
+`@tool(..., annotations={"readOnlyHint": True}, structured_output=True, meta={...})` lists the tool
+with MCP `ToolAnnotations`, an output schema and `_meta`, on mcp's FastMCP and on fastmcp alike.
+`structured_output` follows mcp's FastMCP (None derives an output schema from the return annotation
+where it can, False lists none); a tool returning `Annotated[CallToolResult, Model]` sends its
+result as is, image blocks included, and is listed with `Model`'s schema. An environment chooses
+at mount which of its `@tool` methods it serves, and with which descriptions, by overriding
+`served_tools(tools)`. After the mount, `env.mounted_card()` is the card the application serves, and
+`await env.update_tool(name, description=...)` changes a served tool's description on it and in
+`tools/list` alike, on both FastMCPs.
 
 `AgentEnvStarletteApplication` mounts the same handler onto a Starlette/FastAPI app instead of
 FastMCP; since those apps have no MCP tool registry, constructing one with `@tool` methods
 raises.
+
+### Errors
+
+Raise `AgentEnvError(code, message, *, retryable=False, applied="no", hint=None, status=400)` to
+answer a caller with a code rather than a crash. From an `@extension` method it answers with
+`status` and the body `{"ok": false, "error": {code, message, retryable, applied, hint?}}`; from a
+`@tool` it answers `isError` with `"<code>: <message>"` as the text and the same fields as the
+structured content. `applied` says whether the call's effect happened (`yes`, `no`, or `unknown`
+when it may have been delivered before something failed), and callers retry on their own only when
+`retryable` is true and `applied` is `no`. Any other exception in an extension still answers
+`extension_failed` with status 500, now with `applied: "unknown"`. On the client side,
+`invoke_extension` raises `ExtensionCallError`, an `httpx.HTTPStatusError` carrying `code`,
+`detail`, `retryable`, `applied` and `hint`; a body without those fields, such as a proxy's error
+page, leaves `code` None and `applied` `unknown`.
+
+### Who is calling
+
+A tool that needs the caller declares a parameter annotated `ToolContext` (any name) and receives
+it on every call. The SDK fills it, never the client: it is absent from the advertised
+`inputSchema` and from `tools/list`. Tools that declare no such parameter are registered unchanged.
+
+```python
+from agentenv_protocol import ToolContext
+
+    @tool(name="{environment_name}_list_inbox")
+    def list_inbox(self, ctx: ToolContext) -> list[dict]:
+        """Messages addressed to the caller."""
+        return [m for m in self.messages if m["to"] == ctx.caller.role]
+```
+
+`ctx.caller.role` is the role the agent was deployed with, as the gateway forwarded it (`None` when
+nothing was forwarded; the gateway's `default` role counts as nothing). It is the caller's side's
+assertion, trusted exactly as far as that side is: behind a gateway it is the gateway's view of the
+agent it deployed; a caller that reaches the server directly chooses it in `AgentEnv-Role`. It says
+whose data a call acts on, not that the caller was authenticated, so a server exposed to untrusted
+direct callers keeps access control on its own boundary. `ctx.caller.session` tells
+callers apart when the gateway shares one connection to the server. `ctx.tool`, `ctx.arguments`
+and `ctx.call_id` describe the call. Code that runs on behalf
+of the call without a parameter of its own, such as a database method, reads the same object through
+`ToolContext.current()`, which returns an empty context outside any call. The binding is per call
+and follows the request's task, so concurrent callers never see each other's context. It is made
+at FastMCP's own tool dispatch, for which `mcp` 1.x offers no public hook, and the mount refuses an
+app without one, so a server that mounted is a server whose tool calls are bound.
+
+To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
+it proceed, or an `mcp.types.CallToolResult` (`isError=True` for a refusal) to send that as the
+tool's reply. An `@extension` method may declare the same parameter; it is filled from the request's
+`AgentEnv-Role` header. Code that acts as a caller outside any dispatch, such as a test calling a
+handler directly or a seeding script, binds a context it builds:
+`with bound(ToolContext.as_caller("alice")): ...`.
 
 ## Serving
 
@@ -133,6 +204,68 @@ extension's, and `client.invoke_extension(base_url, card, uri, params, method=..
 its HTTP verb. Without `method`, `invoke_extension` calls the first method listed; an extension
 with several methods, such as a gateway's `urn:agentenv:clock/v1`, should always be called by name.
 
+An extension with several methods is served by giving each handler an `op`. Handlers sharing a URI
+merge into one card entry, each method under `params.methods.<op>` with its own verb and endpoint,
+by default `/agentenv/ext/<extension>/<op>`, where `<extension>` is the URN's name without
+`urn:agentenv:` and the version. Extension-level params, such as features and limits, come from the
+environment's `extension_params(uri)`, merged beside `methods`. A declaration-only extension, a
+promise with params and no handler like `intake/v1`, is returned from `declared_extensions()`.
+Two handlers for one method, or a handler without `op` on a URI another handler also serves, are
+refused at mount.
+
+An environment chooses at mount which of its `@extension` handlers it serves by overriding
+`served_extensions(extensions)`: an extension it leaves out is not served, and of one served with
+`op`, only the methods its returned descriptor still lists under `params.methods`.
+`served_operations(operations)` chooses the data-plane methods (`data/add` and the others it
+marks) the same way. Either hook returning something with no handler is refused at mount.
+
+```python
+@extension("urn:agentenv:computer-display/v1", op="get", method="GET")
+async def display_get(self) -> dict: ...
+
+@extension("urn:agentenv:computer-display/v1", op="set")
+async def display_set(self, width: int, height: int) -> dict: ...
+```
+
+### Tool access without a gateway
+
+An environment agents reach directly, with no gateway in front, can enforce per-role tool access
+itself: set `tool_access = True` on the class. It then filters `tools/list` and refuses `tools/call`
+(`permission_denied`) by the caller's role, read from `AgentEnv-Role` or a gateway-stamped `_meta`
+role, and serves `urn:agentenv:disable-tool/v1` and `urn:agentenv:enable-tool/v1` at the gateway's
+paths (`POST /tools/disable`, `POST /tools/enable`) with its bodies (`{role, tools: [...] | "*"}` to
+`{role, disabled, allowed}`) and its rules, hidden-by-default tools included. So agent-env's
+`modify_env_tool_access` step works on such an env unchanged. A call with no role is `default`, as
+at the gateway.
+
+Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
+
+### Getting part of the data
+
+A `@get_data` handler that takes a `paths` parameter returns only the data under the paths a caller
+names (`client.get_data(base_url, paths=[...])`), and is called with None when the caller names
+none. A handler without one answers `invalid_params` to a call that names paths, rather than
+returning everything.
+
+### A skill for agents
+
+An env can hand agents a skill: a SKILL.md an agent reads before it uses the env. Mark the method
+that writes it with `@agent_skill`; it returns the skill's description and its markdown body,
+sync or async:
+
+```python
+@agent_skill
+def guide(self):
+    return "How to place and track orders.", "# The shop\n\nPlace orders with `place_order`.\n"
+```
+
+The card then declares `urn:agentenv:skill/v1` (`SKILL_EXTENSION_URI`), whose `get {name}`
+answers `{name, description, skill_md}`, the shape `skill-config/v1` takes, with the frontmatter
+written under the name the caller gives; a name that isn't lowercase letters, digits and single
+hyphens, up to 64, is refused `invalid_argument`. agent-env's `add_skills` step installs it on
+an agent through `env_ids`, named after the env's environment name; for an env behind a gateway,
+whose card nests its servers' cards, it installs each server's skill under that server's name.
+
 ### Uploading an export through a grant
 
 An export too large to return from `data/get` can go straight to the caller's object store. A
@@ -165,13 +298,12 @@ class SlackEnv(AgentEnvEnvironment):
 A handler that takes a `write_object` parameter (a `transfers.WriteObject`) is handed one object to
 upload its export to, named by the caller; it uploads with `transfers.upload(write_object, path)`,
 which sends a parts grant's ranges in parallel, and answers with `uploaded_object_part(uploaded,
-name=..., mime_type=...)`, read back with `uploaded_object(part)`. Each grant parameter a handler
-takes is declared under `urn:agentenv:transfers/v1` (`TRANSFERS_EXTENSION_URI`) as the write grant
-kinds it uploads through, `{"write": [...]}`: `write_namespace` adds `http-post-policy`, and
-`write_object` adds `http-put` and `http-put-parts`. `client.write_kinds(card)` reads them, taking a
-card without the declaration to accept `http-post-policy` alone when it advertises
-`DATA_OBJECTS_EXTENSION_URI`, and nothing otherwise; a caller sends only a grant whose kind the card
-lists.
+name=..., mime_type=...)`, read back with `uploaded_object(part)`. Such a handler is declared under
+`urn:agentenv:transfers/v1` (`TRANSFERS_EXTENSION_URI`) with the write grant kinds it uploads
+through, `{"write": [...]}`: `http-put` and `http-put-parts`, after `http-post-policy` when it also
+takes `write_namespace`. `client.write_kinds(card)` reads them, taking a card without the declaration
+to accept `http-post-policy` alone when it advertises `DATA_OBJECTS_EXTENSION_URI`, and nothing
+otherwise; a caller sends only a grant whose kind the card lists.
 
 ```python
 from agentenv_protocol import AgentEnvEnvironment, DataPart, environment_card, get_data, uploaded_object_part
@@ -189,7 +321,247 @@ class GithubEnv(AgentEnvEnvironment):
         return [DataPart(data=self.state())]
 ```
 
-Dependencies are intentionally light (`pydantic`, `starlette`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
+Dependencies are intentionally light (`pydantic`, `starlette`, `httpx`) so the package can be added to environment server images without pulling a heavier framework — `mcp` is imported lazily inside `create_fastmcp_app()` and is deliberately not a dependency.
+
+## Calling an env's tools
+
+A loop of your own, such as a trainer's rollout or an eval harness, reaches an env's tools through `ToolSession`. It
+is an MCP client for the env's streamable-HTTP endpoint, written on `httpx`, so it works wherever this package
+installs, whichever `mcp` version the loop's own environment pins.
+
+```python
+from agentenv_protocol import ToolSession
+
+async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
+    tools = await session.list_tools()                 # EnvironmentTool: name, description, inputSchema
+    result = await session.call_tool("slack_send_message", {"channel": "general", "text": "hi"})
+    print(result.text, result.isError)
+```
+
+- **The URL:** `mcp_url` is `DeployedEnv.mcp_url` in agent-env, or the address a card was fetched from joined with
+  `client.mcp_path(card)`.
+- **Sessions:** a `ToolSession` is one MCP session, and calls on it may run concurrently. `async with` opens and ends
+  it; `open()` and `close()` do the same for a session held across calls. A tool tells sessions apart by
+  `ctx.caller.session`: the session's id when the server is reached directly, or, behind a gateway, a key the gateway
+  gives each session. A session belongs to the event loop that opened it, and using or closing it on another raises
+  `RuntimeError`, so a caller with a synchronous API runs all of a session's calls on one loop of its own.
+- **Roles:** `role` is sent as `AgentEnv-Role` (`ROLE_HEADER`) and says who the caller is. A gateway lists only the
+  tools that role may use, answers a call to a hidden one with an error result, and forwards the role to the servers
+  behind it; a server reached directly reads the header itself. Either way a tool reads it as `ctx.caller.role`
+  ([Who is calling](#who-is-calling)), where `default`, like no role, is `None`. `headers` adds any others.
+- **Errors:**
+  - A tool that fails, or a call the server refuses (a tool hidden from the role, or an `on_tool_call` refusal),
+    returns a result with `isError` set and the server's text.
+  - `ToolSessionError` means the request failed at the MCP level: a JSON-RPC error, an HTTP error status, a reply
+    that can't be read, or a session the server no longer knows. After a restart, the env's state is usually gone too.
+    Only the server the session talks to reports this: a gateway reconnects to a child that restarted and retries the
+    call, and a stateless server has no session to lose, so neither restart raises anything.
+  - `httpx.TransportError` means the connection failed, and `TimeoutError` that a request outlived `timeout`
+    (600 s by default, the gateway's own limit on a tool call).
+  - `ToolSession` retries nothing. A call that raised may still have run on the server, or may yet run: a request
+    stalled on a bad link can arrive after the client has given up. So after any failed call the env's state is
+    unknown; read it back (`data/get`) or end the episode.
+- **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
+  `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
+
+## Computer drivers
+
+A computer driver is what runs inside a computer an agent uses through screenshots and input. Write
+one as a `ComputerDriverEnvironment` subclass from `agentenv_protocol.computer`, which needs the
+`computer` extra (`pip install 'agentenv-framework-protocol[computer]'`: mcp, uvicorn, Pillow and PyAV).
+The driver marks the methods that capture the screen and send input; the base class serves the
+computer contract from them, so the tools, results and errors can't drift from it. A complete
+driver for an X11 desktop is agent-env's reference driver, in its
+[`drivers` bundle](https://github.com/scaleapi/agentenv-framework/tree/main/src/agent_env/drivers).
+
+```python
+from agentenv_protocol.computer import (
+    ComputerDriverEnvironment, Display, computer_driver,
+    capture, click, display, drag, press, scroll, type_text,
+)
+
+
+@computer_driver(name="my-driver", supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}])
+class MyDriver(ComputerDriverEnvironment):
+    buttons = ("left", "right")       # features, on the card
+    max_click_count = 2
+
+    @display
+    async def size(self) -> Display: ...                    # width, height, scale
+    @capture(display="x11")
+    async def grab(self): ...                               # the whole display, native resolution
+    @click
+    async def click_at(self, x, y, button, count, modifiers): ...
+    @drag
+    async def drag_along(self, path, button, duration_ms, modifiers): ...
+    @scroll
+    async def scroll_at(self, x, y, direction, amount, modifiers): ...
+    @type_text
+    async def type_in(self, text): ...
+    @press
+    async def press_keys(self, keys): ...
+
+
+if __name__ == "__main__":
+    MyDriver().serve()
+```
+
+**Operations.** Operations get points in screen pixels, after the base class has mapped, checked
+and queued the call, and may be sync or async. `@capture` returns a Pillow image or an
+`Image(width, height, data, mode)` (PNG or JPEG bytes, or raw `RGB`, `RGBA`, `BGRA` or `BGRX`
+pixels), at the display's size times its scale. Input operations may return an `Effect`.
+
+| Decorator | Required | Gives |
+|---|---|---|
+| `@display`, `@capture`, `@click`, `@drag`, `@scroll`, `@type_text`, `@press` | yes | the seven `computer_*` tools and `computer/v1` |
+| `@set_display` | no, with `display_modes` | `computer-display/v1` `set` (`get` is always served) |
+| `@pointer_move`, `@pointer_down`, `@pointer_up`, `@pointer_position` | all or none | `computer-pointer/v1` and its five tools; click and scroll at the pointer |
+| `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
+| `@run_in_session` | no; a Linux default | `computer-exec/v1` |
+| `@write_files` | no; a Linux default | `data/add` |
+| `@record` | no | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
+
+The class is checked when it is defined: a missing required operation, half a group, two methods
+for one operation that some platform could both match, or features that don't match the
+decorators raise `TypeError`. Predicates (`os`, `distribution`, `version`, `arch`, `display`)
+choose a method per platform, read from `/etc/os-release`, the machine and `XDG_SESSION_TYPE` or
+`DISPLAY`: `@capture(display="x11")` and `@capture(display="wayland")` can sit side by side. A
+driver's own `@run_in_session` or `@write_files` replaces the base class's Linux default, which runs
+as the driver's user inside the desktop session. The base class keeps its state in `self._computer`
+and names its own members `_computer_*` and `computer_*`; a driver that redefines one of them, or
+another private member of the base class, is refused when it is defined, so a helper of the
+driver's can't silently replace one. What the optional operations give is served only when the
+driver has them, through the `served_tools`, `served_extensions` and `served_operations` hooks.
+
+**What the base class serves:**
+
+- **Tools.** `computer_screenshot` (a frame: `frame_id`, image size, display resolution and scale;
+  `region` crops a frame at native resolution), `computer_click`, `computer_drag`,
+  `computer_scroll`, `computer_type`, `computer_key` (W3C key names) and `computer_wait`, plus the
+  group tools. Every result is structured, with a one-line summary as its text block; input results
+  carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
+  after acting. Click and scroll leave out `x` and `y` to act at the pointer on a computer with
+  `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`.
+- **Frames and spaces.** Points are pixels of a named frame (your latest by default), or a
+  0..`norm_scale` grid over it with `space: "norm"`. A point outside the frame or the range is
+  refused (`out_of_bounds`), never clamped. The last 64 frames are kept, and a frame goes stale
+  (`stale_frame`) when the display geometry it was captured at changes.
+- **The input queue.** Input calls run one at a time in arrival order; one that waits past
+  `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue.
+- **The computer skill.** `computer/v1` declares the seven tools, its params the driver's
+  features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
+  class): a SKILL.md written from the computer as it booted (its platform, session user and home,
+  the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
+  class's `notes`, markdown for what its card can't say.
+- **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
+  capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
+  pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
+  request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
+  with `recording`, `computer-recording/v1` (below).
+- **The data plane.** `data/add` takes file parts that name their path, relative to the session
+  user's home, under the `data-objects/v1` marker (`{"path": ...}`), as inline bytes, an https URL,
+  or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
+  `data/get` returns the files under the `paths` it's given, relative to the home, or under the
+  card's `default_data_paths` (`Desktop`, `Documents`, `Downloads`) when it's given none, inline or
+  uploaded under a `write_namespace` grant. An environment whose `@get_data` hook takes no `paths`
+  refuses them.
+- **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
+  access (`tool_access` is on).
+
+**Errors.** A driver raises the errors table's exceptions, all `AgentEnvError`s:
+`InvalidArgument`, `OutOfBounds`, `StaleFrame`, `InputBusy`, `PermissionDenied`, `Unsupported`,
+`BackgroundUnavailable`, `TargetUnavailable`, `DeviceUnavailable` and `LimitExceeded` mean nothing
+was sent (`applied: "no"`); `Timeout`, `DeliveryFailed` and `Internal` mean it may have been. Any
+other exception from an input operation is reported `delivery_failed` with `applied: "unknown"`.
+
+**Settings** reach the driver as one JSON value in `AGENTENV_COMPUTER_SETTINGS`
+(`ComputerSettings`): `default_space`, `default_norm_scale`, `queue_wait_s`,
+`tap_hold_ms`, `type_delay_ms`, `max_hold_ms`, `layout`, `drag_duration_ms`, `exec_output_bytes`
+and `exec_timeout_s`. A driver reads them as `self.settings`, for example its tap hold in `@press`.
+
+Every caller is `default` until agents carry an identity of their own; `caller_identity(context)`
+names the caller whose latest frame and others' input a call uses.
+
+`MyDriver.declaration(platform)` returns the card the class serves on a `Platform`, built without
+running the driver, its operations or its dependencies.
+
+### Recording the display
+
+Every driver serves `computer-recording/v1`: video of the display, as MP4 (H.264) segments, for the
+framework to start and end around the work it wants on record. `recording = Recording(...)` sets its
+limits, and `recording = None` turns it off.
+
+```python
+from agentenv_protocol.computer import RecordedFrame, Recording, record
+
+
+class MyDriver(ComputerDriverEnvironment):
+    recording = Recording(max_fps=30)      # max_concurrent=2, max_duration_s=86400, max_segment_s=15
+
+    @record
+    async def stream(self, hints):         # hints.scope, fps, max_edge, cursor, max_segment_s, directory
+        async for image, captured_at in my_screen_stream(hints.fps):
+            yield RecordedFrame(image, captured_at)   # a Pillow image or a PyAV VideoFrame
+```
+
+- **The stream.** `@record` yields `RecordedFrame`s from a stream the OS pushes, which the base class
+  scales, encodes and splits into segments, each frame timed by its `captured_at`; or
+  `RecordedSegment`s, files a native recorder finished under `hints.directory`, which it only hashes,
+  uploads and lists. The base class closes the stream at `end`. A source that blocks, as most OS
+  capture APIs do, goes through `frames_in_thread(frames)`: the generator `frames()` runs in a thread
+  of its own, the latest 8 frames wait for the encoder, and it is closed when the recording stops. A
+  driver without `@record` records by the base class polling `@capture`, with a pointer drawn at
+  `@pointer_position`: the slow path, at most 15 fps.
+- **The methods.** `start {request_id, scope?, fps?, max_edge?, cursor?, upload?}` returns
+  `{recording_id, started_at, format}`; `end {recording_id, upload?, reason?}` closes the last segment
+  and returns the manifest; `end_all {reason?}` ends every recording not yet ended, each under the
+  grant it started with, and returns `{manifests}`, as the framework does before it resets or tears a
+  computer down. A repeated `request_id`, or a repeated `end`, answers the same. A start past
+  `max_concurrent` is refused `limit_exceeded`; `max_duration_s`, free disk under 512 MB or a stream
+  failing for 60 s end a recording by itself.
+- **Segments.** A segment closes at `max_segment_s`, when the frame size changes or after a gap in the
+  stream. Each uploads as it closes under `start`'s `write_namespace` grant, at
+  `<recording_id>/<index>.mp4`, and is then deleted; `end`'s own grant uploads any that missed. With no
+  grant they stay under `~/.agentenv-recordings/`. An ended recording's manifest uploads beside its
+  segments, at `<recording_id>/manifest.json`, so a reader that didn't end it finds it there.
+- **The manifest** (`RecordingManifest`). Its `segments` (`ManifestSegment`) carry each one's path,
+  `started_at` and `ended_at` (its first and last frames' capture times), size, frame count, byte size,
+  SHA-256 and whether it uploaded, and `ended_by` says why the recording ended: `end`, `reset`,
+  `teardown`, `limit` or `error`. A field it doesn't know is left out.
+
+### Checking a driver: the conformance probe
+
+The probe checks a running driver against the contract through its card, tools and extensions. It
+reports each check, and gives each extension the card declares a verdict: verified, unverified or
+failed.
+
+```bash
+python -m agentenv_protocol.computer.conformance http://localhost:18765 [--level basic|full] [--json report.json]
+```
+
+```python
+from agentenv_protocol.computer.conformance import run_probe
+
+report = await run_probe("http://localhost:18765", "full")   # a ProbeReport
+failed = [c for c in report.checks if c.status == "failed"]
+```
+
+The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach the driver.
+
+| Level | Checks | Needs on the computer |
+|---|---|---|
+| `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held | Linux, `python3` with Tk, a 1280x800 screen or larger, `computer-exec` and `data/add` |
+
+At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
+`~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
+window's widgets report, reads back what reached them, and then removes the fixture. When the
+fixture can't be staged, the `full` checks are unverified rather than failed. The probe leaves out
+the checks for an extension the card doesn't declare. P8 is not applicable to a driver without
+leasing, and unverified for one with it until the probe has lease checks. The probe calls as the
+default role; the tool-access check hides a tool from a role of its own, `agentenv-probe-<random>`,
+and gives it back.
 
 ## A2A agent framework
 
@@ -607,6 +979,21 @@ tools with (agent-env relays the env card's name: the MultiEnv's declared name, 
 `env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
 `mcp_<8 hex>`.
 
+`PEER_AGENTS_V1` lets an agent delegate to the other agents in its task. AgentEnv
+sets the routing table with `POST /ext/peer-agents` (`{"peers": [{"name", "url",
+"card", "description"}]}`; an empty list clears it, and names must be unique), and
+`GET /ext/peer-agents` returns it. An agent that enables the extension without
+handlers of its own gets the SDK's: the SDK serves six MCP tools, `peer_list`,
+`peer_get_card`, `peer_send_message` (send and wait, for at most 50 s, so a call
+answers within the 60 s MCP clients commonly give a request), `peer_start_task`,
+`peer_get_task` and `peer_cancel_task`, at `/ext/peer-agents/mcp` on the agent's
+own port, and adds them to every task's `request.mcp_servers` as `peer_agents`, so
+a harness that connects the task's MCP servers gives its model the tools with no
+code of its own. The tools wrap the peers' A2A `message/send`, `tasks/get` and
+`tasks/cancel`; they answer loopback callers only, while the application's lifespan
+runs, and the name `peer_agents` is reserved from `MCP_CONFIG_V1.add`. An agent that
+overrides both operations keeps the table itself and gets no tools.
+
 `ATTRIBUTION_PROBE_V1.probe` lets a caller check that an agent forwards attribution
 upstream. Attribution is an open map of string dimensions, like AgentEnv's cost
 attribution: the SDK assigns no keys, and each deployment uses whatever dimensions
@@ -619,14 +1006,69 @@ The answer is agent-wide rather than per caller, and like every extension route 
 probe carries no access check of its own, so expose an agent only to the control plane
 that drives it.
 
+`PROXY_V1` hands an agent's turns to a driver outside its sandbox, and `ProxyAgent`
+(`agentenv_protocol.a2a_agent.proxy`) serves it. The proxy has no model: each message it
+gets stays an open turn, its task working, until the driver replies, and every action the
+driver's model takes runs in the proxy, where the agent would work. The driver's first
+`POST /ext/proxy/claim` (`{"token"}`, at least 22 characters) sets the token every later
+call carries in its body. A claim with another token gets 409, and any other call with a
+wrong one 401. The token is held in memory only, never in the environment a command
+inherits. Content travels as parts, `{"kind": "text", "text": ...}`; a message with any
+other part fails as `proxy.unsupported_part` before the driver sees it. The other
+operations:
+
+- `next` (`{"token", "after"}`) waits up to 25 s for the turns' version to pass `after`,
+  then returns `{"version", "turns": [{"task_id", "context_id", "parts", "system_prompt",
+  "skills"}]}`. A turn its sender cancels drops out of the list.
+- `tools` (`{"token", "task_id"}`) lists what the turn can call, with input schemas: the
+  tools of each env server registered through mcp-config, and `bash`. Two servers offering
+  one name are refused with 409, and servers that haven't all listed their tools within
+  600 s get 502. `record` waits for the same listing.
+- `act` (`{"token", "task_id", "action_id", "action"}`) runs one action: `{"kind": "tool",
+  "server", "name", "arguments"}` calls an env server through `ToolSession`, with the URL
+  and headers registered for it, and `{"kind": "bash", "command"}` runs `bash -c` in the
+  proxy's folder, as its user, in a process group of its own. Where there is no `bash`, as
+  in a minimal image, it runs `sh -c`, and the `bash` tool's description says so. A command
+  is done when its shell exits: what it started in the background keeps running, and output
+  that arrives more than a second later is read and dropped. Either takes
+  `"timeout_seconds"` (3600 for `bash`, 600 for a tool by default). The driver picks
+  `action_id`, unique for the proxy, so a retried `act` returns the action it already
+  started. It answers `{"done", "result"}` at once when the action ends within the long-poll;
+  `result` (`{"token", "action_id"}`) long-polls one that doesn't, and gets 404 once the
+  action's turn has closed. A `bash` result is `{"exit_code", "stdout", "stderr",
+  "timed_out"}`, with no `exit_code` when the command was stopped and 126 when it couldn't
+  start; a tool's is `{"content", "is_error"}`.
+- `record` (`{"token", "task_id", "message", "model", "usage"}`) records one model call: an
+  OpenAI chat message, an Anthropic message or a string; anything else gets 400. Once a turn
+  records a call, each action must be one the last recorded call made, by name and
+  arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
+  them must run before the next `record` or the `reply`, else 409.
+  Calls to tools the turn doesn't offer aren't checked.
+- `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
+  turn: parts complete the task, and an error fails it as `proxy.driver_error`.
+
+A turn's actions belong to it: when it closes, by reply or withdrawal, those still running
+are stopped, their whole process groups killed, and its results forgotten; the app's
+lifespan stops what runs when it shuts down. The proxy writes the turn's trajectory as it
+goes, readable live, as OTel GenAI spans in format `agentenv-proxy/v1`: `chat` for each
+recorded call, `execute_tool` for each action, and `chain` for the turn, each with an
+OTel status: `ERROR` for an action that failed, a command that exited nonzero or timed out,
+and a turn that ended in an error. Skills it is given
+are written to `~/skills/<name>/`, once each, and a turn names each one's folder.
+`ProxyAgent(shell=False)` is a proxy for an agent that works in no sandbox: it offers no
+`bash` and keeps no skills. It holds the env servers' headers as any agent does, so run it
+with no credentials in its environment and expose it only to the control plane that drives
+it.
+
 Runnable, self-contained reference agents live in [`examples/`](https://github.com/scaleapi/agentenv-framework/tree/main/packages/agentenv-protocol/examples):
 the normal, streaming, and multimodal `run(request)` paths, single- and
 multi-operation custom extensions, and advanced ASGI-lifespan plus
 common SDK-operation override hooks.
 
 The agent examples make real OpenAI-compatible model calls. Set
-`LITELLM_API_KEY` and, when needed, `LITELLM_BASE_URL`; their typed agent config
-selects the model and system prompt for each deployment. Tests inject a fake
+`LITELLM_API_KEY` and, when needed, `LITELLM_BASE_URL`; they also send the headers in
+`LITELLM_EXTRA_HEADERS`, a JSON object AgentEnv sets when the endpoint needs any. Their typed
+agent config selects the model and system prompt for each deployment. Tests inject a fake
 model client, so the example suite remains offline and deterministic.
 
 ### Object transfer

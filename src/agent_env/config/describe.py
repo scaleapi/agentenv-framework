@@ -59,8 +59,9 @@ SOURCE_INSTALLED: ConfigSource = "installed"
 # debugging round-trip, under-masking prints a credential into a terminal and a paste. On
 # that trade `auth` is in even though it also catches `author` — a store `config` table is
 # where `authorization = "Bearer ..."` lives, and a masked author is the cheaper mistake.
+# `headers` masks a whole table of HTTP headers: a name like `X-Api-Key` doesn't say it holds a key.
 _SECRET_KEY_PARTS = ("password", "passwd", "passphrase", "secret", "token", "credential",
-                     "api_key", "private_key", "auth", "bearer")
+                     "api_key", "private_key", "auth", "bearer", "headers")
 _URI_USERINFO = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)(?P<userinfo>[^/@\s]+)@")
 
 
@@ -192,7 +193,7 @@ class ConfigReport:
     plugins: PluginsReport = field(default_factory=PluginsReport)
 
 
-def _is_secret_key(key: str) -> bool:
+def is_secret_key(key: str) -> bool:
     return any(part in key.lower() for part in _SECRET_KEY_PARTS)
 
 
@@ -213,7 +214,7 @@ def mask_value(key: str, value: Any, *, secret_scope: bool = False) -> Any:
         ref, sep, default = value.partition("?")
         return f"{ref}?{mask_value(key, default, secret_scope=secret_scope)}" if sep else value
     # Before the string check: a secret is no less a secret for being written as a number.
-    if secret_scope or _is_secret_key(key):
+    if secret_scope or is_secret_key(key):
         return MASK
     if not isinstance(value, str):
         return value
@@ -229,7 +230,7 @@ def _mask_table(table: Any, *, key: str = "", secret_scope: bool = False) -> Any
     consulted the leaf's own key would print both.
     """
     if isinstance(table, dict):
-        return {k: _mask_table(v, key=k, secret_scope=secret_scope or _is_secret_key(k))
+        return {k: _mask_table(v, key=k, secret_scope=secret_scope or is_secret_key(k))
                 for k, v in table.items()}
     if isinstance(table, list):
         # A list carries no keys of its own — its items stay in the enclosing key's scope.

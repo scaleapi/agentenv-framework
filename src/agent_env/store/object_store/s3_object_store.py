@@ -9,6 +9,7 @@ import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import BinaryIO, NamedTuple
+from urllib.parse import urlsplit
 
 import boto3
 from agentenv_protocol.transfers import (
@@ -94,20 +95,21 @@ class S3ObjectStore(ObjectStore):
         grant_lifetime_seconds: int = DEFAULT_GRANT_LIFETIME_SECONDS,
     ) -> S3ObjectStore:
         """Build an adaptive-retry boto3 S3 client for ``bucket``."""
-        kwargs = {
-            "config": BotocoreConfig(
-                signature_version="s3v4",
-                retries={"max_attempts": 10, "mode": "adaptive"},
-                max_pool_connections=_MAX_POOL_CONNECTIONS,
-                # Virtual-hosted URLs name the bucket's region, so grants work on a bucket created less than a
-                # day ago, which answers the global endpoint with a redirect; a dotted name can't be a host.
-                s3={"addressing_style": "path" if "." in bucket else "virtual"},
-            )
-        }
-        if region:
-            kwargs["region_name"] = region
+        config = BotocoreConfig(
+            signature_version="s3v4",
+            retries={"max_attempts": 10, "mode": "adaptive"},
+            max_pool_connections=_MAX_POOL_CONNECTIONS,
+        )
+        kwargs = {"region_name": region} if region else {}
+        # On AWS, virtual-hosted URLs name the bucket's region, so grants work on a bucket created less than a day ago,
+        # which answers the global endpoint with a redirect; a dotted name can't be a host. An S3-compatible endpoint
+        # set in AWS's place is addressed as boto3 addresses it by default.
+        addressing = BotocoreConfig(s3={"addressing_style": "path" if "." in bucket else "virtual"})
+        client = boto3.client("s3", config=config.merge(addressing), **kwargs)
+        if not _on_aws(client):
+            client = boto3.client("s3", config=config, **kwargs)
         return cls(
-            boto3.client("s3", **kwargs), bucket, region=region, share_credentials=share_credentials,
+            client, bucket, region=region, share_credentials=share_credentials,
             grant_lifetime_seconds=grant_lifetime_seconds,
         )
 
@@ -334,6 +336,7 @@ class S3ObjectStore(ObjectStore):
             size=head.get("ContentLength"),
             last_modified=head.get("LastModified"),
             content_encoding=head.get("ContentEncoding"),
+            etag=head.get("ETag"),
         )
 
     def _list_keys(self, bucket: str, prefix: str) -> list[str]:
@@ -470,6 +473,13 @@ class _S3PartsWrite(PendingWrite):
 
     def _abort(self) -> None:
         _abort_quietly(self._s3, self._bucket, self._key, self._upload_id)
+
+
+def _on_aws(client) -> bool:
+    """Whether ``client`` sends to AWS itself, not to an S3-compatible endpoint configured in its place."""
+    endpoint = getattr(getattr(client, "meta", None), "endpoint_url", None)
+    host = urlsplit(endpoint).hostname if isinstance(endpoint, str) else None
+    return bool(host) and host.endswith((".amazonaws.com", ".amazonaws.com.cn"))
 
 
 def _code(e: ClientError | BotoCoreError) -> str:

@@ -37,7 +37,7 @@ async def test_enable_docker_never_exposes_host_socket():
     # Security contract: never bind-mount the VM socket; redirect the agent to the
     # isolated daemon. The sandbox (VM) is the external boundary we assert against.
     agent = _agent()
-    agent._sandbox = AsyncMock()
+    agent._sandbox = AsyncMock(ON_THIS_MACHINE=False)
     await agent._run_container("img:1", 8000, {"LITELLM_API_KEY": "k"}, enable_docker=True)
     launch = agent._sandbox.exec_script.await_args.args[0]
     assert "/var/run/docker.sock" not in launch
@@ -49,7 +49,7 @@ async def test_enable_docker_refuses_non_vm_sandbox():
     # Docker is VM-only; asking for it on a non-VM sandbox must fail loudly rather
     # than deploy an agent that silently has no Docker.
     agent = _agent()
-    sandbox = AsyncMock()
+    sandbox = AsyncMock(ON_THIS_MACHINE=False, url_from_sandbox=lambda url: url)
     sandbox.mode = "modal"
     with pytest.raises(ValueError, match="VM sandbox"):
         await agent.deploy(

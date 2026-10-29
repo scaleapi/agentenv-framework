@@ -82,7 +82,7 @@ from agent_env.config import get_config
 from agent_env.env.gateway.constants import EXT_STEP_URI
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
-from agent_env.entity_refs import EntityRef
+from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.task_step.thread_work import finish_on_thread
@@ -778,7 +778,13 @@ class CollectArtifactsTaskStep(TaskStep):
         sandbox = await self._resolve_live_sandbox(provider, agent.sandbox_id)
         logger.info(f"Connected to sandbox {agent.sandbox_id} (mode={sandbox.mode})")
 
-        container = await find_agent_container(sandbox) if sandbox.mode == SANDBOX_MODE_VM else None
+        # An agent installed on a VM's host has no container: its files are on the host. One installed into a
+        # container works in that one.
+        container = (
+            agent.installed_container or await find_agent_container(sandbox)
+            if sandbox.mode == SANDBOX_MODE_VM and not agent.on_host
+            else None
+        )
         if container:
             logger.info(f"Using agent container: {container}")
 
@@ -966,18 +972,15 @@ class CollectArtifactsTaskStep(TaskStep):
         from agent_env.artifact import FileArtifact
 
         fa_id = derive_id(artifact_id, hashlib.sha256(object_name.encode("utf-8")).hexdigest()[:16])
-        fa_version = store.next_version(fa_id)
         fa = FileArtifact(
             id=fa_id,
-            version=fa_version,
             description=f"Collected artifact '{object_name}' from task instance {context.instance_id or artifact_id}",
             filename=object_name.split("/")[-1],
             content_type=content_type,
             object_url=object_url,
         )
         try:
-            store.put_document(fa)
-            file_artifacts[key] = fa
+            file_artifacts[key] = store.put_document(fa)
         except Exception as doc_err:
             # Don't fail the whole collection if the document write fails.
             logger.warning(f"Failed to register FileArtifact for {key}: {doc_err}")

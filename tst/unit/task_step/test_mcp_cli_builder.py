@@ -189,8 +189,8 @@ def test_load_artifact_step_constructor_validation():
     with pytest.raises(ValueError, match="not both"):
         LoadArtifactTaskStep(id="s", version=None, env_id="e",
                               artifacts=[{"id": "a", "version": None}], artifact_id="a")
-    with pytest.raises(ValueError, match="Must pass at least one"):
-        LoadArtifactTaskStep(id="s", version=None, env_id="e")
+    [problem] = LoadArtifactTaskStep(id="s", version=None, env_id="e").config_problems()
+    assert problem.startswith("load_artifact 's': names nothing to load")
 
 
 @pytest.mark.asyncio

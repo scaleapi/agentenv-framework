@@ -6,13 +6,14 @@ which is the actionable part without disclosing that the environment is syntheti
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Callable
 
 from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from .clock import Clock, ClockError, _iso
+from .clock import Clock, ClockError, _iso, _zone
 
 GET_TIME_TOOL_NAME = "get_time"
 GET_TIME_TOOL_DESCRIPTION = (
@@ -20,14 +21,26 @@ GET_TIME_TOOL_DESCRIPTION = (
     "running on is not synchronized with this environment, so do not use it and do not rely on "
     "your own assumption about today's date. Call this tool and derive from its value every "
     "absolute date, time or timestamp you pass to another tool, and every relative phrase you "
-    'resolve ("today", "this week", "overdue", "the last 30 days"). A date taken from any other '
+    'resolve ("today", "this week", "overdue", "the last 30 days"). current_time is in UTC, as '
+    "are the dates and times the other tools here take, so derive those from current_time. If you "
+    "have been told your user's IANA time zone, you can pass it as time_zone to also get "
+    "local_time, the same instant in that zone, for telling your user the time in their own "
+    "terms; it does not change the dates you pass to tools. A date taken from any other "
     "source can silently match no records on a read, or file a record at the wrong time on a "
     "write. Time advances while you work, so re-read this before each write rather than reusing "
     "an earlier value. Inside a raw SQL or free-form query string, prefer the literal date this "
     "tool returns over CURRENT_DATE or NOW(), so the query is reproducible."
 )
 
-_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
+_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"time_zone": {
+        "type": "string",
+        "description": "An IANA time zone name, such as \"America/New_York\" or \"Asia/Tokyo\". The result then "
+                       "also has time_zone and local_time, the same instant with that zone's UTC offset.",
+    }},
+    "additionalProperties": False,
+}
 
 # readOnlyHint is load-bearing: without it, TriggerEngine._is_readonly makes every clock read
 # re-evaluate every armed state trigger. Shared with the descriptor so the two cannot drift.
@@ -43,11 +56,27 @@ def read_time(clock: Clock) -> dict[str, str]:
     return {"current_time": _iso(now.replace(microsecond=0))}
 
 
+def _tool_error(text: str) -> CallToolResult:
+    return CallToolResult(isError=True, content=[TextContent(type="text", text=text)])
+
+
 def build_get_time_tool(clock: Clock, make_arg_model: Callable[[str, dict], Any]) -> FastMCPTool:
     """Built by hand: ToolManager.add_tool only warns on a collision and would silently shadow this."""
 
-    async def get_time() -> dict[str, str]:
-        return read_time(clock)
+    async def get_time(time_zone: str | None = None) -> dict[str, str] | CallToolResult:
+        if time_zone is None:
+            return read_time(clock)
+        zone = _zone(time_zone)
+        if zone is None:
+            return _tool_error(f"unknown time zone {time_zone!r}: pass an IANA time zone name such as "
+                               "'America/New_York'")
+        reading = read_time(clock)
+        try:
+            local = datetime.fromisoformat(reading["current_time"]).astimezone(zone)
+        except OverflowError:
+            return _tool_error(f"the current time {reading['current_time']} can't be shown in time zone "
+                               f"{time_zone!r}: its local date is out of range")
+        return {**reading, "time_zone": time_zone, "local_time": local.isoformat()}
 
     return FastMCPTool(
         fn=get_time,

@@ -11,6 +11,7 @@ plugin's name patches it instead of colliding.
 
 import asyncio
 import importlib
+import importlib.util
 from abc import abstractmethod
 import logging
 import sys
@@ -25,6 +26,7 @@ from fastapi import APIRouter
 
 from agent_env import plugins
 from agent_env.artifact.artifact import Artifact
+from agent_env.artifact.artifacts.environment import SeedsEnvironments
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import ArtifactStore
 from agent_env.config import ConfigError, get_config, load_impl, reset_config
@@ -214,6 +216,16 @@ class _BareArtifact(Artifact):
 
     @abstractmethod
     def render(self) -> str: ...
+
+
+class _MisspeltSeeds(Artifact, SeedsEnvironments):
+    """Declares SeedsEnvironments and misspells its method."""
+
+    type: Literal["misspelt"] = "misspelt"
+
+    @classmethod
+    def seeded_environment(cls, ctx):
+        return ()
 
 
 class _BareProvider(SandboxProvider):
@@ -477,6 +489,7 @@ def test_one_distribution_found_twice_on_the_path_is_not_a_conflict(monkeypatch)
     ("envs", "_BareEnv", "from_dict", "_SiblingEnv", lambda c: c.env_registry()),
     ("task_steps", "_BareStep", "execute and from_dict", "_SiblingStep", lambda c: c.task_step_registry()),
     ("artifacts", "_BareArtifact", "render", "_SiblingArtifact", lambda c: c.artifact_registry()),
+    ("artifacts", "_MisspeltSeeds", "seeded_environments", "_SiblingArtifact", lambda c: c.artifact_registry()),
     ("sandbox_providers", "_BareProvider", "create_sandbox", "_RecordingProvider", lambda c: c.sandbox_registry()),
     ("state_providers", "_BareState", "_teardown and acquire", "_SiblingState", lambda c: c.state_registry()),
     ("env_providers", "_BareEnvProvider", "close and deploy", "_SiblingEnvProvider", lambda c: c.env_provider_registry()),
@@ -527,7 +540,9 @@ def test_every_built_in_type_implements_what_a_plugin_of_its_group_must(monkeypa
         *((cls, Env, _ENV_MUST_IMPLEMENT) for cls in config.env_registry().values()),
         *((cls, TaskStep, _STEP_MUST_IMPLEMENT) for cls in config.task_step_registry().values()),
         *((cls, Artifact, ()) for cls in config.artifact_registry().values()),
-        *((load_impl(entry["impl"], SandboxProvider), SandboxProvider, ()) for entry in config.sandbox_registry().values()),
+        *((load_impl(entry["impl"], SandboxProvider), SandboxProvider, ())
+          for name, entry in config.sandbox_registry().items()
+          if name != "smol_vm" or importlib.util.find_spec("smol") is not None),
         *((load_impl(entry["impl"], EnvStateProvider), EnvStateProvider, ()) for entry in config.state_registry().values()),
         *((cls, EnvironmentProvider, ()) for cls in config.env_provider_registry().values()),
     ]
@@ -651,7 +666,7 @@ def test_a_plugin_cannot_replace_a_built_in_env_provider(monkeypatch):
 def test_building_a_provider_whose_plugin_was_skipped_says_why(monkeypatch):
     _install(monkeypatch, env_providers=[_EP("bare", "_BareEnvProvider")])
 
-    with pytest.raises(ValueError, match=r"Unknown env_provider_type: 'bare' \(expected one of \['gateway', 'server'\]\) "
+    with pytest.raises(ValueError, match=r"Unknown env_provider_type: 'bare' \(expected one of \['computer', 'gateway', 'server'\]\) "
                                          r"\(.*_BareEnvProvider must implement close and deploy"):
         build_env_provider("bare")
 

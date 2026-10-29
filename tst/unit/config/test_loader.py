@@ -288,12 +288,12 @@ _NO_STORAGE = "cannot import name 'storage' from 'google.cloud' (unknown locatio
         (ModuleNotFoundError("No module named 'google.cloud.storage'", name="google.cloud.storage"), "gcp"),
         (_with_name_from(ImportError(_NO_STORAGE, name="google.cloud"), "storage"), "gcp"),
         (ImportError(_NO_STORAGE, name="google.cloud"), "gcp"),  # 3.11 has no name_from
-        (ModuleNotFoundError("No module named 'fastapi'", name="fastapi"), "explorer"),
+        (ModuleNotFoundError("No module named 'tensorlake'", name="tensorlake"), "tensorlake"),
         (ImportError("cannot import name 'genai' from 'google' (unknown location)", name="google"), None),
         (ModuleNotFoundError("No module named 'not_a_dependency'", name="not_a_dependency"), None),
         (ImportError("this backend needs a C compiler"), None),
     ],
-    ids=["missing-module", "name-from", "message", "explorer", "unrelated-namespace-member", "no-extra", "no-module-name"],
+    ids=["missing-module", "name-from", "message", "tensorlake", "unrelated-namespace-member", "no-extra", "no-module-name"],
 )
 def test_load_impl_names_the_extra_a_missing_module_comes_from(monkeypatch, error, extra):
     real = importlib.import_module

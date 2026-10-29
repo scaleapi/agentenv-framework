@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Optional
 
+KEEP_KEY = "keep"
+
 
 class RunStatus(StrEnum):
     """Run lifecycle, engine-neutral: a backend maps its own states onto these. ``QUEUED``
@@ -53,6 +55,7 @@ class RunRecord:
     finished_at_utc: Optional[str] = None
     error: Optional[str] = None
     overrides: dict[str, Any] = field(default_factory=dict)
+    owner: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict:
         return {
@@ -67,6 +70,7 @@ class RunRecord:
             "finished_at_utc": self.finished_at_utc,
             "error": self.error,
             "overrides": self.overrides,
+            "owner": self.owner,
         }
 
     @classmethod
@@ -83,11 +87,12 @@ class RunRecord:
             finished_at_utc=data.get("finished_at_utc"),
             error=data.get("error"),
             overrides=data.get("overrides") or {},
+            owner=data.get("owner"),
         )
 
 
 class Runner(ABC):
-    """Dispatches task runs and reports on them.
+    """Dispatches task runs and reports on them, recording each run in ``agent_env.runner.store``.
 
     ``type`` is persisted on every run record: a hub restarted under a different
     ``[runner]`` reports on a run it does not own rather than misreporting it.
@@ -109,8 +114,13 @@ class Runner(ABC):
         agent_model: Optional[str] = None,
         agent_artifact_id: Optional[str] = None,
         metadata: Optional[dict] = None,
+        instance_id: Optional[str] = None,
     ) -> RunHandle:
-        """Enqueue a run and return its handle immediately, without waiting for it."""
+        """Enqueue a run and return its handle immediately, without waiting for it.
+
+        With ``instance_id`` the run continues that instance from its stored context, at ``metadata["start_step"]``.
+        A run whose ``metadata[KEEP_KEY]`` is set and that ends on its own, passed or failed, is left up: whoever
+        submitted it tears it down. A cancelled run is torn down either way."""
 
     @abstractmethod
     async def status(self, run_id: str) -> Optional[RunRecord]:
@@ -125,3 +135,16 @@ class Runner(ABC):
 
     async def stop(self) -> None:
         """Stop processing and release resources."""
+
+
+def run_outcome(context: Any, exc: Optional[BaseException] = None) -> tuple[RunStatus, Optional[str]]:
+    """How a finished ``Task.run()`` ended, with its error: FAILED if it raised ``exc``, else FAILED if a failed step
+    on the context was not retried (one with ``fail_task_on_error`` off fails without raising; a malformed entry
+    counts), else COMPLETED. Every runner records a run's end by this rule."""
+    if exc is not None:
+        return RunStatus.FAILED, f"{type(exc).__name__}: {exc}"
+    failed = [
+        f for f in (context.metadata or {}).get("failed_steps") or []
+        if not (isinstance(f, dict) and f.get("retried"))
+    ]
+    return (RunStatus.FAILED, str(failed)) if failed else (RunStatus.COMPLETED, None)

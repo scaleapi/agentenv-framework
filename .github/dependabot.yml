@@ -6,8 +6,60 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
+      # A dependency goes to the first group it matches. A ruff release can report findings that the
+      # lint step fails on, so it gets a pull request of its own.
+      ruff:
+        patterns: ["ruff"]
       python-minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # mcp 2 removed mcp.server.fastmcp, which env/gateway imports at module scope, and the dev
+      # extra's fastmcp needs mcp<2, so a major update can't resolve.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
+  # ci-requirements.txt: the uv the workflows install.
+  - package-ecosystem: "pip"
+    directory: "/.github"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/src/agent_env/explorer/ui"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
+  # The images the release publishes. Each base is pinned by digest, and a release rebuilds an image only when its
+  # sources change, so a bump here is what picks up a base's fixes: the next release builds and publishes the image.
+  # Only its fixes: a new digest or patch release of the version it's on. A major or minor version (postgres 16 to 18,
+  # python 3.12 to 3.15) is an upgrade, made by hand with whatever the images run on it.
+  - package-ecosystem: "docker"
+    directories:
+      - "/src/agent_env/env/gateway"
+      - "/src/agent_env/env/envs/service_db"
+      - "/src/agent_env/env/envs/website_browser"
+      - "/src/agent_env/agents/agents/claude-code"
+      - "/src/agent_env/agents/agents/codex"
+      - "/src/agent_env/agents/agents/gemini"
+      - "/src/agent_env/agents/agents/letta-code"
+      - "/src/agent_env/agents/agents/opencode"
+      - "/src/agent_env/agents/agents/openhands"
+      - "/src/agent_env/agents/agents/pi"
+      - "/src/agent_env/agents/agents/proxy"
+      - "/src/agent_env/agents/agents/pydantic-ai"
+      - "/src/agent_env/examples/mail-mcp/envs/mail"
+      - "/src/agent_env/computers/artifacts/ubuntu-24.04"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    groups:
+      infra-base-images:
+        patterns: ["*"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

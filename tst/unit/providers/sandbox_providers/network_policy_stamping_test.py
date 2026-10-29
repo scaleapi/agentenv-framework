@@ -13,14 +13,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_env.providers.sandbox_providers.boat.provider import BoatSandboxProvider
+from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
+from agent_env.providers.sandbox_providers.daytona.config import Settings as DaytonaSettings
+from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm import _sdk as sail_sdk
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SANDBOX_PROVIDERS
+from agent_env.providers.sandbox_providers.tenki.provider import TenkiSandboxProvider
+from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
+from agent_env.providers.sandbox_providers.vercel.provider import VercelSandboxProvider
 
 
 def _modal_provider(cls):
@@ -86,11 +93,89 @@ async def _sail() -> Sandbox:
         return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _vercel() -> Sandbox:
+    raw = MagicMock(name="vercel-test")
+    raw.name = "vercel-test"
+    raw.routes = ()
+    raw.network_policy = SimpleNamespace(mode="allow-all", allow={})
+    client = MagicMock()
+    client.create_sandbox = AsyncMock(return_value=raw)
+    provider = VercelSandboxProvider(client_factory=lambda: client)
+    sandbox = await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+    assert sandbox._client is client
+    return sandbox
+
+
+async def _tensorlake() -> Sandbox:
+    sdk = MagicMock()
+    pending = MagicMock(sandbox_id="tl-test")
+    pending.ready = AsyncMock(return_value=MagicMock(sandbox_id="tl-test"))
+    sdk.create = AsyncMock(return_value=pending)
+    provider = TensorlakeSandboxProvider(
+        api_key="test-key", sandbox_cls=sdk, client_cls=MagicMock(),
+    )
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
+async def _tenki() -> Sandbox:
+    session = MagicMock(id="tenki-test")
+    session.wait_ready = AsyncMock()
+    session.info.timeout_at = None
+    client = MagicMock()
+    client.create = AsyncMock(return_value=session)
+    provider = TenkiSandboxProvider(api_key="test-key", client_cls=MagicMock(return_value=client))
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
+async def _boxd() -> Sandbox:
+    client = MagicMock()
+    client.machines.create = AsyncMock(return_value=MagicMock(id="boxd-test"))
+    client.machines.proxies.list = AsyncMock(return_value=[])
+    client.machines.wait_until_ready = AsyncMock()
+    provider = BoxdSandboxProvider(api_key="test-key", client_cls=MagicMock(return_value=client))
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
+async def _daytona() -> Sandbox:
+    client = MagicMock()
+    client.create = AsyncMock(return_value=MagicMock(id="daytona-test"))
+    provider = DaytonaSandboxProvider(DaytonaSettings(api_key="test-key"), client_factory=lambda settings: client)
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
+async def _boat() -> Sandbox:
+    from tst.unit.providers.sandbox_providers.boat_fakes import SETTINGS, FakeBoatApi
+    provider = BoatSandboxProvider(SETTINGS, api_factory=lambda settings: FakeBoatApi())
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
+async def _smol_vm() -> Sandbox:
+    pytest.importorskip("smol")
+    from agent_env.providers.sandbox_providers.smol_vm import provider as smol_module
+    from agent_env.providers.sandbox_providers.smol_vm.provider import SmolVmSandboxProvider
+    machine = MagicMock(id="agentenv-test")
+    machine.exec.return_value = SimpleNamespace(exit_code=0, stdout="x86_64\n", stderr="")
+    with (
+        patch.object(smol_module, "Machine", SimpleNamespace(create=lambda config, conn: machine)),
+        patch.object(smol_module, "_host_port", return_value=44112),
+        patch.object(SmolVmSandboxProvider, "_setup_docker", new_callable=AsyncMock),
+        patch.object(SmolVmSandboxProvider, "_configure_host_access", new_callable=AsyncMock),
+    ):
+        return await SmolVmSandboxProvider().create_vm(exposed_ports=[])
+
+
 FACTORIES = {
     "modal": _modal,
     "modal_vm": _modal_vm,
     "e2b": _e2b,
     "sail_vm": _sail,
+    "tensorlake": _tensorlake,
+    "vercel": _vercel,
+    "tenki": _tenki,
+    "boxd": _boxd,
+    "daytona": _daytona,
+    "boat": _boat,
+    "smol_vm": _smol_vm,
     "local": _local,
 }
 

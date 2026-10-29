@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
+from agent_env.store.base import ConcurrentModificationError
 from agent_env.store.ids import is_local_id
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -93,6 +100,26 @@ class Filter:
 # --- Sort ------------------------------------------------------------------
 
 
+
+_expected_versions: ContextVar[Mapping[str, int]] = ContextVar("agent_env_expected_versions", default={})
+
+
+@contextmanager
+def expecting_version(entity_id: str, version: int) -> Iterator[None]:
+    """Inside the block, a put of ``entity_id`` that names no version writes exactly ``version``, which must be the
+    id's next, as one that names it does: a write that loses a race to another raises ConcurrentModificationError
+    rather than land on the version after the other's."""
+    token = _expected_versions.set({**_expected_versions.get(), entity_id: version})
+    try:
+        yield
+    finally:
+        _expected_versions.reset(token)
+
+
+def expected_version(entity_id: str) -> Optional[int]:
+    """The version ``expecting_version`` holds a put of ``entity_id`` to, or None."""
+    return _expected_versions.get().get(entity_id)
+
 @dataclass(frozen=True)
 class SortKey:
     field: str
@@ -155,6 +182,10 @@ class UpdateSpec:
 class DuplicateKeyError(Exception):
     """Raised by a ``DocumentStore`` write that would violate a unique index: an ``insert``, or the
     insert an upsert falls back to when its filter matches nothing."""
+
+
+class UnknownDocumentTypeError(ValueError):
+    """Raised when a stored document's ``type`` has no class in the registry that loads it."""
 
 
 def _dig(doc: dict, path: str) -> tuple[bool, Any]:
@@ -439,8 +470,8 @@ class VersionedEntityStore(Generic[T]):
     def next_version(self, id: str) -> int:
         """Allocate the version a write to ``id`` would land on.
 
-        The id is checked here and not only at ``put`` because every artifact
-        helper calls this first and then writes remote data — an object to the object store, an image to a
+        The id is checked here and not only at ``put`` because an artifact helper that reserves its version
+        calls this first and then writes remote data — an object to the object store, an image to a
         registry — before it has a document to store. Refusing the id at the end would leave
         that data orphaned with no artifact record pointing at it.
         """
@@ -449,13 +480,18 @@ class VersionedEntityStore(Generic[T]):
         return (doc["version"] + 1) if doc is not None else 1
 
     def put(self, entity: T, max_retries: int = 5) -> int:
-        """Serialize and insert the entity under the next free version; return that version."""
+        """Serialize and insert the entity; return its version. An entity that names a version is stored as exactly
+        that one, which ``insert_next`` requires to be the id's next; one that doesn't takes the next free version."""
         if self._serialize is None:
             raise RuntimeError("VersionedEntityStore was built without a serializer; put() is unsupported")
         doc = self._serialize(entity)
         if not isinstance(doc.get("id"), str):
             raise ValueError(f"an entity in {self._collection!r} needs a string id, got {doc.get('id')!r}")
         self._doc_store.check_id(doc["id"])
+        version = doc.get("version") or expected_version(doc["id"])
+        if version:
+            self.insert_next(doc, version)
+            return version
         last_error: Optional[DuplicateKeyError] = None
         for _ in range(max_retries):
             version = self.next_version(doc["id"])
@@ -469,6 +505,23 @@ class VersionedEntityStore(Generic[T]):
             f"Could not assign a version for id={doc.get('id')!r} after {max_retries} retries"
         ) from last_error
 
+    def insert_next(self, doc: dict, version: int) -> None:
+        """Insert ``doc`` as ``version``, which must be its id's next version: ConcurrentModificationError when it
+        isn't, or when another write takes it first, so a write never lands on or skips past one it didn't see."""
+        latest = self._doc_store.latest_version(self._collection, doc["id"])
+        current = latest["version"] if latest is not None else 0
+        if version != current + 1:
+            raise ConcurrentModificationError(
+                f"{doc['id']!r} in {self._collection!r} is at version {current}, so its next version is "
+                f"{current + 1}, not {version}"
+            )
+        try:
+            self._doc_store.insert(self._collection, {**doc, "version": version})
+        except DuplicateKeyError as e:
+            raise ConcurrentModificationError(
+                f"another write took version {version} of {doc['id']!r} in {self._collection!r} first"
+            ) from e
+
     def query(
         self,
         filter: Filter,
@@ -476,10 +529,16 @@ class VersionedEntityStore(Generic[T]):
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> list[T]:
-        return [
-            self._deserialize(doc)
-            for doc in self._doc_store.query(self._collection, filter, sort, limit, offset)
-        ]
+        entities = []
+        for doc in self._doc_store.query(self._collection, filter, sort, limit, offset):
+            try:
+                entities.append(self._deserialize(doc))
+            except UnknownDocumentTypeError as e:
+                logger.warning(
+                    "Skipping a document in %s (id=%r version=%r type=%r): %s",
+                    self._collection, doc.get("id"), doc.get("version"), doc.get("type"), e,
+                )
+        return entities
 
     def count(self, filter: Filter) -> int:
         return self._doc_store.count(self._collection, filter)

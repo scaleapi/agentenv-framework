@@ -19,7 +19,7 @@ import httpx
 import pytest
 
 from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox, LocalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep, _exec_args, _is_url_entry
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvCapabilityUnsupported

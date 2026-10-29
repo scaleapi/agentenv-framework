@@ -5,25 +5,35 @@ deploys and answers a verifier calling it: an MCP server built from its folder, 
 under a name of its own, one over a store image, a website, and a multi of bundle and store envs, which is rewritten
 when a child is. Environments and a universe the bundle writes load into an MCP server deployed through the gateway,
 and an edit to their files loads anew. A universe composed every way a bundle composes one seeds each server of a multi
-of bundle and store servers, and a store universe shared across servers seeds the one server it's loaded into. Needs a
-Docker daemon and the local registry."""
+of bundle and store servers, and a store universe shared across servers seeds the one server it's loaded into. The
+echo-mcp example agent-env ships runs by name, and a rerun writes nothing, and a task held under bare ids, as a registry
+holds it, imports as a bundle that runs through the gateway; an output a bundle's task wrote is written under the folder
+that imports the task. A script run on an env's host reaches the env's gateway and MCP endpoint at the addresses its
+input gives. A server that crashes on start fails its deploy with an error that names it and ends with what it printed.
+Needs a Docker daemon and the local registry."""
 
 import hashlib
 import json
 import logging
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
-from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifact
+from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifact
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import parse_bundle
+from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
 from agent_env.env import Env
+from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing
+from agent_env.task import Task
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -153,19 +163,23 @@ def test_an_env_folder_is_built_named_by_its_card_deployed_and_rebuilt_only_when
     assert edited.output.count("building with docker") == 1, edited.output
 
 
-def _server(build):
-    """The items server's source, its list_items answering with ``build``."""
+def _server(build, *, own_list_items=False):
+    """The items server's source, its list_items answering with ``build``. Every copy registers list_items under that
+    one name, so a multi of two can't deploy; with ``own_list_items`` it's prefixed by the server's environment_name."""
     source = (ITEMS / "server.py").read_text()
     server = source.replace('json.dumps({"items": self.store})',
                             f'json.dumps({{"items": self.store, "build": "{build}"}})')
-    assert server != source
+    if own_list_items:
+        server = "import os\n" + server.replace(
+            'self.mcp.tool(name="list_items")', 'self.mcp.tool(name=f"{os.environ[\'ENVIRONMENT_NAME\']}_list_items")')
+    assert server != source and (not own_list_items or "_list_items\")" in server)
     return server
 
 
-def _items(folder, build, dockerfile="Dockerfile"):
+def _items(folder, build, dockerfile="Dockerfile", *, own_list_items=False):
     """The items server of ``build``, built from ``dockerfile`` in its folder."""
     shutil.copytree(PROTOCOL, folder / "agentenv_protocol", ignore=shutil.ignore_patterns("__pycache__"))
-    (folder / "server.py").write_text(_server(build))
+    (folder / "server.py").write_text(_server(build, own_list_items=own_list_items))
     shutil.copy(ITEMS / "seed.json", folder / "seed.json")
     (folder / dockerfile).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(ITEMS / "Dockerfile", folder / dockerfile)
@@ -199,42 +213,47 @@ def _check(root, env, *, items=(), slack=False, websites=(), build="v1"):
 
 def _gateway_bundle(root):
     """An env of each kind a bundle writes, all deployed through the gateway: items and stock are the items server,
-    built from its folder and named by its card, and built from docker/Dockerfile under a name of its own; relay is an
-    MCP server over the store image the CLI put for mail; shop is a website; suite is a multi of items, mail and
-    shop."""
+    built from its folder and named by its card, and built from docker/Dockerfile under a name of its own; depot is
+    the items server built from an image folder, artifacts/depot-image; relay is an MCP server over the store image
+    the CLI put for inbox; shop is a website; suite is a multi of items, inbox and shop."""
     envs = root / "envs"
     _items(envs / "items", "v1")
     _items(envs / "stock", "v1", dockerfile="docker/Dockerfile")
     (envs / "stock/env.toml").write_text('image = { dockerfile = "docker/Dockerfile" }\nenvironment_name = "stock"\n')
+    _items(root / "artifacts/depot-image", "v1")
+    (envs / "depot").mkdir()
+    (envs / "depot/env.toml").write_text('image = "depot-image"\nenvironment_name = "depot"\n')
     (envs / "relay").mkdir()
-    (envs / "relay/env.toml").write_text('image = "mail__env_image"\nenvironment_name = "relay"\n')
+    (envs / "relay/env.toml").write_text('image = "inbox__env_image"\nenvironment_name = "relay"\n')
     _shop(envs / "shop")
     (envs / "suite").mkdir()
     (envs / "suite/env.toml").write_text(
-        'type = "multi"\nmcp_server_envs = ["items", "mail"]\nwebsite_envs = ["shop"]\nname = "suite"\n')
+        'type = "multi"\nmcp_server_envs = ["items", "inbox"]\nwebsite_envs = ["shop"]\nname = "suite"\n')
     _check(root, "items", items=["items"])
     _check(root, "stock", items=["stock"])
+    _check(root, "depot", items=["depot"])
     _check(root, "relay", slack=True)
     _check(root, "shop", websites=["shop"])
     _check(root, "suite", items=["items"], slack=True, websites=["shop"])
     return root
 
 
-def _put_mail():
-    """The slack server as a store env, mail, put by the CLI as a user would before a bundle names it."""
-    put = CliRunner().invoke(cli, ["env", "mcp-server", "put", "--id", "mail", "--environment-name", "mail",
+def _put_inbox():
+    """The slack server as a store env, inbox, put by the CLI as a user would before a bundle names it."""
+    put = CliRunner().invoke(cli, ["env", "mcp-server", "put", "--id", "inbox", "--environment-name", "mail",
                                    "--dockerfile", str(DATA / "slack_mcp/Dockerfile"), "--context", str(DATA),
                                    "--platform", ""])
     assert put.exit_code == 0, put.output
 
 
 GATEWAY_IMAGES = ("envs/items (Dockerfile image)", "envs/stock (docker/Dockerfile image)",
-                  "envs/shop (Dockerfile.backend image)", "envs/shop (Dockerfile.frontend image)")
-GATEWAY_ENVS = ("items", "stock", "relay", "shop", "suite")
+                  "artifacts/depot-image (Dockerfile image)", "envs/shop (Dockerfile.backend image)",
+                  "envs/shop (Dockerfile.frontend image)")
+GATEWAY_ENVS = ("items", "stock", "depot", "relay", "shop", "suite")
 
 
 def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_rewrites_its_multi(state):
-    _put_mail()
+    _put_inbox()
     root = _gateway_bundle(state / "gateway-bundle")
 
     first = _run(root)
@@ -248,11 +267,12 @@ def test_each_kind_of_bundle_env_deploys_through_the_gateway_and_a_child_edit_re
     with namespace_routing():
         ids = {entry.name: entry.id for entry in parse_bundle(root).entries}
         written = {name: Env.get(ids[name]) for name in GATEWAY_ENVS}
-        mail = Env.get("mail")
+        inbox = Env.get("inbox")
     assert {name: env.environment_name for name, env in written.items() if name != "suite"} == {
-        "items": "items", "stock": "stock", "relay": "relay", "shop": "shop"}
-    assert written["relay"].docker_image_artifact.id == mail.docker_image_artifact.id == "mail__env_image"
-    assert [child.id for child in written["suite"].mcp_server_envs] == [ids["items"], "mail"]
+        "items": "items", "stock": "stock", "depot": "depot", "relay": "relay", "shop": "shop"}
+    assert written["depot"].docker_image_artifact.id == ids["depot-image"]
+    assert written["relay"].docker_image_artifact.id == inbox.docker_image_artifact.id == "inbox__env_image"
+    assert [child.id for child in written["suite"].mcp_server_envs] == [ids["items"], "inbox"]
     assert [child.id for child in written["suite"].website_envs] == [ids["shop"]]
     assert written["suite"].name == "suite"
 
@@ -377,8 +397,7 @@ def test_environments_and_a_universe_written_from_a_bundle_load_into_an_env_thro
 
 
 # Checks each items server CONFIG names holds exactly the items loaded into it, read from its export-state route behind
-# the multi's gateway. Not over MCP: every items server registers list_items under that one name, which the gateway
-# serves from only one server. CONFIG goes above it.
+# the multi's gateway. CONFIG goes above it.
 VERIFY_SEEDED = '''
 import httpx
 
@@ -400,7 +419,7 @@ def _put_store_data(state):
     """What a user puts in the store before a bundle names it: the items server as the env ledger, built by the CLI;
     ledger's environment; stock's file; and a universe shared across servers, with environments for items and gmail."""
     source = state / "ledger-src"
-    _items(source, "v1")
+    _items(source, "v1", own_list_items=True)
     for argv in (
         ["env", "mcp-server", "put", "--id", "ledger", "--environment-name", "ledger", "--dockerfile",
          str(source / "Dockerfile"), "--context", str(source), "--platform", ""],
@@ -431,8 +450,8 @@ def _composed_bundle(root):
     items' environment from its folder, stock's a bundle environment over a pinned store file, and ledger's a store
     environment. Task universe loads it into the multi; task shared loads the store's shared universe into items."""
     envs = root / "envs"
-    _items(envs / "items", "v1")
-    _items(envs / "stock", "v1")
+    _items(envs / "items", "v1", own_list_items=True)
+    _items(envs / "stock", "v1", own_list_items=True)
     (envs / "stock/env.toml").write_text('environment_name = "stock"\n')
     (envs / "suite").mkdir()
     (envs / "suite/env.toml").write_text('type = "multi"\nmcp_server_envs = ["items", "stock", "ledger"]\n')
@@ -511,3 +530,165 @@ def test_a_multi_whose_children_name_one_container_is_refused_before_anything_is
             in result.output), result.output
     assert "building with docker" not in result.output and "Traceback" not in result.output, result.output
     assert _files(state) == before
+
+
+def test_a_multi_whose_servers_share_a_tool_name_is_refused_at_deploy_naming_the_tool_and_both_servers(state):
+    """The gateway would serve neither server's tools, so the deploy fails, once, and tears down what it started."""
+    root = state / "shared-name-bundle"
+    envs = root / "envs"
+    _items(envs / "items", "v1")
+    _items(envs / "stock", "v1")
+    (envs / "stock/env.toml").write_text('environment_name = "stock"\n')
+    (envs / "suite").mkdir()
+    (envs / "suite/env.toml").write_text('type = "multi"\nmcp_server_envs = ["items", "stock"]\n')
+    (root / "tasks").mkdir()
+    (root / "tasks/suite.json").write_text(json.dumps(
+        [{"id": "env", "type": "deploy_env", "env_id": "suite", "sandbox_type": "local"}]))
+
+    result = _run(root)
+
+    assert result.exit_code == 1, result.output
+    assert "tasks/suite.json v1: failed at step 'env'" in result.output, result.output
+    assert "serve duplicate tool names" in result.output, result.output
+    assert "'list_items' from 'items' and 'stock'" in result.output, result.output
+
+
+def test_the_shipped_echo_mcp_example_runs_by_name_and_a_rerun_writes_nothing(state):
+    first, second = _run("echo-mcp"), _run("echo-mcp")
+
+    assert first.exit_code == 0, first.output
+    assert "tasks/smoke.json v1: passed (echoes: 1)" in first.output, first.output
+    assert second.exit_code == 0, second.output
+    for entry in ("envs/echo (Dockerfile image)", "envs/echo", "artifacts/check_echo", "tasks/smoke.json"):
+        assert f"{entry}: v1, unchanged" in second.output, second.output
+    assert "tasks/smoke.json v1: passed (echoes: 1)" in second.output, second.output
+
+
+
+def test_the_shipped_mail_mcp_example_runs_and_a_task_outside_a_bundle_deploys_its_env_by_its_alias(state):
+    """The alias is how the A2A agent validator's task, which no bundle holds, names the env it deploys."""
+    first = _run("mail-mcp")
+
+    assert first.exit_code == 0, first.output
+    assert "tasks/smoke.json v1: passed (finds-the-invoice: 1)" in first.output, first.output
+
+    (state / "by-alias.json").write_text(json.dumps([{"id": "env", "type": "deploy_env", "env_id": "mail"}]))
+    created = CliRunner().invoke(cli, ["task", "create", "--id", "by-alias", str(state / "by-alias.json")])
+    ran = CliRunner().invoke(cli, ["task", "run", "--id", "by-alias", "--output-dir", str(state / "out")])
+
+    assert created.exit_code == 0, created.output
+    assert ran.exit_code == 0, ran.output
+    [written] = (state / "out").iterdir()
+    [deployed] = json.loads(written.read_text())["deployed_envs"]
+    assert deployed["env_id"] == "mail" and deployed["gateway_url"], deployed
+
+ECHO = REPO / "src" / "agent_env" / "examples" / "echo-mcp"
+
+
+def _store_echo_server() -> None:
+    """The echo example's MCP server, built and put under bare ids, as a registry holds it."""
+    tag = "bundle-import-echo:test"
+    build = subprocess.run(["docker", "build", "-t", tag, str(ECHO / "envs" / "echo")], capture_output=True, text=True)
+    assert build.returncode == 0, build.stderr[-2000:]
+    image = DockerImageArtifact.put("echo-server-image", description="echo server", image_name=tag)
+    MCPServerEnv.put(id="echo-server", docker_image_artifact=image, environment_name="echo")
+
+
+# Fetches the env's card at its address and opens an MCP session at its endpoint, both as its input gives them: on the
+# local provider, the host port the sandbox mapped, not the port the env serves on.
+_REACH = """\
+import json, urllib.parse, urllib.request
+
+def run(inp):
+    env = inp["env"]
+    address = urllib.parse.urlsplit(env["url"])
+    assert (address.hostname, address.port != 18765) == ("127.0.0.1", True), env
+    with urllib.request.urlopen(env["url"] + "/.well-known/agent-env.json", timeout=30) as response:
+        card = json.load(response)
+    initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "reach", "version": "1"}}}
+    request = urllib.request.Request(env["mcp_url"], data=json.dumps(initialize).encode(), headers={
+        "Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.status == 200, response.status
+    return {"card": card["name"]}
+"""
+
+
+@pytest.mark.parametrize("env_provider_type", ["gateway", "server"])
+def test_a_script_on_an_envs_host_reaches_it_and_its_mcp_endpoint_at_the_addresses_its_input_gives(
+    state, env_provider_type
+):
+    root = state / "reach"
+    shutil.copytree(ECHO / "envs", root / "envs")
+    (root / "envs" / "echo" / "env.toml").write_text(f'env_provider_type = "{env_provider_type}"\n')
+    (root / "artifacts" / "reach").mkdir(parents=True)
+    (root / "artifacts" / "reach" / "run.py").write_text(_REACH)
+    (root / "tasks").mkdir()
+    (root / "tasks" / "reach.json").write_text(json.dumps([
+        {"id": "env", "type": "deploy_env", "env_id": "echo", "sandbox_type": "local"},
+        {"id": "reach", "type": "run_code", "env_id": "echo", "script_artifact_id": "reach", "depends_on": ["env"]}]))
+
+    result = _run(root)
+
+    assert result.exit_code == 0, result.output
+    assert "tasks/reach.json v1: unscored" in result.output, result.output
+
+
+def test_a_stored_mcp_task_imports_as_a_bundle_that_runs_through_the_gateway(state):
+    _store_echo_server()
+    FileArtifact.put_bytes("echo-check", description="calls echo", filename="verify.py",
+                           content=(ECHO / "artifacts" / "check_echo" / "verify.py").read_bytes())
+    Task.put(id="echo-smoke", steps=[build_step(step) for step in [
+        {"id": "env", "type": "deploy_env", "env_id": "echo-server", "sandbox_type": "local"},
+        {"id": "echoes", "type": "env_outcome_verifier", "env_id": "echo-server", "file_artifact_id": "echo-check",
+         "verifier_id": "echoes"}]])
+
+    imported = CliRunner().invoke(cli, ["bundle", "init", str(state / "echo"), "--from-task", "echo-smoke"])
+
+    assert imported.exit_code == 0, imported.output
+    lines = imported.output.splitlines()
+    assert {"  envs/echo-server: mcp_server echo-server v1", "  artifacts/echo-check: file echo-check v1"} <= {*lines}
+    first, second = _run(state / "echo"), _run(state / "echo")
+    assert first.exit_code == 0, first.output
+    assert "tasks/echo-smoke.json v1: passed (echoes: 1)" in first.output, first.output
+    assert "tasks/echo-smoke.json: v1, unchanged" in second.output, second.output
+    assert "tasks/echo-smoke.json v1: passed (echoes: 1)" in second.output, second.output
+
+
+def test_an_output_a_bundles_task_wrote_is_written_under_the_folder_that_imports_it(state):
+    _store_echo_server()
+    old = "@local/~/old/echo-cli"
+    with namespace_routing():
+        Task.put(id=old, steps=[build_step(step) for step in [
+            {"id": "env", "type": "deploy_env", "env_id": "echo-server", "sandbox_type": "local"},
+            {"id": "cli", "type": "build_mcp_cli", "env_id": "echo-server", "command_name": "echo",
+             "cli_artifact_id": f"{old}/echo-cli", "depends_on": ["env"]}]])
+
+    imported = CliRunner().invoke(cli, ["bundle", "init", str(state / "again"), "--from-task", old])
+
+    assert imported.exit_code == 0, imported.output
+    steps = json.loads((state / "again" / "tasks" / "echo-cli.json").read_text())
+    assert steps[1]["cli_artifact_id"] == "echo-cli"
+    ran = _run(state / "again")
+    assert ran.exit_code == 0, ran.output
+    with namespace_routing():
+        written = Artifact.get(f"{parse_bundle(state / 'again').id_root}/echo-cli/echo-cli")
+        assert written.type == "cli"
+        with pytest.raises(NotFoundError):
+            Artifact.get(f"{old}/echo-cli")
+
+
+def test_a_server_that_crashes_on_start_fails_its_deploy_naming_it_and_ending_with_what_it_printed(state):
+    root = state / "crash-bundle"
+    _items(root / "envs/items", "v1")
+    server = root / "envs/items/server.py"
+    server.write_text("import psycopg\n" + server.read_text())
+    _check(root, "items", items=["items"])
+
+    run = _run(root)
+
+    assert run.exit_code == 1, run.output
+    assert "The env's services didn't start:\nitems exited (1):" in run.output, run.output
+    assert "    ModuleNotFoundError: No module named 'psycopg'" in run.output, run.output
+    assert "Error dependency" not in run.output, run.output

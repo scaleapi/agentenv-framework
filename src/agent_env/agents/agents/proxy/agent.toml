@@ -1,0 +1,3 @@
+[metadata]
+# The commands a driver runs in its sandbox can read its environment, so it's given no model credentials.
+takes_credentials = false

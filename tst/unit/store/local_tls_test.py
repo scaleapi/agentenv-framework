@@ -139,7 +139,7 @@ def test_local_hosts_are_accepted(host):
     check_local_host(host)
 
 
-@pytest.mark.parametrize("host", ["example.com", "evil-localhost", "docker.internal", "8.8.8.8", "2001:db8::1"])
+@pytest.mark.parametrize("host", ["example.com", "evil-localhost", "docker.internal", "host.smolvm.internal", "8.8.8.8", "2001:db8::1"])
 def test_other_hosts_are_refused(host):
     with pytest.raises(ValueError):
         check_local_host(host)

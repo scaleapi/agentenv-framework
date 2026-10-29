@@ -5,7 +5,7 @@ import inspect
 import pytest
 
 from agent_env.artifact.registry import get_artifact_registry
-from agent_env.entity_refs import EntityKind, EntityRef, parse_toml_ref, ref_sites
+from agent_env.entity.refs import EntityKind, EntityRef, default_agent_refs, parse_toml_ref, ref_sites
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig
 from agent_env.task_step.task_step import TaskStep
@@ -160,7 +160,7 @@ def test_declared_paths_match_what_to_dict_writes():
         LoadArtifactTaskStep(id="l", version=None, env_id="crm", artifact_id="seed", artifact_version=1),
         AddSkillsTaskStep(
             id="s", version=None, skills=[{"skill_artifact_id": "sk", "skill_artifact_version": 5}],
-            cli_artifact_ids=["cli-crm"], file_artifact_universe_ids=["fau-crm"],
+            cli_artifact_ids=["cli-crm"], file_artifact_universe_ids=["fau-crm"], env_ids=["desk"],
         ),
         DeployAgentTaskStep(id="a", version=None, env_ids=["crm", "mail"], a2a_agent_id="triage", a2a_agent_version=3),
         PromptAgentTaskStep(id="p", version=None, prompt="hi", snapshot_config=SnapshotConfig(env_id="tickets")),
@@ -175,7 +175,7 @@ def test_declared_paths_match_what_to_dict_writes():
         "load_artifact": [("env_id", "crm", None), ("artifacts[0].id", "seed", 1)],
         "add_skills": [
             ("skills[0].skill_artifact_id", "sk", 5), ("cli_artifact_ids[0]", "cli-crm", None),
-            ("file_artifact_universe_ids[0]", "fau-crm", None),
+            ("file_artifact_universe_ids[0]", "fau-crm", None), ("env_ids[0]", "desk", None),
         ],
         "deploy_agent": [("env_ids[0]", "crm", None), ("env_ids[1]", "mail", None), ("a2a_agent_id", "triage", 3)],
         "prompt_agent": [("snapshot_config.env_id", "tickets", None)],
@@ -206,6 +206,25 @@ def test_a_subclass_is_undeclared_until_it_declares():
 def test_malformed_declarations_fail_where_they_are_written(bad):
     with pytest.raises(ValueError):
         bad()
+
+
+@pytest.mark.parametrize("step,unset", [
+    ({"type": "deploy_agent"}, ["a2a_agent_id"]),
+    ({"type": "deploy_agent", "a2a_agent_id": None}, ["a2a_agent_id"]),
+    ({"type": "deploy_agent", "a2a_agent_id": "solver"}, []),
+    ({"type": "rubrics_verifier"}, ["judge_a2a_agent_id"]),
+    ({"type": "rubrics_verifier", "use_agent_judge": True, "agent_name": None}, ["judge_a2a_agent_id"]),
+    ({"type": "rubrics_verifier", "judge_a2a_agent_id": "judge"}, []),
+    ({"type": "rubrics_verifier", "agent_name": "solver"}, ["judge_a2a_agent_id"]),
+    ({"type": "rubrics_verifier", "use_agent_judge": False}, ["judge_a2a_agent_id"]),
+    ({"type": "verify_a2a_agent_card", "a2a_agent_id": "solver"}, []),
+    ({"type": "install_agent", "sandbox_name": "box"}, ["a2a_agent_id"]),
+    ({"type": "install_agent", "sandbox_name": "box", "a2a_agent_id": "solver"}, []),
+])
+def test_an_unset_agent_field_falls_back_to_the_default_agent(step, unset):
+    refs = _builtin_registry()[step["type"]].entity_refs
+
+    assert [ref.path for ref in default_agent_refs(refs, step)] == unset
 
 
 def test_each_kind_has_a_constructor_and_only_artifacts_take_a_type():
