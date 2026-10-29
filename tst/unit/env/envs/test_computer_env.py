@@ -4,6 +4,7 @@ whichever env built it, records each result as it finishes, and writes the arche
 and the registry are faked."""
 
 import asyncio
+import importlib.metadata
 import io
 import json
 import logging
@@ -322,11 +323,7 @@ def test_a_base_built_from_its_context_is_built_here_for_each_arch_and_keyed_by_
 
 
 def test_a_checkout_composes_its_own_protocol_into_the_drivers_venv(base, driver, docker, tmp_path, monkeypatch):
-    source = tmp_path / "protocol"
-    (source / "src" / "agentenv_protocol").mkdir(parents=True)
-    (source / "src" / "agentenv_protocol" / "__init__.py").write_text("")
-    (source / "pyproject.toml").write_text("[project]\nname = 'agentenv-framework-protocol'\n")
-    monkeypatch.setattr(composer, "_protocol_source", lambda: source)
+    monkeypatch.setattr(composer, "_protocol_source", lambda: _protocol_checkout(tmp_path))
 
     _put(base, driver)
 
@@ -334,6 +331,14 @@ def test_a_checkout_composes_its_own_protocol_into_the_drivers_venv(base, driver
     assert "COPY protocol /tmp/agentenv-protocol" in dockerfile
     assert "pip install --no-cache-dir /tmp/agentenv-protocol -r /opt/agentenv/drivers/desk/requirements.txt" in dockerfile
     assert "protocol/pyproject.toml" in docker.builds[0]["files"]
+
+
+def _protocol_checkout(folder):
+    source = folder / "protocol"
+    (source / "src" / "agentenv_protocol").mkdir(parents=True)
+    (source / "src" / "agentenv_protocol" / "__init__.py").write_text("")
+    (source / "pyproject.toml").write_text("[project]\nname = 'agentenv-framework-protocol'\n")
+    return source
 
 
 @pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
@@ -934,7 +939,16 @@ MAIL_SETTINGS = {"properties": {
     "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
 
 
-def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, **changes):
+#: The program of the mail app's own server.
+MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/python -m "
+               "agentenv_protocol.computer.serve_app app.py:Mail\ndirectory=/opt/agentenv/apps/mail\n"
+               "environment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\nredirect_stderr=true\n"
+               "stdout_logfile=/var/log/agentenv/app-mail.log\n")
+PROTOCOL_VERSION = importlib.metadata.version("agentenv-framework-protocol")
+
+
+def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
+         **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
@@ -943,7 +957,7 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
         name: folder / name for name in ("app.py", "requirements.txt")})
     declaration = AppDeclaration.model_validate({
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
-        "permissions": [], "launch": None, "settings": settings, "skill": None,
+        "permissions": [], "launch": launch, "settings": settings, "skill": None,
         "data": [], "install_steps": [], "ready_checks": [],
         "install": {"linux": install or {"python": "requirements.txt", "services": [
             {"name": "imap", "command": "venv/bin/python imap.py"}]}}})
@@ -962,17 +976,35 @@ def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_unde
     dockerfile = build["dockerfile"]
     for line in ("COPY apps/mail/ /opt/agentenv/apps/mail/",
                  "RUN python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip install "
-                 "--no-cache-dir -r /opt/agentenv/apps/mail/requirements.txt",
+                 f"--no-cache-dir 'agentenv-framework-protocol[app]=={PROTOCOL_VERSION}' -r "
+                 "/opt/agentenv/apps/mail/requirements.txt",
+                 "RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv",
                  "COPY agentenv-app-mail.conf /etc/supervisor/conf.d/agentenv-app-mail.conf"):
         assert line in dockerfile
     assert dockerfile.index("COPY driver/") < dockerfile.index("COPY apps/mail/") < dockerfile.index("USER user")
-    assert build["confs"]["agentenv-app-mail.conf"] == (
+    assert build["confs"]["agentenv-app-mail.conf"] == MAIL_SERVER + "\n" + (
         "[program:app-mail-imap]\ncommand=/opt/agentenv/apps/mail/venv/bin/python imap.py\n"
         "directory=/opt/agentenv/apps/mail\nenvironment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\n"
         "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/app-mail-imap.log\n")
     stored = Env.get(app.id)
     assert isinstance(stored, ComputerAppEnv) and stored.build_statuses() == {"container/amd64": "unverified",
                                                                               "container/arm64": "ready"}
+
+
+@pytest.mark.parametrize("at, checkout", [("boot", False), ("demand", True)], ids=["boot-release", "demand-checkout"])
+def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base, driver, docker, tmp_path, monkeypatch,
+                                                                            at, checkout):
+    if checkout:
+        monkeypatch.setattr(composer, "_protocol_source", lambda: _protocol_checkout(tmp_path))
+    launch = {"at": at, "command": ["bin/mail"], "window": {"class": "Mail"}, "ready": {"window": True, "timeout_s": 240.0}}
+    app = _app(base, driver, tmp_path / "mail", install={"services": []}, launch=launch)
+
+    build = docker.builds[0]
+    protocol = "/tmp/agentenv-protocol[app]" if checkout else f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"
+    assert (f"RUN python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip install "
+            f"--no-cache-dir '{protocol}' && ") in build["dockerfile"]
+    assert build["confs"]["agentenv-app-mail.conf"] == MAIL_SERVER
+    assert boot.ready_timeout([app]) == (270.0 if at == "boot" else boot.READY_TIMEOUT_S)
 
 
 def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):
@@ -988,7 +1020,9 @@ def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker
     ({"install": {"services": [{"name": "imap", "command": "a"}, {"name": "imap", "command": "b"}]}},
      "install.linux.services: Value error, names a service twice"),
     ({"driver": None}, "a computer app deploys alone on a computer and a driver; name both or neither"),
-], ids=["platform", "arch", "install", "no-driver"])
+    ({"install": {"files": "linux", "services": []}},
+     "install.linux.files: the app's server serves its class from the app's folder, which needs 'app.py' in 'linux'"),
+], ids=["platform", "arch", "install", "no-driver", "class-file"])
 def test_an_app_that_doesnt_fit_its_computer_and_driver_is_refused_before_anything_is_stored(base, driver, docker,
                                                                                             tmp_path, changes, problem):
     with pytest.raises(ValueError, match=problem.replace(".", "[.]")):

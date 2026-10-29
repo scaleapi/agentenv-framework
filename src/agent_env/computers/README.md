@@ -26,7 +26,9 @@ machine's Docker can build, then boots the one this machine runs natively and pr
 is that env, and `agent-env run desktop` deploys it.
 
 A computer app env (`type = "computer_app"`) deployed alone is composed onto it the same way, with the app's files
-under `/opt/agentenv/apps/<name>/` and its services as programs beside the driver's, run as `user` like everything else.
+under `/opt/agentenv/apps/<name>/`, a venv there with the protocol's `app` extra, and the app's own server and its
+services as programs beside the driver's, run as `user` like everything else. A deploy waits for the computer to be
+ready up to 180 s, or 30 s more than the slowest `boot` app's own `timeout_s`.
 
 Everything in a computer runs as that one user, so any code in it, an app's, a driver's, a `run_code` script or a
 command run through `computer-exec`, can read the environment of any other process there, settings included. A secret

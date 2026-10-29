@@ -428,8 +428,8 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
   class's `notes`, markdown for what its card can't say.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
-  capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
-  pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
+  own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
   descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
   request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
   with `recording`, `computer-recording/v1` (below).
@@ -541,9 +541,10 @@ and gives it back.
 
 A computer app is software an agent uses on a computer, beside the driver: a desktop app, a service
 or both. Write one as a `ComputerAppEnvironment` subclass from `agentenv_protocol.computer`, an
-`AgentEnvEnvironment` whose class also says what it is to a computer. It needs only the plain
-package: `agentenv_protocol.computer` imports what a driver needs (mcp, uvicorn, Pillow, PyAV) only
-when a driver's names are used.
+`AgentEnvEnvironment` whose class also says what it is to a computer. Writing one and reading what
+it declares need only the plain package: `agentenv_protocol.computer` imports what a driver needs
+(mcp, uvicorn, Pillow, PyAV) only when a driver's names are used. On a computer it runs as its own
+server, which needs the `app` extra (below).
 
 ```python
 from pydantic import BaseModel, SecretStr
@@ -564,17 +565,36 @@ class MailApp(ComputerAppEnvironment):
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
   (`environment_name`) and the `computer` and `driver` it deploys alone on.
 - **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
-  copied under its prefix; `python`, a requirements file there installed into a venv beside them;
-  `services`, programs the computer's init runs from the prefix as the session user.
-- **`launch = Launch(...)`** says how it starts in the desktop session, with it (`at="boot"`) or when
-  the agent opens it (`"demand"`), and `ready=Ready(...)` when it's ready; `@ready_check` marks a
-  method for readiness that needs logic, and `@install_step(scope=...)` one a computer runs as it
-  installs the app.
+  copied under its prefix, which holds the class's file; `python`, a requirements file there,
+  installed into the venv every app gets beside them; `services`, programs the computer's init runs
+  from the prefix as the session user.
+- **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
+  the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
+  launch: a window matching `launch.window` by its class, instance or title, a port answering on
+  loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
+  sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
+  app.
 - **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
   its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
 - **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
   in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
   its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+
+On a computer each app is its own server: `python -m agentenv_protocol.computer.serve_app
+<file>:<Class>`, a program the computer's init runs from the app's folder in the app's venv, which
+has the `app` extra (`agentenv-framework-protocol[app]`: mcp and uvicorn). It serves the class's
+card and tools on the Unix socket `.agentenv/server.sock` in that folder, with `computer-app/v1`:
+the app's `launch` as its params, and the methods `launch` (POST), which starts the app in the
+desktop session, and `ready` (GET: an `AppReadiness` of `ready`, `problems`, `launched`, `waited_s`
+and `timeout_s`), which runs the app's readiness checks then, at once, each within 10 s. A server
+that can't start, or whose start in the session fails (adding the launcher, say), writes why to
+`.agentenv/server.failure` in the folder and exits, and the driver reports that in its place. Once
+the session is up the server adds the app's launcher to the session user's menu, which runs `python
+-m agentenv_protocol.computer.launch <folder>` to ask the server, so the server starts every copy of
+the app, and launches a `boot` app, once per boot. The driver finds each app by the socket in its
+folder: the computer is ready once every app's server answers and each `boot` app, and each app with
+no launch, says it's ready; a `demand` app counts once something launches it. What the server does
+in the session (`agentenv_protocol.computer.session`) is Linux's.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as

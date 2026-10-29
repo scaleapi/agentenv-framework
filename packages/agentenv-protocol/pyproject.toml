@@ -35,6 +35,12 @@ agent = [
     "regex>=2023.12.25",
     "uvicorn>=0.30",
 ]
+# A computer app's own server: ComputerAppEnvironment serves its card and computer-app/v1 over mcp's FastMCP, on a Unix
+# socket through uvicorn.
+app = [
+    "mcp>=1.25,<2",
+    "uvicorn>=0.30",
+]
 # A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, and
 # records the display as H.264 with PyAV (computer-recording/v1).
 computer = [

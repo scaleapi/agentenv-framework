@@ -2,24 +2,37 @@
 computer: the platforms it supports and the permissions it needs (``@computer_app``), how each OS installs it
 (``linux = Linux(...)``), how it launches (``launch``), its install steps and ready checks, its skill, and its typed
 ``Settings``. A ``computer_app`` env's put reads that declaration from the class; its data hooks are the base class's.
-Its name is its env's ``environment_name``."""
+Its name is its env's ``environment_name``. On the computer the class runs as the app's own server (``serve_app``),
+which launches the app, adds its launcher and says whether it's ready (``computer-app/v1``)."""
 from __future__ import annotations
 
 import inspect
 import json
 import os
+from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment
+from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment, extension
 from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI
+from .app_runtime import AppRuntime
+from .errors import InvalidArgument
 
 #: The environment variable a computer delivers its apps' settings in: JSON of each app's values by its name.
 APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
 _INSTALL_STEP_ATTR = "_aee_install_step"
 _READY_CHECK_ATTR = "_aee_ready_check"
 _DATA_METHODS = {"reset_data": METHOD_RESET, "add_data": METHOD_ADD, "get_data": METHOD_GET}
+#: What a launch's window can be matched by, as the session lists each window.
+WINDOW_KEYS = frozenset({"class", "instance", "title"})
+#: The framework extension an app's own server serves: its launch as params, and its ``launch`` and ``ready`` methods.
+COMPUTER_APP = "urn:agentenv:computer-app/v1"
+#: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
+SOCKET = Path(".agentenv/server.sock")
+FAILURE = Path(".agentenv/server.failure")
+#: How long an app may take to be ready when its launch doesn't say.
+DEFAULT_TIMEOUT_S = 60.0
 
 
 class Service(BaseModel):
@@ -51,7 +64,13 @@ class Ready(BaseModel):
     window: bool = False
     port: Optional[int] = None
     command: Optional[list[str]] = None
-    timeout_s: float = 60
+    timeout_s: float = DEFAULT_TIMEOUT_S
+
+    @model_validator(mode="after")
+    def _waits_on_something(self) -> Ready:
+        if not self.window and self.port is None and not self.command:
+            raise ValueError("Ready waits on nothing: set window, port or command")
+        return self
 
 
 class Launch(BaseModel):
@@ -61,8 +80,22 @@ class Launch(BaseModel):
 
     at: Literal["boot", "demand"] = "boot"
     command: list[str]
+    #: Matches the app's window by its WM_CLASS ``class`` or ``instance`` and its ``title``, as given.
     window: Optional[dict[str, str]] = None
     ready: Optional[Ready] = None
+
+    @field_validator("window")
+    @classmethod
+    def _matchable(cls, window: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        if window is not None and (not window or set(window) - WINDOW_KEYS):
+            raise ValueError(f"window matches by {', '.join(sorted(WINDOW_KEYS))}, not {window!r}")
+        return window
+
+    @model_validator(mode="after")
+    def _window_to_wait_for(self) -> Launch:
+        if self.ready is not None and self.ready.window and self.window is None:
+            raise ValueError("ready waits on a window: name it with Launch(window={'class': ...})")
+        return self
 
 
 class AppSkill(BaseModel):
@@ -134,6 +167,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     supports: ClassVar[list] = []
     permissions: ClassVar[list[str]] = []
+    _computer_app: Optional[AppRuntime] = None
     linux: ClassVar[Optional[Linux]] = None
     launch: ClassVar[Optional[Launch]] = None
     #: A file of the app's folder holding its skill for agents, when no ``@agent_skill`` method writes it.
@@ -145,6 +179,33 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     def __init__(self) -> None:
         values = json.loads(os.environ.get(APP_SETTINGS_ENV) or "{}").get(os.environ.get("ENVIRONMENT_NAME"), {})
         self.settings = self.Settings.model_validate(values)
+        ready = self.launch.ready if self.launch is not None else None
+        self._computer_app = AppRuntime(
+            self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(type(self))
+                          if hasattr(fn, _READY_CHECK_ATTR)},
+            ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S)
+
+    @extension(COMPUTER_APP, op="launch", description=(
+        "The app's own server: launch launches the app from its folder, as its launcher and a boot do; ready says "
+        "whether it's ready, by its launch's ready and its @ready_check methods."))
+    async def _computer_app_launch(self) -> dict:
+        if self.launch is None:
+            raise InvalidArgument(f"{type(self).__name__} declares no launch")
+        return {"pid": await self._computer_app_runtime().launch_app()}
+
+    @extension(COMPUTER_APP, op="ready", method="GET")
+    async def _computer_app_ready(self) -> dict:
+        return (await self._computer_app_runtime().readiness()).model_dump()
+
+    def _computer_app_runtime(self) -> AppRuntime:
+        if self._computer_app is None:
+            raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")
+        return self._computer_app
+
+    def extension_params(self, uri: str) -> dict:
+        if uri == COMPUTER_APP:
+            return {"launch": self.launch.model_dump(mode="json", exclude_none=True) if self.launch else None}
+        return super().extension_params(uri)
 
     @classmethod
     def declaration(cls) -> AppDeclaration:
@@ -176,3 +237,4 @@ def _methods(cls: type) -> list[Callable]:
     names = dict.fromkeys(name for klass in reversed(cls.__mro__) for name, member in vars(klass).items()
                           if inspect.isfunction(member))
     return [method for name in names if inspect.isfunction(method := getattr(cls, name))]
+
