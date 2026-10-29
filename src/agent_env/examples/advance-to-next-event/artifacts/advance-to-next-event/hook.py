@@ -58,7 +58,7 @@ async def post_turn(turn, params):
 def _params(params):
     unknown = sorted(set(params) - set(PARAMS))
     if unknown:
-        raise ValueError(f"agent-wakeups takes {list(PARAMS)}, not {unknown}")
+        raise ValueError(f"advance-to-next-event takes {list(PARAMS)}, not {unknown}")
     end_time = params.get("end_time")
     if end_time is not None:
         _end_spec(end_time)

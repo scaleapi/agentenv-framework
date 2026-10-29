@@ -1,4 +1,4 @@
-"""The agent-wakeups example hook, turn by turn, against an in-process gateway's real clock, triggers and
+"""The advance-to-next-event example hook, turn by turn, against an in-process gateway's real clock, triggers and
 notifications, with what came due delivered as prompt_agent delivers it."""
 
 from __future__ import annotations
@@ -21,14 +21,14 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHook, PostTurnHooks, Turn, _Answer, run_post_turn_hooks
 
-HOOK = Path(agent_env.__file__).parent / "examples" / "agent-wakeups" / "artifacts" / "agent-wakeups" / "hook.py"
+HOOK = Path(agent_env.__file__).parent / "examples" / "advance-to-next-event" / "artifacts" / "advance-to-next-event" / "hook.py"
 GATEWAY = "http://gateway.test"
 MONDAY = "2026-03-02T08:00:00Z"
 
 
 @pytest.fixture
 def hook(monkeypatch):
-    spec = importlib.util.spec_from_file_location("agent_wakeups_hook", HOOK)
+    spec = importlib.util.spec_from_file_location("advance_to_next_event_hook", HOOK)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "POLL_SECONDS", 0.01)
@@ -79,7 +79,7 @@ async def _turns(hook, context, params=None, on_turn=None, triggers=None, time_z
         raise AssertionError("the hook never asks the user side")
 
     hooks = PostTurnHooks()
-    hooks.hooks.append(PostTurnHook("agent-wakeups", None, dict(params or {}), hook.post_turn))
+    hooks.hooks.append(PostTurnHook("advance-to-next-event", None, dict(params or {}), hook.post_turn))
     sent = []
     while not sent or not isinstance(sent[-1], dict):
         assert len(sent) < 12, sent
@@ -105,7 +105,7 @@ def _turn(hook, context, number=1) -> Turn:
     async def no_trigger():
         return None
 
-    return Turn(context=context, step_id="week", hook=PostTurnHook("agent-wakeups", None, {}, hook.post_turn),
+    return Turn(context=context, step_id="week", hook=PostTurnHook("advance-to-next-event", None, {}, hook.post_turn),
                 answer=_Answer(never, no_trigger), number=number, last=False, agent_reply="ok",
                 agent_parts=[{"kind": "text", "text": "ok"}])
 

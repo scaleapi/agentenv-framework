@@ -1,11 +1,12 @@
 A prompt_agent post-turn hook that runs one conversation over simulated days and wakes the agent only for what
-would really reach it.
+would really reach it. Unlike `next-env-event`, which wakes the agent with a nudge at every env event, it moves time
+past world events silently.
 
-`artifacts/agent-wakeups/hook.py` is the hook. After each agent turn it waits for what the turn set off to finish,
-then lets a firing agent trigger answer. Otherwise it moves the frozen clock, silently, to the next thing that
-happens: a world event (a trigger's mark, a delay ending, an executor's hours opening), something due for the agent
-on notifications/v1, or a message the person writes at a set time. World events change the env but wake no one. The
-agent is woken only when one of these has come due:
+`artifacts/advance-to-next-event/hook.py` is the hook. After each agent turn it waits for what the turn set off to
+finish, then lets a firing agent trigger answer. Otherwise it moves the frozen clock, silently, to the next thing
+that happens: a world event (a trigger's mark, a delay ending, an executor's hours opening), something due for the
+agent on notifications/v1, or a message the person writes at a set time. World events change the env but wake no
+one. The agent is woken only when one of these has come due:
 
 - a check it scheduled with `schedule_check` (which a `configure_scheduled_checks` step gives its role),
 - a notification a trigger sent it with a `notify` action, through a channel the task declares,
@@ -29,7 +30,7 @@ lines show:
 ```json
 {"id": "week", "type": "prompt_agent", "prompt": "Keep an eye on curbfinch this week for an 8x10 rug.",
  "max_conversation_turns": 20, "time_zone": "America/Los_Angeles",
- "post_turn_hooks": [{"file_artifact_id": "@local/agentenv-framework/agent-wakeups/agent-wakeups",
+ "post_turn_hooks": [{"file_artifact_id": "@local/agentenv-framework/advance-to-next-event/advance-to-next-event",
                       "params": {"end_time": "P5D", "time_zone": "America/Los_Angeles"}}]}
 ```
 

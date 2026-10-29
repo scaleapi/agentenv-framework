@@ -1,4 +1,4 @@
-"""The agent-wakeups example hook on a real gateway: a world event lands silently, and the hook moves the clock only
+"""The advance-to-next-event example hook on a real gateway: a world event lands silently, and the hook moves the clock only
 to the agent's own check and a notify action's notification, which prompt_agent delivers, each labelled with its time
 and source."""
 
@@ -25,7 +25,7 @@ from tst.util.a2a_test_agent import put_test_agent
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
-HOOK = Path(agent_env.__file__).parent / "examples" / "agent-wakeups" / "artifacts" / "agent-wakeups" / "hook.py"
+HOOK = Path(agent_env.__file__).parent / "examples" / "advance-to-next-event" / "artifacts" / "advance-to-next-event" / "hook.py"
 MONDAY = "2026-03-02T13:00:00Z"
 
 
@@ -34,7 +34,7 @@ async def test_only_the_agent_s_check_and_a_declared_notification_wake_it(local_
     _seed_bootstrap_envs()
     env, deployed, _ = await _deploy_items("wakeups")
     agent = put_test_agent(f"wakeups-agent-{uuid.uuid4().hex[:8]}")
-    hook = FileArtifact.put(f"wakeups-hook-{uuid.uuid4().hex[:8]}", description="agent-wakeups", file_path=str(HOOK))
+    hook = FileArtifact.put(f"wakeups-hook-{uuid.uuid4().hex[:8]}", description="advance-to-next-event", file_path=str(HOOK))
     context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[], metadata={})
     triggers = [
         {"id": "w-1", "when": {"type": "time", "at": "2026-03-03T17:00:00Z"},
