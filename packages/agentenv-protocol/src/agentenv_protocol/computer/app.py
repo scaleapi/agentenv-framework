@@ -10,7 +10,7 @@ import json
 import os
 from typing import Any, Callable, ClassVar, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment
 from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI
@@ -20,6 +20,8 @@ APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
 _INSTALL_STEP_ATTR = "_aee_install_step"
 _READY_CHECK_ATTR = "_aee_ready_check"
 _DATA_METHODS = {"reset_data": METHOD_RESET, "add_data": METHOD_ADD, "get_data": METHOD_GET}
+#: What a launch's window can be matched by, as a driver's list_windows describes each window.
+WINDOW_KEYS = frozenset({"class", "instance", "title"})
 
 
 class Service(BaseModel):
@@ -53,6 +55,12 @@ class Ready(BaseModel):
     command: Optional[list[str]] = None
     timeout_s: float = 60
 
+    @model_validator(mode="after")
+    def _waits_on_something(self) -> Ready:
+        if not self.window and self.port is None and not self.command:
+            raise ValueError("Ready waits on nothing: set window, port or command")
+        return self
+
 
 class Launch(BaseModel):
     """How the app starts in the desktop session: with it (``boot``) or when the agent opens it (``demand``)."""
@@ -61,8 +69,22 @@ class Launch(BaseModel):
 
     at: Literal["boot", "demand"] = "boot"
     command: list[str]
+    #: Matches the app's window by its WM_CLASS ``class`` or ``instance`` and its ``title``, as given.
     window: Optional[dict[str, str]] = None
     ready: Optional[Ready] = None
+
+    @field_validator("window")
+    @classmethod
+    def _matchable(cls, window: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        if window is not None and (not window or set(window) - WINDOW_KEYS):
+            raise ValueError(f"window matches by {', '.join(sorted(WINDOW_KEYS))}, not {window!r}")
+        return window
+
+    @model_validator(mode="after")
+    def _window_to_wait_for(self) -> Launch:
+        if self.ready is not None and self.ready.window and self.window is None:
+            raise ValueError("ready waits on a window: name it with Launch(window={'class': ...})")
+        return self
 
 
 class AppSkill(BaseModel):
@@ -100,6 +122,13 @@ class AppDeclaration(BaseModel):
     data: list[str]
     install_steps: list[InstallStep]
     ready_checks: list[str]
+
+    @model_validator(mode="after")
+    def _venv_for_ready_checks(self) -> AppDeclaration:
+        if self.ready_checks and not any(install.python for install in self.install.values()):
+            raise ValueError(f"@ready_check {', '.join(self.ready_checks)} runs in the app's own venv: name its "
+                             "requirements with Linux(python=...)")
+        return self
 
 
 def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[str]] = None) -> Callable:

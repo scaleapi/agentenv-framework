@@ -15,11 +15,11 @@ from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.utils.boot import (
-    READY_TIMEOUT_S,
     app_settings_environment,
     boot,
     discard,
     ready,
+    ready_timeout,
     recorded_settings,
     settings_environment,
 )
@@ -96,7 +96,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy,
             environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
-            disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb)
+            disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, ready_s=ready_timeout(env.composed_apps()))
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:
@@ -136,7 +136,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                                       env=_environment(env, computer, values, params))
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
-        _require_name(env, await ready(deployed.environment_url, READY_TIMEOUT_S))
+        _require_name(env, await ready(deployed.environment_url, ready_timeout(env.composed_apps())))
         await _require_display(deployed, values.get("resolution"))
 
 

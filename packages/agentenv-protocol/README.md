@@ -393,6 +393,7 @@ pixels), at the display's size times its scale. Input operations may return an `
 | `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
 | `@run_in_session` | no; a Linux default | `computer-exec/v1` |
 | `@write_files` | no; a Linux default | `data/add` |
+| `@list_windows` | no; a Linux default | a computer app's readiness by its window |
 | `@record` | no | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
 
 The class is checked when it is defined: a missing required operation, half a group, two methods
@@ -400,12 +401,13 @@ for one operation that some platform could both match, or features that don't ma
 decorators raise `TypeError`. Predicates (`os`, `distribution`, `version`, `arch`, `display`)
 choose a method per platform, read from `/etc/os-release`, the machine and `XDG_SESSION_TYPE` or
 `DISPLAY`: `@capture(display="x11")` and `@capture(display="wayland")` can sit side by side. A
-driver's own `@run_in_session` or `@write_files` replaces the base class's Linux default, which runs
-as the driver's user inside the desktop session. The base class keeps its state in `self._computer`
-and names its own members `_computer_*` and `computer_*`; a driver that redefines one of them, or
-another private member of the base class, is refused when it is defined, so a helper of the
-driver's can't silently replace one. What the optional operations give is served only when the
-driver has them, through the `served_tools`, `served_extensions` and `served_operations` hooks.
+driver's own `@run_in_session`, `@write_files` or `@list_windows` replaces the base class's Linux
+default, which runs as the driver's user inside the desktop session. The base class keeps its state
+in `self._computer` and names its own members `_computer_*` and `computer_*`; a driver that
+redefines one of them, or another private member of the base class, is refused when it is defined,
+so a helper of the driver's can't silently replace one. What the optional operations give is
+served only when the driver has them, through the `served_tools`, `served_extensions` and
+`served_operations` hooks.
 
 **What the base class serves:**
 
@@ -428,8 +430,8 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
   class's `notes`, markdown for what its card can't say.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
-  capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
-  pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  capture, the driver's own `ready_checks()`, and one per app that starts with the computer; tools
+  refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
   descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
   request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
   with `recording`, `computer-recording/v1` (below).
@@ -566,10 +568,14 @@ class MailApp(ComputerAppEnvironment):
 - **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
   copied under its prefix; `python`, a requirements file there installed into a venv beside them;
   `services`, programs the computer's init runs from the prefix as the session user.
-- **`launch = Launch(...)`** says how it starts in the desktop session, with it (`at="boot"`) or when
-  the agent opens it (`"demand"`), and `ready=Ready(...)` when it's ready; `@ready_check` marks a
-  method for readiness that needs logic, and `@install_step(scope=...)` one a computer runs as it
-  installs the app.
+- **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`, an XDG
+  autostart entry) or when the agent opens it (`"demand"`); either way the computer gets a launcher
+  for it. `ready=Ready(...)` says when it's ready: a window matching `launch.window` by its class,
+  instance or title, a port answering on loopback, or a command exiting 0. `@ready_check` marks a
+  method for readiness that needs logic, run in the app's own venv, so an app with one names its
+  `python` requirements. A `boot` app counts in `computer-ready`, as does an app with no launch whose
+  `@ready_check` methods watch its services; a `demand` app is checked once something launches it.
+  `@install_step(scope=...)` marks a method a computer runs as it installs the app.
 - **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
   its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
 - **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value

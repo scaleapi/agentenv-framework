@@ -16,6 +16,7 @@ pytest.importorskip("PIL")
 
 from agentenv_protocol.computer import AppDeclaration  # noqa: E402
 from agentenv_protocol.computer._declare import _Stub, _StubModule, declare, main  # noqa: E402
+from agentenv_protocol.computer._ready import main as ready  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
 
 DRIVER = '''import not_installed_here
@@ -68,7 +69,8 @@ from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Linux, R
 @computer_app(supports={supports}, permissions=["camera"])
 class Mail(ComputerAppEnvironment):
     linux = Linux(files="linux", python="requirements.txt", services=[Service(name="imap", command="bin/imap")])
-    launch = Launch(at="demand", command=["thunderbird"], ready=Ready(window=True, timeout_s=30))
+    launch = Launch(at="demand", command=["thunderbird"], window={{"class": "Thunderbird"}},
+                    ready=Ready(window=True, timeout_s=30))
 
     class Settings(BaseModel):
         account: str = "user@example.com"
@@ -174,7 +176,8 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
         "supports": LINUX, "permissions": ["camera"],
         "install": {"linux": {"files": "linux", "python": "requirements.txt",
                               "services": [{"name": "imap", "command": "bin/imap"}]}},
-        "launch": {"at": "demand", "command": ["thunderbird"], "ready": {"window": True, "timeout_s": 30.0}},
+        "launch": {"at": "demand", "command": ["thunderbird"], "window": {"class": "Thunderbird"},
+                   "ready": {"window": True, "timeout_s": 30.0}},
         "skill": {"method": "guide"}, "data": ["data/add", "data/reset"],
         "install_steps": [{"name": "packages", "scope": "system"}, {"name": "profile", "scope": "session"}],
         "ready_checks": ["inbox_open"]}
@@ -187,6 +190,43 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
     with pytest.raises(ValueError, match=re.escape("Twice declares its skill twice: skill = 'skill.md' and "
                                                    "@agent_skill guide")):
         declare(folder, "app.py", "Twice")
+
+
+@pytest.mark.parametrize("change, problem", [
+    ('launch = Launch(command=["mail"], ready=Ready(timeout_s=5))', "Ready waits on nothing: set window, port or command"),
+    ('launch = Launch(command=["mail"], ready=Ready(window=True))', "ready waits on a window: name it with Launch(window="),
+    ('launch = Launch(command=["mail"], window={"role": "main"})', "window matches by class, instance, title, not"),
+    ('linux = Linux(services=[Service(name="imap", command="bin/imap")])',
+     "@ready_check inbox_open runs in the app's own venv: name its requirements with Linux(python=...)"),
+])
+def test_an_app_whose_launch_or_readiness_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
+    (folder / "app.py").write_text(APP.format(supports=LINUX) + f"""
+
+@computer_app(supports={LINUX})
+class Changed(Mail):
+    {change}
+""")
+
+    assert main([str(folder), "app.py", "Changed"]) == 1
+    assert problem in capsys.readouterr().err.splitlines()[-1]
+
+
+@pytest.mark.parametrize("body, code", [("return True", 0), ("return False", 1),
+                                        ("raise RuntimeError('mailbox locked')", 2)])
+def test_a_ready_check_runs_from_the_apps_folder_and_exits_by_what_it_returns(tmp_path, monkeypatch, capsys, body,
+                                                                             code):
+    (tmp_path / "app.py").write_text(f"""from agentenv_protocol.computer import ComputerAppEnvironment, ready_check
+
+
+class Mail(ComputerAppEnvironment):
+    @ready_check
+    async def inbox_open(self):
+        {body}
+""")
+    monkeypatch.setenv("ENVIRONMENT_NAME", "mail")
+
+    assert ready([str(tmp_path), "app.py", "Mail", "inbox_open"]) == code
+    assert capsys.readouterr().err == ("RuntimeError: mailbox locked\n" if code == 2 else "")
 
 
 def test_an_app_reads_the_settings_its_computer_gives_it_by_its_name(monkeypatch):

@@ -84,7 +84,12 @@ class FakeDocker:
         self.builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
                             "files": sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()),
                             "conf": next(context.glob("agentenv-*.conf")).read_text(),
-                            "confs": {conf.name: conf.read_text() for conf in context.glob("agentenv-*.conf")}})
+                            "confs": {conf.name: conf.read_text() for conf in context.glob("agentenv-*.conf")},
+                            "desktop": {entry.name: entry.read_text() for entry in context.glob("desktop/*")},
+                            "described": {path.parent.parent.name: json.loads(path.read_text())
+                                          for path in context.glob("apps/*/.agentenv/app.json")},
+                            "launchers": {path.parent.parent.name: (path.read_text(), bool(path.stat().st_mode & 0o111))
+                                          for path in context.glob("apps/*/.agentenv/launch")}})
 
     def label(self, local, platform, extra):
         self.labels[local] = extra
@@ -934,7 +939,8 @@ MAIL_SETTINGS = {"properties": {
     "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
 
 
-def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, **changes):
+def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
+         ready_checks=(), **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
@@ -943,8 +949,8 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
         name: folder / name for name in ("app.py", "requirements.txt")})
     declaration = AppDeclaration.model_validate({
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
-        "permissions": [], "launch": None, "settings": settings, "skill": None,
-        "data": [], "install_steps": [], "ready_checks": [],
+        "permissions": [], "launch": launch, "settings": settings, "skill": None,
+        "data": [], "install_steps": [], "ready_checks": list(ready_checks),
         "install": {"linux": install or {"python": "requirements.txt", "services": [
             {"name": "imap", "command": "venv/bin/python imap.py"}]}}})
     return ComputerAppEnv.put(**{"id": "@local/~/kit/mail", "environment_name": "mail", "module": "app.py:Mail",
@@ -975,6 +981,26 @@ def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_unde
                                                                               "container/arm64": "ready"}
 
 
+@pytest.mark.parametrize("at", ["boot", "demand"])
+def test_an_apps_launch_reaches_the_desktop_session_and_its_driver(base, driver, docker, tmp_path, at):
+    launch = {"at": at, "command": ["bin/mail", "--folder", "Work mail"], "window": {"class": "Mail"},
+              "ready": {"window": True, "timeout_s": 240.0}}
+    app = _app(base, driver, tmp_path / "mail", launch=launch, ready_checks=["inbox_open"])
+
+    build = docker.builds[0]
+    assert build["desktop"] == {"agentenv-app-mail.desktop": (
+        "[Desktop Entry]\nType=Application\nName=mail\nExec=/opt/agentenv/apps/mail/.agentenv/launch\nTerminal=false\n")}
+    assert build["launchers"] == {"mail": (
+        "#!/bin/sh\ncd /opt/agentenv/apps/mail && ENVIRONMENT_NAME=mail exec bin/mail --folder 'Work mail'\n", True)}
+    copies = [line for line in build["dockerfile"].splitlines() if line.startswith("COPY desktop/")]
+    assert copies == ["COPY desktop/agentenv-app-mail.desktop /usr/share/applications/agentenv-app-mail.desktop",
+                      *(["COPY desktop/agentenv-app-mail.desktop /etc/xdg/autostart/agentenv-app-mail.desktop"]
+                        if at == "boot" else [])]
+    assert build["described"] == {"mail": {"name": "mail", "module": "app.py:Mail", "launch": launch,
+                                           "ready_checks": ["inbox_open"]}}
+    assert boot.ready_timeout([app]) == (270.0 if at == "boot" else boot.READY_TIMEOUT_S)
+
+
 def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):
     _app(base, driver, tmp_path / "mail", supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["arm64"]}])
 
@@ -988,7 +1014,9 @@ def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker
     ({"install": {"services": [{"name": "imap", "command": "a"}, {"name": "imap", "command": "b"}]}},
      "install.linux.services: Value error, names a service twice"),
     ({"driver": None}, "a computer app deploys alone on a computer and a driver; name both or neither"),
-], ids=["platform", "arch", "install", "no-driver"])
+    ({"install": {"files": "linux", "python": "requirements.txt", "services": []}, "ready_checks": ["inbox_open"]},
+     "install.linux.files: @ready_check runs from the app's folder, which needs 'app.py' in 'linux'"),
+], ids=["platform", "arch", "install", "no-driver", "ready-check-file"])
 def test_an_app_that_doesnt_fit_its_computer_and_driver_is_refused_before_anything_is_stored(base, driver, docker,
                                                                                             tmp_path, changes, problem):
     with pytest.raises(ValueError, match=problem.replace(".", "[.]")):

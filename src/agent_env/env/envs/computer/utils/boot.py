@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 #: How long a computer may take from its container starting to its driver saying it's ready.
 READY_TIMEOUT_S = 180.0
+#: How much longer than the slowest starting app's own readiness timeout a computer may take, for the rest of it first.
+APP_READY_MARGIN_S = 30.0
 _POLL_S = 0.5
 #: How a setting a record keeps shows a secret's or a generated one's value, which it never holds.
 WITHHELD = "<withheld>"
@@ -82,7 +84,8 @@ def recorded_settings(computer: ComputerArtifact, values: dict[str, Any]) -> dic
 
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str],
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
-               disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None) -> Booted:
+               disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
+               ready_s: float = READY_TIMEOUT_S) -> Booted:
     """``image`` booted with ``environment`` on ``sandbox_provider``, which the caller chose to run its arch natively,
     its driver's ``port`` reached on the sandbox, once the driver says the computer is ready; a boot that fails is torn
     down."""
@@ -91,7 +94,7 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
         disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
     try:
         url = sandbox.tunnel_urls[port]
-        return Booted(sandbox, url, await ready(url, READY_TIMEOUT_S))
+        return Booted(sandbox, url, await ready(url, ready_s))
     except BaseException:
         await discard(sandbox)
         raise
@@ -107,6 +110,13 @@ async def discard(sandbox: Sandbox) -> None:
     if sandbox.ON_THIS_MACHINE:
         with contextlib.suppress(OSError):
             await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
+
+
+def ready_timeout(apps: list[ComputerAppEnv]) -> float:
+    """How long a computer of ``apps`` may take to be ready: ``READY_TIMEOUT_S``, or longer when an app that starts with
+    it gives itself longer."""
+    return max([READY_TIMEOUT_S, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in apps
+                                   if (launch := app.declaration.launch) and launch.at == "boot" and launch.ready)])
 
 
 async def ready(url: str, timeout: float) -> dict:

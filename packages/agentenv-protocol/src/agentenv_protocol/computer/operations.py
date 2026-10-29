@@ -11,6 +11,7 @@ Each operation is called with screen pixels, positionally, in the order below, a
     pointer_move(x, y), pointer_down(button), pointer_up(button), pointer_position() -> (x, y)
     key_down(keys), key_up(keys)
     run_in_session(argv, cwd, env, timeout_s) -> ExecResult            write_files({path: bytes})
+    list_windows() -> [{"class": ..., "instance": ..., "title": ...}, ...], the desktop's top-level windows
     record(hints) -> an async iterator of RecordedFrame or RecordedSegment, until it is closed
 """
 from __future__ import annotations
@@ -26,7 +27,7 @@ GROUPS = {
     "pointer": ("pointer_move", "pointer_down", "pointer_up", "pointer_position"),
     "keyboard": ("key_down", "key_up"),
 }
-OPTIONAL = ("set_display", "run_in_session", "write_files", "record")
+OPTIONAL = ("set_display", "run_in_session", "write_files", "record", "list_windows")
 INPUT = frozenset({"click", "drag", "scroll", "type_text", "press", "pointer_move", "pointer_down", "pointer_up",
                    "key_down", "key_up"})
 
@@ -116,6 +117,7 @@ key_up = _marker("key_up")
 run_in_session = _marker("run_in_session")
 write_files = _marker("write_files")
 record = _marker("record")
+list_windows = _marker("list_windows")
 
 
 def default_for(operation: str, **predicates: Any) -> Callable:

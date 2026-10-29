@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -27,6 +28,7 @@ from pathlib import Path, PurePosixPath
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from agentenv_protocol.computer import apps as installed_apps
 from agentenv_protocol.computer.conformance import run_probe
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -60,7 +62,12 @@ logger = logging.getLogger(__name__)
 REPOSITORY = "agentenv-computers"
 #: Where a driver's files go in a composed computer, in a folder named for the driver; an app's, under APPS.
 DRIVERS = "/opt/agentenv/drivers"
-APPS = "/opt/agentenv/apps"
+APPS = str(installed_apps.APPS)
+#: Where a desktop session finds its launchers, and the entries it starts with it.
+LAUNCHERS = "/usr/share/applications"
+AUTOSTART = "/etc/xdg/autostart"
+#: The script in an app's folder that its launcher and autostart entry run.
+LAUNCH_SCRIPT = ".agentenv/launch"
 KEY_LABEL = "dev.agentenv.computer-key"
 # What a build installed and whether it was emulated, kept on its image for an env that reuses it.
 INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
@@ -168,7 +175,8 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
     for link in links:
         try:
             booted = await boot.boot(link, image=image, port=driver.port, environment=environment,
-                                     network_policy=None, timeout=_PROBE_TTL_S, attribution=None)
+                                     network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
+                                     ready_s=boot.ready_timeout(env.composed_apps()))
         except Exception as e:
             problems.append(f"{type(link).__name__}: {e}")
             continue
@@ -269,12 +277,14 @@ def _ready_base(base: ComputerArtifact, arch: str) -> None:
 @dataclass(frozen=True)
 class _Layer:
     """A driver's or an app's part of a build: its folder in the build context, its prefix in the image, what it
-    installs, and the file of its supervisord programs."""
+    installs, the file of its supervisord programs, and files of the build context it places elsewhere in the image,
+    as (source, target)."""
 
     folder: str
     prefix: str
     install: Install
     conf: str
+    placed: tuple[tuple[str, str], ...] = ()
 
 
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact) -> _Layer:
@@ -287,12 +297,38 @@ def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifa
 
 
 def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact) -> _Layer:
-    """Write the app's install files under ``context/apps/<name>/`` and its supervisord programs beside them, run under
-    its name, its folder under ``APPS`` named for its id's last part."""
-    install, name = app.install[base.os.type], _name(app.id, "app")
-    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf")
+    """Write the app's install files under ``context/apps/<name>/``, its supervisord programs beside them, run under
+    its name, and the description of it its computer's driver reads; with a launch, its launcher, which a ``boot`` app
+    also places among the desktop session's autostart entries. Its folder under ``APPS`` is named for its id's last
+    part."""
+    install, name, launch = app.install[base.os.type], _name(app.id, "app"), app.declaration.launch
+    prefix, placed = f"{APPS}/{name}", ()
+    if launch is not None:
+        entry = f"desktop/agentenv-app-{name}.desktop"
+        (context / "desktop").mkdir(exist_ok=True)
+        (context / entry).write_text(f"[Desktop Entry]\nType=Application\nName={app.environment_name}\n"
+                                     f"Exec={prefix}/{LAUNCH_SCRIPT}\nTerminal=false\n")
+        placed = ((entry, f"{LAUNCHERS}/agentenv-app-{name}.desktop"),
+                  *([(entry, f"{AUTOSTART}/agentenv-app-{name}.desktop")] if launch.at == "boot" else []))
+    layer = _Layer(f"apps/{name}", prefix, install, f"agentenv-app-{name}.conf", placed)
     _stage(context, layer, f"app {app.id}", app.files, f"app-{name}", {"ENVIRONMENT_NAME": app.environment_name})
+    described = context / layer.folder / installed_apps.APP_FILE
+    described.parent.mkdir(parents=True, exist_ok=True)
+    if launch is not None:
+        script = context / layer.folder / LAUNCH_SCRIPT
+        script.write_text(_launcher(app.environment_name, prefix, launch.command))
+        script.chmod(_EXECUTABLE)
+    described.write_text(json.dumps({
+        "name": app.environment_name, "module": app.module,
+        "launch": launch.model_dump(mode="json", exclude_none=True) if launch is not None else None,
+        "ready_checks": app.declaration.ready_checks}, indent=1))
     return layer
+
+
+def _launcher(name: str, prefix: str, command: list[str]) -> str:
+    """The script a desktop entry runs: ``command`` from the app's folder, as its services run, with
+    ``ENVIRONMENT_NAME`` set. A desktop session may ignore an entry's own working directory."""
+    return f"#!/bin/sh\ncd {prefix} && ENVIRONMENT_NAME={shlex.quote(name)} exec {shlex.join(command)}\n"
 
 
 def _name(env_id: str, fallback: str) -> str:
@@ -378,7 +414,9 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
             lines.append(f"RUN python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-cache-dir {packages} "
                          f"&& {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json")
         lines.append(f"COPY {layer.conf} /etc/supervisor/conf.d/{layer.conf}")
-        checks = [f"test -d {prefix}", f"test -f /etc/supervisor/conf.d/{layer.conf}"]
+        lines += [f"COPY {source} {target}" for source, target in layer.placed]
+        checks = [f"test -d {prefix}", f"test -f /etc/supervisor/conf.d/{layer.conf}",
+                  *(f"test -f {target}" for _, target in layer.placed)]
         if install.python is not None:
             checks.append(f"test -x {prefix}/venv/bin/python")
         lines.append(f"RUN {' && '.join(checks)}")

@@ -1,6 +1,7 @@
 """A computer app deployed alone through ``agent-env run``: a one-app computer of the computer and driver its env.toml
 names, its card named after it, its service running from its folder in a venv of the plain protocol package, on the
-settings the deploy gave it, a secret resolved at boot. Needs Docker and the local registry on localhost:5000."""
+settings the deploy gave it, a secret resolved at boot, its window opened with the desktop session and the computer ready
+only once its window and its @ready_check say so. Needs Docker and the local registry on localhost:5000."""
 
 from pathlib import Path
 
@@ -24,5 +25,7 @@ def test_an_app_deployed_alone_runs_its_service_on_its_settings_on_a_computer_na
     context = run_context(ran.output)
     (deployed,) = context["deployed_envs"]
     assert deployed["env_id"].endswith("/notes") and deployed["environment_card"]["name"] == "notes"
-    assert context["metadata"]["script_results"]["service"] == {"signature": "-- Ada", "token": "t0ken",
-                                                                "card": "notes"}
+    assert context["metadata"]["script_results"]["service"] == {
+        "signature": "-- Ada", "token": "t0ken", "card": "notes",
+        "app_ready": [{"name": "app notes", "ok": True, "detail": "ready"}],
+        "launchers": ["agentenv-app-notes.desktop"], "autostart": ["agentenv-app-notes.desktop"]}

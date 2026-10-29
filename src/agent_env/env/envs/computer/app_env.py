@@ -4,6 +4,7 @@ composed with the app installed under its prefix, its card named after it."""
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol.computer import AppDeclaration
@@ -82,6 +83,7 @@ class ComputerAppEnv(ComputerEnv):
         app = cls(id=id, version=None, environment_name=environment_name, module=module, files=files,
                   declaration=declaration, computer=computer, driver=driver)
         _, problems = _installs(declaration)
+        problems += _ready_checks_beyond_reach(module, declaration)
         if (computer is None) != (driver is None):
             problems.append("a computer app deploys alone on a computer and a driver; name both or neither")
         elif computer is not None and not problems:
@@ -145,3 +147,11 @@ class ComputerAppEnv(ComputerEnv):
 def _installs(declaration: AppDeclaration) -> tuple[dict[str, AppInstall], list[str]]:
     """Its installs by OS type, each checked as the composer installs it, and the problems with them."""
     return installs({os_type: linux.model_dump() for os_type, linux in declaration.install.items()}, AppInstall)
+
+
+def _ready_checks_beyond_reach(module: str, declaration: AppDeclaration) -> list[str]:
+    """An install that leaves out the class's file, from which the computer runs its ``@ready_check`` methods."""
+    file = PurePosixPath(module.partition(":")[0])
+    return [f"install.{os_type}.files: @ready_check runs from the app's folder, which needs {str(file)!r} in "
+            f"{linux.files!r}" for os_type, linux in declaration.install.items()
+            if declaration.ready_checks and linux.files != "." and not file.is_relative_to(linux.files)]
