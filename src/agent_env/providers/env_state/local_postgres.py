@@ -38,6 +38,7 @@ from agent_env.providers.env_state.env_state_provider import (
     StateContext,
     LOCAL_POSTGRES_STATE_TYPE,
 )
+from agent_env.utils.names import image_reference_problem
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -234,7 +235,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         hc = spec.healthcheck
         return [
             f"  {self.env_state_docker_service_name()}:",
-            f"    image: {cfg.db_image}",
+            f"    image: {_checked_image(cfg.db_image)}",
             "    environment:",
             *[f"      - {key}={value}" for key, value in spec.env.items()],
             "    healthcheck:",
@@ -266,7 +267,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         if cfg.db_web_image:
             lines.extend([
                 f"  {PGWEB_SERVICE_NAME}:",
-                f"    image: {cfg.db_web_image}",
+                f"    image: {_checked_image(cfg.db_web_image)}",
                 "    restart: unless-stopped",
                 "    depends_on:",
                 f"      {DATABASE_SERVICE_NAME}:",
@@ -286,7 +287,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         if cfg.db_mcp_image:
             lines.extend([
                 f"  {DB_MCP_SERVICE_NAME}:",
-                f"    image: {cfg.db_mcp_image}",
+                f"    image: {_checked_image(cfg.db_mcp_image)}",
                 "    restart: unless-stopped",
                 "    depends_on:",
                 f"      {DATABASE_SERVICE_NAME}:",
@@ -394,3 +395,10 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         exit_code, _out, err = await store_exec(argv)
         if exit_code != 0:
             raise RuntimeError(f"Changelog trigger install failed for '{environment_name}': {err[-500:]}")
+
+
+def _checked_image(ref: str) -> str:
+    """``ref``, refused when it isn't an image reference: the compose file it goes into reads it as YAML."""
+    if problem := image_reference_problem(ref):
+        raise ValueError(f"Can't render the state store's compose services: {problem}")
+    return ref

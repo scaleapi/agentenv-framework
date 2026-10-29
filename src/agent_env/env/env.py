@@ -336,6 +336,11 @@ class Env(ABC):
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "type": self.type, "version": self.version, "metadata": self.metadata}
 
+    def put_problem(self) -> str | None:
+        """Why the store refuses to write this env, None when it doesn't. Checked on write only, so a document already
+        stored still loads."""
+        return None
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Env":
         raise NotImplementedError(f"{cls.__name__} must implement from_dict")

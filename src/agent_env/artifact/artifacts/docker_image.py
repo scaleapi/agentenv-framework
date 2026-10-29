@@ -25,6 +25,7 @@ from agent_env.store.image_store.oci_registry_credentials import is_loopback_hos
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
 from agent_env.utils.docker.context import BuildContext
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image, normalize_platform
+from agent_env.utils.names import image_reference_problem
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,8 @@ class DockerImageArtifact(Artifact):
         owner = "DockerImageArtifact.put_tar"
         if not tar_gz_object_url:
             raise ValueError(f"{owner}(): tar_gz_object_url is empty")
+        if problem := image_reference_problem(image_name):
+            raise ValueError(f"{owner}(): {problem}")
         for url in (tar_gz_object_url, build_context_object_url):
             if url:
                 get_config().check_object_url(id, url)
@@ -223,6 +226,8 @@ class DockerImageArtifact(Artifact):
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
+        if problem := image_reference_problem(image_name):
+            raise ValueError(problem)
         if not names_registry(image_name):
             raise ValueError(f"{image_name!r} doesn't name its registry; spell it out, as in "
                              f"docker.io/library/{image_name}")
