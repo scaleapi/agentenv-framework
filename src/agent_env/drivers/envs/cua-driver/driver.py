@@ -134,15 +134,15 @@ class CuaDriver(ComputerDriverEnvironment):
             raise Unsupported(f"cua-driver holds only modifier keys in a chord, not {[k for k in held if k not in MODIFIERS]}")
         await self._send("press_key", key=MODIFIERS.get(key) or NAMED.get(key, key), modifiers=_modifiers(held))
 
-    async def _forward(self, name: str, **arguments: Any) -> CallToolResult:
+    async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
         """A call to one of cua-driver's own tools, on its caller's connection, answered as cua-driver answers it."""
         connection = self._callers.setdefault(self.caller_identity(ToolContext.current()), _Connection())
         try:
-            reply = await connection.request({"method": "call", "name": name, "args": arguments})
+            reply = await connection.request({"method": "call", "name": tool, "args": arguments})
         except DeviceUnavailable as e:
             return _refused(e.message)
         if not reply.get("ok"):
-            return _refused(reply.get("error") or f"cua-driver refused {name}")
+            return _refused(reply.get("error") or f"cua-driver refused {tool}")
         return CallToolResult.model_validate(reply["result"])
 
     async def _send(self, name: str, **args: Any) -> None:

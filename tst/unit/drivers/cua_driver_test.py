@@ -164,13 +164,16 @@ async def test_cua_drivers_tools_are_listed_as_pinned_and_forwarded_on_their_cal
         listed = {t.name: t for t in (await session.list_tools()).tools}
         await session.call_tool("computer_screenshot", {})
         answered = await session.call_tool("get_window_state", {"pid": 42, "window_id": 7, "query": "OK"})
+        launched = await session.call_tool("launch_app", {"name": "thunar"})
 
     manifest = {t["name"]: t for t in module._manifest()}
     assert set(manifest) <= set(listed) and {"computer_click", "computer_screenshot"} <= set(listed)
     assert listed["get_window_state"].inputSchema == manifest["get_window_state"]["inputSchema"]
     assert listed["get_window_state"].annotations.readOnlyHint == manifest["get_window_state"]["annotations"]["readOnlyHint"]
     framework, caller = 1, max(c for c, _ in daemon.requests)
-    assert caller != framework and daemon.calls(caller) == [("get_window_state", {"pid": 42, "window_id": 7, "query": "OK"})]
+    assert caller != framework and daemon.calls(caller) == [
+        ("get_window_state", {"pid": 42, "window_id": 7, "query": "OK"}), ("launch_app", {"name": "thunar"})]
+    assert not launched.isError
     assert answered.structuredContent == {"tool": "get_window_state"} and answered.content[0].text == "did get_window_state"
 
 
