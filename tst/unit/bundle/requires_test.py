@@ -16,23 +16,28 @@ from click.testing import CliRunner
 from packaging.requirements import Requirement
 
 from agent_env.artifact import Artifact
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, dry_run_bundle, parse_bundle, prepare_bundle, run_bundle
 from agent_env.bundle import register as register_module
 from agent_env.bundle import requires as requires_module
 from agent_env.bundle.importer import import_task
 from agent_env.bundle.register import register_bundle
 from agent_env.bundle.requires import (
-    Declaring, Provider, Providers, UnmetRequirements, _create, declare, declaring_for,
+    Declaring, Provider, Providers, UnmetRequirements, _create, declare, declaring_for, task_requires,
 )
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle.run import _write_bundle
 from agent_env.cli import _install_prompt, cli
 from agent_env.cli._installers import InstallerError
+from agent_env.config import get_config
 from agent_env.config.runtime import Config
+from agent_env.env import MCPServerEnv
 from agent_env.plugins import ARTIFACTS, TASK_STEPS, Contribution, Distribution
 from agent_env.plugins._requirements import install_command, unmet, unmet_problems
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
+from agent_env.task.store import TASKS_COLLECTION
 from agent_env.task_step.task_step import TaskStep
 from tst.unit._terminal import at_a_terminal
 from tst.unit.bundle._support import fake_plugins, layout
@@ -612,19 +617,33 @@ REGISTERED = {
 }
 
 
-class TestRegisteredTasks:
-    @pytest.fixture(autouse=True)
-    def two_plugins(self, stores, monkeypatch):
-        """agentenv-acme's step type, and agentenv-acme-settings's artifact type, which a task references."""
-        monkeypatch.setattr(register_module, "_git", lambda root, *args: None)
-        artifacts = {**Config().artifact_registry(), _AcmeSetting.model_fields["type"].default: _AcmeSetting}
-        monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
-        fake_plugins(monkeypatch, [
-            Distribution(ACME, "1.2.0", (Contribution(TASK_STEPS, _Acme.type, _value(_Acme), "active"),)),
-            Distribution(SETTINGS, "2.0", (Contribution(ARTIFACTS, _AcmeSetting.model_fields["type"].default,
-                                                         _value(_AcmeSetting), "active"),)),
-        ], versions={ACME: "1.2.0", SETTINGS: "2.0"})
+class _AcmeImage(DockerImageArtifact):
+    """An image artifact type the plugin agentenv-acme-images ships, which an env holds."""
 
+    type: Literal["acme_image_requires_test"] = "acme_image_requires_test"
+
+
+IMAGES = "agentenv-acme-images"
+
+
+@pytest.fixture
+def plugins(stores, monkeypatch):
+    """agentenv-acme's step type, agentenv-acme-settings's artifact type, which a task references, and
+    agentenv-acme-images's, which an env holds."""
+    monkeypatch.setattr(register_module, "_git", lambda root, *args: None)
+    artifacts = {**Config().artifact_registry(),
+                 **{cls.model_fields["type"].default: cls for cls in (_AcmeSetting, _AcmeImage)}}
+    monkeypatch.setattr(Config, "artifact_registry", lambda self: artifacts)
+    fake_plugins(monkeypatch, [
+        Distribution(ACME, "1.2.0", (Contribution(TASK_STEPS, _Acme.type, _value(_Acme), "active"),)),
+        *(Distribution(name, version, (Contribution(ARTIFACTS, cls.model_fields["type"].default, _value(cls),
+                                                    "active"),))
+          for name, version, cls in ((SETTINGS, "2.0", _AcmeSetting), (IMAGES, "3.0", _AcmeImage))),
+    ], versions={ACME: "1.2.0", SETTINGS: "2.0", IMAGES: "3.0"})
+
+
+@pytest.mark.usefixtures("plugins")
+class TestRegisteredTasks:
     def test_each_task_requires_what_it_and_the_bundle_entities_it_references_use(self, stores):
         root = layout(stores / "b", REGISTERED)
 
@@ -658,6 +677,53 @@ class TestRegisteredTasks:
 
         assert parse_bundle(imported.root).requires == ("agentenv-acme>=1.0,<2",)
 
+
+def _steps(steps):
+    """The steps of task ``t``, stored as ``steps`` document by document, as ``Task.get`` loads them."""
+    get_config().get_document_store().insert(TASKS_COLLECTION, {"id": "t", "type": "task", "version": 1,
+                                                                "steps": steps})
+    return Task.get("t").steps
+
+
+@pytest.mark.usefixtures("plugins")
+class TestStoredTasks:
+    def test_a_registered_task_requires_what_registering_it_recorded(self, stores):
+        register_bundle(layout(stores / "b", REGISTERED))
+
+        for name in ("plugin", "loads", "core"):
+            task = Task.get(f"b-{name}")
+            assert task_requires(task.steps) == (task.requires or [])
+
+    def test_a_package_it_required_keeps_its_range_one_used_anew_is_at_least_the_installed_version(self, stores):
+        register_bundle(layout(stores / "b", REGISTERED))
+        declared = ["agentenv-acme>=1.0,<2", "agentenv-acme-settings"]
+
+        assert task_requires(Task.get("b-plugin").steps, declared) == ["agentenv-acme>=1.0,<2"]
+        assert task_requires(Task.get("b-loads").steps, ["agentenv-acme>=1.0,<2"]) == ["agentenv-acme-settings>=2.0"]
+        assert task_requires(Task.get("b-core").steps, declared) == []
+
+    def test_a_type_only_configuration_registers_is_never_required(self, stores):
+        assert task_requires(_steps([{"id": "s", "type": _Configured.type}])) == []
+
+    def test_a_type_an_env_it_reads_holds_is_required(self, stores):
+        with namespace_routing():
+            image = get_artifact_store().put_document(_AcmeImage(
+                id="crm-image", description="crm", image_name="crm:latest", tar_gz_s3_url=None, platform=None))
+            MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
+
+        assert task_requires(_steps([{"id": "env", "type": "deploy_env", "env_id": "crm"}])) == [
+            "agentenv-acme-images>=3.0"]
+
+    @pytest.mark.parametrize("artifact_id", ["absent", "{{seed.artifact}}", "unknown"])
+    def test_a_reference_it_cant_read_keeps_every_package_it_required(self, stores, artifact_id):
+        get_config().get_document_store().insert("artifacts", {"id": "unknown", "type": "acme_unknown_requires_test",
+                                                               "version": 1})
+        steps = _steps([SANDBOX, {"id": "s", "type": _Acme.type},
+                        {"id": "load", "type": "load_artifact", "sandbox_name": "box", "artifact_id": artifact_id,
+                         "depends_on": [{"task_step_id": "box"}]}])
+
+        assert task_requires(steps, ["agentenv-acme-settings", "agentenv-acme>=1.0,<2", "not a requirement!"]) == [
+            "agentenv-acme-settings", "agentenv-acme>=1.0,<2"]
 
 def test_unmet_requirements_are_a_bundle_error():
     assert issubclass(UnmetRequirements, BundleError)
