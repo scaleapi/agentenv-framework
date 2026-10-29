@@ -61,6 +61,8 @@ logger = logging.getLogger(__name__)
 # convenience for `agent-env task run` / hub UI to show a head without an S3
 # round-trip.
 _OUTPUT_PREVIEW_CHARS = 500
+# How much of a failed command's stderr an error quotes, from its end.
+_ERROR_TAIL_CHARS = 1500
 
 # Every env var key — stored, override or seed — reaches the `docker exec` string
 # unquoted (`-e 'K=v'` and `-e K=v` differ to docker), so it must be a POSIX name
@@ -339,7 +341,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         if exit_code != 0 and self.reward_path is None:
             raise RuntimeError(
                 f"Verifier '{self.verifier_id}' exited {exit_code}; "
-                f"stderr (last 1500 chars):\n{stderr[-1500:]}"
+                f"stderr (last {_ERROR_TAIL_CHARS} chars):\n{stderr[-_ERROR_TAIL_CHARS:]}"
             )
 
         return context
@@ -458,7 +460,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             exit_code, _, stderr = await target.run("bash", "-c", setup_cmd)
             if exit_code != 0:
                 raise RuntimeError(f"Verifier '{self.verifier_id}' setup command {i} exited {exit_code}: "
-                                   f"{stderr[-1500:]}")
+                                   f"{stderr[-_ERROR_TAIL_CHARS:]}")
         if self.reward_path:
             exit_code, _, stderr = await target.run("rm", "-f", "--", self.reward_path)
             if exit_code != 0:
