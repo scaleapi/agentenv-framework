@@ -6,10 +6,12 @@ placeholder credentials when the environment has none.
 """
 
 import os
+import threading
 
 import pytest
 
 pytest.importorskip("boto3")
+botocore_client = pytest.importorskip("botocore.client")
 
 _PLACEHOLDER_AWS_ENV = {
     "AWS_ACCESS_KEY_ID": "testing",
@@ -25,3 +27,17 @@ def _placeholder_aws_credentials(monkeypatch):
         for name, value in _PLACEHOLDER_AWS_ENV.items():
             if name not in os.environ:
                 monkeypatch.setenv(name, value)
+
+
+@pytest.fixture
+def one_aws_call_at_a_time(monkeypatch):
+    """moto checks a write's condition and applies the write as two steps any thread can come
+    between, where DynamoDB applies each call atomically; one call at a time restores that for
+    tests that race writers."""
+    serial, make_api_call = threading.Lock(), botocore_client.BaseClient._make_api_call
+
+    def call(client, operation, params):
+        with serial:
+            return make_api_call(client, operation, params)
+
+    monkeypatch.setattr(botocore_client.BaseClient, "_make_api_call", call)
