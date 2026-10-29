@@ -100,7 +100,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                 metadata={"computer": {
                     "form": form, "arch": arch, "provider": type(sandbox_provider).__name__, "image": build["image"],
                     "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
-                    "display": values.get("resolution"), "network": env.network,
+                    "port": env.driver.port, "display": values.get("resolution"), "network": env.network,
                     "computer_settings": recorded_settings(computer, values),
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )

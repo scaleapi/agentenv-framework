@@ -1,8 +1,12 @@
-"""Run a unit-tests-style verifier inside a deployed task container.
+"""Run a unit-tests-style verifier inside a deployed task container, or inside a computer env.
 
 Optionally runs setup_commands first (to install verifier dependencies the
 agent's container didn't have). The main command's exit code, stdout/stderr,
 and any extracted result files land on context.metadata["verifications"].
+
+With ``env_id``, the commands run inside that env's computer as its session user, through its
+driver's computer-exec/v1 ``run``, with ``env_vars`` in their environment; ``result_paths`` and
+``reward_path`` are relative to the home and read with ``data/get``.
 
 stdout and stderr are each persisted as their own FileArtifact in S3 (so the
 verification entry stays small and the full output is addressable via the
@@ -26,14 +30,20 @@ import asyncio
 import json
 import logging
 import os
+import posixpath
 import re
 import shlex
 import tempfile
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar, Optional
 
+from agent_env.config import ConfigError, get_config
 from agent_env.config.model import MODEL_HEADERS_ENV
+from agent_env.entity.refs import EntityRef
+from agent_env.env.env import require_sandbox
+from agent_env.env.envs.computer import inside
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     all_sandbox_container_env,
@@ -42,6 +52,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 from agent_env.store.ids import derive_id, is_local_id, key_segment, validate_local_id
 from agent_env.task_step.context import TaskStepContext, dual_keyed
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.run_code import _DriverTarget
 
 logger = logging.getLogger(__name__)
 
@@ -74,18 +85,20 @@ _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
 
 class RunContainerUnitTestsVerifierTaskStep(TaskStep):
     type: ClassVar[str] = "run_container_unit_tests_verifier"
-    entity_refs = ()
+    entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(
         self,
         id: str,
         version: Optional[int],
-        sandbox_name: str,
-        container_name: str,
+        sandbox_name: Optional[str] = None,
+        container_name: Optional[str] = None,
+        *,
         command: str,
+        env_id: Optional[str] = None,
         verifier_id: Optional[str] = None,
         setup_commands: Optional[list[str]] = None,
-        user: str = "root",
+        user: Optional[str] = None,
         timeout_sec: int = 300,
         env_vars: Optional[dict[str, str]] = None,
         result_paths: Optional[list[str]] = None,
@@ -94,8 +107,16 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        container = (sandbox_name, container_name)
+        if (env_id is None and None in container) or (env_id is not None and container != (None, None)):
+            raise ValueError(f"run_container_unit_tests_verifier '{id}': set env_id, or sandbox_name and "
+                             "container_name")
+        if env_id is not None and user is not None:
+            raise ValueError(f"run_container_unit_tests_verifier '{id}': commands in env '{env_id}' run as its "
+                             "computer's session user; leave user unset")
         self.sandbox_name = sandbox_name
         self.container_name = container_name
+        self.env_id = env_id
         self.command = command
         self.verifier_id = verifier_id or id
         self.setup_commands = list(setup_commands or [])
@@ -115,11 +136,15 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         self.reward_path = reward_path
         if reward_path and reward_path not in self.result_paths:
             self.result_paths.append(reward_path)
+        if env_id is not None and (absolute := [path for path in self.result_paths if posixpath.isabs(path)]):
+            raise ValueError(f"run_container_unit_tests_verifier '{id}': result paths in env '{env_id}' are relative "
+                             f"to its session user's home, not {absolute}")
 
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["sandbox_name"] = self.sandbox_name
         base["container_name"] = self.container_name
+        base["env_id"] = self.env_id
         base["command"] = self.command
         base["verifier_id"] = self.verifier_id
         base["setup_commands"] = self.setup_commands
@@ -134,12 +159,13 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
     def from_dict(cls, data: dict) -> RunContainerUnitTestsVerifierTaskStep:
         return cls(
             **cls._base_from_dict(data),
-            sandbox_name=data["sandbox_name"],
-            container_name=data["container_name"],
+            sandbox_name=data.get("sandbox_name"),
+            container_name=data.get("container_name"),
             command=data["command"],
+            env_id=data.get("env_id"),
             verifier_id=data.get("verifier_id"),
             setup_commands=data.get("setup_commands"),
-            user=data.get("user", "root"),
+            user=data.get("user"),
             timeout_sec=data.get("timeout_sec", 300),
             env_vars=data.get("env_vars"),
             result_paths=data.get("result_paths"),
@@ -203,101 +229,20 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         return command, extra_env
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        from agent_env.providers.sandbox_providers.sandbox_provider import (
-            build_sandbox_provider,
-            get_sandbox_provider,
-        )
-        from agent_env.config import ConfigError, get_config
-
         # The outputs are named after the run: refuse an id they can't take before the tests run.
         if context.instance_id and is_local_id(context.instance_id):
             validate_local_id(derive_id(context.instance_id, f"verifier-stdout-{self.id}"))
 
-        # 1. Lookup container + sandbox, rehydrate VmSandbox
-        containers = context.metadata.get("deployed_docker_containers", [])
-        container_entry = next(
-            (
-                c for c in containers
-                if c.get("container_name") == self.container_name
-                and c.get("sandbox_name") == self.sandbox_name
-            ),
-            None,
-        )
-        if container_entry is None:
-            raise RuntimeError(
-                f"Container '{self.container_name}' not found on sandbox '{self.sandbox_name}' in "
-                f"context.metadata['deployed_docker_containers']"
-            )
-        ds = next((s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None)
-        if ds is None:
-            raise RuntimeError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
-
-        provider = (
-            build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
-        )
-        sandbox = await provider.get_sandbox(ds.sandbox_id)
-
-        # 2. Build the merged env (auto-injected from agent-env config + user overlay)
         config = get_config()
-        merged_env: dict[str, str] = {}
-        try:
-            litellm_key = config.get_litellm_api_key()
-            merged_env["LITELLM_API_KEY"] = litellm_key
-            merged_env["ANTHROPIC_API_KEY"] = litellm_key
-        except (KeyError, ConfigError):
-            logger.warning("LITELLM_API_KEY unavailable; verifier won't have LLM creds")
-        try:
-            litellm_url = config.get_litellm_base_url()
-            merged_env["LITELLM_BASE_URL"] = litellm_url
-            merged_env["ANTHROPIC_BASE_URL"] = litellm_url
-        except (KeyError, ConfigError):
-            logger.warning("LITELLM_BASE_URL unavailable; verifier won't have LLM base URL")
-        merged_env.update(all_sandbox_container_env())
         command, extra_env = self._resolve_command(context)
-        merged_env.update(self.env_vars)
-        merged_env.update(extra_env)
-        # Unlike a missing key or URL, configured headers that don't resolve fail the step: a verifier that ran
-        # without them would grade against an endpoint that answers differently, or bills someone else.
-        if MODEL_HEADERS_ENV not in merged_env:
-            if headers := config.get_model_headers(merged_env.get("LITELLM_BASE_URL")):
-                merged_env[MODEL_HEADERS_ENV] = json.dumps(headers)
-        for key in _MODEL_URL_KEYS & merged_env.keys():
-            merged_env[key] = host_url_for(merged_env[key], sandbox.type)
-        env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in merged_env.items())
-
-        # 3. Run setup_commands (fail loud)
-        for i, setup_cmd in enumerate(self.setup_commands, 1):
-            logger.info(
-                f"[{self.verifier_id}] setup [{i}/{len(self.setup_commands)}]: "
-                f"{setup_cmd.splitlines()[0][:140]}"
-            )
-            await sandbox.exec_script(
-                f"docker exec -u {shlex.quote(self.user)} {env_flags} "
-                f"{shlex.quote(sandbox.scoped_name(self.container_name))} bash -c {shlex.quote(setup_cmd)}"
-            )
-
-        # 4. Clear the reward file the score is read from, so one the agent left in this container
-        # isn't graded; a process the agent left running can still write it. Other result files
-        # stay: a step can extract what an earlier step's job wrote. `-w /` resolves a relative
-        # path as `docker cp` does, and uid 0 needs no passwd entry.
-        if self.reward_path:
-            await sandbox.exec_script(
-                f"docker exec -u 0 -w / "
-                f"{shlex.quote(sandbox.scoped_name(self.container_name))} "
-                f"rm -f -- {shlex.quote(self.reward_path)}"
-            )
-
-        # 5. Run main command, bounded by in-container timeout(1)
-        logger.info(
-            f"[{self.verifier_id}] running verifier (timeout={self.timeout_sec}s) "
-            f"in container '{self.container_name}': {command[:160]}"
-        )
-        wrapped = (
-            f"docker exec -u {shlex.quote(self.user)} {env_flags} "
-            f"{shlex.quote(sandbox.scoped_name(self.container_name))} "
-            f"timeout --kill-after=10 {self.timeout_sec} bash -c {shlex.quote(command)}"
-        )
-        exit_code, stdout, stderr = await sandbox.exec_with_output("sudo", "bash", "-c", wrapped)
+        if self.env_id is not None:
+            target = self._computer(context)
+            target.env = self._merged_env(config, target.deployed.sandbox_type, extra_env)
+            exit_code, stdout, stderr, extracted_files = await self._run_in_computer(target, command)
+        else:
+            sandbox = await self._container_sandbox(context)
+            merged_env = self._merged_env(config, sandbox.type, extra_env)
+            exit_code, stdout, stderr, extracted_files = await self._run_in_container(sandbox, merged_env, command)
         timed_out = exit_code in (124, 137)
         logger.info(
             f"[{self.verifier_id}] exit_code={exit_code} timed_out={timed_out} "
@@ -308,20 +253,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         if stderr:
             logger.info(f"[{self.verifier_id}] stderr:\n{stderr}")
 
-        # 6. Extract result files (docker cp + cat + try JSON parse)
-        extracted_files: dict[str, Any] = {}
-        for result_path in self.result_paths:
-            try:
-                content = await self._extract_file(sandbox, result_path)
-                try:
-                    extracted_files[result_path] = json.loads(content)
-                except json.JSONDecodeError:
-                    extracted_files[result_path] = content
-            except Exception as e:
-                logger.warning(f"[{self.verifier_id}] failed to extract {result_path}: {e}")
-                extracted_files[result_path] = None
-
-        # 7. Persist stdout + stderr as separate FileArtifacts
+        # Persist stdout + stderr as separate FileArtifacts
         # Every execution gets its own key: a retried step keeps its run's instance id, and the
         # outputs are write-once. The instance id and the time only group and order them.
         stamp = f"{int(time.time())}-{uuid.uuid4().hex[:12]}"
@@ -344,7 +276,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             object_url=store.object_url(f"{outputs}/stderr.txt"),
         )
 
-        # 8. Record on context (shape compatible with aggregate_verifiers).
+        # Record on context (shape compatible with aggregate_verifiers).
         # Harbor-style verifiers (reward_path set) grade by the reward file, not
         # the exit code: test.sh exits 0 and encodes pass/fail in the reward.
         passed_surrogate = exit_code == 0 and not timed_out
@@ -395,7 +327,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             "extracted_files": extracted_files,
         }
 
-        # 9. Raise on timeout / non-zero exit AFTER recording. In reward mode a
+        # Raise on timeout / non-zero exit AFTER recording. In reward mode a
         # non-zero exit is graded by the reward file this run wrote (score 0 when
         # it wrote none), not a step error — only an unfinished (timed-out) run is
         # unreliable.
@@ -410,6 +342,146 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             )
 
         return context
+
+    def _merged_env(self, config, sandbox_type: Optional[str], extra_env: dict[str, str]) -> dict[str, str]:
+        """The commands' environment: the model endpoint's key and URL from agent-env's config, every sandbox
+        provider's container env, ``env_vars`` and this run's ``extra_env``, then the endpoint's headers, its URL as
+        ``sandbox_type``'s containers reach it."""
+        merged_env: dict[str, str] = {}
+        try:
+            litellm_key = config.get_litellm_api_key()
+            merged_env["LITELLM_API_KEY"] = litellm_key
+            merged_env["ANTHROPIC_API_KEY"] = litellm_key
+        except (KeyError, ConfigError):
+            logger.warning("LITELLM_API_KEY unavailable; verifier won't have LLM creds")
+        try:
+            litellm_url = config.get_litellm_base_url()
+            merged_env["LITELLM_BASE_URL"] = litellm_url
+            merged_env["ANTHROPIC_BASE_URL"] = litellm_url
+        except (KeyError, ConfigError):
+            logger.warning("LITELLM_BASE_URL unavailable; verifier won't have LLM base URL")
+        merged_env.update(all_sandbox_container_env())
+        merged_env.update(self.env_vars)
+        merged_env.update(extra_env)
+        # Unlike a missing key or URL, configured headers that don't resolve fail the step: a verifier that ran
+        # without them would grade against an endpoint that answers differently, or bills someone else.
+        if MODEL_HEADERS_ENV not in merged_env:
+            if headers := config.get_model_headers(merged_env.get("LITELLM_BASE_URL")):
+                merged_env[MODEL_HEADERS_ENV] = json.dumps(headers)
+        for key in _MODEL_URL_KEYS & merged_env.keys():
+            merged_env[key] = host_url_for(merged_env[key], sandbox_type)
+        return merged_env
+
+    async def _container_sandbox(self, context: TaskStepContext):
+        """The sandbox that hosts the container, once the container is found in the run."""
+        from agent_env.providers.sandbox_providers.sandbox_provider import (
+            build_sandbox_provider,
+            get_sandbox_provider,
+        )
+
+        containers = context.metadata.get("deployed_docker_containers", [])
+        container_entry = next(
+            (
+                c for c in containers
+                if c.get("container_name") == self.container_name
+                and c.get("sandbox_name") == self.sandbox_name
+            ),
+            None,
+        )
+        if container_entry is None:
+            raise RuntimeError(
+                f"Container '{self.container_name}' not found on sandbox '{self.sandbox_name}' in "
+                f"context.metadata['deployed_docker_containers']"
+            )
+        ds = next((s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None)
+        if ds is None:
+            raise RuntimeError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
+
+        provider = (
+            build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
+        )
+        return await provider.get_sandbox(ds.sandbox_id)
+
+    async def _run_in_container(self, sandbox, merged_env: dict[str, str],
+                                command: str) -> tuple[int, str, str, dict[str, Any]]:
+        """Run the setup commands and the command in the container; the command's exit code, stdout and stderr, and
+        the result files."""
+        env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in merged_env.items())
+        user = shlex.quote(self.user or "root")
+        container = shlex.quote(sandbox.scoped_name(self.container_name))
+
+        # Setup commands fail loud.
+        for i, setup_cmd in enumerate(self.setup_commands, 1):
+            self._log_setup(i, setup_cmd)
+            await sandbox.exec_script(f"docker exec -u {user} {env_flags} {container} bash -c {shlex.quote(setup_cmd)}")
+
+        # Clear the reward file the score is read from, so one the agent left in this container
+        # isn't graded; a process the agent left running can still write it. Other result files
+        # stay: a step can extract what an earlier step's job wrote. `-w /` resolves a relative
+        # path as `docker cp` does, and uid 0 needs no passwd entry.
+        if self.reward_path:
+            await sandbox.exec_script(f"docker exec -u 0 -w / {container} rm -f -- {shlex.quote(self.reward_path)}")
+
+        # The command, bounded by in-container timeout(1).
+        logger.info(
+            f"[{self.verifier_id}] running verifier (timeout={self.timeout_sec}s) "
+            f"in container '{self.container_name}': {command[:160]}"
+        )
+        wrapped = (
+            f"docker exec -u {user} {env_flags} {container} "
+            f"timeout --kill-after=10 {self.timeout_sec} bash -c {shlex.quote(command)}"
+        )
+        exit_code, stdout, stderr = await sandbox.exec_with_output("sudo", "bash", "-c", wrapped)
+        return exit_code, stdout, stderr, await self._extracted(lambda path: self._extract_file(sandbox, path))
+
+    def _computer(self, context: TaskStepContext) -> _DriverTarget:
+        """``env_id``'s computer, through its driver, once its card serves what the commands need and allows their
+        timeout."""
+        deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
+        if deployed is None:
+            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+        deployed = require_sandbox(deployed, "Running a verifier in an env")
+        if missing := inside.missing(deployed):
+            raise RuntimeError(f"env '{self.env_id}' doesn't serve {', '.join(missing)}, which running a verifier in "
+                               "it needs")
+        if self.timeout_sec > (limit := inside.max_timeout_s(deployed)):
+            raise RuntimeError(f"timeout_sec {self.timeout_sec} is above the {limit} s env '{self.env_id}' lets a "
+                               "command run")
+        return _DriverTarget(deployed, self.timeout_sec)
+
+    async def _run_in_computer(self, target: _DriverTarget, command: str) -> tuple[int, str, str, dict[str, Any]]:
+        """Run the setup commands and the command in the computer as its session user; the command's exit code, stdout
+        and stderr, each cut at the driver's output cap, and the result files."""
+        for i, setup_cmd in enumerate(self.setup_commands, 1):
+            self._log_setup(i, setup_cmd)
+            exit_code, _, stderr = await target.run("bash", "-c", setup_cmd)
+            if exit_code != 0:
+                raise RuntimeError(f"Verifier '{self.verifier_id}' setup command {i} exited {exit_code}: "
+                                   f"{stderr[-1500:]}")
+        if self.reward_path:
+            await target.run("rm", "-f", "--", self.reward_path)
+        logger.info(f"[{self.verifier_id}] running verifier (timeout={self.timeout_sec}s) in env '{self.env_id}': "
+                    f"{command[:160]}")
+        exit_code, stdout, stderr = await target.run("bash", "-c", command)
+        return exit_code, stdout, stderr, await self._extracted(target.read_file)
+
+    def _log_setup(self, i: int, setup_cmd: str) -> None:
+        logger.info(f"[{self.verifier_id}] setup [{i}/{len(self.setup_commands)}]: {setup_cmd.splitlines()[0][:140]}")
+
+    async def _extracted(self, read: Callable[[str], Awaitable[str]]) -> dict[str, Any]:
+        """Each result file as ``read`` reads it, parsed when it's JSON; None for one that couldn't be read."""
+        extracted_files: dict[str, Any] = {}
+        for result_path in self.result_paths:
+            try:
+                content = await read(result_path)
+                try:
+                    extracted_files[result_path] = json.loads(content)
+                except json.JSONDecodeError:
+                    extracted_files[result_path] = content
+            except Exception as e:
+                logger.warning(f"[{self.verifier_id}] failed to extract {result_path}: {e}")
+                extracted_files[result_path] = None
+        return extracted_files
 
     @staticmethod
     def _parse_reward(raw: Any) -> Optional[float]:

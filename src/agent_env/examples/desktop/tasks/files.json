@@ -1,0 +1,8 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop"},
+  {"id": "load", "type": "load_artifact", "env_id": "desktop", "artifact_id": "figures",
+   "destination_path": "Documents"},
+  {"id": "inside", "type": "run_code", "env_id": "desktop", "script_artifact_id": "read_figures"},
+  {"id": "tests", "type": "run_container_unit_tests_verifier", "env_id": "desktop", "verifier_id": "figures",
+   "command": "grep -qx 'Q3,150' Documents/figures.csv"}
+]

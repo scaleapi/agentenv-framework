@@ -20,7 +20,9 @@ from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env
+from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import load_artifact as load_artifact_mod
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
@@ -198,3 +200,21 @@ async def _async_none(*a, **kw):
 class _FakeProvider:
     async def get_sandbox(self, sandbox_id):
         return SimpleNamespace(scoped_name=lambda name: name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_class, problems", [
+    (ComputerEnv, ["load_artifact 'load': computer env 'desk' loads no environment_universe artifacts, so not "
+                   f"'{UNIVERSE_ID}'"]),
+    (MCPServerEnv, []),
+], ids=["computer", "mcp-server"])
+async def test_an_env_whose_type_loads_no_environment_artifacts_is_refused_at_save_and_at_run(universe, monkeypatch,
+                                                                                             env_class, problems):
+    env = env_class.__new__(env_class)
+    monkeypatch.setattr(Env, "get", classmethod(lambda cls, id, version=None: env))
+    step = LoadArtifactTaskStep(id="load", version=None, env_id="desk", artifact_id=UNIVERSE_ID)
+
+    assert step.preflight() == problems
+    if problems:
+        with pytest.raises(NotImplementedError, match="computer envs load no environment universe artifacts"):
+            await env.load_environment_universe_artifact(universe)

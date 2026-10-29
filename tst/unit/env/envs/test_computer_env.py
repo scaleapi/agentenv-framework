@@ -27,7 +27,7 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.envs.computer import boot, composer, gate
+from agent_env.env.envs.computer import boot, composer, gate, inside
 from agent_env.env.envs.computer.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import Install, Service
@@ -45,6 +45,7 @@ from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.utils.docker.build import DockerBuildError
+from tst.unit.computer_home import Computer
 from tst.util.oci_registry import UBUNTU_LAYER, Registry
 
 OS = {"type": "linux", "distribution": "ubuntu", "version": "24.04", "display": "x11"}
@@ -843,3 +844,75 @@ def test_a_deploy_its_sandbox_provider_cant_carry_out_is_refused_at_save(base, d
     (refusal,) = DeployEnvTaskStep(id="d", version=None, env_id=env.id).preflight()
 
     assert problem in refusal
+
+
+@pytest.fixture
+def computer(tmp_path, monkeypatch):
+    (tmp_path / "home").mkdir()
+    return Computer(tmp_path / "home").install(monkeypatch)
+
+
+def _deployed_env(base, driver, computer, **record):
+    env = _put(base, driver, compose=False)
+    env._deployed = computer.deployed(env_id=env.id, **record)
+    return env
+
+
+def _files(tmp_path, **contents):
+    for name, data in contents.items():
+        (tmp_path / "files" / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "files" / name).write_bytes(data)
+    return FileArtifactUniverse.put_bundled("@local/~/kit/files", files={
+        name: tmp_path / "files" / name for name in contents})
+
+
+@pytest.mark.asyncio
+async def test_a_load_writes_each_file_into_the_computers_downloads_through_its_driver_in_batches(
+        base, driver, docker, computer, tmp_path, monkeypatch):
+    monkeypatch.setattr(inside, "BATCH_BYTES", 10)
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: False)
+    env = _deployed_env(base, driver, computer)
+
+    result = await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa", "b.txt": b"bbbb",
+                                                                       "sub/big.bin": b"x" * 20}))
+
+    assert result.destination_path == "Downloads"
+    assert result.files == {"a.txt": "Downloads/a.txt", "b.txt": "Downloads/b.txt", "sub/big.bin": "Downloads/sub/big.bin"}
+    batches = [sorted(marker["path"] for marker in markers) for kind, markers, _ in computer.calls]
+    assert sorted(batches) == [["Downloads/a.txt", "Downloads/b.txt"], ["Downloads/sub/big.bin"]]
+    assert (computer.home / "Downloads/sub/big.bin").read_bytes() == b"x" * 20
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("network, granted", [
+    (None, True), ({"mode": "allowlist", "allow_hosts": ["example.com"]}, True), ({"mode": "allowlist"}, False),
+], ids=["open", "allowlist", "closed"])
+async def test_a_load_reads_through_a_grant_that_reaches_the_computer_unless_it_has_no_network(
+        base, driver, docker, computer, tmp_path, monkeypatch, network, granted):
+    grants = []
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: sandbox_type == "local")
+    monkeypatch.setattr(inside, "read_object", lambda store, url: grants.append(url) or SimpleNamespace(
+        size_bytes=4, model_dump=lambda mode: {"read": {"url": f"https://store.test/{len(grants)}"}}))
+    env = _deployed_env(base, driver, computer, network=network)
+
+    await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}), destination_path="Documents/in")
+
+    ((_, (marker,), _),) = computer.calls
+    assert marker["path"] == "Documents/in/a.txt"
+    assert ("read" in marker, len(grants)) == ((True, 1) if granted else (False, 0))
+    assert (computer.home / "Documents/in/a.txt").exists() is not granted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("destination, problem", [
+    ("/home/user/Documents", "a computer's destination_path is relative to its session user's home"),
+    ("Documents/../..", "must not contain '..' segments"),
+])
+async def test_a_load_outside_the_home_is_refused_before_anything_is_sent(base, driver, docker, computer, tmp_path,
+                                                                          destination, problem):
+    env = _deployed_env(base, driver, computer)
+
+    with pytest.raises(ValueError, match=problem):
+        await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}), destination_path=destination)
+
+    assert computer.calls == []

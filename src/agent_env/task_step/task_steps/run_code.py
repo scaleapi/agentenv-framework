@@ -2,9 +2,10 @@
 
 The script defines ``run(input) -> JSON``, where ``input = {"args", "results"}``.
 The result is stored at ``context.metadata["script_results"][result_id]``.
-A script on an env's host also gets ``input["env"] = {"id", "url", "mcp_url"}``: the env's
-address, where its card is at ``/.well-known/agent-env.json``, and its MCP endpoint, as that
-host reaches them (``Sandbox.url_on_host``), since a host can't always call its own public URL.
+A script run for an env also gets ``input["env"] = {"id", "url", "mcp_url"}``: the env's
+address, where its card is at ``/.well-known/agent-env.json``, and its MCP endpoint, as the script
+reaches them: on the env's host as that host does (``Sandbox.url_on_host``), since a host can't
+always call its own public URL; inside a computer, the driver on loopback.
 
 ``script_artifact_id`` is either a single-file ``FileArtifact`` or a
 ``FileArtifactUniverse`` whose ``.py`` members are staged side by side so the entry
@@ -12,7 +13,10 @@ file can import its siblings; non-``.py`` members are skipped. ``script_file`` n
 the entry, defaulting to the sole ``.py`` member or to ``run.py``.
 
 Target: with ``env_id`` set, the script runs on that env's VM host, or in its container for an
-env in a container sandbox, whose image needs python3 (no agent, no LLM key); with
+env in a container sandbox, whose image needs python3 (no agent, no LLM key); for an env whose card
+serves computer-exec/v1 (a computer), inside the computer as its session user, through the driver:
+staged under ``~/.agentenv/run_code/<step id>/`` with ``data/add``, run with ``run``, its result read
+with ``data/get``, and the folder then removed, since the agent can read the home; with
 ``sandbox_name`` set, on a ``deploy_sandbox`` sandbox (its VM host, or its container for a
 container-mode sandbox); otherwise it runs inside the agent container (``agent_name``), where
 it can see the agent's workspace.
@@ -25,13 +29,16 @@ import json
 import logging
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Optional, Protocol
+
+from agentenv_protocol.computer import COMPUTER_EXEC
 
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import DeployedSandboxEnv, require_sandbox
+from agent_env.env.envs.computer import inside
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -41,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 
 _RUN_DIR = "/tmp/agent_env_run_code"
+# Inside a computer, relative to the session user's home.
+_COMPUTER_RUN_DIR = ".agentenv/run_code"
+# How much longer than the script's timeout a computer lets the runner run, so the runner stops the script first.
+_RUNNER_SLACK_S = 10
 
 # The bootstrap we run in the sandbox: `python3 runner.py <run_dir> <entrypoint> <script_file> <timeout_seconds>`.
 _RUNNER_SOURCE = (Path(__file__).parent / "run_code_runner.py").read_text(encoding="utf-8")
@@ -170,9 +181,13 @@ class RunCodeTaskStep(TaskStep):
         target = await self._resolve_target(context)
         run_dir = target.run_dir(self.id)
 
-        await self._stage(target, run_dir, files, self._build_input(context, target))
-        await self._run(target, run_dir, script_file)
-        result = await self._read_output(target, run_dir)
+        try:
+            await self._stage(target, run_dir, files, self._build_input(context, target))
+            await self._run(target, run_dir, script_file)
+            result = await self._read_output(target, run_dir)
+        finally:
+            if isinstance(target, _DriverTarget):
+                await self._remove(target, run_dir)
 
         context.metadata.setdefault("script_results", {})[self.result_id] = result
         logger.info(
@@ -300,7 +315,7 @@ class RunCodeTaskStep(TaskStep):
             "results": context.metadata.get("script_results", {}),
         }
         if self.env_id is not None:
-            script_input["env"] = _env_on_host(self._deployed_env(context), target.sandbox)
+            script_input["env"] = target.endpoints(self._deployed_env(context))
         return script_input
 
     def _target_kind(self) -> str:
@@ -360,13 +375,21 @@ class RunCodeTaskStep(TaskStep):
             raise self._validation_error(
                 f"result exceeds {self.MAX_OUTPUT_BYTES}-byte cap"
             )
-        exit_code, stdout, stderr = await target.run("cat", path)
-        if exit_code != 0:
-            raise self._exec_error(f"could not read result file: {self._stderr_tail(stderr)}")
         try:
-            return json.loads(stdout)
+            content = await target.read_file(path)
+        except OSError as exc:
+            raise self._exec_error(f"could not read result file: {self._stderr_tail(str(exc))}") from exc
+        try:
+            return json.loads(content)
         except json.JSONDecodeError as exc:
             raise self._validation_error(f"result is not valid JSON: {exc}") from exc
+
+    async def _remove(self, target: _DriverTarget, run_dir: str) -> None:
+        """Remove a computer's run folder; a failure is logged, not raised over the run's own."""
+        try:
+            await target.remove_dir(run_dir)
+        except Exception as e:
+            logger.warning("run_code '%s': couldn't remove %s: %s", self.id, run_dir, e)
 
     # --- run targets ---
 
@@ -392,6 +415,8 @@ class RunCodeTaskStep(TaskStep):
         )
 
         deployed = self._deployed_env(context)
+        if deployed.supports(COMPUTER_EXEC, "run"):
+            return self._driver_target(deployed)
         # env sandbox provider, honoring a custom sandbox_type
         provider = (
             build_sandbox_provider(deployed.sandbox_type)
@@ -401,6 +426,17 @@ class RunCodeTaskStep(TaskStep):
         sandbox = await provider.get_sandbox(deployed.sandbox_id)
         # An env in a container sandbox has no host to run on: the script runs in the container, beside its server.
         return _HostTarget(sandbox) if isinstance(sandbox, VmSandbox) else _AgentTarget(sandbox, prefix=())
+
+    def _driver_target(self, deployed: DeployedSandboxEnv) -> _DriverTarget:
+        """Inside the computer, through its driver, once its card serves what the run needs and allows its timeout."""
+        if missing := inside.missing(deployed):
+            raise self._validation_error(f"env '{self.env_id}' serves computer-exec/v1 but not {', '.join(missing)}, "
+                                         "which running code in it needs")
+        limit = inside.max_timeout_s(deployed)
+        if self.timeout_seconds > limit:
+            raise self._validation_error(f"timeout_seconds {self.timeout_seconds} is above the {limit} s env "
+                                         f"'{self.env_id}' lets a command run")
+        return _DriverTarget(deployed, min(self.timeout_seconds + _RUNNER_SLACK_S, limit))
 
     async def _sandbox_target(self, context: TaskStepContext) -> _ExecTarget:
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox
@@ -504,12 +540,19 @@ def _env_on_host(deployed: DeployedSandboxEnv, sandbox: Any) -> dict:
     }
 
 
-class _ExecTarget(Protocol):
-    sandbox: Any
+async def _cat(target: _ExecTarget, path: str) -> str:
+    exit_code, stdout, stderr = await target.run("cat", path)
+    if exit_code != 0:
+        raise OSError(stderr)
+    return stdout
 
+
+class _ExecTarget(Protocol):
     def run_dir(self, step_id: str) -> str: ...
+    def endpoints(self, deployed: DeployedSandboxEnv) -> dict: ...
     async def reset_dir(self, path: str) -> None: ...
     async def write_file(self, path: str, content: str) -> None: ...
+    async def read_file(self, path: str) -> str: ...
     async def run(self, *command: str) -> tuple[int, str, str]: ...
 
 
@@ -523,6 +566,9 @@ class _HostTarget:
         # The sandbox's own: runs on the local provider share this machine's /tmp, and teardown removes it there.
         return f"{self.sandbox.scoped_name(_RUN_DIR)}/{step_id}"
 
+    def endpoints(self, deployed: DeployedSandboxEnv) -> dict:
+        return _env_on_host(deployed, self.sandbox)
+
     async def reset_dir(self, path: str) -> None:
         await self.sandbox.exec_script(
             f"rm -rf {shlex.quote(path)} && mkdir -p {shlex.quote(path)}"
@@ -530,6 +576,9 @@ class _HostTarget:
 
     async def write_file(self, path: str, content: str) -> None:
         await self.sandbox.write_host_file(content.encode("utf-8"), path)
+
+    async def read_file(self, path: str) -> str:
+        return await _cat(self, path)
 
     async def run(self, *command: str) -> tuple[int, str, str]:
         # Files are written as root, so run as root too.
@@ -548,6 +597,9 @@ class _AgentTarget:
     def run_dir(self, step_id: str) -> str:
         return f"{_RUN_DIR}/{step_id}"
 
+    def endpoints(self, deployed: DeployedSandboxEnv) -> dict:
+        return _env_on_host(deployed, self.sandbox)
+
     async def reset_dir(self, path: str) -> None:
         await self.run("rm", "-rf", path)
         await self.run("mkdir", "-p", path)
@@ -556,5 +608,46 @@ class _AgentTarget:
         # write_file_from_text takes (content, path); we expose (path, content).
         await self.sandbox.write_file_from_text(content, path, **into_container(self.container))
 
+    async def read_file(self, path: str) -> str:
+        return await _cat(self, path)
+
     async def run(self, *command: str) -> tuple[int, str, str]:
         return await self.sandbox.exec_with_output(*self.prefix, *command)
+
+
+@dataclass
+class _DriverTarget:
+    """Runs the script inside a computer, as its session user, through its driver: files written with ``data/add`` and
+    read with ``data/get``, commands run with computer-exec/v1 ``run`` for at most ``timeout_s``, with ``env`` added
+    to the driver's environment. Paths are relative to the home, where commands run."""
+
+    deployed: DeployedSandboxEnv
+    timeout_s: float
+    env: dict[str, str] = field(default_factory=dict)
+
+    def run_dir(self, step_id: str) -> str:
+        return f"{_COMPUTER_RUN_DIR}/{step_id}"
+
+    def endpoints(self, deployed: DeployedSandboxEnv) -> dict:
+        return inside.loopback(deployed)
+
+    async def reset_dir(self, path: str) -> None:
+        await self.remove_dir(path)
+
+    async def remove_dir(self, path: str) -> None:
+        exit_code, _, stderr = await self.run("rm", "-rf", path)
+        if exit_code != 0:
+            raise OSError(stderr)
+
+    async def write_file(self, path: str, content: str) -> None:
+        await inside.add_files(self.deployed, {path: content.encode("utf-8")})
+
+    async def read_file(self, path: str) -> str:
+        return (await inside.read_file(self.deployed, path)).decode("utf-8")
+
+    async def run(self, *command: str) -> tuple[int, str, str]:
+        """``command``'s exit status, stdout and stderr, each cut at the driver's output cap; a command stopped at the
+        timeout exits as the runner's does."""
+        answer = await inside.run(self.deployed, list(command), timeout_s=self.timeout_s, env=self.env)
+        exit_code = RunCodeTaskStep._TIMEOUT_EXIT_CODE if answer["timed_out"] else answer["exit_code"]
+        return exit_code, answer["stdout"], answer["stderr"]

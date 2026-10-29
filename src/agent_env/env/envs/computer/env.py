@@ -5,13 +5,14 @@ metadata as it builds (``composed``), and the arches built written as its comput
 from __future__ import annotations
 
 import logging
+import posixpath
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
 from agent_env.attribution import Attribution
 from agent_env.entity.refs import EntityRef
-from agent_env.env.env import Env, gateway_url_of
+from agent_env.env.env import Env, LoadFileArtifactUniverseResult, gateway_url_of
 from agent_env.env.envs._deployment import (
     as_builtin,
     builtin_provider_for,
@@ -20,12 +21,13 @@ from agent_env.env.envs._deployment import (
     deploy_through_provider,
     provider_or_class,
 )
-from agent_env.env.envs.computer import composer, gate
+from agent_env.env.envs.computer import composer, gate, inside
 from agent_env.env.envs.computer import params as computer_params
 from agent_env.env.envs.computer_driver import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import get_env_store
 from agent_env.providers.env_providers.env_computer_provider import end_recordings
+from agent_env.utils.paths import validate_relative_filename
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -33,6 +35,9 @@ if TYPE_CHECKING:
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 
 logger = logging.getLogger(__name__)
+
+#: Where load_artifact puts files in a computer by default: one of the folders data/get returns by default.
+DEFAULT_DESTINATION = "Downloads"
 
 
 class ComputerEnv(Env):
@@ -167,6 +172,24 @@ class ComputerEnv(Env):
         env._instance_id = deployed.instance_id
         env._deployed = deployed
         return env
+
+    async def load_file_artifact_universe(self, file_artifact_universe: Any,
+                                          destination_path: Optional[str] = None) -> LoadFileArtifactUniverseResult:
+        """Write each file of ``file_artifact_universe`` under ``destination_path``, a folder relative to the session
+        user's home (``Downloads`` by default), through the driver's ``data/add``, as that user; the result's paths are
+        relative to the home too, since the home's path differs by OS."""
+        if destination_path is not None and posixpath.isabs(destination_path):
+            raise ValueError(f"{self.id}: a computer's destination_path is relative to its session user's home, not "
+                             f"{destination_path!r}")
+        destination = posixpath.normpath(destination_path or DEFAULT_DESTINATION)
+        validate_relative_filename(destination)
+        files = file_artifact_universe.get_file_artifacts()
+        for filename in files:
+            validate_relative_filename(filename)
+        paths = {filename: posixpath.normpath(posixpath.join(destination, filename)) for filename in files}
+        await inside.add_artifacts(self._deployed, {paths[filename]: artifact for filename, artifact in files.items()})
+        logger.info(f"Loaded {len(files)} file(s) of '{file_artifact_universe.id}' into {self.id}'s ~/{destination}")
+        return LoadFileArtifactUniverseResult(destination_path=destination, files=paths)
 
     async def reset(self, deployed: DeployedEnv) -> None:
         """Return the computer to boot state: its recordings ended, its container replaced with a fresh one of the same

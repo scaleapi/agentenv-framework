@@ -383,6 +383,16 @@ class Env(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support reset()")
 
+    async def load_environment_artifact(self, environment_artifact: Any) -> None:
+        """Seed the env's services with ``environment_artifact``; a type whose services take environment data overrides
+        this."""
+        raise NotImplementedError(f"{self.type} envs load no environment artifacts")
+
+    async def load_environment_universe_artifact(self, environment_universe_artifact: Any) -> Any:
+        """Seed the env's services from ``environment_universe_artifact``; a type whose services take environment data
+        overrides this."""
+        raise NotImplementedError(f"{self.type} envs load no environment universe artifacts")
+
     async def load_file_artifact_universe(
         self,
         file_artifact_universe: "Any",

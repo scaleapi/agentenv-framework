@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from agent_env.artifact import FileArtifact
@@ -24,6 +25,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import LocalSan
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import run_code as _run_code_module
+from tst.unit.computer_home import CARD, Computer
 from tst.unit.event_loop_probe import on_event_loop
 from agent_env.task_step.task_steps.run_code import (
     RunCodeExecutionError,
@@ -1289,3 +1291,86 @@ async def test_a_directory_named_after_a_stdlib_module_still_runs(tmp_path):
     assert ctx.metadata["script_results"]["r"] == {"shadowed": True}
 
 
+
+
+@pytest.fixture
+def computer(tmp_path, monkeypatch):
+    (tmp_path / "home").mkdir()
+    return Computer(tmp_path / "home").install(monkeypatch)
+
+
+async def _run_in(computer, body, deployed=None, **step):
+    """Execute a run_code step for the computer's env with a script of ``body``."""
+    ctx = TaskStepContext(deployed_envs=[deployed or computer.deployed()])
+    with patch("agent_env.artifact.Artifact.get", return_value=_file_artifact(body=body)), \
+            patch.object(FileArtifact, "load", _load_body):
+        return await _step(env_id="desk", **step).execute(ctx)
+
+
+@pytest.mark.asyncio
+async def test_a_script_for_a_computer_runs_inside_it_and_reaches_its_driver_on_loopback(computer):
+    body = b"import os\ndef run(inp):\n    return {'env': inp['env'], 'cwd': os.getcwd()}\n"
+
+    ctx = await _run_in(computer, body)
+
+    result = ctx.metadata["script_results"]["run-code-1"]
+    assert result["env"] == {"id": "desk", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp"}
+    assert Path(result["cwd"]).resolve() == computer.home.resolve()
+    run_dir = ".agentenv/run_code/run-code-1"
+    assert [call[1] for call in computer.calls if call[0] == "data/add"] == [
+        [{"path": f"{run_dir}/script.py"}], [{"path": f"{run_dir}/input.json"}], [{"path": f"{run_dir}/runner.py"}]]
+    (script,) = [params for kind, params, *_ in computer.calls if kind == "run" and params["argv"][0] == "python3"]
+    assert script["argv"] == ["python3", f"{run_dir}/runner.py", run_dir, "run", "script.py", "600"]
+    assert script["timeout_s"] == 610
+    assert ("data/get", [f"{run_dir}/output.json"]) in computer.calls
+    assert not (computer.home / run_dir).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_script_in_a_computer_is_reported_and_leaves_no_run_folder(computer):
+    with pytest.raises(RunCodeExecutionError, match="(?s)exited 1: .*ValueError: no"):
+        await _run_in(computer, b"def run(inp):\n    raise ValueError('no')\n")
+
+    assert not (computer.home / ".agentenv/run_code/run-code-1").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_run_the_computer_stopped_at_its_timeout_is_reported_as_one(computer, monkeypatch):
+    monkeypatch.setattr(computer, "_run", lambda params: {"exit_code": None, "stdout": "", "stderr": "",
+                                                          "truncated": False, "timed_out": True}
+                        if params["argv"][0] == "python3" else Computer._run(computer, params))
+
+    with pytest.raises(RunCodeExecutionError, match="timed out after 30s"):
+        await _run_in(computer, _DEFAULT_BODY, timeout_seconds=30)
+
+
+@pytest.mark.asyncio
+async def test_each_run_has_a_request_id_of_its_own_which_only_a_dropped_call_sends_again(computer, monkeypatch):
+    invoke, dropped = computer.invoke_extension, []
+
+    async def drop_once(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+        if params["argv"][0] == "python3" and not dropped:
+            dropped.append(params["request_id"])
+            raise httpx.RemoteProtocolError("the driver went away")
+        return await invoke(base_url, card, uri, params, timeout, verify, method=method)
+
+    monkeypatch.setattr("agentenv_protocol.client.invoke_extension", drop_once)
+    for _ in range(2):
+        await _run_in(computer, _DEFAULT_BODY)
+
+    runs = [params["request_id"] for kind, params, *_ in computer.calls if kind == "run" and params["argv"][0] == "python3"]
+    assert runs[0] == dropped[0] and runs[0] != runs[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card, step, problem", [
+    ({**CARD, "capabilities": {**CARD["capabilities"], "operations": ["data/get"]}}, {},
+     "env 'desk' serves computer-exec/v1 but not data/add, which running code in it needs"),
+    (CARD, {"timeout_seconds": 3601}, "timeout_seconds 3601 is above the 3600 s env 'desk' lets a command run"),
+], ids=["no-data-add", "timeout"])
+async def test_a_computer_run_its_driver_cant_carry_out_is_refused_before_anything_is_staged(computer, card, step,
+                                                                                          problem):
+    with pytest.raises(RunCodeValidationError, match=problem):
+        await _run_in(computer, _DEFAULT_BODY, deployed=computer.deployed(card=card), **step)
+
+    assert computer.calls == []

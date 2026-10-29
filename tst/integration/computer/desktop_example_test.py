@@ -1,7 +1,8 @@
 """The shipped desktop example through ``agent-env run``: its computer env, deployed on local Docker, passes the
-conformance probe at full; a scripted drive of the conformance fixture on it is recorded on the clock its screenshots
-carry; and an agent given the computer's skill makes a folder through the computer_* tools under a recording. Needs
-Docker and the local registry; the agent's task, a model endpoint too."""
+conformance probe at full; a file loaded into it is read by code run inside it and checked by a command there; a
+scripted drive of the conformance fixture on it is recorded on the clock its screenshots carry; and an agent given the
+computer's skill files a loaded file in a new folder through the computer_* tools under a recording. Needs Docker and
+the local registry; the agent's task, a model endpoint too."""
 
 import json
 import logging
@@ -57,6 +58,17 @@ def test_the_desktop_examples_computer_passes_the_probe_at_full(state):
     assert "passed (probe: 1)" in ran.output, ran.output
 
 
+def test_a_file_loaded_into_the_desktop_is_read_by_code_inside_it_and_checked_there(state):
+    ran = _run("desktop", "files")
+
+    assert ran.exit_code == 0, ran.output
+    assert "passed (figures: 1)" in ran.output, ran.output
+    context = _context(ran.output)
+    (loaded,) = context["metadata"]["loaded_file_artifact_universes"]
+    assert (loaded["destination_path"], loaded["files"]) == ("Documents", {"figures.csv": "Documents/figures.csv"})
+    assert context["metadata"]["script_results"]["inside"] == {"header": "quarter,revenue", "card": "desktop"}
+
+
 def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state):
     ran = _run(str(RECORDING), "recording")
 
@@ -87,7 +99,7 @@ def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state):
 
 
 @skip_without_model_endpoint()
-def test_an_agent_given_the_computers_skill_makes_a_folder_under_a_recording(state):
+def test_an_agent_given_the_computers_skill_files_a_loaded_file_in_a_new_folder_under_a_recording(state):
     ran = _run("desktop", "agent")
 
     assert ran.exit_code == 0, ran.output
@@ -102,13 +114,18 @@ def _run(bundle: str, task: str):
     return CliRunner().invoke(cli, ["run", bundle, "--task", task])
 
 
+def _context(output: str) -> dict:
+    """The context of the run whose output ``output`` is."""
+    with namespace_routing():
+        return get_task_instance_store().get(re.search(r"instance (@local/\S+)", output).group(1)).context
+
+
 def _recorded(output: str, name: str, tmp: Path) -> tuple[dict, dict, list]:
     """The run's context, the manifest of its recording ``name``, and every frame of the video with its time on the
     computer's clock."""
-    instance_id = re.search(r"instance (@local/\S+)", output).group(1)
+    context = _context(output)
+    entry = context["metadata"]["computer_recordings"][name]
     with namespace_routing():
-        context = get_task_instance_store().get(instance_id).context
-        entry = context["metadata"]["computer_recordings"][name]
         universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
         objects = get_config().get_object_store()
         files = {name: objects.get(Artifact.get(ref).object_url) for name, ref in universe.file_artifact_ids.items()}

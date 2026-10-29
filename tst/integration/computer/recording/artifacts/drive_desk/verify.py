@@ -21,8 +21,8 @@ def _thumb(result):
     return Image.open(io.BytesIO(base64.b64decode(data))).convert("L").resize(THUMB).tobytes().hex()
 
 
-async def verify(mcp_url):
-    driver = await Driver.connect(mcp_url.rsplit("/mcp", 1)[0], 60)
+async def verify(mcp_url, env_url):
+    driver = await Driver.connect(env_url, 60)
     await driver.add_file("desk/fixture.py", FIXTURE)
     await driver.run("sh", "-c", "python3 desk/fixture.py fixture > desk/fixture.log 2>&1 &")
     for _ in range(60):  # the Fixture Desk writes its layout once it is up

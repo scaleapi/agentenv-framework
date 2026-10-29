@@ -13,12 +13,15 @@ from dataclasses import dataclass
 from typing import Callable, ClassVar, Optional
 from urllib.parse import unquote, urlparse
 
+from agent_env.artifact import Artifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+from agent_env.env.env import Env
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
+from agent_env.store.base import NotFoundError
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.utils.paths import validate_relative_filename
 
@@ -121,6 +124,11 @@ def _url_downloads(step_id: str, urls: list[UrlEntry]) -> list[tuple[str, str]]:
     return downloads
 
 
+# The Env method that loads each kind of environment artifact, which a type that loads none leaves as Env's.
+_ENVIRONMENT_LOADERS = {EnvironmentArtifact: "load_environment_artifact",
+                        EnvironmentUniverseArtifact: "load_environment_universe_artifact"}
+
+
 @dataclass
 class _LoadInputs:
     """What a load_artifact step loads and where, after per-run overrides."""
@@ -212,6 +220,19 @@ class LoadArtifactTaskStep(TaskStep):
     def config_problems(self) -> list[str]:
         """A step naming nothing to load."""
         return [] if self._names_a_source() else [self._nothing_to_load()]
+
+    def preflight(self) -> list[str]:
+        """An environment artifact this step names for an env whose type loads none."""
+        if self.env_id is None:
+            return []
+        try:
+            env = Env.get(self.env_id)
+            artifacts = [Artifact.get(ref["id"], ref.get("version")) for ref in self.artifacts]
+        except NotFoundError:  # what the run reports
+            return []
+        return [f"load_artifact '{self.id}': {env.type} env '{self.env_id}' loads no {artifact.type} artifacts, so "
+                f"not '{artifact.id}'" for artifact in artifacts for kind, loader in _ENVIRONMENT_LOADERS.items()
+                if isinstance(artifact, kind) and getattr(type(env), loader) is getattr(Env, loader)]
 
     def _names_a_source(self) -> bool:
         return bool(self.artifacts or self.urls or self.collected_artifacts_step_id or self.artifact_from_step_id)

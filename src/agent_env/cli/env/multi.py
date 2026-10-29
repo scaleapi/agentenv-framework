@@ -110,7 +110,7 @@ def load_environment_universe_artifact(env_instance_id: str, environment_univers
     env = Env.get(deployed_env.env_id, deployed_env.env_version)
     env = asyncio.run(type(env).from_deployed_env(deployed_env))
 
-    if not hasattr(env, "load_environment_universe_artifact"):
+    if type(env).load_environment_universe_artifact is Env.load_environment_universe_artifact:
         click.echo(f"Error: Env type '{env.type}' does not support load_environment_universe_artifact", err=True)
         raise SystemExit(1)
 
@@ -172,7 +172,7 @@ def load_environment_artifact(env_instance_id: str, environment_artifact_id: str
     env = Env.get(deployed_env.env_id, deployed_env.env_version)
     env = asyncio.run(type(env).from_deployed_env(deployed_env))
 
-    if not hasattr(env, "load_environment_artifact"):
+    if type(env).load_environment_artifact is Env.load_environment_artifact:
         click.echo(f"Error: Env type '{env.type}' does not support load_environment_artifact", err=True)
         raise SystemExit(1)
 
