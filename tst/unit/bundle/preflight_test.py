@@ -19,6 +19,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, BundleKind, dry_run_bundle, run_bundle
 from agent_env.bundle.run import _write_bundle
+from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
@@ -751,6 +752,23 @@ def test_an_attached_state_instance_needs_the_service_db_by_its_own_type(bundle_
     _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "crm", "env_state_instance_id": "state-1"}])
 
     assert [build.kind for build in dry_run_bundle(bundle_dir).infra] == kinds
+
+
+@pytest.mark.parametrize("step, kinds", [
+    ({"env_id": "crm"}, {"gateway", "service-db"}),
+    ({"env_id": "shop", "env_state_type": "external_db"}, {"gateway", "website-browser"}),
+    ({"env_id": "{{seed.env}}"}, set()),
+    ({"env_id": "absent"}, set()),
+], ids=["local-postgres", "website", "filled-in-by-the-run", "not-in-the-store"])
+def test_a_stored_tasks_gateway_deploys_name_their_infra_as_a_run_of_its_folder_does(bundle_dir, step, kinds):
+    _env("crm")
+    with namespace_routing():
+        WebsiteEnv.put(id="shop", backend_docker_image_artifact=_image("shop-back"),
+                       frontend_docker_image_artifact=_image("shop-front"), environment_name="shop")
+        steps = [build_step({"id": "env", "type": "deploy_env", **step}),
+                 build_step({"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"})]
+
+        assert preflight_module.stored_infra(steps) == kinds
 
 
 def test_infra_built_from_other_inputs_is_rebuilt_and_infra_built_from_this_releases_isnt(bundle_dir, monkeypatch):

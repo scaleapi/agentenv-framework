@@ -189,6 +189,15 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   bundle requiring nothing. A type only configuration registers gets a hint naming the installed package its class
   comes from, never a requirement. `bundle init
   --from-task` writes the same file.
+- `bundle register` records on each task it writes the plugin packages behind its own step types and the types of the
+  bundle entities it references (`Task.requires`, saved only when there are some), in the range `bundle.toml` gives a
+  package it requires, else at least the installed version; the ledger hashes them, so a new range writes the task
+  anew. Before a stored task's first step, `agent-env task run` and `run-batch` refuse one whose requirements aren't
+  met, or whose steps read an env or artifact of a type nothing here registers, offering in a terminal to install what
+  it requires (`cli/task/_checks.py`), then set up in local stores the infra envs its gateway deploys run on
+  (`preflight.stored_infra`). A step type nothing registers names the task's unmet requirements in the load error
+  (`UnknownStepTypeError`). A task stored without `requires` loads and runs as before; a hub edit drops it until the
+  hub passes it through.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with

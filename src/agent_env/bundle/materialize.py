@@ -143,7 +143,8 @@ def materialize(
         if problems:
             raise BundleError(problems)
         for write in tasks:
-            through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps).version)
+            through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps,
+                                                   requires=write.requires).version)
         for write in evals:
             through_ledger(write, lambda: _write_eval(plan, write, written))
     return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked))

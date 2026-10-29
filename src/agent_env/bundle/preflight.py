@@ -69,6 +69,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.store.base import NotFoundError
+from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep, linked_sandbox_problem
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
@@ -204,15 +205,11 @@ class _Walk:
 
     def _env(self, where: str, step: DeployEnvTaskStep) -> None:
         provider = _provider(self.sandbox or step.sandbox_type, get_env_sandbox_provider)
-        deployment = self._planned(step.env_id) if step.env_id in self.envs else self._stored(step)
+        deployment = self._planned(step.env_id) if step.env_id in self.envs else _stored(step)
         if deployment is None:
             return
         if issubclass(deployment.provider, EnvironmentGatewayProvider):
-            kinds = {GATEWAY}
-            if _state_type(step) == LOCAL_POSTGRES_STATE_TYPE:
-                kinds.add(SERVICE_DB)
-            if deployment.websites:
-                kinds.add(WEBSITE_BROWSER)
+            kinds = _gateway_infra(step, deployment)
         elif issubclass(deployment.provider, EnvironmentServerProvider) and deployment.one_server:
             kinds = set()
         else:  # a plugin's provider, or one deploy_env's own preflight refuses for this env
@@ -236,23 +233,6 @@ class _Walk:
             found.append(f"deploys env {env_id!r} on the {_shown(link)} sandbox provider, which {problem}; run it on a VM "
                          "provider, such as --sandbox local")
         return found + self._remote_infra(link, kinds if env_provider.in_vm(link) else kinds - {WEBSITE_BROWSER})
-
-    def _stored(self, step: DeployEnvTaskStep) -> _Deployment | None:
-        """How a store env deploys, or None when the walk leaves it to deploy_env's own preflight."""
-        try:
-            env = Env.get(step.env_id, step.env_version)
-        except NotFoundError:
-            return None  # the plan reports a store env that isn't there
-        if not isinstance(env, (MCPServerEnv, WebsiteEnv, MultiEnv)):
-            return None  # an env type that deploys itself, as deploy_env's own preflight leaves it
-        try:
-            provider_class = provider_or_class(env)
-        except (ValueError, KeyError):
-            return None  # deploy_env's own preflight reports a provider type this process can't load
-        if not isinstance(provider_class, type):
-            provider_class = type(provider_class)
-        images, websites = _stored_images(env)
-        return _Deployment(provider_class, images, websites, isinstance(env, MCPServerEnv))
 
     def _planned(self, env_id: str) -> _Deployment | None:
         """How an env the bundle writes deploys, from its planned config: what deploys it, and its images and its
@@ -522,6 +502,50 @@ class _Walk:
         """Record ``problem`` at the deploy ``where``. One found at several deploys, such as an infra env's image every
         gateway deploy runs, is reported once, naming the first of them."""
         self.problems.setdefault(problem, {})[where] = None
+
+
+def stored_infra(steps: Iterable[TaskStep]) -> frozenset[str]:
+    """The infra env kinds a stored task's ``steps`` deploy on through the gateway, reading the envs they deploy from
+    the store: the gateway, the service-db its local Postgres state runs in, and the website browser for its sites."""
+    kinds: set[str] = set()
+    for step in steps:
+        if not isinstance(step, DeployEnvTaskStep) or not step.env_id:
+            continue
+        try:
+            deployment = _stored(step)
+        except ValueError:  # an id the run fills in, or an env this process can't load, which its deploy reports
+            continue
+        if deployment is not None and issubclass(deployment.provider, EnvironmentGatewayProvider):
+            kinds |= _gateway_infra(step, deployment)
+    return frozenset(kinds)
+
+
+def _gateway_infra(step: DeployEnvTaskStep, deployment: _Deployment) -> set[str]:
+    """The infra env kinds ``step``'s deploy of ``deployment`` through the gateway runs on."""
+    kinds = {GATEWAY}
+    if _state_type(step) == LOCAL_POSTGRES_STATE_TYPE:
+        kinds.add(SERVICE_DB)
+    if deployment.websites:
+        kinds.add(WEBSITE_BROWSER)
+    return kinds
+
+
+def _stored(step: DeployEnvTaskStep) -> _Deployment | None:
+    """How a store env deploys, or None when the walk leaves it to deploy_env's own preflight."""
+    try:
+        env = Env.get(step.env_id, step.env_version)
+    except NotFoundError:
+        return None  # the plan reports a store env that isn't there
+    if not isinstance(env, (MCPServerEnv, WebsiteEnv, MultiEnv)):
+        return None  # an env type that deploys itself, as deploy_env's own preflight leaves it
+    try:
+        provider_class = provider_or_class(env)
+    except (ValueError, KeyError):
+        return None  # deploy_env's own preflight reports a provider type this process can't load
+    if not isinstance(provider_class, type):
+        provider_class = type(provider_class)
+    images, websites = _stored_images(env)
+    return _Deployment(provider_class, images, websites, isinstance(env, MCPServerEnv))
 
 
 def _stored_images(env: Env) -> tuple[list[_Image], bool]:

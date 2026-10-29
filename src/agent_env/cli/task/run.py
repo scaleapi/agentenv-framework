@@ -11,7 +11,10 @@ from uuid import uuid4
 
 import click
 
+from agent_env.bundle.requires import UnmetRequirements
+from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.banner import print_banner
+from agent_env.cli.task._checks import runnable_task
 from agent_env.cli import submitted_runs
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_teardown
@@ -377,8 +380,6 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
 
-    from agent_env.task import Task
-
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-run{uuid4().hex[:6]}"
     if context_json:
@@ -419,7 +420,7 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     initial_context.metadata["task_id"] = task_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
-    task = Task.get(task_id, version=task_version)
+    task = _runnable(task_id, task_version, gateway_env_id, service_db_env_id)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
 
     print_banner()
@@ -464,6 +465,18 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         raise SystemExit(1)
 
 
+def _runnable(task_id: str, task_version: int | None, gateway_env_id: str | None = None,
+              service_db_env_id: str | None = None):
+    """The stored task, checked before its first step (``runnable_task``); a refusal for what it requires offers, in a
+    terminal, to install it and run the command again."""
+    try:
+        return runnable_task(task_id, task_version, say=click.echo, gateway_env_id=gateway_env_id,
+                             service_db_env_id=service_db_env_id)
+    except UnmetRequirements as e:
+        offer_to_install(e)
+        raise
+
+
 def _seed_universe_id(task, seed: dict) -> str | None:
     """The universe a seed's runs collect into, so runs of one seed share it: derived from the task version and the
     seed's id, else its name. None leaves collect_artifacts to name it after the run."""
@@ -506,8 +519,6 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
     context.metadata["seed"]. Prompt templates with <placeholder> variables
     are rendered using the seed values before being sent to the agent.
     """
-    from agent_env.task import Task
-
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-batch{uuid4().hex[:6]}"
 
@@ -521,7 +532,7 @@ def run_batch(task_id: str, task_version: int | None, seeds: str, concurrency: i
         raise click.ClickException("No seeds found in CSV")
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
-    task = Task.get(task_id, version=task_version)
+    task = _runnable(task_id, task_version)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
     suffixes = {step.universe_id_suffix or "" for step in task.steps if isinstance(step, CollectArtifactsTaskStep)}
     if is_local_id(task.id) and suffixes:

@@ -164,6 +164,7 @@ class Write:
     id: str
     source: ResolvedEntry | BundleImage
     needs: tuple[_Key, ...]  # (kind.store, id) of the earlier writes it references
+    requires: tuple[str, ...] | None = None  # a task's plugin packages, which a registration records (Task.requires)
 
 
 @dataclass(frozen=True)

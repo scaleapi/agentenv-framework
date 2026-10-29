@@ -8,7 +8,8 @@ so it runs before a plugin is imported, and for ``inventory(load=False)``.
 from __future__ import annotations
 
 import functools
-from collections.abc import Iterable
+import shlex
+from collections.abc import Iterable, Sequence
 from importlib.metadata import PackageNotFoundError, distribution, version
 from typing import Any, Optional
 
@@ -69,6 +70,30 @@ def unmet(requires: Iterable[str]) -> list[tuple[str, str]]:
             found.append((line, f"and {requirement.name} {have} is installed without {', '.join(missing)}, which its "
                                 f"extras need"))
     return found
+
+
+def unmet_problems(requires: Iterable[str], owner: str) -> tuple[list[str], list[str]]:
+    """The problems ``owner``'s unmet ``requires`` raise, a bundle's ``bundle.toml`` or a stored task, naming the one
+    command that installs every plugin package among them, and those requirements. One on agent-env itself, which
+    ``plugin add`` doesn't change, says to upgrade it instead."""
+    found = unmet(requires)
+    core = [(line, why) for line, why in found if canonicalize_name(Requirement(line).name) in CORE]
+    plugins = [(line, why) for line, why in found if (line, why) not in core]
+    problems = [f"{owner}: requires {line!r}, {why}; upgrade agent-env with the installer that installed it"
+                for line, why in core]
+    lines = [line for line, _ in plugins]
+    if len(plugins) == 1:
+        (line, why), = plugins
+        problems.append(f"{owner}: requires {line!r}, {why}; install it with: {install_command(lines)}")
+    elif plugins:
+        problems += [f"{owner}: requires {line!r}, {why}" for line, why in plugins]
+        problems.append(f"{owner}: install what it requires with: {install_command(lines)}")
+    return problems, lines
+
+
+def install_command(requirements: Sequence[str]) -> str:
+    """The command that installs ``requirements`` into this environment, through the installer that owns it."""
+    return shlex.join(["agent-env", "plugin", "add", *requirements])
 
 
 def _allows(requirement: Requirement, version: str) -> bool:
