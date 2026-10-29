@@ -202,6 +202,21 @@ async def test_the_skill_is_written_from_the_computer_as_it_booted_under_the_nam
 
 
 @pytest.mark.asyncio
+async def test_a_driver_whose_software_ships_a_skill_leads_with_it_and_the_computers_part_follows(monkeypatch):
+    class Bundling(FakeDriver):
+        async def bundled_skill(self):
+            return "Drive any app through its own tools.", "# Desktop driver\n\nRead LINUX.md first.\n", {
+                "LINUX.md": "# Linux\n"}
+
+    async with http_client(Bundling()) as http:
+        answer = (await http.get("/agentenv/ext/skill/get", params={"name": "desktop"})).json()
+    body = answer["skill_md"].partition("---\n\n")[2]
+    assert body.startswith("# Desktop driver\n\nRead LINUX.md first.\n\n# This computer\n\nBeside the tools above")
+    assert "## Input" in body and "# Using this computer" not in body and answer["files"] == {"LINUX.md": "# Linux\n"}
+    assert answer["description"].startswith("Drive any app through its own tools. This computer: Ubuntu 24.04 (amd64)")
+
+
+@pytest.mark.asyncio
 async def test_a_minimal_driver_declares_only_what_it_has():
     async with http_client(MinimalDriver(platform=MACOS)) as http:
         card = (await http.get("/.well-known/agent-env.json")).json()

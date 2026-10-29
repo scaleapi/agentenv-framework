@@ -1,6 +1,7 @@
 """The computer skill: a SKILL.md an agent reads before it uses the computer, written from the computer as it booted:
-its platform, its session user, its screen, its OS's shortcuts, what its card declares, and the driver's notes. It
-says nothing about any task."""
+its platform, its session user, its screen, its OS's shortcuts, what its card declares, and the driver's notes. A
+driver whose software ships a skill of its own (``bundled_skill``) leads with it, its files beside the SKILL.md, and
+the computer's part follows. It says nothing about any task."""
 from __future__ import annotations
 
 import getpass
@@ -24,8 +25,8 @@ SHORTCUTS = {
 _SESSIONS = {"x11": "an X11 session", "wayland": "a Wayland session"}
 
 
-async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str]:
-    """The skill's description and its markdown body, as ``agent_skill`` takes them."""
+async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, str]]:
+    """The skill's description, its markdown body and its other files, as ``agent_skill`` takes them."""
     display = await driver._computer.display_now()
     platform = driver.platform
     system = " ".join(part for part in ((platform.distribution or platform.os or "").title(), platform.version,
@@ -49,7 +50,13 @@ async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str]:
         sections += ["## Shortcuts", shortcuts.rstrip()]
     if notes := driver.notes.strip():
         sections += ["## Notes", notes]
-    return description, "\n\n".join(sections) + "\n"
+    if (bundled := await driver.bundled_skill()) is None:
+        return description, "\n\n".join(sections) + "\n", {}
+    own_description, own_body, files = bundled
+    sections[:2] = ["# This computer", "Beside the tools above, this computer serves its `computer_*` tools: "
+                    "`computer_screenshot` shows the screen, and the others click, type and press keys on what it shows."]
+    return (f"{own_description} This computer: {system}, {display.width}x{display.height}, and its computer_* tools.",
+            own_body.rstrip() + "\n\n" + "\n\n".join(sections) + "\n", files)
 
 
 def _input(driver: ComputerDriverEnvironment) -> str:

@@ -1,4 +1,4 @@
-"""@tool annotations, structured output and _meta on both FastMCPs, served_tools choosing what a handler serves, and\nupdate_tool changing a served description."""
+"""@tool annotations, structured output and _meta on both FastMCPs, served_tools choosing what a handler serves,\nupdate_tool changing a served description, and forwarded tools served with their own schemas."""
 from __future__ import annotations
 
 from typing import Annotated
@@ -20,6 +20,7 @@ from agentenv_protocol import (  # noqa: E402
     AgentEnvFastMCPApplication,
     EnvironmentCard,
     EnvironmentTool,
+    ForwardedTool,
     environment_card,
     tool,
 )
@@ -209,3 +210,58 @@ async def test_update_tool_needs_a_mounted_env_and_a_served_tool():
     env.create_app()
     with pytest.raises(ValueError, match="no served tool is named 'secret'"):
         await env.update_tool("secret", description="x")
+
+
+_CLICK = {"type": "object", "additionalProperties": False, "properties": {
+    "element_token": {"type": "string"}, "x": {"type": "integer"}, "count": {"type": "integer", "minimum": 1}}}
+
+
+@environment_card(name="forwarding")
+class _Forwarding(AgentEnvEnvironment):
+    def __init__(self, calls: list) -> None:
+        self.calls = calls
+
+    @tool()
+    def look(self) -> str:
+        return "looked"
+
+    def forwarded_tools(self) -> list[ForwardedTool]:
+        async def click(**arguments) -> CallToolResult:
+            self.calls.append(arguments)
+            return CallToolResult(content=[TextContent(type="text", text="clicked"),
+                                           ImageContent(type="image", data="aGk=", mimeType="image/png")],
+                                  structuredContent={"hit": "button OK"})
+
+        return [ForwardedTool(EnvironmentTool(name="click", description="Click an element.", inputSchema=_CLICK), click,
+                              {"readOnlyHint": False, "destructiveHint": False})]
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_tool_is_listed_with_its_own_schema_and_called_with_its_arguments_as_they_came():
+    calls = []
+    env = _Forwarding(calls)
+    with anyio.fail_after(30):
+        async with create_connected_server_and_client_session(env.create_app()) as session:
+            listed = {t.name: t for t in (await session.list_tools()).tools}
+            result = await session.call_tool("click", {"element_token": "s1:4", "count": 2})
+
+    assert listed["click"].inputSchema == _CLICK and listed["click"].description == "Click an element."
+    assert listed["click"].annotations.readOnlyHint is False and listed["click"].outputSchema is None
+    assert calls == [{"element_token": "s1:4", "count": 2}]
+    assert [c.type for c in result.content] == ["text", "image"] and result.structuredContent == {"hit": "button OK"}
+    assert {t.name: t.inputSchema for t in env.mounted_card().capabilities.tools}["click"] == _CLICK
+
+
+def test_a_forwarded_tool_named_like_a_tool_is_refused():
+    class Clashing(_Forwarding):
+        @tool()
+        def click(self) -> str:
+            return "mine"
+
+    with pytest.raises(ValueError, match="forwarded tools named like another tool: \\['click'\\]"):
+        Clashing([]).create_app()
+
+
+def test_a_forwarded_tool_needs_mcps_fastmcp():
+    with pytest.raises(RuntimeError, match="the forwarded tool 'click' needs mcp's FastMCP"):
+        _Forwarding([]).mount(fastmcp.FastMCP("forwarding"))

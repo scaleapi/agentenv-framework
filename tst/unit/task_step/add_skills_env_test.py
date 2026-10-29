@@ -1,6 +1,6 @@
 """``add_skills`` ``env_ids``: each env's skill, or each of its child envs' behind a gateway, written under that card's
-environment name, installed on the agent and recorded in the run; refused for an env the run didn't deploy or bind to
-the agent, or that serves no skill."""
+environment name, installed on the agent and recorded in the run, a skill with files beside its SKILL.md sent as a
+stored bundle; refused for an env the run didn't deploy or bind to the agent, or that serves no skill."""
 
 import hashlib
 from types import SimpleNamespace
@@ -62,6 +62,24 @@ async def test_each_envs_skill_is_installed_under_its_environment_name_and_recor
     agent.register.assert_awaited_once_with("deployed-agent", name="my-shop", description="How to use this env",
                                             skill_md="---\nname: my-shop\n")
     assert context.metadata[ENV_SKILLS_KEY] == {"solver": {"shop": {"my-shop": "---\nname: my-shop\n"}}}
+
+
+@pytest.mark.asyncio
+async def test_a_skill_with_files_is_stored_once_and_installed_as_a_bundle(agent, local_stores, monkeypatch):
+    files = {"LINUX.md": "# Linux\n", "WORKFLOW.md": "# Workflow\n"}
+
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+        return {"name": params["name"], "description": "Drive the desktop", "skill_md": "# Skill\n", "files": files}
+
+    monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
+    await _step("shop").execute(_context(_env()))
+    await _step("shop").execute(_context(_env()))
+
+    (first, again) = [call.kwargs for call in agent.register.await_args_list]
+    store = local_stores.get_object_store()
+    assert first == again and set(first) == {"name", "description", "object_url"}
+    assert sorted(store.get_object_key(url).rpartition("/")[2] for url in store.list_at(first["object_url"])) == [
+        "LINUX.md", "SKILL.md", "WORKFLOW.md"]
 
 
 @pytest.mark.asyncio
