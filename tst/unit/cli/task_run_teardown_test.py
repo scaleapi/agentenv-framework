@@ -29,7 +29,7 @@ pytestmark = pytest.mark.usefixtures("sigint_handled", "local_stores")
 class _Deploys:
     """Records a sandbox on a fake backend, then naps, then ends as told."""
 
-    id, version, steps = "t", 1, []
+    id, version, steps, requires = "t", 1, [], None
 
     def __init__(self, nap=0.0, ending=None):
         self.nap, self.ending, self.contexts = nap, ending, []

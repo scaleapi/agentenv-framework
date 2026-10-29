@@ -337,7 +337,7 @@ def test_a_seeded_runs_universe_is_named_after_its_task_and_seed(tmp_path, monke
     seen: list[str] = []
 
     class _Task:
-        id, version, steps = task_id, 2, []
+        id, version, steps, requires = task_id, 2, [], None
 
         async def run(self, context, **kwargs):
             seen.append(context.metadata["universe_id"])
@@ -369,7 +369,7 @@ def test_a_seed_that_cant_name_an_local_universe_stops_a_collecting_run_batch_be
     ran: list[TaskStepContext] = []
 
     class _Task:
-        id, version, steps = LOCAL_TASK, 2, task_steps
+        id, version, steps, requires = LOCAL_TASK, 2, task_steps, None
 
         async def run(self, context, **kwargs):
             ran.append(context)

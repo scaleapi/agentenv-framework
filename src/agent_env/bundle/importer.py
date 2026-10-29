@@ -170,6 +170,7 @@ class _Importer:
         self.floating: list[Floating] = []
         self.dropped: list[Dropped] = []
         self.needs: list[Use] = []
+        self.declared: list[str] = []  # what the imported tasks record they require (Task.requires)
         self.undeclared: list[str] = []
         self.duplicates: list[str] = []
         self.problems: list[str] = []
@@ -216,6 +217,7 @@ class _Importer:
             self._default_agents(step, cls.entity_refs or (), where)
         self.files[path] = json.dumps(steps, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
+        self.declared += task.requires or ()
         return name
 
     def add_eval(self, stored: Eval, names: list[str]) -> None:
@@ -286,7 +288,7 @@ class _Importer:
             if self.problems:
                 raise BundleError(self.problems)
             shutil.rmtree(scratch)
-            if requires := detected(self.needs):
+            if requires := detected(self.needs, self.declared):
                 self.files[BUNDLE_TOML] = _toml.dumps({"requires": requires})
             files = sorted([*self.files, PROVENANCE, "README.md"])
             imported = BundleImport(

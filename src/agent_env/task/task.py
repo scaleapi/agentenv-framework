@@ -13,10 +13,12 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
 from agent_env.config import run_env_ids
 from agent_env.plugins import _registration
+from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
 from agent_env.task_step.context import TaskStepContext, regraft_redacted_keys
@@ -311,11 +313,22 @@ class _SchedulerState:
     epoch: int = 0
 
 
+class UnknownStepTypeError(UnknownDocumentTypeError):
+    """A stored task naming a step type nothing here registers; ``requirements`` are the ones it records
+    (``Task.requires``) that aren't met here, which the message names with the command that installs them."""
+
+    def __init__(self, message: str, requirements: Sequence[str] = ()):
+        super().__init__(message)
+        self.requirements = tuple(requirements)
+
+
 class Task:
     """A task is an ordered sequence of task steps.
 
     Steps are stored inline and executed by run() according to the DAG
     encoded in each step's depends_on. Independent steps run concurrently.
+    ``requires`` names the plugin packages its steps and what they reference use, as pip requirements, which a
+    registration records (``agent-env bundle register``); None when nothing recorded it.
     """
 
     type: ClassVar[str] = "task"
@@ -325,10 +338,12 @@ class Task:
         id: str,
         version: Optional[int],
         steps: list[TaskStep] | None = None,
+        requires: Sequence[str] | None = None,
     ):
         self.id = id
         self.version = version
         self.steps: list[TaskStep] = steps or []
+        self.requires: list[str] | None = list(requires) if requires is not None else None
         self._validate_dag(self.steps)
 
     @classmethod
@@ -377,12 +392,15 @@ class Task:
         return problems
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "id": self.id,
             "type": self.type,
             "version": self.version,
             "steps": [step.to_dict() for step in self.steps],
         }
+        if self.requires is not None:
+            data["requires"] = list(self.requires)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Task":
@@ -394,8 +412,11 @@ class Task:
             step_type = step_dict["type"]
             step_cls = registry.get(step_type)
             if step_cls is None:
-                raise UnknownDocumentTypeError(
-                    f"Unknown task step type: {step_type}{_registration.failure_note(_registration.TASK_STEPS, step_type)}"
+                problems, unmet = unmet_problems(data.get("requires") or (), f"task {data['id']} v{data.get('version')}")
+                raise UnknownStepTypeError(
+                    "; ".join([f"Unknown task step type: {step_type}"
+                               f"{_registration.failure_note(_registration.TASK_STEPS, step_type)}", *problems]),
+                    unmet,
                 )
             from agent_env.task_step.task_step import attach_retry_config
 
@@ -404,6 +425,7 @@ class Task:
             id=data["id"],
             version=data.get("version"),
             steps=steps,
+            requires=data["requires"] if isinstance(data.get("requires"), list) else None,
         )
 
     async def run(

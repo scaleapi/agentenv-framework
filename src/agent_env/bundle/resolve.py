@@ -25,6 +25,7 @@ from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.registry import get_env_registry
 from agent_env.eval.eval import Eval
 from agent_env.plugins import _registration
+from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import LOCAL_PREFIX, derive_id, validate_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task_step.registry import get_task_step_registry
@@ -32,8 +33,8 @@ from agent_env.task_step.task_step import TaskStep, attach_retry_config, depende
 
 from ._fs import fold, relative, show
 from .authoring import AuthoringContext, default_dockerfile
-from .parse import DOCKERFILE, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
-from .requires import UnmetRequirements, unmet_problems
+from .parse import BUNDLE_TOML, DOCKERFILE, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
+from .requires import UnmetRequirements
 
 # Step keys that hold step ids, never entity ids.
 _STEP_ID_KEYS = ("id", "type", "depends_on")
@@ -171,7 +172,7 @@ class _Resolver:
                         self.ignored[kind, fold(name)] = path
 
     def resolve(self) -> ResolvedBundle:
-        problems, unmet = unmet_problems(self.bundle.requires or ())
+        problems, unmet = unmet_problems(self.bundle.requires or (), BUNDLE_TOML)
         self.problems.extend(problems)
         resolved = []
         for entry in self.bundle.entries:

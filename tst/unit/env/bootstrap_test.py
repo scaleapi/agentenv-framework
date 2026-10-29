@@ -106,6 +106,19 @@ def test_infra_built_from_other_inputs_is_rebuilt_once(puts, monkeypatch):
     assert len(puts) == 2
 
 
+def test_missing_only_sets_up_what_the_store_lacks_and_leaves_what_it_holds_as_it_is(puts, monkeypatch):
+    ensure_default_envs([GATEWAY])
+    monkeypatch.setattr(bootstrap, "build_inputs_digest", lambda kind: "this release's")
+
+    # Before what an env it holds is built from is weighed: its files hashed, the registry read for its images.
+    monkeypatch.setattr(bootstrap, "_built_from_stock", lambda env, kind: pytest.fail("weighed the env it holds"))
+
+    builds = ensure_default_envs([GATEWAY, SERVICE_DB], missing_only=True)
+
+    assert [str(build) for build in builds] == ["service-db env 'default-db' (missing)"]
+    assert len(puts) == 2
+
+
 def test_infra_built_before_its_inputs_were_recorded_is_rebuilt(puts):
     artifact = get_artifact_store().put_document(DockerImageArtifact(
         id="gateway-default", description="g", image_name="g:v1", tar_gz_s3_url="file:///g.tar.gz"))
