@@ -1,4 +1,5 @@
-"""The agent-wakeups example hook, turn by turn, against an in-process gateway's real clock, triggers and wakeups."""
+"""The agent-wakeups example hook, turn by turn, against an in-process gateway's real clock, triggers and
+notifications, with what came due delivered as prompt_agent delivers it."""
 
 from __future__ import annotations
 
@@ -17,7 +18,8 @@ from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.constants import GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from agent_env.env.gateway.gateway import Gateway
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHook, Turn, _Answer
+from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_zone, next_message, take_due
+from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHook, PostTurnHooks, Turn, _Answer, run_post_turn_hooks
 
 HOOK = Path(agent_env.__file__).parent / "examples" / "agent-wakeups" / "artifacts" / "agent-wakeups" / "hook.py"
 GATEWAY = "http://gateway.test"
@@ -48,7 +50,7 @@ def gateway(tmp_path, monkeypatch):
         return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
 
     gw._call_child_tool = call_child_tool
-    gw._wakeups.configure({"scheduled_checks": True})
+    gw._notifications.configure({"roles": ["default"]})
     real_client = httpx.AsyncClient
     transport = httpx.ASGITransport(app=gw._mcp.streamable_http_app())
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: real_client(*a, **{**kw, "transport": transport}))
@@ -64,8 +66,10 @@ def _context() -> TaskStepContext:
     return TaskStepContext(deployed_envs=[env])
 
 
-async def _turns(hook, context, params=None, on_turn=None, triggers=None) -> list:
-    """Each turn's decision until the hook ends the conversation; ``on_turn(n)`` plays the agent's turn n first."""
+async def _turns(hook, context, params=None, on_turn=None, triggers=None, time_zone=None) -> list:
+    """What prompt_agent sends the agent after each turn until the conversation ends: each message's part texts (what
+    came due for the solver's role first, then the hook's or a trigger's reply), then the end. ``on_turn(n)`` plays
+    the agent's turn n first."""
     answers = list(triggers or [])
 
     async def user_triggers():
@@ -74,21 +78,50 @@ async def _turns(hook, context, params=None, on_turn=None, triggers=None) -> lis
     async def ask_user():
         raise AssertionError("the hook never asks the user side")
 
-    decisions = []
-    while not decisions or "end" not in decisions[-1]:
-        assert len(decisions) < 12, decisions
-        number = len(decisions) + 1
+    hooks = PostTurnHooks()
+    hooks.hooks.append(PostTurnHook("agent-wakeups", None, dict(params or {}), hook.post_turn))
+    sent = []
+    while not sent or not isinstance(sent[-1], dict):
+        assert len(sent) < 12, sent
+        number = len(sent) + 1
         if on_turn:
             on_turn(number)
-        turn = Turn(context=context, step_id="week", hook=PostTurnHook("agent-wakeups", None, {}, hook.post_turn),
-                    answer=_Answer(ask_user, user_triggers), number=number, last=False, agent_reply="ok",
-                    agent_parts=[{"kind": "text", "text": "ok"}])
-        decisions.append(await hook.post_turn(turn, dict(params or {})))
-    return decisions
+        answer = await run_post_turn_hooks(hooks, context=context, step_id="week", number=number, last=False,
+                                           agent_reply="ok", agent_parts=[{"kind": "text", "text": "ok"}],
+                                           ask_user=ask_user, user_triggers=user_triggers)
+        if "end" in answer:
+            sent.append(answer)
+            continue
+        due = await take_due(context.deployed_envs, "default")
+        message = next_message(delivered_parts(due, label_zone(time_zone)), answer["message"])
+        sent.append([p["text"] for p in message] if message else {"end": "nothing_to_send"})
+    return sent
+
+
+def _turn(hook, context, number=1) -> Turn:
+    async def never():
+        raise AssertionError("not asked")
+
+    async def no_trigger():
+        return None
+
+    return Turn(context=context, step_id="week", hook=PostTurnHook("agent-wakeups", None, {}, hook.post_turn),
+                answer=_Answer(never, no_trigger), number=number, last=False, agent_reply="ok",
+                agent_parts=[{"kind": "text", "text": "ok"}])
 
 
 def _register(gw: Gateway, *triggers: dict) -> None:
     gw._trigger_engine.register({"watch_roles": ["default"], "triggers": list(triggers)})
+
+
+@pytest.mark.asyncio
+async def test_the_hook_moves_the_clock_to_what_is_due_and_leaves_it_for_prompt_agent_to_take(hook, gateway):
+    gateway._notifications.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
+
+    assert await hook.post_turn(_turn(hook, _context()), {}) == {"message": []}
+
+    assert gateway._clock.read()["virtual_time"] == "2026-03-03T18:00:00Z"
+    assert gateway._notifications.state("default")["next_due_at"] == "2026-03-03T18:00:00Z"
 
 
 @pytest.mark.asyncio
@@ -98,52 +131,67 @@ async def test_a_world_event_with_no_channel_happens_silently_and_the_agent_s_ow
 
     def agent(n):
         if n == 1:
-            gateway._wakeups.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
+            gateway._notifications.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
 
-    decisions = await _turns(hook, _context(), on_turn=agent)
+    sent = await _turns(hook, _context(), on_turn=agent)
 
-    assert decisions == [{"message": "[Tue Mar 3, 6:00 PM · your scheduled check] check for new rugs"},
-                         {"end": "nothing_can_wake_the_agent"}]
+    assert sent == [["[Tue Mar 3, 6:00 PM · your scheduled check] check for new rugs"],
+                    {"end": "nothing_can_wake_the_agent"}]
     assert gateway.calls == [("rug listed", "2026-03-03T09:00:00Z")]
 
 
 @pytest.mark.asyncio
-async def test_a_notify_agent_action_wakes_the_agent_when_it_fires_with_its_channel(hook, gateway):
+async def test_a_notify_action_wakes_the_agent_when_it_fires_with_its_channel(hook, gateway):
     _register(gateway, {"id": "w-2", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
-                        "actions": [{"type": "notify_agent", "channel": "Curbfinch alert",
+                        "actions": [{"type": "notify", "channel": "Curbfinch alert",
                                      "text": 'New for "rug 8x10": 1970s wool rug · $360'}]})
-    decisions = await _turns(hook, _context(), params={"time_zone": "America/Los_Angeles"})
-    assert decisions == [{"message": '[Tue Mar 3, 1:00 AM · Curbfinch alert] New for "rug 8x10": 1970s wool rug · $360'},
-                         {"end": "nothing_can_wake_the_agent"}]
+    sent = await _turns(hook, _context(), time_zone="America/Los_Angeles")
+    assert sent == [['[Tue Mar 3, 1:00 AM · Curbfinch alert] New for "rug 8x10": 1970s wool rug · $360'],
+                    {"end": "nothing_can_wake_the_agent"}]
+
+
+@pytest.mark.asyncio
+async def test_only_what_is_due_for_the_agent_s_role_wakes_it(hook, gateway):
+    _register(gateway, {"id": "landlord", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
+                        "actions": [{"type": "notify", "channel": "Gmail", "to": "landlord", "text": "rent is due"}]})
+    gateway._notifications.schedule("check for new rugs", at="2026-03-04T09:00:00Z")
+
+    sent = await _turns(hook, _context())
+
+    assert sent == [["[Wed Mar 4, 9:00 AM · your scheduled check] check for new rugs"],
+                    {"end": "nothing_can_wake_the_agent"}]
+    assert [n["to"] for n in gateway._notifications.state()["pending_notifications"]] == ["landlord"]
 
 
 @pytest.mark.asyncio
 async def test_the_person_s_messages_arrive_at_their_times_once_each(hook, gateway):
     params = {"person_messages": [{"at": "2026-03-04T16:30:00Z", "text": "got Leo, we're home"},
                                   {"at": "2026-03-03T15:00:00Z", "text": "I'm up"}]}
-    decisions = await _turns(hook, _context(), params=params)
-    assert decisions == [{"message": "[Tue Mar 3, 3:00 PM] I'm up"},
-                         {"message": "[Wed Mar 4, 4:30 PM] got Leo, we're home"},
-                         {"end": "nothing_can_wake_the_agent"}]
+    sent = await _turns(hook, _context(), params=params)
+    assert sent == [["[Tue Mar 3, 3:00 PM] I'm up"],
+                    ["[Wed Mar 4, 4:30 PM] got Leo, we're home"],
+                    {"end": "nothing_can_wake_the_agent"}]
 
 
 @pytest.mark.asyncio
 async def test_what_comes_due_together_goes_in_one_message_oldest_first(hook, gateway):
     _register(gateway, {"id": "w-3", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
-                        "actions": [{"type": "notify_agent", "channel": "Gmail", "text": "School: early dismissal"}]})
+                        "actions": [{"type": "notify", "channel": "Gmail", "text": "School: early dismissal"}]})
 
     def agent(n):
         if n == 1:
-            gateway._wakeups.schedule("morning sweep", at="2026-03-03T09:00:00Z")
+            gateway._notifications.schedule("morning sweep", at="2026-03-03T09:00:00Z")
 
-    [first, end] = await _turns(hook, _context(), on_turn=agent)
-    assert first == {"message": "[Tue Mar 3, 9:00 AM · Gmail] School: early dismissal\n"
-                                "[Tue Mar 3, 9:00 AM · your scheduled check] morning sweep"}
+    [first, end] = await _turns(hook, _context(), on_turn=agent,
+                                params={"person_messages": [{"at": "2026-03-03T09:00:00Z", "text": "pick up Leo?"}]})
+    assert first == ["[Tue Mar 3, 9:00 AM · your scheduled check] morning sweep",
+                     "[Tue Mar 3, 9:00 AM · Gmail] School: early dismissal",
+                     "[Tue Mar 3, 9:00 AM] pick up Leo?"]
 
 
 @pytest.mark.asyncio
 async def test_it_ends_at_end_time_without_waking_for_what_lies_beyond(hook, gateway):
-    gateway._wakeups.schedule("next week", at="2026-03-10T09:00:00Z")
+    gateway._notifications.schedule("next week", at="2026-03-10T09:00:00Z")
     assert await _turns(hook, _context(), params={"end_time": "P5D"}) == [{"end": "end_time"}]
 
 
@@ -165,20 +213,21 @@ async def test_a_state_check_the_agents_turn_set_off_finishes_before_the_clock_j
 
 @pytest.mark.asyncio
 async def test_a_firing_agent_trigger_answers_before_any_jump(hook, gateway):
-    gateway._wakeups.schedule("later", at="2026-03-03T09:00:00Z")
-    decisions = await _turns(hook, _context(), triggers=[{"message": "the person pushes back"}])
-    assert decisions[0] == {"message": "the person pushes back"}
-    assert decisions[1] == {"message": "[Tue Mar 3, 9:00 AM · your scheduled check] later"}
+    gateway._notifications.schedule("later", at="2026-03-03T09:00:00Z")
+    pushback = {"message": [{"kind": "text", "text": "the person pushes back"}]}
+    sent = await _turns(hook, _context(), triggers=[pushback])
+    assert sent[0] == ["the person pushes back"]
+    assert sent[1] == ["[Tue Mar 3, 9:00 AM · your scheduled check] later"]
 
 
 @pytest.mark.asyncio
 async def test_a_repeating_check_wakes_once_per_time_and_the_record_names_why(hook, gateway):
-    gateway._wakeups.schedule("sweep", every="P1D", until="P2D")
+    gateway._notifications.schedule("sweep", every="P1D", until="P2D")
     context = _context()
-    decisions = await _turns(hook, context)
-    assert decisions == [{"message": "[Tue Mar 3, 8:00 AM · your scheduled check] sweep"},
-                         {"message": "[Wed Mar 4, 8:00 AM · your scheduled check] sweep"},
-                         {"end": "nothing_can_wake_the_agent"}]
+    sent = await _turns(hook, context)
+    assert sent == [["[Tue Mar 3, 8:00 AM · your scheduled check] sweep"],
+                    ["[Wed Mar 4, 8:00 AM · your scheduled check] sweep"],
+                    {"end": "nothing_can_wake_the_agent"}]
     records = context.metadata["post_turn_hooks"]["week"]
     assert [r.get("for") for r in records[:2]] == [["scheduled_check"], ["scheduled_check"]]
 

@@ -1,31 +1,33 @@
-"""A prompt_agent post-turn hook that runs a conversation over simulated days, waking the agent only for what would
-really reach it: a check it scheduled for itself, a notification a trigger sent it (notify_agent), or a message the
-person writes at a set time. Everything else the world does happens silently while the agent is away."""
+"""A prompt_agent post-turn hook that runs a conversation over simulated days by moving a frozen clock to the next
+thing due for the agent: a check it scheduled for itself or a notification a trigger sent it (notifications/v1, which
+prompt_agent delivers), or a message the person writes at a set time (which this hook sends). Everything else the
+world does happens silently on the way, while the agent is away."""
 import asyncio
 import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+
+from agent_env.task_step.task_steps.notification_delivery import label_time, label_zone
 
 CLOCK = "urn:agentenv:clock/v1"
 TRIGGERS = "urn:agentenv:triggers/v1"
-WAKEUPS = "urn:agentenv:wakeups/v1"
+NOTIFICATIONS = "urn:agentenv:notifications/v1"
 IN_FLIGHT = ("firing", "queued")
-PARAMS = ("end_time", "time_zone", "person_messages", "settle_timeout_seconds", "max_jumps_per_turn")
+PARAMS = ("end_time", "role", "time_zone", "person_messages", "settle_timeout_seconds", "max_jumps_per_turn")
 POLL_SECONDS = 0.5
 
 logger = logging.getLogger(__name__)
 
 
 async def post_turn(turn, params):
-    """A firing agent trigger answers first; else jump, silently, to the next thing that would wake the agent."""
+    """A firing agent trigger answers first; else move the clock, silently, to the next thing due for the agent."""
     if turn.last:
         return None
-    end_time, zone, person, settle_timeout, max_jumps = _params(params)
-    envs = [env for env in turn.envs if env.supports(CLOCK, "advance") and env.supports(WAKEUPS, "take")]
+    end_time, role, zone, person, settle_timeout, max_jumps = _params(params)
+    envs = [env for env in turn.envs if env.supports(CLOCK, "advance") and env.supports(NOTIFICATIONS, "state")]
     if not envs:
-        return _end(turn, "no_env_with_clock_and_wakeups")
+        return _end(turn, "no_env_with_clock_and_notifications")
     await _settle(turn, envs, settle_timeout)
     answer = await turn.user_triggers()
     if answer is not None:
@@ -35,13 +37,14 @@ async def post_turn(turn, params):
     sent = _delivered_person(turn)
     for _ in range(max_jumps):
         now = await _now(envs)
-        items = await _take(envs, now)
+        due = await _due(envs, role, now)
         due_person = [m for m in person if m["at"] <= now and _iso(m["at"]) not in sent]
-        if items or due_person:
-            turn.record({"woke_at": _iso(now), "for": [i["kind"] for i in items] + ["person"] * len(due_person),
+        if due or due_person:
+            turn.record({"woke_at": _iso(now), "for": due + ["person"] * len(due_person),
                          **({"person_at": [_iso(m["at"]) for m in due_person]} if due_person else {})})
-            return {"message": _message(items, due_person, zone)}
-        nxt = await _next(envs, person, now, sent)
+            # prompt_agent puts what came due on notifications/v1 ahead of this; [] sends only that
+            return {"message": _person_message(due_person, zone) if due_person else []}
+        nxt = await _next(envs, role, person, now, sent)
         if nxt is None:
             return _end(turn, "nothing_can_wake_the_agent", at=_iso(now))
         if end is not None and nxt > end:
@@ -59,11 +62,10 @@ def _params(params):
     end_time = params.get("end_time")
     if end_time is not None:
         _end_spec(end_time)
-    zone_name = params.get("time_zone", "UTC")
-    try:
-        zone = ZoneInfo(zone_name)
-    except Exception as e:
-        raise ValueError(f"time_zone must be an IANA name such as 'America/Los_Angeles': {e!r}") from e
+    role = params.get("role", "default")
+    if not isinstance(role, str) or not role.strip():
+        raise ValueError(f"role must name the agent's AgentEnv-Role, e.g. 'default', got {role!r}")
+    zone = label_zone(params.get("time_zone"))
     person = []
     for m in params.get("person_messages", []):
         if not isinstance(m, dict) or not isinstance(m.get("at"), str) or not isinstance(m.get("text"), str):
@@ -75,28 +77,34 @@ def _params(params):
     max_jumps = params.get("max_jumps_per_turn", 500)
     if isinstance(max_jumps, bool) or not isinstance(max_jumps, int) or max_jumps < 1:
         raise ValueError(f"max_jumps_per_turn must be a positive integer, got {max_jumps!r}")
-    return end_time, zone, sorted(person, key=lambda m: m["at"]), timeout, max_jumps
+    return end_time, role.strip(), zone, sorted(person, key=lambda m: m["at"]), timeout, max_jumps
 
 
 async def _now(envs):
     return min([_utc((await env.invoke(CLOCK, "state"))["virtual_time"]) for env in envs])
 
 
-async def _take(envs, now):
-    items = []
+async def _due(envs, role, now):
+    """The source of each check and notification due for ``role`` by now, oldest first. Read, not taken: prompt_agent
+    takes and delivers them."""
+    due = []
     for env in envs:
-        items += (await env.invoke(WAKEUPS, "take", {"until": _iso(now)})).get("items", [])
-    return sorted(items, key=lambda i: i.get("at") or "")
+        state = await env.invoke(NOTIFICATIONS, "state", {"to": role})
+        due += [(_utc(c["next"]), "scheduled_check") for c in state.get("checks", [])
+                if c["status"] == "active" and _utc(c["next"]) <= now]
+        due += [(_utc(n["at"]) if n.get("at") else now, "trigger") for n in state.get("pending_notifications", [])
+                if not n.get("at") or _utc(n["at"]) <= now]
+    return [source for _, source in sorted(due, key=lambda d: d[0])]
 
 
-async def _next(envs, person, now, sent):
-    """The earliest instant after now at which anything happens: a world event (silent), a scheduled check, a
-    notification, or a person's message."""
+async def _next(envs, role, person, now, sent):
+    """The earliest instant after now at which anything happens: a world event (silent), a check or notification due
+    for ``role``, or a person's message."""
     candidates = [m["at"] for m in person if m["at"] > now and _iso(m["at"]) not in sent]
     for env in envs:
-        wake = await env.invoke(WAKEUPS, "state")
-        if wake.get("next_check_at"):
-            candidates.append(_utc(wake["next_check_at"]))
+        notes = await env.invoke(NOTIFICATIONS, "state", {"to": role})
+        if notes.get("next_due_at"):
+            candidates.append(_utc(notes["next_due_at"]))
         if env.supports(TRIGGERS, "state"):
             world = await env.invoke(TRIGGERS, "state")
             if world.get("next_event_at"):
@@ -114,26 +122,9 @@ def _delivered_person(turn):
     return sent
 
 
-def _message(items, person, zone):
-    """One line per thing, oldest first, each saying when and through what, so nothing poses as the person."""
-    lines = []
-    for item in items:
-        when = _local(item.get("at"), zone)
-        if item["kind"] == "scheduled_check":
-            again = f" (it came due {item['times']} times while you were away)" if item.get("times", 1) > 1 else ""
-            lines.append((item.get("at") or "", f"[{when} · your scheduled check] {item['note']}{again}"))
-        else:
-            lines.append((item.get("at") or "", f"[{when} · {item['channel']}] {item['text']}"))
-    for m in person:
-        lines.append((_iso(m["at"]), f"[{_local(_iso(m['at']), zone)}] {m['text']}"))
-    return "\n".join(text for _, text in sorted(lines))
-
-
-def _local(at, zone):
-    if not at:
-        return "now"
-    local = _utc(at).astimezone(zone)
-    return f"{local.strftime('%a %b')} {local.day}, {local.strftime('%I:%M %p').lstrip('0')}"
+def _person_message(person, zone):
+    """One line per message, oldest first, each saying when it was written."""
+    return "\n".join(f"[{label_time(_iso(m['at']), zone)}] {m['text']}" for m in person)
 
 
 async def _advance(env, target):

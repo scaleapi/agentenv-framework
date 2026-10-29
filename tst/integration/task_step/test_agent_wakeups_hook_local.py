@@ -1,5 +1,6 @@
-"""The agent-wakeups example hook on a real gateway: a world event lands silently, and only the agent's own check and
-a notify_agent notification wake it, each labelled with its time and source."""
+"""The agent-wakeups example hook on a real gateway: a world event lands silently, and the hook moves the clock only
+to the agent's own check and a notify action's notification, which prompt_agent delivers, each labelled with its time
+and source."""
 
 import json
 import uuid
@@ -13,7 +14,7 @@ from agent_env.a2a_agent import conversation_store
 from agent_env.artifact import FileArtifact
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.configure_wakeups import ConfigureWakeupsTaskStep
+from agent_env.task_step.task_steps.configure_scheduled_checks import ConfigureScheduledChecksTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
@@ -39,12 +40,13 @@ async def test_only_the_agent_s_check_and_a_declared_notification_wake_it(local_
         {"id": "w-1", "when": {"type": "time", "at": "2026-03-03T17:00:00Z"},
          "actions": [{"type": "tool", "tool": "items_add_item", "args": {"item": "rug listed"}}]},
         {"id": "w-2", "when": {"type": "time", "at": "2026-03-04T16:00:00Z"},
-         "actions": [{"type": "notify_agent", "channel": "Messages", "text": "Jamie: did the rug thing get sorted?"}]},
+         "actions": [{"type": "notify", "channel": "Messages", "text": "Jamie: did the rug thing get sorted?"}]},
     ]
     try:
         await SyncEnvClockTaskStep(id="clock", version=None, env_id=env.id, virtual_time=MONDAY,
                                    virtual_seconds_per_real_second=0).execute(context)
-        await ConfigureWakeupsTaskStep(id="wakeups", version=None, env_id=env.id).execute(context)
+        await ConfigureScheduledChecksTaskStep(id="checks", version=None, env_id=env.id,
+                                               roles=["default"]).execute(context)
         await RegisterEnvTriggersStep(id="world", version=None, env_id=env.id, triggers=triggers,
                                       watch_roles=["default"]).execute(context)
         async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
@@ -56,25 +58,25 @@ async def test_only_the_agent_s_check_and_a_declared_notification_wake_it(local_
         await _deploy(agent, "solver").execute(context)
         await PromptAgentTaskStep(
             id="watch", version=None, prompt="Keep an eye on things.", agent_name="solver", max_conversation_turns=6,
-            poll_interval_seconds=1,
+            poll_interval_seconds=1, time_zone="America/Los_Angeles",
             post_turn_hooks=[{"file_artifact_id": hook.id, "file_artifact_version": hook.version,
-                              "params": {"end_time": "P5D", "time_zone": "America/Los_Angeles"}}],
+                              "params": {"end_time": "P5D"}}],
         ).execute(context)
         async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
             stored = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}},
                                        headers={AGENT_ENV_ROLE_HEADER: "harness"})
-            wake = (await client.get("/wakeups/state")).raise_for_status().json()
+            state = (await client.get("/notifications/state")).raise_for_status().json()
     finally:
         await env.close()
 
     messages = conversation_store.get_conversation(context.metadata["a2a_conversations"]["watch"])["messages"]
-    assert [m["parts"][0]["text"] for m in messages if m["role"] == "user"] == [
-        "Keep an eye on things.",
-        "[Tue Mar 3, 6:00 PM · your scheduled check] look for new rugs",
-        "[Wed Mar 4, 8:00 AM · Messages] Jamie: did the rug thing get sorted?",
+    assert [[p["text"] for p in m["parts"]] for m in messages if m["role"] == "user"] == [
+        ["Keep an eye on things."],
+        ["[Tue Mar 3, 6:00 PM · your scheduled check] look for new rugs"],
+        ["[Wed Mar 4, 8:00 AM · Messages] Jamie: did the rug thing get sorted?"],
     ]
     assert "rug listed" in json.loads(stored.json()["content"][0]["text"])["items"]
-    assert wake["pending_notifications"] == [] and wake["next_check_at"] is None
+    assert state["pending_notifications"] == [] and state["next_due_at"] is None
     records = context.metadata["post_turn_hooks"]["watch"]
-    assert [r.get("for") for r in records] == [["scheduled_check"], ["notification"], None]
+    assert [r.get("for") for r in records] == [["scheduled_check"], ["trigger"], None]
     assert records[-1]["end"] == "nothing_can_wake_the_agent"
