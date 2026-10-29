@@ -83,7 +83,8 @@ def write_kinds(card: dict) -> frozenset[str]:
     """The write grant kinds a server's `data/get` takes: the names its `TRANSFERS_EXTENSION_URI` lists, else
     `http-post-policy` alone for a server advertising `DATA_OBJECTS_EXTENSION_URI`, else none."""
     if find_extension(card, TRANSFERS_EXTENSION_URI) is not None:
-        kinds = extension_params(card, TRANSFERS_EXTENSION_URI).get("write")
+        params = extension_params(card, TRANSFERS_EXTENSION_URI)
+        kinds = params.get("write") if isinstance(params, dict) else None
         return frozenset(kind for kind in kinds if isinstance(kind, str)) if isinstance(kinds, list) else frozenset()
     if find_extension(card, DATA_OBJECTS_EXTENSION_URI) is not None:
         return frozenset({"http-post-policy"})
