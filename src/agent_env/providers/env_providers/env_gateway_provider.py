@@ -9,6 +9,7 @@ import logging
 import re
 import shlex
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
@@ -42,6 +43,7 @@ from agent_env.providers.env_providers.constants import (
     DOCKER_COMPOSE_PATH,
     GATEWAY_APP_DIR,
     GATEWAY_SERVICE_NAME,
+    GATEWAY_SERVICE_NAMES,
 )
 from agent_env.providers.env_providers.env_provider import (
     DeployRefused,
@@ -1522,11 +1524,21 @@ def environment_name_problem(name: str) -> str | None:
 
 def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: list[WebsiteConfig] | None,
                            sidecars: list[SidecarConfig] | None = None, *, images: tuple[str, ...] = ()) -> list[str]:
-    """Why the environment names and images of a gateway deploy can't go into its compose file and shell lines."""
+    """Why the environment names and images of a gateway deploy can't go into its compose file and shell lines: one
+    can't be a service name, two of its services would share one (a website's are suffixed, so a website may share an
+    MCP server's name), or one is a service every gateway deploy runs."""
     names = [c.environment_name for c in [*mcp_servers, *(website_configs or []), *(sidecars or [])]]
     refs = [*images, *(s.image for s in mcp_servers), *(s.image for s in sidecars or []),
             *(ref for w in website_configs or [] for ref in (w.backend_image, w.frontend_image))]
-    return [problem for problem in [*map(environment_name_problem, names), *map(image_reference_problem, refs)] if problem]
+    problems = [problem for problem in [*map(environment_name_problem, names), *map(image_reference_problem, refs)]
+                if problem]
+    services = Counter([*(c.environment_name for c in [*mcp_servers, *(sidecars or [])]),
+                        *(f"{w.environment_name}-{suffix}" for w in website_configs or []
+                          for suffix in (AGENT_ENV_WEBSITE_BACKEND_SUFFIX, AGENT_ENV_WEBSITE_FRONTEND_SUFFIX))])
+    problems += [f"two of its services would both be named {name!r}" for name, count in services.items() if count > 1]
+    problems += [f"environment name {name!r} is one a gateway deploy names its own containers "
+                 f"({', '.join(sorted(GATEWAY_SERVICE_NAMES))})" for name in services if name in GATEWAY_SERVICE_NAMES]
+    return problems
 
 
 # Compose `environment:` keys whose values are secrets and must be masked before the

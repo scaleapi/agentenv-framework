@@ -195,7 +195,7 @@ def _website(name, toml=""):
      "'_', '.' and '-'"),
     ({**_mcp("x"), "envs/x/env.toml": 'environment_name = "gateway"\n'},
      "envs/x: env.toml: environment_name 'gateway' is one a gateway deploy names its own containers (db-mcp, gateway, "
-     "pgweb, playwright-mcp, servicedb, website-browser); choose another"),
+     "pgweb, servicedb); choose another"),
     (_website("x", 'env_provider_type = "server"\n'),
      "envs/x: env.toml: env_provider_type 'server' deploys one MCP server, not a website env"),
     ({**_mcp("x"), "envs/x/env.toml": 'image = { dockerfile = "Dockerfile", build_args = { A = "1" } }\n'},

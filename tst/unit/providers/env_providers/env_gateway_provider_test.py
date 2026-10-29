@@ -1646,6 +1646,33 @@ def test_compose_refuses_a_name_or_image_that_would_change_what_it_says(field, v
         )
 
 
+def _render(mcp_servers, website_configs=None):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    return EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=mcp_servers, website_configs=website_configs, gateway_image="agent-gateway", gateway_port=18765,
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance())
+
+
+@pytest.mark.parametrize("browser", ["playwright-mcp", "browseruse-mcp"])
+def test_compose_takes_a_browser_of_any_name_and_refuses_an_env_named_like_it(browser):
+    browser_server = MCPServerConfig(image="browser", environment_name=browser, card_port=18766)
+    shop = WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="slack")
+
+    services = yaml.safe_load(_render([MCPServerConfig(image="mcp-slack", environment_name="slack"), browser_server],
+                                      [shop]))["services"]
+    assert {browser, "slack", "slack-website-backend", "slack-website-frontend"} <= set(services)
+    with pytest.raises(ValueError, match=f"two of its services would both be named '{browser}'"):
+        _render([MCPServerConfig(image="mcp-x", environment_name=browser), browser_server], [shop])
+
+
+@pytest.mark.parametrize("name", ["gateway", "servicedb", "pgweb", "db-mcp"])
+def test_compose_refuses_an_env_named_like_a_service_every_gateway_deploy_runs(name):
+    with pytest.raises(ValueError, match=f"environment name '{name}' is one a gateway deploy names its own containers"):
+        _render([MCPServerConfig(image="mcp-x", environment_name=name)])
+
+
 @pytest.mark.parametrize("name, image", [
     ("slack", "mcp-slack"), ("Items.v2_x-1", "localhost:5000/local/items-0123abcd:v1"),
     ("google_calendar", f"ghcr.io/acme/calendar:1.2@{_DIGEST}"), ("crm", f"public.ecr.aws/acme/crm@{_DIGEST}"),
