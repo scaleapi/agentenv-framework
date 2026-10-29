@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -145,16 +146,7 @@ class DockerImageArtifact(Artifact):
                 stderr=subprocess.PIPE,
             )
             with gzip.open(tmp_path, "wb") as gz_file:
-                while chunk := save_proc.stdout.read(8192):
-                    gz_file.write(chunk)
-            try:
-                save_proc.wait(timeout=cls.DOCKER_SAVE_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                save_proc.kill()
-                raise RuntimeError(f"docker save {image_ref} timed out after {cls.DOCKER_SAVE_TIMEOUT_SECONDS} seconds")
-            if save_proc.returncode != 0:
-                stderr = save_proc.stderr.read().decode() if save_proc.stderr else ""
-                raise RuntimeError(f"docker save {image_ref} failed: {stderr}")
+                _stream_save_output(save_proc, gz_file, image_ref, cls.DOCKER_SAVE_TIMEOUT_SECONDS)
 
             tar_gz_object_url = objects.put_file_at(
                 f"{prefix}{fs_safe(id)}-v{version}.tar.gz", str(tmp_path), "application/gzip"
@@ -613,6 +605,53 @@ def docker_login(auth) -> None:
                            input=auth.password, text=True, capture_output=True)
     if login.returncode != 0:
         raise RuntimeError(f"docker login failed: {login.stderr}")
+
+
+# How much of a failed save's stderr its error message carries.
+_SAVE_STDERR_TAIL_BYTES = 65536
+
+
+def _stream_save_output(save_proc: subprocess.Popen, gz_file, image_ref: str, timeout_seconds: int) -> None:
+    """Stream a ``docker save`` process's stdout into ``gz_file`` until it exits, bounded by ``timeout_seconds``.
+
+    stderr drains on a thread into a bounded tail, and a watchdog kills the process at the
+    deadline: reading stdout to EOF first deadlocks once the process fills its stderr pipe, and
+    a stalled process blocks the read itself, so timing out only the wait after EOF never fires.
+    The process is reaped on every path.
+    """
+    stderr_tail = bytearray()
+
+    def drain_stderr() -> None:
+        while chunk := save_proc.stderr.read(8192):
+            stderr_tail.extend(chunk)
+            del stderr_tail[:-_SAVE_STDERR_TAIL_BYTES]
+
+    drainer = threading.Thread(target=drain_stderr, daemon=True)
+    drainer.start()
+    timed_out = threading.Event()
+
+    def watchdog() -> None:
+        timed_out.set()
+        save_proc.kill()
+
+    timer = threading.Timer(timeout_seconds, watchdog)
+    timer.start()
+    try:
+        while chunk := save_proc.stdout.read(8192):
+            gz_file.write(chunk)
+    except BaseException:
+        save_proc.kill()
+        raise
+    finally:
+        # The process is reaped on every path: it either exited, or the watchdog killed it
+        # (which is also what unblocks a read stuck on a stalled process's stdout).
+        save_proc.wait()
+        timer.cancel()
+        drainer.join(timeout=5)
+    if timed_out.is_set():
+        raise RuntimeError(f"docker save {image_ref} timed out after {timeout_seconds} seconds")
+    if save_proc.returncode != 0:
+        raise RuntimeError(f"docker save {image_ref} failed: {stderr_tail.decode(errors='replace')}")
 
 
 def _parse_copy_sources(dockerfile_text: str, dockerfile_rel_path: str | None = None) -> list[str]:

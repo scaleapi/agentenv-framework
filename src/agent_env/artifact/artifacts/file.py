@@ -10,10 +10,16 @@ from pydantic import ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.config import get_config
+from agent_env.store.base import NotFoundError, ObjectAlreadyExistsError
 
 if TYPE_CHECKING:
+    from agent_env.artifact.store import ArtifactStore
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.entity.export import ExportContext
+
+
+# How many reserved versions one upload tries before giving up on the version path.
+_UPLOAD_VERSION_ATTEMPTS = 3
 
 
 class FileArtifact(Artifact):
@@ -69,19 +75,10 @@ class FileArtifact(Artifact):
         if content_type is None:
             content_type = "application/octet-stream"
 
-        version = store.next_version(id)
-
         # put_object_file, not put_object: a hosted store uploads a file in parts, where a
         # single put is capped (5 GB on S3). It streams from disk, so large files don't get
         # loaded into RAM either.
-        stored_url = store.put_object_file(
-            artifact_type="file",
-            id=id,
-            version=version,
-            object_name=filename,
-            file_path=file_path,
-            content_type=content_type,
-        )
+        stored_url = cls._upload(store, id, filename, content_type, file_path=file_path)
 
         # The object is keyed by the reserved version; the document takes the next free one, the same unless a
         # concurrent write took it first.
@@ -108,16 +105,7 @@ class FileArtifact(Artifact):
         from agent_env.artifact.store import get_artifact_store
 
         store = get_artifact_store()
-        version = store.next_version(id)
-
-        stored_url = store.put_object(
-            artifact_type="file",
-            id=id,
-            version=version,
-            object_name=filename,
-            data=content,
-            content_type=content_type,
-        )
+        stored_url = cls._upload(store, id, filename, content_type, content=content)
 
         # The object is keyed by the reserved version; the document takes the next free one, the same unless a
         # concurrent write took it first.
@@ -129,6 +117,61 @@ class FileArtifact(Artifact):
             object_url=stored_url,
         )
         return store.put_document(instance)
+
+    @classmethod
+    def _upload(
+        cls,
+        store: "ArtifactStore",
+        id: str,
+        filename: str,
+        content_type: str,
+        *,
+        file_path: str | None = None,
+        content: bytes | None = None,
+    ) -> str:
+        """Upload to the reserved version's write-once path, working around what is already there.
+
+        A collision with a published version means a concurrent writer won the reservation:
+        reserve the next version and retry. A collision with no document behind it is an
+        orphan an earlier attempt left when its document insert failed; write-once objects
+        are never deleted or overwritten, so this attempt uploads under a prefix of its own
+        (``ArtifactStore.attempt_prefix``) instead of staying blocked by the orphan.
+        """
+        version = store.next_version(id)
+        for _ in range(_UPLOAD_VERSION_ATTEMPTS):
+            try:
+                if file_path is not None:
+                    return store.put_object_file(
+                        artifact_type="file",
+                        id=id,
+                        version=version,
+                        object_name=filename,
+                        file_path=file_path,
+                        content_type=content_type,
+                    )
+                return store.put_object(
+                    artifact_type="file",
+                    id=id,
+                    version=version,
+                    object_name=filename,
+                    data=content,
+                    content_type=content_type,
+                )
+            except ObjectAlreadyExistsError:
+                try:
+                    store.get(id, version)
+                except NotFoundError:
+                    break
+                version = store.next_version(id)
+        else:
+            raise ObjectAlreadyExistsError(
+                f"every reserved version of artifact {id!r} was published by a concurrent writer"
+            )
+        prefix = store.attempt_prefix("file", id)
+        objects = get_config().get_object_store_to_write(prefix, id)
+        if file_path is not None:
+            return objects.put_file_at(prefix + filename, file_path, content_type)
+        return objects.put(objects.get_object_key(prefix + filename), content, content_type)
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> Self:
