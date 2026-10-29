@@ -5,7 +5,11 @@ snapshot of a context's conversation and workspace restored into another context
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import stat
+import sys
+from pathlib import Path
 
 import pytest
 from agentenv_protocol.a2a_agent import Uploaded
@@ -105,6 +109,29 @@ async def test_a_file_part_is_written_under_the_task_and_named_in_the_prompt(her
     (call,) = turns.calls
     assert call["prompt"].startswith("describe\n\nAttached files")
     assert f"- {attached}" in call["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_two_pdfs_whose_names_share_a_stem_keep_their_own_pages(monkeypatch, tmp_path, hermes, turns):
+    # A pdftoppm that renders as many pages as the file's text says, each naming the file it came from.
+    fake = tmp_path / "pdfbin" / "pdftoppm"
+    fake.parent.mkdir()
+    fake.write_text(f"#!{sys.executable}\nimport pathlib, sys\nsource, prefix = sys.argv[-2:]\n"
+                    "for page in range(1, int(pathlib.Path(source).read_text()) + 1):\n"
+                    "    pathlib.Path(f'{prefix}-{page}.png').write_text(pathlib.Path(source).name)\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+    parts = [{"kind": "text", "text": "compare"},
+             {"kind": "file", "file": {"name": "report.pdf", "mimeType": "application/pdf", "bytes": "Mw=="}},
+             {"kind": "file", "file": {"name": "report", "mimeType": "application/pdf", "bytes": "MQ=="}}]
+    async with hermes.client() as client:
+        await hermes.send(client, parts)
+
+    (call,) = turns.calls
+    listed = [Path(line[2:]) for line in call["prompt"].splitlines() if line.startswith("- ")]
+    pages = [path for path in listed if path.suffix == ".png"]
+    assert [path.read_text() for path in pages] == ["report.pdf"] * 3 + ["report"]
+    assert len(set(pages)) == 4
 
 
 @pytest.mark.asyncio

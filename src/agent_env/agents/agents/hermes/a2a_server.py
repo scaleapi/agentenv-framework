@@ -178,12 +178,13 @@ async def _materialize_and_render(part: FilePart, task_id: str) -> list[str]:
         await _download_uri_to(part.uri, target)
     if (part.mime_type or "").lower() != "application/pdf" and target.suffix.lower() != ".pdf":
         return [str(target)]
-    # Hermes looks at images with its vision tool, so a PDF goes as its pages' images too.
-    prefix = str(target.with_suffix("")) + "_page"
-    if not await _render_pdf(target, prefix):
+    # Hermes looks at images with its vision tool, so a PDF goes as its pages' images too: in a folder of their own, so
+    # two PDFs whose names share a stem (report.pdf, report.PDF) never mix their pages.
+    pages_dir = Path(tempfile.mkdtemp(prefix=f"{target.name}-pages-", dir=directory))
+    if not await _render_pdf(target, str(pages_dir / "page")):
         logger.warning("PDF rendering failed for %s; passing the PDF alone", target)
         return [str(target)]
-    pages = sorted(directory.glob(f"{Path(prefix).name}*.png"))
+    pages = sorted(pages_dir.glob("page*.png"))
     return [str(target), *(str(page) for page in pages)]
 
 
