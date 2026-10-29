@@ -50,15 +50,24 @@ async def windows() -> list[dict[str, str]]:
     for window in re.findall(r"0x[0-9a-f]+", listed.partition("#")[2]):
         props = await _xprop("-id", window, "WM_CLASS", "_NET_WM_NAME")
         names = dict(re.findall(r'^(WM_CLASS|_NET_WM_NAME)[^=]*= (.*)$', props, re.MULTILINE))
-        parts = re.findall(r'"((?:[^"\\]|\\.)*)"', names.get("WM_CLASS", ""))
+        parts = _strings(names.get("WM_CLASS", ""))
         if len(parts) == 2:
-            title = re.findall(r'"((?:[^"\\]|\\.)*)"', names.get("_NET_WM_NAME", ""))
+            title = _strings(names.get("_NET_WM_NAME", ""))
             found.append({"instance": parts[0], "class": parts[1], "title": title[0] if title else ""})
     return found
+
+
+def _strings(value: str) -> list[str]:
+    """The quoted strings of an ``xprop`` value, as the window holds them, without the escapes ``xprop`` prints."""
+    return [re.sub(r"\\(.)", r"\1", text) for text in re.findall(r'"((?:[^"\\]|\\.)*)"', value)]
 
 
 async def _xprop(*args: str) -> str:
     process = await asyncio.create_subprocess_exec("xprop", *args, stdout=asyncio.subprocess.PIPE,
                                                    stderr=asyncio.subprocess.DEVNULL)
-    out, _ = await process.communicate()
+    try:
+        out, _ = await process.communicate()
+    except asyncio.CancelledError:
+        process.kill()
+        raise
     return out.decode(errors="replace") if process.returncode == 0 else ""

@@ -6,9 +6,11 @@ import asyncio
 import contextlib
 import os
 import shlex
+import signal
 import socket
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -59,8 +61,8 @@ class Sync(ComputerAppEnvironment):
 
 
 @pytest.fixture
-def desktop(monkeypatch):
-    """A session with no windows yet, recording what's launched into it."""
+def desktop(monkeypatch, tmp_path):
+    """A session with no windows yet, recording what's launched into it, its launches marked under ``tmp_path``."""
     shown, launched = [], []
 
     async def windows():
@@ -76,6 +78,7 @@ def desktop(monkeypatch):
     monkeypatch.setattr(session, "windows", windows)
     monkeypatch.setattr(session, "launch", launch)
     monkeypatch.setattr(session, "wait_until_up", up)
+    monkeypatch.setattr(app_module, "LAUNCHED", tmp_path / "launched")
     monkeypatch.setenv("ENVIRONMENT_NAME", "mail")
     return shown, launched
 
@@ -141,7 +144,6 @@ async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_
 async def test_a_boot_app_is_launched_once_per_boot_with_its_launcher_added_each_start(desktop, tmp_path, monkeypatch):
     _, launched = desktop
     launchers = []
-    monkeypatch.setattr(app_module, "LAUNCHED", tmp_path / "launched")
     monkeypatch.setattr(session, "add_launcher", lambda name, folder: launchers.append((name, folder)))
     monkeypatch.chdir(tmp_path)
 
@@ -155,12 +157,47 @@ async def test_a_boot_app_is_launched_once_per_boot_with_its_launcher_added_each
 
 
 @pytest.mark.asyncio
+async def test_a_restarted_server_finds_the_demand_app_it_launched_and_leaves_it_be(desktop, tmp_path, monkeypatch):
+    _, launched = desktop
+    monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
+    monkeypatch.setenv("ENVIRONMENT_NAME", "music")
+
+    opened, restarted = Music(), Music()
+    await opened._computer_app_start()
+    await opened._computer_app_launch()
+    await restarted._computer_app_start()
+
+    assert len(launched) == 1 and (await restarted._computer_app_ready())["launched"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_sync_check_past_its_bound_runs_once_however_often_readiness_is_asked(desktop, monkeypatch):
+    monkeypatch.setattr(app_module, "CHECK_TIMEOUT_S", 0.2)
+    released, calls = threading.Event(), []
+
+    class Syncing(ComputerAppEnvironment):
+        @ready_check
+        def synced(self):
+            calls.append(len(calls))
+            return released.wait(5)
+
+    syncing = Syncing()
+    stuck = [(await syncing._computer_app_ready())["problems"] for _ in range(3)]
+    released.set()
+    while not syncing._computer_app_checking["synced"].done():
+        await asyncio.sleep(0.01)
+    after = await syncing._computer_app_ready()
+
+    assert stuck == [["@ready_check synced ran past 0.2 s"]] * 3
+    assert after["ready"] is True and calls == [0, 1]
+
+
+@pytest.mark.asyncio
 async def test_a_boot_app_whose_launch_fails_says_why_and_is_launched_again_by_its_next_server(desktop, tmp_path,
                                                                                               monkeypatch):
     async def missing(argv, cwd, env):
         raise FileNotFoundError(f"No such file or directory: {argv[0]!r}")
 
-    monkeypatch.setattr(app_module, "LAUNCHED", tmp_path / "launched")
     monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
     monkeypatch.setattr(session, "launch", missing)
     mail = Mail()
@@ -307,7 +344,22 @@ async def test_the_sessions_windows_are_listed_by_class_instance_and_title(monke
         return replies[args]
 
     monkeypatch.setattr(session, "_xprop", xprop)
-    assert await session.windows() == [{"instance": "mail", "class": "Mail", "title": 'Inbox \\"work\\"'}]
+    assert await session.windows() == [{"instance": "mail", "class": "Mail", "title": 'Inbox "work"'}]
+
+
+@pytest.mark.asyncio
+async def test_a_window_listing_cut_short_kills_its_xprop(monkeypatch):
+    started, spawn = [], asyncio.create_subprocess_exec
+
+    async def hanging(*args, **kwargs):
+        started.append(await spawn("sleep", "30", **kwargs))
+        return started[-1]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", hanging)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(session.windows(), 0.2)
+
+    assert await asyncio.wait_for(started[0].wait(), 5) == -signal.SIGKILL
 
 
 @contextlib.asynccontextmanager

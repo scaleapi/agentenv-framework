@@ -35,7 +35,7 @@ COMPUTER_APP = "urn:agentenv:computer-app/v1"
 #: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
 SOCKET = Path(".agentenv/server.sock")
 FAILURE = Path(".agentenv/server.failure")
-#: Where an app's server marks that it launched the app since the computer booted.
+#: Where an app's server marks that it launched the app since the computer booted, at boot or on demand.
 LAUNCHED = Path("/run/agentenv/apps")
 #: How long one readiness check may take; an app's checks run at once.
 CHECK_TIMEOUT_S = 10.0
@@ -187,27 +187,23 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         self._computer_app_started_at = time.monotonic()
         self._computer_app_launched_at: Optional[float] = None
         self._computer_app_launch_failed: Optional[str] = None
+        #: Each sync ``@ready_check`` still running in its thread, by name, which a later poll waits on.
+        self._computer_app_checking: dict[str, asyncio.Future] = {}
 
     async def _computer_app_start(self) -> None:
         """Once the desktop session is up, add the app's menu launcher and launch a boot app, once per boot: a server
-        that restarts leaves the app it launched be."""
+        that restarts finds the app launched, at boot or on demand, and leaves it be."""
         if self.launch is None:
             return
         await session.wait_until_up()
         session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())
-        marker = LAUNCHED / Path.cwd().name
-        if self.launch.at != "boot":
-            return
-        if marker.exists():
+        if _launched().exists():
             self._computer_app_launched_at = time.monotonic()
-            return
-        try:
-            await self._computer_app_launch()
-        except Exception as e:
-            self._computer_app_launch_failed = f"{type(e).__name__}: {e}"
-            return
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
+        elif self.launch.at == "boot":
+            try:
+                await self._computer_app_launch()
+            except Exception as e:
+                self._computer_app_launch_failed = f"{type(e).__name__}: {e}"
 
     @extension(COMPUTER_APP, op="launch", description=(
         "The app's own server: launch launches the app from its folder, as its launcher and a boot do; ready says "
@@ -218,6 +214,8 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         pid = await session.launch(self.launch.command, Path.cwd(),
                                    {"ENVIRONMENT_NAME": os.environ["ENVIRONMENT_NAME"]})
         self._computer_app_launched_at, self._computer_app_launch_failed = time.monotonic(), None
+        _launched().parent.mkdir(parents=True, exist_ok=True)
+        _launched().touch()
         return {"pid": pid}
 
     @extension(COMPUTER_APP, op="ready", method="GET")
@@ -272,6 +270,10 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         )
 
 
+def _launched() -> Path:
+    return LAUNCHED / Path.cwd().name
+
+
 def _methods(cls: type) -> list[Callable]:
     """The class's methods, each as the class resolves its name, in the order they were first defined."""
     names = dict.fromkeys(name for klass in reversed(cls.__mro__) for name, member in vars(klass).items()
@@ -284,7 +286,7 @@ async def _bounded(name: str, check: Callable[[], Awaitable[Optional[str]]]) -> 
     try:
         return await asyncio.wait_for(check(), CHECK_TIMEOUT_S)
     except TimeoutError:
-        return f"{name} ran past {CHECK_TIMEOUT_S:.0f} s"
+        return f"{name} ran past {CHECK_TIMEOUT_S:g} s"
     except Exception as e:
         return f"{name}: {type(e).__name__}: {e}"
 
@@ -319,6 +321,14 @@ async def _command(argv: list[str]) -> Optional[str]:
 
 
 async def _ready_check(fn: Callable, app: ComputerAppEnvironment) -> Optional[str]:
-    """A sync check runs in a thread, so it can't hold up the server."""
-    passed = await fn(app) if inspect.iscoroutinefunction(fn) else await asyncio.to_thread(fn, app)
+    """A sync check runs in a thread, so it can't hold up the server, and once at a time: a thread can't be stopped, so
+    a poll while one runs past its bound waits on that same call."""
+    if inspect.iscoroutinefunction(fn):
+        passed = await fn(app)
+    else:
+        running = app._computer_app_checking.get(fn.__name__)
+        if running is None or running.done():
+            running = app._computer_app_checking[fn.__name__] = asyncio.ensure_future(asyncio.to_thread(fn, app))
+            running.add_done_callback(lambda done: done.cancelled() or done.exception())
+        passed = await asyncio.shield(running)
     return None if passed else f"@ready_check {fn.__name__} returned {passed!r}"
