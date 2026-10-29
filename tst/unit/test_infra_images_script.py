@@ -63,7 +63,7 @@ def test_plan_only_lists_the_infra_images_or_the_agents_images(script, monkeypat
     assert planned == {"infra": [image.name for image in bootstrap.PUBLISHED_IMAGES if image.name not in after],
                        "agents": after}
     assert "agentenv-gateway" in planned["infra"] and bundles == [
-        "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-letta-code", "agentenv-opencode",
+        "agentenv-browser-use", "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-letta-code", "agentenv-opencode",
         "agentenv-openhands", "agentenv-pi", "agentenv-proxy", "agentenv-pydantic-ai", "agentenv-mail-mcp",
         "agentenv-ubuntu-24.04"]
 
