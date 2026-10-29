@@ -4,6 +4,7 @@ The terminal A2A status message carries the agent's text reply plus a DataPart w
 telemetry and — when the agent ran with output_format — the typed structured_output.
 """
 
+import asyncio
 import json
 import logging
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from agent_env.a2a_agent.protocol import (
     extract_terminal_response,
     poll_a2a_task,
     raise_for_extension_status,
+    wake_poll,
 )
 from agentenv_protocol.a2a_agent import TaskResult, Usage
 from agentenv_protocol.a2a_agent.framework import _to_a2a_parts
@@ -205,7 +207,8 @@ class _Agent:
         client = httpx.AsyncClient
         monkeypatch.setattr(protocol.httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
         monkeypatch.setattr(protocol, "time", SimpleNamespace(monotonic=lambda: self.now))
-        monkeypatch.setattr(protocol, "asyncio", SimpleNamespace(sleep=self._sleep))
+        monkeypatch.setattr(protocol, "asyncio", SimpleNamespace(sleep=self._sleep, Event=asyncio.Event))
+        monkeypatch.setattr(protocol, "_nap", lambda woken, seconds: self._sleep(seconds))
 
     async def _sleep(self, seconds):
         self.now += seconds
@@ -314,6 +317,26 @@ async def test_an_agent_answering_with_errors_is_waited_on_until_the_timeout(mon
 
     assert not isinstance(raised.value, AgentUnreachableError)
     assert agent.now >= 600
+
+
+@pytest.mark.asyncio
+async def test_a_poll_woken_for_its_task_asks_at_once_and_again_until_it_shows_as_ended(monkeypatch):
+    asked = []
+
+    def answer(request):
+        asked.append(json.loads(request.content)["params"]["id"])
+        return _task("completed" if len(asked) > 1 else "working")
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(protocol.httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(answer), **kw))
+    polling = asyncio.create_task(poll_a2a_task("http://agent", "t-1", 600, 60))
+    await asyncio.sleep(0)
+
+    wake_poll("t-1")
+
+    assert (await asyncio.wait_for(polling, 1))["status"]["state"] == "completed"
+    assert asked == ["t-1", "t-1"]
+    assert "t-1" not in protocol._polls
 
 
 @pytest.mark.asyncio

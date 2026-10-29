@@ -97,6 +97,11 @@ async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(te
     hidden = _task(ITEMS, ALICE, hide, {**hide, "id": "other", "role": "bob@example.com"}, TURN, REPLIES)
     assert ServedTask(hidden, "hidden", EpisodeSpec.from_task(hidden), _score_at("replies")).toolset["access"] == [
         {"env": "items", "action": "disable", "tools": ["add_item"]}]
+    roleless = {key: value for key, value in ALICE.items() if key != "role"}
+    defaulted = _task(ITEMS, roleless, {**hide, "role": "default"}, TURN, REPLIES)
+    assert ServedTask(defaulted, "defaulted", EpisodeSpec.from_task(defaulted), _score_at("replies")).toolset == {
+        "envs": ["items"], "versions": {}, "role": None, "access": [{"env": "items", "action": "disable",
+                                                                      "tools": ["add_item"]}], "bash": False}
     assert [task["index"] for task in env.get_task_range("all", 1)] == [1, 2]
     assert [task["id"] for task in env.list_tasks("smoke")] == ["dock-0"]
     with pytest.raises(IndexError, match="split 'all' has 3 tasks, so it has no task 3"):
@@ -109,9 +114,10 @@ async def test_the_task_api_lists_each_split_with_each_tasks_prompt_and_agent(te
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("reply", "reward"), [("Added a crate.", 1.0), ("", 0.0)])
-async def test_an_episode_resets_to_its_turn_steps_through_the_envs_tools_and_is_scored_on_end_turn(
+async def test_an_episode_resets_to_its_turn_steps_through_the_envs_tools_and_is_scored_on_end_turn_before_teardown(
         teardowns, tools, reply, reward):
     env = _env(ITEMS, ALICE, TURN, REPLIES)
+    teardowns.hold = asyncio.Event()
 
     reset = await env.reset_async(split="all", index=0)
     assert (reset.done, reset.reward) == (False, None)
@@ -135,7 +141,10 @@ async def test_an_episode_resets_to_its_turn_steps_through_the_envs_tools_and_is
     after = await _call(env, "add_item")
     assert (after.done, after.reward, after.metadata["status"], after.metadata["error"]) == (
         True, None, "error", ENDED)
-    assert teardowns.finished == [env.state.episode_id]
+    await _until(lambda: teardowns.started == [env.state.episode_id])
+    assert teardowns.finished == []
+    teardowns.hold.set()
+    await _until(lambda: teardowns.finished == [env.state.episode_id])
 
 
 @pytest.mark.asyncio
@@ -267,7 +276,7 @@ async def test_an_end_turn_the_proxy_refuses_ends_the_episode_in_an_error_observ
 
 
 @pytest.mark.asyncio
-async def test_a_teardown_that_fails_ends_the_episode_in_an_error_observation_and_frees_the_session(
+async def test_a_teardown_that_fails_after_the_episode_is_scored_leaves_its_reward_and_frees_the_session(
         teardowns, tools, monkeypatch):
     async def failing(context, **_):
         raise RuntimeError("the sandbox didn't stop")
@@ -279,8 +288,7 @@ async def test_a_teardown_that_fails_ends_the_episode_in_an_error_observation_an
     await env.reset_async()
     await asyncio.to_thread(env.close)
 
-    assert (ended.done, ended.reward, ended.metadata["status"]) == (True, None, "error")
-    assert ended.metadata["error"] == "RuntimeError: the sandbox didn't stop"
+    assert (ended.done, ended.reward, ended.metadata["scores"]) == (True, 1.0, {"replies": 1.0})
     assert (env._served.live, list(episode_run._live)) == (set(), [])
 
 

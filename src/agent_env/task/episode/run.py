@@ -15,6 +15,7 @@ from agentenv_protocol.a2a_agent import (
     ProxyToolAction,
 )
 
+from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 from agent_env.store.routing import namespace_routing, run_scope
@@ -81,6 +82,7 @@ class Turn:
             return
         try:
             await self._checked(self._proxy.reply(self._task_id, parts=[ProxyTextPart(text=response or "")]))
+            protocol.wake_poll(self._task_id)
         except httpx.HTTPError as e:
             logger.warning("turn %r of agent %r: its reply didn't reach the proxy: %s", self.step_id, self.agent, e)
         self._open = False
@@ -90,6 +92,7 @@ class Turn:
             self._open = False
             try:
                 await self._proxy.reply(self._task_id, error=str(error))
+                protocol.wake_poll(self._task_id)
             except httpx.HTTPError as e:
                 logger.warning("turn %r of agent %r: its failure didn't reach the proxy: %s", self.step_id, self.agent,
                                e)
@@ -167,6 +170,7 @@ class Episode:
         self._waiting: deque[Turn] = deque()
         self._turns: set[Turn] = set()
         self._changed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._ran = False
         self._tearing_down = False
         self._abandoned: str | None = None
         self._proxies: list[ProxyClient] = []
@@ -180,8 +184,8 @@ class Episode:
         return self._run.done()
 
     async def next_turn(self) -> Turn | None:
-        """The next outside turn the run reaches, or None once the run has finished. Raises the run's error if it
-        failed first. End the turns you hold before waiting on one that depends on them."""
+        """The next outside turn the run reaches, or None once the run's steps have finished, its teardown aside.
+        Raises the run's error if it failed first. End the turns you hold before waiting on one that depends on them."""
         while True:
             changed = self._changed
             self._close_turns_of_failed_steps()
@@ -192,12 +196,15 @@ class Episode:
             if self._run.done():
                 self._raise_unless_completed()
                 return None
+            if self._ran:
+                return None
             await self._wait(changed)
 
-    async def result(self) -> dict[str, float]:
+    async def result(self, *, teardown: bool = True) -> dict[str, float]:
         """Every score the run recorded, by the id of the step that recorded it, once the run and its teardown are
-        over: what ``agent-env run`` reports. Making a reward of them is the caller's."""
-        while not self._run.done():
+        over: what ``agent-env run`` reports. Making a reward of them is the caller's. Without ``teardown``, once the
+        run's steps have finished; the teardown goes on, and ``abandon()`` waits for it."""
+        while not (self._run.done() or (self._ran and not teardown)):
             changed = self._changed
             self._close_turns_of_failed_steps()
             if open_turn := next((turn for turn in self._turns if turn._open), None):
@@ -205,7 +212,8 @@ class Episode:
                     f"turn {open_turn.step_id!r} of agent {open_turn.agent!r} isn't ended, so the run can't finish"
                 )
             await self._wait(changed)
-        self._raise_unless_completed()
+        if self._run.done():
+            self._raise_unless_completed()
         return recorded_scores(self._seeded_steps(), self._context)
 
     async def abandon(self, reason: str) -> None:
@@ -243,6 +251,8 @@ class Episode:
         with namespace_routing():
             try:
                 await self._task.run(context=self._context, instance_id=self.id)
+                self._ran = True
+                self._notify()
             finally:
                 self._tearing_down = True
                 try:
@@ -323,8 +333,11 @@ class Episode:
                     )
                     self._waiting.append(turn)
                     self._turns.add(turn)
-            self._changed.set_result(None)
-            self._changed = asyncio.get_running_loop().create_future()
+            self._notify()
+
+    def _notify(self) -> None:
+        self._changed.set_result(None)
+        self._changed = asyncio.get_running_loop().create_future()
 
     def _step_of(self, agent: str, context_id: str) -> str:
         """The ``prompt_agent`` step a message to ``agent`` on ``context_id`` comes from: of its prompts in that

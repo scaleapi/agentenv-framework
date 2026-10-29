@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -25,6 +26,12 @@ _UNREACHABLE_MIN_POLLS = 3
 # What a proxy in front of the agent answers when it can't reach it; any other status is the agent answering.
 _GATEWAY_STATUSES = frozenset({502, 503, 504})
 _CANCEL_TIMEOUT_SECONDS = 10
+# The A2A tasks ``poll_a2a_task`` is polling in this process, each with the event ``wake_poll`` sets. A task its waker
+# just ended can show as working for a moment longer, so a woken poll asks again every _WOKEN_POLL_SECONDS for up to
+# _WOKEN_FOR_SECONDS before going back to its interval.
+_polls: dict[str, asyncio.Event] = {}
+_WOKEN_POLL_SECONDS = 0.05
+_WOKEN_FOR_SECONDS = 2.0
 
 
 class AgentUnreachableError(TimeoutError):
@@ -150,18 +157,43 @@ async def poll_a2a_task(
     *,
     sandbox_id: Optional[str] = None,
 ) -> dict:
-    """POST /a2a tasks/get until the task reaches a terminal state, and return it.
+    """POST /a2a tasks/get until the task reaches a terminal state, and return it. ``wake_poll(task_id)`` has it ask
+    at once rather than at its next interval.
 
     Out of time, it raises ``TimeoutError``. ``sandbox_id`` names the sandbox the agent runs on: then it raises
     ``AgentUnreachableError``, naming it, once the agent has gone UNREACHABLE_AFTER_SECONDS without answering,
     rather than waiting out the timeout. Either way it first asks the agent to cancel the task, so an agent still
     working on it stops."""
+    _polls[task_id] = woken = asyncio.Event()
+    try:
+        return await _poll(a2a_url, task_id, timeout_seconds, poll_interval_seconds, sandbox_id, woken)
+    finally:
+        if _polls.get(task_id) is woken:
+            del _polls[task_id]
+
+
+def wake_poll(task_id: str) -> None:
+    """Have this process's poll of ``task_id``, if any, ask for its state now: for whoever just ended the task here,
+    as an episode ending a turn its proxy holds does, so the step waiting on it goes on without a poll interval."""
+    if (woken := _polls.get(task_id)) is not None:
+        woken.set()
+
+
+async def _poll(
+    a2a_url: str, task_id: str, timeout_seconds: int, poll_interval_seconds: int, sandbox_id: Optional[str],
+    woken: asyncio.Event,
+) -> dict:
     deadline = time.monotonic() + timeout_seconds
     consecutive_failures = 0
     answered_at, unanswered, last_failure = time.monotonic(), 0, ""
+    quick_until = 0.0
     while time.monotonic() < deadline:
         backoff = min(poll_interval_seconds + consecutive_failures * 5, 60)
-        await asyncio.sleep(backoff)
+        if time.monotonic() < quick_until:
+            backoff = min(backoff, _WOKEN_POLL_SECONDS)
+        if await _nap(woken, backoff):
+            quick_until = time.monotonic() + _WOKEN_FOR_SECONDS
+        woken.clear()
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.post(f"{a2a_url}/a2a", json={
@@ -202,6 +234,15 @@ async def poll_a2a_task(
 
     await cancel_a2a_task(a2a_url, task_id)
     raise TimeoutError(f"A2A task {task_id} did not complete within {timeout_seconds}s")
+
+
+async def _nap(woken: asyncio.Event, seconds: float) -> bool:
+    """Whether ``woken`` was set before ``seconds`` passed."""
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(seconds):
+            await woken.wait()
+            return True
+    return False
 
 
 async def cancel_a2a_task(a2a_url: str, task_id: str) -> None:
