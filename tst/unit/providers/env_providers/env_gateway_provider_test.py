@@ -8,7 +8,9 @@ import dataclasses
 import json
 import logging
 import re
+import shlex
 import socket
+import subprocess
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -1608,6 +1610,120 @@ def test_compose_writes_the_env_name_literally(name, rendered):
         mcp_server_name=name,
     )
     assert f"      - MCP_SERVER_NAME={rendered}\n" in compose
+
+
+_DIGEST = "sha256:" + "0" * 64
+_ESCAPES = ["slack\nCOMPOSE_EOF\ntouch pwned", "slack\n    privileged: true", "a b", "-x", "$x", "it's", "[::1]:5000/x", ""]
+_NAME_FIELDS = ["server_name", "website_name", "sidecar_name"]
+_IMAGE_FIELDS = ["server_image", "backend_image", "frontend_image", "sidecar_image", "gateway_image"]
+
+
+@pytest.mark.parametrize("field, value", [(field, value) for field in _NAME_FIELDS + _IMAGE_FIELDS for value in _ESCAPES]
+                         + [(field, "a:b") for field in _NAME_FIELDS]
+                         + [("mcp_server_name", value) for value in _ESCAPES if "\n" in value])
+def test_compose_refuses_a_name_or_image_that_would_change_what_it_says(field, value):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    values = {"server_name": "slack", "server_image": "mcp-slack", "website_name": "shop", "backend_image": "shop-be",
+              "frontend_image": "shop-fe", "sidecar_name": "proxy", "sidecar_image": "proxy", "gateway_image": "gw",
+              "mcp_server_name": "crm", field: value}
+    with pytest.raises(ValueError, match="Can't render the gateway's docker-compose.yml"):
+        EnvironmentGatewayProvider().create_docker_compose(
+            mcp_servers=[MCPServerConfig(image=values["server_image"], environment_name=values["server_name"])],
+            website_configs=[WebsiteConfig(backend_image=values["backend_image"], frontend_image=values["frontend_image"],
+                                           environment_name=values["website_name"])],
+            sidecars=[SidecarConfig(environment_name=values["sidecar_name"], image_artifact=_image(values["sidecar_image"]),
+                                    container_port=80, host_port=8080)],
+            gateway_image=values["gateway_image"],
+            state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+            state_instance=LocalPostgresStateProvider.default_instance(),
+            mcp_server_name=values["mcp_server_name"],
+        )
+
+
+@pytest.mark.parametrize("name, image", [
+    ("slack", "mcp-slack"), ("Items.v2_x-1", "localhost:5000/local/items-0123abcd:v1"),
+    ("google_calendar", f"ghcr.io/acme/calendar:1.2@{_DIGEST}"), ("crm", f"public.ecr.aws/acme/crm@{_DIGEST}"),
+    ("db", "a:b"), ("x", "084828598639.dkr.ecr.us-west-2.amazonaws.com/team/x__y:latest"),
+])
+def test_compose_takes_the_names_and_images_compose_and_docker_take(name, image):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = yaml.safe_load(EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image=image, environment_name=name)], gateway_image="gw",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    ))
+    assert compose["services"][name]["image"] == image
+
+
+@pytest.mark.parametrize("field", ["db_image", "db_web_image", "db_mcp_image"])
+def test_compose_refuses_a_state_store_image_that_would_change_what_it_says(field):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    config = ServiceDBConfig()
+    setattr(config, field, "postgres:16\n    privileged: true")
+    with pytest.raises(ValueError, match="state store's compose services"):
+        EnvironmentGatewayProvider().create_docker_compose(
+            mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="gw",
+            state_provider=LocalPostgresStateProvider(service_db_config=config),
+            state_instance=LocalPostgresStateProvider.default_instance(),
+        )
+
+
+@pytest.mark.parametrize("bad", ["slack\nCOMPOSE_EOF\ntouch pwned", "a b"])
+@pytest.mark.asyncio
+async def test_a_gateway_deploy_refuses_a_name_that_isnt_one_before_anything_starts(bad):
+    gp = EnvironmentGatewayProvider()
+    env = MCPServerEnv(id="mail", version=1, docker_image_artifact=_loadable("mcp-mail"), environment_name=bad)
+    with patch("agent_env.providers.env_state.acquire_state_for_deploy", new=AsyncMock()) as acquire, \
+         patch.object(gp, "_launch", new=AsyncMock()) as launch:
+        with pytest.raises(ValueError, match="Can't deploy 'mail' behind a gateway"):
+            await gp.deploy(env, _vm_provider())
+    acquire.assert_not_awaited()
+    launch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_written_file_holds_its_content_as_it_is_and_runs_none_of_it(tmp_path):
+    content = "services:\nCOMPOSE_EOF\ntouch pwned\nINIT_EOF\n$(touch pwned) `touch pwned` 'it''s' %s \\n"
+    target = tmp_path / "docker-compose.yml"
+    host = MagicMock(exec_script=AsyncMock(side_effect=lambda script, **_: subprocess.run(
+        ["bash", "-c", script], cwd=tmp_path, check=True)))
+    await EnvironmentGatewayProvider._write_file(host, str(target), content)
+    assert target.read_text() == content + "\n"
+    assert not (tmp_path / "pwned").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_vm_deploy_writes_its_compose_file_as_one_quoted_argument():
+    from agent_env.env.gateway import GatewayMode
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock())
+    gp._state_instance = MagicMock()
+    sandbox = AsyncMock()
+    sandbox_provider = MagicMock(create_vm=AsyncMock(return_value=sandbox))
+    compose = "services:\nCOMPOSE_EOF\ntouch pwned\n"
+
+    class _Stop(Exception):
+        """Abort at compose up: the files are written by then."""
+
+    with patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=_loadable("gw"))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", return_value=compose), \
+         patch.object(gp, "_compose_up", side_effect=_Stop):
+        with pytest.raises(_Stop):
+            await gp._deploy_via_vm(
+                sandbox_provider=sandbox_provider, mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+                mcp_server_images=[_loadable("mcp-slack")], gateway_port=18765, website_configs=None, website_images=None,
+                gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10,
+            )
+
+    scripts = [call.args[0] for call in sandbox.exec_script.await_args_list]
+    assert ["printf", "%s\\n", compose, ">", f"{GATEWAY_APP_DIR}/docker-compose.yml"] in map(shlex.split, scripts)
+    assert not any("<<" in script for script in scripts)
 
 
 _PROBE_CARD = {"name": "env1234", "children_environments": [

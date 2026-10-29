@@ -57,6 +57,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts,
     SandboxProvider,
 )
+from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -367,6 +368,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
               env-network:
                 driver: bridge
         """
+        problems = _compose_name_problems(mcp_servers, website_configs, sidecars, images=(gateway_image,))
+        if mcp_server_name and ("\n" in mcp_server_name or "\r" in mcp_server_name):
+            problems.append(f"MCP server name {mcp_server_name!r} must be one line")
+        if problems:
+            raise ValueError(f"Can't render the gateway's docker-compose.yml: {'; '.join(problems)}")
         lines = ["services:"]
 
         # MCP servers and website backends are both DB clients (one schema each).
@@ -587,6 +593,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         from agent_env.providers.env_state import LOCAL_POSTGRES_STATE_TYPE, acquire_state_for_deploy
 
         topology = _gateway_topology(env)
+        if problems := _compose_name_problems(topology.mcp_servers, topology.website_configs):
+            raise ValueError(f"Can't deploy {env.id!r} behind a gateway: {'; '.join(problems)}")
         state_instance = await acquire_state_for_deploy(
             env_state_type=env_state_type, ttl_seconds=ttl_seconds, name_hint=env.id, env_state_instance_id=env_state_instance_id,
         )
@@ -816,17 +824,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if self._needs_local_postgres:
             init_script = local_store_spec.init_sql
             logger.info(f"Generated init-schemas.sql:\n{init_script}")
-            init_script_path = f"{GATEWAY_APP_DIR}/init-schemas.sql"
-            write_init_script = f'''cat > {init_script_path} << 'INIT_EOF'
-{init_script}
-INIT_EOF'''
-            await sandbox.exec_script(write_init_script, max_retries=2)
+            await self._write_file(sandbox, f"{GATEWAY_APP_DIR}/init-schemas.sql", init_script)
 
-        # Write docker-compose.yml
-        write_compose_script = f'''cat > {DOCKER_COMPOSE_PATH} << 'COMPOSE_EOF'
-{compose_content}
-COMPOSE_EOF'''
-        await sandbox.exec_script(write_compose_script, max_retries=2)
+        await self._write_file(sandbox, DOCKER_COMPOSE_PATH, compose_content)
 
         # Start MCP services with docker compose
         logger.info("Starting MCP services...")
@@ -1120,6 +1120,12 @@ COMPOSE_EOF'''
             if line:
                 events.append(json.loads(line))
         return events
+
+    @staticmethod
+    async def _write_file(sandbox: VmSandbox, path: str, content: str) -> None:
+        """Write ``content`` and a newline to ``path`` on the sandbox host, the content one quoted argument so no byte
+        of it is shell."""
+        await sandbox.exec_script(f"printf '%s\\n' {shlex.quote(content)} > {shlex.quote(path)}", max_retries=2)
 
     async def _compose_up(self, sandbox: VmSandbox, args: str = "") -> None:
         """``docker compose up -d`` the stack, whose failure names each service that went down and ends with its
@@ -1499,6 +1505,28 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
         mcp_server_name=name,
         names_gateway_on_vm=is_multi,
     )
+
+
+# Compose's service-name characters, with a letter or digit first so no name reads as a command-line option.
+_ENVIRONMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+def environment_name_problem(name: str) -> str | None:
+    """Why ``name`` can't be an environment name, None when it can: a gateway deploy makes it a compose service, a
+    container hostname and a schema, so it may carry nothing else."""
+    if isinstance(name, str) and _ENVIRONMENT_NAME.fullmatch(name):
+        return None
+    return (f"environment name {name!r} must start with a letter or digit and hold only letters, digits, "
+            f"'_', '.' and '-'")
+
+
+def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: list[WebsiteConfig] | None,
+                           sidecars: list[SidecarConfig] | None = None, *, images: tuple[str, ...] = ()) -> list[str]:
+    """Why the environment names and images of a gateway deploy can't go into its compose file and shell lines."""
+    names = [c.environment_name for c in [*mcp_servers, *(website_configs or []), *(sidecars or [])]]
+    refs = [*images, *(s.image for s in mcp_servers), *(s.image for s in sidecars or []),
+            *(ref for w in website_configs or [] for ref in (w.backend_image, w.frontend_image))]
+    return [problem for problem in [*map(environment_name_problem, names), *map(image_reference_problem, refs)] if problem]
 
 
 # Compose `environment:` keys whose values are secrets and must be masked before the
