@@ -490,7 +490,9 @@ export function TaskInstanceViewer({
             id: string;
             score: number;
             result: boolean;
-            message: string;
+            message?: string;
+            description?: string;
+            weight?: number;
             title?: string;
             justification?: string;
           }[];
@@ -1084,6 +1086,9 @@ export function TaskInstanceViewer({
                         >
                           Score: {(v.score * 100).toFixed(0)}%
                         </span>
+                        <code className="text-[10px] font-mono text-[var(--muted-foreground)]">
+                          {verifierId}
+                        </code>
                       </div>
 
                       {results.map((r, i) => (
@@ -1107,6 +1112,14 @@ export function TaskInstanceViewer({
                             <span className="text-sm font-semibold">
                               {(r.id ?? `check ${i + 1}`).replace(/_/g, ' ')}
                             </span>
+                            {typeof r.weight === 'number' && r.weight < 0 && (
+                              <span
+                                className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600"
+                                title={`Penalty check (weight −${Math.abs(r.weight)}): when it fails, weighted_average subtracts ${Math.abs(r.weight)} from the weighted sum; passing adds nothing`}
+                              >
+                                penalty −{Math.abs(r.weight)}
+                              </span>
+                            )}
                             {typeof r.score === 'number' && r.score !== 0 && r.score !== 1 && (
                               <span className="text-xs text-[var(--muted-foreground)]">
                                 score:{' '}
@@ -1116,9 +1129,9 @@ export function TaskInstanceViewer({
                               </span>
                             )}
                           </div>
-                          {r.message ? (
+                          {(r.message ?? r.description) ? (
                             <p className="text-xs text-[var(--muted-foreground)] whitespace-pre-wrap">
-                              {r.message}
+                              {r.message ?? r.description}
                             </p>
                           ) : null}
                         </div>
