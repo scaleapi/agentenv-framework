@@ -14,7 +14,7 @@ import pytest
 
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 
 _SHELL_NAMES = [
     ("email", "x;touch pwned;#.json"),
