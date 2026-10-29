@@ -9,6 +9,10 @@ Two kinds, each for one recipient (the AgentEnv-Role it goes to):
 Nothing here wakes anyone: prompt_agent `take`s what has come due for its agent's role after each turn and opens the
 agent's next message with it, and a harness (a post-turn hook) may read `state` to learn when the next one is due and
 move the clock there. Unrelated to A2A push notifications.
+
+`take` hands out both as one shape, with where each came from as data, so a consumer never branches on the source:
+    {"id", "to", "at", "times", "source": "scheduled_check" | "trigger", "source_id": the check's or trigger's id,
+     "channel": the label the agent sees ("your scheduled check", or the trigger's channel), "parts": [one text part]}
 """
 from __future__ import annotations
 
@@ -28,6 +32,9 @@ SCHEDULE_CHECK_TOOL_NAME = "schedule_check"
 LIST_SCHEDULED_CHECKS_TOOL_NAME = "list_scheduled_checks"
 CANCEL_SCHEDULED_CHECK_TOOL_NAME = "cancel_scheduled_check"
 CHECK_TOOL_NAMES = (SCHEDULE_CHECK_TOOL_NAME, LIST_SCHEDULED_CHECKS_TOOL_NAME, CANCEL_SCHEDULED_CHECK_TOOL_NAME)
+
+CHECK_CHANNEL = "your scheduled check"  # the channel every check is delivered through; no trigger may use it
+CHECK_SOURCE, TRIGGER_SOURCE = "scheduled_check", "trigger"
 
 DEFAULT_MAX_ACTIVE = 10
 DEFAULT_MIN_INTERVAL = "PT1H"
@@ -265,9 +272,10 @@ class Notifications:
 
     def take(self, body: Any = None) -> dict:
         """Everything due for the recipient `to` (default: the solver's role) by `until` (default: now), oldest
-        first; each is handed out once. A repeating check moves to its next time after `until` and says how many
-        times it came due, so a long jump wakes the agent once. A `take_id` makes it safe to retry: the same id for
-        the same recipient gets the same batch back instead of an empty one."""
+        first, as items of the one shape the module docstring gives; each is handed out once. A repeating check moves
+        to its next time after `until` and says how many times it came due (`times`), so a long jump wakes the agent
+        once. A `take_id` makes it safe to retry: the same id for the same recipient gets the same batch back instead
+        of an empty one."""
         body = body if isinstance(body, dict) else {}
         to = _recipient(body.get("to", DEFAULT_ROLE))
         take_id = body.get("take_id")
@@ -288,8 +296,8 @@ class Notifications:
             notes = [n for n in self._queue if n["status"] == "pending" and n["to"] == to
                      and (until is None or n["_at"] is None or n["_at"] <= until)]
             for check, times, nxt in checks:
-                due.append((check["next"], {"kind": "scheduled_check", "check_id": check["check_id"], "to": to,
-                                            "note": check["note"], "at": _iso(check["next"]), "times": times}))
+                due.append((check["next"], _item(check["check_id"], to, _iso(check["next"]), times, CHECK_SOURCE,
+                                                 check["check_id"], CHECK_CHANNEL, check["note"])))
                 check["fired"] += 1
                 if nxt is None:
                     check["status"] = "done"
@@ -297,8 +305,8 @@ class Notifications:
                     check["next"] = nxt
             for note in notes:
                 note["status"] = "delivered"
-                due.append((note["_at"], {"kind": "trigger", "id": note["id"], "to": to, "channel": note["channel"],
-                                          "text": note["text"], "at": note["at"], "trigger_id": note["trigger_id"]}))
+                due.append((note["_at"], _item(note["id"], to, note["at"], 1, TRIGGER_SOURCE, note["trigger_id"],
+                                               note["channel"], note["text"])))
             self._prune()
             due.sort(key=lambda d: (d[0] is not None, d[0]))
             result = {"to": to, "items": [item for _, item in due], "until": _iso(until) if until else None}
@@ -307,6 +315,13 @@ class Notifications:
                 while len(self._takes) > _KEPT_TAKES:
                     del self._takes[next(iter(self._takes))]
         return result
+
+
+def _item(item_id: str, to: str, at: str | None, times: int, source: str, source_id: str | None, channel: str,
+          text: str) -> dict:
+    """One thing `take` hands out, the same shape whatever its source."""
+    return {"id": item_id, "to": to, "at": at, "times": times, "source": source, "source_id": source_id,
+            "channel": channel, "parts": [{"kind": "text", "text": text}]}
 
 
 def _after(check: dict, until: datetime) -> tuple[int, datetime | None]:
@@ -406,3 +421,6 @@ def validate_channel(channel: Any, where: str) -> None:
         raise ValueError(f"{where}: channel must be a non-empty string, e.g. 'Gmail' or 'Curbfinch alert'")
     if len(channel) > _MAX_CHANNEL_CHARS:
         raise ValueError(f"{where}: channel must be at most {_MAX_CHANNEL_CHARS} characters")
+    if channel.strip().casefold() == CHECK_CHANNEL.casefold():  # a trigger can't pass itself off as the agent's own
+        raise ValueError(f"{where}: channel {CHECK_CHANNEL!r} is reserved for the agent's own scheduled checks; "
+                         "name where the notification comes from, e.g. 'Gmail'")

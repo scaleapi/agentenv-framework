@@ -44,6 +44,12 @@ def _notifications(clock: Clock | None = None, **config) -> Notifications:
     return w
 
 
+def _said(item: dict) -> str:
+    """A taken item's text."""
+    [part] = item["parts"]
+    return part["text"]
+
+
 # ---- Notifications ----
 
 def test_scheduled_checks_are_off_until_a_task_turns_them_on():
@@ -118,7 +124,7 @@ def test_take_hands_out_each_due_check_once_and_a_one_shot_is_done():
     assert w.state()["next_due_at"] == "2027-02-01T17:00:00Z"
     clock.set_time("2027-02-01T17:00:00Z", 0)
     taken = w.take({})["items"]
-    assert [(i["kind"], i["note"], i["at"]) for i in taken] == [("scheduled_check", "look at 9", "2027-02-01T17:00:00Z")]
+    assert [(i["source"], _said(i), i["at"]) for i in taken] == [("scheduled_check", "look at 9", "2027-02-01T17:00:00Z")]
     assert w.take({})["items"] == []
     assert [c["note"] for c in w.list()["checks"]] == ["look at noon"]
     assert w.state()["next_due_at"] == "2027-02-01T20:00:00Z"
@@ -177,7 +183,23 @@ def test_take_until_looks_ahead_without_moving_the_clock():
     w = _notifications()
     w.schedule("later", at="PT3H")
     assert w.take({"until": "PT1H"})["items"] == []
-    assert [i["note"] for i in w.take({"until": "PT3H"})["items"]] == ["later"]
+    assert [_said(i) for i in w.take({"until": "PT3H"})["items"]] == ["later"]
+
+
+def test_a_check_and_a_notification_are_taken_as_one_shape():
+    clock = _frozen_clock()
+    n = _notifications(clock)
+    n.schedule("See if Dana replied", at="PT2H", every="PT6H")
+    clock.set_time("2027-02-01T23:10:00Z", 0)
+    n.notify("Curbfinch alert", "New listing: 2BR on Ivy St", trigger_id="curbfinch-new-listing")
+    assert n.take({})["items"] == [
+        {"id": "check-1", "to": "default", "at": "2027-02-01T17:00:00Z", "times": 2, "source": "scheduled_check",
+         "source_id": "check-1", "channel": "your scheduled check",
+         "parts": [{"kind": "text", "text": "See if Dana replied"}]},
+        {"id": "notification-2", "to": "default", "at": "2027-02-01T23:10:00Z", "times": 1, "source": "trigger",
+         "source_id": "curbfinch-new-listing", "channel": "Curbfinch alert",
+         "parts": [{"kind": "text", "text": "New listing: 2BR on Ivy St"}]},
+    ]
 
 
 def test_a_take_retried_with_its_take_id_gets_the_same_batch_back():
@@ -185,7 +207,7 @@ def test_a_take_retried_with_its_take_id_gets_the_same_batch_back():
     n = Notifications(lambda: clock)
     n.notify("Messages", "Jamie: did the rug thing get sorted?")
     first = n.take({"take_id": "t-1"})
-    assert [i["text"] for i in first["items"]] == ["Jamie: did the rug thing get sorted?"]
+    assert [_said(i) for i in first["items"]] == ["Jamie: did the rug thing get sorted?"]
     assert n.take({"take_id": "t-1"}) == first          # the response was lost; the retry still gets the item
     assert n.take({"take_id": "t-2"})["items"] == []    # a new take hands nothing out twice
     with pytest.raises(NotificationError, match="take_id"):
@@ -199,7 +221,7 @@ def test_notifications_queue_at_the_virtual_time_and_are_taken_once():
     pending = w.state()["pending_notifications"]
     assert [(n["channel"], n["at"], n["trigger_id"]) for n in pending] == [("Messages", T0, "t1")]
     [item] = w.take({})["items"]
-    assert (item["kind"], item["text"]) == ("trigger", "Jamie: did the rug thing get sorted?")
+    assert (item["source"], _said(item)) == ("trigger", "Jamie: did the rug thing get sorted?")
     assert w.take({})["items"] == [] and w.state()["pending_notifications"] == []
 
 
@@ -209,7 +231,7 @@ def test_due_is_judged_on_the_time_not_its_text():
     w.notify("Messages", "on the second")                    # 15:00:00Z sorts after 15:00:00.500000Z as text
     w.schedule("half a second on", at="PT0.5S")
     items = w.take({"until": "PT0.75S"})["items"]
-    assert [i.get("text") or i.get("note") for i in items] == ["on the second", "half a second on"]
+    assert [_said(i) for i in items] == ["on the second", "half a second on"]
 
 
 def test_turning_checks_off_cancels_the_ones_still_to_come():
@@ -277,8 +299,8 @@ def test_a_persona_s_check_never_reaches_the_solver():
     n.schedule("chase the deposit", at="PT1H", to="landlord")
     n.schedule("see if Dana replied", at="PT2H", to="default")
     clock.set_time("2027-02-01T18:00:00Z", 0)
-    assert [(i["to"], i["note"]) for i in n.take({})["items"]] == [("default", "see if Dana replied")]
-    assert [(i["to"], i["note"]) for i in n.take({"to": "landlord"})["items"]] == [("landlord", "chase the deposit")]
+    assert [(i["to"], _said(i)) for i in n.take({})["items"]] == [("default", "see if Dana replied")]
+    assert [(i["to"], _said(i)) for i in n.take({"to": "landlord"})["items"]] == [("landlord", "chase the deposit")]
 
 
 def test_the_active_cap_counts_each_role_s_checks_on_their_own():
@@ -314,8 +336,8 @@ def test_a_notification_goes_to_the_solver_unless_it_names_a_role():
     n = Notifications(lambda: _frozen_clock())
     n.notify("Gmail", "for the solver")
     n.notify("Messages", "for the landlord", to="landlord")
-    assert [i["text"] for i in n.take({})["items"]] == ["for the solver"]
-    assert [i["text"] for i in n.take({"to": "landlord"})["items"]] == ["for the landlord"]
+    assert [_said(i) for i in n.take({})["items"]] == ["for the solver"]
+    assert [_said(i) for i in n.take({"to": "landlord"})["items"]] == ["for the landlord"]
 
 
 @pytest.mark.parametrize("call", [lambda n: n.take({"to": ""}), lambda n: n.take({"to": 3}), lambda n: n.state(" ")])
@@ -420,7 +442,7 @@ def test_the_agent_schedules_through_the_tool_and_the_harness_takes_it(gateway):
     assert state["next_due_at"] == "2027-02-01T17:00:00Z"
     gateway._clock.set_time("2027-02-01T17:00:00Z", 0)
     items = _request(gateway, "POST", "/notifications/take", {}).json()["items"]
-    assert [i["note"] for i in items] == ["check rugs"]
+    assert [_said(i) for i in items] == ["check rugs"]
 
 
 def test_list_is_read_only_so_it_does_not_re_check_state_triggers(gateway):
@@ -458,7 +480,7 @@ def test_a_check_is_for_the_role_that_scheduled_it_and_only_its_take_hands_it_ou
     gateway._clock.set_time("2027-02-01T17:00:00Z", 0)
     assert _request(gateway, "POST", "/notifications/take", {}).json()["items"] == []
     taken = _request(gateway, "POST", "/notifications/take", {"to": "planner"}).json()["items"]
-    assert [(i["to"], i["note"]) for i in taken] == [("planner", "re-plan the week")]
+    assert [(i["to"], _said(i)) for i in taken] == [("planner", "re-plan the week")]
 
 
 # ---- notify ----
@@ -509,6 +531,7 @@ async def test_notify_queues_a_templated_notification():
 
 @pytest.mark.parametrize("action, error", [
     ({"channel": ""}, "channel"),
+    ({"channel": "Your Scheduled Check "}, "the agent's own scheduled checks"),
     ({"text": " "}, "text"),
     ({"verify": {"tool": "x", "predicate": {"exists": True}}}, "nothing to verify"),
     ({"text": "${result.id}", "channel": "Gmail"}, None),

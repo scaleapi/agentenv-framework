@@ -81,7 +81,7 @@ async def test_what_came_due_for_the_solver_opens_its_next_message_on_a_real_gat
     ]
     assert [p.get("metadata", {}).get("agentenv", {}).get("source") for p in sent[1]] == [
         "scheduled_check", "trigger", None]
-    assert sent[1][1]["metadata"]["agentenv"]["trigger_id"] == "ivy-listed"
+    assert sent[1][1]["metadata"]["agentenv"]["source_id"] == "ivy-listed"
     assert state["pending_notifications"] == [] and state["next_due_at"] is None
     assert [(c["to"], c["status"]) for c in state["checks"]] == [("default", "done")]
     assert context.metadata["post_turn_hooks"]["watch"][-1]["end"] == "no_pending_events"

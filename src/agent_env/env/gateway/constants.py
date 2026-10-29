@@ -249,7 +249,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_NOTIFICATIONS_URI,
-        "description": "Notifications (urn:agentenv:notifications/v1): what comes due for a role between its turns, on the virtual clock, each for one recipient (`to`): checks a role scheduled for itself (schedule_check, which only the roles config names see) and notifications triggers sent (the notify action, to the default role unless it names another). state says when the next is due; take hands a recipient each due one once (harness control path). Unrelated to A2A push notifications.",
+        "description": "Notifications (urn:agentenv:notifications/v1): what comes due for a role between its turns, on the virtual clock, each for one recipient (`to`): checks a role scheduled for itself (schedule_check, which only the roles config names see) and notifications triggers sent (the notify action, to the default role unless it names another). state says when the next is due; take hands a recipient each due one once (harness control path), every item one shape: id, to, at, times, source (scheduled_check or trigger), source_id, channel (the label the agent sees) and parts. Unrelated to A2A push notifications.",
         "params": {"endpoint": "/notifications/state", "methods": {
             "config": {"method": "POST", "endpoint": "/notifications/config", "request": {"type": "object", "properties": {
                 "roles": {"type": "array", "items": {"type": "string"}}, "max_active": {"type": "integer", "minimum": 1},

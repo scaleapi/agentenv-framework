@@ -92,11 +92,13 @@ async def test_what_came_due_opens_the_next_message_ahead_of_the_user_sims_reply
 
     assert _to_agent(ctx)[1] == [
         {"kind": "text", "text": f"[Mon Feb 1, 3:00 PM · your scheduled check] {ALDER}",
-         "metadata": {"agentenv": {"source": "scheduled_check", "check_id": "check-1", "times": 1,
-                                   "at": "2027-02-01T23:00:00Z", "env_id": "env"}}},
+         "metadata": {"agentenv": {"id": "check-1", "to": "default", "at": "2027-02-01T23:00:00Z", "times": 1,
+                                   "source": "scheduled_check", "source_id": "check-1",
+                                   "channel": "your scheduled check", "env_id": "env"}}},
         {"kind": "text", "text": f"[Mon Feb 1, 3:10 PM · Curbfinch alert] {IVY}",
-         "metadata": {"agentenv": {"source": "trigger", "id": "notification-2", "trigger_id": "ivy-listed",
-                                   "channel": "Curbfinch alert", "at": "2027-02-01T23:10:00Z", "env_id": "env"}}},
+         "metadata": {"agentenv": {"id": "notification-2", "to": "default", "at": "2027-02-01T23:10:00Z", "times": 1,
+                                   "source": "trigger", "source_id": "ivy-listed", "channel": "Curbfinch alert",
+                                   "env_id": "env"}}},
         {"kind": "text", "text": "Actually, can we look at places in Fremont too?"},
     ]
     assert peers.takes == [{"to": "default"}]  # the user sim's done ended the run: its turn took nothing
@@ -226,12 +228,29 @@ def test_time_zone_round_trips_is_stored_only_when_set_and_is_checked_when_built
         _step(time_zone="Pacific Time")
 
 
-def test_a_check_that_came_due_more_than_once_says_so():
-    item = {"kind": "scheduled_check", "check_id": "check-1", "note": "check rugs", "at": MONDAY, "times": 4}
-    assert delivered_line(item, label_zone(None)) == (
+def _item(source: str, channel: str, text: str, at: str | None = MONDAY, times: int = 1) -> dict:
+    return {"id": "x-1", "to": "default", "at": at, "times": times, "source": source, "source_id": "x",
+            "channel": channel, "parts": [{"kind": "text", "text": text}]}
+
+
+def test_every_item_is_labelled_with_its_channel_and_one_that_came_due_more_than_once_says_so():
+    check = _item("scheduled_check", "your scheduled check", "check rugs", times=4)
+    assert delivered_line(check, label_zone(None)) == (
         "[Mon Feb 1, 3:00 PM · your scheduled check] check rugs (it came due 4 times while you were away)")
-    queued_unclocked = {"kind": "trigger", "id": "n", "channel": "Gmail", "text": "hi", "at": None}
+    queued_unclocked = _item("trigger", "Gmail", "hi", at=None)
     assert delivered_line(queued_unclocked, label_zone(None)) == "[now · Gmail] hi"
+    unknown_source = _item("calendar", "Calendar", "Standup in 10 minutes")
+    assert delivered_line(unknown_source, label_zone(None)) == "[Mon Feb 1, 3:00 PM · Calendar] Standup in 10 minutes"
+
+
+def test_a_delivered_part_carries_the_item_without_its_parts_and_a_part_that_is_not_text_follows_as_it_is():
+    item = {**_item("trigger", "Gmail", "New email"), "env_id": "env"}
+    item["parts"].append({"kind": "data", "data": {"thread": "t-9"}})
+    meta = {"agentenv": {k: v for k, v in item.items() if k != "parts"}}
+    assert notification_delivery.delivered_parts([item], label_zone(None)) == [
+        {"kind": "text", "text": "[Mon Feb 1, 3:00 PM · Gmail] New email", "metadata": meta},
+        {"kind": "data", "data": {"thread": "t-9"}, "metadata": meta},
+    ]
 
 
 def test_a_blank_reply_adds_nothing_to_delivered_lines_and_without_them_is_sent_as_it_was():
@@ -270,5 +289,5 @@ async def test_a_take_retried_after_a_lost_response_still_delivers_the_item(monk
     n.notify("Messages", "Jamie: did the rug thing get sorted?")
     env = _FlakyEnv(n)
     items = await notification_delivery.take_due([env], "default")
-    assert [i["text"] for i in items] == ["Jamie: did the rug thing get sorted?"]
+    assert [i["parts"][0]["text"] for i in items] == ["Jamie: did the rug thing get sorted?"]
     assert env.bodies[0]["take_id"] == env.bodies[1]["take_id"]

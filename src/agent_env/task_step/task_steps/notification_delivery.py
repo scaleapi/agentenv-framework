@@ -1,13 +1,16 @@
 """How what came due on an env's notifications/v1 reaches an agent: the one place that says what a delivered line reads
 like, for prompt_agent after each turn and for any post-turn hook that composes its own message.
 
-Each item becomes one text part, labelled with when and through what, so nothing poses as the person:
+Every item ``take`` returns has one shape (``id``, ``to``, ``at``, ``times``, ``source``, ``source_id``, ``channel``,
+``parts``), so each is delivered the same way, whatever its source: its text labelled with when and through what
+(``channel``), so nothing poses as the person, and "came due N times" when ``times`` is more than one:
 
     [Mon Feb 1, 3:00 PM · your scheduled check] See if Dana replied about the 2BR on Alder St
     [Mon Feb 1, 3:10 PM · Curbfinch alert] New listing: 2BR on Ivy St, $3,050/mo
 
-and carries ``metadata.agentenv`` naming its source, so a verifier reading the stored conversation can tell a
-delivered line from what the person wrote in the same message.
+Each delivered part carries ``metadata.agentenv``, the item without its parts (``source`` and ``source_id`` among
+them), so a verifier reading the stored conversation can tell a delivered line from what the person wrote in the same
+message.
 
 How prompt_agent delivers, after each agent turn:
 - The user side answers first, as without notifications: a post-turn hook, else agent triggers, then the user sim or
@@ -53,28 +56,23 @@ def label_time(at: Optional[str], zone: ZoneInfo) -> str:
 
 
 def delivered_line(item: dict, zone: ZoneInfo) -> str:
-    """One taken item as the agent reads it."""
+    """A taken item's text as the agent reads it: ``[when · channel]``, then its text parts."""
     when = label_time(item.get("at"), zone)
-    if item["kind"] == "scheduled_check":
-        times = item.get("times", 1)
-        again = f" (it came due {times} times while you were away)" if times > 1 else ""
-        return f"[{when} · your scheduled check] {item['note']}{again}"
-    return f"[{when} · {item['channel']}] {item['text']}"
+    times = item.get("times", 1)
+    again = f" (it came due {times} times while you were away)" if times > 1 else ""
+    text = "\n\n".join(p["text"] for p in item["parts"] if p.get("kind") == "text")
+    return f"[{when} · {item['channel']}] {text}{again}"
 
 
 def delivered_parts(items: Iterable[dict], zone: ZoneInfo) -> list[dict]:
-    """One text part per taken item, oldest first, each with ``metadata.agentenv``: ``{"source": "scheduled_check",
-    "check_id", "times", "at"}`` or ``{"source": "trigger", "id", "trigger_id", "channel", "at"}``, plus the
-    ``env_id`` it came from when the item carries one."""
+    """Per taken item, oldest first: one text part, its ``delivered_line``, then any parts that aren't text, as they
+    are. Each carries ``metadata.agentenv``: the item without its parts, with the ``env_id`` it came from when the
+    item has one."""
     parts = []
     for item in sorted(items, key=_oldest_first):
-        if item["kind"] == "scheduled_check":
-            source = {"source": "scheduled_check", "check_id": item["check_id"], "times": item.get("times", 1)}
-        else:
-            source = {"source": "trigger", "id": item["id"], "trigger_id": item.get("trigger_id"),
-                      "channel": item["channel"]}
-        meta = {**source, "at": item.get("at"), **({"env_id": item["env_id"]} if item.get("env_id") else {})}
-        parts.append({"kind": "text", "text": delivered_line(item, zone), "metadata": {"agentenv": meta}})
+        meta = {"agentenv": {k: v for k, v in item.items() if k != "parts"}}
+        parts.append({"kind": "text", "text": delivered_line(item, zone), "metadata": meta})
+        parts.extend({**p, "metadata": meta} for p in item["parts"] if p.get("kind") != "text")
     return parts
 
 
