@@ -2,8 +2,9 @@
 (``daemon.sh``), agents get its own tools as its pinned version lists them (``tools.json``), beside the ``computer_*``
 tools, and the computer/v1 operations are its desktop-scope calls. The daemon takes line-delimited JSON on a Unix
 socket; the framework's calls and each caller's run on connections of their own, the framework's in a session of its
-own. When a connection drops, as when the daemon restarts, a read is sent once more on a new one; input is not, since
-some of it may have arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs."""
+own. When a connection drops, as when the daemon restarts, a read is sent once more on a new one; input is not, and
+input whose reply is lost fails with its outcome unknown, since it may have arrived. It needs
+``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs."""
 from __future__ import annotations
 
 import asyncio
@@ -131,9 +132,7 @@ class CuaDriver(ComputerDriverEnvironment):
     @press
     async def press_keys(self, keys) -> None:
         *held, key = keys
-        if any(k not in MODIFIERS for k in held):
-            raise Unsupported(f"cua-driver holds only modifier keys in a chord, not {[k for k in held if k not in MODIFIERS]}")
-        await self._send("press_key", key=MODIFIERS.get(key) or NAMED.get(key, key), modifiers=_modifiers(held))
+        await self._send("press_key", modifiers=_modifiers(held), key=MODIFIERS.get(key) or NAMED.get(key, key))
 
     async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
         """A call to one of cua-driver's own tools, on its caller's connection, answered as cua-driver answers it."""
@@ -153,10 +152,13 @@ class CuaDriver(ComputerDriverEnvironment):
     async def _call(self, name: str, failure: type[Exception], **args: Any) -> dict:
         """The result of one of cua-driver's tools called in the framework's session, a read (``DeviceUnavailable``
         when it fails) sent again on a new connection when this one dropped; ``failure`` names what went wrong when
-        it fails or refuses."""
-        reply = await self._framework.request({"method": "call", "name": name,
-                                               "args": {**args, "session": FRAMEWORK_SESSION}},
-                                              retry=failure is DeviceUnavailable)
+        it fails, refuses or loses its reply after it was sent."""
+        try:
+            reply = await self._framework.request({"method": "call", "name": name,
+                                                   "args": {**args, "session": FRAMEWORK_SESSION}},
+                                                  retry=failure is DeviceUnavailable)
+        except _ReplyLost as e:
+            raise failure(e.message) from None
         if not reply.get("ok"):
             raise failure(f"cua-driver {name}: {reply.get('error')}")
         result = reply["result"]
@@ -177,6 +179,10 @@ class CuaDriver(ComputerDriverEnvironment):
                            f"its executable's sha256 is {digest}, not the pinned {expected}"),
                 ReadyCheck("cua-driver tools", not differ, f"{len(running)} tools, as pinned" if not differ else
                            f"these tools differ from tools.json: {', '.join(differ)}")]
+
+
+class _ReplyLost(DeviceUnavailable):
+    """The connection dropped after a request was sent, so the daemon may have acted on it."""
 
 
 class _Connection:
@@ -200,10 +206,14 @@ class _Connection:
             return await self._exchange(payload)
 
     async def _exchange(self, payload: dict) -> dict:
+        """One request and its reply; a request cancelled in flight closes the connection, so its reply can't be read
+        as the next one's."""
+        sent = False
         try:
             if self._stream is None:
                 self._stream = await asyncio.open_unix_connection(str(SOCKET), limit=REPLY_LIMIT)
             reader, writer = self._stream
+            sent = True
             writer.write((json.dumps(payload) + "\n").encode())
             await writer.drain()
             line = await reader.readline()
@@ -211,7 +221,13 @@ class _Connection:
                 raise ConnectionError("the daemon closed the connection")
         except (OSError, ValueError) as e:
             self._close()
+            if sent:
+                raise _ReplyLost(f"cua-driver's daemon stopped answering after the request was sent, which it may "
+                                 f"have acted on: {e}") from None
             raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
+        except asyncio.CancelledError:
+            self._close()
+            raise
         return json.loads(line)
 
     def _close(self) -> None:
@@ -231,6 +247,8 @@ def _read_only() -> frozenset[str]:
 
 
 def _modifiers(keys) -> list[str]:
+    if held := [key for key in keys if key not in MODIFIERS]:
+        raise Unsupported(f"cua-driver holds only modifier keys, not {held}")
     return [MODIFIERS[key] for key in keys]
 
 

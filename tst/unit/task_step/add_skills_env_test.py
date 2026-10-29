@@ -83,6 +83,18 @@ async def test_a_skill_with_files_is_stored_once_and_installed_as_a_bundle(agent
 
 
 @pytest.mark.asyncio
+async def test_a_skill_file_whose_path_leaves_its_folder_is_refused_before_anything_is_stored(agent, local_stores,
+                                                                                             monkeypatch):
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+        return {"name": params["name"], "description": "d", "skill_md": "# Skill\n", "files": {"../../victim": "x"}}
+
+    monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
+    with pytest.raises(ValueError, match="must stay inside its folder, not \\['../../victim'\\]"):
+        await _step("shop").execute(_context(_env()))
+    assert local_stores.get_object_store().list("") == [] and not agent.register.await_args_list
+
+
+@pytest.mark.asyncio
 async def test_an_env_behind_a_gateway_installs_each_child_envs_skill_under_the_childs_name(agent):
     gateway = _env("office", name="office", extensions=(), children=(("mail", (_SKILL,)), ("Chat Room", (_SKILL,)),
                                                                      ("calendar", ())))

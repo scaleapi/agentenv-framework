@@ -20,7 +20,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from PIL import Image as PILImage
 
 import agent_env
-from agentenv_protocol.computer import DeviceUnavailable, Unsupported
+from agentenv_protocol.computer import DeliveryFailed, DeviceUnavailable, Unsupported
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "cua-driver" / "driver.py"
 
@@ -33,13 +33,16 @@ def _png(width: int, height: int) -> str:
 
 class FakeDaemon:
     """cua-driver's daemon as the driver sees it, on ``path``: each request by the connection it came on, ``refuse``
-    naming tools whose results are errors, ``fail`` tools it can't call, and ``tools`` what ``list`` lists."""
+    naming tools whose results are errors, ``fail`` tools it can't call, ``slow`` tools it answers after a second,
+    ``drop`` tools whose connection it closes without answering, and ``tools`` what ``list`` lists."""
 
     def __init__(self, manifest: list[dict], path: Path) -> None:
         self.path = path
         self.requests: list[tuple[int, dict]] = []
         self.refuse: set[str] = set()
         self.fail: set[str] = set()
+        self.slow: set[str] = set()
+        self.drop: set[str] = set()
         self.tools = [{"name": t["name"], "input_schema": t["inputSchema"]} for t in manifest]
         self.connections = 0
         self.writers: list[asyncio.StreamWriter] = []
@@ -62,6 +65,10 @@ class FakeDaemon:
         while line := await reader.readline():
             request = json.loads(line)
             self.requests.append((connection, request))
+            if request.get("name") in self.drop:
+                break
+            if request.get("name") in self.slow:
+                await asyncio.sleep(1)
             writer.write((json.dumps(self.reply(request)) + "\n").encode())
             await writer.drain()
         writer.close()
@@ -150,6 +157,8 @@ async def test_what_cua_driver_cant_do_or_refuses_fails_naming_it(module, daemon
 
     with pytest.raises(Unsupported, match="holds only modifier keys"):
         await driver.press_keys(["Control", "a", "b"])
+    with pytest.raises(Unsupported, match="holds only modifier keys, not \\['a'\\]"):
+        await driver.click_at(1, 1, "left", 1, ["Shift", "a"])
     with pytest.raises(Unsupported, match="no keys held"):
         await driver.scroll_at(1, 1, "up", 1, ["Shift"])
     with pytest.raises(Exception, match="cua-driver click: click refused") as refused:
@@ -230,10 +239,33 @@ async def test_a_read_is_sent_again_after_the_daemon_restarts_but_input_is_not(m
     assert (await driver.screen()).width == 1280
     await daemon.stop()
     await daemon.start()
-    with pytest.raises(DeviceUnavailable):
+    with pytest.raises(DeliveryFailed, match="may have acted on"):
         await driver.click_at(1, 1, "left", 1, [])
     await driver.click_at(2, 2, "left", 1, [])
     assert [args["x"] for name, args in daemon.calls() if name == "click"] == [2]
+
+
+@pytest.mark.asyncio
+async def test_input_whose_reply_is_lost_fails_with_its_outcome_unknown(module, daemon):
+    daemon.drop.add("type_text")
+    with pytest.raises(DeliveryFailed, match="may have acted on") as lost:
+        await module.CuaDriver().type_in("hello")
+    assert lost.value.applied == "unknown" and [name for name, _ in daemon.calls()] == ["type_text"]
+
+
+@pytest.mark.asyncio
+async def test_a_request_cancelled_in_flight_leaves_no_reply_for_the_next_one(module, daemon):
+    driver = module.CuaDriver()
+    daemon.slow.add("get_screen_size")
+    screen = asyncio.ensure_future(driver.screen())
+    await asyncio.sleep(0.2)
+    screen.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await screen
+    daemon.slow.clear()
+
+    shot = await driver.grab()
+    assert (shot.width, shot.mode) == (1280, "png") and daemon.connections == 2
 
 
 @pytest.mark.asyncio
@@ -247,7 +279,7 @@ async def test_one_of_cua_drivers_read_only_tools_is_sent_again_after_a_restart_
         await daemon.stop()
         await daemon.start()
         clicked = await session.call_tool("click", {"element_token": "s1:1"})
-    assert not read.isError and clicked.isError and "isn't answering" in clicked.content[0].text
+    assert not read.isError and clicked.isError and "may have acted on" in clicked.content[0].text
     assert [name for name, _ in daemon.calls()] == ["list_windows", "list_windows"]
 
 

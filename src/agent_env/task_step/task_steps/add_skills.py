@@ -8,6 +8,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import ClassVar, Optional
 
 from agentenv_protocol import SKILL_EXTENSION_URI
@@ -310,7 +311,11 @@ class AddSkillsTaskStep(TaskStep):
 
 
 def _stored_skill(skill_md: str, files: dict[str, str]) -> str:
-    """The object-store prefix holding an env skill's SKILL.md and its other files, one prefix per content."""
+    """The object-store prefix holding an env skill's SKILL.md and its other files, one prefix per content; a file
+    whose path leaves the skill's folder is refused."""
+    if outside := [path for path in files if not path or PurePosixPath(path).is_absolute()
+                   or ".." in PurePosixPath(path).parts]:
+        raise ValueError(f"an env skill's files must stay inside its folder, not {outside}")
     config = get_config()
     store, contents = config.get_object_store(), {"SKILL.md": skill_md, **files}
     digest = hashlib.sha256(json.dumps(contents, sort_keys=True).encode()).hexdigest()
