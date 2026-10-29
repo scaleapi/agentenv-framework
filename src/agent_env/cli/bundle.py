@@ -9,6 +9,8 @@ import click
 from agent_env.bundle.importer import BundleImport, import_eval, import_task
 from agent_env.bundle.parse import BundleKind
 from agent_env.bundle.register import describe_target, register_bundle
+from agent_env.bundle.requires import Declaring, UnmetRequirements, declaring_for
+from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.utils import interruptible
 from agent_env.entity.scopes import FieldScope
 
@@ -87,17 +89,27 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
 
     It checks everything first and says what it would write: an @local id left in what it would write or, for a store
     other than this machine's, a credential written out or a URL only this machine reaches refuses the whole
-    registration. An id the store holds already takes a new version, whoever wrote it. A store other than this
-    machine's is written only after you confirm, or with --yes. Registering again writes only what changed since."""
+    registration. The plugin packages the bundle's bundle.toml requires must be installed, as for a run; a folder
+    with no bundle.toml that uses plugin packages is given one. An id the store holds already takes a new version,
+    whoever wrote it. A store other than this machine's is written only after you confirm, or with --yes. Registering
+    again writes only what changed since."""
     options = {"tasks": tasks, "evals": evals, "prefix": prefix}
     click.echo(f"Registering {folder} into:")
     for line in describe_target():
         click.echo(f"  {line}")
     click.echo("Checking:")
     with interruptible():
-        planned = register_bundle(folder, dry_run=True, on_progress=click.echo, **options)
+        try:
+            planned = register_bundle(folder, dry_run=True, on_progress=click.echo, **options,
+                                      declaring=declaring_for(folder, installed=False, dry_run=dry_run))
+        except UnmetRequirements as e:
+            if not dry_run:
+                offer_to_install(e)
+            raise
     for line in planned.floating:
         click.echo(f"  floating, since its field takes no version: {line}")
+    for line in planned.requires:
+        click.echo(f"  {line}")
     if dry_run:
         click.echo("Nothing was written: --dry-run.")
         return
@@ -108,7 +120,7 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
         click.confirm("Write these to the stores above?", abort=True)
     click.echo("Writing:")
     with interruptible():
-        registered = register_bundle(folder, on_progress=click.echo, **options)
+        registered = register_bundle(folder, on_progress=click.echo, **options, declaring=Declaring.QUIET)
     tasks_written = [done for done in registered.materialization.writes if done.write.kind is BundleKind.TASK]
     if tasks_written:
         first = tasks_written[0]

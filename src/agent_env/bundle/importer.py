@@ -4,7 +4,6 @@ runs with no store; nothing is written to a store."""
 from __future__ import annotations
 
 import contextlib
-import importlib
 import json
 import os
 import shutil
@@ -19,7 +18,7 @@ from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.skill import SkillArtifact
-from agent_env.artifact.registry import ARTIFACT_REGISTRY, canonical_type, get_artifact_registry
+from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.bundle import _toml
 from agent_env.bundle._fs import fold, show
 from agent_env.bundle._images import ImageJob, context_groups, write_images
@@ -30,7 +29,6 @@ from agent_env.bundle._import_report import (
     Floating,
     ImportedEval,
     ImportedTask,
-    Need,
     Pinned,
     Pulled,
     Written,
@@ -42,6 +40,7 @@ from agent_env.bundle._import_report import (
 from agent_env.bundle._secrets import scrub
 from agent_env.bundle.installed import InstalledBundle, installed_bundles
 from agent_env.bundle.parse import (
+    BUNDLE_TOML,
     CONFIG_FILES,
     LEAVINGS,
     BundleError,
@@ -51,21 +50,20 @@ from agent_env.bundle.parse import (
     segment_problem,
 )
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
+from agent_env.bundle.requires import Providers, Use, detected
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import get_config
 from agent_env.entity.export import ExportContext, Unwritable, checked_path
 from agent_env.entity.refs import EntityKind, EntityRef, RefRole, RefSite, default_agent_refs, ref_sites
 from agent_env.entity.scopes import FieldScope, prune
-from agent_env.env import registry as env_registry
 from agent_env.env.env import Env
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
-from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS, inventory, load_failures
+from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task.task import Task
-from agent_env.task_step import registry as task_step_registry
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.paths import os_reason
 
@@ -171,7 +169,7 @@ class _Importer:
         self.pinned: list[Pinned] = []
         self.floating: list[Floating] = []
         self.dropped: list[Dropped] = []
-        self.needs: list[Need] = []
+        self.needs: list[Use] = []
         self.undeclared: list[str] = []
         self.duplicates: list[str] = []
         self.problems: list[str] = []
@@ -180,7 +178,7 @@ class _Importer:
         self.tomls: dict[str, tuple[str, dict]] = {}  # each entity folder's toml: its file's name, and its keys
         self.downloads: dict[str, str] = {}  # each file to write: its path in the bundle, and its object's url
         self.jobs: list[ImageJob] = []
-        self.origins: dict[tuple[str, str], str] | None = None
+        self.providers = Providers()
         self.installed: tuple[InstalledBundle, ...] | None = None
         _check_destination(self.dest)
 
@@ -288,6 +286,8 @@ class _Importer:
             if self.problems:
                 raise BundleError(self.problems)
             shutil.rmtree(scratch)
+            if requires := detected(self.needs):
+                self.files[BUNDLE_TOML] = _toml.dumps({"requires": requires})
             files = sorted([*self.files, PROVENANCE, "README.md"])
             imported = BundleImport(
                 root=self.dest, files=tuple(files), tasks=tuple(self.tasks), eval=self.eval,
@@ -477,19 +477,10 @@ class _Importer:
                        get_artifact_registry().get(name))
 
     def _need(self, where: str, what: str, group: str, name: str, cls: type | None) -> None:
-        """``name``, of the plugin ``group``, is a need when core doesn't ship it, named with what registers ``cls``,
-        the class it resolves to here: the distribution whose entry point names that class, or configuration. A plugin
-        the registry build skipped registers nothing, so it isn't loaded again to compare."""
-        if name in _BUILTINS[group]():
-            return
-        if self.origins is None:
-            self.origins = {(contribution.group, contribution.name): (distribution.name, contribution.value)
-                            for distribution in inventory(load=False).distributions
-                            for contribution in distribution.contributions}
-        distribution, value = self.origins.get((group, name), (None, None))
-        registered = value is not None and cls is not None and name not in load_failures().get(group, {})
-        by = distribution if registered and _names(value, cls) else "configuration"
-        self.needs.append(Need(where, what, name, by))
+        """``name``, of the plugin ``group``, is a need when core doesn't ship it, with what provides ``cls``, the class
+        it resolves to here (``Providers.of``)."""
+        if (provider := self.providers.of(group, name, cls)) is not None:
+            self.needs.append(Use(where, what, name, provider))
 
     def _default_agents(self, step: dict, refs: tuple[EntityRef, ...], where: str) -> None:
         """A step that leaves an agent field unset falls back to the configured default, which no field pins."""
@@ -509,11 +500,6 @@ class _Importer:
             name = f"{base}-{n}"
         self.taken[names].add(fold(name))
         return name
-
-
-# What core ships, per plugin group: anything else a task uses is a need.
-_BUILTINS = {TASK_STEPS: task_step_registry._builtin_registry, ENVS: env_registry._builtin_registry,
-             ARTIFACTS: lambda: ARTIFACT_REGISTRY}
 
 
 def _names_of(kind: BundleKind) -> str:
@@ -547,18 +533,6 @@ def _saved_size(url: str) -> int | None:
 def _fetch(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     get_config().get_object_store_at(url).download_to_file(url, str(dest))
-
-
-def _names(value: str, cls: type) -> bool:
-    """Whether the entry point ``value``, ``module:attribute``, names ``cls``."""
-    module, _, attribute = value.partition(":")
-    try:
-        named = importlib.import_module(module)
-        for part in attribute.split("."):
-            named = getattr(named, part)
-    except (ImportError, AttributeError):
-        return False
-    return named is cls
 
 
 def _output_names(sites: list[RefSite]) -> dict[tuple[EntityKind, str], str]:

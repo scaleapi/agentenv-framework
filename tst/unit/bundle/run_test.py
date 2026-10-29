@@ -27,7 +27,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
-from tst.unit.bundle._support import layout, local_store, plan_of
+from tst.unit.bundle._support import fake_plugins, layout, local_store, plan_of
 
 ROOT = "@local/~/triage"
 DRY_RUN = "Dry run: nothing is written or run.\n"
@@ -111,6 +111,15 @@ class _NamesAgent(_Scored):
         return {**super().to_dict(), "a2a_agent_id": self.a2a_agent_id}
 
 
+# The hint a run gives for the step types these tests register through configuration, as a config file would.
+CONFIGURED = ("this bundle uses the step type 'scored_run_test' and the step type 'failing_run_test' (tasks/a.json: "
+              "step 'check', and 3 more), which this machine's configuration registers; whoever runs it needs that "
+              "configuration too")
+CONFIGURED_WITH_AGENT = ("this bundle uses the step type 'scored_run_test', the step type 'names_agent_run_test' and "
+                         "the step type 'failing_run_test' (tasks/a.json: step 'check', and 4 more), which this "
+                         "machine's configuration registers; whoever runs it needs that configuration too")
+
+
 def _scored(score):
     return json.dumps([{"id": "check", "type": "scored_run_test", "verifier_id": "v", "score": score}])
 
@@ -130,6 +139,7 @@ def registries(monkeypatch):
     steps = {**Config().task_step_registry(),
              **{cls.type: cls for cls in (_Scored, _Failing, _Cancelled, _NamesAgent, _RecordsModels)}}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
+    fake_plugins(monkeypatch)  # no installed package ships these classes
     monkeypatch.setattr(_Scored, "seen", [])
     monkeypatch.setattr(_Scored, "peak", 0)
 
@@ -329,6 +339,7 @@ def test_progress_is_reported_and_a_progress_callback_that_raises_stops_without_
     run_bundle(bundle_dir, tasks=["a"], on_progress=lines.append)
 
     assert [re.sub(r"\d+\.\ds", "<t>", line) for line in lines] == [
+        CONFIGURED,
         "tasks/a.json: v1 (new)",
         "[tasks/a.json] step 1/1 check (scored_run_test)",
         "[tasks/a.json] step 1/1 check done in <t>",
@@ -342,7 +353,7 @@ def test_progress_is_reported_and_a_progress_callback_that_raises_stops_without_
         raise BrokenPipeError
 
     assert run_bundle(bundle_dir, tasks=["a"], on_progress=broken).runs[0].outcome is Outcome.PASSED
-    assert calls == ["tasks/a.json: v1, unchanged"]
+    assert calls == [CONFIGURED]
 
 
 def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its_agent(bundle_dir, docker,
@@ -356,7 +367,8 @@ def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its
 
     run_bundle(bundle_dir, tasks=["agent"], on_progress=lines.append)
 
-    assert lines[:4] == [
+    assert lines[:5] == [
+        CONFIGURED_WITH_AGENT,
         "agents/solver (Dockerfile image): building with docker, which can take minutes",
         "agents/solver (Dockerfile image): v1 (new)",
         "agents/solver: v1 (new)",
@@ -541,7 +553,8 @@ def test_the_cli_dry_run_prints_what_the_run_would_write_and_run_and_exits_0(bun
     assert result.exit_code == 0, result.output
     assert result.output == (
         DRY_RUN
-        + "artifacts/script: v1 (new)\n"
+        + f"{CONFIGURED}\n"
+        "artifacts/script: v1 (new)\n"
         "tasks/a.json: v1 (new)\n"
         "tasks/b.json: v1 (new)\n"
         "tasks/c.json: v1 (new)\n"
@@ -583,7 +596,8 @@ def test_the_cli_dry_run_reads_another_bundles_entity_and_says_why_an_agent_pinn
     assert result.exit_code == 0, result.output
     assert result.output.startswith(
         DRY_RUN
-        + f"agents/solver: v2 (artifact {image} has a new version in the store (v1 → v2))\n"
+        + f"{CONFIGURED}\n"
+        f"agents/solver: v2 (artifact {image} has a new version in the store (v1 → v2))\n"
         "tasks/agent.json: v1, unchanged\n"
         "\n"
         "Store refs:\n"
@@ -601,7 +615,8 @@ def test_the_cli_dry_run_lists_an_image_it_would_write_and_builds_nothing(bundle
     assert result.exit_code == 0, result.output
     assert result.output == (
         DRY_RUN
-        + "agents/solver (Dockerfile image): v1 (new)\n"
+        + f"{CONFIGURED_WITH_AGENT}\n"
+        "agents/solver (Dockerfile image): v1 (new)\n"
         "agents/solver: v1 (new)\n"
         "tasks/agent.json: v1 (new)\n"
         "\n"

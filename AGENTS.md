@@ -179,6 +179,16 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   `A2AAgent.validate()` deploys `mail` (`A2AAgent.VALIDATION_ENV_ID`) with namespace routing on, first writing the
   example (its writes and infra, no run) when the store has no env of that id: on a remote sandbox its image is
   context-only and built in the VM, so a service like the hub's worker needs no Docker.
+- A bundle names the plugin packages it needs in an optional `bundle.toml` at its root (`requires = ["<pip
+  requirement>", ...]`, read by `bundle/parse.py`, checked by `bundle/requires.py`). Resolving a bundle refuses one
+  whose requirements this environment doesn't meet (`UnmetRequirements`), naming the `agent-env plugin add` command
+  that installs them (a requirement on agent-env itself says to upgrade it instead); in a terminal `agent-env run` and
+  `bundle register` offer to run it, then run the command again in a new process. A run or registration of a writable folder run by its path that has no `bundle.toml` creates one,
+  requiring at least the installed version of each plugin distribution whose type the bundle uses, never over a file
+  that appeared meanwhile. An existing one is never edited: the run says what to add, so `requires = []` keeps a
+  bundle requiring nothing. A type only configuration registers gets a hint naming the installed package its class
+  comes from, never a requirement. `bundle init
+  --from-task` writes the same file.
 - Environment providers have no table: an installed package registers one as an `agent_env.env_providers`
   entry point named its `type`, which records carry as `env_provider_type`.
 - `[plugins.<distribution name>]` is reserved for an installed plugin's own settings, read with

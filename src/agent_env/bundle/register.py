@@ -43,6 +43,7 @@ from .ledger import Ledger
 from .materialize import Materialization, Materialized, materialize
 from .parse import Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle, plan_entities
+from .requires import Declaring, declare, declaring_for
 from .run import _label
 from .resolve import BundleImage, Reference, ResolvedBundle, ResolvedEntry, resolve_bundle
 
@@ -64,6 +65,7 @@ class Registration:
     floating: tuple[str, ...]  # each reference written without a version, so whatever runs it reads its latest
     bundle: str  # the bundle's identity, which its ledger rows name
     shared: bool  # the target is a store other than this machine's own
+    requires: tuple[str, ...]  # what to say of the plugin packages it uses that its bundle.toml doesn't require
 
 
 def register_bundle(
@@ -73,12 +75,15 @@ def register_bundle(
     evals: Sequence[str] = (),
     prefix: str | None = None,
     dry_run: bool = False,
+    declaring: Declaring | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> Registration:
     """Register the bundle at ``root``: ``tasks`` and ``evals`` by name, or with neither every task and eval it has,
     or every entity when it has none, with what they reference. ``prefix`` opens each entry's registry id, the folder's
     name and a dash unless given. An id the store holds already takes a new version, whoever wrote it. ``on_progress``
-    is given a line for each write, as it's checked or written, and before each image is built.
+    is given a line for each write, as it's checked or written, and before each image is built. A folder with no
+    bundle.toml that uses plugin packages is given one, or told what to declare, as ``declaring`` says: by default as a
+    run of the folder would (``declaring_for``).
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
     written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse."""
@@ -97,13 +102,14 @@ def register_bundle(
         problems = list(_unregistrable(registered, shared))
         if problems:
             raise BundleError(problems)
+        requires = tuple(declare(resolved, declaring or declaring_for(bundle.root, installed=False, dry_run=dry_run)))
         say = on_progress or (lambda line: None)
         materialization = materialize(
             registered, dry_run=dry_run, ledger=ledger,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"  {_label(registered, write)}: building with docker and pushing"),
             on_write=lambda done: say(f"  {registered_line(registered, done)}"))
-    return Registration(registered, materialization, ids, tuple(_floating(registered)), identity, shared)
+    return Registration(registered, materialization, ids, tuple(_floating(registered)), identity, shared, requires)
 
 
 def shared_store(store: DocumentStore) -> bool:
