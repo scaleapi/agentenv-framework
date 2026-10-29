@@ -43,6 +43,7 @@ nemo-gym = {{ path = "../..", editable = true }}
 """
 
 _ROUTE = re.compile(r"[A-Za-z0-9._~-]+")
+_FILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 
 
 def write_server(source: str | Path, root: str | Path, *, name: str | None = None, sandbox: str | None = None,
@@ -61,6 +62,9 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
     served = None if url else Server(build_app(source, reward=reward, sandbox=sandbox, max_concurrent_envs=1))
     try:
         env_name, tasks = read_tasks(url or served.url, local="name the bundle's folder instead of its server")
+        if unfit := [split for split in tasks if not _FILE.fullmatch(split)]:
+            raise ValueError(f"the server's splits {unfit} can't name a data file: a split's name must be letters, "
+                             "digits, '.', '_' and '-', not starting with '.'")
         grouped = toolsets(env_name, tasks)
         tools = {each: [_function(tool) for tool in asyncio.run(probe(url or served.url, toolset, reset_timeout))[1]]
                  for each, toolset in grouped.items()}

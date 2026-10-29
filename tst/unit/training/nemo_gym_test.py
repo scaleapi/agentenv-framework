@@ -106,6 +106,15 @@ def test_each_toolset_is_probed_once_and_a_rows_tools_are_its_tasks(served, tmp_
     assert len(teardowns.finished) == 2
 
 
+def test_a_split_whose_name_isnt_a_file_name_is_refused_before_anything_is_written(served, tmp_path):
+    server = served({"a": PLAYED}, {"../escape": ["a"]})
+
+    with pytest.raises(ValueError, match=r"the server's splits \['\.\./escape'\] can't name a data file"):
+        write_server(server.url, tmp_path / "gym")
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_a_tool_named_after_a_route_gym_serves_is_refused(served, tmp_path, tools):
     tools("verify")
     server = served({"a": PLAYED})
