@@ -560,9 +560,9 @@ class MailApp(ComputerAppEnvironment):
         password: SecretStr = SecretStr("")
 ```
 
-- **`@computer_app`** names the platforms the app supports, as a driver names them, the
-  `permissions` it needs of the computer, and the `computer` and `driver` it deploys alone on. Its
-  name is its env's `environment_name`.
+- **`@computer_app`** names the platforms the app supports, as a driver names them, and the
+  `permissions` it needs of the computer. Its env.toml names the rest: the app itself
+  (`environment_name`) and the `computer` and `driver` it deploys alone on.
 - **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
   copied under its prefix; `python`, a requirements file there installed into a venv beside them;
   `services`, programs the computer's init runs from the prefix as the session user.

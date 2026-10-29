@@ -4,12 +4,10 @@
     "version": 1
   },
   "declaration": {
-    "computer": null,
     "data": [
       "data/add",
       "data/get"
     ],
-    "driver": null,
     "install": {
       "linux": {
         "files": ".",

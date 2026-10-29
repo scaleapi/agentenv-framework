@@ -82,7 +82,7 @@ def test_an_app_folder_is_written_with_its_files_and_what_its_class_declares(bun
     assert (env.computer, env.driver) == (None, None)
     assert ComputerAppEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()
     (refusal,) = DeployEnvTaskStep(id="env", version=None, env_id=env.id).preflight()
-    assert "names no computer and driver to deploy alone on; name them in its env.toml or its @computer_app" in refusal
+    assert "names no computer and driver to deploy alone on; name them in its env.toml" in refusal
 
 
 @pytest.mark.parametrize("toml, extra, skill, problem", [

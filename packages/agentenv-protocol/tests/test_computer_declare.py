@@ -63,7 +63,7 @@ from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Linux, R
                                         install_step, ready_check)
 
 
-@computer_app(supports={supports}, permissions=["camera"], computer="ubuntu-24.04", driver="reference")
+@computer_app(supports={supports}, permissions=["camera"])
 class Mail(ComputerAppEnvironment):
     linux = Linux(files="linux", python="requirements.txt", services=[Service(name="imap", command="bin/imap")])
     launch = Launch(at="demand", command=["thunderbird"], ready=Ready(window=True, timeout_s=30))
@@ -166,7 +166,7 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
     assert declared.pop("type") == "computer_app"
     settings = declared.pop("settings")
     assert declared == {
-        "supports": LINUX, "permissions": ["camera"], "computer": "ubuntu-24.04", "driver": "reference",
+        "supports": LINUX, "permissions": ["camera"],
         "install": {"linux": {"files": "linux", "python": "requirements.txt",
                               "services": [{"name": "imap", "command": "bin/imap"}]}},
         "launch": {"at": "demand", "command": ["thunderbird"], "ready": {"window": True, "timeout_s": 30.0}},

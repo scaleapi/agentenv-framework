@@ -943,7 +943,7 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
         name: folder / name for name in ("app.py", "requirements.txt")})
     declaration = {
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
-        "permissions": [], "computer": None, "driver": None, "launch": None, "settings": settings, "skill": None,
+        "permissions": [], "launch": None, "settings": settings, "skill": None,
         "data": [], "install_steps": [], "ready_checks": [],
         "install": {"linux": install or {"python": "requirements.txt", "services": [
             {"name": "imap", "command": "venv/bin/python imap.py"}]}}}

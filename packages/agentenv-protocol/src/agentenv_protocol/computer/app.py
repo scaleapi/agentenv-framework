@@ -65,15 +65,13 @@ class Launch(BaseModel):
     ready: Optional[Ready] = None
 
 
-def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[str]] = None,
-                 computer: Optional[str] = None, driver: Optional[str] = None) -> Callable:
-    """Declare what an app is: the platforms it supports, as a driver names them; the permissions it needs of the
-    computer; and the computer and driver it deploys alone on, which its env.toml may name instead."""
+def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[str]] = None) -> Callable:
+    """Declare what an app is: the platforms it supports, as a driver names them, and the permissions it needs of the
+    computer. Its env.toml names it and the computer and driver it deploys alone on."""
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, ComputerAppEnvironment)):
             raise TypeError("@computer_app decorates a ComputerAppEnvironment subclass")
         cls.supports, cls.permissions = list(supports or []), list(permissions or [])
-        cls.computer, cls.driver = computer, driver
         return cls
     return deco
 
@@ -99,8 +97,6 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     supports: ClassVar[list] = []
     permissions: ClassVar[list[str]] = []
-    computer: ClassVar[Optional[str]] = None
-    driver: ClassVar[Optional[str]] = None
     linux: ClassVar[Optional[Linux]] = None
     launch: ClassVar[Optional[Launch]] = None
     #: A file of the app's folder holding its skill for agents, when no ``@agent_skill`` method writes it.
@@ -126,7 +122,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             raise ValueError(f"{cls.__name__} declares its skill twice: skill = {cls.skill!r} and @agent_skill "
                              f"{skill_methods[0]}")
         return {
-            "supports": cls.supports, "permissions": cls.permissions, "computer": cls.computer, "driver": cls.driver,
+            "supports": cls.supports, "permissions": cls.permissions,
             "install": {"linux": cls.linux.model_dump(exclude_none=True)} if cls.linux is not None else {},
             "launch": cls.launch.model_dump(exclude_none=True) if cls.launch is not None else None,
             "settings": cls.Settings.model_json_schema(),

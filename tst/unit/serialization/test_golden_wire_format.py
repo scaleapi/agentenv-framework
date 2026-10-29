@@ -181,7 +181,6 @@ ENV_FIXTURES = {
         module="app.py:Notes",
         files=ARTIFACT_FIXTURES["file_artifact_universe"](),
         declaration={"supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}], "permissions": [],
-                     "computer": None, "driver": None,
                      "install": {"linux": {"files": ".", "python": "requirements.txt",
                                            "services": [{"name": "notes", "command": "venv/bin/python serve.py"}]}},
                      "launch": {"at": "demand", "command": ["notes"]},

@@ -1,6 +1,6 @@
 """Computer app env: software on a computer, a ``ComputerAppEnvironment`` subclass, with its files and what it declares,
 read from the class at put. Deployed alone it is a one-app computer env: the computer and driver its env.toml names,
-else its class, composed with the app installed under its prefix, its card named after it."""
+composed with the app installed under its prefix, its card named after it."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.install import AppInstall, installs, missing
 from agent_env.env.envs.computer_driver import ComputerDriverEnv, declared
 from agent_env.env.store import get_env_store
-from agent_env.store.base import NotFoundError
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
@@ -37,7 +36,7 @@ class ComputerAppEnv(ComputerEnv):
         self.files = files
         #: What its class declares: ``supports``, ``permissions``, ``install`` by OS type, ``launch``, the JSON schema
         #: of its ``settings``, its ``skill``, the ``data`` operations it serves, its ``install_steps`` and
-        #: ``ready_checks``, and the ``computer`` and ``driver`` it names.
+        #: ``ready_checks``.
         self.declaration = declaration
 
     @property
@@ -98,8 +97,8 @@ class ComputerAppEnv(ComputerEnv):
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> ComputerAppEnv:
         """Write the app an env.toml declares, its class read in a process of its own (``declared``), its files stored
-        as a file universe, its computer and driver those env.toml names, else its class; its environment_name the
-        folder's when it sets none."""
+        as a file universe, with the computer and driver env.toml names; its environment_name the folder's when it sets
+        none."""
         fields = cls.accept_toml(data, ctx)
         declaration = declared(ctx, fields["module"], cls.type)
         files = ctx.files()
@@ -109,12 +108,8 @@ class ComputerAppEnv(ComputerEnv):
             problems.append(f"skill: {skill!r} isn't in this folder")
         if problems:
             ctx.refuse(list(map(ctx.config_problem, problems)))
-        computer, driver = (fields.get(key, declaration[key]) for key in ("computer", "driver"))
-        try:
-            computer = ctx.artifact(computer, ComputerArtifact) if computer is not None else None
-            driver = ctx.env(driver, ComputerDriverEnv) if driver is not None else None
-        except NotFoundError as e:
-            ctx.refuse([ctx.config_problem(f"{e}; a computer and driver named in env.toml are built with the app")])
+        computer = ctx.artifact(fields["computer"], ComputerArtifact) if "computer" in fields else None
+        driver = ctx.env(fields["driver"], ComputerDriverEnv) if "driver" in fields else None
         universe = FileArtifactUniverse.put_bundled(derive_id(ctx.id, "files"), files=files)
         try:
             return cls.put(id=ctx.id, environment_name=fields.get("environment_name", ctx.name),
@@ -143,5 +138,5 @@ class ComputerAppEnv(ComputerEnv):
                        **options) -> str | None:
         if self.computer is None:
             return (f"computer app env {self.id!r} names no computer and driver to deploy alone on; name them in its "
-                    "env.toml or its @computer_app")
+                    "env.toml")
         return super().deploy_refusal(sandbox_type=sandbox_type, env_params=env_params, **options)
