@@ -602,6 +602,19 @@ async def test_notify_queues_a_templated_notification():
     assert ok and ok[0]["detail"]["notify"] == "Messages" and "got your text" not in json.dumps(ok[0])
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["${args.note?}", " ${args.note?} "])
+async def test_notify_whose_text_resolves_to_nothing_queues_no_notification(text):
+    gw = _FakeGateway()
+    engine = TriggerEngine(gw)
+    engine.register({"watch_roles": ["default"], "triggers": [_notify_trigger(text=text)]})
+    engine.on_tool_call("default", "messaging_send_message", {"to": "Jamie"}, _ok())
+    await asyncio.sleep(0.2)
+    assert gw._notifications.state()["pending_notifications"] == []
+    ok = [e for e in engine.state()["events"] if e["kind"] == "action_ok"]
+    assert ok and ok[0]["detail"]["skipped"] == "text resolved to nothing"
+
+
 @pytest.mark.parametrize("action, error", [
     ({"channel": ""}, "channel"),
     ({"channel": "Your Scheduled Check "}, "the agent's own scheduled checks"),

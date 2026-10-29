@@ -1379,15 +1379,19 @@ class TriggerEngine:
                 detail = {"tool": action["tool"], "args": _echo_args(args), **acting}
             elif action["type"] == "notify":
                 try:
-                    text = _template(action["text"], {}, ctx)
+                    # inside an object so a missing `${x?}` drops the text instead of sending the placeholder
+                    text = str(_template({"text": action["text"]}, {}, ctx).get("text", ""))
                 except TemplateError as e:
                     self._emit("action_failed", tid, action_index=index, detail=str(e)[:300])
                     return False
-                note = self._gw._notifications.notify(action["channel"], str(text), trigger_id=tid,
-                                                      to=action.get("to", DEFAULT_ROLE).strip())
-                # the text may carry what a person wrote, so the log keeps its size, not its words
-                detail = {"notify": action["channel"], "to": note["to"], "notification_id": note["id"],
-                          "text_len": len(str(text))}
+                if not text.strip():
+                    detail = {"notify": action["channel"], "skipped": "text resolved to nothing"}
+                else:
+                    note = self._gw._notifications.notify(action["channel"], text, trigger_id=tid,
+                                                          to=action.get("to", DEFAULT_ROLE).strip())
+                    # the text may carry what a person wrote, so the log keeps its size, not its words
+                    detail = {"notify": action["channel"], "to": note["to"], "notification_id": note["id"],
+                              "text_len": len(text)}
             else:
                 if not await self._run_nl(tid, trig, index, action, ctx):
                     return False
