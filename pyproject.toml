@@ -59,6 +59,7 @@ openenv = [
 trl = [
     "agentenv-framework[openenv]",
     "datasets>=3",
+    "transformers>=5.2",  # renders the tools as TRL shows them to a model; 5.2 is what TRL's environment_factory needs
 ]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
@@ -106,7 +107,6 @@ boat = [
 dev = [
     "agentenv-framework[aws,boat,boxd,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
-    "transformers>=5.2",  # get_json_schema, which reads agent_env.training's tool methods as TRL shows them to a model
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases

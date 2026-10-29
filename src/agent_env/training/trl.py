@@ -1,7 +1,7 @@
 """TRL's trainers on a bundle served as an OpenEnv env (``agent_env.openenv.build_app``, or the package ``openenv import``
 writes): ``AgentEnv`` reads the server's tasks into a dataset, and makes the ``environment_factory`` whose environments
 each play one episode of a task over OpenEnv's WebSocket, offer its turn's tools as methods and own its reward.
-``GRPOTrainer`` takes both as they are, verified with TRL 1.16, and AsyncGRPO takes the same ``environment_factory``;
+``GRPOTrainer`` takes both as they are, verified with TRL 1.16 and 1.17, and AsyncGRPO the same ``environment_factory``;
 either needs TRL 1.15 or later, for an environment that owns its reward. Every session runs on one event-loop thread of
 this module's own, since TRL calls an environment synchronously, from its own threads."""
 
@@ -29,8 +29,9 @@ import uvicorn
 try:
     from datasets import Dataset
     from openenv.core.generic_client import GenericEnvClient
+    from transformers.utils.chat_template_utils import render_jinja_template
 except ModuleNotFoundError as exc:
-    if exc.name not in ("datasets", "openenv"):
+    if exc.name not in ("datasets", "openenv", "transformers"):
         raise
     raise ImportError("agent_env.training.trl requires pip install 'agentenv-framework[trl]'") from exc
 
@@ -38,7 +39,7 @@ from agent_env.openenv import build_app
 from agent_env.openenv.environment import END_TURN as END_TURN_TOOL
 from agent_env.openenv.environment import TIMEOUT_METADATA, Toolset
 from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS
-from agent_env.training._tools import tool_method
+from agent_env.training._tools import SchemaTool, tool_method
 
 logger = logging.getLogger(__name__)
 
@@ -247,8 +248,9 @@ class _Rollout:
 
 class _Environment:
     """One session on the server, playing one episode at a time. Its public methods other than ``reset`` and
-    ``get_reward`` are the tools, which ``AgentEnv.factory`` binds per toolset; every call on the session waits its
-    turn, as AsyncGRPO can call two tools of a completion at once."""
+    ``get_reward`` are the tools, which ``AgentEnv.factory`` binds per toolset, and each but ``end_turn`` is set over
+    with its ``SchemaTool``; every call on the session waits its turn, as AsyncGRPO can call two tools of a completion
+    at once."""
 
     _shared: ClassVar[_Shared]
     _tools: ClassVar[tuple[dict[str, Any], ...]]
@@ -258,6 +260,9 @@ class _Environment:
         self._opened = False
         self._rollout: _Rollout | None = None
         self._lock = asyncio.Lock()
+        for tool in self._tools:
+            if tool["name"] != END_TURN:
+                setattr(self, tool["name"], SchemaTool(tool, getattr(self, tool["name"])))
         _environments.add(self)
 
     def reset(self, *, split: str, index: int, task_id: str | None = None, **_: Any) -> None:
@@ -413,7 +418,17 @@ def _environment_class(name: str, tools: tuple[dict[str, Any], ...], shared: _Sh
     methods = {tool["name"]: tool_method(tool) for tool in tools}
     for method in methods.values():
         method.__qualname__ = f"{name}.{method.__name__}"
+    _check_rendered([SchemaTool(tool, methods[tool["name"]]) for tool in tools if tool["name"] != END_TURN])
     return _EnvironmentClass(name, (_Environment,), {**methods, "_shared": shared, "_tools": tools})
+
+
+def _check_rendered(tools: list[SchemaTool]) -> None:
+    """Fails as the trainer sets up, not as the model meets the tools, when transformers doesn't render a tool given
+    as its JSON Schema as it is."""
+    [rendered], _ = render_jinja_template([[]], tools=tools, chat_template="{{ tools | tojson }}")
+    if changed := [tool.__name__ for tool, shown in zip(tools, json.loads(rendered), strict=True) if shown != tool]:
+        raise RuntimeError(f"this transformers renders the tools {changed} other than as their env's JSON Schema, so "
+                           "TRL would show the model other tools than the env's")
 
 
 def _reduce_environment_class(environment: _EnvironmentClass) -> tuple[Any, ...] | str:

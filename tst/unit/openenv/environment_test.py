@@ -21,9 +21,9 @@ AGAIN = {**TURN, "id": "again", "prompt_id": "again", "prompt": "Add another.", 
 
 
 class _Tools:
-    """Stands in for the proxy's ``ToolSession``: every env offers ``offered``, and a call answers with what ``answers`` maps
-    its tool to, raising it when it's an exception. A session opens once ``release``, a ``threading.Event`` since the
-    in-process proxy runs on a loop of its own, is set, when there is one."""
+    """Stands in for the proxy's ``ToolSession``: every env offers ``offered``, tools or their names, and a call answers
+    with what ``answers`` maps its tool to, raising it when it's an exception. A session opens once ``release``, a
+    ``threading.Event`` since the in-process proxy runs on a loop of its own, is set, when there is one."""
 
     def __init__(self, offered, answers):
         self.offered, self.answers, self.closed, self.release = offered, answers, 0, None
@@ -38,8 +38,9 @@ class _Tools:
                 return self
 
             async def list_tools(self):
-                return [EnvironmentTool(name=name, description=f"{name}.", inputSchema={"type": "object"})
-                        for name in tools.offered]
+                return [tool if isinstance(tool, EnvironmentTool)
+                        else EnvironmentTool(name=tool, description=f"{tool}.", inputSchema={"type": "object"})
+                        for tool in tools.offered]
 
             async def call_tool(self, name, arguments=None):
                 answer = tools.answers.get(name, ToolResult(content=[{"type": "text", "text": f"{name} {arguments}"}]))

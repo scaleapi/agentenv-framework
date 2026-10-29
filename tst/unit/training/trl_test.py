@@ -24,6 +24,7 @@ from agent_env.training.trl import ENDED, FAILED, AgentEnv
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
 from tst.unit.task.episode.run_test import ALICE, ITEMS, PANTRY, PANTRY_MCP, REPLIES, TURN, _tool_sessions
+from tst.unit.training.tools_test import called_by_qwen3, shown_to_qwen3
 
 PLAYED = [ITEMS, ALICE, TURN, REPLIES]
 SYSTEM = {"role": "system", "content": "You keep the items."}
@@ -325,6 +326,59 @@ def test_tasks_whose_agent_gets_other_tools_take_trls_multi_environment_mode(ser
     assert pantry.take_item() == f"take_item on {PANTRY_MCP}"
     pantry.end_turn(response="Took one.")
     assert pantry.get_reward() == 1.0
+
+
+STACK = EnvironmentTool(name="stack_crates", description="Stack crates on a pallet.", inputSchema={
+    "type": "object", "required": ["pallet", "crates"], "properties": {
+        "pallet": {"type": "string", "enum": ["north", "south"]},
+        "crates": {"type": "array", "description": "bottom crate first", "items": {
+            "type": "object", "required": ["kind"], "properties": {
+                "kind": {"type": "string", "description": "what the crate holds"},
+                "size": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}}}}}})
+#: What TRL shows the model of the tools ``add_item`` and ``STACK``: each as its env publishes it, and ``end_turn`` as
+#: TRL has shown it since the factory's first release, its method's schema.
+SHOWN = [
+    {"type": "function", "function": {"name": "add_item", "description": "add_item.", "parameters": {"type": "object"}}},
+    {"type": "function", "function": {
+        "name": "end_turn",
+        "description": "End your turn with your reply. The episode goes on to your next turn, or ends and is scored.",
+        "parameters": {"type": "object", "properties": {
+            "response": {"type": "string", "nullable": True, "description": "Your reply."}}},
+        "return": {"type": "string"}}},
+    {"type": "function", "function": {"name": "stack_crates", "description": "Stack crates on a pallet.",
+                                      "parameters": STACK.inputSchema}}]
+
+
+def test_trl_shows_the_model_each_tool_as_its_env_publishes_it_and_end_turn_as_before_and_calls_them(served, tools):
+    tools("add_item", STACK)
+    env = served({"a": PLAYED})
+    environment = env.factory()
+    fetched = [getattr(environment, name) for name in _tools(env.factory) if name not in ("reset", "get_reward")]
+
+    assert shown_to_qwen3(fetched) == SHOWN
+    from_the_class = env.factory.stack_crates.__get__(environment)
+    assert shown_to_qwen3([from_the_class])[0]["function"]["parameters"]["properties"]["crates"]["items"] == {
+        "type": "object"}
+    environment.reset(**env.dataset[0])
+    crates = [{"kind": "apples", "size": [1, 1, 0.5]}]
+    calls = called_by_qwen3(fetched, {"name": "stack_crates", "arguments": {"pallet": "north", "crates": crates}},
+                            {"name": "end_turn", "arguments": {"response": "Added a crate."}})
+    by_name = {tool.__name__: tool for tool in fetched}
+
+    assert [by_name[call["function"]["name"]](**call["function"]["arguments"]) for call in calls] == [
+        f"stack_crates {{'pallet': 'north', 'crates': {crates}}}", ENDED]
+    assert environment.get_reward() == 1.0
+
+
+def test_a_transformers_that_renders_a_tool_other_than_as_its_schema_stops_the_factory(served, tools, monkeypatch):
+    tools(STACK)
+    env = served({"a": PLAYED})
+    monkeypatch.setattr(trl, "render_jinja_template", lambda conversations, tools, chat_template: (
+        [json.dumps([{**tool, "function": {**tool["function"], "parameters": {"type": "object"}}} for tool in tools])],
+        []))
+
+    with pytest.raises(RuntimeError, match=r"renders the tools \['stack_crates'\] other than as their env's"):
+        env.factory  # noqa: B018
 
 
 def test_a_tool_trl_cant_call_is_refused_with_how_to_fix_it(served, tools):
