@@ -200,17 +200,21 @@ class PluginFailures:
 
 
 class _DefaultEnvId:
-    """One of Config's default infra env ids: an id set in code, by ``configure()`` or assignment, beats ``[envs]`` in
-    config.toml, which beats the built-in id."""
+    """One of Config's default infra env ids, a dataclass field: an id set in code, by ``Config(...)``,
+    ``configure()`` or assignment, beats ``[envs]`` in config.toml, which beats the built-in id. None unsets it."""
 
     def __set_name__(self, owner: type, name: str) -> None:
         self.name = name
 
     def __get__(self, config: Optional["Config"], owner: Optional[type] = None) -> Any:
-        return self if config is None else config.get_default_env_id(self.name)
+        # On the class, the field's default: nothing set in code.
+        return None if config is None else config.get_default_env_id(self.name)
 
-    def __set__(self, config: "Config", value: str) -> None:
-        config._env_ids_in_code[self.name] = value
+    def __set__(self, config: "Config", value: Optional[str]) -> None:
+        if value is None:
+            config._env_ids_in_code.pop(self.name, None)
+        else:
+            config._env_ids_in_code[self.name] = value
 
 
 # Identity, not field equality: a Config owns a document, so two are interchangeable only if
@@ -225,8 +229,11 @@ class Config:
     agent_sandbox_mode: str = field(
         default_factory=lambda: os.getenv("AGENT_SANDBOX_MODE") or _default_sandbox_mode()
     )
-    # The default infra env ids set in code; read them as default_gateway_env_id and its siblings below.
-    _env_ids_in_code: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    # The default infra env ids set in code, which the three fields below write and read through.
+    _env_ids_in_code: dict[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
+    default_gateway_env_id: Optional[str] = _DefaultEnvId()  # type: ignore[assignment]
+    default_service_db_env_id: Optional[str] = _DefaultEnvId()  # type: ignore[assignment]
+    default_website_browser_env_id: Optional[str] = _DefaultEnvId()  # type: ignore[assignment]
     default_a2a_agent_id: Optional[str] = None
     modal_default_region: str = field(
         default_factory=lambda: os.getenv("AGENT_ENV_MODAL_REGION", "us-east-1")
@@ -235,9 +242,6 @@ class Config:
 
     _secret: Optional[Mapping[str, Any]] = field(default=None, repr=False, compare=False)
 
-    default_gateway_env_id = _DefaultEnvId()
-    default_service_db_env_id = _DefaultEnvId()
-    default_website_browser_env_id = _DefaultEnvId()
     _snapshot: Optional[config_snapshot.Snapshot] = field(default=None, repr=False, compare=False)
     _snapshot_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
     _document_store: Optional["DocumentStore"] = field(default=None, repr=False, compare=False)
@@ -1040,12 +1044,9 @@ def configure(
     if default_a2a_agent_id is not None:
         overrides["default_a2a_agent_id"] = default_a2a_agent_id
     config_path = config_loader.discover_config_path()
-    _config = Config(**overrides)
-    for name, env_id in (("default_gateway_env_id", default_gateway_env_id),
-                         ("default_service_db_env_id", default_service_db_env_id),
-                         ("default_website_browser_env_id", default_website_browser_env_id)):
-        if env_id is not None:
-            setattr(_config, name, env_id)
+    _config = Config(**overrides, default_gateway_env_id=default_gateway_env_id,
+                     default_service_db_env_id=default_service_db_env_id,
+                     default_website_browser_env_id=default_website_browser_env_id)
     if document_store is not None:
         _config.set_document_store(document_store)
     if image_store is not None:

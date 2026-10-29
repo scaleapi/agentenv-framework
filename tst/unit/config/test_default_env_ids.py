@@ -38,6 +38,12 @@ def test_an_id_set_in_code_beats_the_envs_key(name):
     assert getattr(config, name) == "from-code"
 
 
+@pytest.mark.parametrize("name", BUILT_IN)
+def test_a_constructor_argument_beats_the_envs_key_and_none_leaves_it(name):
+    assert getattr(config_with_document({"envs": {name: "from-file"}}, **{name: "from-code"}), name) == "from-code"
+    assert getattr(config_with_document({"envs": {name: "from-file"}}, **{name: None}), name) == "from-file"
+
+
 def test_configure_sets_one_on_the_singleton_and_leaves_the_others():
     try:
         configure(default_website_browser_env_id="from-code")
