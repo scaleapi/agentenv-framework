@@ -8,7 +8,7 @@ import pytest
 from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.env.published_images import AGENT_IMAGES
 from agent_env.providers.sandbox_providers import host_images
-from tst.unit.bundle._support import DIGEST, listing
+from tst.unit.bundle._support import CLAUDE_CODE_IMAGE, DIGEST, listing
 
 
 @pytest.fixture
@@ -50,4 +50,4 @@ def agents_published(monkeypatch):
     """The registry serves each shipped agent's image, under DIGEST, and nothing else."""
     refs = {image.ref() for image in AGENT_IMAGES}
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in refs else None)
-    return AGENT_IMAGES[0].ref()
+    return CLAUDE_CODE_IMAGE.ref()

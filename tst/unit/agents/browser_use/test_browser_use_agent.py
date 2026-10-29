@@ -65,6 +65,16 @@ def test_a_turn_returns_the_answer_and_a_context_keeps_one_conversation(client: 
     assert json.loads(record.read_text())["historyFile"] != turn["historyFile"]
 
 
+def test_a_registration_names_the_browser_and_agent_config_overrides_it(
+        client: TestClient, record: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BROWSER_USE_A2A_CDP_URL", "http://172.17.0.1:9222")
+    _send(client, "hi")
+    assert json.loads(record.read_text())["cdpUrl"] == "http://172.17.0.1:9222"
+    client.post("/ext/agent-config", json={"cdp_url": "ws://chrome:9222/devtools/browser/b"})
+    _send(client, "again")
+    assert json.loads(record.read_text())["cdpUrl"] == "ws://chrome:9222/devtools/browser/b"
+
+
 def test_a_run_that_stops_early_fails_with_its_reason(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FAKE_SCENARIO", "max_steps")
     task = _send(client, "too long")

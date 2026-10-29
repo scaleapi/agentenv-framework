@@ -254,7 +254,7 @@ def test_verify_record_refuses_a_digest_the_registry_doesnt_serve_under_its_tag(
 
 
 @pytest.mark.parametrize("record, problem", [
-    ({"images": []}, "records no agentenv-claude-code, agentenv-codex, agentenv-db-mcp"),
+    ({"images": []}, "records no agentenv-browser-use, agentenv-claude-code, agentenv-codex"),
     ({"images": [], "extra": 1}, "it holds ['extra', 'images']"),
     ({"images": [{"repository": "ghcr.io/someone/thing", "tag": _TAG, "digest": _DIGEST}]},
      "'ghcr.io/someone/thing' isn't an image agent-env ships"),

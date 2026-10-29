@@ -76,7 +76,7 @@ class BrowserUseAgent(AgentEnvAgent):
             "systemPrompt": config.system_prompt,
             "maxSteps": config.max_steps,
             "timeoutMs": max(config.timeout_seconds - DELIVERY_SECONDS, 1) * 1000,
-            "cdpUrl": config.cdp_url,
+            "cdpUrl": config.cdp_url or os.environ.get("BROWSER_USE_A2A_CDP_URL"),
             "mcpServers": {name: {"url": s["url"], "headers": s.get("headers") or {}} for name, s in request.mcp_servers.items()},
             "workspace": str(workspace),
             # Browser Use Pi refuses a history saved under another model, so a model change starts a new conversation.

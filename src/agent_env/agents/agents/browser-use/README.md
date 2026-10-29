@@ -2,13 +2,15 @@
 
 [Browser Use Pi](https://github.com/browser-use/browser-use-pi) wrapped with `agentenv_protocol.a2a_agent`, shipped in
 the `agents` bundle as `@local/agentenv-framework/agents/browser-use`, with alias `browser-use`. Browser Use Pi drives
-a real browser over CDP from a persistent JavaScript REPL. `package-lock.json` pins `@browser_use/pi` to 0.1.0.
+a real browser over CDP from a persistent JavaScript REPL. `package-lock.json` pins `@browser_use/pi` to 0.1.0, and
+`package.json` overrides the `undici` and `brace-expansion` it pins with their patched releases.
 
 Each turn runs `node agent.mjs` once. It calls the `[model]` endpoint as an OpenAI-compatible one
 (`LITELLM_BASE_URL`, `LITELLM_API_KEY`, `LITELLM_EXTRA_HEADERS`), and the task env's MCP tools are the agent's tools
 next to the browser, named `<server>__<tool>`. The browser is a [Browser Use Cloud](https://cloud.browser-use.com)
-browser, which needs `BROWSER_USE_API_KEY`, or the Chrome DevTools endpoint `cdp_url` names. A context's turns
-continue one conversation through a saved history file; each turn opens a fresh browser.
+browser, which needs `BROWSER_USE_API_KEY`, or the Chrome DevTools endpoint `cdp_url` names, else
+`BROWSER_USE_A2A_CDP_URL`, which a registration can set with `--env-var`. A context's turns continue one conversation
+through a saved history file; each turn opens a fresh browser.
 
 ```bash
 agent-env a2a-agent put --id browser-use --dockerfile src/agent_env/agents/agents/browser-use/Dockerfile \
@@ -18,7 +20,7 @@ agent-env run agents --task browser-use-smoke
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `model` (else `BROWSER_USE_A2A_MODEL`), `effort`, `system_prompt` (added to Browser Use Pi's instructions), `max_steps`, `cdp_url`, `timeout_seconds` |
+| `agent-config/v1` | `model` (else `BROWSER_USE_A2A_MODEL`), `effort`, `system_prompt` (added to Browser Use Pi's instructions), `max_steps`, `cdp_url` (else `BROWSER_USE_A2A_CDP_URL`), `timeout_seconds` |
 | `mcp-config/v1` | SDK default; each server's tools are listed per turn and called over streamable HTTP |
 | `trajectory/v1` | Browser Use Pi's agent events, live, format `browser-use-pi-events/1`, without the streamed `message_update` / `tool_execution_update` deltas |
 
