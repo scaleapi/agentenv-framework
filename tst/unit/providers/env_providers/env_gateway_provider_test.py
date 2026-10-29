@@ -1302,10 +1302,15 @@ def test_needs_local_postgres_reflects_provider_type():
 
 
 @pytest.mark.asyncio
-async def test_deploy_via_vm_prepares_schemas_including_website_browser():
-    """The gateway auto-adds the browser MCP when websites are present, then drives stage 2
-    (prepare) with the full post-append service list — so a remote store provisions the browser's
+@pytest.mark.parametrize("overrides, browser_name", [
+    ({}, "website-browser"),
+    ({"website_browser_env_id": "wb-run"}, "wb-run"),
+], ids=["configured-default", "run-override"])
+async def test_deploy_via_vm_prepares_schemas_including_website_browser(overrides, browser_name):
+    """The gateway auto-adds the browser MCP when websites are present, the run's own when it names one, then drives
+    stage 2 (prepare) with the full post-append service list — so a remote store provisions the browser's
     schema. This replaces the earlier band-aid that made Env.deploy compute that list."""
+    from agent_env.config import run_env_ids
     from agent_env.env.gateway import GatewayMode
     from agent_env.providers.env_state import DatabaseStateProvider
 
@@ -1329,7 +1334,7 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser():
         env.environment_name = "website-browser" if env_id == "wb-id" else env_id
         return env
 
-    with patch("agent_env.env.env.Env.get", side_effect=_fake_env_get), \
+    with run_env_ids(overrides), patch("agent_env.env.env.Env.get", side_effect=_fake_env_get), \
          patch("agent_env.config.get_config", return_value=MagicMock(
              default_gateway_env_id="gw-id", default_website_browser_env_id="wb-id")), \
          patch.object(gp, "create_docker_compose", side_effect=_Stop) as compose:
@@ -1349,9 +1354,9 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser():
 
     state_provider.prepare.assert_awaited_once()
     names = state_provider.prepare.call_args.args[0]
-    assert set(names) == {"slack", "shop", "website-browser"}
+    assert set(names) == {"slack", "shop", browser_name}
     assert compose.call_args.kwargs["mcp_server_name"] == "crm"
-    browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == "website-browser")
+    browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == browser_name)
     assert browser.card_port == 18766  # its card is the recorder's
 
 

@@ -1,7 +1,7 @@
-"""The website browser's recorder: computer-recording/v1 of the page Playwright MCP drives, from Chrome DevTools
+"""The Playwright MCP browser's recorder: computer-recording/v1 of the page Playwright MCP drives, from Chrome DevTools
 screencast frames, on a card and port of its own beside the MCP server. It is idle until a recording starts, which
 finds the browser through the remote debugging port Playwright opens for an ``--isolated`` Chromium and follows the
-page the agent is on. It runs standalone in the website browser's image, so it imports only
+page the agent is on. It runs standalone in the browser's image, so it imports only
 ``agentenv-framework-protocol[computer]`` and, to talk to the browser, ``websockets``."""
 from __future__ import annotations
 
@@ -31,10 +31,10 @@ from agentenv_protocol.agent_env_environment import (
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.computer.recording import RecordedFrame, RecordHints, Recording, Recordings, recording_params
 
-logger = logging.getLogger("website-browser-recorder")
+logger = logging.getLogger("playwright-mcp-recorder")
 
 #: The port the recorder serves its card on, unless RECORDER_PORT says another; the gateway reads the browser's card
-#: there (agent_env.env.envs.website_browser.WEBSITE_BROWSER_RECORDER_PORT).
+#: there (agent_env.env.envs.playwright_mcp.PLAYWRIGHT_MCP_RECORDER_PORT).
 DEFAULT_PORT = 18766
 #: How often the browser is looked for while a recording has none.
 FIND_S = 0.5
@@ -222,9 +222,9 @@ class Screencast:
             self._session = session
 
 
-@environment_card(name="website-browser")
+@environment_card(name="playwright-mcp")
 class BrowserRecorder(AgentEnvEnvironment):
-    """computer-recording/v1 of the website browser's page; the browser's tools stay Playwright MCP's."""
+    """computer-recording/v1 of the Playwright MCP browser's page; the browser's tools stay Playwright MCP's."""
 
     recording = Recording()
 

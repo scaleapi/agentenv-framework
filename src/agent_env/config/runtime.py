@@ -79,6 +79,10 @@ _HUMAN_A2A_CONFIG_KEY = "default_human_a2a_url"
 _AGENTS_CONFIG_SECTION = "agents"
 _AGENTS_CONFIG_KEY = "default_a2a_agent_id"
 _DEFAULT_A2A_AGENT_ID = "@local/agentenv-framework/agents/claude-code"  # the agents bundle's Claude Code
+_ENVS_CONFIG_SECTION = "envs"
+# The infra envs a deploy runs on, which [envs] can name, each by its built-in id.
+_DEFAULT_ENV_IDS = {"default_gateway_env_id": "default", "default_service_db_env_id": "default-db",
+                    "default_website_browser_env_id": "playwright-mcp"}
 
 
 def _validated_human_a2a_url(value: object, source: str) -> str:
@@ -91,6 +95,12 @@ def _validated_human_a2a_url(value: object, source: str) -> str:
 def _validated_a2a_agent_id(value: object, source: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{source} must be a non-empty string A2A agent id, got {value!r}")
+    return value
+
+
+def _validated_env_id(value: object, source: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{source} must be a non-empty string env id, got {value!r}")
     return value
 
 
@@ -145,6 +155,9 @@ RESOLVED_KEYS: tuple[ResolvedKey, ...] = (
                 env_var="AGENT_ENV_HUMAN_A2A_URL", field="default_human_a2a_url"),
     ResolvedKey(("agents", "default_a2a_agent_id"), field="default_a2a_agent_id",
                 default=_DEFAULT_A2A_AGENT_ID, default_label="built-in default in config.runtime"),
+    *(ResolvedKey((_ENVS_CONFIG_SECTION, name), field=name, default=env_id,
+                  default_label="built-in default in config.runtime")
+      for name, env_id in _DEFAULT_ENV_IDS.items()),
 )
 _KEY_BY_NAME = {key.name: key for key in RESOLVED_KEYS}
 
@@ -186,6 +199,20 @@ class PluginFailures:
         return {group: dict(failures) for group, failures in groups.items() if failures}
 
 
+class _DefaultEnvId:
+    """One of Config's default infra env ids: an id set in code, by ``configure()`` or assignment, beats ``[envs]`` in
+    config.toml, which beats the built-in id."""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __get__(self, config: Optional["Config"], owner: Optional[type] = None) -> Any:
+        return self if config is None else config.get_default_env_id(self.name)
+
+    def __set__(self, config: "Config", value: str) -> None:
+        config._env_ids_in_code[self.name] = value
+
+
 # Identity, not field equality: a Config owns a document, so two are interchangeable only if
 # they are the same object. Field equality called two on different config files equal.
 @dataclass(eq=False)
@@ -198,9 +225,8 @@ class Config:
     agent_sandbox_mode: str = field(
         default_factory=lambda: os.getenv("AGENT_SANDBOX_MODE") or _default_sandbox_mode()
     )
-    default_gateway_env_id: str = "default"
-    default_service_db_env_id: str = "default-db"
-    default_website_browser_env_id: str = "website-browser"
+    # The default infra env ids set in code; read them as default_gateway_env_id and its siblings below.
+    _env_ids_in_code: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     default_a2a_agent_id: Optional[str] = None
     modal_default_region: str = field(
         default_factory=lambda: os.getenv("AGENT_ENV_MODAL_REGION", "us-east-1")
@@ -208,6 +234,10 @@ class Config:
     default_human_a2a_url: Optional[str] = None
 
     _secret: Optional[Mapping[str, Any]] = field(default=None, repr=False, compare=False)
+
+    default_gateway_env_id = _DefaultEnvId()
+    default_service_db_env_id = _DefaultEnvId()
+    default_website_browser_env_id = _DefaultEnvId()
     _snapshot: Optional[config_snapshot.Snapshot] = field(default=None, repr=False, compare=False)
     _snapshot_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
     _document_store: Optional["DocumentStore"] = field(default=None, repr=False, compare=False)
@@ -384,6 +414,21 @@ class Config:
             return _validated_human_a2a_url(resolved, key.file_label)
         raise ConfigError(f"No human-A2A URL configured: set [{_HUMAN_A2A_CONFIG_SECTION}] {_HUMAN_A2A_CONFIG_KEY} or AGENT_ENV_HUMAN_A2A_URL")
 
+    def get_default_env_id(self, name: str) -> str:
+        """The default infra env id ``name`` (``default_gateway_env_id``, ``default_service_db_env_id`` or
+        ``default_website_browser_env_id``): one set in code > ``[envs] <name>`` in config.toml > the built-in id."""
+        key = _KEY_BY_NAME[f"{_ENVS_CONFIG_SECTION}.{name}"]
+        for layer in self.key_candidates(key):
+            if layer.kind == KIND_INSTALLED:
+                return _validated_env_id(layer.raw, key.field)
+            if layer.kind == KIND_DEFAULT:
+                return layer.raw
+            # Only here, where the file is what we are about to take, does a broken file matter.
+            self.section(_ENVS_CONFIG_SECTION)
+            resolved = config_loader.interpolate(layer.raw, secret_resolver=self._resolve_secret)
+            return _validated_env_id(resolved, key.file_label)
+        return _DEFAULT_ENV_IDS[name]
+
     def get_default_a2a_agent_id(self) -> str:
         """The agent a ``deploy_agent`` step without an id deploys:
         ``configure(default_a2a_agent_id=...)`` > ``[agents] default_a2a_agent_id`` > the agents bundle's Claude Code."""
@@ -508,7 +553,8 @@ class Config:
             if override is not None:
                 candidates.append(Layer(KIND_ENV, f"${key.env_var}", override))
         if key.field is not None:
-            installed = getattr(self, key.field, None)
+            installed = (self._env_ids_in_code.get(key.field) if key.field in _DEFAULT_ENV_IDS
+                         else getattr(self, key.field, None))
             if installed is not None:
                 candidates.append(Layer(KIND_INSTALLED, f"configure({key.field}=...)", installed))
         from_file = self.file_candidate(key.toml_path)
@@ -967,6 +1013,9 @@ def configure(
     *,
     default_human_a2a_url: Optional[str] = None,
     default_a2a_agent_id: Optional[str] = None,
+    default_gateway_env_id: Optional[str] = None,
+    default_service_db_env_id: Optional[str] = None,
+    default_website_browser_env_id: Optional[str] = None,
     document_store: Optional[DocumentStore] = None,
     image_store: Optional[ImageStore] = None,
     object_store: Optional[ObjectStore] = None,
@@ -977,7 +1026,9 @@ def configure(
     Pass ``document_store`` / ``image_store`` / ``object_store`` / ``secret_store`` to install explicit backends on the new config.
 
     ``default_human_a2a_url`` overrides config.toml ``[conversations]`` but not
-    ``AGENT_ENV_HUMAN_A2A_URL``. ``default_a2a_agent_id`` overrides config.toml ``[agents]``.
+    ``AGENT_ENV_HUMAN_A2A_URL``. ``default_a2a_agent_id`` overrides config.toml ``[agents]``, and
+    ``default_gateway_env_id``, ``default_service_db_env_id`` and ``default_website_browser_env_id`` override
+    ``[envs]``.
 
     Select the stage *before* calling this, by pointing ``AGENT_ENV_CONFIG`` at a per-stage
     config file (a plugin can do this for you, for instance from a CLI root option it registers).
@@ -990,6 +1041,11 @@ def configure(
         overrides["default_a2a_agent_id"] = default_a2a_agent_id
     config_path = config_loader.discover_config_path()
     _config = Config(**overrides)
+    for name, env_id in (("default_gateway_env_id", default_gateway_env_id),
+                         ("default_service_db_env_id", default_service_db_env_id),
+                         ("default_website_browser_env_id", default_website_browser_env_id)):
+        if env_id is not None:
+            setattr(_config, name, env_id)
     if document_store is not None:
         _config.set_document_store(document_store)
     if image_store is not None:
@@ -1032,16 +1088,18 @@ def get_runner():
 
 
 _RUN_ENV_IDS: ContextVar[Mapping[str, str]] = ContextVar("agent_env_run_env_ids", default={})
-# The user_overrides keys naming the gateway and service-db envs a run deploys on, over the configured defaults.
+# The user_overrides keys naming the gateway, service-db and website browser envs a run deploys on, over the
+# configured defaults.
 GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE = "gateway_env_id", "service_db_env_id"
+WEBSITE_BROWSER_OVERRIDE = "website_browser_env_id"
+_RUN_ENV_ID_KEYS = (GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBSITE_BROWSER_OVERRIDE)
 
 
 @contextlib.contextmanager
 def run_env_ids(user_overrides: Mapping[str, Any]) -> Iterator[None]:
-    """Within a run, the ``gateway_env_id`` and ``service_db_env_id`` its ``user_overrides`` name win over the
-    configured defaults, in whichever process runs it."""
-    token = _RUN_ENV_IDS.set(
-        {key: user_overrides[key] for key in (GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE) if user_overrides.get(key)})
+    """Within a run, the ``gateway_env_id``, ``service_db_env_id`` and ``website_browser_env_id`` its
+    ``user_overrides`` name win over the configured defaults, in whichever process runs it."""
+    token = _RUN_ENV_IDS.set({key: user_overrides[key] for key in _RUN_ENV_ID_KEYS if user_overrides.get(key)})
     try:
         yield
     finally:
@@ -1056,6 +1114,12 @@ def gateway_env_id(config: Config) -> str:
 def service_db_env_id(config: Config) -> str:
     """The service-db env a deploy uses: the run's override, else ``config.default_service_db_env_id``."""
     return _RUN_ENV_IDS.get().get(SERVICE_DB_OVERRIDE) or config.default_service_db_env_id
+
+
+def website_browser_env_id(config: Config) -> str:
+    """The website browser env a deploy with websites adds: the run's override, else
+    ``config.default_website_browser_env_id``."""
+    return _RUN_ENV_IDS.get().get(WEBSITE_BROWSER_OVERRIDE) or config.default_website_browser_env_id
 
 
 def get_config() -> Config:

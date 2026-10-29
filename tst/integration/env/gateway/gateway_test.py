@@ -33,9 +33,9 @@ from agent_env.env.gateway.get_time import (
     _SCHEMA as GET_TIME_SCHEMA,
 )
 from agent_env.env.envs.service_db import ServiceDBEnv
-from agent_env.env.envs.website_browser import (
-    WEBSITE_BROWSER_IMAGE_TAG,
-    WEBSITE_BROWSER_ENVIRONMENT_NAME,
+from agent_env.env.envs.playwright_mcp import (
+    PLAYWRIGHT_MCP_IMAGE_TAG,
+    PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
 )
 from agent_env.env.snapshot_store import compute_env_fingerprint
 from agent_env.config import get_config
@@ -118,12 +118,12 @@ ALL_MCP_SERVER_IMAGES = [
     ),
 ]
 
-WEBSITE_BROWSER_IMAGE = DockerImageConfig(
-    name="website-browser",
-    dockerfile=ENVS_DIR / "website_browser" / "Dockerfile",
-    tag=WEBSITE_BROWSER_IMAGE_TAG,
-    context=ENVS_DIR / "website_browser",
-    service_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
+PLAYWRIGHT_MCP_IMAGE = DockerImageConfig(
+    name="playwright-mcp",
+    dockerfile=ENVS_DIR / "playwright_mcp" / "Dockerfile",
+    tag=PLAYWRIGHT_MCP_IMAGE_TAG,
+    context=ENVS_DIR / "playwright_mcp",
+    service_name=PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
 )
 
 SLACK_WEBSITE_BACKEND_IMAGE = DockerImageConfig(
@@ -233,8 +233,8 @@ def service_db_env() -> ServiceDBEnv:
 
 @pytest.fixture(scope="module")
 def website_browser_env() -> MCPServerEnv:
-    """Build website-browser image, create artifact, and create MCPServerEnv."""
-    img = WEBSITE_BROWSER_IMAGE
+    """Build the Playwright MCP browser's image, create artifact, and create MCPServerEnv."""
+    img = PLAYWRIGHT_MCP_IMAGE
     logger.info(f"Building {img.name} Docker image...")
     result = subprocess.run(
         ["docker", "build", "--platform", "linux/amd64",
@@ -246,16 +246,16 @@ def website_browser_env() -> MCPServerEnv:
         raise RuntimeError(f"{img.name} build failed: {result.stderr}")
 
     artifact = DockerImageArtifact.put(
-        id=f"website-browser-{img.name}",
-        description="Website browser MCP server image",
+        id=f"playwright-mcp-{img.name}",
+        description="Playwright MCP website browser image",
         image_name=img.tag,
     )
     env = MCPServerEnv.put(
-        id="website-browser",
+        id="playwright-mcp",
         docker_image_artifact=artifact,
-        environment_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
+        environment_name=PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
     )
-    logger.info(f"Created website-browser MCPServerEnv: {env.id} version={env.version}")
+    logger.info(f"Created playwright-mcp MCPServerEnv: {env.id} version={env.version}")
     return env
 
 

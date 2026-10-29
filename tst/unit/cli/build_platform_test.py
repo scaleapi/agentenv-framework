@@ -8,12 +8,12 @@ import pytest
 from click.testing import CliRunner
 
 from agent_env.cli import cli
-from agent_env.env.envs.website_browser import WEBSITE_BROWSER_IMAGE_TAG
+from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_IMAGE_TAG
 from agent_env.utils.docker.build import DockerBuildError
 
 gateway = importlib.import_module("agent_env.cli.env.gateway")  # the packages export the click commands
 service_db = importlib.import_module("agent_env.cli.env.service_db")
-website_browser = importlib.import_module("agent_env.cli.env.website_browser")
+playwright_mcp = importlib.import_module("agent_env.cli.env.playwright_mcp")
 
 
 def test_platform_option_wired_on_mcp_server_put():
@@ -48,13 +48,13 @@ def _put_commands(tmp_path):
         "service-db": ("agent_env.env.bootstrap", ["env", "service-db", "put", "--id", "x"],
                        (service_db.SERVICE_DB_DOCKERFILE, service_db.SERVICE_DB_DOCKERFILE.parent,
                         service_db.SERVICE_DB_IMAGE_NAME), None),
-        "website-browser": ("agent_env.env.bootstrap", ["env", "website-browser", "put", "--id", "x"],
-                            (website_browser.WEBSITE_BROWSER_DOCKERFILE, website_browser.WEBSITE_BROWSER_CONTEXT,
-                             WEBSITE_BROWSER_IMAGE_TAG), None),
+        "playwright-mcp": ("agent_env.env.bootstrap", ["env", "playwright-mcp", "put", "--id", "x"],
+                           (playwright_mcp.PLAYWRIGHT_MCP_DOCKERFILE, playwright_mcp.PLAYWRIGHT_MCP_CONTEXT,
+                            PLAYWRIGHT_MCP_IMAGE_TAG), None),
     }
 
 
-@pytest.mark.parametrize("name", ["a2a-agent", "mcp-server", "website", "gateway", "service-db", "website-browser"])
+@pytest.mark.parametrize("name", ["a2a-agent", "mcp-server", "website", "gateway", "service-db", "playwright-mcp"])
 def test_each_put_builds_through_build_image_and_a_failed_build_is_one_line(tmp_path, name):
     module, argv, (dockerfile, context, tag), build_args = _put_commands(tmp_path)[name]
 

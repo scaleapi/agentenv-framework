@@ -34,7 +34,7 @@ from agent_env.env.envs.service_db import (
     DB_WEB_PORT,
     PGWEB_SERVICE_NAME,
 )
-from agent_env.env.envs.website_browser import WEBSITE_BROWSER_RECORDER_PORT
+from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_RECORDER_PORT
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
@@ -723,7 +723,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
-        from agent_env.config import gateway_env_id, get_config
+        from agent_env.config import gateway_env_id, get_config, website_browser_env_id
 
         website_configs = website_configs or []
         website_images = website_images or []
@@ -732,13 +732,13 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         config = get_config()
         gateway_env = Env.get(gateway_env_id(config))
 
-        # Auto-include website_browser MCP server when websites are present
+        # Auto-include the website browser's MCP server when websites are present
         if website_configs:
-            website_browser_env = Env.get(config.default_website_browser_env_id)
+            website_browser_env = Env.get(website_browser_env_id(config))
             browser_server = MCPServerConfig(
                 image=website_browser_env.docker_image_artifact.image_name,
                 environment_name=website_browser_env.environment_name,
-                card_port=WEBSITE_BROWSER_RECORDER_PORT,
+                card_port=PLAYWRIGHT_MCP_RECORDER_PORT,
             )
             mcp_servers = list(mcp_servers) + [browser_server]
             mcp_server_images = list(mcp_server_images) + [website_browser_env.docker_image_artifact]

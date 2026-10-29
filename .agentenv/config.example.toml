@@ -43,6 +43,11 @@ agent_default = "local"   # agents too
 # default_a2a_agent_id = "my-agent"   # what a deploy_agent step that names no agent deploys; by default the
 #                                     # agents bundle's Claude Code, @local/agentenv-framework/agents/claude-code
 
+# [envs]
+# default_gateway_env_id = "default"                 # the gateway every gateway deploy runs
+# default_service_db_env_id = "default-db"           # the service-db local Postgres state runs from
+# default_website_browser_env_id = "playwright-mcp"  # the website browser a deploy with websites adds
+
 # [model]
 # base_url = "http://localhost:4000"   # a model proxy on this machine; local containers reach it as host.docker.internal
 #                                      # on Linux, bind it to the Docker bridge address and use that: http://172.17.0.1:4000
