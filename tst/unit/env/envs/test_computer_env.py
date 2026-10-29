@@ -434,10 +434,13 @@ def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, doc
     assert ComputerArtifact.get(Env.get(env.id).metadata["computer"]["id"]).arch == ["amd64", "arm64"]
 
 
-def test_env_build_refuses_an_env_that_isnt_a_computer_env(base, driver, docker):
+def test_env_build_refuses_an_env_that_isnt_a_computer_env_or_an_app_naming_no_computer(base, driver, docker,
+                                                                                        tmp_path):
     refused = CliRunner().invoke(cli, ["env", "build", "--id", driver.id])
+    alone = CliRunner().invoke(cli, ["env", "build", "--id", _app(None, None, tmp_path / "mail").id])
 
     assert refused.exit_code == 1 and "is a computer_driver env; only a computer env is built" in refused.output
+    assert alone.exit_code == 1 and "names no computer and driver, so it has nothing to build alone" in alone.output
 
 
 @pytest.mark.asyncio
