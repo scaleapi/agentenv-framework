@@ -106,6 +106,9 @@ secret_name = "s"
 
 [envs]
 impls = []
+default_gateway_env_id = "a-gateway"
+default_service_db_env_id = "a-db"
+default_website_browser_env_id = "a-browser"
 
 [artifacts]
 impls = []
@@ -321,7 +324,8 @@ def test_every_key_a_reader_asks_for_is_declared(monkeypatch):
     readers = [config.env_registry, config.task_step_registry, config.artifact_registry, config.sandbox_registry,
                config.state_registry, sandbox_provider._default_sandbox_spec, sandbox_provider._agent_sandbox_spec,
                lambda: sandbox_provider.apply_default_attribution({}), explorer_app.explorer_settings,
-               lambda: explorer_plugin.load_plugins(source=config)]
+               lambda: explorer_plugin.load_plugins(source=config), lambda: config.default_gateway_env_id,
+               lambda: config.default_service_db_env_id, lambda: config.default_website_browser_env_id]
     for read in readers:
         try:
             read()

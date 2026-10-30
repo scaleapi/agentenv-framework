@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +43,29 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.env.envs.website_browser import WEBSITE_BROWSER_RECORDER_PORT
+from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME
+from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH
+from agent_env.providers.env_state.local_postgres import INIT_SCRIPT_MOUNT_PATH
 from agent_env.store.ids import derive_id
+from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
+
+
+# The servicedb's image line in a deploy's compose file, as the local Postgres state renders it.
+_SERVICE_DB_IMAGE = re.compile(rf"^(  {re.escape(DATABASE_SERVICE_NAME)}:\n    image: ).*$", re.MULTILINE)
+
+
+def snapshot_compose(compose: str, db_image: str) -> str:
+    """``compose``, the file a deploy wrote, with its servicedb started from ``db_image`` and without the schema init
+    script, whose work a snapshot already holds. Every other service stays as the deploy wrote it."""
+    if problem := image_reference_problem(db_image):
+        raise ValueError(problem)
+    swapped, count = _SERVICE_DB_IMAGE.subn(lambda match: match.group(1) + db_image, compose)
+    if count != 1:
+        raise RuntimeError(f"{DOCKER_COMPOSE_PATH} names a {DATABASE_SERVICE_NAME} image {count} times, not once, so "
+                           "the snapshot can't replace it")
+    return swapped.replace(f"    volumes:\n      - ./init-schemas.sql:{INIT_SCRIPT_MOUNT_PATH}\n", "")
 
 
 class MultiEnv(Env):
@@ -577,17 +599,19 @@ class MultiEnv(Env):
         raise ValueError(f"{type(self).__name__} '{self.id}' cannot load artifact '{getattr(artifact, 'id', '?')}' of type '{getattr(artifact, 'type', '?')}' — expected a EnvironmentArtifact or EnvironmentUniverseArtifact")
 
     async def _load_from_snapshot(self, snapshot) -> None:
-        """Swap the servicedb container with a pre-loaded snapshot image. Only supported when both the current deploy and the snapshot has env_state_type set to local_postgres"""
+        """Swap the servicedb container with a pre-loaded snapshot image. Only supported when both the current deploy and the snapshot has env_state_type set to local_postgres.
+
+        The compose file the deploy wrote is edited in place, not rendered again, so every other service, the website
+        browser included, keeps the image and name it was deployed with whatever config says now."""
         import asyncio
         from agent_env.artifact import Artifact, DockerImageArtifact
         from agent_env.env.env import Env
         from agent_env.env.envs.service_db import DB_USER
         from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
-        from agent_env.providers import EnvironmentGatewayProvider, MCPServerConfig, WebsiteConfig
-        from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME, DB_MCP_SERVICE_NAME, PGWEB_SERVICE_NAME
-        from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
+        from agent_env.providers import EnvironmentGatewayProvider
+        from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR
         from agent_env.providers.env_state import LocalPostgresStateProvider
-        from agent_env.config import gateway_env_id, get_config, service_db_env_id
+        from agent_env.config import get_config, service_db_env_id
 
         if self._sandbox is None:
             raise RuntimeError("Environment not deployed - call deploy() first")
@@ -599,44 +623,16 @@ class MultiEnv(Env):
         logger.info(f"Loading snapshot image {db_image.image_name} into sandbox...")
         await self._sandbox.load_docker_images([db_image])
 
-        # Regenerate docker-compose.yml with the snapshot image (no init-schemas volume needed)
-        logger.info("Regenerating docker-compose.yml with snapshot image...")
-        config = get_config()
-        gateway_env = Env.get(gateway_env_id(config))
-        service_db = Env.get(service_db_env_id(config))
-        service_db_config = service_db.to_config()
-        service_db_config.db_image = db_image.image_name
-
+        logger.info("Pointing docker-compose.yml's servicedb at the snapshot image...")
+        # The write adds back the newline cat returns, so the file doesn't grow a blank line each reload.
+        deployed = (await self._sandbox.exec_script(f"cat {DOCKER_COMPOSE_PATH}")).removesuffix("\n")
+        compose = snapshot_compose(deployed, db_image.image_name)
         gw = EnvironmentGatewayProvider()
         gw._sandbox = self._sandbox
-        gw._state_provider = LocalPostgresStateProvider(service_db_config=service_db_config)
+        # The state store is the deploy's local Postgres; the changelog triggers below run through it.
+        gw._state_provider = LocalPostgresStateProvider(service_db_config=Env.get(service_db_env_id(get_config())).to_config())
         gw._state_instance = LocalPostgresStateProvider.default_instance()
-        mcp_servers = [MCPServerConfig(image=env.docker_image_artifact.image_name, environment_name=env.environment_name) for env in self.mcp_server_envs]
-        website_configs = [
-            WebsiteConfig(backend_image=env.backend_docker_image_artifact.image_name, frontend_image=env.frontend_docker_image_artifact.image_name, environment_name=env.environment_name)
-            for env in self.website_envs
-        ]
-        if website_configs:
-            website_browser_env = Env.get(config.default_website_browser_env_id)
-            mcp_servers = list(mcp_servers) + [MCPServerConfig(image=website_browser_env.docker_image_artifact.image_name, environment_name=website_browser_env.environment_name,
-                                                               card_port=WEBSITE_BROWSER_RECORDER_PORT)]
-
-        compose_content = gw.create_docker_compose(
-            mcp_servers=mcp_servers,
-            gateway_image=gateway_env.docker_image_artifact.image_name,
-            gateway_port=AGENT_ENV_GATEWAY_MCP_PORT, website_configs=website_configs or None,
-            gateway_mode=self._gateway_mode,
-            state_provider=gw._state_provider,  # local-only, set above
-            state_instance=gw._state_instance,
-            host_port=self._sandbox.host_port,
-            host_ips=self._sandbox.host_ips,
-            extra_hosts=self._sandbox.extra_hosts,
-            mcp_server_name=self._mcp_server_name or self.name,
-        )
-        compose_content = compose_content.replace(
-            "    volumes:\n      - ./init-schemas.sql:/docker-entrypoint-initdb.d/init-schemas.sql\n", "",
-        )
-        await gw._write_file(self._sandbox, DOCKER_COMPOSE_PATH, compose_content)
+        await gw._write_file(self._sandbox, DOCKER_COMPOSE_PATH, compose)
 
         # Remove old servicedb container and its anonymous volume, then start fresh from snapshot image
         logger.info("Recreating servicedb container with snapshot image...")
@@ -660,13 +656,15 @@ class MultiEnv(Env):
         else:
             raise RuntimeError("servicedb not healthy after 60s")
 
-        # Recreate non-servicedb services so they reconnect to the new servicedb.
+        # Recreate every other service the compose file runs so it reconnects to the new servicedb.
         # Uses `up -d --force-recreate` which respects depends_on ordering
         # (MCP servers start before gateway), unlike `restart` which is unordered.
         environment_names = list(dict.fromkeys(
             [env.environment_name for env in self.mcp_server_envs] + [env.environment_name for env in self.website_envs]
         ))
-        svc_list = " ".join(map(shlex.quote, environment_names + [GATEWAY_SERVICE_NAME, PGWEB_SERVICE_NAME, DB_MCP_SERVICE_NAME]))
+        # BaseLoader keeps every name a string: safe_load reads a service named `on` as True and `123` as an int.
+        svc_list = " ".join(map(shlex.quote, (name for name in yaml.load(compose, Loader=yaml.BaseLoader)["services"]
+                                              if name != DATABASE_SERVICE_NAME)))
         logger.info(f"Recreating services: {svc_list}")
         await gw._compose_up(self._sandbox, f"--force-recreate {svc_list}")
         await gw._wait_for_gateway(self._sandbox, self._sandbox.host_port(AGENT_ENV_GATEWAY_MCP_PORT))

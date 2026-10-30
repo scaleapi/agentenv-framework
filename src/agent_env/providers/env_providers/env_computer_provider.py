@@ -96,7 +96,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy,
             environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
-            disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, ready_s=ready_timeout(env.composed_apps()))
+            disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
+            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type))
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:
@@ -136,7 +137,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                                       env=_environment(env, computer, values, params))
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
-        _require_name(env, await ready(deployed.environment_url, ready_timeout(env.composed_apps())))
+        card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), env.computer.os.type))
+        _require_name(env, card)
         await _require_display(deployed, values.get("resolution"))
 
 
@@ -161,7 +163,7 @@ def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
                  params: computer_params.ComputerParams) -> dict[str, str]:
     return {**settings_environment(computer, values, environment_name=env.environment_name,
                                    driver_settings=params.driver_settings),
-            **app_settings_environment(env.composed_apps(), params.app_settings)}
+            **app_settings_environment(env.composed_apps(), params.app_settings, env.computer.os.type)}
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:

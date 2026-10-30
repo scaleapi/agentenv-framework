@@ -183,9 +183,9 @@ ENV_FIXTURES = {
         files=ARTIFACT_FIXTURES["file_artifact_universe"](),
         declaration=AppDeclaration.model_validate({
             "supports": [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64"]}], "permissions": [],
-            "install": {"linux": {"files": ".", "python": "requirements.txt",
-                                  "services": [{"name": "notes", "command": "venv/bin/python serve.py"}]}},
-            "launch": {"at": "demand", "command": ["notes"]},
+            "os": {"linux": {"install": {"files": ".", "python": "requirements.txt",
+                                         "services": [{"name": "notes", "command": "venv/bin/python serve.py"}]},
+                             "launch": {"at": "demand", "command": ["notes"]}}},
             "settings": {"properties": {"signature": {"default": "", "title": "Signature", "type": "string"}},
                          "title": "Settings", "type": "object"},
             "skill": {"file": "skill.md"}, "data": ["data/add", "data/get"], "install_steps": [], "ready_checks": []}),

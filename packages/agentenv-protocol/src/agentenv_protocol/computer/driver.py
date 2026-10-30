@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from ..agent_env_environment import _CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication, environment_card
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
-from . import card, linux
+from . import _linux, card
 from .checks import check_features, check_names
 from .dataplane import DataPlane
 from .extensions import Extensions
@@ -111,6 +111,11 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         """Checks of the driver's own, run with the base class's by computer-ready/v1; never sends input."""
         return []
 
+    async def bundled_skill(self) -> tuple[str, str, dict[str, str]] | None:
+        """The skill the software this driver drives ships for agents, as its description, its SKILL.md body without
+        frontmatter, and its other files by relative path; the computer skill leads with it. None by default."""
+        return None
+
     def create_app(self) -> Any:
         self._computer_require_init()
         return super().create_app()
@@ -144,11 +149,11 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
 
     @default_for("run_in_session", os="linux")
     async def _computer_linux_run_in_session(self, argv: list, cwd: str | None, env: dict | None, timeout_s: float):
-        return await linux.run_in_session(argv, cwd, env, timeout_s, output_bytes=self.settings.exec_output_bytes)
+        return await _linux.run_in_session(argv, cwd, env, timeout_s, output_bytes=self.settings.exec_output_bytes)
 
     @default_for("write_files", os="linux")
     async def _computer_linux_write_files(self, files: dict) -> None:
-        await asyncio.to_thread(linux.write_files, files)
+        await asyncio.to_thread(_linux.write_files, files)
 
 
 def computer_driver(name: str | None = None, *, supports: list | None = None) -> Callable:

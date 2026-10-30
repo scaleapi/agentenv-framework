@@ -37,7 +37,7 @@ async def test_enable_docker_never_exposes_host_socket():
     # Security contract: never bind-mount the VM socket; redirect the agent to the
     # isolated daemon. The sandbox (VM) is the external boundary we assert against.
     agent = _agent()
-    agent._sandbox = AsyncMock(ON_THIS_MACHINE=False)
+    agent._sandbox = AsyncMock(ON_THIS_MACHINE=False, container_name="agent-api")
     await agent._run_container("img:1", 8000, {"LITELLM_API_KEY": "k"}, enable_docker=True)
     launch = agent._sandbox.exec_script.await_args.args[0]
     assert "/var/run/docker.sock" not in launch

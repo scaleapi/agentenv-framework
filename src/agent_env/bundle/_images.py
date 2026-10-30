@@ -34,15 +34,20 @@ class ImageJob:
     problem: str | None = None  # why it can't be written
     locked: Locked | None = None
     unlocked: str | None = None  # why its versions weren't pinned
+    ref: str | None = None  # the registry image the folder names, given for it, its context beside it
 
 
 def context_groups(jobs: list[ImageJob]) -> list[list[ImageJob]]:
     """``jobs`` grouped by the stored context they're built from: the same object when the store tells its content
-    (an ETag), else the same URL."""
+    (an ETag), else the same URL. A context in a store this config can't read is grouped by its URL, and its download
+    says why it can't be written."""
     groups: dict[tuple, list[ImageJob]] = {}
     for job in jobs:
         url = job.artifact.build_context_object_url
-        metadata = get_config().get_object_store_at(url).get_object_metadata_at(url)
+        try:
+            metadata = get_config().get_object_store_at(url).get_object_metadata_at(url)
+        except ValueError:
+            metadata = None
         job.size = metadata.size if metadata is not None else None
         key = ("etag", metadata.etag, metadata.size) if metadata is not None and metadata.etag else ("url", url)
         groups.setdefault(key, []).append(job)
@@ -91,6 +96,13 @@ def write_images(groups: list[list[ImageJob]], staging: Path, scratch: Path,
     for job in placed:
         sharing.setdefault((job.folder, job.pruned.dockerfile), []).append(job)
     for (folder, dockerfile), jobs in sharing.items():
+        if pulled := [job.key for job in jobs if job.ref is not None]:
+            # A run pulls an image given its ref, and a deploy that can't rebuilds it from this Dockerfile as written.
+            for job in jobs:
+                if job.ref is None:
+                    job.unlocked = (f"its Dockerfile is also the build context of {', '.join(pulled)}, which a run "
+                                    "pulls, so a build resolves them afresh")
+            continue
         _lock(jobs, staging / folder, dockerfile)
 
 

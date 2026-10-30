@@ -240,6 +240,69 @@ at the gateway.
 
 Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
 
+### Tools served on another server's behalf
+
+An environment can serve tools another server defines, each with that server's own schema:
+`forwarded_tools()` returns `ForwardedTool(tool, call, annotations, output_schema)` entries, where
+`tool` is an `EnvironmentTool` carrying the other server's `inputSchema`, and `call` takes the
+call's arguments as keywords, untouched, and returns that server's `CallToolResult`, which reaches
+the caller as it is. An `output_schema` is listed as the tool's `outputSchema` and isn't checked
+here, so `call` answers every result, its errors too, in a shape that schema admits. They're listed
+on the card beside the `@tool` methods, chosen by `served_tools` and under tool access like them;
+one named like another tool is refused. They need mcp's FastMCP. The cua-driver driver serves
+cua-driver's own tools this way.
+
+### Resources
+
+Mark a method that serves MCP resources with `@resource`; an env may mark several, and each read
+calls the method, which returns text or bytes. The URI decides what's served:
+
+```python
+@environment_card(name="orders")
+class Orders(AgentEnvEnvironment):
+    @resource("docs://orders/refund-policy", mime_type="text/markdown")
+    def refund_policy(self) -> str:
+        """When a refund is allowed and who approves it."""
+        return POLICY.read_text()
+
+    @resource("orders://{order_id}")
+    async def order(self, order_id: str) -> str:
+        return json.dumps(await self.db.order(order_id))
+
+    @resource("skill://upstream/{file}", listed=lambda env: UPSTREAM["resources"])
+    async def upstream_file(self, file: str) -> str:
+        return await read_upstream(f"skill://upstream/{file}")
+```
+
+- A fixed URI is one resource. Its name defaults to the method's name and its description to the
+  docstring.
+- A template such as `orders://{order_id}` is an MCP resource template; the method takes its parts.
+- A template with `listed` serves the resources `listed` returns, each as MCP lists one (`uri`,
+  `name`, `description`, `mimeType`), and only those. Each is read through the method with its
+  URI's parts. That's how an env serves another server's resources from a list: the cua-driver
+  driver serves cua-driver's skill files this way.
+
+A URI served twice, a listed URI that doesn't match its template, and a method that doesn't take
+exactly the template's parts are refused. Resources need mcp's FastMCP.
+
+### Instructions at connect
+
+An MCP server may answer `initialize` with `instructions`: how to use it, which a client may put in
+the agent's context, as Claude Code does. Mark the plain method that returns them with
+`@server_instructions`:
+
+```python
+@environment_card(name="orders")
+class Orders(AgentEnvEnvironment):
+    @server_instructions
+    def how_to(self) -> str:
+        return "Look an order up with get_order before refunding it; refunds can't be undone."
+```
+
+They're read once, when the SDK builds the app (`create_app`, `serve`, `create_fastmcp_app`), and
+every session gets the same text. An env has at most one such method. An app you build yourself
+and pass to `mount` keeps its own instructions: set them when you construct it.
+
 ### Getting part of the data
 
 A `@get_data` handler that takes a `paths` parameter returns only the data under the paths a caller
@@ -262,9 +325,11 @@ def guide(self):
 The card then declares `urn:agentenv:skill/v1` (`SKILL_EXTENSION_URI`), whose `get {name}`
 answers `{name, description, skill_md}`, the shape `skill-config/v1` takes, with the frontmatter
 written under the name the caller gives; a name that isn't lowercase letters, digits and single
-hyphens, up to 64, is refused `invalid_argument`. agent-env's `add_skills` step installs it on
-an agent through `env_ids`, named after the env's environment name; for an env behind a gateway,
-whose card nests its servers' cards, it installs each server's skill under that server's name.
+hyphens, up to 64, is refused `invalid_argument`. A skill with other files beside its SKILL.md
+returns them as a third value, `{relative path: text}`, and `get` answers them as `files`.
+agent-env's `add_skills` step installs it on an agent through `env_ids`, named after the env's
+environment name, a skill with files as a bundle of them; for an env behind a gateway, whose card
+nests its servers' cards, it installs each server's skill under that server's name.
 
 ### Uploading an export through a grant
 
@@ -426,7 +491,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
   the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
-  class's `notes`, markdown for what its card can't say.
+  class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
+  its own returns it from `bundled_skill()` (its description, body and other files), and the
+  computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
   capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
   own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
@@ -548,37 +615,75 @@ server, which needs the `app` extra (below).
 
 ```python
 from pydantic import BaseModel, SecretStr
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Linux, Service, computer_app
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Packages, Service, computer_app,
+                                        install_step, linux)
+
+class LinuxSettings(BaseModel):
+    font: str = "DejaVu Sans"
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+@linux(packages=Packages(apt=["thunderbird"]), python="requirements.txt",
+       services=[Service(name="imap", command="venv/bin/python imap.py")],
+       launch=Launch(command=["thunderbird"], window={"class": "thunderbird"}), settings=LinuxSettings)
 class MailApp(ComputerAppEnvironment):
-    linux = Linux(python="requirements.txt", services=[Service(name="imap", command="venv/bin/python imap.py")])
-    launch = Launch(command=["thunderbird"], window={"class": "thunderbird"})
     skill = "skill.md"
 
     class Settings(BaseModel):
         signature: str = ""
         password: SecretStr = SecretStr("")
+
+    class BuildSettings(BaseModel):
+        locale: str = "en_US"
+
+    @install_step(scope="session")
+    def profile(self) -> None: ...
 ```
 
 - **`@computer_app`** names the platforms the app supports, as a driver names them, and the
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
-  (`environment_name`) and the `computer` and `driver` it deploys alone on.
-- **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
-  copied under its prefix, which holds the class's file; `python`, a requirements file there,
-  installed into the venv every app gets beside them; `services`, programs the computer's init runs
-  from the prefix as the session user.
-- **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
+  (`environment_name`), the `computer` and `driver` it deploys alone on, and `build_settings`, its
+  build settings' values (`build_settings = { locale = "fr_FR" }`).
+- **`@linux(...)`** is how a Linux computer installs it, `Linux`'s fields: `files`, a folder of the app's
+  copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
+  (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
+  installed into the venv every app gets beside them; `sources`, extra apt repositories
+  (`AptSource`, with a key file in the folder); `downloads`, files fetched by URL and checked by
+  sha256 (`Download`); `run`, scripts of the folder run as root or the session user (`RunScript`);
+  `services`, programs the computer's init runs from the prefix as the session user; and `ports`,
+  those it listens on. Packages, requirements and downloads are resolved and fetched once, when the
+  computer env is put, and every build installs only those stored files, with the network closed.
+  Each value is checked as the class is defined: a URL, a sha256, a path that stays in the folder.
+  Installs are exact: apt installs each package without its recommends, and the venv gets exactly
+  the wheels resolved for it (`pip install --no-deps`). A requirements file lists everything itself,
+  since its lock covers that file alone: a line including another file (`-r`, `-c`), an editable
+  install (`-e`), a local path or a local folder of wheels is refused at put.
+- **Each OS has its own decorator,** and what differs by OS goes in it: `launch=` always; and
+  optionally `skill=`, a file used instead of the class's, and `settings=` and `build_settings=`,
+  models whose fields add to the class's `Settings` and `BuildSettings` on that OS. What's on the
+  class applies to every OS. `@install(os_type, spec, launch=..., ...)` is the generic form, for an
+  OS type a plugin adds, with that OS type's own install model as `spec`; `@linux(...)` is
+  `@install("linux", Linux(...), ...)`. On the computer the class reads what's declared for the OS
+  it runs on (`platform.detect()`).
+- **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title, a port answering on
   loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
-  app.
+  app, after its run scripts, offline and without the class's `__init__`. Each runs on every OS the
+  app installs on, or on those its `os=` names (`@install_step(os="linux")`, `@ready_check(os=[...])`);
+  naming one the app declares no install for is refused when the class is read. A step reads
+  `self.build_settings`; a deploy's `self.settings` aren't known at build, and reading one raises
+  `AttributeError` (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
 - **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
   its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
 - **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
   in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
   its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+- **`BuildSettings`** is typed too: values the app's env fixes in its computer's image, which only
+  another image changes, so a deploy can't give one. The composer writes them to
+  `.agentenv/build_settings.json` in the app's folder, and the base class reads them, over the
+  defaults, as `self.build_settings`, in its install steps and on the computer alike. None is a
+  secret, since the image keeps them; `declaration()` refuses a `SecretStr` one.
 
 On a computer each app is its own server: `python -m agentenv_protocol.computer.serve_app
 <file>:<Class>`, a program the computer's init runs from the app's folder in the app's venv, which

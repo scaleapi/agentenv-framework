@@ -20,15 +20,16 @@ import os
 import sys
 from pathlib import Path
 
-from agent_env.env.bootstrap import PUBLISHED_IMAGES
+from agent_env.env.bootstrap import PLAYWRIGHT_MCP_DOCKERFILE, PUBLISHED_IMAGES
 from agent_env.env.published_images import BUNDLE_IMAGES, REGISTRY, PublishedImage, write_release_digests
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest
 
 REPO = Path(__file__).resolve().parents[2]
 # "agents" is the images that install the protocol a release publishes: the shipped bundles', the agents' and an
-# example env's, and the website browser's, whose recorder installs it.
-_AFTER_PROTOCOL = BUNDLE_IMAGES + tuple(image for image in PUBLISHED_IMAGES if image.name == "agentenv-website-browser")
+# example env's, and the Playwright MCP browser's, whose recorder installs it, matched by its Dockerfile.
+_AFTER_PROTOCOL = BUNDLE_IMAGES + tuple(image for image in PUBLISHED_IMAGES
+                                       if image.dockerfile == PLAYWRIGHT_MCP_DOCKERFILE)
 _GROUPS = {"infra": tuple(image for image in PUBLISHED_IMAGES if image not in _AFTER_PROTOCOL), "agents": _AFTER_PROTOCOL}
 
 

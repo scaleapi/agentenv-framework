@@ -1,6 +1,6 @@
-"""The website browser's recorder: it finds the browser Playwright MCP launched, follows the page the agent is on
+"""The Playwright MCP browser's recorder: it finds the browser Playwright MCP launched, follows the page the agent is on
 through DevTools target events, holds a still page's frame so the recording doesn't split, and serves
-computer-recording/v1 on a card of its own that the gateway nests as the website-browser child env."""
+computer-recording/v1 on a card of its own that the gateway nests as the playwright-mcp child env."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ from agentenv_protocol import client as protocol_client  # noqa: E402
 from agentenv_protocol.computer.card import COMPUTER_RECORDING  # noqa: E402
 from agentenv_protocol.computer.recording import RecordHints  # noqa: E402
 
-from agent_env.env.envs import website_browser  # noqa: E402
-from agent_env.env.envs.website_browser import recorder  # noqa: E402
+from agent_env.env.envs import playwright_mcp  # noqa: E402
+from agent_env.env.envs.playwright_mcp import recorder  # noqa: E402
 from agent_env.env.gateway.constants import GATEWAY_EXTENSIONS  # noqa: E402
 from agent_env.env.gateway.rest_proxy import rewrite_child_card  # noqa: E402
 
@@ -195,7 +195,7 @@ async def test_a_recording_through_the_card_is_an_mp4_of_the_page(home):
             await asyncio.sleep(0.1)
         manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
 
-    assert card["name"] == "website-browser" and card["capabilities"]["operations"] == []
+    assert card["name"] == "playwright-mcp" and card["capabilities"]["operations"] == []
     assert [e["uri"] for e in card["capabilities"]["extensions"]] == [COMPUTER_RECORDING]
     params = card["capabilities"]["extensions"][0]["params"]
     assert params["cursor"] is False and params["source"] == "stream" and set(params["methods"]) == {"start", "end"}
@@ -213,16 +213,16 @@ async def test_the_gateway_nests_the_card_as_a_child_env_whose_recording_is_invo
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=card), base_url="http://recorder") as http:
         served = (await http.get("/.well-known/agent-env.json")).json()
     composed = {"name": "env", "capabilities": {"extensions": GATEWAY_EXTENSIONS},
-                "children_environments": [rewrite_child_card("mcp-website-browser", served, GATEWAY_EXTENSIONS)]}
-    child = protocol_client.find_child(composed, website_browser.WEBSITE_BROWSER_ENVIRONMENT_NAME)
+                "children_environments": [rewrite_child_card("mcp-playwright-mcp", served, GATEWAY_EXTENSIONS)]}
+    child = protocol_client.find_child(composed, playwright_mcp.PLAYWRIGHT_MCP_ENVIRONMENT_NAME)
     methods = protocol_client.find_extension(child, COMPUTER_RECORDING)["params"]["methods"]
     assert {op: m["endpoint"] for op, m in methods.items()} == {
-        "start": "/svc/mcp-website-browser/agentenv/ext/computer-recording/start",
-        "end": "/svc/mcp-website-browser/agentenv/ext/computer-recording/end"}
+        "start": "/svc/mcp-playwright-mcp/agentenv/ext/computer-recording/start",
+        "end": "/svc/mcp-playwright-mcp/agentenv/ext/computer-recording/end"}
 
 
 def test_the_image_serves_the_recorder_on_the_port_the_gateway_reads_the_card_on():
-    entrypoint = (Path(website_browser.__file__).parent / "entrypoint.sh").read_text()
+    entrypoint = (Path(playwright_mcp.__file__).parent / "entrypoint.sh").read_text()
     default = re.search(r'RECORDER_PORT="\$\{RECORDER_PORT:-(\d+)\}"', entrypoint).group(1)
-    assert int(default) == recorder.DEFAULT_PORT == website_browser.WEBSITE_BROWSER_RECORDER_PORT
+    assert int(default) == recorder.DEFAULT_PORT == playwright_mcp.PLAYWRIGHT_MCP_RECORDER_PORT
     assert "--isolated" in entrypoint  # the remote debugging port the recorder finds comes with it
