@@ -217,8 +217,9 @@ class DockerImageArtifact(Artifact):
                 dockerfile_path: str | None = None) -> "DockerImageArtifact":
         """Register ``image_name``, an image already in a registry, which a sandbox pulls; nothing is built, pushed or
         saved. A tag is pinned to the digest the registry serves now, as ``name:tag@sha256:...`` (``earlier_pin`` kept
-        when it pins the same ref). Given the image's build context and ``image_digest``, the tag stays the name, the
-        digest is recorded beside it, and the context is uploaded for a sandbox that can't pull the image to build it.
+        when it pins the same ref). Given the image's build context, the name is recorded without its digest, the
+        digest beside it (``image_digest``, or the one the registry pins it to), and the context is uploaded for a
+        sandbox that can't pull the image to build it.
 
         ``image_name`` must name its registry, read with the configured image store's credentials where it holds them;
         one on this machine is refused unless ``id``'s image store is the local registry."""
@@ -235,25 +236,26 @@ class DockerImageArtifact(Artifact):
                 and not isinstance(config.get_image_store_for(id), LocalRegistryImageStore)):
             raise ValueError(f"{image_name} is in a registry on this machine, which only an image in the local "
                              "registry's store, such as an @local one, can name")
-        if context_path is not None:
-            context = _context_of(Path(context_path), dockerfile_path)
-            store = get_artifact_store()
-            prefix = store.attempt_prefix("docker_image", id)
-            return store.put_document(cls(
-                id=id,
-                description=description,
-                image_name=image_name,
-                image_digest=image_digest,
-                build_context_object_url=_upload_context(config.get_object_store_to_write(prefix, id), prefix, context),
-                dockerfile_path=context.dockerfile,
-                source_digest=context.source_digest(None),
-            ))
-        if earlier_pin is not None and pinned_from(earlier_pin, image_name):
-            pinned = earlier_pin
-        else:
-            pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
+        if context_path is None or image_digest is None:
+            if earlier_pin is not None and pinned_from(earlier_pin, image_name):
+                pinned = earlier_pin
+            else:
+                pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
+            if context_path is None:
+                return get_artifact_store().put_document(cls(id=id, description=description, image_name=pinned))
+            image_name, _, image_digest = pinned.rpartition("@")
+        context = _context_of(Path(context_path), dockerfile_path)
         store = get_artifact_store()
-        return store.put_document(cls(id=id, description=description, image_name=pinned))
+        prefix = store.attempt_prefix("docker_image", id)
+        return store.put_document(cls(
+            id=id,
+            description=description,
+            image_name=image_name,
+            image_digest=image_digest,
+            build_context_object_url=_upload_context(config.get_object_store_to_write(prefix, id), prefix, context),
+            dockerfile_path=context.dockerfile,
+            source_digest=context.source_digest(None),
+        ))
 
     @classmethod
     def put_context(cls, id: str, *, description: str, context_path: str, dockerfile_path: str,

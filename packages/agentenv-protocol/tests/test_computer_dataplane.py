@@ -170,6 +170,6 @@ async def test_data_get_uploads_under_a_write_namespace_grant(home):
 
 @pytest.mark.asyncio
 async def test_a_failed_write_leaves_no_temporary_file(home):
-    with patch("agentenv_protocol.computer.linux.os.replace", side_effect=OSError("disk full")):
+    with patch("agentenv_protocol.computer._linux.os.replace", side_effect=OSError("disk full")):
         answer = await _add(FakeDriver(), _part("notes/a.txt"))
     assert "disk full" in answer["error"]["message"] and list((home / "notes").iterdir()) == []

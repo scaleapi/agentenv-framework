@@ -23,14 +23,16 @@ import httpx  # noqa: E402
 
 import agentenv_protocol.computer.launch as launcher  # noqa: E402
 from agentenv_protocol import client  # noqa: E402
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, ReadyCheck, Ready, ready_check  # noqa: E402
-from agentenv_protocol.computer import app_runtime, apps, session  # noqa: E402
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, ReadyCheck, Ready, linux,  # noqa: E402
+                                        ready_check)
+from agentenv_protocol.computer import app, app_runtime, apps, session  # noqa: E402
 from agentenv_protocol.computer.app import COMPUTER_APP, FAILURE, SOCKET  # noqa: E402
+from agentenv_protocol.computer.platform import Platform  # noqa: E402
 
 
 
+@linux(launch=Launch(command=["mail"], window={"class": "Mail"}, ready=Ready(window=True, timeout_s=30)))
 class Mail(ComputerAppEnvironment):
-    launch = Launch(command=["mail"], window={"class": "Mail"}, ready=Ready(window=True, timeout_s=30))
     synced = False
 
     @ready_check
@@ -38,14 +40,21 @@ class Mail(ComputerAppEnvironment):
         return self.synced
 
 
+@linux(launch=Launch(at="demand", command=["music"], window={"class": "Music"}, ready=Ready(window=True)))
 class Music(ComputerAppEnvironment):
-    launch = Launch(at="demand", command=["music"], window={"class": "Music"}, ready=Ready(window=True))
+    pass
 
 
 class Sync(ComputerAppEnvironment):
     @ready_check
     async def caught_up(self):
         return True
+
+
+@pytest.fixture(autouse=True)
+def on_linux(monkeypatch):
+    """Every app here runs as on Linux, which its launch is declared for."""
+    monkeypatch.setattr(app, "detect", lambda: Platform(os="linux"))
 
 
 @pytest.fixture
@@ -103,8 +112,8 @@ async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_
         port = closed.getsockname()[1]
     exits = [sys.executable, "-c", "import sys; sys.exit('no database yet')"]
 
+    @linux(launch=Launch(command=["slow"], ready=Ready(port=port, command=exits)))
     class Slow(ComputerAppEnvironment):
-        launch = Launch(command=["slow"], ready=Ready(port=port, command=exits))
 
         @ready_check
         def stuck(self):

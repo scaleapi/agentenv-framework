@@ -615,37 +615,75 @@ server, which needs the `app` extra (below).
 
 ```python
 from pydantic import BaseModel, SecretStr
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Linux, Service, computer_app
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Packages, Service, computer_app,
+                                        install_step, linux)
+
+class LinuxSettings(BaseModel):
+    font: str = "DejaVu Sans"
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+@linux(packages=Packages(apt=["thunderbird"]), python="requirements.txt",
+       services=[Service(name="imap", command="venv/bin/python imap.py")],
+       launch=Launch(command=["thunderbird"], window={"class": "thunderbird"}), settings=LinuxSettings)
 class MailApp(ComputerAppEnvironment):
-    linux = Linux(python="requirements.txt", services=[Service(name="imap", command="venv/bin/python imap.py")])
-    launch = Launch(command=["thunderbird"], window={"class": "thunderbird"})
     skill = "skill.md"
 
     class Settings(BaseModel):
         signature: str = ""
         password: SecretStr = SecretStr("")
+
+    class BuildSettings(BaseModel):
+        locale: str = "en_US"
+
+    @install_step(scope="session")
+    def profile(self) -> None: ...
 ```
 
 - **`@computer_app`** names the platforms the app supports, as a driver names them, and the
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
-  (`environment_name`) and the `computer` and `driver` it deploys alone on.
-- **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
-  copied under its prefix, which holds the class's file; `python`, a requirements file there,
-  installed into the venv every app gets beside them; `services`, programs the computer's init runs
-  from the prefix as the session user.
-- **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
+  (`environment_name`), the `computer` and `driver` it deploys alone on, and `build_settings`, its
+  build settings' values (`build_settings = { locale = "fr_FR" }`).
+- **`@linux(...)`** is how a Linux computer installs it, `Linux`'s fields: `files`, a folder of the app's
+  copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
+  (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
+  installed into the venv every app gets beside them; `sources`, extra apt repositories
+  (`AptSource`, with a key file in the folder); `downloads`, files fetched by URL and checked by
+  sha256 (`Download`); `run`, scripts of the folder run as root or the session user (`RunScript`);
+  `services`, programs the computer's init runs from the prefix as the session user; and `ports`,
+  those it listens on. Packages, requirements and downloads are resolved and fetched once, when the
+  computer env is put, and every build installs only those stored files, with the network closed.
+  Each value is checked as the class is defined: a URL, a sha256, a path that stays in the folder.
+  Installs are exact: apt installs each package without its recommends, and the venv gets exactly
+  the wheels resolved for it (`pip install --no-deps`). A requirements file lists everything itself,
+  since its lock covers that file alone: a line including another file (`-r`, `-c`), an editable
+  install (`-e`), a local path or a local folder of wheels is refused at put.
+- **Each OS has its own decorator,** and what differs by OS goes in it: `launch=` always; and
+  optionally `skill=`, a file used instead of the class's, and `settings=` and `build_settings=`,
+  models whose fields add to the class's `Settings` and `BuildSettings` on that OS. What's on the
+  class applies to every OS. `@install(os_type, spec, launch=..., ...)` is the generic form, for an
+  OS type a plugin adds, with that OS type's own install model as `spec`; `@linux(...)` is
+  `@install("linux", Linux(...), ...)`. On the computer the class reads what's declared for the OS
+  it runs on (`platform.detect()`).
+- **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title, a port answering on
   loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
-  app.
+  app, after its run scripts, offline and without the class's `__init__`. Each runs on every OS the
+  app installs on, or on those its `os=` names (`@install_step(os="linux")`, `@ready_check(os=[...])`);
+  naming one the app declares no install for is refused when the class is read. A step reads
+  `self.build_settings`; a deploy's `self.settings` aren't known at build, and reading one raises
+  `AttributeError` (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
 - **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
   its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
 - **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
   in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
   its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+- **`BuildSettings`** is typed too: values the app's env fixes in its computer's image, which only
+  another image changes, so a deploy can't give one. The composer writes them to
+  `.agentenv/build_settings.json` in the app's folder, and the base class reads them, over the
+  defaults, as `self.build_settings`, in its install steps and on the computer alike. None is a
+  secret, since the image keeps them; `declaration()` refuses a `SecretStr` one.
 
 On a computer each app is its own server: `python -m agentenv_protocol.computer.serve_app
 <file>:<Class>`, a program the computer's init runs from the app's folder in the app's venv, which
