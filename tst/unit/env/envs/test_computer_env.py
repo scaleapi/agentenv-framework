@@ -30,9 +30,10 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
+from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.envs.computer.utils import boot, composer, gate, inside, packages
+from agent_env.env.envs.computer.utils import boot, composer, gate, inside, packages, resolve_in_base
 from agent_env.env.envs.computer.utils.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
@@ -81,6 +82,10 @@ class FakeDocker:
             (out / "apt" / f"{name}_1.0_{arch}.deb").write_bytes(f"{name} for {arch}".encode())
             result["apt"].append({"file": f"{name}_1.0_{arch}.deb", "package": name, "version": "1.0", "arch": arch})
         for layer in request["python"]:
+            requirements = context / layer["folder"].removeprefix("/ctx/") / (layer["requirements"] or "-")
+            if not (requirements.is_file() and requirements.read_text().strip()) and not layer["add"]:
+                result["wheels"][layer["name"]] = []
+                continue
             (out / "wheels" / layer["name"]).mkdir(parents=True)
             (out / "wheels" / layer["name"] / "mss-10.1.0-py3-none-any.whl").write_bytes(b"mss")
             result["wheels"][layer["name"]] = ["mss-10.1.0-py3-none-any.whl"]
@@ -1048,10 +1053,10 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
                             "key": "ppa.asc"}],
                "downloads": [{"url": "https://example.com/tool", "sha256": hashlib.sha256(tool).hexdigest(),
                               "to": "bin/tool", "arch": "arm64"}],
-               "run": [{"script": "setup.sh"}, {"script": "profile.sh", "scope": "session"}], "services": []}
+               "run": [{"script": "set up.sh"}, {"script": "profile.sh", "scope": "session"}], "services": []}
 
     app = _app(base, driver, tmp_path / "mail", install=install, steps=[("index_mail", "session")],
-               extra={"ppa.asc": "key", "setup.sh": "mkdir -p /srv/mail\n", "profile.sh": "#!/bin/sh\n"})
+               extra={"ppa.asc": "key", "set up.sh": "mkdir -p /srv/mail\n", "profile.sh": "#!/bin/sh\n"})
 
     requests = dict(docker.resolved)
     assert requests["arm64"]["apt"] == ["hello", "xdotool/noble"] and requests["arm64"]["sources"] == [
@@ -1065,7 +1070,7 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
         "/tmp/agentenv-apt", "COPY driver/ /opt/agentenv/drivers/desk/"]
     steps = lines.index("RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv")
     assert lines[steps + 1:steps + 8] == [
-        "RUN --network=none cd /opt/agentenv/apps/mail && ./setup.sh",
+        "RUN --network=none cd /opt/agentenv/apps/mail && './set up.sh'",
         "USER user", "RUN --network=none cd /opt/agentenv/apps/mail && ./profile.sh", "USER root",
         "USER user", "RUN --network=none cd /opt/agentenv/apps/mail && venv/bin/python -m "
         "agentenv_protocol.computer.run_install_step app.py:Mail index_mail", "USER root"]
@@ -1076,13 +1081,23 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
     assert composed["arm64"]["lock"] != composed["amd64"]["lock"]
 
 
-@pytest.mark.parametrize("failing", ["resolver", "download"])
+@pytest.mark.parametrize("failing", ["resolver", "download", "link"])
 def test_a_resolve_or_download_that_fails_fails_its_arch_at_the_resolve_stage(base, driver, docker, tmp_path,
                                                                              monkeypatch, failing):
     if failing == "resolver":
         def refuse(request, context, source, arch, work):
             raise packages.ResolveError("resolving the packages failed", "E: Unable to locate package nosuch\n")
         monkeypatch.setattr(packages, "_run_resolver", refuse)
+    if failing == "link":
+        (tmp_path / "credentials").write_text("secret")
+
+        def linking(request, context, source, arch, work):
+            result, out = docker.resolve(request, context, source, arch, work)
+            wheel = out / "wheels" / "driver" / "mss-10.1.0-py3-none-any.whl"
+            wheel.unlink()
+            wheel.symlink_to(tmp_path / "credentials")
+            return result, out
+        monkeypatch.setattr(packages, "_run_resolver", linking)
     monkeypatch.setattr(packages.httpx, "stream", _serving({"https://example.com/tool": b"something else"}))
     install = {"python": "requirements.txt", "services": [],
                "downloads": [{"url": "https://example.com/tool", "sha256": "a" * 64, "to": "tool"}]}
@@ -1093,9 +1108,60 @@ def test_a_resolve_or_download_that_fails_fails_its_arch_at_the_resolve_stage(ba
     reason = composed["arm64"]["reason"]
     if failing == "resolver":
         assert reason == "resolving the packages failed: E: Unable to locate package nosuch" and composed["arm64"]["log"]
+    elif failing == "link":
+        assert reason == "the resolver's 'wheels/driver/mss-10.1.0-py3-none-any.whl' isn't a plain file it wrote"
+        assert not get_config().get_object_store().list(packages.PREFIX)
     else:
         assert reason.startswith("https://example.com/tool has the sha256 ") and reason.endswith(
             f"not the {'a' * 64} its download names")
+
+
+def test_a_venv_whose_requirements_resolve_to_nothing_is_made_empty(base, docker, tmp_path):
+    driver = _driver(tmp_path / "empty", requirements="")
+
+    _put(base, driver)
+
+    lines = docker.builds[0]["dockerfile"].splitlines()
+    assert "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip " \
+           "list --format=json > /opt/agentenv/drivers/desk/installed.json" in lines
+    assert not [line for line in lines if "agentenv-wheels" in line]
+
+
+def test_two_puts_resolving_the_same_inputs_at_once_both_get_the_first_stored_lock(docker, tmp_path, monkeypatch):
+    folder = tmp_path / "ctx" / "driver"
+    folder.mkdir(parents=True)
+    (folder / "requirements.txt").write_text("mss\n")
+    wants = [packages.Want("driver", Install(python="requirements.txt", services=[Service(name="d", command="x")]), True)]
+    inputs = packages.inputs_digest(wants, tmp_path / "ctx", "base", "arm64")
+    first = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop")
+
+    def newer(request, context, source, arch, work):
+        result, out = docker.resolve(request, context, source, arch, work)
+        (out / "wheels" / "driver" / "mss-10.1.0-py3-none-any.whl").write_bytes(b"mss, published again")
+        return result, out
+    monkeypatch.setattr(packages, "_run_resolver", newer)
+    second = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop")
+
+    assert second == first == packages.stored(inputs, "@local/~/kit/desktop")
+
+
+def test_the_resolver_installs_the_apt_packages_it_downloads_before_building_wheels(tmp_path, monkeypatch):
+    ran = []
+    monkeypatch.setattr(resolve_in_base, "KEYRINGS", tmp_path / "keyrings")
+    monkeypatch.setattr(resolve_in_base, "SOURCES", tmp_path)
+    monkeypatch.setattr(resolve_in_base.subprocess, "run", lambda argv, **kwargs: ran.append(argv) or SimpleNamespace(
+        stdout=""))
+    monkeypatch.setattr(resolve_in_base.os, "chown", lambda *args: None)
+    request = {"apt": ["build-essential", "libxml2-dev"], "sources": [], "owner": [0, 0], "python": [
+        {"name": "driver", "folder": str(tmp_path), "requirements": "requirements.txt", "add": []}]}
+    (tmp_path / "request.json").write_text(json.dumps(request))
+
+    resolve_in_base.main(str(tmp_path / "request.json"), str(tmp_path / "out"))
+
+    commands = [" ".join(argv[:3]) for argv in ran]
+    assert commands[:3] == ["apt-get update -q", "apt-get install -y", "apt-get install -y"]
+    assert "--download-only" in ran[1] and "--download-only" not in ran[2] and ran[2][-2:] == request["apt"]
+    assert ran[-1][1:3] == ["wheel", "--no-cache-dir"]
 
 
 def _serving(bodies):

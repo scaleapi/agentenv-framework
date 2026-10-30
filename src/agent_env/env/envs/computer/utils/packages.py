@@ -94,16 +94,19 @@ def resolve(inputs: str, wants: list[Want], context: Path, source: str, arch: st
     with tempfile.TemporaryDirectory(prefix="agentenv-resolve-") as folder:
         work = Path(folder)
         result, out = _run_resolver(_request(wants, arch), context, source, arch, work)
-        apt = [{**deb, **_put(store, prefix, out / "apt" / deb["file"])} for deb in result["apt"]]
-        wheels = {want.folder: [_put(store, prefix, out / "wheels" / want.name / wheel)
+        apt = [{**deb, **_put(store, prefix, _written(out, "apt", deb["file"]))} for deb in result["apt"]]
+        wheels = {want.folder: [_put(store, prefix, _written(out, "wheels", want.name, wheel))
                                 for wheel in result["wheels"][want.name]] for want in wants if want.venv}
         downloads = {want.folder: [{"url": download.url, "to": download.to,
                                     **_put(store, prefix, _fetch(download.url, download.sha256, work))}
                                    for download in _downloads(want.install, arch)]
                      for want in wants if _downloads(want.install, arch)}
     lock = {"inputs": inputs, "arch": arch, "apt": apt, "wheels": wheels, "downloads": downloads}
-    store.put(f"{prefix}/locks/{inputs.removeprefix('sha256:')}.json", json.dumps(lock, sort_keys=True).encode(),
-              content_type="application/json", allow_overwrite=True)
+    key = f"{prefix}/locks/{inputs.removeprefix('sha256:')}.json"
+    try:
+        store.put(key, json.dumps(lock, sort_keys=True).encode(), content_type="application/json")
+    except ObjectAlreadyExistsError:
+        return json.loads(store.read(key))
     return lock
 
 
@@ -180,6 +183,15 @@ def _fetch(url: str, sha256: str, work: Path) -> Path:
 
 def _downloads(install: Install, arch: str) -> list:
     return [download for download in install.downloads or [] if download.arch in (None, arch)]
+
+
+def _written(out: Path, *parts: str) -> Path:
+    """The file the resolver says it wrote at ``parts`` under ``out``, refused unless it's a plain file there: a
+    dependency's build code, run in the container, could leave a link to one of this machine's files instead."""
+    path = out.joinpath(*parts)
+    if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(out.resolve()):
+        raise ResolveError(f"the resolver's {'/'.join(parts)!r} isn't a plain file it wrote")
+    return path
 
 
 def _put(store, prefix: str, path: Path) -> dict:

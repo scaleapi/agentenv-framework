@@ -28,7 +28,8 @@ def main(request_path: str, out: str) -> None:
 
 def _apt(packages: list[str], sources: list[dict], dest: Path) -> list[dict]:
     """Download ``packages`` with every dependency the base doesn't have, no recommends, from the OS's repositories and
-    ``sources``, each signed by its key; each .deb with its package, version and arch."""
+    ``sources``, each signed by its key, and install them here too, so the wheels built next have the build tools and
+    headers they name; each .deb with its package, version and arch."""
     KEYRINGS.mkdir(parents=True, exist_ok=True)
     for i, source in enumerate(sources):
         key = Path(source["key"]).read_bytes()
@@ -40,8 +41,11 @@ def _apt(packages: list[str], sources: list[dict], dest: Path) -> list[dict]:
     env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
     (dest / "partial").mkdir(parents=True)
     subprocess.run(["apt-get", "update", "-q"], check=True, env=env)
-    subprocess.run(["apt-get", "install", "-y", "-q", "--download-only", "--no-install-recommends",
-                    "-o", f"Dir::Cache::Archives={dest}/", *packages], check=True, env=env)
+    archives = ["-o", f"Dir::Cache::Archives={dest}/"]
+    subprocess.run(["apt-get", "install", "-y", "-q", "--download-only", "--no-install-recommends", *archives,
+                    *packages], check=True, env=env)
+    subprocess.run(["apt-get", "install", "-y", "-q", "--no-install-recommends", *archives, *packages], check=True,
+                   env=env)
     shutil.rmtree(dest / "partial")
     (dest / "lock").unlink(missing_ok=True)
     debs = []

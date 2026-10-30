@@ -415,15 +415,20 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
         prefix = layer.prefix
         lines.append(f"COPY {layer.folder}/ {prefix}/")
         if _venv(layer):
-            wheels = f"/tmp/agentenv-wheels/{layer.folder.replace('/', '-')}"
-            lines += [f"COPY {packages.STAGED}/wheels/{layer.folder.replace('/', '-')}/ {wheels}/",
-                      f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-index "
-                      f"--no-deps {wheels}/*.whl && {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json "
-                      f"&& rm -rf {wheels}"]
+            slug = layer.folder.replace("/", "-")
+            wheels = f"/tmp/agentenv-wheels/{slug}"
+            if lock is not None and lock["wheels"].get(layer.folder):
+                lines += [f"COPY {packages.STAGED}/wheels/{slug}/ {wheels}/",
+                          f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install "
+                          f"--no-index --no-deps {wheels}/*.whl && {prefix}/venv/bin/pip list --format=json > "
+                          f"{prefix}/installed.json && rm -rf {wheels}"]
+            else:
+                lines.append(f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip list "
+                             f"--format=json > {prefix}/installed.json")
         if layer.app:
             lines.append(f"RUN mkdir -p {prefix}/{SOCKET.parent} && chown {user} {prefix}/{SOCKET.parent}")
         for run in layer.install.run or []:
-            lines += _as(run.scope, user, f"RUN --network=none cd {prefix} && ./{run.script}")
+            lines += _as(run.scope, user, f"RUN --network=none cd {prefix} && {shlex.quote('./' + run.script)}")
         for step, scope in layer.steps:
             lines += _as(scope, user, f"RUN --network=none cd {prefix} && venv/bin/python -m "
                                       f"agentenv_protocol.computer.run_install_step {layer.served} {step}")
