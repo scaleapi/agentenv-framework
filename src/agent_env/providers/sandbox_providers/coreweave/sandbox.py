@@ -52,6 +52,10 @@ DOCKER_STORAGE_MEMORY = "memory"
 _HOST_DIR = "/run/agentenv"
 _HOST_LOG = "/var/log/agentenv-host.log"
 HOST_SETUP_TIMEOUT_SEC = 600
+_DOCKERD_READY_TIMEOUT_SEC = 120
+# How long the host-wait exec outlives the wait it runs, so the wait's own timeout message comes back.
+_HOST_WAIT_GRACE_SEC = 60
+_URL_DOWNLOAD_TIMEOUT_SEC = 120
 # What exec returns when the stream drops without an exit status; exec_script retries only this.
 _UNKNOWN_EXIT_CODE = -1
 _TIMED_OUT_EXIT_CODE = 124
@@ -84,7 +88,7 @@ setup() {{
   done
   mkdir -p /var/lib/docker && {mount} || return 1
   dockerd --host=unix:///var/run/docker.sock &
-  for _ in $(seq 120); do
+  for _ in $(seq {_DOCKERD_READY_TIMEOUT_SEC}); do
     docker info >/dev/null 2>&1 && return 0
     sleep 1
   done
@@ -317,7 +321,7 @@ class CoreWeaveContainerSandbox(_CoreWeaveSandbox):
 
     async def write_file_from_url(self, url: str, destination_path: str) -> None:
         """Fetched here and written over the Sandbox API, since the image need not have curl."""
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120) as http:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=_URL_DOWNLOAD_TIMEOUT_SEC) as http:
             response = await http.get(url)
             response.raise_for_status()
         await self._sandbox.write_file(destination_path, response.content)
@@ -358,7 +362,7 @@ class CoreWeaveSandbox(_CoreWeaveSandbox, VmSandbox):
         """Wait for the start command to ready Docker, and raise what it reported if it couldn't."""
         for _ in range(_WAIT_ATTEMPTS):
             exit_code, stdout, stderr = await self._run("sh", "-c", _WAIT_FOR_HOST,
-                                                        timeout=HOST_SETUP_TIMEOUT_SEC + 60)
+                                                        timeout=HOST_SETUP_TIMEOUT_SEC + _HOST_WAIT_GRACE_SEC)
             if exit_code != _UNKNOWN_EXIT_CODE:
                 break
         if exit_code != 0:
