@@ -316,6 +316,8 @@ class _Resolver:
             return True
         if value is None:
             dockerfile = default_dockerfile(ref.path)
+            if ref.optional and not (entry.path / dockerfile).is_file():
+                return True
         elif isinstance(value, dict) and value.keys() == {"dockerfile"}:
             dockerfile = value["dockerfile"]
         elif isinstance(value, dict) and "dockerfile" in value:
