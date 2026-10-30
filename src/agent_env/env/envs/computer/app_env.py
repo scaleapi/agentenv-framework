@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol.computer import AppDeclaration, Launch
+from agentenv_protocol.computer.app import SOCKET
 
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -22,7 +23,7 @@ from agent_env.env.store import get_env_store
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -109,6 +110,7 @@ class ComputerAppEnv(ComputerEnv):
                   declaration=declaration, computer=computer, driver=driver, build_settings=build_settings)
         _, problems = _installs(declaration)
         problems += _class_beyond_reach(module, declaration)
+        problems += _in_server_folder(declaration, files.get_file_artifacts())
         problems += gate.check_app_build_settings(app, app.build_settings, "build_settings",
                                                   computer.os.type if computer is not None else None)
         if (computer is None) != (driver is None):
@@ -179,6 +181,18 @@ class ComputerAppEnv(ComputerEnv):
 def _installs(declaration: AppDeclaration) -> tuple[dict[str, AppInstall], list[str]]:
     """Its installs by OS type, each checked as the composer installs it, and the problems with them."""
     return installs({os_type: on.install for os_type, on in declaration.os.items()}, AppInstall)
+
+
+def _in_server_folder(declaration: AppDeclaration, names: Iterable[str]) -> list[str]:
+    """The app's files its install would put in the folder its own server keeps its socket and build settings in,
+    which is the framework's: a build settings file there would reach the app unchecked."""
+    reserved, problems = SOCKET.parent.as_posix(), []
+    for os_type, on in declaration.os.items():
+        folder = PurePosixPath(on.install.get("files", "."))
+        problems += [f"install.{os_type}.files: {name!r} is in {reserved}/, where the app's own server keeps its socket "
+                     "and build settings; leave it out of the app's folder"
+                     for name in sorted(names) if PurePosixPath(name).is_relative_to(folder / reserved)]
+    return problems
 
 
 def _class_beyond_reach(module: str, declaration: AppDeclaration) -> list[str]:

@@ -41,6 +41,7 @@ from agent_env.env import env as env_module
 from agent_env.env.envs.computer.utils import boot, builder, composer, gate, inside, packages, resolve_in_base
 from agent_env.env.envs.computer.utils.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer import app_env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.utils.install import Install, Service
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -1261,6 +1262,7 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
     (folder / "app.py").write_text("class Mail: ...\n")
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
     for name, text in (extra or {}).items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
         (folder / name).write_text(text)
     files = FileArtifactUniverse.put_bundled("@local/~/kit/mail__files", files={
         name: folder / name for name in ("app.py", "requirements.txt", *(extra or {}))})
@@ -1489,6 +1491,20 @@ def test_an_apps_build_settings_are_fixed_in_its_folder_and_a_change_builds_anot
     stored = Env.get(second.id)
     assert stored.build_settings == {"locale": "fr_FR", "edition": "pro"}
     assert ComputerAppEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
+
+
+def test_an_apps_file_in_its_servers_folder_is_refused_and_one_stored_before_is_built_over_by_its_build_settings(
+        base, driver, docker, signing, tmp_path, monkeypatch):
+    own = {".agentenv/build_settings.json": '{"locale": "en_GB"}'}
+
+    with pytest.raises(ValueError, match=r"install.linux.files: '.agentenv/build_settings.json' is in .agentenv/, where "
+                                         r"the app's own server keeps its socket and build settings"):
+        _app(base, driver, tmp_path / "mail", extra=own, build_settings={"locale": "fr_FR"})
+    monkeypatch.setattr(app_env, "_in_server_folder", lambda declaration, names: [])
+    stored = _app(base, driver, tmp_path / "mail", extra=own, build_settings={"locale": "fr_FR"}, compose=False)
+    composer.compose(stored, sandbox_provider=FakeVmProvider(docker, tmp_path / "vms"))
+
+    assert [build["build_settings"] for build in docker.builds] == [{"mail": {"locale": "fr_FR"}}] * 2
 
 
 @pytest.mark.parametrize("build, values, problem", [

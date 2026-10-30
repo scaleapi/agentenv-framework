@@ -320,6 +320,8 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
     if app.build_settings:
         (context / layer.folder / BUILD_SETTINGS).parent.mkdir(exist_ok=True)
         (context / layer.folder / BUILD_SETTINGS).write_text(json.dumps(app.build_settings, sort_keys=True))
+        # Inline, over any the app's files hold, as an app stored before that folder was refused can.
+        from_store.pop(f"{layer.folder}/{BUILD_SETTINGS.as_posix()}", None)
     return layer
 
 
