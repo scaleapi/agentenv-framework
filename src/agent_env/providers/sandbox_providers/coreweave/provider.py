@@ -178,6 +178,7 @@ async def _reclaim(client: Client, raw: Any, create_tag: str, starting: asyncio.
     if not starting.done():
         logger.warning("A cancelled CoreWeave create's start request is still unanswered after %ss; looking for its "
                        "sandbox by its tag %s", _START_SETTLE_SEC, create_tag)
+        starting.add_done_callback(lambda done: _reap_late_start(client, raw, done))
     elif not starting.cancelled():
         starting.exception()
     if raw.sandbox_id:
@@ -483,3 +484,17 @@ def _remember_egress_host(host: str) -> None:
     known = CoreWeaveSandboxProvider.EGRESS_HOSTS
     if host not in known and len(known) < _MAX_ENDPOINT_PARENTS:
         CoreWeaveSandboxProvider.EGRESS_HOSTS = (*known, host)
+
+
+# Deletes of sandboxes a create made after its cleanup stopped waiting, held so they aren't collected mid-run.
+_late_reaps: set[asyncio.Task] = set()
+
+
+def _reap_late_start(client: Client, raw: Any, starting: asyncio.Future) -> None:
+    """Delete the sandbox a start request made after its create's cleanup stopped waiting for it. This runs only while
+    the event loop does; a sandbox made after it closes stops at its max lifetime."""
+    if starting.cancelled() or starting.exception() is not None or not raw.sandbox_id:
+        return
+    task = asyncio.ensure_future(_reap(client, raw.sandbox_id))
+    _late_reaps.add(task)
+    task.add_done_callback(_late_reaps.discard)

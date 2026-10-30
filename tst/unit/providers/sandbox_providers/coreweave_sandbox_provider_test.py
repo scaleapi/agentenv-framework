@@ -326,6 +326,20 @@ async def test_a_cancelled_create_deletes_its_sandbox_once_it_exists(sandbox_cls
     assert sandbox_cls.server.deleted == ["sb-1"]
 
 
+@pytest.mark.asyncio
+async def test_a_start_that_answers_after_cleanup_stopped_waiting_has_its_sandbox_deleted_then(sandbox_cls, monkeypatch):
+    monkeypatch.setattr(provider_module, "_START_SETTLE_SEC", 0.01)
+    sandbox_cls.server.start_delay = 0.1
+    create = asyncio.ensure_future(_provider(sandbox_cls).create_vm())
+    await asyncio.sleep(0.02)
+    create.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    assert sandbox_cls.server.deleted == []
+    await asyncio.sleep(0.2)
+    assert sandbox_cls.server.deleted == ["sb-1"]
+
+
 def _slow_round_trips(sandbox_cls) -> None:
     """List and delete take a network round trip, as the SDK's do."""
     listed, deleted = sandbox_cls.list.__func__, sandbox_cls.delete.__func__
