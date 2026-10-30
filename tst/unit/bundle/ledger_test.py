@@ -16,6 +16,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.bundle import parse_bundle
 from agent_env.bundle import plan as plan_module
+from agent_env.bundle import authoring as authoring_module
 from agent_env.bundle import resolve as resolve_module
 from agent_env.bundle import ledger as ledger_module
 from agent_env.bundle.ledger import LEDGER_COLLECTION, Ledger, materializing
@@ -95,11 +96,12 @@ class _OwnFile(FileArtifact):
 
 @pytest.fixture
 def bundle_dir(tmp_path, monkeypatch):
-    envs = {**resolve_module.get_env_registry(), **{cls.type: cls for cls in (_Shelf, _Rack, _OwnEnv, _Imaged)}}
-    monkeypatch.setattr(resolve_module, "get_env_registry", lambda: envs)
+    envs = {**authoring_module.get_env_registry(), **{cls.type: cls for cls in (_Shelf, _Rack, _OwnEnv, _Imaged)}}
+    monkeypatch.setattr(authoring_module, "get_env_registry", lambda: envs)
     monkeypatch.setattr("agent_env.bundle.ledger.get_env_registry", lambda: envs)
     artifacts = {**resolve_module.get_artifact_registry(), "own_file_ledger_test": _OwnFile}
     monkeypatch.setattr(resolve_module, "get_artifact_registry", lambda: artifacts)
+    monkeypatch.setattr(authoring_module, "get_artifact_registry", lambda: artifacts)
     monkeypatch.setattr(plan_module, "get_artifact_registry", lambda: artifacts)
     monkeypatch.setattr("agent_env.bundle.ledger.get_artifact_registry", lambda: artifacts)
     monkeypatch.setenv("HOME", str(tmp_path))

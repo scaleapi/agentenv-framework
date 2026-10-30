@@ -14,11 +14,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar, overload
 
+from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
+from agent_env.env.registry import get_env_registry
+from agent_env.eval.eval import Eval
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, environment_name_problem
 from agent_env.providers.env_providers.env_provider import _env_provider_class
@@ -255,21 +259,32 @@ def entry_files(bundle: Bundle, entry: BundleEntry, *, empty_ok: bool = False) -
     return _Walk(bundle, entry, empty_ok).files()
 
 
+def entity_class(entry: BundleEntry) -> type | None:
+    """The class that writes ``entry``: its env type's, its artifact type's, the agent's or the eval's; None for a type
+    nothing registers."""
+    if entry.kind is BundleKind.ENV:
+        return get_env_registry().get(entry.type)
+    if entry.kind is BundleKind.AGENT:
+        return A2AAgent if entry.type == A2AAgent.type else None
+    if entry.kind is BundleKind.EVAL:
+        return Eval if entry.type == Eval.type else None
+    return get_artifact_registry().get(canonical_type(entry.type))
+
+
 def entry_archives(entry: BundleEntry) -> frozenset[str]:
-    """The image archives ``entry``'s toml names, by an image table's ``archive``, or an image folder's, as POSIX paths
-    in its folder in NFC: what an image loads, which no build context or file the entry writes holds."""
-    named, pending = set(), [entry.config or {}]
-    while pending:
-        value = pending.pop()
-        if isinstance(value, dict):
-            # A top-level key names an archive only in an image folder's toml, which is its image's table.
-            image_table = value is not entry.config or entry.kind is BundleKind.ARTIFACT
-            if image_table and isinstance(value.get("archive"), str):
-                named.add(unicodedata.normalize("NFC", posixpath.normpath(value["archive"])))
-            pending.extend(value.values())
-        elif isinstance(value, list):
-            pending.extend(value)
-    return frozenset(named)
+    """The image archives ``entry``'s toml names, as POSIX paths in its folder in NFC: an image folder's ``archive``,
+    and the ``archive`` of each image key its type declares, as the resolver reads them. What an image loads, which no
+    build context or file the entry writes holds."""
+    config = entry.config if isinstance(entry.config, dict) else {}
+    tables = [config] if entry.kind is BundleKind.ARTIFACT and canonical_type(entry.type) == "docker_image" else []
+    for ref in getattr(entity_class(entry), "toml_refs", ()):
+        if ref.artifact_type == "docker_image" and "[]" not in ref.path:
+            value: Any = config
+            for key in ref.path.split("."):
+                value = value.get(key) if isinstance(value, dict) else None
+            tables.append(value)
+    return frozenset(unicodedata.normalize("NFC", posixpath.normpath(table["archive"])) for table in tables
+                     if isinstance(table, dict) and isinstance(table.get("archive"), str))
 
 
 def build_context_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:

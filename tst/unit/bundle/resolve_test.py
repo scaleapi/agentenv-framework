@@ -6,6 +6,7 @@ import random
 import pytest
 
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
+from agent_env.bundle import authoring as authoring_module
 from agent_env.bundle import resolve as resolve_module
 from agent_env.bundle.resolve import (
     ArchivedImage,
@@ -52,8 +53,8 @@ class _Plugin(TaskStep):
 
 @pytest.fixture(autouse=True)
 def registries(monkeypatch):
-    envs, steps = resolve_module.get_env_registry(), resolve_module.get_task_step_registry()
-    monkeypatch.setattr(resolve_module, "get_env_registry", lambda: {**envs, _Composite.type: _Composite})
+    envs, steps = authoring_module.get_env_registry(), resolve_module.get_task_step_registry()
+    monkeypatch.setattr(authoring_module, "get_env_registry", lambda: {**envs, _Composite.type: _Composite})
     monkeypatch.setattr(resolve_module, "get_task_step_registry", lambda: {**steps, _Plugin.type: _Plugin})
 
 

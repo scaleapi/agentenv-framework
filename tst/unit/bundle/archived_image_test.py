@@ -186,3 +186,16 @@ def test_a_saved_image_is_in_no_build_context_of_its_folder_and_a_new_one_rebuil
     assert ([call["build"][1] for call in builds], kept) == ([["Dockerfile", "env.toml"]], ["Dockerfile", "env.toml"])
     shop_now = Env.get(shop, done.version_of("env", shop))
     assert (shop_now.backend_docker_image_artifact.version, shop_now.frontend_docker_image_artifact.version) == (1, 2)
+
+
+def test_an_archive_key_that_isnt_an_images_leaves_its_file_in_the_build_context(bundle_dir, builds):
+    layout(bundle_dir, {
+        "agents/solver/Dockerfile": "FROM scratch\nCOPY assets.zip /\n",
+        "agents/solver/assets.zip": "zipped",
+        "agents/solver/agent.toml": 'default_env_vars = { archive = "assets.zip" }\n',
+        "tasks/t.json": json.dumps([{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}]),
+    })
+
+    _run(bundle_dir)
+
+    assert builds[0]["build"][1] == ["Dockerfile", "agent.toml", "assets.zip"]

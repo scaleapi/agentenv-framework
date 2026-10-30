@@ -10,6 +10,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import plan as plan_module
+from agent_env.bundle import authoring as authoring_module
 from agent_env.bundle import resolve as resolve_module
 from agent_env.bundle.plan import check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
@@ -82,8 +83,8 @@ class _UnreadableStep:
 @pytest.fixture(autouse=True)
 def stores(monkeypatch):
     set_document_store(FakeDocumentStore())
-    envs = resolve_module.get_env_registry()
-    monkeypatch.setattr(resolve_module, "get_env_registry", lambda: {**envs, _Composite.type: _Composite})
+    envs = authoring_module.get_env_registry()
+    monkeypatch.setattr(authoring_module, "get_env_registry", lambda: {**envs, _Composite.type: _Composite})
     monkeypatch.setattr("agent_env.env.registry.get_env_registry", lambda: {_NoteEnv.type: _NoteEnv})
     yield
     reset_artifact_store()
@@ -404,6 +405,7 @@ def test_a_plugin_file_type_is_checked_as_a_file_artifact_is_whichever_from_toml
     registry = {**artifacts, _PluginFile.model_fields["type"].default: _PluginFile,
                 _OwnFile.model_fields["type"].default: _OwnFile}
     monkeypatch.setattr(resolve_module, "get_artifact_registry", lambda: registry)
+    monkeypatch.setattr(authoring_module, "get_artifact_registry", lambda: registry)
     monkeypatch.setattr(plan_module, "get_artifact_registry", lambda: registry)
     resolved = make(tasks={"t": [load("mine", "l1"), load("theirs", "l2")]}, files={
         "artifacts/mine/artifact.toml": 'type = "plugin_file_test"\n', "artifacts/mine/a.txt": "a",

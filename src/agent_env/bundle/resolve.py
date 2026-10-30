@@ -16,14 +16,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity.refs import EntityKind, EntityRef, RefRole, RefSite, parse_toml_ref, ref_sites
 from agent_env.env.envs.gateway_server import GatewayEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
-from agent_env.env.registry import get_env_registry
-from agent_env.eval.eval import Eval
 from agent_env.plugins import _registration
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import LOCAL_PREFIX, derive_id, validate_local_id
@@ -32,7 +29,7 @@ from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
 
 from ._fs import fold, relative, show
-from .authoring import AuthoringContext, default_dockerfile
+from .authoring import AuthoringContext, default_dockerfile, entity_class
 from .parse import BUNDLE_TOML, DOCKERFILE, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
 from .requires import UnmetRequirements
 
@@ -502,18 +499,6 @@ class _Resolver:
 
     def _problem(self, entry: BundleEntry, message: str) -> None:
         self.problems.append(f"{relative(self.bundle.root, entry.path)}: {message}")
-
-
-def entity_class(entry: BundleEntry) -> type | None:
-    """The class that writes ``entry``: its env type's, its artifact type's, the agent's or the eval's; None for a type
-    nothing registers."""
-    if entry.kind is BundleKind.ENV:
-        return get_env_registry().get(entry.type)
-    if entry.kind is BundleKind.AGENT:
-        return A2AAgent if entry.type == A2AAgent.type else None
-    if entry.kind is BundleKind.EVAL:
-        return Eval if entry.type == Eval.type else None
-    return get_artifact_registry().get(canonical_type(entry.type))
 
 
 def _folder_file(entry: BundleEntry, name: Any) -> bool:
