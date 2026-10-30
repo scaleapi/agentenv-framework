@@ -51,6 +51,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.utils.docker.build import DockerBuildError
 from tst.unit.computer_home import Computer
 from tst.util.oci_registry import UBUNTU_LAYER, Registry
@@ -106,7 +107,9 @@ class FakeDocker:
         self.builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
                             "files": sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()),
                             "conf": next(context.glob("agentenv-*.conf")).read_text(),
-                            "confs": {conf.name: conf.read_text() for conf in context.glob("agentenv-*.conf")}})
+                            "confs": {conf.name: conf.read_text() for conf in context.glob("agentenv-*.conf")},
+                            "build_settings": {path.parent.parent.name: json.loads(path.read_text())
+                                               for path in context.glob("apps/*/.agentenv/build_settings.json")}})
 
     def label(self, local, platform, extra):
         self.labels[local] = extra
@@ -266,10 +269,15 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
 
 
 @pytest.mark.parametrize("change", ["requirements", "build-setting", "service", "display-read-at-build"])
-def test_what_changes_the_image_changes_its_key_and_builds_it_again(base, driver, docker, tmp_path, change):
+def test_what_changes_the_image_changes_its_key_and_builds_it_again(base, driver, docker, tmp_path, monkeypatch,
+                                                                    change):
+    staged, download = [], LocalFilesystemObjectStore.download_to_file
+    monkeypatch.setattr(LocalFilesystemObjectStore, "download_to_file", lambda self, url, dest: (
+        staged.append(url) if packages.PREFIX in url else None, download(self, url, dest))[1])
     if change == "display-read-at-build":
         base = _base(base.image(), config={**CONFIG, "resolution": {"default": "1280x800", "phase": "build"}})
     first = Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]["key"]
+    assert staged == []
     if change == "requirements":
         driver = _driver(tmp_path / "changed", requirements="mss>=10,<11\n")
     elif change == "service":
@@ -281,6 +289,7 @@ def test_what_changes_the_image_changes_its_key_and_builds_it_again(base, driver
         "container"]["arm64"]
 
     assert again["key"] != first and again["reused"] is False and len(docker.builds) == 4
+    assert bool(staged) == (change != "requirements")
     if display:
         assert 'ENV AGENTENV_SETTING_RESOLUTION="1600x900"' in docker.builds[-1]["dockerfile"]
 
@@ -969,6 +978,10 @@ MAIL_SETTINGS = {"properties": {
     "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
 
 
+MAIL_BUILD = {"properties": {"edition": {"default": "home", "enum": ["home", "pro"], "type": "string"},
+                             "locale": {"default": "en_US", "type": "string"}}, "type": "object"}
+
+
 #: The program of the mail app's own server.
 MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/python -m "
                "agentenv_protocol.computer.serve_app app.py:Mail\ndirectory=/opt/agentenv/apps/mail\n"
@@ -978,9 +991,9 @@ PROTOCOL_VERSION = importlib.metadata.version("agentenv-framework-protocol")
 
 
 def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
-         extra=None, steps=(), **changes):
+         extra=None, steps=(), build=MAIL_BUILD, **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
-    them, by name, and ``steps``, its install steps by name and scope."""
+    them, by name, ``steps``, its install steps by name and scope, and ``build``, the schema of its build settings."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
@@ -990,7 +1003,7 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
         name: folder / name for name in ("app.py", "requirements.txt", *(extra or {}))})
     declaration = AppDeclaration.model_validate({
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
-        "permissions": [], "launch": launch, "settings": settings, "skill": None,
+        "permissions": [], "launch": launch, "settings": settings, "build_settings": build, "skill": None,
         "data": [], "install_steps": [{"name": name, "scope": scope} for name, scope in steps], "ready_checks": [],
         "install": {"linux": install or {"python": "requirements.txt", "services": [
             {"name": "imap", "command": "venv/bin/python imap.py"}]}}})
@@ -1133,14 +1146,15 @@ def test_two_puts_resolving_the_same_inputs_at_once_both_get_the_first_stored_lo
     (folder / "requirements.txt").write_text("mss\n")
     wants = [packages.Want("driver", Install(python="requirements.txt", services=[Service(name="d", command="x")]), True)]
     inputs = packages.inputs_digest(wants, tmp_path / "ctx", "base", "arm64")
-    first = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop")
+    first, _ = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop", tmp_path / "1")
 
     def newer(request, context, source, arch, work):
         result, out = docker.resolve(request, context, source, arch, work)
         (out / "wheels" / "driver" / "mss-10.1.0-py3-none-any.whl").write_bytes(b"mss, published again")
         return result, out
     monkeypatch.setattr(packages, "_run_resolver", newer)
-    second = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop")
+    second, _ = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop",
+                                 tmp_path / "2")
 
     assert second == first == packages.stored(inputs, "@local/~/kit/desktop")
 
@@ -1170,6 +1184,36 @@ def _serving(bodies):
     def stream(method, url, **kwargs):
         yield httpx.Response(200, content=bodies[url], request=httpx.Request(method, url))
     return stream
+
+
+def test_an_apps_build_settings_are_fixed_in_its_folder_and_a_change_builds_another_image_from_the_same_lock(
+        base, driver, docker, tmp_path):
+    first = _app(base, driver, tmp_path / "mail", build_settings={"locale": "fr_FR"})
+    second = _app(base, driver, tmp_path / "mail", build_settings={"locale": "fr_FR", "edition": "pro"})
+
+    assert [build["build_settings"] for build in docker.builds if build["platform"] == "linux/arm64"] == [
+        {"mail": {"locale": "fr_FR"}}, {"mail": {"edition": "pro", "locale": "fr_FR"}}]
+    keys = {Env.get(app.id, app.version).metadata["composed"]["container"]["arm64"]["key"] for app in (first, second)}
+    assert len(keys) == 2 and len(docker.resolved) == 2
+    stored = Env.get(second.id)
+    assert stored.build_settings == {"locale": "fr_FR", "edition": "pro"}
+    assert ComputerAppEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
+
+
+@pytest.mark.parametrize("build, values, problem", [
+    ({**MAIL_BUILD, "required": ["locale"]}, {}, "build_settings: 'locale' is a required property"),
+    (MAIL_BUILD, {"colour": "blue"}, "build_settings.colour: @local/~/kit/mail declares no build setting 'colour'"),
+    (MAIL_BUILD, {"edition": "office"}, "build_settings.edition: 'office' is not one of ['home', 'pro']"),
+    (None, {"edition": "pro"}, "build_settings.edition: @local/~/kit/mail declares no build setting 'edition'"),
+], ids=["required", "unknown", "enum", "none-declared"])
+def test_build_settings_an_app_doesnt_declare_or_its_schema_refuses_are_refused_before_anything_is_stored(
+        base, driver, docker, tmp_path, build, values, problem):
+    with pytest.raises(ValueError, match=re.escape(problem)):
+        _app(base, driver, tmp_path / "mail", build=build, build_settings=values)
+
+    assert docker.builds == []
+    with pytest.raises(NotFoundError):
+        Env.get("@local/~/kit/mail")
 
 
 def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):
@@ -1258,7 +1302,9 @@ async def test_a_load_whose_connection_to_the_driver_breaks_says_so(base, driver
     ({"theme": "blue"}, "env_params.app_settings.mail.theme: 'blue' is not one of ['light', 'dark']"),
     ({"password": "hunter2"}, "env_params.app_settings.mail.password is a secret, so it takes a secret:KEY"),
     ({"token": "hunter2"}, "env_params.app_settings.mail.token is a secret, so it takes a secret:KEY"),
-], ids=["unknown", "type", "enum", "secret-value", "optional-secret-value"])
+    ({"edition": "pro"}, "env_params.app_settings.mail.edition is one of @local/~/kit/mail's build settings, which only "
+                         "another image changes"),
+], ids=["unknown", "type", "enum", "secret-value", "optional-secret-value", "build-setting"])
 async def test_app_settings_an_app_doesnt_declare_are_refused_at_save_and_at_deploy(base, driver, docker, boots,
                                                                                    tmp_path, values, problem):
     app = _app(base, driver, tmp_path / "mail")

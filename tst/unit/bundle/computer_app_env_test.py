@@ -35,6 +35,9 @@ class Mail(ComputerAppEnvironment):
         signature: str = ""
         password: SecretStr = SecretStr("")
 
+    class BuildSettings(BaseModel):
+        edition: str = "home"
+
     @install_step(scope="session")
     def profile(self): not_installed_here.profile()
 
@@ -68,7 +71,7 @@ def _problems(root):
 
 @pytest.mark.asyncio
 async def test_an_app_folder_is_written_with_its_files_and_what_its_class_declares(bundle_dir):
-    _bundle(bundle_dir)
+    _bundle(bundle_dir, toml=f'{TOML}build_settings = {{ edition = "pro" }}\n')
 
     materialize(plan_of(bundle_dir))
     env = Env.get(f"{ROOT}/mail")
@@ -81,6 +84,7 @@ async def test_an_app_folder_is_written_with_its_files_and_what_its_class_declar
                                                services=[Service(name="imap", command="venv/bin/python imap.py")])}
     assert declared.launch == Launch(command=["thunderbird"], window={"class": "thunderbird"})
     assert declared.settings["properties"]["password"]["writeOnly"] is True
+    assert list(declared.build_settings["properties"]) == ["edition"] and env.build_settings == {"edition": "pro"}
     assert (declared.skill, declared.data) == (AppSkill(file="skill.md"), ["data/add", "data/get"])
     assert declared.install_steps == [InstallStep(name="profile", scope="session")]
     assert (env.computer, env.driver) == (None, None)
@@ -100,7 +104,9 @@ async def test_an_app_folder_is_written_with_its_files_and_what_its_class_declar
      "install.linux.python: 'requirements.txt' isn't in this folder"),
     (TOML, {}, "guide.md", "skill: 'guide.md' isn't in this folder"),
     (f'{TOML}image = "x"\n', {}, "skill.md", "unknown key 'image'"),
-], ids=["no-module", "a-driver", "install-python", "skill", "unknown-key"])
+    (f'{TOML}build_settings = {{ colour = "blue" }}\n', {}, "skill.md",
+     "build_settings.colour: @local/~/apps/mail declares no build setting 'colour'"),
+], ids=["no-module", "a-driver", "install-python", "skill", "unknown-key", "build-setting"])
 def test_an_app_folder_that_cant_be_read_is_refused_before_any_write(bundle_dir, toml, extra, skill, problem):
     _bundle(bundle_dir, toml=toml, skill=skill, **{path: data for path, data in extra.items() if data is not None})
     for path in (path for path, data in extra.items() if data is None):

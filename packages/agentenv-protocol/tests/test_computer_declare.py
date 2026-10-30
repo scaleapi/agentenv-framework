@@ -16,6 +16,7 @@ pytest.importorskip("PIL")
 
 from agentenv_protocol.computer import AppDeclaration  # noqa: E402
 from agentenv_protocol.computer._declare import _Stub, _StubModule, declare, main  # noqa: E402
+from agentenv_protocol.computer.app import BUILD_SETTINGS  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
 
 DRIVER = '''import not_installed_here
@@ -78,6 +79,9 @@ class Mail(ComputerAppEnvironment):
     class Settings(BaseModel):
         account: str = "user@example.com"
         password: SecretStr = SecretStr("")
+
+    class BuildSettings(BaseModel):
+        locale: str = "en_US"
 
     @install_step()
     def packages(self): not_installed_here.apt()
@@ -175,7 +179,7 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
 
     assert isinstance(declared, AppDeclaration)
     settings = declared.settings
-    assert declared.model_dump(mode="json", exclude_none=True, exclude={"settings"}) == {
+    assert declared.model_dump(mode="json", exclude_none=True, exclude={"settings", "build_settings"}) == {
         "supports": LINUX, "permissions": ["camera"],
         "install": {"linux": {
             "files": "linux", "packages": {"apt": ["dovecot-imapd"]}, "python": "requirements.txt",
@@ -189,6 +193,7 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
         "install_steps": [{"name": "packages", "scope": "system"}, {"name": "profile", "scope": "session"}],
         "ready_checks": ["inbox_open"]}
     assert list(settings["properties"]) == ["account", "password"] and settings["properties"]["password"]["writeOnly"]
+    assert declared.build_settings["properties"] == {"locale": {"default": "en_US", "title": "Locale", "type": "string"}}
 
 
 def test_an_app_declaring_its_skill_twice_is_refused(folder):
@@ -203,8 +208,11 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
     ('launch = Launch(command=["mail"], ready=Ready(timeout_s=5))', "Ready waits on nothing: set window, port or command"),
     ('launch = Launch(command=["mail"], ready=Ready(window=True))', "ready waits on a window: name it with Launch(window="),
     ('launch = Launch(command=["mail"], window={"role": "main"})', "window matches by class, instance, title, not"),
+    ('class BuildSettings(BaseModel): key: SecretStr = SecretStr("")',
+     "Changed.BuildSettings.key is a secret, which its computer's image would keep; declare it in Settings"),
 ])
-def test_an_app_whose_launch_or_readiness_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
+def test_an_app_whose_launch_readiness_or_build_settings_cant_be_checked_is_refused_saying_why(folder, capsys, change,
+                                                                                                problem):
     (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64) + f"""
 
 @computer_app(supports={LINUX})
@@ -216,7 +224,8 @@ class Changed(Mail):
     assert problem in capsys.readouterr().err.splitlines()[-1]
 
 
-def test_an_app_reads_the_settings_its_computer_gives_it_by_its_name(monkeypatch):
+def test_an_app_reads_the_settings_its_computer_gives_it_by_its_name_and_its_build_settings_in_its_folder(
+        monkeypatch, tmp_path):
     from pydantic import BaseModel
 
     from agentenv_protocol.computer import APP_SETTINGS_ENV, ComputerAppEnvironment
@@ -226,10 +235,21 @@ def test_an_app_reads_the_settings_its_computer_gives_it_by_its_name(monkeypatch
             signature: str = ""
             lines: int = 1
 
+        class BuildSettings(BaseModel):
+            edition: str = "home"
+            locale: str = "en_US"
+
     monkeypatch.setenv("ENVIRONMENT_NAME", "notes")
     monkeypatch.setenv(APP_SETTINGS_ENV, json.dumps({"notes": {"signature": "-- Ada"}, "mail": {"lines": 9}}))
+    monkeypatch.chdir(tmp_path)
+    assert Notes().build_settings == Notes.BuildSettings()
+    (tmp_path / BUILD_SETTINGS).parent.mkdir()
+    (tmp_path / BUILD_SETTINGS).write_text(json.dumps({"edition": "pro"}))
 
-    assert Notes().settings == Notes.Settings(signature="-- Ada", lines=1)
+    notes = Notes()
+
+    assert notes.settings == Notes.Settings(signature="-- Ada", lines=1)
+    assert notes.build_settings == Notes.BuildSettings(edition="pro", locale="en_US")
 
 
 def test_an_apps_code_needs_only_the_plain_package():

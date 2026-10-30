@@ -1,6 +1,7 @@
-"""Computer app env: software on a computer, a ``ComputerAppEnvironment`` subclass, with its files and what it declares,
-read from the class at put. Deployed alone it is a one-app computer env: the computer and driver its env.toml names,
-composed with the app installed under its prefix, its card named after it."""
+"""Computer app env: software on a computer, a ``ComputerAppEnvironment`` subclass, with its files, what it declares,
+read from the class at put, and the values of its build settings the env fixes in the image. Deployed alone it is a
+one-app computer env: the computer and driver its env.toml names, composed with the app installed under its prefix, its
+card named after it."""
 
 from __future__ import annotations
 
@@ -33,11 +34,13 @@ class ComputerAppEnv(ComputerEnv):
 
     def __init__(self, id: str, version: Optional[int], environment_name: str, module: str, files: FileArtifactUniverse,
                  declaration: AppDeclaration, computer: Optional[ComputerArtifact] = None,
-                 driver: Optional[ComputerDriverEnv] = None, metadata: Optional[dict[str, Any]] = None):
+                 driver: Optional[ComputerDriverEnv] = None, build_settings: Optional[dict[str, Any]] = None,
+                 metadata: Optional[dict[str, Any]] = None):
         super().__init__(id, version, environment_name, computer, driver, metadata=metadata)
         self.module = module
         self.files = files
         self.declaration = declaration
+        self.build_settings = build_settings or {}
 
     @property
     def install(self) -> dict[str, AppInstall]:
@@ -59,7 +62,8 @@ class ComputerAppEnv(ComputerEnv):
                 "files": {"id": self.files.id, "version": self.files.version, "type": self.files.type},
                 "declaration": self.declaration.model_dump(mode="json", exclude_none=True),
                 "computer": {"id": self.computer.id, "version": self.computer.version} if self.computer else None,
-                "driver": {"id": self.driver.id, "version": self.driver.version} if self.driver else None}
+                "driver": {"id": self.driver.id, "version": self.driver.version} if self.driver else None,
+                **({"build_settings": self.build_settings} if self.build_settings else {})}
 
     @classmethod
     def from_dict(cls, data: dict) -> ComputerAppEnv:
@@ -70,20 +74,21 @@ class ComputerAppEnv(ComputerEnv):
         return cls(id=data["id"], version=data.get("version"), environment_name=data["environment_name"],
                    module=data["module"], files=Artifact.get(data["files"]["id"], version=data["files"]["version"]),
                    declaration=AppDeclaration.model_validate(data["declaration"]), computer=computer, driver=driver,
-                   metadata=data.get("metadata") or {})
+                   build_settings=data.get("build_settings"), metadata=data.get("metadata") or {})
 
     @classmethod
     def put(cls, *, id: str, environment_name: str, module: str, files: FileArtifactUniverse,
             declaration: AppDeclaration, computer: Optional[ComputerArtifact] = None,
-            driver: Optional[ComputerDriverEnv] = None, compose: bool = True,
-            on_build: Optional[Callable[[], None]] = None) -> Self:
-        """Write the app once what it declares checks out, and with a computer and a driver, once it fits them (gate
-        1); then compose it with them unless ``compose`` is False. Refused, naming every problem, before anything is
-        stored."""
+            driver: Optional[ComputerDriverEnv] = None, build_settings: Optional[dict[str, Any]] = None,
+            compose: bool = True, on_build: Optional[Callable[[], None]] = None) -> Self:
+        """Write the app once what it declares and ``build_settings``, its build settings' values, check out, and with
+        a computer and a driver, once it fits them (gate 1); then compose it with them unless ``compose`` is False.
+        Refused, naming every problem, before anything is stored."""
         app = cls(id=id, version=None, environment_name=environment_name, module=module, files=files,
-                  declaration=declaration, computer=computer, driver=driver)
+                  declaration=declaration, computer=computer, driver=driver, build_settings=build_settings)
         _, problems = _installs(declaration)
         problems += _class_beyond_reach(module, declaration)
+        problems += gate.check_app_build_settings(app, app.build_settings, "build_settings")
         if (computer is None) != (driver is None):
             problems.append("a computer app deploys alone on a computer and a driver; name both or neither")
         elif computer is not None and not problems:
@@ -99,8 +104,8 @@ class ComputerAppEnv(ComputerEnv):
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> ComputerAppEnv:
         """Write the app an env.toml declares, its class read in a process of its own (``declared``), its files stored
-        as a file universe, with the computer and driver env.toml names; its environment_name the folder's when it sets
-        none."""
+        as a file universe, with the computer and driver and the build settings' values env.toml names; its
+        environment_name the folder's when it sets none."""
         fields = cls.accept_toml(data, ctx)
         declaration = AppDeclaration.model_validate(declared(ctx, fields["module"], cls.type))
         files = ctx.files()
@@ -116,16 +121,17 @@ class ComputerAppEnv(ComputerEnv):
         try:
             return cls.put(id=ctx.id, environment_name=fields.get("environment_name", ctx.name),
                            module=fields["module"], files=universe, declaration=declaration, computer=computer,
-                           driver=driver, on_build=ctx.on_build)
+                           driver=driver, build_settings=fields.get("build_settings"), on_build=ctx.on_build)
         except ValueError as e:
             ctx.refuse([str(e)])
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a computer app env takes: ``module = "<file>:<class>"``, naming a file of
-        its folder; ``environment_name``; and the ``computer`` and ``driver`` it deploys alone on. Raises BundleError
-        listing every problem."""
-        fields, refused = ctx.accepted(data, environment_name=str, module=str, computer=object, driver=object)
+        its folder; ``environment_name``; the ``computer`` and ``driver`` it deploys alone on; and ``build_settings``,
+        the values of its build settings. Raises BundleError listing every problem."""
+        fields, refused = ctx.accepted(data, environment_name=str, module=str, computer=object, driver=object,
+                                       build_settings=dict)
         files, module, problems = ctx.files(), fields.get("module"), []
         if module is None and "module" not in data:
             problems.append('module is required: the app\'s file and class, such as "app.py:MailApp"')

@@ -626,11 +626,15 @@ class MailApp(ComputerAppEnvironment):
     class Settings(BaseModel):
         signature: str = ""
         password: SecretStr = SecretStr("")
+
+    class BuildSettings(BaseModel):
+        locale: str = "en_US"
 ```
 
 - **`@computer_app`** names the platforms the app supports, as a driver names them, and the
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
-  (`environment_name`) and the `computer` and `driver` it deploys alone on.
+  (`environment_name`), the `computer` and `driver` it deploys alone on, and `build_settings`, its
+  build settings' values (`build_settings = { locale = "fr_FR" }`).
 - **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
   copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
   (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
@@ -645,14 +649,19 @@ class MailApp(ComputerAppEnvironment):
   launch: a window matching `launch.window` by its class, instance or title, a port answering on
   loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
-  app, after its run scripts, offline and without the class's `__init__`: `self.settings` holds only
-  the `Settings` defaults, since no deploy's are known at build
-  (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
+  app, after its run scripts, offline and without the class's `__init__`. A step reads
+  `self.build_settings`; a deploy's `self.settings` aren't known at build, and reading one raises
+  `AttributeError` (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
 - **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
   its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
 - **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
   in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
   its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+- **`BuildSettings`** is typed too: values the app's env fixes in its computer's image, which only
+  another image changes, so a deploy can't give one. The composer writes them to
+  `.agentenv/build_settings.json` in the app's folder, and the base class reads them, over the
+  defaults, as `self.build_settings`, in its install steps and on the computer alike. None is a
+  secret, since the image keeps them; `declaration()` refuses a `SecretStr` one.
 
 On a computer each app is its own server: `python -m agentenv_protocol.computer.serve_app
 <file>:<Class>`, a program the computer's init runs from the app's folder in the app's venv, which

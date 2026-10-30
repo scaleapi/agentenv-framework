@@ -12,7 +12,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,27 +86,28 @@ def stored(inputs: str, store_id: str) -> dict | None:
     return json.loads(store.read(key)) if store.exists(key) else None
 
 
-def resolve(inputs: str, wants: list[Want], context: Path, source: str, arch: str, store_id: str) -> dict:
+def resolve(inputs: str, wants: list[Want], context: Path, source: str, arch: str, store_id: str,
+            work: Path) -> tuple[dict, dict[str, Path]]:
     """Resolve ``wants`` for ``arch`` in a container of ``source``, the base's image, with their folders and the
-    protocol's source from ``context``; fetch their downloads; store every file and the lock, and return the lock."""
-    store, prefix = _store(store_id)
-    with tempfile.TemporaryDirectory(prefix="agentenv-resolve-") as folder:
-        work = Path(folder)
-        result, out = _run_resolver(_request(wants, arch), context, source, arch, work)
-        apt = [{**deb, **_put(store, prefix, _written(out, "apt", deb["file"]))} for deb in result["apt"]]
-        wheels = {want.folder: [_put(store, prefix, _written(out, "wheels", want.name, wheel))
-                                for wheel in result["wheels"][want.name]] for want in wants if want.venv}
-        downloads = {want.folder: [{"url": download.url, "to": download.to,
-                                    **_put(store, prefix, _fetch(download.url, download.sha256, work))}
-                                   for download in _downloads(want.install, arch)]
-                     for want in wants if _downloads(want.install, arch)}
+    protocol's source from ``context``, into ``work``; fetch their downloads; store every file and the lock. The lock,
+    and where each file this resolve fetched is under ``work``, by its sha256, for a build that follows to stage it from
+    there rather than the store."""
+    (store, prefix), fetched = _store(store_id), {}
+    result, out = _run_resolver(_request(wants, arch), context, source, arch, work)
+    apt = [{**deb, **_put(store, prefix, fetched, _written(out, "apt", deb["file"]))} for deb in result["apt"]]
+    wheels = {want.folder: [_put(store, prefix, fetched, _written(out, "wheels", want.name, wheel))
+                            for wheel in result["wheels"][want.name]] for want in wants if want.venv}
+    downloads = {want.folder: [{"url": download.url, "to": download.to,
+                                **_put(store, prefix, fetched, _fetch(download.url, download.sha256, work))}
+                               for download in _downloads(want.install, arch)]
+                 for want in wants if _downloads(want.install, arch)}
     lock = {"inputs": inputs, "arch": arch, "apt": apt, "wheels": wheels, "downloads": downloads}
     key = f"{prefix}/locks/{inputs.removeprefix('sha256:')}.json"
     try:
         store.put(key, json.dumps(lock, sort_keys=True).encode(), content_type="application/json")
     except ObjectAlreadyExistsError:
-        return json.loads(store.read(key))
-    return lock
+        return json.loads(store.read(key)), fetched
+    return lock, fetched
 
 
 def digest(lock: dict | None) -> str | None:
@@ -115,19 +115,21 @@ def digest(lock: dict | None) -> str | None:
     return None if lock is None else "sha256:" + hashlib.sha256(json.dumps(lock, sort_keys=True).encode()).hexdigest()
 
 
-def stage(lock: dict, context: Path, store_id: str) -> None:
+def stage(lock: dict, context: Path, store_id: str, fetched: dict[str, Path]) -> None:
     """Write the lock's files into ``context`` for a build: .debs under ``packages/apt``, each layer's wheels under
-    ``packages/wheels/<name>``, and its downloads at their places in its folder, a script or binary executable."""
+    ``packages/wheels/<name>``, and its downloads at their places in its folder, a script or binary executable; each
+    linked from ``fetched``, the files a resolve just fetched by sha256, or else downloaded from the store."""
     store, prefix = _store(store_id)
     for deb in lock["apt"]:
-        _get(store, prefix, deb["sha256"], context / STAGED / "apt" / deb["file"])
+        _get(store, prefix, fetched, deb["sha256"], context / STAGED / "apt" / deb["file"])
     for folder, wheels in lock["wheels"].items():
         for wheel in wheels:
-            _get(store, prefix, wheel["sha256"], context / STAGED / "wheels" / folder.replace("/", "-") / wheel["file"])
+            _get(store, prefix, fetched, wheel["sha256"],
+                 context / STAGED / "wheels" / folder.replace("/", "-") / wheel["file"])
     for folder, downloads in lock["downloads"].items():
         for download in downloads:
             target = context / folder / download["to"]
-            _get(store, prefix, download["sha256"], target)
+            _get(store, prefix, fetched, download["sha256"], target)
             with target.open("rb") as file:
                 if file.read(4).startswith(RUN_ONLY):
                     target.chmod(EXECUTABLE)
@@ -148,7 +150,7 @@ def _run_resolver(request: dict, context: Path, source: str, arch: str, work: Pa
     """Run the resolver in a container of ``source`` for ``arch``, as root, with the build context read-only at /ctx;
     what it wrote, and the folder it wrote it in."""
     out = work / "out"
-    out.mkdir()
+    out.mkdir(parents=True)
     (out / "request.json").write_text(json.dumps(request))
     shutil.copy(RESOLVER, out / "resolve.py")
     try:
@@ -194,8 +196,9 @@ def _written(out: Path, *parts: str) -> Path:
     return path
 
 
-def _put(store, prefix: str, path: Path) -> dict:
-    """Store the file at ``path`` by its sha256 unless it's there; its name, sha256 and size."""
+def _put(store, prefix: str, fetched: dict[str, Path], path: Path) -> dict:
+    """Store the file at ``path`` by its sha256 unless it's there, and add it to ``fetched``; its name, sha256 and
+    size."""
     sha256 = _sha256(path)
     key = f"{prefix}/files/{sha256}"
     if not store.exists(key):
@@ -203,12 +206,17 @@ def _put(store, prefix: str, path: Path) -> dict:
             store.put_file(key, str(path))
         except ObjectAlreadyExistsError:
             pass
+    fetched[sha256] = path
     return {"file": path.name, "sha256": sha256, "size": path.stat().st_size}
 
 
-def _get(store, prefix: str, sha256: str, target: Path) -> None:
+def _get(store, prefix: str, fetched: dict[str, Path], sha256: str, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    store.download_to_file(store.object_url(f"{prefix}/files/{sha256}"), str(target))
+    if sha256 in fetched:
+        target.unlink(missing_ok=True)
+        os.link(fetched[sha256], target)
+    else:
+        store.download_to_file(store.object_url(f"{prefix}/files/{sha256}"), str(target))
 
 
 def _store(store_id: str):

@@ -1,9 +1,9 @@
 """ComputerAppEnvironment: software on a computer, an AgentEnvEnvironment whose class also declares what it is for a
 computer: the platforms it supports and the permissions it needs (``@computer_app``), how each OS installs it
-(``linux = Linux(...)``), how it launches (``launch``), its install steps and ready checks, its skill, and its typed
-``Settings``. A ``computer_app`` env's put reads that declaration from the class; its data hooks are the base class's.
-Its name is its env's ``environment_name``. On the computer the class runs as the app's own server (``serve_app``),
-which launches the app, adds its launcher and says whether it's ready (``computer-app/v1``)."""
+(``linux = Linux(...)``), how it launches (``launch``), its install steps and ready checks, its skill, its typed
+``Settings`` and its ``BuildSettings``. A ``computer_app`` env's put reads that declaration from the class; its data
+hooks are the base class's. Its name is its env's ``environment_name``. On the computer the class runs as the app's own
+server (``serve_app``), which launches the app, adds its launcher and says whether it's ready (``computer-app/v1``)."""
 from __future__ import annotations
 
 import inspect
@@ -31,6 +31,8 @@ COMPUTER_APP = "urn:agentenv:computer-app/v1"
 #: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
 SOCKET = Path(".agentenv/server.sock")
 FAILURE = Path(".agentenv/server.failure")
+#: The values of an app's build settings its env fixes in its computer's image, in the app's folder.
+BUILD_SETTINGS = Path(".agentenv/build_settings.json")
 #: How long an app may take to be ready when its launch doesn't say.
 DEFAULT_TIMEOUT_S = 60.0
 
@@ -168,8 +170,9 @@ class InstallStep(BaseModel):
 
 class AppDeclaration(BaseModel):
     """What a ComputerAppEnvironment class declares, as a ``computer_app`` env stores it: the platforms it ``supports``,
-    as a driver names them; its ``install`` by OS type; ``settings``, the JSON schema of its ``Settings``; and the
-    ``data`` methods, ``install_steps`` and ``ready_checks`` it serves, by name."""
+    as a driver names them; its ``install`` by OS type; ``settings`` and ``build_settings``, the JSON schemas of its
+    ``Settings`` and of its ``BuildSettings`` when it declares any; and the ``data`` methods, ``install_steps`` and
+    ``ready_checks`` it serves, by name."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -178,6 +181,7 @@ class AppDeclaration(BaseModel):
     install: dict[str, Linux]
     launch: Optional[Launch] = None
     settings: dict[str, Any]
+    build_settings: Optional[dict[str, Any]] = None
     skill: Optional[AppSkill] = None
     data: list[str]
     install_steps: list[InstallStep]
@@ -198,7 +202,7 @@ def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[
 def install_step(scope: Literal["system", "session"] = "system") -> Callable:
     """Mark a method a computer runs as it installs the app, after its files, packages, venv and run scripts, in the
     order the class defines them: as root, or for ``session``, as the session user. It runs offline, at build, without
-    the class's ``__init__``: ``self.settings`` holds only the Settings' defaults, since no deploy's are known yet."""
+    the class's ``__init__``, on ``self.build_settings``; a deploy's ``self.settings`` aren't known yet."""
     def deco(fn: Callable) -> Callable:
         setattr(fn, _INSTALL_STEP_ATTR, scope)
         return fn
@@ -213,7 +217,7 @@ def ready_check(fn: Callable) -> Callable:
 
 class ComputerAppEnvironment(AgentEnvEnvironment):
     """Subclass it, declare it with ``@computer_app``, and set ``linux``, ``launch`` and ``skill`` as class attributes;
-    a deploy's settings arrive as ``self.settings``."""
+    a deploy's settings arrive as ``self.settings``, and those its env fixes at build as ``self.build_settings``."""
 
     supports: ClassVar[list] = []
     permissions: ClassVar[list[str]] = []
@@ -226,9 +230,14 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     class Settings(BaseModel):
         """The app's settings: an app declares its own; a ``SecretStr`` field is a secret."""
 
+    class BuildSettings(BaseModel):
+        """The app's build settings, which its env fixes in its computer's image and only another image changes: an
+        app declares its own, which its install steps read too. None is a secret, since the image keeps them."""
+
     def __init__(self) -> None:
         values = json.loads(os.environ.get(APP_SETTINGS_ENV) or "{}").get(os.environ.get("ENVIRONMENT_NAME"), {})
         self.settings = self.Settings.model_validate(values)
+        self.build_settings = _built_settings(type(self))
         ready = self.launch.ready if self.launch is not None else None
         self._computer_app = AppRuntime(
             self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(type(self))
@@ -259,10 +268,15 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     @classmethod
     def declaration(cls) -> AppDeclaration:
-        """What the class declares. Raises ValueError for a skill declared twice or an install that isn't a
-        ``Linux``."""
+        """What the class declares. Raises ValueError for a skill declared twice, an install that isn't a ``Linux``,
+        or a build setting that's a secret."""
         if cls.linux is not None and not isinstance(cls.linux, Linux):
             raise ValueError(f"{cls.__name__}.linux is a Linux(...), not {cls.linux!r}")
+        build = cls.BuildSettings.model_json_schema()
+        if secret := next((name for name, schema in build.get("properties", {}).items()
+                           if any(option.get("writeOnly") for option in [schema, *schema.get("anyOf", [])])), None):
+            raise ValueError(f"{cls.__name__}.BuildSettings.{secret} is a secret, which its computer's image would "
+                             "keep; declare it in Settings")
         methods = _methods(cls)
         skill_methods = [fn.__name__ for fn in methods
                          if getattr(getattr(fn, _EXT_ATTR, None), "uri", None) == SKILL_EXTENSION_URI]
@@ -273,6 +287,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             supports=cls.supports, permissions=cls.permissions,
             install={"linux": cls.linux} if cls.linux is not None else {},
             launch=cls.launch, settings=cls.Settings.model_json_schema(),
+            build_settings=build if build.get("properties") else None,
             skill=AppSkill(file=cls.skill) if cls.skill is not None else
                   AppSkill(method=skill_methods[0]) if skill_methods else None,
             data=sorted({_DATA_METHODS[op] for fn in methods if (op := getattr(fn, _OP_ATTR, None)) in _DATA_METHODS}),
@@ -280,6 +295,12 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
                            if hasattr(fn, _INSTALL_STEP_ATTR)],
             ready_checks=[fn.__name__ for fn in methods if hasattr(fn, _READY_CHECK_ATTR)],
         )
+
+
+def _built_settings(cls: type[ComputerAppEnvironment]) -> BaseModel:
+    """The app's build settings, as its env fixed them in its computer's image, read in the app's folder: the values
+    the env gives, over the defaults."""
+    return cls.BuildSettings.model_validate(json.loads(BUILD_SETTINGS.read_text()) if BUILD_SETTINGS.is_file() else {})
 
 
 def _methods(cls: type) -> list[Callable]:

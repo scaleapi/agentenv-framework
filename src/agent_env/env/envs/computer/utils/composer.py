@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer import apps as installed_apps
-from agentenv_protocol.computer.app import SOCKET
+from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 from agentenv_protocol.computer.conformance import run_probe
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -187,7 +187,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
     stage, key = "build", None
     try:
         with tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work:
-            context = Path(work)
+            context, fetched = Path(work) / "context", {}
+            context.mkdir()
             source, base_identity = _base(base, arch)
             layer = _stage_driver(context, driver, base)
             apps = [_stage_app(context, app, base) for app in env.composed_apps()]
@@ -206,7 +207,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 stage = "resolve"
                 building()
                 ready()
-                lock = packages.resolve(inputs, wants, context, source, arch, env.stored_id)
+                lock, fetched = packages.resolve(inputs, wants, context, source, arch, env.stored_id,
+                                                 Path(work) / "resolve")
                 stage = "build"
             dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
             key = "sha256:" + hashlib.sha256(json.dumps({
@@ -226,7 +228,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             building()
             ready()
             if lock is not None:
-                packages.stage(lock, context, env.stored_id)
+                packages.stage(lock, context, env.stored_id, fetched)
             (context / "Dockerfile").write_text(f"{dockerfile}LABEL {KEY_LABEL}={key}\n")
             local = f"agentenv-computer:{key[7:23]}-{arch}"
             build_image(context / "Dockerfile", context, local, platform=platform, labels={KEY_LABEL: key})
@@ -309,9 +311,9 @@ def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifa
 
 
 def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact) -> _Layer:
-    """Write the app's install files under ``context/apps/<name>/`` and its supervisord programs beside them, run under
-    its name: its services and its own server, which serves its class from its venv and launches the app. Its folder
-    under ``APPS`` is named for its id's last part."""
+    """Write the app's install files under ``context/apps/<name>/``, with the values of its build settings the env
+    fixes, and its supervisord programs beside them, run under its name: its services and its own server, which serves
+    its class from its venv and launches the app. Its folder under ``APPS`` is named for its id's last part."""
     install, name = app.install[base.os.type], _name(app.id, "app")
     file, _, cls = app.module.partition(":")
     served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
@@ -320,6 +322,9 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact) -> _L
     programs = {f"app-{name}": f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
                 **_services(f"app-{name}", install)}
     _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name})
+    if app.build_settings:
+        (context / layer.folder / BUILD_SETTINGS).parent.mkdir(exist_ok=True)
+        (context / layer.folder / BUILD_SETTINGS).write_text(json.dumps(app.build_settings, sort_keys=True))
     return layer
 
 
