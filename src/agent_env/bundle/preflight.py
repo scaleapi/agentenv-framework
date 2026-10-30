@@ -46,7 +46,8 @@ from agent_env.env.bootstrap import (
     env_images,
     infra_to_set_up,
     needs_docker,
-    put_command,
+    put_hint,
+    ships,
     stores_are_local,
 )
 from agent_env.env.env import Env
@@ -429,16 +430,21 @@ class _Walk:
     def _remote_infra(self, link: SandboxProvider, kinds: set[str]) -> list[str]:
         """Why ``link``, a provider not on this machine, can't run the infra envs of ``kinds``. One the run sets up, in
         local stores, isn't checked: it's written anew, pulled from its registry or built, with its build context."""
-        set_up = {setup.kind for setup in infra_to_set_up(kinds)} if stores_are_local() else set()
+        local = stores_are_local()
+        # A website browser agent-env doesn't ship is never set up; missing from local stores, finish() reports it.
+        shipped = {kind for kind in kinds if ships(kind, default_env_id(kind))}
+        set_up = {setup.kind for setup in infra_to_set_up(shipped)} if local else set()
         found = []
         for kind in sorted(kinds - set_up):
             env_id = default_env_id(kind)
             try:
                 env = Env.get(env_id)
             except NotFoundError:
+                if local and kind not in shipped:
+                    continue
                 found.append(f"deploys on the {_shown(link)} sandbox provider, which needs the {kind} env {env_id!r}, "
                              f"and the store doesn't hold it; agent-env builds infra envs only into local stores, so put "
-                             f"it with `{put_command(kind)}`")
+                             f"it with {put_hint(kind)}")
                 continue
             accepts = EnvironmentGatewayProvider.accepts(link)
             found += [refusal for image in env_images(env)

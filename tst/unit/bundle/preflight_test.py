@@ -797,6 +797,19 @@ def test_missing_infra_in_stores_that_arent_local_is_refused_naming_its_put_comm
     ]
 
 
+def test_a_missing_browser_agent_env_doesnt_ship_is_reported_once_for_a_deploy_on_another_provider(bundle_dir,
+                                                                                                    monkeypatch):
+    with namespace_routing():
+        WebsiteEnv.put(id="shop", backend_docker_image_artifact=_image("shop-back", REMOTE),
+                       frontend_docker_image_artifact=_image("shop-front", REMOTE), environment_name="shop")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "shop"}])
+    monkeypatch.setattr(get_config(), "default_website_browser_env_id", "browseruse-mcp")
+
+    problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
+    assert [problem for problem in problems if "browseruse-mcp" in problem] == [next(
+        problem for problem in problems if problem.startswith("the website-browser env 'browseruse-mcp' isn't in the store"))]
+
+
 def test_a_gateway_deploy_on_another_provider_has_its_missing_infra_built_in_local_stores(bundle_dir, monkeypatch):
     """Built for this machine, with the build context a VM of another platform builds it from."""
     _env("crm", REMOTE)

@@ -280,7 +280,7 @@ def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_a_build_installs(
 
 
 def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_floor_a_build_names(script, monkeypatch, capsys):
-    """The website browser's recorder names a protocol floor, which its release may be the first to publish."""
+    """The Playwright MCP browser's recorder names a protocol floor, which its release may be the first to publish."""
     missing = "ERROR: No matching distribution found for agentenv-framework-protocol[computer]>=0.1.382\n"
     runs, waits = _attempts(script, monkeypatch, [(missing, 1), ("#13 DONE 4.1s\n", 0)])
 

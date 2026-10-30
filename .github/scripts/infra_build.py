@@ -30,7 +30,7 @@ IMAGES = {
     "agentenv-service-db": "src/agent_env/env/envs/service_db/Dockerfile",
     "agentenv-db-web": "src/agent_env/env/envs/service_db/Dockerfile.db-web",
     "agentenv-db-mcp": "src/agent_env/env/envs/service_db/Dockerfile.db-mcp",
-    "agentenv-website-browser": "src/agent_env/env/envs/website_browser/Dockerfile",
+    "agentenv-playwright-mcp": "src/agent_env/env/envs/playwright_mcp/Dockerfile",
     "agentenv-claude-code": "src/agent_env/agents/agents/claude-code/Dockerfile",
     "agentenv-codex": "src/agent_env/agents/agents/codex/Dockerfile",
     "agentenv-gemini": "src/agent_env/agents/agents/gemini/Dockerfile",
@@ -68,9 +68,9 @@ _SMOKES = {
     "agentenv-gateway": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import gateway.entrypoint"],
     "agentenv-db-web": ["docker", "run", "--rm", "--entrypoint", "/usr/bin/pgweb", "{image}", "--version"],
     "agentenv-db-mcp": ["docker", "run", "--rm", "{image}", "--help"],
-    "agentenv-website-browser": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
-                                 'npx --no-install @playwright/mcp@"$PLAYWRIGHT_MCP_VERSION" --help >/dev/null'
-                                 " && ls -d /root/.cache/ms-playwright/chromium-*"],
+    "agentenv-playwright-mcp": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+                                'npx --no-install @playwright/mcp@"$PLAYWRIGHT_MCP_VERSION" --help >/dev/null'
+                                " && ls -d /root/.cache/ms-playwright/chromium-*"],
     "agentenv-claude-code": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                              'claude --version && python -c "import a2a_server"'],
     "agentenv-codex": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",

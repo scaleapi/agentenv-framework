@@ -92,6 +92,11 @@ or one of them only where it is used.
   endpoint serving Anthropic's Messages API, such as a LiteLLM gateway. It declares `install/v1` too: its
   folder's `install.sh` installs it into a task container or onto a VM sandbox's host, with its own Claude
   Code, uv and Python, adding bash only to a target with neither bash nor zsh.
+- `[envs] default_gateway_env_id`, `default_service_db_env_id`, `default_website_browser_env_id`: the infra envs a
+  deploy runs on; built-in `default`, `default-db` and `playwright-mcp`, the Playwright MCP website browser a deploy
+  with websites adds. An id set in code, by `configure(...)` or the config attribute (as `agent-env env deploy
+  --gateway` does), beats the file. Within a run, its `user_overrides` (`gateway_env_id`, `service_db_env_id`,
+  `website_browser_env_id`) beat both.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A

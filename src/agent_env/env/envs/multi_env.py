@@ -40,7 +40,7 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
-from agent_env.env.envs.website_browser import WEBSITE_BROWSER_RECORDER_PORT
+from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_RECORDER_PORT
 from agent_env.store.ids import derive_id
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
@@ -587,7 +587,7 @@ class MultiEnv(Env):
         from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME, DB_MCP_SERVICE_NAME, PGWEB_SERVICE_NAME
         from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
         from agent_env.providers.env_state import LocalPostgresStateProvider
-        from agent_env.config import gateway_env_id, get_config, service_db_env_id
+        from agent_env.config import gateway_env_id, get_config, service_db_env_id, website_browser_env_id
 
         if self._sandbox is None:
             raise RuntimeError("Environment not deployed - call deploy() first")
@@ -617,9 +617,9 @@ class MultiEnv(Env):
             for env in self.website_envs
         ]
         if website_configs:
-            website_browser_env = Env.get(config.default_website_browser_env_id)
+            website_browser_env = Env.get(website_browser_env_id(config))
             mcp_servers = list(mcp_servers) + [MCPServerConfig(image=website_browser_env.docker_image_artifact.image_name, environment_name=website_browser_env.environment_name,
-                                                               card_port=WEBSITE_BROWSER_RECORDER_PORT)]
+                                                               card_port=PLAYWRIGHT_MCP_RECORDER_PORT)]
 
         compose_content = gw.create_docker_compose(
             mcp_servers=mcp_servers,

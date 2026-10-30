@@ -15,7 +15,7 @@ from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.banner import print_banner
 from agent_env.cli.task._checks import runnable_task
-from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE
+from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBSITE_BROWSER_OVERRIDE
 from agent_env.cli import submitted_runs
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.cli.teardown_output import echo_teardown
@@ -364,6 +364,8 @@ def _stored(task, context: TaskStepContext) -> str:
               help="Override default_gateway_env_id (required when --env-sandbox=modal until the default gateway image is rebuilt)")
 @click.option("--service-db-env-id", default=None, type=str,
               help="Override default_service_db_env_id (on Modal its images must be in the configured image store)")
+@click.option("--website-browser-env-id", default=None, type=str,
+              help="Override default_website_browser_env_id, the browser a deploy with websites adds")
 @click.option("--env-state-type", default=None, type=str,
               help="Override the env state type for deploy_env steps")
 @click.option("--env-state-instance-id", default=None, type=str,
@@ -372,7 +374,7 @@ def _stored(task, context: TaskStepContext) -> str:
               help="Keep what a run deployed up when it ends, print it, and tear it down on Ctrl-C; while it holds, "
                    "another terminal can resume the run with --start-step and --context-json. Without it, each run "
                    "is torn down as it ends, as Ctrl-C mid-run always does.")
-def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
+def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, start_step: int, context_json: str | None, litellm_api_key: str | None, judge_litellm_api_key: str | None, apply_trajectory_filter: bool | None, a2a_agent_id: str | None, agent_sandbox: str | None, env_sandbox: str | None, gateway_env_id: str | None, service_db_env_id: str | None, website_browser_env_id: str | None, env_state_type: str | None, env_state_instance_id: str | None, keep: bool):
     """Run a task through the configured [runner] and follow it.
 
     Each run's sandboxes are torn down as it ends, passed or failed; its instance and context JSON stay.
@@ -416,6 +418,8 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         initial_context.metadata.setdefault("user_overrides", {})[GATEWAY_OVERRIDE] = gateway_env_id
     if service_db_env_id:
         initial_context.metadata.setdefault("user_overrides", {})[SERVICE_DB_OVERRIDE] = service_db_env_id
+    if website_browser_env_id:
+        initial_context.metadata.setdefault("user_overrides", {})[WEBSITE_BROWSER_OVERRIDE] = website_browser_env_id
     initial_context.metadata["start_step"] = start_step
     initial_context.metadata[KEEP_KEY] = keep
     initial_context.metadata["task_id"] = task_id
