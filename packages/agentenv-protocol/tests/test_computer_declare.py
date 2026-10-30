@@ -95,7 +95,7 @@ class LeakyBuildSettings(BaseModel):
        services=[Service(name="imap", command="bin/imap")], ports=[143],
        launch=Launch(at="demand", command=["thunderbird"], window={{"class": "Thunderbird"}},
                      ready=Ready(window=True, timeout_s=30)),
-       skill="skill-linux.md", settings=LinuxSettings, build_settings=LinuxBuildSettings)
+       settings=LinuxSettings, build_settings=LinuxBuildSettings)
 @install("freebsd", FreeBSD(ports=["mail/thunderbird"]), launch=Launch(command=["thunderbird"]))
 class Mail(ComputerAppEnvironment):
     class Settings(BaseModel):
@@ -221,8 +221,7 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
                     "run": [{"script": "setup.sh", "scope": "system"}, {"script": "profile.sh", "scope": "session"}],
                     "services": [{"name": "imap", "command": "bin/imap"}], "ports": [143]},
                 "launch": {"at": "demand", "command": ["thunderbird"], "window": {"class": "Thunderbird"},
-                           "ready": {"window": True, "timeout_s": 30.0}},
-                "skill": {"file": "skill-linux.md"}},
+                           "ready": {"window": True, "timeout_s": 30.0}}},
             "freebsd": {"install": {"ports": ["mail/thunderbird"]},
                         "launch": {"at": "boot", "command": ["thunderbird"]}}},
         "skill": {"method": "guide"}, "data": ["data/add", "data/reset"],
@@ -256,6 +255,9 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Download.sha256: String should match pattern '^[0-9a-f]{64}$'"),
     ('@linux(run=[RunScript(script="../setup.sh")])',
      "RunScript.script: '../setup.sh' must be a path inside the layer's folder"),
+    ('@linux(skill="skill-linux.md")',
+     "Changed declares its skill twice on linux: skill = 'skill-linux.md' there and @agent_skill guide, which its "
+     "server serves on every OS"),
     ('@linux(build_settings=LeakyBuildSettings)',
      "LeakyBuildSettings holds a secret at properties.key, which its computer's image would keep"),
     ('@install_step(os="windows")\n    def fonts(self): pass',
@@ -269,7 +271,8 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.BuildSettings holds a secret at properties.keys.items, which"),
     ('class BuildSettings(BaseModel): mail: Mail.Settings = Mail.Settings()',
      "Changed.BuildSettings holds a secret at $defs.Settings.properties.password, which"),
-], ids=["no-wait", "no-window", "window-key", "download-sha", "script-escape", "os-build-secret", "step-os",
+], ids=["no-wait", "no-window", "window-key", "download-sha", "script-escape", "os-skill-twice", "os-build-secret",
+        "step-os",
         "check-os", "build-secret", "build-secrets-listed", "build-secret-nested"])
 def test_an_app_whose_declaration_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
     decorator, body = (change, "pass") if change.startswith("@linux") else ("", change)
@@ -321,6 +324,19 @@ def test_an_app_reads_its_settings_build_settings_and_launch_as_declared_for_the
             "DejaVu Sans", "linux", ["notes"])
     else:
         assert (type(notes.settings), notes.build_settings.edition, notes.launch) == (Notes.Settings, "home", None)
+
+
+def test_a_declaration_stored_before_each_os_had_its_own_part_reads_as_its_linux_part():
+    stored = {"supports": LINUX, "permissions": [], "settings": {"type": "object"}, "data": [], "install_steps": [],
+              "install": {"linux": {"files": ".", "services": [{"name": "imap", "command": "bin/imap"}]}},
+              "launch": {"at": "demand", "command": ["mail"]}, "ready_checks": ["inbox_open"]}
+
+    declared = AppDeclaration.model_validate(stored)
+
+    assert declared.os["linux"].install == stored["install"]["linux"]
+    assert declared.os["linux"].launch == Launch(at="demand", command=["mail"])
+    assert [check.model_dump(exclude_none=True) for check in declared.ready_checks] == [{"name": "inbox_open"}]
+    assert AppDeclaration.model_validate(declared.model_dump(mode="json")) == declared
 
 
 def test_linux_takes_every_field_of_a_linux_install_and_what_install_adds_for_an_os():

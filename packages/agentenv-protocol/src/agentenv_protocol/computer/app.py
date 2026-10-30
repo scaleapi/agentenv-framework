@@ -237,6 +237,20 @@ class AppDeclaration(BaseModel):
     install_steps: list[InstallStep]
     ready_checks: list[AppReadyCheck]
 
+    @model_validator(mode="before")
+    @classmethod
+    def _stored_before_each_os(cls, data: Any) -> Any:
+        """A declaration stored before each OS had its own part: its ``install`` by OS type and one ``launch`` for
+        them, which become ``os``, and its ready checks by name."""
+        if not isinstance(data, dict) or "install" not in data:
+            return data
+        data = dict(data)
+        installs, launch = data.pop("install"), data.pop("launch", None)
+        data["os"] = {os_type: {"install": install, "launch": launch} for os_type, install in installs.items()}
+        data["ready_checks"] = [{"name": check} if isinstance(check, str) else check
+                                for check in data.get("ready_checks", [])]
+        return data
+
 
 @dataclass(frozen=True)
 class _OsDeclared:
@@ -394,6 +408,11 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         if cls.skill is not None and skill_methods:
             raise ValueError(f"{cls.__name__} declares its skill twice: skill = {cls.skill!r} and @agent_skill "
                              f"{skill_methods[0]}")
+        if skill_methods and (os_type := next((os_type for os_type, declared in cls._installs.items()
+                                               if declared.skill is not None), None)):
+            raise ValueError(f"{cls.__name__} declares its skill twice on {os_type}: skill = "
+                             f"{cls._installs[os_type].skill!r} there and @agent_skill {skill_methods[0]}, which its "
+                             "server serves on every OS")
         steps = [InstallStep(name=fn.__name__, scope=scope, os=os_types) for fn in methods
                  if hasattr(fn, _INSTALL_STEP_ATTR) for scope, os_types in [getattr(fn, _INSTALL_STEP_ATTR)]]
         checks = [AppReadyCheck(name=fn.__name__, os=getattr(fn, _READY_CHECK_ATTR)) for fn in methods
