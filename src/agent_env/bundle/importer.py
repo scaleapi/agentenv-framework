@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import unicodedata
 import uuid
@@ -542,12 +543,16 @@ def _kind_of(entity: Any) -> EntityKind:
     raise TypeError(f"{entity!r} is no env, agent or artifact")
 
 
+# A reference pinned to a whole sha256 digest, at its end.
+_PINNED = re.compile(r"@sha256:[0-9a-f]{64}$")
+
+
 def _given_ref_problem(ref: str) -> str | None:
     """Why ``ref``, given for an image, can't be written: it must name its registry and pin a digest."""
     if not isinstance(ref, str) or not names_registry(ref):
         return "doesn't name its registry"
-    if "@sha256:" not in ref:
-        return "doesn't pin a digest, as <registry>/<repo>:<tag>@sha256:<digest> does"
+    if not _PINNED.search(ref):
+        return "doesn't pin a digest, as <registry>/<repo>:<tag>@sha256:<64 hex digits> does"
     return None
 
 

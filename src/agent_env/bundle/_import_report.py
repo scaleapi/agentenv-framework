@@ -172,10 +172,10 @@ def readme(description: str, imported: BundleImport) -> str:
     held = ("Every env, agent and artifact it uses is written here, so `agent-env run` runs it with no store"
             + (", except what *Still needs the store* lists, which it reads from the store this was imported from."
                if imported.pinned else "."))
-    built = not imported.images or any(image.ref is None for image in imported.images)
-    pulled = [_PULLED_IMAGES] if any(image.ref for image in imported.images) else []
+    built = [_BUILT_IMAGES] if any(image.ref is None for image in imported.images) else []
+    pulled = [_PULLED_IMAGES] if imported.pulled or any(image.ref for image in imported.images) else []
     lines = [description, "", f"Imported with agent-env {package_version('agentenv-framework')} on {stamp}. {held}", "",
-             *_RUN_IT, *_needs_lines(imported), "", *([_BUILT_IMAGES] if built else []), *pulled, "", *_SHARE_IT, ""]
+             *_RUN_IT, *_needs_lines(imported), "", *built, *pulled, "", *_SHARE_IT, ""]
     contents = _sections([("Tasks", [f"{task.path}: task {task.id} v{task.version}" for task in imported.tasks]),
                           ("Eval", [f"{imported.eval.path}: eval {imported.eval.id} v{imported.eval.version}"]
                            if imported.eval else [])])
@@ -236,8 +236,8 @@ _BUILT_IMAGES = (
     "Python and npm versions of the images the store held, as *Images* says. To build one unpinned, take out the "
     f"COPY and two ARG lines naming {posixpath.basename(IN_IMAGE)} after each FROM in its Dockerfile.")
 _PULLED_IMAGES = (
-    "An image *Images* says is pulled is pulled by its digest, never built; the build context beside it is there to "
-    "read or rebuild, and a deploy builds it only when it can't pull it.")
+    "An image *Images* says is pulled comes from its registry and is never built here. A build context beside one is "
+    "there to read or rebuild, and a deploy builds from it only when it can't pull the image.")
 _SHARE_IT = [
     "## Share it",
     "",

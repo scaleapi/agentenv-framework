@@ -14,6 +14,7 @@ from agent_env.bundle.importer import import_task
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
+from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.task import Task
@@ -51,7 +52,7 @@ def test_an_image_given_a_ref_is_written_as_it_with_its_pruned_context_beside_it
         f"envs/crm: image pulled as {REF}, its build context beside it from Dockerfile, 2 file(s), 61 B; largest: "
         "Dockerfile (42 B), app.py (19 B)"]
     readme = (imported.root / "README.md").read_text()
-    assert "An image *Images* says is pulled is pulled by its digest, never built" in readme
+    assert "An image *Images* says is pulled comes from its registry and is never built here." in readme
     assert "Its images are built from the build contexts" not in readme
     assert "`123456789012.dkr.ecr.us-west-2.amazonaws.com`" in readme
     assert json.loads((imported.root / "provenance.json").read_text())["images"][0]["ref"] == REF
@@ -84,11 +85,14 @@ def test_an_image_with_no_context_given_a_ref_is_written_as_the_ref_alone(home):
 @pytest.mark.parametrize("refs, problem", [
     ({"crm-image": REF.split("@")[0]},
      "envs/crm: image: the reference given for crm-image, '" + REF.split("@")[0] + "', doesn't pin a digest, as "
-     "<registry>/<repo>:<tag>@sha256:<digest> does"),
+     "<registry>/<repo>:<tag>@sha256:<64 hex digits> does"),
+    ({"crm-image": REF.split("@")[0] + "@sha256:"}, "doesn't pin a digest"),
+    ({"crm-image": REF[:-1]}, "doesn't pin a digest"),
+    ({"crm-image": REF[:-1] + "X"}, "doesn't pin a digest"),
     ({"crm-image": "crm@sha256:" + "c" * 64}, "doesn't name its registry"),
     ({"crm-image": REF, "other-image": REF},
      "a reference was given for other-image, which the import writes no image of"),
-], ids=["no digest", "no registry", "unused"])
+], ids=["no digest", "empty digest", "short digest", "not hex", "no registry", "unused"])
 def test_a_ref_that_cant_be_written_fails_the_import_and_writes_nothing(home, refs, problem):
     _stored(context_image(home, "crm-image"))
 
@@ -97,6 +101,29 @@ def test_a_ref_that_cant_be_written_fails_the_import_and_writes_nothing(home, re
 
     assert any(problem in found for found in caught.value.problems)
     assert not (home / "t").exists()
+
+
+def test_an_image_whose_context_no_configured_store_can_read_is_written_as_its_ref_alone(home, monkeypatch):
+    _stored(get_artifact_store().put_document(DockerImageArtifact(
+        id="crm-image", description="d", image_name="crm-image:v1",
+        build_context_s3_url="ftp://elsewhere/crm/build-context.tar.gz", dockerfile_path="Dockerfile")))
+    config_type, store_at = type(get_config()), type(get_config()).get_object_store_at
+
+    def refuse_ftp(self, url):
+        if url.startswith("ftp://"):
+            raise ValueError(f"no configured object store reads {url}")
+        return store_at(self, url)
+
+    monkeypatch.setattr(config_type, "get_object_store_at", refuse_ftp)
+
+    imported = import_task("t", home / "t", image_refs={"crm-image": REF})
+
+    assert _toml(imported.root, "envs/crm/env.toml")["image"] == {"ref": REF}
+    assert [(pull.image, pull.why) for pull in imported.pulled] == [
+        (REF, "its build context can't be downloaded: the configured stores can't read it")]
+    readme = (imported.root / "README.md").read_text()
+    assert "comes from its registry and is never built here" in readme
+    assert "Its images are built from the build contexts" not in readme
 
 
 def test_the_cli_takes_each_ref_as_id_equals_ref(home):
