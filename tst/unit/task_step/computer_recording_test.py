@@ -320,9 +320,24 @@ async def test_a_child_env_is_recorded_through_its_own_card_from_start_to_end(st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("children", [[{"name": "website-browser", "capabilities": {"extensions": []}}], []])
+async def test_a_child_env_that_declares_no_recording_fails_the_start_saying_so(store, children):
+    """A browser without a recorder, as each stage's first website browser was: its card has no recording, or there's no
+    card for it at all."""
+    gateway = _Gateway(store)
+    gateway.environment_card["children_environments"] = children
+    context = await _start(env_id="shop", environment_name="website-browser").execute(_context(gateway))
+    entry = context.metadata[RECORDINGS_KEY]["desk"]
+    assert entry["state"] == "failed" and gateway.calls == []
+    assert entry["error"].startswith(
+        f"EnvCapabilityUnsupported: env 'shop' child env 'website-browser' does not offer 'start' on {COMPUTER_RECORDING}")
+
+
+@pytest.mark.asyncio
 async def test_a_start_without_a_child_env_reads_the_envs_own_card_as_before(store):
     context = await _start(env_id="shop").execute(_context(_Gateway(store)))
     entry = context.metadata[RECORDINGS_KEY]["desk"]
-    assert entry["state"] == "failed" and "max_duration_s" in entry["error"]  # its own card declares no recording
+    assert entry["state"] == "failed"  # its own card declares no recording
+    assert entry["error"].startswith("EnvCapabilityUnsupported: env 'shop' does not offer 'start' on ")
     context = await _start().execute(_context(_Computer(store)))
     assert "environment_name" not in context.metadata[RECORDINGS_KEY]["desk"]
