@@ -24,6 +24,7 @@ from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import (
     AGENT_ENV_ROLE_HEADER,
     EXT_CLOCK_URI,
+    EXT_NOTIFICATIONS_URI,
     EXT_STEP_URI,
     EXT_TRIGGERS_URI,
     STEP_SOURCE,
@@ -33,7 +34,7 @@ from agent_env.task_step.context import TaskStepContext, _strip_redacted_keys
 
 _SPEC_KEYS = ("file_artifact_id", "file_artifact_version", "params")
 _RECORD_TAGS = ("hook", "turn")
-_INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI)
+_INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI, EXT_NOTIFICATIONS_URI)
 _TOOL_CALL_TIMEOUT_S = 600
 
 Answer = dict[str, Any]
@@ -118,7 +119,8 @@ class PostTurnHooks:
 
 
 class HookEnv:
-    """A deployed env as a hook reaches it: clock and triggers calls, and tool calls recorded as the hook's."""
+    """A deployed env as a hook reaches it: clock, triggers and notifications calls, and tool calls recorded as the
+    hook's."""
 
     def __init__(self, deployed: DeployedEnv, hook_artifact_id: str) -> None:
         self.env_id = deployed.env_id
@@ -215,6 +217,12 @@ class Turn:
             raise ValueError(f"a hook records an object, without the keys {list(_RECORD_TAGS)} it is tagged with")
         (self._context.metadata.setdefault("post_turn_hooks", {}).setdefault(self._step_id, [])
             .append({"hook": self._hook.artifact_id, "turn": self.number, **copy.deepcopy(entry)}))
+
+    def records(self) -> list[dict]:
+        """This hook's own records in this conversation, oldest first: what ``record`` appended for this step, as
+        read-only copies (another step's conversation, or another hook in this one, keeps its own)."""
+        entries = (self._context.metadata.get("post_turn_hooks") or {}).get(self._step_id, [])
+        return [copy.deepcopy(e) for e in entries if e.get("hook") == self._hook.artifact_id]
 
     def heartbeat(self) -> None:
         self._context.heartbeat()
