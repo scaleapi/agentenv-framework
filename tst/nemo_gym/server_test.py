@@ -1,13 +1,16 @@
 """``AgentEnvResourcesServer`` driven as NeMo Gym's ``simple_agent`` drives it, through a client that keeps the session
 cookie Gym keeps per rollout, over the bundle the unit tier serves on loopback: a row's seed starts its task's episode,
 the tool routes answer as text, verify ends the turns left open and scores the episode or masks the rollout, a rollout
-waits its turn at the server's limit, a closed or idle session ends its episode, the server takes one worker, and a
-bundle named in the config is served for the server's lifetime. CI runs it on the nemo-gym ``uv.lock`` pins and on the
-latest nemo-gym."""
+waits its turn at the server's limit, a closed or idle session ends its episode, the server takes one worker, a
+bundle named in the config is served for the server's lifetime, and ``serve`` runs a written server on its own. CI runs
+it on the nemo-gym ``uv.lock`` pins and on the latest nemo-gym."""
 
 import asyncio
 import json
 import logging
+import socket
+import subprocess
+import sys
 import time
 from unittest.mock import MagicMock
 
@@ -16,6 +19,7 @@ import pydantic
 import pytest
 from fastapi.testclient import TestClient
 
+from agent_env.training.nemo_gym.prepare import write_server
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
@@ -174,6 +178,28 @@ def test_a_bundle_named_in_the_config_is_served_while_the_server_runs(tmp_path, 
     assert len(teardowns.finished) == 2
 
 
+def test_serve_runs_a_written_server_on_its_own_at_the_port_it_is_given(serve, tmp_path, teardowns):
+    bundle_server = serve({"a": PLAYED})
+    folder = write_server(bundle_server.url, tmp_path)
+    row = json.loads((folder / "data" / "all.jsonl").read_text().splitlines()[0])
+    port = _free_port()
+
+    served = subprocess.Popen([sys.executable, "-m", "agent_env.training.nemo_gym", "serve", str(folder), "--port",
+                               str(port)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        with httpx.Client(base_url=_up(served, f"http://127.0.0.1:{port}")) as client:
+            assert client.post("/seed_session", json=row).json() == {}
+            assert client.post("/add_item", json={"item": "crate"}).text == "add_item {'item': 'crate'}"
+            verified = _verify(client, row, "Added a crate.")
+    finally:
+        served.terminate()
+        served.wait(timeout=30)
+    bundle_server.stop()
+
+    assert (verified["reward"], verified["mask_sample"], verified["task_id"]) == (1.0, False, "a")
+    assert len(teardowns.finished) == 2
+
+
 _EPISODE = {"rollout_id": "rollout"}
 
 
@@ -200,6 +226,26 @@ def _verified(row, reply):
     response = {"id": "resp", "created_at": 0.0, "model": "policy", "object": "response", "output": output,
                 "parallel_tool_calls": True, "tool_choice": "auto", "tools": []}
     return {**row, "response": response}
+
+
+def _free_port():
+    with socket.socket() as bound:
+        bound.bind(("127.0.0.1", 0))
+        return bound.getsockname()[1]
+
+
+def _up(process, url, timeout=180):
+    """``url`` once the server ``process`` runs answers there; the first import of NeMo Gym can take a minute."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise AssertionError(f"serve exited {process.returncode}: {process.stdout.read()}")
+        try:
+            if httpx.get(url).status_code == 200:
+                return url
+        except httpx.TransportError:
+            time.sleep(0.5)
+    raise AssertionError(f"serve didn't answer at {url} in {timeout}s")
 
 
 def _client(app):
