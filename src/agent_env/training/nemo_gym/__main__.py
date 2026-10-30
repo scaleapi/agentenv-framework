@@ -53,13 +53,17 @@ def write(source: str, root: str, name: str | None, sandbox: str | None, reward:
 @click.option("--host", default="127.0.0.1", show_default=True,
               help="The address to listen on. The server checks no token, so keep it off public interfaces.")
 @click.option("--port", type=int, required=True, help="The port to listen on.")
-def serve(folder: str, host: str, port: int) -> None:
+@click.option("--masked-as-error", is_flag=True,
+              help="Answer verify for a rollout the environment failed with HTTP 503 rather than mask_sample, for a "
+                   "client that doesn't read mask_sample, as verifiers' NeMo Gym taskset doesn't: it then fails the "
+                   "rollout, and prime-rl trains on none of it.")
+def serve(folder: str, host: str, port: int, masked_as_error: bool) -> None:
     """Runs the resources server written into FOLDER, a Gym root's resources_servers/<name>, on its own: without Gym's
     head server or the agent servers its config names. Point verifiers' NeMo Gym taskset at it with
     env.taskset.task.resources_url, and its env.taskset.dataset at the folder's data/<split>.jsonl."""
     if run_server is None:
         raise click.ClickException(UNSERVABLE)
-    run_server(folder, host=host, port=port)
+    run_server(folder, host=host, port=port, masked_as_error=masked_as_error)
 
 
 if __name__ == "__main__":
