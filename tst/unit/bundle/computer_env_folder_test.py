@@ -12,9 +12,12 @@ from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle, plan_entities
 from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle.run import dry_run_bundle
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import composer
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.unit.bundle._support import layout, local_builds
 
 UBUNTU = "@local/agentenv-framework/computers/ubuntu-24.04"
@@ -35,9 +38,11 @@ def composed(tmp_path, monkeypatch, local_stores, cli_routing, builds):
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: None)
     calls = []
 
-    def compose(env, on_build=None):
-        on_build()
-        calls.append((env.id, env.computer.id, env.driver.id))
+    def compose(env, pairs=None, composing=Composing()):
+        if composing.on_progress is not None:
+            composing.on_progress("composing")
+        calls.append((env.id, env.computer.id, env.driver.id, composing.sandbox_provider)
+                     + ((pairs,) if pairs is not None else ()))
 
     monkeypatch.setattr(composer, "compose", compose)
     return calls
@@ -69,17 +74,52 @@ def _plan_env(root):
 
 @pytest.mark.parametrize("planned", [_plan, _plan_env], ids=["a-run", "the-env-alone"])
 def test_a_computer_env_naming_shipped_aliases_is_written_over_them_and_composed(tmp_path, composed, planned):
-    plan = planned(_bundle(tmp_path / "desk"))
-    building = []
+    plan, provider = planned(_bundle(tmp_path / "desk")), LocalSandboxProvider()
+    told = []
 
-    done = materialize(plan, build_here=local_builds(plan), on_build=lambda write: building.append(write.id))
+    done = materialize(plan, build_here=local_builds(plan), composing=Composing(provider),
+                       on_progress=lambda write, line: told.append((write.id, line)))
 
     env = Env.get(f"{plan.bundle.bundle.id_root}/desktop")
     written = {item.write.id for item in done.writes}
     assert isinstance(env, ComputerEnv) and {UBUNTU, REFERENCE} <= written
     assert (env.computer.id, env.driver.id, env.environment_name) == (UBUNTU, REFERENCE, "desktop")
     assert env.computer_settings == {"timezone": "Europe/Paris"} and env.display == {"width": 1600, "height": 900}
-    assert composed == [(env.id, UBUNTU, REFERENCE)] and env.id in building
+    assert composed == [(env.id, UBUNTU, REFERENCE, provider)] and told == [(env.id, "composing")]
+
+
+def test_a_reused_computer_env_composes_what_it_has_left_on_the_runs_provider_and_nothing_once_its_built(tmp_path,
+                                                                                                         composed):
+    root, provider = _bundle(tmp_path / "desk"), LocalSandboxProvider()
+    materialize(_plan(root), build_here=local_builds(_plan(root)))
+    env = Env.get(f"{_plan(root).bundle.bundle.id_root}/desktop")
+    told = []
+
+    checked = materialize(_plan(root), dry_run=True, composing=Composing(provider),
+                          on_progress=lambda write, line: told.append((write.id, line)))
+    again = materialize(_plan(root), build_here=local_builds(_plan(root)), composing=Composing(provider),
+                        on_progress=lambda write, line: told.append((write.id, line)))
+    env.update_metadata({**env.metadata, "computer": {"id": "c", "version": 1, "images": {"amd64": "a", "arm64": "b"}},
+                         "composed": {"container": {"amd64": {"status": "ready", "image": "a"},
+                                                    "arm64": {"status": "ready", "image": "b"}}}})
+    built = materialize(_plan(root), build_here=local_builds(_plan(root)), composing=Composing(provider))
+
+    assert built.composing == () and checked.composing == again.composing == (env.id,) and all(item.reused for item in again.writes)
+    assert told == [(env.id, "would compose container/amd64, container/arm64"), (env.id, "composing")]
+    assert composed == [(env.id, UBUNTU, REFERENCE, None),
+                        (env.id, UBUNTU, REFERENCE, provider, [("container", "amd64"), ("container", "arm64")])]
+
+
+def test_a_dry_run_says_what_it_would_compose_of_a_reused_computer_env(tmp_path, composed):
+    root = _bundle(tmp_path / "desk")
+    materialize(_plan(root), build_here=local_builds(_plan(root)))
+    told = []
+
+    dry = dry_run_bundle(root, sandbox="local", on_progress=told.append)
+
+    env_id = f"{_plan(root).bundle.bundle.id_root}/desktop"
+    assert dry.materialization.composing == (env_id,) and len(composed) == 1
+    assert "envs/desktop: would compose container/amd64, container/arm64" in told
 
 
 def test_the_env_alone_is_planned_whatever_the_bundles_tasks_would_deploy(tmp_path, composed, monkeypatch):

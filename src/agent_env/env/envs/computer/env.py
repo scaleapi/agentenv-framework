@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import posixpath
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
@@ -22,6 +21,7 @@ from agent_env.env.envs._deployment import (
     provider_or_class,
 )
 from agent_env.env.envs.computer.utils import composer, gate, inside
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
@@ -82,10 +82,9 @@ class ComputerEnv(Env):
     @classmethod
     def put(cls, *, id: str, computer: ComputerArtifact, driver: ComputerDriverEnv, environment_name: str,
             apps: Any = (), display: Any = None, network: Any = None, computer_settings: Any = None,
-            compose: bool = True, on_build: Optional[Callable[[], None]] = None) -> Self:
-        """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it unless ``compose`` is
-        False, calling ``on_build`` just before it builds an image. Refused, naming every mismatch, before anything is
-        stored."""
+            compose: bool = True, composing: Composing = Composing()) -> Self:
+        """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it as ``composing``
+        says unless ``compose`` is False. Refused, naming every mismatch, before anything is stored."""
         values, problems = gate.check(computer, driver, apps=list(apps), display=display, network=network,
                                       computer_settings=computer_settings or {})
         if problems:
@@ -94,7 +93,7 @@ class ComputerEnv(Env):
             id=id, version=None, environment_name=environment_name,
             computer=computer, driver=driver, display=display, network=network, computer_settings=values))
         if compose:
-            composer.compose(env, on_build=on_build)
+            composer.compose(env, composing=composing)
         return env
 
     @classmethod
@@ -111,7 +110,8 @@ class ComputerEnv(Env):
                                                                                        ComputerDriverEnv)
         try:
             return cls.put(id=ctx.id, computer=base, driver=driver,
-                           environment_name=fields.pop("environment_name", ctx.name), on_build=ctx.on_build, **fields)
+                           environment_name=fields.pop("environment_name", ctx.name), composing=ctx.composing,
+                           **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
 

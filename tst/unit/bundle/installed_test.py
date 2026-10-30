@@ -281,11 +281,11 @@ def test_the_cli_says_so_when_no_bundles_are_installed_and_needs_a_bundle_for_it
 
     assert CliRunner().invoke(cli, ["run"]).output == "No bundles are installed. agent-env run PATH runs a folder.\n"
     for option in (["--task", "t"], ["--keep"], ["--dry-run"], ["--user-model", "m"], ["--judge-model", "m"],
-                   ["--agent", "pi"]):
+                   ["--agent", "pi"], ["--no-emulate"]):
         usage = CliRunner().invoke(cli, ["run", *option])
         assert usage.exit_code == 2
-        assert ("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep and --dry-run need a "
-                "BUNDLE to run") in " ".join(usage.output.split())
+        assert ("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep, --dry-run and "
+                "--no-emulate need a BUNDLE to run") in " ".join(usage.output.split())
 
 
 def test_the_cli_runs_an_installed_bundle_by_name_with_ids_rooted_at_its_package(site, monkeypatch, quiet_logs,

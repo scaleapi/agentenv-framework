@@ -41,16 +41,19 @@ _DRY_RUN = "Dry run: nothing is written or run."
               help="The agent the solver runs as, whatever the tasks name: an alias such as pi, an agent of this "
                    "bundle or an installed one, or the store's.")
 @click.option("--sandbox", default=None,
-              help="The sandbox provider envs, agents, sandboxes and the judge deploy on; comma-separated for a "
-                   "fallback chain.")
+              help="The sandbox provider computer envs compose on and envs, agents, sandboxes and the judge deploy "
+                   "on; comma-separated for a fallback chain.")
 @click.option("--keep", is_flag=True,
               help="Keep the sandboxes up after the runs, print their endpoints, and tear them down on Ctrl-C.")
 @click.option("--dry-run", is_flag=True,
               help="Check the bundle as the run does and show what it would write and run; write and run nothing.")
+@click.option("--no-emulate", is_flag=True,
+              help="Skip, rather than emulate, a computer env's arch no link of the sandbox provider runs natively; "
+                   "a later run or env build builds it.")
 @click.pass_context
 def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: tuple[str, ...], model: str | None,
         user_model: str | None, judge_model: str | None, agent: str | None, sandbox: str | None, keep: bool,
-        dry_run: bool):
+        dry_run: bool, no_emulate: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
     BUNDLE is a folder, or the name of a bundle an installed package provides (PACKAGE/NAME when several
@@ -78,9 +81,9 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     exits 130 (143 for SIGTERM); a second one stops the teardown and prints what is still up.
     """
     if bundle is None:
-        if tasks or evals or model or user_model or judge_model or agent or sandbox or keep or dry_run:
-            raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep "
-                                   "and --dry-run need a BUNDLE to run")
+        if tasks or evals or model or user_model or judge_model or agent or sandbox or keep or dry_run or no_emulate:
+            raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep, "
+                                   "--dry-run and --no-emulate need a BUNDLE to run")
         _list_installed()
         return
     root, id_root = locate_bundle(bundle, _installed)
@@ -89,11 +92,11 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
         if dry_run:
             click.echo(_DRY_RUN)
             _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent,
-                                           on_progress=click.echo, id_root=id_root))
+                                           on_progress=click.echo, id_root=id_root, emulate=not no_emulate))
             return
         result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
                             judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
-                            id_root=id_root, keep=keep)
+                            id_root=id_root, keep=keep, emulate=not no_emulate)
     except BundleError as e:
         _note_an_installed_namesake(e, bundle, root, id_root)
         if isinstance(e, UnmetRequirements) and not dry_run:
@@ -219,6 +222,10 @@ def _report_dry_run(dry: DryRun) -> None:
         click.echo("Would set up first:")
     for build in dry.infra:
         click.echo(f"  {build}: {build.planned()}")
+    if materialization.composing:
+        click.echo("Would compose what's left of:")
+    for env_id in materialization.composing:
+        click.echo(f"  {env_id}")
     click.echo("Would run:")
     for entry in dry.runs:
         click.echo(f"  {dry.path(entry)} v{materialization.version_of('task', entry.id)}")

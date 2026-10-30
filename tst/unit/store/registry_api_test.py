@@ -1,8 +1,9 @@
-"""Pinning an image ref to the digest its registry serves, and reading its manifests and blobs, over a fake
-registry's OCI distribution API."""
+"""Pinning an image ref to the digest its registry serves, reading its manifests and blobs, and writing an index of its
+images, over a fake registry's OCI distribution API."""
 
 import base64
 import hashlib
+import json
 
 import httpx
 import pytest
@@ -272,3 +273,45 @@ def test_what_the_registry_refuses_is_raised_as_pin_digest_raises_it(fake_regist
     with pytest.raises(error):
         read_blob("localhost:5000/desk:1", DIGEST, None, tmp_path / "layer")
     assert str(seen[0].url) == "http://localhost:5000/v2/desk/manifests/1"
+
+
+DOCKER_IMAGE, OCI_IMAGE = "application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.manifest.v1+json"
+OCI_INDEX = "application/vnd.oci.image.index.v1+json"
+
+
+@pytest.mark.parametrize("arm64, written", [("index", OCI_INDEX),
+                                            ("docker", "application/vnd.docker.distribution.manifest.list.v2+json")])
+def test_an_index_of_images_is_written_with_a_token_that_pushes_and_an_image_that_is_an_index_keeps_its_manifests(
+        fake_registry, arm64, written):
+    amd64 = b'{"schemaVersion": 2}'
+    children = [{"mediaType": OCI_IMAGE, "digest": "sha256:" + "c" * 64, "size": 400,
+                 "platform": {"architecture": "arm64", "os": "linux"}},
+                {"mediaType": OCI_IMAGE, "digest": "sha256:" + "d" * 64, "size": 500,
+                 "platform": {"architecture": "unknown", "os": "unknown"}}]
+    served = {DIGEST: (DOCKER_IMAGE, amd64),
+              OTHER: (OCI_INDEX, json.dumps({"manifests": children}).encode()) if arm64 == "index" else (DOCKER_IMAGE, amd64)}
+    put = []
+
+    def ghcr(request):
+        scope = "repository:org/desk:pull,push" if request.method == "PUT" else "repository:org/desk:pull"
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"token": request.url.params["scope"]})
+        if request.headers.get("authorization") != f"Bearer {scope}":
+            return httpx.Response(401, headers={"WWW-Authenticate": f'Bearer realm="https://ghcr.io/token",scope="{scope}"'})
+        if request.method == "PUT":
+            put.append(request)
+            return httpx.Response(201)
+        media, body = served[request.url.path.rpartition("/")[2]]
+        return httpx.Response(200, content=body, headers={"Content-Type": media})
+
+    fake_registry(ghcr)
+    registry_api.write_index("ghcr.io/org/desk:index-1", {"linux/amd64": f"ghcr.io/org/desk:a@{DIGEST}",
+                                                          "linux/arm64": f"ghcr.io/org/desk:b@{OTHER}"}, None)
+
+    (request,) = put
+    assert request.url.path == "/v2/org/desk/manifests/index-1" and request.headers["content-type"] == written
+    amd64_entry = {"mediaType": DOCKER_IMAGE, "digest": DIGEST, "size": len(amd64),
+                   "platform": {"architecture": "amd64", "os": "linux"}}
+    assert json.loads(request.content) == {"schemaVersion": 2, "mediaType": written, "manifests": [
+        amd64_entry, *(children if arm64 == "index" else [{**amd64_entry, "digest": OTHER,
+                                                           "platform": {"architecture": "arm64", "os": "linux"}}])]}

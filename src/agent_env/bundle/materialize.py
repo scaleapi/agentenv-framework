@@ -19,7 +19,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
@@ -27,6 +27,10 @@ from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, push_context_image
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
 from agent_env.entity.refs import EntityKind, EntityRef, RefRole, ref_sites
+from agent_env.env import Env
+from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer.utils import composer
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval, EvalTask
 from agent_env.providers.sandbox_providers.host_images import build, build_staged
@@ -64,6 +68,8 @@ class Materialization:
     writes: tuple[Materialized, ...]  # in the plan's order
     # A dry run's steps with a preflight that read what it would write first, so the store can't check them yet.
     not_preflighted: tuple[tuple[Write, TaskStep], ...] = ()
+    # The computer envs reused with pairs left to compose, which a run composes and a dry run says it would.
+    composing: tuple[str, ...] = ()
 
     def version_of(self, store: str, id: str) -> int:
         for done in self.writes:
@@ -81,6 +87,8 @@ def materialize(
     on_write: Callable[[Materialized], None] | None = None,
     build_here: frozenset[str] = frozenset(),
     ledger: Ledger | None = None,
+    composing: Composing = Composing(),
+    on_progress: Callable[[Write, str], None] | None = None,
 ) -> Materialization:
     """Write ``plan``'s entities, tasks and evals. The first write that fails stops it, and every earlier
     one stays: they're in the ledger, so the next run reuses them. ``on_wait`` is called when another run
@@ -94,6 +102,9 @@ def materialize(
     Each write gets the version it would reuse or the store's next, which another run can take first. A step
     reading what the run would write first isn't preflighted, since the store doesn't hold it yet.
 
+    Each computer env written is composed as ``composing`` says, and so is what one reused has left, as ``agent-env
+    env build`` does; ``on_progress``, when given, is told how each goes, a line at a time with its write.
+
     ``ledger`` keeps the rows, this run's in the ``@local`` namespace's store unless given; it also says whether each
     task and eval names the versions it reads (``Ledger.pins_references``) and whether each image the bundle builds is
     built here and pushed (``Ledger.pushes_images``), as a registration's does."""
@@ -106,6 +117,7 @@ def materialize(
     tasks = [write for write in plan.writes if write.kind is BundleKind.TASK]
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
     done: dict[tuple[str, str], Materialized] = {}
+    left: list[str] = []
 
     def through_ledger(write: Write, write_fn: Callable[[], int]) -> None:
         with _noted(plan, write, "checking" if dry_run else "writing"):
@@ -128,9 +140,13 @@ def materialize(
             if ledger.pushes_images and isinstance(write.source, BuiltImage) and write.id not in plan.published:
                 through_ledger(write, lambda: _write_pushed_image(plan, write, on_build))
             else:
-                through_ledger(write, lambda: _write_entity(plan, write, here, on_build))
+                through_ledger(write, lambda: _write_entity(plan, write, here, on_build,
+                                                            _composing(composing, on_progress, write)))
             if here and done[_key(write)].reused:
                 _build_reused(plan, write, done[_key(write)].version, on_build)
+            if write.kind is BundleKind.ENV and done[_key(write)].reused and _compose_reused(
+                    write, done[_key(write)].version, _composing(composing, on_progress, write), dry_run):
+                left.append(write.id)
         unwritten = {_key(item.write) for item in done.values() if not item.reused} if dry_run else set()
         written = done if ledger.pins_references else None
         built, problems, unchecked = {}, [], []
@@ -147,10 +163,16 @@ def materialize(
                                                    requires=write.requires).version)
         for write in evals:
             through_ledger(write, lambda: _write_eval(plan, write, written))
-    return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked))
+    return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked), tuple(left))
 
 
-def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Write], None] | None) -> int:
+def _composing(composing: Composing, on_progress: Callable[[Write, str], None] | None, write: Write) -> Composing:
+    """``composing`` for ``write``, telling ``on_progress`` its lines with it when given."""
+    return composing if on_progress is None else replace(composing, on_progress=lambda line: on_progress(write, line))
+
+
+def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Write], None] | None,
+                  composing: Composing) -> int:
     if isinstance(write.source, ReferencedImage):
         return _write_referenced_image(plan, write)
     if isinstance(write.source, BuiltImage):
@@ -158,7 +180,7 @@ def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Writ
             return _write_published_image(plan, write)
         return _write_build_context(plan, write, here, on_build)
     if write.kind is BundleKind.ENV:
-        return _write_env(plan, write, _before(on_build, write))
+        return _write_env(plan, write, composing)
     return _WRITERS[write.kind](plan, write)
 
 
@@ -292,11 +314,29 @@ def _write_agent(plan: Plan, write: Write) -> int:
                               AuthoringContext(plan.bundle_of(entry), entry)).version
 
 
-def _write_env(plan: Plan, write: Write, on_build: Callable[[], None] | None = None) -> int:
+def _compose_reused(write: Write, version: int, composing: Composing, dry_run: bool) -> bool:
+    """Whether the computer env ``write`` reuses has pairs left to compose on ``composing``'s provider (``pending``:
+    failed, stopped, or built but unprobed though it runs their arch natively) or its computer to write again;
+    composed unless ``dry_run``, which says what it would compose."""
+    env = Env.get(write.id, version)
+    if not isinstance(env, ComputerEnv) or env.computer is None:
+        return False
+    pairs = composer.pending(env, composing.sandbox_provider)
+    if not pairs and composer.current(env):
+        return False
+    if not dry_run:
+        composer.compose(env, pairs, composing)
+    elif composing.on_progress is not None:
+        composing.on_progress(
+            f"would compose {', '.join(f'{form}/{arch}' for form, arch in pairs) or 'its computer again'}")
+    return True
+
+
+def _write_env(plan: Plan, write: Write, composing: Composing = Composing()) -> int:
     entry = write.source.entry
     cls = get_env_registry()[entry.type]
     return cls.from_toml(_pinned(plan, write, cls.toml_refs),
-                         AuthoringContext(plan.bundle_of(entry), entry, on_build=on_build)).version
+                         AuthoringContext(plan.bundle_of(entry), entry, composing=composing)).version
 
 
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:
