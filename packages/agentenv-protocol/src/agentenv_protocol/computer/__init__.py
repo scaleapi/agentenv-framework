@@ -11,10 +11,14 @@ from typing import TYPE_CHECKING, Any
 from .app import (
     APP_SETTINGS_ENV,
     AppDeclaration,
+    AptSource,
     ComputerAppEnvironment,
+    Download,
     Launch,
     Linux,
+    Packages,
     Ready,
+    RunScript,
     Service,
     computer_app,
     install_step,
@@ -98,6 +102,7 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration",
     "ComputerAppEnvironment", "computer_app", "install_step", "ready_check", "Linux", "Service", "Launch", "Ready",
+    "Packages", "AptSource", "Download", "RunScript",
     "AppDeclaration",
     "APP_SETTINGS_ENV",
     "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV",

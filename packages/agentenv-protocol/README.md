@@ -632,15 +632,22 @@ class MailApp(ComputerAppEnvironment):
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
   (`environment_name`) and the `computer` and `driver` it deploys alone on.
 - **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
-  copied under its prefix, which holds the class's file; `python`, a requirements file there,
-  installed into the venv every app gets beside them; `services`, programs the computer's init runs
-  from the prefix as the session user.
+  copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
+  (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
+  installed into the venv every app gets beside them; `sources`, extra apt repositories
+  (`AptSource`, with a key file in the folder); `downloads`, files fetched by URL and checked by
+  sha256 (`Download`); `run`, scripts of the folder run as root or the session user (`RunScript`);
+  `services`, programs the computer's init runs from the prefix as the session user; and `ports`,
+  those it listens on. Packages, requirements and downloads are resolved and fetched once, when the
+  computer env is put, and every build installs only those stored files, with the network closed.
 - **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title, a port answering on
   loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
-  app.
+  app, after its run scripts, offline and without the class's `__init__`: `self.settings` holds only
+  the `Settings` defaults, since no deploy's are known at build
+  (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
 - **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
   its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
 - **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value

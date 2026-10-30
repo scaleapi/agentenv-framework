@@ -45,15 +45,64 @@ class Service(BaseModel):
     command: str
 
 
+class Packages(BaseModel):
+    """The OS's packages, each as its package manager takes it: for apt, ``name``, ``name=version`` or
+    ``name/suite``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    apt: list[str] = Field(default_factory=list)
+
+
+class AptSource(BaseModel):
+    """An apt repository resolved from besides the OS's own: its URL, suite and components, and its signing key, a file
+    of the app's folder."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    apt: str
+    suite: str
+    components: list[str] = Field(default_factory=list)
+    key: str
+
+
+class Download(BaseModel):
+    """A file fetched by its URL and checked against its sha256, put at ``to`` under the app's prefix; for one arch
+    only, when ``arch`` names it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    sha256: str
+    to: str
+    arch: Optional[Literal["amd64", "arm64"]] = None
+
+
+class RunScript(BaseModel):
+    """A script of the app's folder run as root, or for ``session``, as the session user, before its install steps."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    script: str
+    scope: Literal["system", "session"] = "system"
+
+
 class Linux(BaseModel):
-    """How a Linux computer installs the app: ``files``, a folder of the app's copied under its prefix; ``python``, a
-    requirements file in that folder installed into a venv beside them; ``services``, programs its init runs."""
+    """How a Linux computer installs the app: ``files``, a folder of the app's copied under its prefix; ``packages``,
+    the OS's; ``python``, a requirements file in that folder installed into a venv beside them; ``sources``, extra apt
+    repositories; ``downloads``, files fetched by URL; ``run``, scripts run once those are in; ``services``, programs
+    its init runs; ``ports``, those it listens on. Everything is fetched once at put, and builds install only that."""
 
     model_config = ConfigDict(extra="forbid")
 
     files: str = "."
+    packages: Optional[Packages] = None
     python: Optional[str] = None
+    sources: Optional[list[AptSource]] = None
+    downloads: Optional[list[Download]] = None
+    run: Optional[list[RunScript]] = None
     services: list[Service] = Field(default_factory=list)
+    ports: Optional[list[int]] = None
 
 
 class Ready(BaseModel):
@@ -147,8 +196,9 @@ def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[
 
 
 def install_step(scope: Literal["system", "session"] = "system") -> Callable:
-    """Mark a method a computer runs as it installs the app, after its files, in the order the class defines them: as
-    root, or for ``session``, as the session user."""
+    """Mark a method a computer runs as it installs the app, after its files, packages, venv and run scripts, in the
+    order the class defines them: as root, or for ``session``, as the session user. It runs offline, at build, without
+    the class's ``__init__``: ``self.settings`` holds only the Settings' defaults, since no deploy's are known yet."""
     def deco(fn: Callable) -> Callable:
         setattr(fn, _INSTALL_STEP_ATTR, scope)
         return fn

@@ -4,6 +4,8 @@ whichever env built it, records each result as it finishes, and writes the arche
 and the registry are faked."""
 
 import asyncio
+import contextlib
+import hashlib
 import importlib.metadata
 import io
 import json
@@ -30,7 +32,7 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.envs.computer.utils import boot, composer, gate, inside
+from agent_env.env.envs.computer.utils import boot, composer, gate, inside, packages
 from agent_env.env.envs.computer.utils.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
@@ -68,7 +70,21 @@ class FakeDocker:
 
     def __init__(self, registry: Registry):
         self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
-        self.probed, self.probe_fails = [], {}
+        self.probed, self.probe_fails, self.resolved = [], {}, []
+
+    def resolve(self, request, context, source, arch, work):
+        """The resolver in the base: each apt package as one .deb, each venv's requirements as one wheel."""
+        self.resolved.append((arch, request))
+        out, result = work / "out", {"apt": [], "wheels": {}}
+        for name in (re.split("[=/]", wanted)[0] for wanted in request["apt"]):
+            (out / "apt").mkdir(parents=True, exist_ok=True)
+            (out / "apt" / f"{name}_1.0_{arch}.deb").write_bytes(f"{name} for {arch}".encode())
+            result["apt"].append({"file": f"{name}_1.0_{arch}.deb", "package": name, "version": "1.0", "arch": arch})
+        for layer in request["python"]:
+            (out / "wheels" / layer["name"]).mkdir(parents=True)
+            (out / "wheels" / layer["name"] / "mss-10.1.0-py3-none-any.whl").write_bytes(b"mss")
+            result["wheels"][layer["name"]] = ["mss-10.1.0-py3-none-any.whl"]
+        return result, out
 
     async def probe(self, links, env, driver, image):
         arch = self._arch(self.registry.manifests[image.rpartition("@")[2]]["config"]["digest"])
@@ -121,6 +137,7 @@ def docker(local_stores, cli_routing, monkeypatch):
     monkeypatch.setattr(composer, "_emulated_platforms", lambda: {"linux/arm64", *fake.emulates})
     monkeypatch.setattr(composer, "_installed", lambda local, layer: {"mss": "10.1.0"})
     monkeypatch.setattr(composer, "_protocol_source", lambda: None)
+    monkeypatch.setattr(packages, "_run_resolver", fake.resolve)
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
     return fake
 
@@ -197,15 +214,21 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert stored.computer_settings == {"timezone": "Europe/Paris", "theme": "dark"}
     arm64 = next(build for build in docker.builds if build["platform"] == "linux/arm64")
     assert arm64["dockerfile"].splitlines() == [
-        f"FROM {base.image().image_name}", "USER root", "COPY driver/ /opt/agentenv/drivers/desk/",
-        "RUN python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip install "
-        "--no-cache-dir -r /opt/agentenv/drivers/desk/requirements.txt && /opt/agentenv/drivers/desk/venv/bin/pip list "
-        "--format=json > /opt/agentenv/drivers/desk/installed.json",
+        f"FROM {base.image().image_name}", "USER root", 'ENV AGENTENV_SETTING_THEME="dark"',
+        "COPY driver/ /opt/agentenv/drivers/desk/", "COPY packages/wheels/driver/ /tmp/agentenv-wheels/driver/",
+        "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip "
+        "install --no-index --no-deps /tmp/agentenv-wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
+        "--format=json > /opt/agentenv/drivers/desk/installed.json && rm -rf /tmp/agentenv-wheels/driver",
         "COPY agentenv-desk.conf /etc/supervisor/conf.d/agentenv-desk.conf",
         "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-desk.conf && test -x "
         "/opt/agentenv/drivers/desk/venv/bin/python",
-        'ENV AGENTENV_SETTING_THEME="dark"', "USER user", f"LABEL dev.agentenv.computer-key={composed['arm64']['key']}"]
-    assert arm64["files"] == ["Dockerfile", "agentenv-desk.conf", "driver/driver.py", "driver/requirements.txt"]
+        "USER user", f"LABEL dev.agentenv.computer-key={composed['arm64']['key']}"]
+    assert arm64["files"] == ["Dockerfile", "agentenv-desk.conf", "driver/driver.py", "driver/requirements.txt",
+                              "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"]
+    assert sorted(arch for arch, _ in docker.resolved) == ["amd64", "arm64"]
+    assert docker.resolved[0][1]["python"] == [{"name": "driver", "folder": "/ctx/driver",
+                                                "requirements": "requirements.txt", "add": []}]
+    assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
         "[program:desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
         'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
@@ -228,6 +251,8 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
 
     built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
     assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused) and announced == ["first"]
+    assert len(docker.resolved) == 2 and {arch: r["lock"] for arch, r in reused.items()} == {
+        arch: r["lock"] for arch, r in built.items()}
     assert {arch: reused[arch]["image"] for arch in reused} == {arch: built[arch]["image"] for arch in built}
     assert {arch: (r["installed"], r["emulated"]) for arch, r in reused.items()} == {
         "amd64": ({"mss": "10.1.0"}, True), "arm64": ({"mss": "10.1.0"}, False)}
@@ -322,20 +347,20 @@ def test_a_base_built_from_its_context_is_built_here_for_each_arch_and_keyed_by_
         "amd64": "unverified", "arm64": "ready"}
 
 
-def test_a_checkout_composes_its_own_protocol_into_the_drivers_venv(base, driver, docker, tmp_path, monkeypatch):
+def test_a_checkout_resolves_its_own_protocol_into_the_drivers_venv(base, driver, docker, tmp_path, monkeypatch):
     monkeypatch.setattr(composer, "_protocol_source", lambda: _protocol_checkout(tmp_path))
 
     _put(base, driver)
 
-    dockerfile = docker.builds[0]["dockerfile"]
-    assert "COPY protocol /tmp/agentenv-protocol" in dockerfile
-    assert "pip install --no-cache-dir /tmp/agentenv-protocol -r /opt/agentenv/drivers/desk/requirements.txt" in dockerfile
+    assert {layer["name"]: layer["add"] for _, request in docker.resolved for layer in request["python"]} == {
+        "driver": ["/ctx/protocol"]}
     assert "protocol/pyproject.toml" in docker.builds[0]["files"]
+    assert "agentenv-protocol" not in docker.builds[0]["dockerfile"]
 
 
 def _protocol_checkout(folder):
     source = folder / "protocol"
-    (source / "src" / "agentenv_protocol").mkdir(parents=True)
+    (source / "src" / "agentenv_protocol").mkdir(parents=True, exist_ok=True)
     (source / "src" / "agentenv_protocol" / "__init__.py").write_text("")
     (source / "pyproject.toml").write_text("[project]\nname = 'agentenv-framework-protocol'\n")
     return source
@@ -948,17 +973,20 @@ PROTOCOL_VERSION = importlib.metadata.version("agentenv-framework-protocol")
 
 
 def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
-         **changes):
-    """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements."""
+         extra=None, steps=(), **changes):
+    """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
+    them, by name, and ``steps``, its install steps by name and scope."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
+    for name, text in (extra or {}).items():
+        (folder / name).write_text(text)
     files = FileArtifactUniverse.put_bundled("@local/~/kit/mail__files", files={
-        name: folder / name for name in ("app.py", "requirements.txt")})
+        name: folder / name for name in ("app.py", "requirements.txt", *(extra or {}))})
     declaration = AppDeclaration.model_validate({
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
         "permissions": [], "launch": launch, "settings": settings, "skill": None,
-        "data": [], "install_steps": [], "ready_checks": [],
+        "data": [], "install_steps": [{"name": name, "scope": scope} for name, scope in steps], "ready_checks": [],
         "install": {"linux": install or {"python": "requirements.txt", "services": [
             {"name": "imap", "command": "venv/bin/python imap.py"}]}}})
     return ComputerAppEnv.put(**{"id": "@local/~/kit/mail", "environment_name": "mail", "module": "app.py:Mail",
@@ -974,10 +1002,12 @@ def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_unde
     build = docker.builds[0]
     assert "apps/mail/app.py" in build["files"] and "apps/mail/requirements.txt" in build["files"]
     dockerfile = build["dockerfile"]
+    assert [layer for _, request in docker.resolved for layer in request["python"]][-1] == {
+        "name": "apps-mail", "folder": "/ctx/apps/mail", "requirements": "requirements.txt",
+        "add": [f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"]}
     for line in ("COPY apps/mail/ /opt/agentenv/apps/mail/",
-                 "RUN python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip install "
-                 f"--no-cache-dir 'agentenv-framework-protocol[app]=={PROTOCOL_VERSION}' -r "
-                 "/opt/agentenv/apps/mail/requirements.txt",
+                 "RUN --network=none python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip"
+                 " install --no-index --no-deps /tmp/agentenv-wheels/apps-mail/*.whl",
                  "RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv",
                  "COPY agentenv-app-mail.conf /etc/supervisor/conf.d/agentenv-app-mail.conf"):
         assert line in dockerfile
@@ -1000,11 +1030,80 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
     app = _app(base, driver, tmp_path / "mail", install={"services": []}, launch=launch)
 
     build = docker.builds[0]
-    protocol = "/tmp/agentenv-protocol[app]" if checkout else f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"
-    assert (f"RUN python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip install "
-            f"--no-cache-dir '{protocol}' && ") in build["dockerfile"]
+    protocol = "/ctx/protocol[app]" if checkout else f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"
+    assert {layer["name"]: (layer["requirements"], layer["add"]) for _, request in docker.resolved
+            for layer in request["python"]}["apps-mail"] == (None, [protocol])
+    assert "/opt/agentenv/apps/mail/venv/bin/pip install --no-index --no-deps /tmp/agentenv-wheels/apps-mail/*.whl" in (
+        build["dockerfile"])
     assert build["confs"]["agentenv-app-mail.conf"] == MAIL_SERVER
     assert boot.ready_timeout([app]) == (270.0 if at == "boot" else boot.READY_TIMEOUT_S)
+
+
+def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,
+                                                                                               tmp_path, monkeypatch):
+    tool = b"#!/bin/sh\necho tool\n"
+    monkeypatch.setattr(packages.httpx, "stream", _serving({"https://example.com/tool": tool}))
+    install = {"python": "requirements.txt", "packages": {"apt": ["hello", "xdotool/noble"]},
+               "sources": [{"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": ["main"],
+                            "key": "ppa.asc"}],
+               "downloads": [{"url": "https://example.com/tool", "sha256": hashlib.sha256(tool).hexdigest(),
+                              "to": "bin/tool", "arch": "arm64"}],
+               "run": [{"script": "setup.sh"}, {"script": "profile.sh", "scope": "session"}], "services": []}
+
+    app = _app(base, driver, tmp_path / "mail", install=install, steps=[("index_mail", "session")],
+               extra={"ppa.asc": "key", "setup.sh": "mkdir -p /srv/mail\n", "profile.sh": "#!/bin/sh\n"})
+
+    requests = dict(docker.resolved)
+    assert requests["arm64"]["apt"] == ["hello", "xdotool/noble"] and requests["arm64"]["sources"] == [
+        {"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": ["main"], "key": "/ctx/apps/mail/ppa.asc"}]
+    builds = {build["platform"]: build for build in docker.builds}
+    lines = builds["linux/arm64"]["dockerfile"].splitlines()
+    first = lines.index("COPY packages/apt/ /tmp/agentenv-apt/")
+    assert lines[first:first + 3] == [
+        "COPY packages/apt/ /tmp/agentenv-apt/",
+        "RUN --network=none apt-get install -y --no-install-recommends /tmp/agentenv-apt/*.deb && rm -rf "
+        "/tmp/agentenv-apt", "COPY driver/ /opt/agentenv/drivers/desk/"]
+    steps = lines.index("RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv")
+    assert lines[steps + 1:steps + 8] == [
+        "RUN --network=none cd /opt/agentenv/apps/mail && ./setup.sh",
+        "USER user", "RUN --network=none cd /opt/agentenv/apps/mail && ./profile.sh", "USER root",
+        "USER user", "RUN --network=none cd /opt/agentenv/apps/mail && venv/bin/python -m "
+        "agentenv_protocol.computer.run_install_step app.py:Mail index_mail", "USER root"]
+    assert {"packages/apt/hello_1.0_arm64.deb", "packages/apt/xdotool_1.0_arm64.deb", "apps/mail/bin/tool"} <= set(
+        builds["linux/arm64"]["files"])
+    assert "apps/mail/bin/tool" not in builds["linux/amd64"]["files"]
+    composed = Env.get(app.id).metadata["composed"]["container"]
+    assert composed["arm64"]["lock"] != composed["amd64"]["lock"]
+
+
+@pytest.mark.parametrize("failing", ["resolver", "download"])
+def test_a_resolve_or_download_that_fails_fails_its_arch_at_the_resolve_stage(base, driver, docker, tmp_path,
+                                                                             monkeypatch, failing):
+    if failing == "resolver":
+        def refuse(request, context, source, arch, work):
+            raise packages.ResolveError("resolving the packages failed", "E: Unable to locate package nosuch\n")
+        monkeypatch.setattr(packages, "_run_resolver", refuse)
+    monkeypatch.setattr(packages.httpx, "stream", _serving({"https://example.com/tool": b"something else"}))
+    install = {"python": "requirements.txt", "services": [],
+               "downloads": [{"url": "https://example.com/tool", "sha256": "a" * 64, "to": "tool"}]}
+
+    composed = Env.get(_app(base, driver, tmp_path / "mail", install=install).id).metadata["composed"]["container"]
+
+    assert {result["stage"] for result in composed.values()} == {"resolve"} and docker.builds == []
+    reason = composed["arm64"]["reason"]
+    if failing == "resolver":
+        assert reason == "resolving the packages failed: E: Unable to locate package nosuch" and composed["arm64"]["log"]
+    else:
+        assert reason.startswith("https://example.com/tool has the sha256 ") and reason.endswith(
+            f"not the {'a' * 64} its download names")
+
+
+def _serving(bodies):
+    """``httpx.stream`` answering each URL with its body."""
+    @contextlib.contextmanager
+    def stream(method, url, **kwargs):
+        yield httpx.Response(200, content=bodies[url], request=httpx.Request(method, url))
+    return stream
 
 
 def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):

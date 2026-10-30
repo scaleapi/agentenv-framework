@@ -39,7 +39,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils import boot, gate
+from agent_env.env.envs.computer.utils import boot, gate, packages
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
 from agent_env.store.base import ConcurrentModificationError
@@ -67,10 +67,6 @@ APPS = str(installed_apps.APPS)
 KEY_LABEL = "dev.agentenv.computer-key"
 # What a build installed and whether it was emulated, kept on its image for an env that reuses it.
 INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
-# What a file starts with when it's only ever run: a script or a Linux binary, made executable in the image, since the
-# store keeps no file modes.
-_RUN_ONLY = (b"#!", b"\x7fELF")
-_EXECUTABLE = 0o755
 # A pair's statuses once its image is in the store.
 _BUILT = ("unverified", "ready")
 _WRITE_TRIES = 4
@@ -195,10 +191,27 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             source, base_identity = _base(base, arch)
             layer = _stage_driver(context, driver, base)
             apps = [_stage_app(context, app, base) for app in env.composed_apps()]
-            dockerfile = _dockerfile(source, [layer, *apps], base, _build_settings(env, base), _stage_protocol(context))
+            layers = [layer, *apps]
+            wants = _wants(layers, _stage_protocol(context))
+            platform = f"linux/{arch}"
+            emulated = platform != host_platform()
+            unemulated = f"this machine can't build {platform}: its Docker has no emulation for it" if (
+                emulated and platform not in _emulated_platforms()) else None
+            ready = _once(lambda: _ready_base(base, arch))
+            inputs = packages.inputs_digest(wants, context, base_identity, arch)
+            lock = packages.stored(inputs, env.stored_id) if inputs is not None else None
+            if inputs is not None and lock is None:
+                if unemulated:
+                    return _failed(env, form, arch, "resolve", None, unemulated)
+                stage = "resolve"
+                building()
+                ready()
+                lock = packages.resolve(inputs, wants, context, source, arch, env.stored_id)
+                stage = "build"
+            dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
             key = "sha256:" + hashlib.sha256(json.dumps({
-                "base": base_identity, "dockerfile": dockerfile, "context": _digest(context), "form": form,
-                "arch": arch, "composer": _composer_digest(),
+                "base": base_identity, "dockerfile": dockerfile, "context": _digest(context), "lock": packages.digest(lock),
+                "form": form, "arch": arch, "composer": _composer_digest(),
             }, sort_keys=True).encode()).hexdigest()
             store = get_config().get_image_store_for(env.stored_id)
             store.ensure_repository(REPOSITORY)
@@ -206,15 +219,14 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             if (pinned := _served(ref, store)) is not None:
                 kept = labels(pinned, arch, store.auth(pinned))
                 return {"status": "unverified", "key": key, "image": pinned, "reused": True,
-                        "emulated": kept.get(EMULATED_LABEL) == "true",
+                        "emulated": kept.get(EMULATED_LABEL) == "true", "lock": inputs,
                         "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": _now()}
-            platform = f"linux/{arch}"
-            emulated = platform != host_platform()
-            if emulated and platform not in _emulated_platforms():
-                return _failed(env, form, arch, "build", key, f"this machine can't build {platform}: its Docker has "
-                               "no emulation for it")
+            if unemulated:
+                return _failed(env, form, arch, "build", key, unemulated)
             building()
-            _ready_base(base, arch)
+            ready()
+            if lock is not None:
+                packages.stage(lock, context, env.stored_id)
             (context / "Dockerfile").write_text(f"{dockerfile}LABEL {KEY_LABEL}={key}\n")
             local = f"agentenv-computer:{key[7:23]}-{arch}"
             build_image(context / "Dockerfile", context, local, platform=platform, labels={KEY_LABEL: key})
@@ -224,7 +236,9 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             stage = "push"
             push_local_image(local, ref, store)
             return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
-                    "emulated": emulated, "installed": installed, "built_at": _now()}
+                    "emulated": emulated, "lock": inputs, "installed": installed, "built_at": _now()}
+    except packages.ResolveError as e:
+        return _failed(env, form, arch, "resolve", None, str(e), log=e.log or None)
     except DockerBuildError as e:
         # Docker can list a platform it has lost the emulation for, until it restarts; the build says so.
         unemulated = "exec format error" in str(e)
@@ -281,6 +295,8 @@ class _Layer:
     install: Install
     conf: str
     app: bool = False
+    served: str | None = None
+    steps: tuple[tuple[str, str], ...] = ()
 
 
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact) -> _Layer:
@@ -297,9 +313,10 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact) -> _L
     its name: its services and its own server, which serves its class from its venv and launches the app. Its folder
     under ``APPS`` is named for its id's last part."""
     install, name = app.install[base.os.type], _name(app.id, "app")
-    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app=True)
     file, _, cls = app.module.partition(":")
     served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
+    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app=True, served=served,
+                   steps=tuple((step.name, step.scope) for step in app.declaration.install_steps))
     programs = {f"app-{name}": f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
                 **_services(f"app-{name}", install)}
     _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name})
@@ -317,9 +334,10 @@ def _services(name: str, install: Install) -> dict[str, str]:
 
 def _stage(context: Path, layer: _Layer, what: str, files: FileArtifactUniverse, programs: dict[str, str],
            environment: dict[str, Any]) -> None:
-    """Write the ``files`` of ``what``'s folder its install names to ``layer``'s folder, a script or binary executable,
-    and ``programs``, commands by name, as its supervisord programs, with ``environment``."""
+    """Write the ``files`` of ``what``'s folder its install names to ``layer``'s folder, a script, a binary or a file its
+    install runs executable, and ``programs``, commands by name, as its supervisord programs, with ``environment``."""
     folder = PurePosixPath(layer.install.files)
+    runs = {PurePosixPath(run.script) for run in layer.install.run or []}
     for name, artifact in files.get_file_artifacts().items():
         try:
             path = PurePosixPath(checked_path(name))
@@ -329,8 +347,8 @@ def _stage(context: Path, layer: _Layer, what: str, files: FileArtifactUniverse,
             target = context / layer.folder / path.relative_to(folder)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data := artifact.load())
-            if data.startswith(_RUN_ONLY):
-                target.chmod(_EXECUTABLE)
+            if data.startswith(packages.RUN_ONLY) or path.relative_to(folder) in runs:
+                target.chmod(packages.EXECUTABLE)
     (context / layer.folder).mkdir(parents=True, exist_ok=True)
     (context / layer.conf).write_text(_programs(programs, layer.prefix, environment))
 
@@ -381,41 +399,63 @@ def _values(env: ComputerEnv) -> dict[str, Any]:
     return {**env.computer_settings, **({"resolution": f"{display['width']}x{display['height']}"} if display else {})}
 
 
-def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict, protocol: bool) -> str:
-    """The composed image's Dockerfile but its key's label, which the key is a digest of: each layer's files under its
-    prefix, its venv beside them, with this checkout's protocol when ``protocol``, and its programs; an app's server's
-    folder owned by the session user."""
-    venvs = [layer for layer in layers if layer.install.python is not None or layer.app]
-    lines = [f"FROM {source}", "USER root", *(["COPY protocol /tmp/agentenv-protocol"] if protocol and venvs else [])]
+def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict, lock: dict | None) -> str:
+    """The composed image's Dockerfile but its key's label, which the key is a digest of: the build-phase settings, the
+    lock's .debs, then each layer's files under its prefix, its venv beside them from the lock's wheels, its run scripts
+    and an app's install steps, each run as root or the session user, every install with the network closed; then its
+    programs, and an app's server's folder owned by the session user."""
+    user = base.session.user
+    lines = [f"FROM {source}", "USER root",
+             *(f"ENV AGENTENV_SETTING_{name.upper()}={json.dumps(str(value))}" for name, value in build_settings.items())]
+    if lock is not None and lock["apt"]:
+        lines += [f"COPY {packages.STAGED}/apt/ /tmp/agentenv-apt/",
+                  "RUN --network=none apt-get install -y --no-install-recommends /tmp/agentenv-apt/*.deb && "
+                  "rm -rf /tmp/agentenv-apt"]
     for layer in layers:
         prefix = layer.prefix
         lines.append(f"COPY {layer.folder}/ {prefix}/")
-        if layer in venvs:
-            lines.append(f"RUN python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-cache-dir "
-                         f"{_packages(layer, protocol)} && {prefix}/venv/bin/pip list --format=json > "
-                         f"{prefix}/installed.json")
+        if _venv(layer):
+            wheels = f"/tmp/agentenv-wheels/{layer.folder.replace('/', '-')}"
+            lines += [f"COPY {packages.STAGED}/wheels/{layer.folder.replace('/', '-')}/ {wheels}/",
+                      f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-index "
+                      f"--no-deps {wheels}/*.whl && {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json "
+                      f"&& rm -rf {wheels}"]
         if layer.app:
-            lines.append(f"RUN mkdir -p {prefix}/{SOCKET.parent} && chown {base.session.user} {prefix}/{SOCKET.parent}")
+            lines.append(f"RUN mkdir -p {prefix}/{SOCKET.parent} && chown {user} {prefix}/{SOCKET.parent}")
+        for run in layer.install.run or []:
+            lines += _as(run.scope, user, f"RUN --network=none cd {prefix} && ./{run.script}")
+        for step, scope in layer.steps:
+            lines += _as(scope, user, f"RUN --network=none cd {prefix} && venv/bin/python -m "
+                                      f"agentenv_protocol.computer.run_install_step {layer.served} {step}")
         lines.append(f"COPY {layer.conf} /etc/supervisor/conf.d/{layer.conf}")
         checks = [f"test -d {prefix}", f"test -f /etc/supervisor/conf.d/{layer.conf}"]
-        if layer in venvs:
+        if _venv(layer):
             checks.append(f"test -x {prefix}/venv/bin/python")
         lines.append(f"RUN {' && '.join(checks)}")
-    if protocol and venvs:
-        lines.append("RUN rm -rf /tmp/agentenv-protocol")
-    lines += [f"ENV AGENTENV_SETTING_{name.upper()}={json.dumps(str(value))}" for name, value in build_settings.items()]
-    lines.append(f"USER {base.session.user}")
+    lines.append(f"USER {user}")
     return "\n".join(lines) + "\n"
 
 
-def _packages(layer: _Layer, protocol: bool) -> str:
-    """What ``layer``'s venv installs: its requirements and, for an app, the protocol's ``app`` extra at this release,
-    which a driver's requirements name themselves; the protocol from this checkout's source when ``protocol``."""
-    extra = "[app]" if layer.app else ""
-    protocols = ([f"/tmp/agentenv-protocol{extra}"] if protocol else
-                 [f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}"] if layer.app else [])
-    requirements = ["-r", f"{layer.prefix}/{layer.install.python}"] if layer.install.python is not None else []
-    return shlex.join([*protocols, *requirements])
+def _as(scope: str, user: str, run: str) -> list[str]:
+    """``run`` as root, or for ``session``, as ``user``."""
+    return [run] if scope == "system" else [f"USER {user}", run, "USER root"]
+
+
+def _venv(layer: _Layer) -> bool:
+    """Whether ``layer`` has a venv: its requirements, or an app's own server."""
+    return layer.install.python is not None or layer.app
+
+
+def _wants(layers: list[_Layer], protocol: bool) -> list[packages.Want]:
+    """What each layer asks a lock for; a venv adds the protocol, for an app with its ``app`` extra: from this checkout's
+    source when ``protocol``, else an app's pinned to this release, which a driver's requirements name themselves."""
+    wants = []
+    for layer in layers:
+        extra = "[app]" if layer.app else ""
+        adds = ((f"/ctx/protocol{extra}",) if protocol else
+                (f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}",) if layer.app else ())
+        wants.append(packages.Want(layer.folder, layer.install, _venv(layer), adds if _venv(layer) else ()))
+    return wants
 
 
 def _installed(local: str, prefix: str) -> dict[str, str]:

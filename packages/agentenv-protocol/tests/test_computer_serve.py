@@ -11,7 +11,7 @@ pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
 pytest.importorskip("uvicorn")
 
-from agentenv_protocol.computer import ComputerDriverEnvironment, serve_app  # noqa: E402
+from agentenv_protocol.computer import ComputerDriverEnvironment, run_install_step, serve_app  # noqa: E402
 from agentenv_protocol.computer.app import FAILURE, SOCKET  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppRuntime  # noqa: E402
 from agentenv_protocol.computer.serve import USAGE, main  # noqa: E402
@@ -65,6 +65,34 @@ class Broken(ComputerAppEnvironment):
 
 class Skipping(ComputerAppEnvironment):
     def __init__(self):
+        pass
+'''
+
+
+STEPS = '''from pathlib import Path
+
+from pydantic import BaseModel
+
+from agentenv_protocol.computer import ComputerAppEnvironment, install_step
+
+
+class Notes(ComputerAppEnvironment):
+    class Settings(BaseModel):
+        folder: str = "notes"
+        token: str
+
+    def __init__(self):
+        raise RuntimeError("no deploy's settings at build")
+
+    @install_step()
+    def make_folder(self):
+        Path(self.settings.folder).mkdir()
+
+    @install_step(scope="session")
+    async def write_index(self):
+        Path(self.settings.folder, "index").write_text("ready")
+
+    def helper(self):
         pass
 '''
 
@@ -178,3 +206,17 @@ def test_an_apps_server_that_cant_start_says_why_in_the_apps_folder(tmp_path, mo
         serve_app.main(argv)
 
     assert (tmp_path / FAILURE).read_text() == failure == f"{type(stopped.value).__name__}: {stopped.value}"
+
+
+def test_an_apps_install_step_runs_without_its_init_seeing_its_settings_defaults(tmp_path, monkeypatch, isolated):
+    (tmp_path / "app.py").write_text(STEPS)
+    monkeypatch.chdir(tmp_path)
+
+    run_install_step.main(["app.py:Notes", "make_folder"])
+    run_install_step.main(["app.py:Notes", "write_index"])
+
+    assert (tmp_path / "notes" / "index").read_text() == "ready"
+    with pytest.raises(SystemExit, match="Notes has no @install_step method 'helper'"):
+        run_install_step.main(["app.py:Notes", "helper"])
+    with pytest.raises(SystemExit, match="usage: "):
+        run_install_step.main(["app.py:Notes"])

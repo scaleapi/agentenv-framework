@@ -61,13 +61,17 @@ APP = '''import not_installed_here
 from pydantic import BaseModel, SecretStr
 
 from agentenv_protocol import add_data, agent_skill, reset_data
-from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Linux, Ready, Service, computer_app,
-                                        install_step, ready_check)
+from agentenv_protocol.computer import (AptSource, ComputerAppEnvironment, Download, Launch, Linux, Packages, Ready,
+                                        RunScript, Service, computer_app, install_step, ready_check)
 
 
 @computer_app(supports={supports}, permissions=["camera"])
 class Mail(ComputerAppEnvironment):
-    linux = Linux(files="linux", python="requirements.txt", services=[Service(name="imap", command="bin/imap")])
+    linux = Linux(files="linux", python="requirements.txt", packages=Packages(apt=["dovecot-imapd"]),
+                  sources=[AptSource(apt="https://ppa.example/ubuntu", suite="noble", key="ppa.asc")],
+                  downloads=[Download(url="https://example.com/mbox", sha256="{sha}", to="data/mbox", arch="arm64")],
+                  run=[RunScript(script="setup.sh"), RunScript(script="profile.sh", scope="session")],
+                  services=[Service(name="imap", command="bin/imap")], ports=[143])
     launch = Launch(at="demand", command=["thunderbird"], window={{"class": "Thunderbird"}},
                     ready=Ready(window=True, timeout_s=30))
 
@@ -165,7 +169,7 @@ def test_main_prints_only_the_declaration_or_exits_1_with_why_it_cant(folder, ca
 
 
 def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_computer(folder):
-    (folder / "app.py").write_text(APP.format(supports=LINUX))
+    (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64))
 
     declared = declare(folder, "app.py", "Mail")
 
@@ -173,8 +177,12 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
     settings = declared.settings
     assert declared.model_dump(mode="json", exclude_none=True, exclude={"settings"}) == {
         "supports": LINUX, "permissions": ["camera"],
-        "install": {"linux": {"files": "linux", "python": "requirements.txt",
-                              "services": [{"name": "imap", "command": "bin/imap"}]}},
+        "install": {"linux": {
+            "files": "linux", "packages": {"apt": ["dovecot-imapd"]}, "python": "requirements.txt",
+            "sources": [{"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": [], "key": "ppa.asc"}],
+            "downloads": [{"url": "https://example.com/mbox", "sha256": "a" * 64, "to": "data/mbox", "arch": "arm64"}],
+            "run": [{"script": "setup.sh", "scope": "system"}, {"script": "profile.sh", "scope": "session"}],
+            "services": [{"name": "imap", "command": "bin/imap"}], "ports": [143]}},
         "launch": {"at": "demand", "command": ["thunderbird"], "window": {"class": "Thunderbird"},
                    "ready": {"window": True, "timeout_s": 30.0}},
         "skill": {"method": "guide"}, "data": ["data/add", "data/reset"],
@@ -184,7 +192,7 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
 
 
 def test_an_app_declaring_its_skill_twice_is_refused(folder):
-    (folder / "app.py").write_text(APP.format(supports=LINUX))
+    (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64))
 
     with pytest.raises(ValueError, match=re.escape("Twice declares its skill twice: skill = 'skill.md' and "
                                                    "@agent_skill guide")):
@@ -197,7 +205,7 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
     ('launch = Launch(command=["mail"], window={"role": "main"})', "window matches by class, instance, title, not"),
 ])
 def test_an_app_whose_launch_or_readiness_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
-    (folder / "app.py").write_text(APP.format(supports=LINUX) + f"""
+    (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64) + f"""
 
 @computer_app(supports={LINUX})
 class Changed(Mail):

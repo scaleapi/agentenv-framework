@@ -59,7 +59,12 @@ class Desk(ComputerDriverEnvironment):
 LINUX = [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}]
 TOML = 'type = "computer_driver"\nmodule = "driver.py:Desk"\n'
 SERVE = 'services = [{ name = "driver", command = "venv/bin/python -m agentenv_protocol.computer.serve driver.py:Desk" }]'
-INSTALLED = f'{TOML}port = 19000\n\n[install.linux]\nfiles = "linux"\npython = "requirements.txt"\n{SERVE}\n'
+INSTALLED = (f'{TOML}port = 19000\n\n[install.linux]\nfiles = "linux"\npython = "requirements.txt"\n'
+             'packages = { apt = ["xdotool", "libxtst6=2:1.2.3-1.1build1", "x11-utils/noble"] }\n'
+             'sources = [{ apt = "https://ppa.example/ubuntu", suite = "noble", components = ["main"], key = "ppa.asc" }]\n'
+             f'downloads = [{{ url = "https://example.com/tool", sha256 = "{"a" * 64}", to = "bin/tool", arch = "amd64" }}]\n'
+             'run = [{ script = "setup.sh" }, { script = "profile.sh", scope = "session" }]\n'
+             f'ports = [9000]\n{SERVE}\n')
 
 
 @pytest.fixture
@@ -104,15 +109,22 @@ def test_a_driver_folder_is_written_with_its_files_and_what_its_class_declares(b
 
 
 def test_a_driver_is_written_with_how_a_computer_installs_it_and_the_port_it_serves_on(bundle_dir):
-    _bundle(bundle_dir, toml=INSTALLED, **{"envs/desk/linux/requirements.txt": "mss>=9,<11\n"})
+    _bundle(bundle_dir, toml=INSTALLED, **{"envs/desk/linux/requirements.txt": "mss>=9,<11\n",
+                                           "envs/desk/linux/ppa.asc": "key", "envs/desk/linux/setup.sh": "#!/bin/sh\n",
+                                           "envs/desk/linux/profile.sh": "#!/bin/sh\n"})
 
     _run(bundle_dir)
     env = Env.get(f"{ROOT}/desk")
 
     install = env.install["linux"]
-    assert (env.port, install.files, install.python) == (19000, "linux", "requirements.txt")
+    assert (env.port, install.files, install.python, install.ports) == (19000, "linux", "requirements.txt", [9000])
+    assert install.packages.apt == ["xdotool", "libxtst6=2:1.2.3-1.1build1", "x11-utils/noble"]
+    assert [(source.apt, source.key) for source in install.sources] == [("https://ppa.example/ubuntu", "ppa.asc")]
+    assert [(download.to, download.arch) for download in install.downloads] == [("bin/tool", "amd64")]
+    assert [(run.script, run.scope) for run in install.run] == [("setup.sh", "system"), ("profile.sh", "session")]
     assert [(service.name, service.scope) for service in install.services] == [("driver", "session")]
-    assert sorted(env.files.file_artifact_ids) == ["driver.py", "linux/requirements.txt"]
+    assert sorted(env.files.file_artifact_ids) == ["driver.py", "linux/ppa.asc", "linux/profile.sh",
+                                                   "linux/requirements.txt", "linux/setup.sh"]
     assert ComputerDriverEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()
 
 
@@ -151,8 +163,18 @@ def test_a_driver_is_written_again_only_when_one_of_its_files_changes(bundle_dir
      ("left",), "install.linux.services: Value error, names a service twice: ['d', 'd']"),
     (f'{TOML}[install.linux]\nservices = [{{ name = "d", command = "x", scope = "root" }}]\n', LINUX, ("left",),
      "install.linux.services.0.scope: Input should be 'session' or 'system'"),
+    (f'{TOML}[install.linux]\nrun = [{{ script = "setup.sh" }}]\n{SERVE}\n', LINUX, ("left",),
+     "install.linux.run: 'setup.sh' isn't in this folder"),
+    (f'{TOML}[install.linux]\npackages = {{ apt = ["two words"] }}\n{SERVE}\n', LINUX, ("left",),
+     "each package is one word, as apt takes it, not ['two words']"),
+    (f'{TOML}[install.linux]\nsources = [{{ apt = "https://ppa.example", suite = "noble", key = "k.asc" }}]\n{SERVE}\n',
+     LINUX, ("left",), "sources are apt repositories to resolve packages from, and packages names none"),
+    (f'{TOML}[install.linux]\ndownloads = [{{ url = "https://example.com/t", sha256 = "abc", to = "t" }}]\n{SERVE}\n',
+     LINUX, ("left",), "install.linux.downloads.0.sha256: String should match pattern"),
+    (f'{TOML}[install.linux]\nports = [70000]\n{SERVE}\n', LINUX, ("left",), "a port is 1 to 65535, not [70000]"),
 ], ids=["no-module", "module-file", "module-class", "button", "no-platform", "unknown-key", "port", "install-os",
-        "install-python", "install-files", "install-escape", "no-service", "service-twice", "service-scope"])
+        "install-python", "install-files", "install-escape", "no-service", "service-twice", "service-scope",
+        "run-missing", "apt-word", "sources-alone", "download-sha", "install-port"])
 def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle_dir, toml, supports, buttons,
                                                                           problem):
     _bundle(bundle_dir, toml=toml, supports=supports, buttons=buttons)
