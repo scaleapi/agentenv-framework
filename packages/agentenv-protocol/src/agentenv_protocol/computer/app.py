@@ -273,9 +273,8 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         if cls.linux is not None and not isinstance(cls.linux, Linux):
             raise ValueError(f"{cls.__name__}.linux is a Linux(...), not {cls.linux!r}")
         build = cls.BuildSettings.model_json_schema()
-        if secret := next((name for name, schema in build.get("properties", {}).items()
-                           if any(option.get("writeOnly") for option in [schema, *schema.get("anyOf", [])])), None):
-            raise ValueError(f"{cls.__name__}.BuildSettings.{secret} is a secret, which its computer's image would "
+        if (secret := _secret_at(build)) is not None:
+            raise ValueError(f"{cls.__name__}.BuildSettings holds a secret at {secret}, which its computer's image would "
                              "keep; declare it in Settings")
         methods = _methods(cls)
         skill_methods = [fn.__name__ for fn in methods
@@ -295,6 +294,20 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
                            if hasattr(fn, _INSTALL_STEP_ATTR)],
             ready_checks=[fn.__name__ for fn in methods if hasattr(fn, _READY_CHECK_ATTR)],
         )
+
+
+def _secret_at(schema: Any, path: str = "") -> Optional[str]:
+    """Where in ``schema`` a secret is, a ``SecretStr``'s ``writeOnly``, at any depth: in a list's items or a nested
+    model's definition too; None when it holds none."""
+    if isinstance(schema, dict):
+        if schema.get("writeOnly"):
+            return path
+        found = (_secret_at(value, f"{path}.{key}" if path else key) for key, value in schema.items())
+    elif isinstance(schema, list):
+        found = (_secret_at(value, f"{path}[{index}]") for index, value in enumerate(schema))
+    else:
+        return None
+    return next((at for at in found if at is not None), None)
 
 
 def _built_settings(cls: type[ComputerAppEnvironment]) -> BaseModel:

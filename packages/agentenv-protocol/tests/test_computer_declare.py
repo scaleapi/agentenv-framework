@@ -209,8 +209,13 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
     ('launch = Launch(command=["mail"], ready=Ready(window=True))', "ready waits on a window: name it with Launch(window="),
     ('launch = Launch(command=["mail"], window={"role": "main"})', "window matches by class, instance, title, not"),
     ('class BuildSettings(BaseModel): key: SecretStr = SecretStr("")',
-     "Changed.BuildSettings.key is a secret, which its computer's image would keep; declare it in Settings"),
-])
+     "Changed.BuildSettings holds a secret at properties.key, which its computer's image would keep; declare it in "
+     "Settings"),
+    ('class BuildSettings(BaseModel): keys: list[SecretStr] = []',
+     "Changed.BuildSettings holds a secret at properties.keys.items, which"),
+    ('class BuildSettings(BaseModel): mail: Mail.Settings = Mail.Settings()',
+     "Changed.BuildSettings holds a secret at $defs.Settings.properties.password, which"),
+], ids=["no-wait", "no-window", "window-key", "build-secret", "build-secrets-listed", "build-secret-nested"])
 def test_an_app_whose_launch_readiness_or_build_settings_cant_be_checked_is_refused_saying_why(folder, capsys, change,
                                                                                                 problem):
     (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64) + f"""
