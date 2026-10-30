@@ -13,6 +13,7 @@ from cwsandbox import (
     Container,
     EgressRule,
     SandboxError,
+    SandboxExecutionError,
     SandboxNotRunningError,
     SandboxRequestTimeoutError,
     SandboxStreamTruncatedError,
@@ -73,6 +74,7 @@ async def test_exec_runs_with_the_lifetime_budget_and_drops_sudo():
     SandboxUnavailableError("unavailable"),
     SandboxStreamTruncatedError("output lost in transit"),
     SandboxRequestTimeoutError("request timed out"),
+    SandboxExecutionError("Command cat /big ended without an exit status from the sandbox; it may not have finished"),
 ])
 async def test_a_lost_or_cut_stream_is_exit_minus_one_with_no_stdout(error):
     sandbox, raw = _sandbox()
@@ -91,7 +93,11 @@ async def test_a_timed_out_command_is_exit_124():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", [SandboxNotRunningError("gone"), SandboxError("rejected")])
+@pytest.mark.parametrize("error", [
+    SandboxNotRunningError("gone"),
+    SandboxError("rejected"),
+    SandboxExecutionError("Command true failed with exit code 1", exec_result=object()),
+])
 async def test_other_sdk_errors_propagate(error):
     sandbox, raw = _sandbox()
     raw.results = [error]

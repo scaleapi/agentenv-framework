@@ -220,7 +220,9 @@ async def _settle(process: Any, timeout: float) -> tuple[int, bytes, bytes]:
     try:
         result = await process
     except SandboxError as exc:
-        if isinstance(exc, (SandboxUnavailableError, SandboxStreamTruncatedError, SandboxRequestTimeoutError)):
+        # A bare SandboxExecutionError without a result is a stream that closed with no exit status.
+        if isinstance(exc, (SandboxUnavailableError, SandboxStreamTruncatedError, SandboxRequestTimeoutError)) or (
+                type(exc) is SandboxExecutionError and exc.exec_result is None):
             return _UNKNOWN_EXIT_CODE, b"", f"{type(exc).__name__}: {exc}".encode()
         if isinstance(exc, SandboxTimeoutError):
             return _TIMED_OUT_EXIT_CODE, b"", f"command timed out after {timeout}s".encode()
