@@ -1,5 +1,6 @@
-"""``bundle init --image-ref``: an image given a registry reference pinned by digest is written as that reference,
-which a run pulls, with the part of its stored build context its Dockerfile reads kept beside it."""
+"""``bundle init --image-ref``: an image given a registry reference is written as that reference, its tag pinned to the
+digest its registry serves now, which a run pulls, with the part of its stored build context its Dockerfile reads kept
+beside it."""
 
 import json
 import tomllib
@@ -10,6 +11,7 @@ from click.testing import CliRunner
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError
+from agent_env.bundle import importer as importer_module
 from agent_env.bundle.importer import import_task
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.resolve import build_step
@@ -21,6 +23,7 @@ from agent_env.task import Task
 from tst.unit.bundle._support import context_image, local_builds, plan_of
 
 REF = "123456789012.dkr.ecr.us-west-2.amazonaws.com/delivery/crm:t1@sha256:" + "c" * 64
+TAG = REF.split("@")[0]
 DEPLOY = {"id": "env", "type": "deploy_env", "env_id": "crm"}
 
 
@@ -28,6 +31,19 @@ DEPLOY = {"id": "env", "type": "deploy_env", "env_id": "crm"}
 def home(local_stores, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture
+def pins(monkeypatch):
+    """Each ref the import asks its registry to pin; a tag pins to REF's digest."""
+    asked = []
+
+    def pin(ref, auth):
+        asked.append(ref)
+        return f"{ref}@{REF.split('@')[1]}"
+
+    monkeypatch.setattr(importer_module, "pin_digest", pin)
+    return asked
 
 
 def _stored(image):
@@ -82,17 +98,51 @@ def test_an_image_with_no_context_given_a_ref_is_written_as_the_ref_alone(home):
     assert [(pull.folder, pull.image) for pull in imported.pulled] == [("envs/crm", REF)]
 
 
+def test_a_tag_given_for_an_image_is_pinned_to_the_digest_its_registry_serves_once_per_image(home, pins):
+    image = context_image(home, "crm-image")
+    MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
+    MCPServerEnv.put(id="crm-eu", docker_image_artifact=image, environment_name="crm")
+    Task.put(id="t", steps=[build_step(dict(DEPLOY)), build_step({**DEPLOY, "id": "env2", "env_id": "crm-eu"})])
+
+    imported = import_task("t", home / "t", image_refs={"crm-image": TAG})
+
+    assert [_toml(imported.root, f"envs/{name}/env.toml")["image"]["ref"] for name in ("crm", "crm-eu")] == [REF] * 2
+    assert pins == [TAG]
+
+
+def test_a_digest_given_for_an_image_is_written_as_given_without_asking_its_registry(home, pins):
+    _stored(context_image(home, "crm-image"))
+
+    import_task("t", home / "t", image_refs={"crm-image": REF})
+
+    assert pins == []
+
+
+def test_a_tag_its_registry_cant_pin_fails_the_import_naming_the_image(home, monkeypatch):
+    _stored(context_image(home, "crm-image"))
+
+    def refuse(ref, auth):
+        raise ValueError(f"{ref}: the registry has no such tag")
+
+    monkeypatch.setattr(importer_module, "pin_digest", refuse)
+
+    with pytest.raises(BundleError) as caught:
+        import_task("t", home / "t", image_refs={"crm-image": TAG})
+
+    assert caught.value.problems == (f"envs/crm: image: the reference given for crm-image, {TAG!r}, can't be pinned to "
+                                     f"a digest: {TAG}: the registry has no such tag",)
+
+
 @pytest.mark.parametrize("refs, problem", [
-    ({"crm-image": REF.split("@")[0]},
-     "envs/crm: image: the reference given for crm-image, '" + REF.split("@")[0] + "', doesn't pin a digest, as "
+    ({"crm-image": TAG + "@sha256:"},
+     "envs/crm: image: the reference given for crm-image, '" + TAG + "@sha256:', doesn't give a whole digest, as "
      "<registry>/<repo>:<tag>@sha256:<64 hex digits> does"),
-    ({"crm-image": REF.split("@")[0] + "@sha256:"}, "doesn't pin a digest"),
-    ({"crm-image": REF[:-1]}, "doesn't pin a digest"),
-    ({"crm-image": REF[:-1] + "X"}, "doesn't pin a digest"),
+    ({"crm-image": REF[:-1]}, "doesn't give a whole digest"),
+    ({"crm-image": REF[:-1] + "X"}, "doesn't give a whole digest"),
     ({"crm-image": "crm@sha256:" + "c" * 64}, "doesn't name its registry"),
     ({"crm-image": REF, "other-image": REF},
      "a reference was given for other-image, which the import writes no image of"),
-], ids=["no digest", "empty digest", "short digest", "not hex", "no registry", "unused"])
+], ids=["empty digest", "short digest", "not hex", "no registry", "unused"])
 def test_a_ref_that_cant_be_written_fails_the_import_and_writes_nothing(home, refs, problem):
     _stored(context_image(home, "crm-image"))
 

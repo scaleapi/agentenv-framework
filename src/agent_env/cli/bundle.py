@@ -30,8 +30,8 @@ def bundle():
               help="Keep the fields of this scope as stored, and leave in the store what the folder can't hold, for a "
                    "folder run against the same store. Repeatable.")
 @click.option("--image-ref", "image_refs", multiple=True, metavar="ID=REF",
-              help="Write the stored image ID as the registry image REF, pinned by its digest "
-                   "(<registry>/<repo>:<tag>@sha256:<digest>), which a run pulls, with its build context beside it. "
+              help="Write the stored image ID as the registry image REF, which a run pulls, with its build context "
+                   "beside it. A tag is pinned to the digest its registry serves now; a digest is written as given. "
                    "Repeatable.")
 def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | None,
          include_scopes: tuple[str, ...], image_refs: tuple[str, ...]):
