@@ -140,8 +140,8 @@ class Builder(ABC):
 
     @abstractmethod
     def written(self, tag: str, commands: list[str]) -> list[dict[str, str]]:
-        """What each of ``commands``, a RUN of ``tag``'s build, wrote in its layer of ``tag``, read from the image saved
-        (``layers_in_image``)."""
+        """What each of ``commands``, a RUN of ``tag``'s build, wrote in its layer of ``tag``, read from a save of the
+        image (``layers_in_image``)."""
 
     @abstractmethod
     def push(self, tag: str, ref: str, store) -> None:
