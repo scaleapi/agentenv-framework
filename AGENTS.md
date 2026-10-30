@@ -327,7 +327,7 @@ skips; a `changes` job decides, and a skipped `installer` counts as passed.
 `.github/workflows/trl.yml` runs `tst/trl` against TRL 1.16 (1.15 can't train on CPU) and the latest, on pull
 requests that touch `agent_env/training`, `agent_env/openenv` or the tier, weekly, and on demand; it allows no skips
 and isn't a required check. `.github/workflows/nemo-gym.yml` runs `tst/nemo_gym` on Python 3.13 with the `nemo-gym`
-extra from `uv.lock`, on the same triggers; it allows no skips and isn't a required check.
+extra from `uv.lock` and with the latest nemo-gym, on the same triggers; it allows no skips and isn't a required check.
 `.github/workflows/plugin-api.yml` runs the `plugin-api` job on every pull
 request, title edits included, and on `main`: `.github/scripts/check_plugin_api.py` compares the
 plugin surface (its `BASES` and `USED`) between `HEAD^1` and `HEAD` with griffe, pinned in the `dev` extra, and fails on a break the
