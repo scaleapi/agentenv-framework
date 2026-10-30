@@ -28,7 +28,7 @@ import httpx
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
-from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, upload_vm_file
+from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 from agent_env.store.base import ObjectAlreadyExistsError
 from agent_env.store.image_store.oci_registry_credentials import (
@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 FORMAT = 1
 CONTEXT, RESOLVED = "context", "resolve"
 RESOLVER = Path(__file__).with_name("resolve_in_base.py")
+#: The shell side of a builder VM, its subcommands run there (``VmBuilder``).
+IN_VM = Path(__file__).with_name("builder_in_vm.sh")
 #: What a file starts with when it's only ever run: a script or a Linux binary, made executable where it's staged,
 #: since the stores keep no file modes.
 RUN_ONLY = (b"#!", b"\x7fELF")
@@ -338,23 +340,19 @@ class VmBuilder(Builder):
         except BaseException:
             self._runner.close()
             raise
-        self.platform = self.sandbox.platform
+        self.platform, self.helper = self.sandbox.platform, f"bash {self.work}/{IN_VM.name}"
 
     def start(self, work: Path, base: DockerImageArtifact, platform: str,
               from_store: dict[str, tuple[str, str]]) -> None:
         """Give the VM's Docker BuildKit when it has none, register emulation for ``platform`` when it isn't the VM's
         own, sign in to the base's registry or build the base from its build context, and put the build context here:
         the files of ``from_store`` from the store, and the rest, which only the putting machine holds, inline."""
-        plugin = f"{_PLUGINS}/docker-buildx"
-        self._exec(f"docker buildx version >/dev/null 2>&1 || {{ mkdir -p {_PLUGINS} && curl -fsSL {CURL_RETRY_FLAGS} "
-                   f"{BUILDX.format(platform=self.platform.replace('/', '-'))} -o {plugin} && echo "
-                   f"'{BUILDX_SHA256[self.platform]}  {plugin}' | sha256sum --check --quiet && chmod 755 {plugin}; }}")
+        self._write(f"{self.work}/{IN_VM.name}", IN_VM.read_bytes())
+        self._exec(f"{self.helper} buildx {BUILDX.format(platform=self.platform.replace('/', '-'))} "
+                   f"{BUILDX_SHA256[self.platform]} {_PLUGINS}")
         if platform != self.platform:
-            # The VM's own binfmt_misc first: a newer kernel gives a mount of it in a container an instance of its own.
             try:
-                self._exec("mountpoint -q /proc/sys/fs/binfmt_misc || mount -t binfmt_misc binfmt_misc "
-                           f"/proc/sys/fs/binfmt_misc\ndocker run --privileged --rm {BINFMT} --install "
-                           f"{platform.rsplit('/', 1)[-1]}")
+                self._exec(f"{self.helper} emulate {platform.rsplit('/', 1)[-1]} {BINFMT}")
             except RuntimeError as e:
                 raise Unbuildable(f"{self.name}'s VM couldn't register emulation for {platform}: {e}") from None
         if names_registry(base.image_name):
@@ -380,19 +378,15 @@ class VmBuilder(Builder):
         return json.loads(self._exec(f"cat {out}/result.json"))
 
     def download(self, url: str, sha256: str, path: str) -> None:
-        target = shlex.quote(f"{self.work}/{path}")
         try:
-            self._exec(f"mkdir -p $(dirname {target}) && curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(url)} -o {target}")
+            found = self._exec(f"{self.helper} download {shlex.quote(url)} {self._at(path)}").strip()
         except RuntimeError as e:
             raise ResolveError(f"downloading {url} failed: {e}") from None
-        if (found := self._exec(f"sha256sum {target}").split()[0]) != sha256:
+        if found != sha256:
             raise ResolveError(f"{url} has the sha256 {found}, not the {sha256} its download names")
 
     def files(self, folder: str) -> dict[str, Hashed]:
-        listed = self._exec(
-            f"cd {shlex.quote(f'{self.work}/{folder}')} && find . -type f -printf '%P\\0' | "
-            "while IFS= read -r -d '' f; do printf '%s %s %s\\0' \"$(sha256sum < \"$f\" | cut -c1-64)\" "
-            "\"$(stat -c %s \"$f\")\" \"$f\"; done")
+        listed = self._exec(f"{self.helper} files {self._at(folder)}")
         found = {}
         for entry in filter(None, listed.split("\0")):
             sha256, size, path = entry.split(" ", 2)
@@ -403,24 +397,20 @@ class VmBuilder(Builder):
         self._run(upload_vm_file(self.sandbox, f"{self.work}/{path}", store, store.object_url(key)))
 
     def place(self, copies: dict[str, str], fetches: dict[str, tuple[str, str]]) -> None:
-        targets = [*copies, *fetches]
-        self._each([f"mkdir -p {shlex.quote(str(PurePosixPath(self.work, target).parent))}" for target in targets])
-        self._each([f"ln -f {shlex.quote(f'{self.work}/{source}')} {shlex.quote(f'{self.work}/{target}')}"
-                    for target, source in copies.items()])
+        self._each([f"{self.helper} link {self._at(source)} {self._at(target)}" for target, source in copies.items()])
         if not fetches:
             return
+        self._each([f"mkdir -p {shlex.quote(str(PurePosixPath(self.work, target).parent))}" for target in fetches])
         self._run(self._fetch({f"{self.work}/{target}": url for target, (url, _) in fetches.items()}))
         listed = "".join(f"{sha256}  {target}\n" for target, (_, sha256) in fetches.items())
         self._write(f"{self.work}/fetched.sha256", listed.encode())
         try:
-            self._exec(f"cd {self.work} && sha256sum --check --quiet fetched.sha256")
+            self._exec(f"{self.helper} check {self.work} {self.work}/fetched.sha256")
         except RuntimeError as e:
             raise RuntimeError(f"a file the store served isn't the one this build stages: {e}") from None
 
     def mark_runnable(self, paths: list[str]) -> None:
-        self._each([f"case \"$(head -c 4 {shlex.quote(f'{self.work}/{path}')} | od -An -tx1 | tr -d ' \\n')\" in "
-                    f"2321*|7f454c46) chmod {EXECUTABLE:o} {shlex.quote(f'{self.work}/{path}')};; esac"
-                    for path in paths])
+        self._each([f"{self.helper} runnable {self._at(path)}" for path in paths])
 
     def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT) -> None:
         folder = f"{self.work}/{context}"
@@ -432,9 +422,7 @@ class VmBuilder(Builder):
             raise DockerBuildError(f"docker build of {tag} failed (exit {code}):\n{(stdout + stderr).rstrip()}")
 
     def installed(self, tag: str, prefix: str) -> dict[str, str]:
-        copied = f"{self.work}/installed.json"
-        listed = self._exec(f"c=$(docker create {shlex.quote(tag)}) && {{ docker cp \"$c:{prefix}/installed.json\" "
-                            f"{copied} >/dev/null 2>&1 && cat {copied}; docker rm \"$c\" >/dev/null; }}")
+        listed = self._exec(f"{self.helper} installed {shlex.quote(tag)} {shlex.quote(f'{prefix}/installed.json')}")
         return _packages(listed.encode()) if listed.strip() else {}
 
     def push(self, tag: str, ref: str, store) -> None:
@@ -478,7 +466,11 @@ class VmBuilder(Builder):
         await asyncio.gather(*(fetch(path, url) for path, url in urls.items()))
 
     def _chmod(self, paths: list[str]) -> None:
-        self._each([f"chmod {EXECUTABLE:o} {shlex.quote(f'{self.work}/{path}')}" for path in paths])
+        self._each([f"chmod {EXECUTABLE:o} {self._at(path)}" for path in paths])
+
+    def _at(self, path: str) -> str:
+        """``path``, in the builder's work folder, quoted for a script."""
+        return shlex.quote(f"{self.work}/{path}")
 
     def _each(self, commands: list[str]) -> None:
         """Run ``commands`` in as few scripts as fit a script's limit."""

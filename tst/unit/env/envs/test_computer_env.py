@@ -669,8 +669,8 @@ def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on(base, driv
 
 
 class FakeVm:
-    """A builder VM, amd64: its files under ``root``, each line of a script it's given run as a VM's shell runs it, its
-    Docker the fake's."""
+    """A builder VM, amd64: its files under ``root``, each line of a script it's given run by bash here, but for Docker
+    and uploads to the store, which the fake's Docker and the store do, and the helper's subcommands that use Docker."""
 
     platform, _WFT_CHUNK_BYTES = "linux/amd64", 96 * 1024
 
@@ -710,82 +710,78 @@ class FakeVm:
 
     def _line(self, line):
         self.provider.ran.append(line)
-        if line.startswith("case "):
-            path = self.at(shlex.split(line.split("$(head -c 4 ", 1)[1].split(" |", 1)[0])[0])
-            if path.read_bytes()[:4].startswith((b"#!", b"\x7fELF")):
-                path.chmod(0o755)
-            return 0, ""
-        if line.startswith("c=$(docker create"):
-            return 0, json.dumps([{"name": "mss", "version": "10.1.0"}])
-        if line.startswith(("docker buildx version", "mountpoint ")):
-            return 0, ""
-        if "docker login" in line:
-            self.provider.logins.append(shlex.split(line)[-1])
-            return 0, ""
-        if "find . -type f" in line:
-            folder = self.at(shlex.split(line)[1])
-            return 0, "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()} {path.stat().st_size} "
-                              f"{path.relative_to(folder).as_posix()}\0" for path in sorted(folder.rglob("*"))
-                              if path.is_file() and not path.is_symlink())
-        cwd, printed = None, ""
-        for command in " ".join(shlex.split(line, posix=False)).split(" && "):
-            words = shlex.split(command)
-            if words[0] == "cd":
-                cwd = self.at(words[1])
-                continue
-            code, printed = self._command(words, cwd)
-            if code:
-                return code, printed
-        return 0, printed
+        words = shlex.split(line)
+        if builder.IN_VM.name in line and words[2] in ("buildx", "emulate", "installed"):
+            if words[2] == "emulate":
+                self.provider.binfmt.append(words[3])
+            return 0, json.dumps([{"name": "mss", "version": "10.1.0"}]) if words[2] == "installed" else ""
+        if "docker" in words or "curl" in words:
+            return self._docker(words)
+        ran = subprocess.run(["bash", "-c", line.replace("/tmp/agentenv-compose-", f"{self.root}/tmp/agentenv-compose-")],
+                             capture_output=True, text=True)
+        return ran.returncode, ran.stdout + ran.stderr
 
-    def _command(self, words, cwd):
-        docker = self.provider.docker
-        if words[0] == "mkdir":
-            for folder in words[2:]:
-                self.at(folder).mkdir(parents=True, exist_ok=True)
-        elif words[0] == "tar":
-            with tarfile.open(self.at(words[2])) as archive:
-                archive.extractall(self.at(words[words.index("-C") + 1]), filter="data")
-        elif words[0] == "rm":
-            self.at(words[-1]).unlink()
-        elif words[0] == "ln":
-            self.at(words[3]).unlink(missing_ok=True)
-            self.at(words[3]).hardlink_to(self.at(words[2]))
-        elif words[0] == "chmod":
-            self.at(words[2]).chmod(0o755)
-        elif words[0] == "cat":
-            return 0, self.at(words[1]).read_text()
-        elif words[:2] == ["sha256sum", "--check"]:
-            for listed in (cwd / words[-1]).read_text().splitlines():
-                sha256, path = listed.split("  ", 1)
-                if hashlib.sha256((cwd / path).read_bytes()).hexdigest() != sha256:
-                    return 1, f"{path}: FAILED\n"
-        elif words[:2] == ["curl", "-fsSL"] and "--upload-file" in words:
-            url = urllib.parse.unquote(words[-1].partition("?")[2])
-            get_config().get_object_store_at(url).put_file_at(url, str(self.at(words[-2])))
-            self.provider.uploaded.append(url)
-        elif words[0] == "timeout":
-            out, platform = self.at(words[words.index("-v", 13) + 1].split(":")[0]), words[words.index("--platform") + 1]
-            context = self.at(words[words.index("-v") + 1].split(":")[0])
-            result = docker.resolve(json.loads((out / "request.json").read_text()), context, words[-4],
-                                    platform.split("/")[1], out.parent)
-            (out / "result.json").write_text(json.dumps(result))
-        elif words[:2] == ["docker", "run"]:
-            self.provider.binfmt.append(words[-1])
-        elif words[:2] == ["docker", "build"]:
-            labels = dict(words[i + 1].split("=", 1) for i, word in enumerate(words) if word == "--label")
-            try:
-                docker.build_image(cwd / "Dockerfile", cwd, words[words.index("-t") + 1],
-                                   platform=words[words.index("--platform") + 1], labels=labels)
-            except DockerBuildError as e:
-                return 1, str(e)
-        elif words[:2] == ["docker", "tag"]:
-            self.provider.tagged[words[3]] = words[2]
-        elif words[:2] == ["docker", "push"]:
-            docker.push(self.provider.tagged[words[2]], words[2], None)
-        else:
-            raise AssertionError(f"a builder VM was asked to run {words}")
+    def _docker(self, words):
+        docker, cwd = self.provider.docker, None
+        while words:
+            command, words = (words[:words.index("&&")], words[words.index("&&") + 1:]) if "&&" in words else (words, [])
+            if command[0] == "cd":
+                cwd = self.at(command[1])
+            elif "login" in command:
+                self.provider.logins.append(command[-1])
+            elif command[0] == "timeout":
+                mounts = [i for i, word in enumerate(command) if word == "-v"]
+                context, out = (self.at(command[i + 1].split(":")[0]) for i in mounts)
+                platform = command[command.index("--platform") + 1]
+                result = docker.resolve(json.loads((out / "request.json").read_text()), context,
+                                        command[mounts[1] + 2], platform.split("/")[1], out.parent)
+                (out / "result.json").write_text(json.dumps(result))
+            elif command[:2] == ["docker", "build"]:
+                labels = dict(command[i + 1].split("=", 1) for i, word in enumerate(command) if word == "--label")
+                try:
+                    docker.build_image(cwd / "Dockerfile", cwd, command[command.index("-t") + 1],
+                                       platform=command[command.index("--platform") + 1], labels=labels)
+                except DockerBuildError as e:
+                    return 1, str(e)
+            elif command[:2] == ["docker", "tag"]:
+                self.provider.tagged[command[3]] = command[2]
+            elif command[:2] == ["docker", "push"]:
+                docker.push(self.provider.tagged[command[2]], command[2], None)
+            elif command[0] == "curl" and "--upload-file" in command:
+                url = urllib.parse.unquote(command[-1].partition("?")[2])
+                get_config().get_object_store_at(url).put_file_at(url, str(self.at(command[-2])))
+                self.provider.uploaded.append(url)
+            else:
+                raise AssertionError(f"a builder VM was asked to run {command}")
         return 0, ""
+
+
+def test_the_builder_vms_helper_lists_plain_files_marks_runnables_links_checks_and_downloads(tmp_path):
+    folder = tmp_path / "out"
+    (folder / "sub dir").mkdir(parents=True)
+    (folder / "sub dir" / "run me").write_bytes(b"#!/bin/sh\n")
+    (folder / "plain").write_bytes(b"data")
+    (folder / "elf").write_bytes(b"\x7fELF\x02")
+    (folder / "link").symlink_to(tmp_path / "elsewhere")
+    (tmp_path / "list").write_text(f"{hashlib.sha256(b'data').hexdigest()}  plain\n{'0' * 64}  elf\n")
+
+    def helper(*args):
+        return subprocess.run(["bash", str(builder.IN_VM), *map(str, args)], capture_output=True, text=True)
+
+    listed = helper("files", folder).stdout
+    helper("runnable", folder / "sub dir" / "run me", folder / "plain", folder / "elf")
+    helper("link", folder / "plain", tmp_path / "linked" / "plain")
+    checked = helper("check", folder, tmp_path / "list")
+    downloaded = helper("download", (folder / "plain").as_uri(), tmp_path / "fetched" / "plain")
+
+    assert sorted(filter(None, listed.split("\0"))) == sorted(
+        f"{hashlib.sha256(data).hexdigest()} {len(data)} {name}"
+        for name, data in (("sub dir/run me", b"#!/bin/sh\n"), ("plain", b"data"), ("elf", b"\x7fELF\x02")))
+    assert {name: (folder / name).stat().st_mode & 0o111 for name in ("sub dir/run me", "plain", "elf")} == {
+        "sub dir/run me": 0o111, "plain": 0, "elf": 0o111}
+    assert (tmp_path / "linked" / "plain").stat().st_ino == (folder / "plain").stat().st_ino
+    assert checked.returncode == 1 and checked.stdout.startswith("elf: its sha256 is ")
+    assert downloaded.stdout.strip() == hashlib.sha256(b"data").hexdigest()
 
 
 class FakeVmProvider(SandboxProvider):
@@ -859,16 +855,16 @@ def test_a_chain_builds_each_arch_on_the_first_link_that_runs_it_natively(base, 
 
 def test_a_builder_vm_its_provider_loses_fails_its_pair_alone_and_is_torn_down(base, driver, docker, signing, tmp_path,
                                                                               monkeypatch):
-    vms, real = FakeVmProvider(docker, tmp_path / "vms"), FakeVm._command
+    vms, real = FakeVmProvider(docker, tmp_path / "vms"), FakeVm._docker
 
     class Gone(Exception):
         pass
 
-    def command(vm, words, cwd):
+    def gone(vm, words):
         if words[0] == "timeout" and "linux/arm64" in words:
             raise Gone("the sandbox is shutting down")
-        return real(vm, words, cwd)
-    monkeypatch.setattr(FakeVm, "_command", command)
+        return real(vm, words)
+    monkeypatch.setattr(FakeVm, "_docker", gone)
 
     composed = Env.get(_put(base, driver, composing=Composing(vms)).id).metadata["composed"]["container"]
 
