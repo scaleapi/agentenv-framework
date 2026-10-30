@@ -236,6 +236,15 @@ class Sandbox(ABC):
         raise NotImplementedError(f"{self.__class__.__name__} does not support write_file_from_text")
 
 
+
+def _load_tarball(path: str, image_name: str) -> str:
+    """Shell that loads the image tar.gz at ``path`` and, when it saves the image under another name, as an archive a
+    bundle carries does, tags the image it loaded ``image_name``."""
+    tar, out, name = shlex.quote(path), shlex.quote(f"{path}.loaded"), shlex.quote(image_name)
+    return (f"gunzip -c {tar} | docker load > {out} && rm -f {tar} && "
+            f"{{ docker image inspect {name} > /dev/null 2>&1 || "
+            f"docker tag \"$(awk '/^Loaded image/ {{print $NF; exit}}' {out})\" {name}; }} && rm -f {out}")
+
 class VmSandbox(Sandbox):
     """VM-style sandbox with a Docker daemon and shell access inside."""
 
@@ -475,15 +484,11 @@ class VmSandbox(Sandbox):
             if signed is not None:
                 # Download to a file first (retry-safe with -o); a `curl | ... docker load`
                 # pipe can't be retried without corrupting the stream (curl won't rewind).
-                load_commands.append(
-                    f"(curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(signed)} -o {shlex.quote(tmp_tar)} "
-                    f"&& gunzip -c {shlex.quote(tmp_tar)} | docker load && rm -f {shlex.quote(tmp_tar)})"
-                )
+                fetch = f"curl -fsSL {CURL_RETRY_FLAGS} {shlex.quote(signed)} -o {shlex.quote(tmp_tar)} && "
             else:
                 await self._download_object_to_vm(artifact.tar_gz_object_url, tmp_tar)
-                load_commands.append(
-                    f"(gunzip -c {shlex.quote(tmp_tar)} | docker load && rm -f {shlex.quote(tmp_tar)})"
-                )
+                fetch = ""
+            load_commands.append(f"({fetch}{_load_tarball(tmp_tar, artifact.image_name)})")
             logger.info(f"  Queued: {artifact.image_name}")
         await self.exec_script(" & ".join(load_commands) + " & wait", max_retries=2)
 

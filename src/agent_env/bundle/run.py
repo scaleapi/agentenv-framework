@@ -40,7 +40,8 @@ from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle
 from .preflight import Preflight, preflight_run
 from .requires import Declaring, declare, declaring_for
-from .resolve import BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle, without_played_agents
+from .resolve import (ArchivedImage, BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle,
+                      without_played_agents)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,8 @@ class DryRun:
             f"{_label(plan, done.write)} v{done.version}: "
             + ("pulled from its registry, its tag pinned to a digest when it's written"
                if isinstance(done.write.source, ReferencedImage)
+               else "a saved image, which each deploy loads"
+               if isinstance(done.write.source, ArchivedImage)
                else f"{plan.published[done.write.id].ref}, published for its sources, which each deploy pulls by its "
                     "digest, or builds from its build context when it can't"
                if done.write.id in plan.published
@@ -590,4 +593,6 @@ def _label(plan: Plan, write: Write) -> str:
     path = plan.path(write.source.entry)
     if isinstance(write.source, BuiltImage):
         return f"{path} ({write.source.dockerfile} image)"
+    if isinstance(write.source, ArchivedImage):
+        return f"{path} ({write.source.archive} image)"
     return f"{path} ({write.source.ref} image)" if isinstance(write.source, ReferencedImage) else path

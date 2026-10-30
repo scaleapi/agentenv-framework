@@ -7,7 +7,14 @@ import pytest
 
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import resolve as resolve_module
-from agent_env.bundle.resolve import BuiltImage, Output, Reference, ReferencedImage, resolve_bundle
+from agent_env.bundle.resolve import (
+    ArchivedImage,
+    BuiltImage,
+    Output,
+    Reference,
+    ReferencedImage,
+    resolve_bundle,
+)
 from agent_env.entity.refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.task import Task
@@ -434,6 +441,66 @@ def test_an_image_folder_is_the_image_built_from_its_dockerfile_or_the_registry_
         {"image": f"{ROOT}/nginx"}, [(EntityKind.ARTIFACT, f"{ROOT}/nginx", None, "nginx")])
 
 
+
+def test_an_image_key_or_folder_naming_a_saved_image_has_the_bundle_load_it(make):
+    result = resolve_bundle(make(files={
+        "envs/web/Dockerfile": "FROM scratch\n",
+        "envs/web/image.tar.gz": "saved",
+        "envs/web/env.toml": 'type = "composite_test"\nimage = { archive = "image.tar.gz", dockerfile = "Dockerfile", '
+                             'platform = "linux/arm64" }\nbackend_image = { archive = "api.tar" }\n',
+        "envs/web/api.tar": "saved",
+        "artifacts/crm/image.tar": "saved",
+        "artifacts/crm/artifact.toml": 'type = "docker_image"\narchive = "image.tar"\nplatform = "linux/amd64"\n',
+    }))
+    web = next(e for e in result.entries if e.entry.name == "web")
+    crm = next(entry for entry in result.bundle.entries if entry.name == "crm")
+
+    assert web.config == {"type": "composite_test", "image": f"{ROOT}/web__env_image",
+                          "backend_image": f"{ROOT}/web__backend_image"}
+    assert [image for image in result.images if image.entry in (web.entry, crm)] == [
+        ArchivedImage(f"{ROOT}/web__env_image", web.entry, "image.tar.gz", "Dockerfile", "linux/arm64"),
+        ArchivedImage(f"{ROOT}/web__backend_image", web.entry, "api.tar"),
+        ArchivedImage(f"{ROOT}/crm", crm, "image.tar", None, "linux/amd64"),
+    ]
+
+
+def test_an_image_folder_saving_its_image_beside_its_dockerfile_keeps_the_dockerfile_as_its_context(make):
+    result = resolve_bundle(make(files={
+        "artifacts/crm/Dockerfile": "FROM scratch\n",
+        "artifacts/crm/image.tar.gz": "saved",
+        "artifacts/crm/artifact.toml": 'archive = "image.tar.gz"\ndescription = "the CRM"\n',
+    }))
+    crm = next(entry for entry in result.bundle.entries if entry.name == "crm")
+
+    assert [image for image in result.images if image.entry == crm] == [
+        ArchivedImage(f"{ROOT}/crm", crm, "image.tar.gz", "Dockerfile", description="the CRM")]
+
+
+@pytest.mark.parametrize("files, problem", [
+    ({"envs/web/env.toml": 'image = { archive = "image.tar" }\n'},
+     "image: there is no 'image.tar' in this folder to load"),
+    ({"envs/web/env.toml": 'image = { archive = "../image.tar" }\n', "envs/image.tar": "saved"},
+     "image: there is no '../image.tar' in this folder to load"),
+    ({"envs/web/env.toml": 'image = { archive = "image.tar", dockerfile = "Dockerfile.web" }\n',
+      "envs/web/image.tar": "saved"},
+     "image: there is no 'Dockerfile.web' in this folder to keep as its build context"),
+    ({"envs/web/env.toml": 'image = { archive = "image.tar", ref = "ghcr.io/acme/web:1" }\n',
+      "envs/web/image.tar": "saved"},
+     "image: a registry image takes only ref, not archive"),
+    ({"envs/web/env.toml": 'image = { archive = "image.tar", platform = "arm64" }\n', "envs/web/image.tar": "saved"},
+     "image: platform is the one the image was built for, such as linux/amd64, not 'arm64'"),
+    ({"artifacts/img/artifact.toml": 'type = "docker_image"\narchive = "image.tar"\nref = "ghcr.io/acme/img:1"\n',
+      "artifacts/img/image.tar": "saved"},
+     "artifacts/img: artifact.toml: archive names an image saved in this folder, so it takes no ref"),
+    ({"envs/web/env.toml": 'image = { archive = "image.tar", size = 1 }\n', "envs/web/image.tar": "saved"},
+     "image: an archived image takes archive, dockerfile and platform, not size"),
+    ({"artifacts/img/artifact.toml": 'type = "docker_image"\narchive = "image.tar"\n'},
+     "artifacts/img: artifact.toml: archive: there is no 'image.tar' in this folder to load"),
+], ids=["no archive", "outside", "no dockerfile", "with a ref", "platform", "folder with a ref", "unknown key",
+        "folder no archive"])
+def test_a_saved_image_the_bundle_cant_load_is_a_problem(make, files, problem):
+    assert any(problem in found for found in problems(make(files=files)))
+
 @pytest.mark.parametrize("files, problem", [
     ({"artifacts/img/artifact.toml": 'type = "docker_image"\n'},
      'artifacts/img: an image folder needs a Dockerfile, or ref = "<image>" in its artifact.toml'),
@@ -443,12 +510,14 @@ def test_an_image_folder_is_the_image_built_from_its_dockerfile_or_the_registry_
     ({"artifacts/img/artifact.toml": 'type = "docker_image"\nref = "img:1"\n'},
      "artifacts/img: artifact.toml: ref: 'img:1' doesn't name its registry; spell it out, as in "
      "docker.io/library/img:1"),
-    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": 'platform = "linux/amd64"\n'},
-     "artifacts/img: artifact.toml: unknown key 'platform'; a docker_image artifact takes description, ref, type "
-     "and id"),
+    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": "size = 1\n"},
+     "artifacts/img: artifact.toml: unknown key 'size'; a docker_image artifact takes description, ref, archive, "
+     "platform, type and id"),
     ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": "description = 1\n"},
      "artifacts/img: artifact.toml: description must be a string, not 1"),
-], ids=["nothing to build", "both", "no registry", "unknown key", "description type"])
+    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": 'platform = "linux/amd64"\n'},
+     "artifacts/img: artifact.toml: platform is only for an archived image"),
+], ids=["nothing to build", "both", "no registry", "unknown key", "description type", "platform alone"])
 def test_an_image_folder_its_toml_cant_describe_is_a_problem(make, files, problem):
     assert problem in problems(make(files=files))
 

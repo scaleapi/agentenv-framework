@@ -271,6 +271,32 @@ def test_an_image_folder_naming_a_registry_on_this_machine_is_refused_where_a_sa
     assert "localhost:5000/team/solver:v1 is in a registry on this machine" in problem
 
 
+
+SAVED = {"artifacts/base/artifact.toml": 'type = "docker_image"\narchive = "image.tar"\n',
+         "artifacts/base/image.tar": "saved", "agents/solver/agent.toml": 'image = "base"\n'}
+
+
+@pytest.mark.parametrize("sandbox", ["local", "modal_vm", "modal_vm,modal"])
+def test_an_image_folder_saving_its_image_is_loaded_wherever_its_deploys_load_a_tar_gz(bundle_dir, sandbox):
+    layout(bundle_dir, SAVED)
+    _task(bundle_dir, [AGENT])
+
+    dry = dry_run_bundle(bundle_dir, sandbox=sandbox)
+
+    assert dry.built_here == set()
+    assert dry.images() == ("artifacts/base (image.tar image) v1: a saved image, which each deploy loads",)
+
+
+def test_an_image_folder_saving_its_image_is_refused_where_a_sandbox_only_pulls_images(bundle_dir):
+    layout(bundle_dir, SAVED)
+    _task(bundle_dir, [AGENT])
+
+    [problem] = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal"))
+
+    assert problem.startswith("tasks/t.json: step 'agent': deploys agent ")
+    assert "'@local/~/triage/base' is stored as a tar.gz under " in problem
+    assert "a sandbox elsewhere can't pull; run it with --sandbox local, or on a provider whose VMs load" in problem
+
 class _ContainersOnly(SandboxProvider):
     """A plugin's provider that runs an agent's image in a container of its own, and creates no VM."""
 

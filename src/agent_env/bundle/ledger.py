@@ -32,9 +32,9 @@ from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
 
 from .authoring import build_context_files
-from .parse import BundleKind
+from .parse import Bundle, BundleKind
 from .plan import Plan, Write, artifact_writer, env_folder_writer, env_writer, folder_files, unpinned_store_refs
-from .resolve import BuiltImage, BundleImage, ReferencedImage
+from .resolve import ArchivedImage, BuiltImage, BundleImage, ReferencedImage
 
 LEDGER_COLLECTION = "bundle_ledger"
 # Bumped by hand when what a digest covers changes, or a writer's output changes enough that every
@@ -133,7 +133,9 @@ class Ledger:
                   "files": {}, "needs": {}, "store_refs": {}}
         from_folder = write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL) or (
             write.kind is BundleKind.ENV and env_folder_writer(get_env_registry().get(_type(write))))
-        if from_folder and not isinstance(write.source, ReferencedImage):
+        if isinstance(write.source, ArchivedImage):
+            inputs["files"] = _archived_files(self._plan.bundle_of(write.source.entry), write.source)
+        elif from_folder and not isinstance(write.source, ReferencedImage):
             built = isinstance(write.source, BuiltImage)
             listing = build_context_files if built else folder_files
             for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
@@ -255,7 +257,11 @@ def _config(write: Write) -> Any:
     source = write.source
     if not isinstance(source, BundleImage):
         return source.config
-    config = {"dockerfile": source.dockerfile} if isinstance(source, BuiltImage) else {"ref": source.ref}
+    if isinstance(source, ArchivedImage):
+        config = {key: value for key, value in (("archive", source.archive), ("dockerfile", source.dockerfile),
+                                                ("platform", source.platform)) if value is not None}
+    else:
+        config = {"dockerfile": source.dockerfile} if isinstance(source, BuiltImage) else {"ref": source.ref}
     if source.description is not None:  # only an image folder's, so an image key's digest is as before
         config["description"] = source.description
     return config
@@ -325,6 +331,16 @@ def _sha256(data: bytes) -> str:
 # A build copies each file's permission bits into the image, so they're part of what it's made from; a file with the
 # usual rw-r--r-- is hashed as its content alone.
 _USUAL_MODE = 0o644
+
+
+def _archived_files(bundle: Bundle, image: ArchivedImage) -> dict[str, str]:
+    """What an archived image is written from: its archive, and its build context's files, with their modes, when it
+    keeps one."""
+    files = {image.archive: _file_sha256(image.entry.path / image.archive)}
+    if image.dockerfile is not None:
+        for key, path in build_context_files(bundle, image.entry, {image.archive}).items():
+            files[key] = _file_sha256(path) + _mode(path)
+    return files
 
 
 def _mode(path: Path) -> str:

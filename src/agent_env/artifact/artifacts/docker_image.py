@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gzip
+import hashlib
 import logging
 import posixpath
 import re
@@ -282,6 +284,35 @@ class DockerImageArtifact(Artifact):
             source_digest=source_digest,
         ))
 
+    @classmethod
+    def put_archive(cls, id: str, *, description: str, archive_path: str, context_path: str | None = None,
+                    dockerfile_path: str | None = None, platform: str | None = None) -> "DockerImageArtifact":
+        """Register the image ``docker save`` wrote to ``archive_path``, stored as its tar.gz, which a deploy loads, so
+        no Docker is needed here; with the build context at ``context_path`` kept beside it when given. Its
+        ``image_name``, ``local/<slug>-<hash>:<archive>``, the same for the same archive, names no registry: each load
+        tags the image with it, whatever name the archive gives it."""
+        from agent_env.artifact.store import get_artifact_store
+        from agent_env.config import get_config
+
+        context = _context_of(Path(context_path), dockerfile_path) if context_path else None
+        platform = normalize_platform(platform) if platform else None
+        store = get_artifact_store()
+        prefix = store.attempt_prefix("docker_image", id)
+        objects = get_config().get_object_store_to_write(prefix, id)
+        with tempfile.TemporaryDirectory(prefix="agent-env-archive-") as tmp:
+            gzipped, digest = _gzipped(Path(archive_path), Path(tmp) / "image.tar.gz")
+            tar_gz_object_url = objects.put_file_at(f"{prefix}{fs_safe(id)}.tar.gz", str(gzipped), "application/gzip")
+        return cls.put_tar(
+            id,
+            description=description,
+            image_name=f"{local_image_repository(id)}:{digest[:_SOURCES_TAG_CHARS]}",
+            tar_gz_object_url=tar_gz_object_url,
+            build_context_object_url=_upload_context(objects, prefix, context) if context else None,
+            dockerfile_path=context.dockerfile if context else None,
+            platform=platform,
+            source_digest=context.source_digest(platform) if context else None,
+        )
+
     @staticmethod
     def context_identity(id: str, context_path: str, dockerfile_path: str,
                          platform: str | None = DEFAULT_BUILD_PLATFORM) -> tuple[str, str]:
@@ -320,9 +351,11 @@ class DockerImageArtifact(Artifact):
         return bool(self.tar_gz_object_url) and not names_registry(self.image_name)
 
     def build_tag_reason(self) -> str:
-        """Why a sandbox elsewhere can't pull an image ``stored_under_build_tag``."""
-        return (f"{self.id!r} v{self.version} is stored as a tar.gz under {self.image_name!r}, which names no registry: "
-                "it's the tag the machine that built it gave it, which a sandbox elsewhere can't pull")
+        """Why a sandbox elsewhere can't pull an image ``stored_under_build_tag``; one not yet written has no
+        version."""
+        named = f"{self.id!r} v{self.version}" if self.version else repr(self.id)
+        return (f"{named} is stored as a tar.gz under {self.image_name!r}, which names no registry: it's a tag only a "
+                "machine that loads the tar.gz has, which a sandbox elsewhere can't pull")
 
     def rebuilt_for(self, platform: str | None) -> bool:
         """Whether a VM sandbox of ``platform`` builds this image from its build context rather than load its tar.gz,
@@ -672,6 +705,22 @@ def _context_of(root: Path, dockerfile_path: str) -> BuildContext:
 def _context_image_name(id: str, source_digest: str) -> str:
     """The tag a build gives a context-only image: the same for the same sources."""
     return f"{local_image_repository(id)}:{source_digest.removeprefix('sha256:')[:_SOURCES_TAG_CHARS]}"
+
+
+def _gzipped(archive: Path, dest: Path) -> tuple[Path, str]:
+    """``archive`` as a tar.gz: itself when it is one, else gzipped to ``dest``; and the sha256 of ``archive`` as
+    given, hex."""
+    hashed = hashlib.sha256()
+    with archive.open("rb") as source:
+        compressed = source.read(2) == b"\x1f\x8b"
+        source.seek(0)
+        out = contextlib.nullcontext() if compressed else gzip.open(dest, "wb", compresslevel=1)
+        with out as sink:
+            while chunk := source.read(1 << 20):
+                hashed.update(chunk)
+                if sink is not None:
+                    sink.write(chunk)
+    return (archive if compressed else dest), hashed.hexdigest()
 
 
 def _upload_context(objects, prefix: str, context: BuildContext) -> str:

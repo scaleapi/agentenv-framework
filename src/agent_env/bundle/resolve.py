@@ -67,6 +67,16 @@ class ReferencedImage(BundleImage):
 
 
 @dataclass(frozen=True)
+class ArchivedImage(BundleImage):
+    """An image saved in the folder by ``docker save``, which a run loads rather than builds or pulls:
+    ``{ archive = "<path>" }``, with the Dockerfile it names, when it names one, kept as its build context."""
+
+    archive: str  # relative to the entry's folder
+    dockerfile: str | None = None
+    platform: str | None = None  # the platform it was built for, when given
+
+
+@dataclass(frozen=True)
 class Reference:
     """A resolved reference: to ``local``, this bundle's entity or image, or, when ``local`` is
     None, to a store id at ``version`` (None for its latest)."""
@@ -256,8 +266,23 @@ class _Resolver:
         if cls is not DockerImageArtifact:
             return False
         ctx = AuthoringContext(self.bundle, entry)
-        fields, problems = ctx.accepted(entry.config, description=str, ref=str)
-        ref, built = fields.get("ref"), (entry.path / DOCKERFILE).is_file()
+        fields, problems = ctx.accepted(entry.config, description=str, ref=str, archive=str, platform=str)
+        ref, archive, built = fields.get("ref"), fields.get("archive"), (entry.path / DOCKERFILE).is_file()
+        if archive is not None:
+            if ref is not None:
+                problems.append(ctx.config_problem("archive names an image saved in this folder, so it takes no ref"))
+            elif problem := _archive_problem("archive", entry, {"archive": archive, **fields}):
+                problems.append(ctx.config_problem(problem))
+        elif "platform" in fields:
+            problems.append(ctx.config_problem("platform is only for an archived image"))
+        if archive is not None or problems:
+            if problems:
+                for problem in problems:
+                    self._problem(entry, problem)
+                return True
+            self.images.append(ArchivedImage(entry.id, entry, archive, DOCKERFILE if built else None,
+                                             fields.get("platform"), description=fields.get("description")))
+            return True
         if ref is not None and built:
             problems.append(ctx.config_problem(f"ref names a registry image, so this folder builds none; remove ref "
                                                f"or its {DOCKERFILE}"))
@@ -292,8 +317,9 @@ class _Resolver:
 
     def _image(self, entry: BundleEntry, config: dict, ref: EntityRef, references: list[Reference]) -> bool:
         """Record the image an image key has the bundle write: the folder's Dockerfile when a top-level ``image`` is
-        left out, ``{ dockerfile = "<path>" }``, or a registry image, ``{ ref = "<image>" }``. A key in a table, such as
-        a computer's ``forms.container.image``, says which. False when the key names an image artifact instead."""
+        left out, ``{ dockerfile = "<path>" }``, a registry image, ``{ ref = "<image>" }``, or an image saved in the
+        folder, ``{ archive = "<path>" }``. A key in a table, such as a computer's ``forms.container.image``, says
+        which. False when the key names an image artifact instead."""
         if ref.artifact_type != "docker_image" or "[]" in ref.path:
             return False
         *tables, key = ref.path.split(".")
@@ -314,6 +340,16 @@ class _Resolver:
             else:
                 self._implied(ReferencedImage(derive_id(entry.id, role), entry, name), owner, key, ref, references)
             return True
+        if isinstance(value, dict) and "archive" in value:
+            if extra := value.keys() - {"archive", "dockerfile", "platform"}:
+                self._problem(entry, f"{ref.path}: an archived image takes archive, dockerfile and platform, not "
+                              f"{', '.join(sorted(extra))}")
+            elif problem := _archive_problem(ref.path, entry, value):
+                self._problem(entry, problem)
+            else:
+                self._implied(ArchivedImage(derive_id(entry.id, role), entry, value["archive"], value.get("dockerfile"),
+                                            value.get("platform")), owner, key, ref, references)
+            return True
         if value is None:
             dockerfile = default_dockerfile(ref.path)
         elif isinstance(value, dict) and value.keys() == {"dockerfile"}:
@@ -324,9 +360,7 @@ class _Resolver:
             return True
         else:
             return False
-        path = entry.path / dockerfile if isinstance(dockerfile, str) and dockerfile else None
-        inside = path is not None and not Path(dockerfile).is_absolute() and path.resolve().is_relative_to(entry.path.resolve())
-        if not (inside and path.is_file()):
+        if not _folder_file(entry, dockerfile):
             self._problem(entry, f"{ref.path}: there is no {dockerfile!r} in this folder to build")
             return True
         self._implied(BuiltImage(derive_id(entry.id, role), entry, dockerfile), owner, key, ref, references)
@@ -480,6 +514,26 @@ def entity_class(entry: BundleEntry) -> type | None:
     if entry.kind is BundleKind.EVAL:
         return Eval if entry.type == Eval.type else None
     return get_artifact_registry().get(canonical_type(entry.type))
+
+
+def _folder_file(entry: BundleEntry, name: Any) -> bool:
+    """Whether ``name`` is a relative path to a file inside ``entry``'s folder."""
+    if not isinstance(name, str) or not name or Path(name).is_absolute():
+        return False
+    path = entry.path / name
+    return path.resolve().is_relative_to(entry.path.resolve()) and path.is_file()
+
+
+def _archive_problem(key: str, entry: BundleEntry, value: dict) -> str | None:
+    """What's wrong with an archived image's ``value``, its archive, Dockerfile and platform, or None."""
+    if not _folder_file(entry, value["archive"]):
+        return f"{key}: there is no {value['archive']!r} in this folder to load"
+    if value.get("dockerfile") is not None and not _folder_file(entry, value["dockerfile"]):
+        return f"{key}: there is no {value['dockerfile']!r} in this folder to keep as its build context"
+    platform = value.get("platform")
+    if platform is not None and not (isinstance(platform, str) and platform.startswith("linux/")):
+        return f"{key}: platform is the one the image was built for, such as linux/amd64, not {platform!r}"
+    return None
 
 
 def _registry_problem(key: str, name: Any) -> str | None:

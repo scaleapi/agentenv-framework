@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -254,14 +254,14 @@ def entry_files(bundle: Bundle, entry: BundleEntry, *, empty_ok: bool = False) -
     return _Walk(bundle, entry, empty_ok).files()
 
 
-def build_context_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
+def build_context_files(bundle: Bundle, entry: BundleEntry, exclude: Collection[str] = ()) -> dict[str, Path]:
     """What an image built from an entry's folder is built from: its ``entry_files`` and its own toml, which
-    the Dockerfile can copy too."""
+    the Dockerfile can copy too, but for the paths in ``exclude``, such as an archived image's own archive."""
     files = entry_files(bundle, entry)
     toml = entry.path / CONFIG_FILES[entry.kind]
     if toml.is_file():
         files[toml.name] = toml
-    return dict(sorted(files.items()))
+    return {key: path for key, path in sorted(files.items()) if key not in exclude}
 
 
 @dataclass(frozen=True)
@@ -279,11 +279,13 @@ class StagedContext:
 
 
 @contextmanager
-def staged_build_context(bundle: Bundle, entry: BundleEntry, dockerfile: str) -> Iterator[StagedContext]:
-    """``entry``'s ``StagedContext`` for its ``dockerfile``, a path in its folder, removed on leaving."""
+def staged_build_context(bundle: Bundle, entry: BundleEntry, dockerfile: str,
+                         exclude: Collection[str] = ()) -> Iterator[StagedContext]:
+    """``entry``'s ``StagedContext`` for its ``dockerfile``, a path in its folder, removed on leaving; without the paths
+    in ``exclude``."""
     with tempfile.TemporaryDirectory(prefix="agent-env-build-") as staged:
         context = Path(staged)
-        for key, path in build_context_files(bundle, entry).items():
+        for key, path in build_context_files(bundle, entry, exclude).items():
             (context / key).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, context / key)
         yield StagedContext(context, str(context / dockerfile))

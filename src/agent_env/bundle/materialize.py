@@ -17,6 +17,7 @@ write.
 from __future__ import annotations
 
 import copy
+import functools
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -42,7 +43,7 @@ from .authoring import AuthoringContext, staged_build_context
 from .ledger import Ledger, locked_ids, materializing
 from .parse import BundleError, BundleKind
 from .plan import Plan, Write, artifact_writer, env_writer, unpinned_store_refs
-from .resolve import BuiltImage, BundleImage, ReferencedImage, build_step
+from .resolve import ArchivedImage, BuiltImage, BundleImage, ReferencedImage, build_step
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,8 @@ def materialize(
 def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Write], None] | None) -> int:
     if isinstance(write.source, ReferencedImage):
         return _write_referenced_image(plan, write)
+    if isinstance(write.source, ArchivedImage):
+        return _write_archived_image(plan, write)
     if isinstance(write.source, BuiltImage):
         if write.id in plan.published:
             return _write_published_image(plan, write)
@@ -253,6 +256,21 @@ def _write_referenced_image(plan: Plan, write: Write) -> int:
         raise BundleError([f"{_path(plan, write)}: {e}"]) from None
 
 
+def _write_archived_image(plan: Plan, write: Write) -> int:
+    """Register the image an entry's archive holds, stored as its tar.gz, which each deploy loads, with the build
+    context its Dockerfile names kept beside it when it names one."""
+    image, entry = write.source, write.source.entry
+    put = functools.partial(DockerImageArtifact.put_archive, write.id, description=_image_description(plan, write),
+                            archive_path=str(entry.path / image.archive), platform=image.platform)
+    try:
+        if image.dockerfile is None:
+            return put().version
+        with staged_build_context(plan.bundle_of(entry), entry, image.dockerfile, {image.archive}) as staged:
+            return put(context_path=str(staged.path), dockerfile_path=staged.dockerfile).version
+    except (ValueError, RuntimeError, OSError) as e:  # a context it can't write, or the object store
+        raise BundleError([f"{_path(plan, write)}: {e}"]) from None
+
+
 def _latest_image_name(image_id: str) -> str | None:
     """The image name ``image_id``'s latest version records, when that version is an image: a folder can change type."""
     try:
@@ -269,6 +287,8 @@ def _image_description(plan: Plan, write: Write) -> str:
         return image.description
     if isinstance(image, BuiltImage):
         return f"built from {_path(plan, write)}/{image.dockerfile}"
+    if isinstance(image, ArchivedImage):
+        return f"loaded from {_path(plan, write)}/{image.archive}"
     return f"referenced by {_path(plan, write)}"
 
 

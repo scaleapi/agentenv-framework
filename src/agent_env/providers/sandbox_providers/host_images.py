@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import platform as host
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -158,6 +159,39 @@ def pull(image: DockerImageArtifact) -> None:
 async def pull_here(image: DockerImageArtifact) -> None:
     """``pull`` off the event loop."""
     await asyncio.to_thread(pull, image)
+
+
+def load(image: DockerImageArtifact) -> None:
+    """Have this machine's Docker hold ``image``, a tar.gz stored under a tag no registry has, under its name: loaded
+    from its object store, then tagged with its name, unless Docker holds that name already. Loads of one image wait
+    for each other. Raises RuntimeError when Docker can't load it."""
+    with holding_locks([f"image-load:{image.tar_gz_object_url}"]):
+        if present(image.image_name):
+            return
+        with tempfile.TemporaryDirectory(prefix="agent-env-load-") as work:
+            saved = Path(work) / "image.tar.gz"
+            with get_config().get_object_store_at(image.tar_gz_object_url).open(image.tar_gz_object_url) as source, \
+                    saved.open("wb") as out:
+                shutil.copyfileobj(source, out, 1 << 20)
+            logger.info(f"Loading {image.image_name} from its saved image on this machine...")
+            loaded = subprocess.run(["docker", "load", "-i", str(saved)], capture_output=True, text=True,
+                                    errors="replace")
+        if loaded.returncode != 0:
+            why = (loaded.stderr.strip().splitlines() or [f"docker load exited {loaded.returncode}"])[-1]
+            raise RuntimeError(f"Couldn't load {image.id!r} v{image.version}'s saved image: {why}")
+        names = [line.split(":", 1)[1].strip() for line in loaded.stdout.splitlines()
+                 if line.startswith(("Loaded image:", "Loaded image ID:"))]
+        if not names:
+            raise RuntimeError(f"{image.id!r} v{image.version}'s saved image holds no image to load")
+        tagged = subprocess.run(["docker", "tag", names[0], image.image_name], capture_output=True, text=True,
+                                errors="replace")
+        if tagged.returncode != 0:
+            raise RuntimeError(f"Couldn't tag {image.id!r} v{image.version}'s loaded image: {tagged.stderr.strip()}")
+
+
+async def load_here(image: DockerImageArtifact) -> None:
+    """``load`` off the event loop."""
+    await asyncio.to_thread(load, image)
 
 
 async def saved_here(image: DockerImageArtifact) -> str:

@@ -38,7 +38,8 @@ except ImportError:  # Windows, which agent-env does not target.
 from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
-from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
+from agent_env.providers.sandbox_providers.host_images import (build_here, built_here, host_platform, load_here,
+                                                             present, pull_here)
 from agent_env.providers.sandbox_providers.local_docker.relay import relay_image
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
@@ -794,12 +795,15 @@ class LocalSandboxProvider(SandboxProvider):
 
     async def prepare_image(self, image: Any, *, attribution: Optional[Attribution] = None) -> None:
         """Have this machine's Docker hold the image the local provider starts containers from by name: one that is only
-        a build context built here, and one with a digest pulled by it, or built from its build context when it can't
-        be."""
+        a build context built here, one with a digest pulled by it, or built from its build context when it can't
+        be, and one saved as a tar.gz under a tag no registry has, such as a bundle's archived image, loaded."""
         if image.context_only:
             await build_here(image)
         elif image.image_digest:
             await pull_here(image)
+            self._prepared.add(image.image_name)
+        elif image.stored_under_build_tag:
+            await load_here(image)
             self._prepared.add(image.image_name)
 
     async def create_sandbox(

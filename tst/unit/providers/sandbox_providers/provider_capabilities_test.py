@@ -206,7 +206,7 @@ BARE_TAG_TAR_GZ_AND_CONTEXT = BARE_TAG_TAR_GZ.model_copy(update={"build_context_
                                                                  "dockerfile_path": "Dockerfile"})
 BARE_TAG_TAR_GZ_AND_AN_OLD_CONTEXT = BARE_TAG_TAR_GZ.model_copy(
     update={"build_context_object_url": "s3://bucket/ctx.tar.gz"})
-BUILT_ELSEWHERE = "it's the tag the machine that built it gave it"
+BUILT_ELSEWHERE = "it's a tag only a machine that loads the tar.gz has"
 
 
 @pytest.mark.parametrize("image, accepts, problem", [

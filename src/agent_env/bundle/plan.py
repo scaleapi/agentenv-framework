@@ -66,8 +66,8 @@ from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
-from .resolve import (BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, entity_class,
-                      resolve_bundle)
+from .resolve import (ArchivedImage, BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step,
+                      entity_class, resolve_bundle)
 
 if TYPE_CHECKING:
     from .installed import InstalledBundle
@@ -580,7 +580,8 @@ class _Planner:
         claims: list[tuple[_Key, str, str]] = []
         for key, source in self.nodes.items():
             if isinstance(source, BundleImage):
-                how = "built" if isinstance(source, BuiltImage) else "referenced"
+                how = ("built" if isinstance(source, BuiltImage) else "loaded" if isinstance(source, ArchivedImage)
+                       else "referenced")
                 claims.append((key, self._path(source.entry), f"the image {how} for {self._path(source.entry)}"))
             else:
                 claims.append((key, self._path(source.entry), self._path(source.entry)))

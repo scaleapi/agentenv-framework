@@ -124,17 +124,24 @@ async def test_load_docker_images_uses_unique_tmp_per_artifact(signing_store):
 
 
 @pytest.mark.asyncio
-async def test_a_load_of_tarballs_runs_the_script_it_always_has(signing_store):
+async def test_a_load_of_tarballs_loads_each_and_tags_it_with_its_name_when_saved_under_another(signing_store):
     sandbox = _RecordingVmSandbox(images_stdout="a\nb\n")
 
     await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz", "a:1"), _image("s3://bucket/b.tar.gz", "b:1")])
 
     flags = "--retry 5 --retry-all-errors --retry-delay 1"
+
+    def load(index, name):
+        tar = f"/tmp/_docker_image_vm-test_{index}.tar.gz"
+        out = f"{tar}.loaded"
+        return (f"gunzip -c {tar} | docker load > {out} && rm -f {tar} && "
+                f"{{ docker image inspect {name} > /dev/null 2>&1 || "
+                f"docker tag \"$(awk '/^Loaded image/ {{print $NF; exit}}' {out})\" {name}; }} && rm -f {out}")
+
     assert sandbox.scripts == [
-        f"(curl -fsSL {flags} https://signed/a.tar.gz -o /tmp/_docker_image_vm-test_0.tar.gz "
-        "&& gunzip -c /tmp/_docker_image_vm-test_0.tar.gz | docker load && rm -f /tmp/_docker_image_vm-test_0.tar.gz) & "
-        f"(curl -fsSL {flags} https://signed/b.tar.gz -o /tmp/_docker_image_vm-test_1.tar.gz "
-        "&& gunzip -c /tmp/_docker_image_vm-test_1.tar.gz | docker load && rm -f /tmp/_docker_image_vm-test_1.tar.gz) & wait"
+        f"(curl -fsSL {flags} https://signed/a.tar.gz -o /tmp/_docker_image_vm-test_0.tar.gz && {load(0, 'a:1')}) & "
+        f"(curl -fsSL {flags} https://signed/b.tar.gz -o /tmp/_docker_image_vm-test_1.tar.gz && {load(1, 'b:1')}) & "
+        "wait"
     ]
 
 

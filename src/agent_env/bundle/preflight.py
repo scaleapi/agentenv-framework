@@ -70,6 +70,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_sandbox_provider,
 )
 from agent_env.store.base import NotFoundError
+from agent_env.store.ids import local_image_repository
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep, linked_sandbox_problem
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
@@ -80,7 +81,7 @@ from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_m
 
 from .parse import BundleError, BundleKind
 from .plan import AgentOverride, Plan
-from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step, played_deploys
+from .resolve import ArchivedImage, BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step, played_deploys
 
 _SHOWN = 3
 _MODEL_VARS = frozenset({ENV_BASE_URL, ENV_API_KEY})
@@ -144,6 +145,11 @@ class _Walk:
         self.referenced = {write.id: DockerImageArtifact(id=write.id, description="", image_name=write.source.ref)
                            for write in plan.writes if isinstance(write.source, ReferencedImage)}
         self.referenced.update({id: found.unwritten(id) for id, found in plan.published.items()})
+        # Each image a folder saves as an archive, as a tar.gz under a tag no registry has, which the store will hold.
+        self.referenced.update({write.id: DockerImageArtifact(
+            id=write.id, description="", image_name=f"{local_image_repository(write.id)}:archive",
+            tar_gz_object_url="file:///archive.tar.gz", platform=write.source.platform)
+            for write in plan.writes if isinstance(write.source, ArchivedImage)})
         # Each deploy of an image the bundle builds: (where, what, its provider's links, the images it accepts on each)
         self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], Callable[[SandboxProvider], Accepts]]]] = {}
 

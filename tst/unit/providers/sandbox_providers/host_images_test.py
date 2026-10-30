@@ -303,11 +303,74 @@ def test_a_published_image_with_no_build_context_that_cant_be_pulled_says_why(mo
         host_images.pull(image)
 
 
+
+def _archived(tmp_path):
+    archive = tmp_path / "image.tar"
+    archive.write_bytes(b"the tar docker save wrote")
+    return DockerImageArtifact.put_archive("crm_image", description="d", archive_path=str(archive))
+
+
+def _docker_load(monkeypatch, *, held=(), printed="Loaded image: acme/crm:1\n", failure=None):
+    """The docker commands ``load`` runs, each recorded with the bytes it was given to load; Docker holds ``held``, and
+    its load prints ``printed``, or exits 1 saying ``failure``."""
+    ran = []
+
+    def run(argv, **kwargs):
+        if argv[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(argv, int(argv[3] not in held), "", "")
+        ran.append(argv[1:] if argv[1] != "load" else ["load", gzip.decompress(open(argv[3], "rb").read())])
+        if argv[1] == "load" and failure:
+            return subprocess.CompletedProcess(argv, 1, "", failure)
+        return subprocess.CompletedProcess(argv, 0, printed if argv[1] == "load" else "", "")
+
+    monkeypatch.setattr(host_images.subprocess, "run", run)
+    return ran
+
+
+def test_a_saved_image_is_loaded_from_its_store_and_tagged_with_its_name(local_stores, tmp_path, monkeypatch):
+    image = _archived(tmp_path)
+    ran = _docker_load(monkeypatch)
+
+    host_images.load(image)
+
+    assert ran == [["load", b"the tar docker save wrote"], ["tag", "acme/crm:1", image.image_name]]
+
+
+def test_a_saved_image_docker_holds_isnt_loaded_again(local_stores, tmp_path, monkeypatch):
+    image = _archived(tmp_path)
+    ran = _docker_load(monkeypatch, held={image.image_name})
+
+    host_images.load(image)
+
+    assert ran == []
+
+
+def test_a_saved_image_holding_only_an_untagged_image_is_tagged_by_its_id(local_stores, tmp_path, monkeypatch):
+    image = _archived(tmp_path)
+    ran = _docker_load(monkeypatch, printed="Loaded image ID: sha256:" + "c" * 64 + "\n")
+
+    host_images.load(image)
+
+    assert ran[1] == ["tag", "sha256:" + "c" * 64, image.image_name]
+
+
+@pytest.mark.parametrize("load, problem", [
+    ({"failure": "open /x: no space left on device\n"},
+     "Couldn't load 'crm_image' v1's saved image: open /x: no space"),
+    ({"printed": ""}, "'crm_image' v1's saved image holds no image to load"),
+], ids=["refused", "empty"])
+def test_a_saved_image_docker_cant_load_says_why(local_stores, tmp_path, monkeypatch, load, problem):
+    image = _archived(tmp_path)
+    _docker_load(monkeypatch, **load)
+
+    with pytest.raises(RuntimeError, match=problem):
+        host_images.load(image)
+
 @pytest.mark.asyncio
-async def test_the_local_provider_pulls_a_published_image_and_builds_one_that_is_only_its_context(local_stores, context,
-                                                                                                 monkeypatch):
+async def test_the_local_provider_pulls_a_published_image_builds_a_context_and_loads_a_saved_one(local_stores, context,
+                                                                                                   monkeypatch):
     """It starts containers from an image by name, so this machine's Docker holds the image first."""
-    pulled, built = [], []
+    pulled, built, loaded = [], [], []
 
     async def pull_here(image):
         pulled.append(image.image_name)
@@ -315,8 +378,12 @@ async def test_the_local_provider_pulls_a_published_image_and_builds_one_that_is
     async def build_here(image):
         built.append(image.image_name)
 
+    async def load_here(image):
+        loaded.append(image.image_name)
+
     monkeypatch.setattr(local_sandbox, "pull_here", pull_here)
     monkeypatch.setattr(local_sandbox, "build_here", build_here)
+    monkeypatch.setattr(local_sandbox, "load_here", load_here)
     provider, context_only = LocalSandboxProvider(), _put(context)
 
     for image in (_published(context), context_only,
@@ -324,7 +391,8 @@ async def test_the_local_provider_pulls_a_published_image_and_builds_one_that_is
                                       tar_gz_object_url="s3://bucket/img.tar.gz")):
         await provider.prepare_image(image)
 
-    assert (pulled, built) == ([_PUBLISHED_REF], [context_only.image_name])
-    assert (await provider.create_vm()).prepared == {_PUBLISHED_REF}  # its containers start from it as it is
+    assert (pulled, built, loaded) == ([_PUBLISHED_REF], [context_only.image_name], ["img:v1"])
+    # its containers start from them as they are
+    assert (await provider.create_vm()).prepared == {_PUBLISHED_REF, "img:v1"}
     assert LocalSandboxProvider()._prepared == set()
 
