@@ -55,6 +55,7 @@ class EntityRef:
     element of a list (``env_ids[]``, ``artifacts[].id``); ``version_field`` is the key beside the
     ref, in the same dict, that pins its version. ``walk``, for a shape a path cannot spell, maps
     the value at the path's parent to the dicts that hold the last key, each with its path parts.
+    ``optional``, for an image a toml may leave out, means a folder with no Dockerfile for it builds none.
     Declarations build one with ``EntityRef.env``, ``EntityRef.agent`` or ``EntityRef.artifact``,
     passing the keyword fields."""
 
@@ -66,6 +67,7 @@ class EntityRef:
     artifact_type: str | None = None
     env_type: str | None = None
     walk: Walker | None = None
+    optional: bool = False
 
     @classmethod
     def env(cls, path: str, **options: Any) -> EntityRef:

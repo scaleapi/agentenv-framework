@@ -304,7 +304,7 @@ def test_a_put_with_an_local_id_builds_and_writes_its_images_under_ids_derived_f
     saved = {d["id"]: d["image_name"] for d in _local().query("artifacts", Filter())}
     assert saved == {image: image_repository(image) for image in images}
     (owner,) = _local().query("a2a_agents" if module.endswith(".put") else "envs", Filter())
-    assert sorted(ref["id"] for ref in owner.values() if isinstance(ref, dict) and "id" in ref) == images
+    assert sorted({ref["id"] for ref in owner.values() if isinstance(ref, dict) and "id" in ref}) == images
     assert not _documents().path.exists() or _documents().count("artifacts", Filter()) == 0
 
 

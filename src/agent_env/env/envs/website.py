@@ -1,4 +1,5 @@
-"""Website environment with frontend and backend containers."""
+"""Website environment: one site, served by one server image that holds its pages and API. A site
+built before the server image held its pages may still name a separate frontend image, which is deprecated."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import asyncio
 import logging
 import os
 import shlex
+import re
 import uuid
 from importlib.metadata import version as pkg_version
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
@@ -32,25 +34,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
+DEFAULT_HEALTH_PATH = "/api/health"
+_HEALTH_PATH = re.compile(r"/[A-Za-z0-9._~/-]*")
 
 
 class WebsiteEnv(Env):
     type: ClassVar[str] = "website"
-    description = "Website environment with frontend and backend containers, deployed through the environment provider its env_provider_type names"
+    description = "Website environment: one server image serving a site's pages and API, deployed through the environment provider its env_provider_type names"
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("backend_image", artifact_type="docker_image"),
-                                                  EntityRef.artifact("frontend_image", artifact_type="docker_image"))
+                                                  EntityRef.artifact("frontend_image", artifact_type="docker_image",
+                                                                     optional=True))
     toml_keys: ClassVar[dict[str, type]] = {"backend_image": object, "frontend_image": object, "environment_name": str,
-                                            "env_provider_type": str}
+                                            "health": str, "env_provider_type": str}
 
     def __init__(
         self,
         id: str,
         version: Optional[int],
-        backend_docker_image_artifact: DockerImageArtifact,
-        frontend_docker_image_artifact: DockerImageArtifact,
+        server_docker_image_artifact: Optional[DockerImageArtifact] = None,
+        frontend_docker_image_artifact: Optional[DockerImageArtifact] = None,
         environment_name: Optional[str] = None,
         *,
+        backend_docker_image_artifact: Optional[DockerImageArtifact] = None,
+        health_path: str = DEFAULT_HEALTH_PATH,
         metadata: Optional[dict[str, str]] = None,
         env_provider_type: str = "gateway",
     ):
@@ -59,8 +65,14 @@ class WebsiteEnv(Env):
             raise ValueError("environment_name cannot be empty")
         if not env_provider_type:
             raise ValueError("env_provider_type cannot be empty")
-        self.backend_docker_image_artifact = backend_docker_image_artifact
+        if server_docker_image_artifact is not None and backend_docker_image_artifact is not None:
+            raise ValueError("a website env names its server image once, as server_docker_image_artifact or as its "
+                             "older name backend_docker_image_artifact")
+        self.server_docker_image_artifact = server_docker_image_artifact or backend_docker_image_artifact
         self.frontend_docker_image_artifact = frontend_docker_image_artifact
+        if problem := health_path_problem(health_path):
+            raise ValueError(f"website env {id!r}: {problem}")
+        self.health_path = health_path
         self.environment_name = environment_name
         self.env_provider_type = env_provider_type
         self._sandbox = None
@@ -70,18 +82,24 @@ class WebsiteEnv(Env):
         self._deployed: Optional[DeployedEnv] = None
         self._replaced: list[tuple] = []  # the provider and sandbox of each deployment a later deploy replaced, for close()
 
+    @property
+    def backend_docker_image_artifact(self) -> DockerImageArtifact:
+        """The server image, under the name it had while a site's pages came from a separate frontend image."""
+        return self.server_docker_image_artifact
+
     def to_dict(self) -> dict:
         base = super().to_dict()
-        base["backend_docker_image_artifact"] = {
-            "id": self.backend_docker_image_artifact.id,
-            "version": self.backend_docker_image_artifact.version,
-            "type": self.backend_docker_image_artifact.type,
-        }
-        base["frontend_docker_image_artifact"] = {
-            "id": self.frontend_docker_image_artifact.id,
-            "version": self.frontend_docker_image_artifact.version,
-            "type": self.frontend_docker_image_artifact.type,
-        }
+        server = {"id": self.server_docker_image_artifact.id, "version": self.server_docker_image_artifact.version,
+                  "type": self.server_docker_image_artifact.type}
+        base["server_docker_image_artifact"] = server
+        base["backend_docker_image_artifact"] = server
+        if self.frontend_docker_image_artifact is not None:
+            base["frontend_docker_image_artifact"] = {
+                "id": self.frontend_docker_image_artifact.id,
+                "version": self.frontend_docker_image_artifact.version,
+                "type": self.frontend_docker_image_artifact.type,
+            }
+        base["health_path"] = self.health_path
         base["service_name"] = self.environment_name
         base["environment_name"] = self.environment_name  # dual-write with service_name during the rename
         base["env_provider_type"] = self.env_provider_type
@@ -89,41 +107,60 @@ class WebsiteEnv(Env):
 
     @classmethod
     def from_dict(cls, data: dict) -> WebsiteEnv:
-        backend_ref = data["backend_docker_image_artifact"]
-        backend_artifact = Artifact.get(backend_ref["id"], version=backend_ref["version"])
-        frontend_ref = data["frontend_docker_image_artifact"]
-        frontend_artifact = Artifact.get(frontend_ref["id"], version=frontend_ref["version"])
+        server_ref = data.get("server_docker_image_artifact") or data["backend_docker_image_artifact"]
+        frontend_ref = data.get("frontend_docker_image_artifact")
         return cls(
             id=data["id"],
             version=data.get("version"),
-            backend_docker_image_artifact=backend_artifact,
-            frontend_docker_image_artifact=frontend_artifact,
+            server_docker_image_artifact=Artifact.get(server_ref["id"], version=server_ref["version"]),
+            frontend_docker_image_artifact=(Artifact.get(frontend_ref["id"], version=frontend_ref["version"])
+                                            if frontend_ref else None),
             environment_name=data["environment_name"] if "environment_name" in data else data["service_name"],
+            health_path=data.get("health_path", DEFAULT_HEALTH_PATH),
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
         )
 
     @classmethod
+    def put(cls, **kwargs: Any) -> WebsiteEnv:
+        """Write the website env, warning when it names a separate frontend image: a site's server image serves its
+        pages, and a frontend image is deprecated, still deployed for the sites built on one."""
+        if kwargs.get("frontend_docker_image_artifact") is not None:
+            logger.warning(f"website env {kwargs.get('id')!r} names a separate frontend image, which is deprecated: "
+                           "build the site's pages into its server image instead")
+        return super().put(**kwargs)
+
+    @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> WebsiteEnv:
-        """Write the env authored as ``data`` (its env.toml, with ``backend_image`` and ``frontend_image`` resolved to
-        image artifacts' ids) under ``ctx.id`` and return it."""
+        """Write the env authored as ``data`` (its env.toml, with ``backend_image``, the server image, and any
+        ``frontend_image`` resolved to image artifacts' ids) under ``ctx.id`` and return it."""
         fields = cls.accept_toml(data, ctx)
+        frontend = fields.get("frontend_image")
         return cls.put(id=ctx.id,
-                       backend_docker_image_artifact=ctx.artifact(fields["backend_image"], DockerImageArtifact),
-                       frontend_docker_image_artifact=ctx.artifact(fields["frontend_image"], DockerImageArtifact),
-                       environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"])
+                       server_docker_image_artifact=ctx.artifact(fields["backend_image"], DockerImageArtifact),
+                       frontend_docker_image_artifact=ctx.artifact(frontend, DockerImageArtifact) if frontend else None,
+                       environment_name=fields["environment_name"],
+                       health_path=fields.get("health", DEFAULT_HEALTH_PATH),
+                       env_provider_type=fields["env_provider_type"])
 
     def to_toml(self, out: ExportContext) -> dict:
-        """The env.toml of a folder both of this env's images are built from, which ``from_toml`` reads back as it."""
-        return {"type": self.type, "environment_name": self.environment_name,
-                "backend_image": out.image(self.backend_docker_image_artifact, "backend_image"),
-                "frontend_image": out.image(self.frontend_docker_image_artifact, "frontend_image"),
-                **self.provider_toml(out, self.env_provider_type)}
+        """The env.toml of a folder this env's images are built from, which ``from_toml`` reads back as it."""
+        toml = {"type": self.type, "environment_name": self.environment_name,
+                "backend_image": out.image(self.server_docker_image_artifact, "backend_image")}
+        if self.frontend_docker_image_artifact is not None:
+            toml["frontend_image"] = out.image(self.frontend_docker_image_artifact, "frontend_image")
+        if self.health_path != DEFAULT_HEALTH_PATH:
+            toml["health"] = self.health_path
+        return {**toml, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
-        """The keys of ``data``, an env.toml, a website env takes, its environment_name read from the backend image's
-        @environment_card when it isn't set. Raises BundleError listing every problem."""
+        """The keys of ``data``, an env.toml, a website env takes, ``backend_image`` naming its server image, its
+        environment_name read from that image's @environment_card when it isn't set. Raises BundleError listing every
+        problem."""
+        health = data.get("health", DEFAULT_HEALTH_PATH)
+        if isinstance(health, str) and (problem := health_path_problem(health)):
+            ctx.refuse([ctx.config_problem(problem)])
         return ctx.accept_env(data, cls, named_by="backend_image")
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
@@ -137,6 +174,9 @@ class WebsiteEnv(Env):
     def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
         """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
         ``sandbox_type`` is deploy()'s own, which no provider takes."""
+        if self.frontend_docker_image_artifact is None:
+            return (f"website env '{self.id}' has no frontend image, and its server serving its own pages deploys "
+                    "once the gateway serves a one-image site")
         return deploy_refusal(self, provider_or_class(self), options)
 
     @classmethod
@@ -278,24 +318,25 @@ class WebsiteEnv(Env):
         github_token: str | None = None,
         env_provider_type: str = "gateway",
     ) -> WebsiteEnv:
-        """Build backend and frontend Docker images from GitHub in parallel and create a WebsiteEnv."""
+        """Build the server image, from ``backend_dockerfile_github_url``, and any deprecated frontend image from
+        GitHub in parallel, and create a WebsiteEnv."""
         refuse_local_github_build(id)
-        backend, frontend = await asyncio.gather(
-            DockerImageArtifact.put_from_github(
-                id=derive_id(id, "backend_image"),
-                dockerfile_github_url=backend_dockerfile_github_url,
-                docker_context_github_url=backend_docker_context_github_url,
-                on_progress=on_backend_progress,
-                github_token=github_token,
-            ),
-            DockerImageArtifact.put_from_github(
+        builds = [DockerImageArtifact.put_from_github(
+            id=derive_id(id, "backend_image"),
+            dockerfile_github_url=backend_dockerfile_github_url,
+            docker_context_github_url=backend_docker_context_github_url,
+            on_progress=on_backend_progress,
+            github_token=github_token,
+        )]
+        if frontend_dockerfile_github_url:
+            builds.append(DockerImageArtifact.put_from_github(
                 id=derive_id(id, "frontend_image"),
                 dockerfile_github_url=frontend_dockerfile_github_url,
                 docker_context_github_url=frontend_docker_context_github_url,
                 on_progress=on_frontend_progress,
                 github_token=github_token,
-            ),
-        )
+            ))
+        backend, *frontend = await asyncio.gather(*builds)
 
         combined_metadata: dict[str, str] = {}
         user = os.getenv("USER")
@@ -305,7 +346,7 @@ class WebsiteEnv(Env):
             combined_metadata["agent_env_version"] = pkg_version("agentenv-framework")
         except Exception:
             pass
-        for prefix, build in [("backend", backend), ("frontend", frontend)]:
+        for prefix, build in [("backend", backend), *(("frontend", build) for build in frontend)]:
             combined_metadata[f"{prefix}_dockerfile_github_url"] = build.dockerfile_github_url
             combined_metadata[f"{prefix}_github_owner"] = build.github_owner
             combined_metadata[f"{prefix}_github_repo"] = build.github_repo
@@ -319,10 +360,18 @@ class WebsiteEnv(Env):
 
         env = cls.put(
             id=id,
-            backend_docker_image_artifact=backend.artifact,
-            frontend_docker_image_artifact=frontend.artifact,
+            server_docker_image_artifact=backend.artifact,
+            frontend_docker_image_artifact=frontend[0].artifact if frontend else None,
             environment_name=environment_name,
             metadata=combined_metadata,
             env_provider_type=env_provider_type,
         )
         return env
+
+
+def health_path_problem(health_path: str) -> str | None:
+    """Why ``health_path`` can't be where a site answers once it's usable, or None: it's a path of plain characters,
+    since the gateway writes it into a health check."""
+    if _HEALTH_PATH.fullmatch(health_path):
+        return None
+    return f"health: {health_path!r} is not a path of letters, digits, '.', '_', '~', '-' and '/' starting with '/'"
