@@ -58,7 +58,7 @@ async def test_only_the_agent_s_check_and_a_declared_notification_wake_it(local_
         await _deploy(agent, "solver").execute(context)
         await PromptAgentTaskStep(
             id="watch", version=None, prompt="Keep an eye on things.", agent_name="solver", max_conversation_turns=6,
-            poll_interval_seconds=1, time_zone="America/Los_Angeles",
+            poll_interval_seconds=1,
             post_turn_hooks=[{"file_artifact_id": hook.id, "file_artifact_version": hook.version,
                               "params": {"end_time": "P5D"}}],
         ).execute(context)
@@ -72,8 +72,8 @@ async def test_only_the_agent_s_check_and_a_declared_notification_wake_it(local_
     messages = conversation_store.get_conversation(context.metadata["a2a_conversations"]["watch"])["messages"]
     assert [[p["text"] for p in m["parts"]] for m in messages if m["role"] == "user"] == [
         ["Keep an eye on things."],
-        ["[Tue Mar 3, 6:00 PM · your scheduled check] look for new rugs"],
-        ["[Wed Mar 4, 8:00 AM · Messages] Jamie: did the rug thing get sorted?"],
+        ["[Wed Mar 4, 2:00 AM UTC · your scheduled check] look for new rugs"],
+        ["[Wed Mar 4, 4:00 PM UTC · Messages] Jamie: did the rug thing get sorted?"],
     ]
     assert "rug listed" in json.loads(stored.json()["content"][0]["text"])["items"]
     assert state["pending_notifications"] == [] and state["next_due_at"] is None

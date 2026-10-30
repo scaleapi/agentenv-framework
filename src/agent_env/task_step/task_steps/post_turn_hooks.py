@@ -218,6 +218,12 @@ class Turn:
         (self._context.metadata.setdefault("post_turn_hooks", {}).setdefault(self._step_id, [])
             .append({"hook": self._hook.artifact_id, "turn": self.number, **copy.deepcopy(entry)}))
 
+    def records(self) -> list[dict]:
+        """This hook's own records in this conversation, oldest first: what ``record`` appended for this step, as
+        read-only copies (another step's conversation, or another hook in this one, keeps its own)."""
+        entries = (self._context.metadata.get("post_turn_hooks") or {}).get(self._step_id, [])
+        return [copy.deepcopy(e) for e in entries if e.get("hook") == self._hook.artifact_id]
+
     def heartbeat(self) -> None:
         self._context.heartbeat()
 

@@ -174,6 +174,16 @@ async def test_the_person_s_messages_arrive_at_their_times_once_each(hook, gatew
 
 
 @pytest.mark.asyncio
+async def test_another_conversation_delivering_a_message_at_the_same_time_does_not_skip_this_one(hook, gateway):
+    context = _context()
+    context.metadata["post_turn_hooks"] = {"other": [{"hook": "advance-to-next-event", "turn": 1,
+                                                      "person_at": ["2026-03-03T15:00:00Z"]}]}
+    params = {"person_messages": [{"at": "2026-03-03T15:00:00Z", "text": "I'm up"}]}
+    sent = await _turns(hook, context, params=params)
+    assert sent == [["[Tue Mar 3, 3:00 PM UTC] I'm up"], {"end": "nothing_can_wake_the_agent"}]
+
+
+@pytest.mark.asyncio
 async def test_what_comes_due_together_goes_in_one_message_oldest_first(hook, gateway):
     _register(gateway, {"id": "w-3", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
                         "actions": [{"type": "notify", "channel": "Gmail", "text": "School: early dismissal"}]})

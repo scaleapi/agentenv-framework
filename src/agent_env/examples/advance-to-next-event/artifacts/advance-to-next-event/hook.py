@@ -126,11 +126,11 @@ async def _next(envs, role, person, now, sent):
 
 
 def _delivered_person(turn):
-    """The person's messages this hook already delivered, from its own records (a module global would outlive the run)."""
+    """The person's messages this hook already delivered in this conversation, from its own records (a module global
+    would outlive the run, and another conversation's records are not this one's)."""
     sent = set()
-    for entries in (turn.metadata.get("post_turn_hooks") or {}).values():
-        for entry in entries:
-            sent.update(entry.get("person_at", []))
+    for entry in turn.records():
+        sent.update(entry.get("person_at", []))
     return sent
 
 
