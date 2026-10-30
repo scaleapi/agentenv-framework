@@ -82,6 +82,8 @@ class Mail(ComputerAppEnvironment):
 
     class BuildSettings(BaseModel):
         locale: str = "en_US"
+        writeOnly: bool = False
+        flags: dict = {{"writeOnly": True}}
 
     @install_step()
     def packages(self): not_installed_here.apt()
@@ -193,7 +195,7 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
         "install_steps": [{"name": "packages", "scope": "system"}, {"name": "profile", "scope": "session"}],
         "ready_checks": ["inbox_open"]}
     assert list(settings["properties"]) == ["account", "password"] and settings["properties"]["password"]["writeOnly"]
-    assert declared.build_settings["properties"] == {"locale": {"default": "en_US", "title": "Locale", "type": "string"}}
+    assert list(declared.build_settings["properties"]) == ["locale", "writeOnly", "flags"]
 
 
 def test_an_app_declaring_its_skill_twice_is_refused(folder):

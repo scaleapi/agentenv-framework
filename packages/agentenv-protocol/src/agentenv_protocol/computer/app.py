@@ -33,6 +33,10 @@ SOCKET = Path(".agentenv/server.sock")
 FAILURE = Path(".agentenv/server.failure")
 #: The values of an app's build settings its env fixes in its computer's image, in the app's folder.
 BUILD_SETTINGS = Path(".agentenv/build_settings.json")
+# The JSON schema keywords that hold a subschema, a list of them, or a map of them by name.
+_SUBSCHEMA = ("items", "additionalProperties", "not")
+_SUBSCHEMA_LISTS = ("anyOf", "allOf", "oneOf", "prefixItems")
+_SUBSCHEMA_MAPS = ("properties", "$defs", "patternProperties")
 #: How long an app may take to be ready when its launch doesn't say.
 DEFAULT_TIMEOUT_S = 60.0
 
@@ -296,18 +300,23 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         )
 
 
-def _secret_at(schema: Any, path: str = "") -> Optional[str]:
-    """Where in ``schema`` a secret is, a ``SecretStr``'s ``writeOnly``, at any depth: in a list's items or a nested
-    model's definition too; None when it holds none."""
-    if isinstance(schema, dict):
-        if schema.get("writeOnly"):
-            return path
-        found = (_secret_at(value, f"{path}.{key}" if path else key) for key, value in schema.items())
-    elif isinstance(schema, list):
-        found = (_secret_at(value, f"{path}[{index}]") for index, value in enumerate(schema))
-    else:
-        return None
-    return next((at for at in found if at is not None), None)
+def _secret_at(schema: dict, path: str = "") -> Optional[str]:
+    """Where in ``schema``, a JSON schema, a secret is, a ``SecretStr``'s ``writeOnly``: in it or any of its subschemas,
+    a field's, a list's items or a nested model's definition; None when it holds none. A default or a field's name
+    is data, never a marker."""
+    if schema.get("writeOnly") is True:
+        return path
+    subschemas = [*((_joined(path, key), schema[key]) for key in _SUBSCHEMA if key in schema),
+                  *((_joined(path, f"{key}[{index}]"), sub) for key in _SUBSCHEMA_LISTS
+                    for index, sub in enumerate(schema.get(key, []))),
+                  *((_joined(path, f"{key}.{name}"), sub) for key in _SUBSCHEMA_MAPS
+                    for name, sub in schema.get(key, {}).items())]
+    return next((at for at in (_secret_at(sub, at) for at, sub in subschemas if isinstance(sub, dict))
+                 if at is not None), None)
+
+
+def _joined(path: str, part: str) -> str:
+    return f"{path}.{part}" if path else part
 
 
 def _built_settings(cls: type[ComputerAppEnvironment]) -> BaseModel:
