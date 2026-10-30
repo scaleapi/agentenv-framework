@@ -643,7 +643,11 @@ class MailApp(ComputerAppEnvironment):
   sha256 (`Download`); `run`, scripts of the folder run as root or the session user (`RunScript`);
   `services`, programs the computer's init runs from the prefix as the session user; and `ports`,
   those it listens on. Packages, requirements and downloads are resolved and fetched once, when the
-  computer env is put, and every build installs only those stored files, with the network closed.
+  computer env is put, and every build installs only those stored files, with the network closed:
+  apt installs each package without its recommends, and the venv gets exactly the wheels resolved for
+  it (`pip install --no-deps`). A requirements file lists everything itself, since its lock covers
+  that file alone: a line including another file (`-r`, `-c`), an editable install (`-e`), a local
+  path or a local folder of wheels is refused at put.
 - **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title, a port answering on

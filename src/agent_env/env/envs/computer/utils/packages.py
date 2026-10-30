@@ -118,7 +118,8 @@ def digest(lock: dict | None) -> str | None:
 def stage(lock: dict, context: Path, store_id: str, fetched: dict[str, Path]) -> None:
     """Write the lock's files into ``context`` for a build: .debs under ``packages/apt``, each layer's wheels under
     ``packages/wheels/<name>``, and its downloads at their places in its folder, a script or binary executable; each
-    linked from ``fetched``, the files a resolve just fetched by sha256, or else downloaded from the store."""
+    linked from ``fetched``, the files a resolve just fetched by sha256, or else downloaded from the store and refused
+    unless its sha256 is the one the lock names."""
     store, prefix = _store(store_id)
     for deb in lock["apt"]:
         _get(store, prefix, fetched, deb["sha256"], context / STAGED / "apt" / deb["file"])
@@ -215,8 +216,11 @@ def _get(store, prefix: str, fetched: dict[str, Path], sha256: str, target: Path
     if sha256 in fetched:
         target.unlink(missing_ok=True)
         os.link(fetched[sha256], target)
-    else:
-        store.download_to_file(store.object_url(f"{prefix}/files/{sha256}"), str(target))
+        return
+    key = f"{prefix}/files/{sha256}"
+    store.download_to_file(store.object_url(key), str(target))
+    if (found := _sha256(target)) != sha256:
+        raise RuntimeError(f"the store's {key} isn't the file the lock names: its sha256 is {found}")
 
 
 def _store(store_id: str):

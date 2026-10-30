@@ -108,8 +108,14 @@ def test_a_driver_folder_is_written_with_its_files_and_what_its_class_declares(b
     assert ComputerDriverEnv.from_dict(env.to_dict()).to_dict() == env.to_dict()
 
 
+#: Lines a requirements file may have: none names another file of the folder.
+REQUIREMENTS = ("# what the venv installs\nmss>=9,<11  # -r is fine in a comment\n"
+                "--extra-index-url https://pypi.example/simple\n--find-links https://wheels.example/\n"
+                "xlib @ https://example.com/python_xlib-0.33-py2.py3-none-any.whl\n--require-hashes\n")
+
+
 def test_a_driver_is_written_with_how_a_computer_installs_it_and_the_port_it_serves_on(bundle_dir):
-    _bundle(bundle_dir, toml=INSTALLED, **{"envs/desk/linux/requirements.txt": "mss>=9,<11\n",
+    _bundle(bundle_dir, toml=INSTALLED, **{"envs/desk/linux/requirements.txt": REQUIREMENTS,
                                            "envs/desk/linux/ppa.asc": "key", "envs/desk/linux/setup.sh": "#!/bin/sh\n",
                                            "envs/desk/linux/profile.sh": "#!/bin/sh\n"})
 
@@ -180,6 +186,20 @@ def test_a_driver_its_class_cant_be_read_from_is_refused_before_any_write(bundle
     _bundle(bundle_dir, toml=toml, supports=supports, buttons=buttons)
 
     assert problem in _problems(bundle_dir)
+    with pytest.raises(Exception):
+        Env.get(f"{ROOT}/desk")
+
+
+@pytest.mark.parametrize("line", ["-r base.txt", "--requirement=base.txt", "-c pins.txt", "--constraint pins.txt",
+                                  "-e .", "--editable ./desk", "./vendored", "../elsewhere/pkg", "/opt/pkg",
+                                  "~/pkg", "file:///opt/pkg", "desk @ file:///opt/pkg", "-f wheels/",
+                                  "--find-links=wheels"])
+def test_a_requirements_file_naming_another_file_is_refused_before_any_write(bundle_dir, line):
+    _bundle(bundle_dir, toml=f'{TOML}[install.linux]\npython = "requirements.txt"\n{SERVE}\n',
+            **{"envs/desk/requirements.txt": f"mss>=9,<11\n{line}  # the lock wouldn't see it\n"})
+
+    assert (f"install.linux.python: 'requirements.txt' line 2, {line + '  # the lock wouldn' + chr(39) + 't see it'!r}, "
+            "names another file, which the lock of a requirements file doesn't cover") in _problems(bundle_dir)
     with pytest.raises(Exception):
         Env.get(f"{ROOT}/desk")
 

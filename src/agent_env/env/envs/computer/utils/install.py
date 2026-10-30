@@ -8,7 +8,8 @@ build installs only what was stored then (``packages`` module)."""
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+import re
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -17,6 +18,9 @@ from agent_env.artifact.artifacts.computer import OS_TYPES
 
 #: The highest port a layer can listen on.
 MAX_PORT = 65535
+# A requirements line that includes another requirements or constraints file, or installs one editable.
+_INCLUDES = re.compile(r"-[rce]|--(requirement|constraint|editable)(=|$)")
+_FIND_LINKS = re.compile(r"-f|--find-links(=|$)")
 
 
 class Service(BaseModel):
@@ -176,6 +180,29 @@ def missing(os_type: str, install: Install, files: dict) -> list[str]:
     problems += [f"install.{os_type}.{field}: {(folder / path).as_posix()!r} isn't in this folder"
                  for field, path in named if path is not None and (folder / path).as_posix() not in files]
     return problems
+
+
+def unlocked(os_type: str, install: Install, files: dict[str, Path]) -> list[str]:
+    """The lines of ``install``'s requirements file, in the layer's folder ``files`` by path, that name another file:
+    an included requirements or constraints file, an editable install, a local path or ``file:`` URL, or a local folder
+    of wheels. A lock's inputs are the requirements file alone, so it would be reused when one of those changed."""
+    path = (PurePosixPath(install.files) / install.python).as_posix() if install.python is not None else None
+    if path not in files:
+        return []
+    return [f"install.{os_type}.python: {path!r} line {number}, {line.strip()!r}, names another file, which the lock "
+            "of a requirements file doesn't cover; list what it installs in the file itself"
+            for number, line in enumerate(files[path].read_text().splitlines(), 1) if _names_a_file(line)]
+
+
+def _names_a_file(line: str) -> bool:
+    words = re.sub(r"(^|\s)#.*", "", line).split()
+    if not words:
+        return False
+    if _INCLUDES.match(words[0]):
+        return True
+    if _FIND_LINKS.match(words[0]):
+        return "://" not in line
+    return words[0].startswith((".", "/", "~", "file:")) or re.search(r"@\s*file:", line) is not None
 
 
 def _inside(path: str) -> str:

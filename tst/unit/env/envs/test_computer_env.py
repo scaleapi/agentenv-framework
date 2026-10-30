@@ -13,6 +13,8 @@ import logging
 import re
 import subprocess
 import tarfile
+import urllib.parse
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -1127,6 +1129,21 @@ def test_a_resolve_or_download_that_fails_fails_its_arch_at_the_resolve_stage(ba
     else:
         assert reason.startswith("https://example.com/tool has the sha256 ") and reason.endswith(
             f"not the {'a' * 64} its download names")
+
+
+def test_a_stored_file_that_isnt_the_one_its_lock_names_fails_the_build_that_stages_it(base, driver, docker,
+                                                                                        tmp_path):
+    lock = packages.stored(Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]["lock"],
+                           "@local/~/kit/desktop")
+    sha256 = lock["wheels"]["driver"][0]["sha256"]
+    store, prefix = packages._store("@local/~/kit/desktop")
+    Path(urllib.parse.urlparse(store.object_url(f"{prefix}/files/{sha256}")).path).write_bytes(b"tampered")
+
+    again = Env.get(_put(base, driver, computer_settings={"theme": "dark"}).id).metadata["composed"]["container"]["arm64"]
+
+    assert (again["status"], again["stage"]) == ("failed", "build")
+    assert again["reason"].endswith(f"agentenv-packages/files/{sha256} isn't the file the lock names: its sha256 is "
+                                    f"{hashlib.sha256(b'tampered').hexdigest()}")
 
 
 def test_a_venv_whose_requirements_resolve_to_nothing_is_made_empty(base, docker, tmp_path):
