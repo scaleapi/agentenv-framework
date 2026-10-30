@@ -200,6 +200,14 @@ def where(link: SandboxProvider) -> str:
     return "with this machine's Docker" if _docker_here(link) else f"in a {type(link).__name__} VM"
 
 
+def instead_of_emulating(provider: SandboxProvider, platform: str) -> str:
+    """What a person can do rather than wait for ``provider`` to emulate ``platform``: skip it, or, when this machine
+    runs it and the chain has no link on this machine's Docker, add one."""
+    local = "add local to --sandbox to build it natively with this machine's Docker, or " if (
+        platform == host_platform() and not any(_docker_here(link) for link in provider.links)) else ""
+    return f"{local}pass --no-emulate to skip it"
+
+
 def _docker_here(link: SandboxProvider) -> bool:
     """Whether ``link``'s sandboxes are containers on this machine's Docker, which then builds itself."""
     return link.ON_THIS_MACHINE and link.REACHES_HOST_AT is None

@@ -206,8 +206,10 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             def on() -> builder.Builder:
                 if not held:
                     link = builds.link(platform)
-                    how = "natively" if platform in link.native_platforms() else "emulated, which is slow,"
-                    progress.at(pair, "starting its builder", f"building {how} {builder.where(link)}")
+                    native = platform in link.native_platforms()
+                    progress.at(pair, "starting its builder", f"building natively {builder.where(link)}" if native else
+                                f"building emulated, which is slow, {builder.where(link)}; "
+                                f"{builder.instead_of_emulating(builds.provider, platform)}")
                     held.append(opened.enter_context(builds.open(link, platform, Path(work), base.image(), from_store)))
                 return held[0]
 

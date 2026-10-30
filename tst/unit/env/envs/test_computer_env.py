@@ -276,7 +276,8 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
     assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
     assert "container/arm64: building natively with this machine's Docker" in first_told
-    assert "container/amd64: building emulated, which is slow, with this machine's Docker" in first_told
+    assert ("container/amd64: building emulated, which is slow, with this machine's Docker; pass --no-emulate to skip "
+            "it") in first_told
     assert not [line for line in second_told if "building" in line or "resolving" in line]
     assert second_told[0] == "composing container/amd64, container/arm64 on LocalSandboxProvider"
     assert "container/amd64: reusing the image of the same key, built earlier" in second_told
@@ -818,8 +819,12 @@ def test_a_put_on_a_vm_provider_builds_each_arch_in_a_vm_of_its_own_and_its_imag
     for name in ("build_image", "push_local_image", "docker_login", "_emulated_platforms"):
         monkeypatch.setattr(builder, name, lambda *args, **kwargs: pytest.fail("this machine's Docker was used"))
 
-    composed = Env.get(_put(base, driver, sandbox_provider=vms).id).metadata["composed"]["container"]
+    told = []
+    composed = Env.get(_put(base, driver, sandbox_provider=vms, on_progress=told.append).id).metadata["composed"][
+        "container"]
 
+    assert ("container/arm64: building emulated, which is slow, in a FakeVmProvider VM; add local to --sandbox to build "
+            "it natively with this machine's Docker, or pass --no-emulate to skip it") in told
     assert {arch: (r["status"], r["builder"], r["emulated"]) for arch, r in composed.items()} == {
         "amd64": ("ready", "FakeVmProvider", False), "arm64": ("unverified", "FakeVmProvider", True)}
     assert composed["arm64"]["reason"] == "no link of the sandbox provider runs linux/arm64 natively to probe it"
@@ -921,7 +926,8 @@ def test_a_put_that_wont_emulate_skips_an_arch_no_link_runs_natively_and_a_later
     reason = "emulation is off, and LocalSandboxProvider doesn't run linux/amd64 natively"
     assert skipped.exit_code == 0 and f"container/amd64: skipped ({reason})" in skipped.output
     assert [build["platform"] for build in docker.builds] == ["linux/arm64", "linux/amd64"]
-    assert built.exit_code == 0 and "container/amd64: building emulated, which is slow," in built.output
+    assert built.exit_code == 0 and "container/amd64: building emulated, which is slow, with this machine's Docker; " \
+                                    "pass --no-emulate to skip it" in built.output
     composed = Env.get(env.id).metadata["composed"]["container"]
     assert {arch: r["status"] for arch, r in composed.items()} == {"amd64": "unverified", "arm64": "ready"}
 
