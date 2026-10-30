@@ -4,4 +4,5 @@ TRL downloads its tiny test model from the Hub."""
 from tst.unit.conftest import local_stores  # noqa: F401
 from tst.unit.openenv.environment_test import tools  # noqa: F401
 from tst.unit.task.episode.run_test import teardowns  # noqa: F401
+from tst.unit.training._support import serve  # noqa: F401
 from tst.unit.training.trl_test import served  # noqa: F401

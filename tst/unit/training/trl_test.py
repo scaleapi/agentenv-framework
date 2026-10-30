@@ -15,12 +15,10 @@ from agentenv_protocol import EnvironmentTool, ToolResult
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 from agent_env.config.runtime import Config
-from agent_env.openenv.app import _app, _score_at
-from agent_env.openenv.environment import AgentEnvEnvironment, Served, ServedTask
-from agent_env.task import EpisodeSpec, Task
+from agent_env.openenv.environment import AgentEnvEnvironment
 from agent_env.task_step.task_step import TaskStep
 from agent_env.training import trl
-from agent_env.training._openenv import ENDED, FAILED, Server
+from agent_env.training._openenv import ENDED, FAILED
 from agent_env.training.trl import AgentEnv
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
@@ -32,27 +30,19 @@ SYSTEM = {"role": "system", "content": "You keep the items."}
 
 
 @pytest.fixture
-def served(teardowns, tools):
-    """Serves ``tasks`` by name, every one in the split ``all`` and those ``splits`` name in theirs, as ``build_app``
-    serves a bundle's; closed after the test."""
+def served(serve):
+    """``serve``'s tasks as an ``AgentEnv``, whose close stops their server; closed after the test."""
     opened = []
 
-    def serve(tasks, splits=None, max_concurrent_envs=8, **kwargs):
-        by_name = {}
-        for name, steps in tasks.items():
-            task = Task.from_dict({"id": name, "version": 1, "steps": steps})
-            by_name[name] = ServedTask(task, name, EpisodeSpec.from_task(task), _score_at("replies"))
-        named = {split: tuple(by_name[name] for name in names) for split, names in (splits or {}).items()}
-        server = Server(_app(Served(splits={"all": tuple(by_name.values()), **named}, sandbox=None), "dock",
-                                  max_concurrent_envs))
-        env = AgentEnv(server.url, **kwargs)
-        env._server = server
-        opened.append(env)
-        return env
+    def env(tasks, splits=None, max_concurrent_envs=8, **kwargs):
+        server = serve(tasks, splits, max_concurrent_envs)
+        opened.append(AgentEnv(server.url, **kwargs))
+        opened[-1]._server = server
+        return opened[-1]
 
-    yield serve
-    for env in opened:
-        env.close()
+    yield env
+    for each in opened:
+        each.close()
 
 
 def _tools(environment):

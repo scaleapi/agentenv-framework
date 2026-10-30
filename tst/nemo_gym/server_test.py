@@ -27,8 +27,8 @@ server = pytest.importorskip("agent_env.training.nemo_gym.server", reason=missin
 server_utils = pytest.importorskip("nemo_gym.server_utils", reason=missing_capability_reason(NEMO_GYM))
 
 
-def test_a_rows_seed_plays_its_task_and_verify_ends_its_turn_with_the_last_reply_and_scores_it(served, teardowns):
-    server = served({"a": PLAYED})
+def test_a_rows_seed_plays_its_task_and_verify_ends_its_turn_with_the_last_reply_and_scores_it(serve, teardowns):
+    server = serve({"a": PLAYED})
 
     with TestClient(_app(url=server.url)) as client:
         assert client.post("/seed_session", json=_row()).json() == {}
@@ -44,8 +44,8 @@ def test_a_rows_seed_plays_its_task_and_verify_ends_its_turn_with_the_last_reply
     assert len(teardowns.finished) == 2
 
 
-def test_end_turn_answers_with_the_next_turns_prompt_and_a_turn_left_open_ends_empty(served):
-    server = served({"a": [ITEMS, ALICE, TURN, AGAIN, REPLIES]})
+def test_end_turn_answers_with_the_next_turns_prompt_and_a_turn_left_open_ends_empty(serve):
+    server = serve({"a": [ITEMS, ALICE, TURN, AGAIN, REPLIES]})
 
     with TestClient(_app(url=server.url)) as client:
         client.post("/seed_session", json=_row())
@@ -63,8 +63,8 @@ def test_end_turn_answers_with_the_next_turns_prompt_and_a_turn_left_open_ends_e
     ({"a": PLAYED}, {"tools": [FUNCTION_END_TURN]},
      "task 'a' offers the tools ['add_item', 'end_turn'], not the ['end_turn'] the row shows the model"),
 ])
-def test_a_rollout_the_environment_fails_or_that_isnt_its_rows_is_masked(served, tasks, row, why):
-    server = served(tasks)
+def test_a_rollout_the_environment_fails_or_that_isnt_its_rows_is_masked(serve, tasks, row, why):
+    server = serve(tasks)
 
     with TestClient(_app(url=server.url)) as client:
         client.post("/seed_session", json=_row(**row))
@@ -76,8 +76,8 @@ def test_a_rollout_the_environment_fails_or_that_isnt_its_rows_is_masked(served,
     assert why in verified["failure_reason"]
 
 
-def test_a_closed_session_ends_its_episode_and_a_session_with_none_answers_so(served, teardowns):
-    server = served({"a": PLAYED})
+def test_a_closed_session_ends_its_episode_and_a_session_with_none_answers_so(serve, teardowns):
+    server = serve({"a": PLAYED})
 
     with TestClient(_app(url=server.url)) as client:
         assert client.post("/add_item", json={"item": "crate"}).status_code == 400
@@ -93,8 +93,8 @@ def test_a_closed_session_ends_its_episode_and_a_session_with_none_answers_so(se
 
 
 @pytest.mark.asyncio
-async def test_a_rollout_waits_for_room_while_the_server_is_at_its_limit_saying_so_once(served, teardowns, caplog):
-    server = served({"a": PLAYED}, max_concurrent_envs=1)
+async def test_a_rollout_waits_for_room_while_the_server_is_at_its_limit_saying_so_once(serve, teardowns, caplog):
+    server = serve({"a": PLAYED}, max_concurrent_envs=1)
     app = _app(url=server.url)
     caplog.set_level(logging.WARNING, logger="agent_env.training._openenv")
 
@@ -117,8 +117,8 @@ async def test_a_rollout_waits_for_room_while_the_server_is_at_its_limit_saying_
         "bundle with a higher MAX_CONCURRENT_ENVS (or max_concurrent_envs=) to run more at once"]
 
 
-def test_a_rollout_gym_stopped_before_verifying_has_its_episode_ended_once_idle(served, teardowns, caplog):
-    server = served({"a": PLAYED})
+def test_a_rollout_gym_stopped_before_verifying_has_its_episode_ended_once_idle(serve, teardowns, caplog):
+    server = serve({"a": PLAYED})
 
     with TestClient(_app(url=server.url, idle_timeout=1)) as client:
         client.post("/seed_session", json=_row())

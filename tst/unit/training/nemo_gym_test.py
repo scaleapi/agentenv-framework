@@ -9,10 +9,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from agent_env.openenv.app import _app, _score_at
-from agent_env.openenv.environment import END_TURN, Served, ServedTask
-from agent_env.task import EpisodeSpec, Task
-from agent_env.training._openenv import Server
+from agent_env.openenv.environment import END_TURN
 from agent_env.training.nemo_gym.__main__ import main
 from agent_env.training.nemo_gym.prepare import APP, write_server
 from tst.unit.bundle._support import layout
@@ -34,30 +31,10 @@ FUNCTION_END_TURN = {"type": "function", "name": "end_turn", "description": END_
                      "parameters": END_TURN.input_schema, "strict": False}
 
 
-@pytest.fixture
-def served(teardowns, tools):
-    """Serves ``tasks`` by name in the split ``all`` and those ``splits`` name in theirs, as ``build_app`` serves a
-    bundle's; stopped after the test, if the test hasn't stopped it to wait out its episodes' teardowns."""
-    servers = []
-
-    def serve(tasks, splits=None, max_concurrent_envs=8):
-        by_name = {}
-        for name, steps in tasks.items():
-            task = Task.from_dict({"id": name, "version": 1, "steps": steps})
-            by_name[name] = ServedTask(task, name, EpisodeSpec.from_task(task), _score_at("replies"))
-        named = {split: tuple(by_name[name] for name in names) for split, names in (splits or {}).items()}
-        servers.append(Server(_app(Served(splits={"all": tuple(by_name.values()), **named}, sandbox=None), "Dock Yard",
-                                   max_concurrent_envs)))
-        return servers[-1]
-
-    yield serve
-    for server in servers:
-        server.stop()
-
-
-def test_a_servers_tasks_become_a_resources_server_its_config_and_a_row_per_task_of_each_split(served, tmp_path,
+def test_a_servers_tasks_become_a_resources_server_its_config_and_a_row_per_task_of_each_split(serve, tmp_path,
                                                                                             teardowns):
-    server = served({"a": PLAYED, "b": [ITEMS, ALICE, {**TURN, "prompt": "Add a barrel."}, REPLIES]}, {"smoke": ["b"]})
+    server = serve({"a": PLAYED, "b": [ITEMS, ALICE, {**TURN, "prompt": "Add a barrel."}, REPLIES]}, {"smoke": ["b"]},
+                   name="Dock Yard")
     url = server.url
 
     folder = write_server(url, tmp_path)
@@ -93,9 +70,9 @@ def test_a_servers_tasks_become_a_resources_server_its_config_and_a_row_per_task
     assert len(teardowns.finished) == 1
 
 
-def test_each_toolset_is_probed_once_and_a_rows_tools_are_its_tasks(served, tmp_path, monkeypatch, teardowns):
+def test_each_toolset_is_probed_once_and_a_rows_tools_are_its_tasks(serve, tmp_path, monkeypatch, teardowns):
     _tool_sessions(monkeypatch, {ITEMS_MCP: ["add_item"], PANTRY_MCP: ["take_item"]})
-    server = served({"a": PLAYED, "p": [PANTRY, {**ALICE, "env_ids": ["pantry"]}, TURN, REPLIES], "c": PLAYED})
+    server = serve({"a": PLAYED, "p": [PANTRY, {**ALICE, "env_ids": ["pantry"]}, TURN, REPLIES], "c": PLAYED})
 
     folder = write_server(server.url, tmp_path, name="dock")
     server.stop()
@@ -106,8 +83,8 @@ def test_each_toolset_is_probed_once_and_a_rows_tools_are_its_tasks(served, tmp_
     assert len(teardowns.finished) == 2
 
 
-def test_a_split_whose_name_isnt_a_file_name_is_refused_before_anything_is_written(served, tmp_path):
-    server = served({"a": PLAYED}, {"../escape": ["a"]})
+def test_a_split_whose_name_isnt_a_file_name_is_refused_before_anything_is_written(serve, tmp_path):
+    server = serve({"a": PLAYED}, {"../escape": ["a"]})
 
     with pytest.raises(ValueError, match=r"the server's splits \['\.\./escape'\] can't name a data file"):
         write_server(server.url, tmp_path / "gym")
@@ -115,9 +92,9 @@ def test_a_split_whose_name_isnt_a_file_name_is_refused_before_anything_is_writt
     assert list(tmp_path.iterdir()) == []
 
 
-def test_a_tool_named_after_a_route_gym_serves_is_refused(served, tmp_path, tools):
+def test_a_tool_named_after_a_route_gym_serves_is_refused(serve, tmp_path, tools):
     tools("verify")
-    server = served({"a": PLAYED})
+    server = serve({"a": PLAYED})
 
     with pytest.raises(ValueError, match="the env's tool 'verify' can't be a NeMo Gym tool"):
         write_server(server.url, tmp_path)
