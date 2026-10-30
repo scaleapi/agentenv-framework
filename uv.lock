@@ -133,6 +133,7 @@ gcp = [
 ]
 nemo-gym = [
     { name = "nemo-gym", marker = "python_full_version >= '3.13.14'" },
+    { name = "omegaconf", marker = "python_full_version >= '3.13.14'" },
     { name = "openenv" },
 ]
 openenv = [
@@ -196,6 +197,7 @@ requires-dist = [
     { name = "modal", specifier = ">=1.5.2.dev22" },
     { name = "moto", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "nemo-gym", marker = "python_full_version >= '3.13.14' and extra == 'nemo-gym'", specifier = ">=0.7.0rc0" },
+    { name = "omegaconf", marker = "python_full_version >= '3.13.14' and extra == 'nemo-gym'", specifier = ">=2.3" },
     { name = "openenv", marker = "extra == 'openenv'", specifier = ">=0.9" },
     { name = "packaging", specifier = ">=22" },
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.4" },

@@ -2,15 +2,19 @@
 package ``openenv import`` writes). Gym's ``simple_agent`` seeds a session with a row, which starts the row's episode,
 calls the episode's tools at their routes, and verifies the session, which ends the turns the model left open, its last
 reply ending the first, and answers with the episode's reward; a rollout the environment failed is masked out of
-training. It runs in the venv Gym builds for it, with one worker, since a rollout's session lives in the process."""
+training. It runs in the venv Gym builds for it, or on its own through ``serve``, with one worker, since a rollout's
+session lives in the process."""
 
 import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
+import uvicorn
+import yaml
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import ConfigDict, PrivateAttr, model_validator
@@ -26,7 +30,9 @@ try:
         ResourcesCloseSessionResponse,
         SimpleResourcesServer,
     )
-    from nemo_gym.server_utils import SESSION_ID_KEY
+    from nemo_gym.config_types import BaseServerConfig
+    from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+    from omegaconf import OmegaConf
     from openenv.core.generic_client import GenericEnvClient  # noqa: F401
 except ModuleNotFoundError as exc:
     if exc.name not in ("nemo_gym", "openenv"):
@@ -197,6 +203,24 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         if served is not None and not await asyncio.to_thread(served.stop):
             logger.warning("the bundle's server at %s was still tearing down its episodes after %gs; their sandboxes "
                            "may be left running", served.url, STOP_SECONDS)
+
+
+def serve(folder: str | Path, *, host: str, port: int) -> None:
+    """Runs the resources server ``write_server`` wrote into ``folder`` on its own, at ``host``:``port``, without Gym's
+    head server or the agent servers its config names, for a trainer that plays the folder's rows against the server's
+    URL. As verifiers' launcher for Gym's own servers does, its client names a head server nothing calls."""
+    folder = Path(folder).resolve()
+    written = yaml.safe_load((folder / "configs" / f"{folder.name}.yaml").read_text())
+    config = written[folder.name]["resources_servers"][folder.name]
+    resources = AgentEnvResourcesServer(
+        config=AgentEnvResourcesServerConfig(**config, name=folder.name, host=host, port=port),
+        server_client=ServerClient(head_server_config=BaseServerConfig(host=host, port=port),
+                                   global_config_dict=OmegaConf.create({})),
+    )
+    app = resources.setup_webserver()
+    resources.setup_liveness(app)
+    resources.setup_exception_middleware(app)
+    uvicorn.run(app, host=host, port=port)
 
 
 class _Session(Session):

@@ -22,11 +22,13 @@ SRC = Path(agent_env.__file__).resolve().parent
 PYPROJECT = SRC.parents[1] / "pyproject.toml"
 CONTAINER_ONLY = (SRC / "env" / "gateway",)
 SELF = "agentenv-framework"
-# The Smol SDK has no wheel for some development hosts, and NeMo Gym needs Python 3.13.14 or later; both are
-# deliberately absent from [dev].
+# The Smol SDK has no wheel for some development hosts, and NeMo Gym needs Python 3.13.14 or later, as the extra's
+# omegaconf does with it; all are deliberately absent from [dev].
 _UNINSTALLED_OPTIONAL_MODULES = {
     "smolmachines": frozenset({"smol"}),
-    "nemo-gym": frozenset({"nemo_gym", "nemo_gym.base_resources_server", "nemo_gym.server_utils"}),
+    "nemo-gym": frozenset({"nemo_gym", "nemo_gym.base_resources_server", "nemo_gym.config_types",
+                           "nemo_gym.server_utils"}),
+    "omegaconf": frozenset({"omegaconf"}),
 }
 
 
