@@ -38,7 +38,7 @@ class Extensions:
     mounted_card: Callable[[], EnvironmentCard]
 
     @agent_skill
-    async def _computer_skill(self) -> tuple[str, str]:
+    async def _computer_skill(self) -> tuple[str, str, dict[str, str]]:
         return await skill(self)
 
     @extension(COMPUTER_READY, op="status", method="GET",

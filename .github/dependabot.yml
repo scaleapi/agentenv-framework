@@ -10,6 +10,10 @@ updates:
       # lint step fails on, so it gets a pull request of its own.
       ruff:
         patterns: ["ruff"]
+      # The nemo-gym extra's tree, locked for Python 3.13.14 or later only, pins some of its dependencies exactly
+      # (openai), so its updates come in a pull request of their own rather than holding up everyone else's.
+      nemo-gym:
+        patterns: ["nemo-gym"]
       python-minor-and-patch:
         update-types: ["minor", "patch"]
     ignore:
@@ -39,7 +43,7 @@ updates:
     directories:
       - "/src/agent_env/env/gateway"
       - "/src/agent_env/env/envs/service_db"
-      - "/src/agent_env/env/envs/website_browser"
+      - "/src/agent_env/env/envs/playwright_mcp"
       - "/src/agent_env/agents/agents/claude-code"
       - "/src/agent_env/agents/agents/codex"
       - "/src/agent_env/agents/agents/gemini"

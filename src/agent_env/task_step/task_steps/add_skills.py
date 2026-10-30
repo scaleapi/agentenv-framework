@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import ClassVar, Optional
 
 from agentenv_protocol import SKILL_EXTENSION_URI
 from agentenv_protocol.client import find_extension_method
 
+from agent_env.config import get_config
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
@@ -21,6 +25,9 @@ logger = logging.getLogger(__name__)
 #: ``context.metadata[ENV_SKILLS_KEY][agent_name][env_id][skill_name]``: the SKILL.md add_skills installed from an env, as
 #: the env, or one of its child envs, wrote it for that deploy.
 ENV_SKILLS_KEY = "env_skills"
+#: Where an env's skill with files beside its SKILL.md is stored, under the artifact key prefix, by a digest of its
+#: files, to be sent to the agent as a skill bundle.
+_ENV_SKILL_PREFIX = "agentenv-env-skills"
 
 
 @dataclass
@@ -291,13 +298,31 @@ class AddSkillsTaskStep(TaskStep):
             logger.info(f"Registered skill: {result}")
         for env_id, skills in env_skills.items():
             for skill in skills:
+                files = skill.get("files")
+                sent = ({"object_url": await asyncio.to_thread(_stored_skill, skill["skill_md"], files)} if files else
+                        {"skill_md": skill["skill_md"]})
                 result = await A2AAgent.register_skill(deployed, name=skill["name"], description=skill["description"],
-                                                       skill_md=skill["skill_md"])
+                                                       **sent)
                 installed = context.metadata.setdefault(ENV_SKILLS_KEY, {}).setdefault(self.agent_name, {})
                 installed.setdefault(env_id, {})[skill["name"]] = skill["skill_md"]
                 logger.info(f"Registered the skill {skill['name']} of env {env_id}: {result}")
 
         return context
+
+
+def _stored_skill(skill_md: str, files: dict[str, str]) -> str:
+    """The object-store prefix holding an env skill's SKILL.md and its other files, one prefix per content; a file
+    whose path leaves the skill's folder is refused."""
+    if outside := [path for path in files if not path or PurePosixPath(path).is_absolute()
+                   or ".." in PurePosixPath(path).parts]:
+        raise ValueError(f"an env skill's files must stay inside its folder, not {outside}")
+    config = get_config()
+    store, contents = config.get_object_store(), {"SKILL.md": skill_md, **files}
+    digest = hashlib.sha256(json.dumps(contents, sort_keys=True).encode()).hexdigest()
+    prefix = f"{config.get_artifact_key_prefix()}{_ENV_SKILL_PREFIX}/{digest}"
+    for path, text in contents.items():
+        store.put(f"{prefix}/{path}", text.encode(), content_type="text/markdown", allow_overwrite=True)
+    return store.object_url(prefix)
 
 
 async def _env_skills(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> list[dict]:

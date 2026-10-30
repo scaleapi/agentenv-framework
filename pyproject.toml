@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1387"
+version = "0.9.1394"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -60,6 +60,12 @@ trl = [
     "agentenv-framework[openenv]",
     "datasets>=3",
     "transformers>=5.2",  # renders the tools as TRL shows them to a model; 5.2 is what TRL's environment_factory needs
+]
+# agent_env.training.nemo_gym: a bundle served to NeMo Gym as a resources server. rc0 is the version NeMo RL's Gym
+# checkout reports; Gym needs Python 3.13.14 or later.
+nemo-gym = [
+    "agentenv-framework[openenv]",
+    "nemo-gym>=0.7.0rc0; python_full_version >= '3.13.14'",
 ]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [

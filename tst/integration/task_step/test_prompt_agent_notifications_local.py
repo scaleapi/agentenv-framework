@@ -62,7 +62,7 @@ async def test_what_came_due_for_the_solver_opens_its_next_message_on_a_real_gat
         await _deploy(agent, "solver").execute(context)
         await PromptAgentTaskStep(
             id="watch", version=None, prompt="Keep an eye on things.", agent_name="solver", max_conversation_turns=4,
-            poll_interval_seconds=1, time_zone="America/Los_Angeles",
+            poll_interval_seconds=1,
             post_turn_hooks=[{"file_artifact_id": hook.id, "file_artifact_version": hook.version,
                               "params": {"end_time": "P5D"}}],
         ).execute(context)
@@ -75,8 +75,8 @@ async def test_what_came_due_for_the_solver_opens_its_next_message_on_a_real_gat
     sent = [m["parts"] for m in messages if m["role"] == "user"]
     assert [[p["text"] for p in parts] for parts in sent] == [
         ["Keep an eye on things."],
-        ["[Tue Mar 3, 7:40 AM · your scheduled check] look for new rugs",
-         "[Tue Mar 3, 8:40 AM · Curbfinch alert] New listing: 2BR on Ivy St",
+        ["[Tue Mar 3, 3:40 PM UTC · your scheduled check] look for new rugs",
+         "[Tue Mar 3, 4:40 PM UTC · Curbfinch alert] New listing: 2BR on Ivy St",
          NUDGE.format(TUESDAY)],
     ]
     assert [p.get("metadata", {}).get("agentenv", {}).get("source") for p in sent[1]] == [

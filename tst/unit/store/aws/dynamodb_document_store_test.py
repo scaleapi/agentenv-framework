@@ -1,8 +1,5 @@
 """DynamoDbDocumentStore runs the full DocumentStore conformance suite against moto."""
 
-import threading
-
-import botocore.client
 import pytest
 from moto import mock_aws
 
@@ -12,17 +9,7 @@ from tst.store import conformance
 
 
 @pytest.fixture
-def store_coll(monkeypatch):
-    """moto checks a write's condition and applies the write as two steps any thread can come
-    between, where DynamoDB applies each call atomically; one call at a time restores that for
-    the kit's racing cases."""
-    serial, make_api_call = threading.Lock(), botocore.client.BaseClient._make_api_call
-
-    def one_call_at_a_time(client, operation, params):
-        with serial:
-            return make_api_call(client, operation, params)
-
-    monkeypatch.setattr(botocore.client.BaseClient, "_make_api_call", one_call_at_a_time)
+def store_coll(one_aws_call_at_a_time):
     with mock_aws():
         yield DynamoDbDocumentStore(table_prefix="test_", region="us-west-2"), "coll"
 

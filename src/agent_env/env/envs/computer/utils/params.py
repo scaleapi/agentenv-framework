@@ -53,7 +53,8 @@ def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParam
     problems += [f"env_params.app_settings.{name}: {env.id} has no app {name!r}"
                  + (f"; its apps are {', '.join(apps)}" if apps else "") for name in params.app_settings if name not in apps]
     for name, app in apps.items():
-        problems += gate.check_app_settings(app, params.app_settings.get(name, {}), f"env_params.app_settings.{name}")
+        problems += gate.check_app_settings(app, params.app_settings.get(name, {}), f"env_params.app_settings.{name}",
+                                            env.computer.os.type)
     return params, values, problems
 
 

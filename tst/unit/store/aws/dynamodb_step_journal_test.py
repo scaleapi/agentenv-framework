@@ -14,7 +14,7 @@ from tst.unit.task.step_journal_test import *  # noqa: F403
 
 
 @pytest.fixture
-def store():
+def store(one_aws_call_at_a_time):
     with mock_aws():
         set_document_store(DynamoDbDocumentStore(table_prefix="test_", region="us-west-2"))
         s = TaskInstanceStore()

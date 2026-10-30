@@ -22,7 +22,7 @@ from agent_env.config import get_config
 from agent_env.env.env import Env
 from agent_env.env.envs import GatewayEnv, MCPServerEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
-from agent_env.env.envs.website_browser import WEBSITE_BROWSER_ENVIRONMENT_NAME, WEBSITE_BROWSER_IMAGE_TAG
+from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME, PLAYWRIGHT_MCP_IMAGE_TAG
 from agent_env.env.published_images import BUNDLE_IMAGES, PublishedImage, published_digest
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import LocalSqliteDocumentStore
@@ -45,10 +45,10 @@ DB_WEB_DOCKERFILE = _ENV_PACKAGE / "envs" / "service_db" / "Dockerfile.db-web"
 DB_WEB_IMAGE_NAME = "agent-env-db-web"
 DB_MCP_DOCKERFILE = _ENV_PACKAGE / "envs" / "service_db" / "Dockerfile.db-mcp"
 DB_MCP_IMAGE_NAME = "agent-env-db-mcp"
-WEBSITE_BROWSER_DOCKERFILE = _ENV_PACKAGE / "envs" / "website_browser" / "Dockerfile"
-WEBSITE_BROWSER_CONTEXT = WEBSITE_BROWSER_DOCKERFILE.parent
+PLAYWRIGHT_MCP_DOCKERFILE = _ENV_PACKAGE / "envs" / "playwright_mcp" / "Dockerfile"
+PLAYWRIGHT_MCP_CONTEXT = PLAYWRIGHT_MCP_DOCKERFILE.parent
 
-GATEWAY, SERVICE_DB, WEBSITE_BROWSER = "gateway", "service-db", "website-browser"  # the kinds, named as their commands
+GATEWAY, SERVICE_DB, WEBSITE_BROWSER = "gateway", "service-db", "website-browser"  # the kinds
 MISSING = "missing"  # the reason an infra env the store doesn't hold is set up
 
 
@@ -93,18 +93,18 @@ def put_service_db_env(env_id: str, *, platform: str | None, metadata: Mapping[s
     return env
 
 
-def put_website_browser_env(env_id: str, *, platform: str | None, metadata: Mapping[str, Any] | None = None,
-                            say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
-                            version: int | None = None) -> MCPServerEnv:
-    """Write the website browser as the MCP server env ``env_id``, its image registered from ``published``, each
-    Dockerfile's published digest, when given, else built for ``platform`` (this host's when None). It's stored as
-    ``version`` when given, which must be the env's next: ConcurrentModificationError otherwise."""
+def put_playwright_mcp_env(env_id: str, *, platform: str | None, metadata: Mapping[str, Any] | None = None,
+                           say: Callable[[str], None] = _quiet, published: Mapping[Path, str] | None = None,
+                           version: int | None = None) -> MCPServerEnv:
+    """Write the Playwright MCP website browser as the MCP server env ``env_id``, its image registered from
+    ``published``, each Dockerfile's published digest, when given, else built for ``platform`` (this host's when None).
+    It's stored as ``version`` when given, which must be the env's next: ConcurrentModificationError otherwise."""
     _check_version(version)
-    artifact = _image("website browser", derive_id(env_id, "env_image"), "Website browser MCP server",
-                      WEBSITE_BROWSER_DOCKERFILE, WEBSITE_BROWSER_IMAGE_TAG, platform=platform, say=say,
+    artifact = _image("Playwright MCP", derive_id(env_id, "env_image"), "Playwright MCP website browser",
+                      PLAYWRIGHT_MCP_DOCKERFILE, PLAYWRIGHT_MCP_IMAGE_TAG, platform=platform, say=say,
                       published=published)
     say("Creating MCPServerEnv...")
-    env = MCPServerEnv.put(id=env_id, docker_image_artifact=artifact, environment_name=WEBSITE_BROWSER_ENVIRONMENT_NAME,
+    env = MCPServerEnv.put(id=env_id, docker_image_artifact=artifact, environment_name=PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
                            metadata=_metadata(WEBSITE_BROWSER, metadata), version=version)
     say(f"Created MCPServerEnv: id={env.id} version={env.version} environment_name={env.environment_name}")
     return env
@@ -153,7 +153,7 @@ BUILD_INPUTS_KEY = "build_inputs_sha256"  # the metadata key a put records build
 _DOCKERFILES = {
     GATEWAY: [GATEWAY_DOCKERFILE],
     SERVICE_DB: [SERVICE_DB_DOCKERFILE, DB_WEB_DOCKERFILE, DB_MCP_DOCKERFILE],
-    WEBSITE_BROWSER: [WEBSITE_BROWSER_DOCKERFILE],
+    WEBSITE_BROWSER: [PLAYWRIGHT_MCP_DOCKERFILE],
 }
 # The image each shipped Dockerfile is published as: the infra envs', the shipped agents' and an example env's.
 PUBLISHED_IMAGES = (
@@ -161,7 +161,7 @@ PUBLISHED_IMAGES = (
     PublishedImage("agentenv-service-db", SERVICE_DB_DOCKERFILE),
     PublishedImage("agentenv-db-web", DB_WEB_DOCKERFILE),
     PublishedImage("agentenv-db-mcp", DB_MCP_DOCKERFILE),
-    PublishedImage("agentenv-website-browser", WEBSITE_BROWSER_DOCKERFILE),
+    PublishedImage("agentenv-playwright-mcp", PLAYWRIGHT_MCP_DOCKERFILE),
     *BUNDLE_IMAGES,
 )
 _PUBLISHED = {image.dockerfile: image for image in PUBLISHED_IMAGES}
@@ -193,7 +193,7 @@ def build_inputs_digest(kind: str) -> str:
     return digest.hexdigest()
 
 
-_PUTS = {GATEWAY: put_gateway_env, SERVICE_DB: put_service_db_env, WEBSITE_BROWSER: put_website_browser_env}
+_PUTS = {GATEWAY: put_gateway_env, SERVICE_DB: put_service_db_env, WEBSITE_BROWSER: put_playwright_mcp_env}
 
 
 class InfraError(ValueError):
@@ -244,14 +244,36 @@ class InfraSetup:
         return "images" if len(_DOCKERFILES[self.kind]) > 1 else "image"
 
 
+# The config key naming each kind's env, under [envs] in config.toml.
+_DEFAULT_ENV_ID_KEYS = {GATEWAY: "default_gateway_env_id", SERVICE_DB: "default_service_db_env_id",
+                        WEBSITE_BROWSER: "default_website_browser_env_id"}
+
+
 def default_env_id(kind: str) -> str:
-    config = get_config()
-    return {GATEWAY: config.default_gateway_env_id, SERVICE_DB: config.default_service_db_env_id,
-            WEBSITE_BROWSER: config.default_website_browser_env_id}[kind]
+    return get_config().get_default_env_id(_DEFAULT_ENV_ID_KEYS[kind])
 
 
-def put_command(kind: str) -> str:
-    return f"agent-env env {kind} put --id {default_env_id(kind)}"
+def ships(kind: str, env_id: str) -> bool:
+    """Whether agent-env sets up ``kind``'s env as ``env_id``: the gateway and service-db under any id, as it ships one
+    of each, and the website browser only under the id of the one it ships, since the slot may name any browser."""
+    return kind != WEBSITE_BROWSER or env_id == PLAYWRIGHT_MCP_ENVIRONMENT_NAME
+
+
+def put_hint(kind: str) -> str:
+    """How to put ``kind``'s env under the id config names, as a message says it. The website browser is an MCP server
+    env, which ``mcp-server put`` writes: the one agent-env ships over the image this install's release publishes when
+    there is one, else built from its Dockerfile; any other browser over its own image."""
+    env_id = default_env_id(kind)
+    if kind != WEBSITE_BROWSER:
+        return f"`agent-env env {kind} put --id {env_id}`"
+    image = _PUBLISHED[PLAYWRIGHT_MCP_DOCKERFILE]
+    shipped = (f"--environment-name {PLAYWRIGHT_MCP_ENVIRONMENT_NAME} "
+               + (f"--image-ref {image.ref()}" if published_digest(image) is not None
+                  else f"--dockerfile {PLAYWRIGHT_MCP_DOCKERFILE}"))
+    if ships(kind, env_id):
+        return f"`agent-env env mcp-server put --id {env_id} {shipped}`"
+    return (f"`agent-env env mcp-server put --id {env_id} --environment-name <its name> --image-ref <its image>`, "
+            f"as for the browser agent-env ships: `{shipped}`")
 
 
 def infra_to_set_up(kinds: Iterable[str], *, missing_only: bool = False) -> list[InfraSetup]:
@@ -269,11 +291,14 @@ def infra_to_set_up(kinds: Iterable[str], *, missing_only: bool = False) -> list
         try:
             env = Env.get(env_id)
         except NotFoundError:
-            if local:
+            if not ships(kind, env_id):
+                problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env sets up only the website "
+                                f"browser it ships, {PLAYWRIGHT_MCP_ENVIRONMENT_NAME!r}; put it with {put_hint(kind)}")
+            elif local:
                 setups.append(_pulled_or_built(kind, env_id, MISSING))
             else:
                 problems.append(f"the {kind} env {env_id!r} isn't in the store, and agent-env builds infra envs only into "
-                                f"local stores; put it with `{put_command(kind)}`")
+                                f"local stores; put it with {put_hint(kind)}")
             continue
         if missing_only or not (local and _built_from_stock(env, kind)):
             continue

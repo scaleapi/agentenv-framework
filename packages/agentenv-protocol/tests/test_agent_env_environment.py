@@ -184,6 +184,19 @@ async def test_an_env_serves_its_skill_under_the_name_its_asked_for_and_refuses_
     assert refused.status_code == 400 and "lowercase letters, digits and single hyphens" in refused.text
 
 
+class _SkillWithFilesHandler:
+    @agent_skill
+    async def _guide(self):
+        return "Drive the desktop.", "# Desktop\n\nSee LINUX.md.\n", {"LINUX.md": "# Linux\n"}
+
+
+@pytest.mark.asyncio
+async def test_a_skill_with_other_files_serves_them_beside_its_skill_md():
+    async with _client(_SkillWithFilesHandler) as client:
+        answer = (await client.get("/agentenv/ext/skill/get", params={"name": "desktop"})).json()
+    assert answer["files"] == {"LINUX.md": "# Linux\n"} and answer["skill_md"].endswith("# Desktop\n\nSee LINUX.md.\n")
+
+
 @pytest.mark.asyncio
 async def test_unknown_method_returns_error():
     async with _client(_ItemsHandler) as client:

@@ -75,6 +75,7 @@ class WrittenImage:
     pruned: Pruned  # what its folder holds of the context
     locked: Locked | None  # what was pinned to the stored image's versions
     unlocked: str | None  # why nothing was
+    ref: str | None = None  # the registry image a run pulls, given for it, the context kept beside it
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,7 @@ def provenance(source: dict, imported: BundleImport) -> str:
         "written": [{"folder": entity.folder, "kind": entity.kind.value, "type": entity.type, "id": entity.id,
                      "version": entity.version} for entity in imported.written],
         "images": [{"folder": image.folder, "key": image.key, "id": image.artifact, "version": image.version,
+                    **({"ref": image.ref} if image.ref else {}),
                     "dockerfile": image.pruned.dockerfile, "dockerfile_found": image.found}
                    for image in imported.images],
         "store": [{"where": pin.where, "kind": pin.kind.value, "id": pin.id, "version": pin.version, "why": pin.why}
@@ -170,8 +172,10 @@ def readme(description: str, imported: BundleImport) -> str:
     held = ("Every env, agent and artifact it uses is written here, so `agent-env run` runs it with no store"
             + (", except what *Still needs the store* lists, which it reads from the store this was imported from."
                if imported.pinned else "."))
+    built = [_BUILT_IMAGES] if any(image.ref is None for image in imported.images) else []
+    pulled = [_PULLED_IMAGES] if imported.pulled or any(image.ref for image in imported.images) else []
     lines = [description, "", f"Imported with agent-env {package_version('agentenv-framework')} on {stamp}. {held}", "",
-             *_RUN_IT, *_needs_lines(imported), "", *_SHARE_IT, ""]
+             *_RUN_IT, *_needs_lines(imported), "", *built, *pulled, "", *_SHARE_IT, ""]
     contents = _sections([("Tasks", [f"{task.path}: task {task.id} v{task.version}" for task in imported.tasks]),
                           ("Eval", [f"{imported.eval.path}: eval {imported.eval.id} v{imported.eval.version}"]
                            if imported.eval else [])])
@@ -186,8 +190,11 @@ def _image_line(image: WrittenImage) -> str:
     found = " (found: the image records no Dockerfile)" if image.found else ""
     largest = ", ".join(f"{name} ({size_text(size)})" for name, size in pruned.largest)
     whole = f"; all of its build context, since {pruned.whole}" if pruned.whole else ""
-    return (f"{image.folder}: {image.key} built from {pruned.dockerfile}{found}, {pruned.files} file(s), "
-            f"{size_text(pruned.size)}{whole}; largest: {largest}; {_locked_text(image)}")
+    held = f"{pruned.files} file(s), {size_text(pruned.size)}{whole}; largest: {largest}"
+    if image.ref:
+        return (f"{image.folder}: {image.key} pulled as {image.ref}, its build context beside it from "
+                f"{pruned.dockerfile}{found}, {held}")
+    return f"{image.folder}: {image.key} built from {pruned.dockerfile}{found}, {held}; {_locked_text(image)}"
 
 
 def _locked_text(image: WrittenImage) -> str:
@@ -223,11 +230,14 @@ _RUN_IT = [
     f"- A model endpoint for its agents and judges: `{ENV_BASE_URL}` and `{ENV_API_KEY}`, or `[model] base_url` and "
     "`api_key` in `.agentenv/config.toml`.",
     "- An agent where a step names none: the configured default (`[agents] default_a2a_agent_id`).",
-    "",
+]
+_BUILT_IMAGES = (
     "Its images are built from the build contexts in their folders on the machine that runs it, pinned to the "
     "Python and npm versions of the images the store held, as *Images* says. To build one unpinned, take out the "
-    f"COPY and two ARG lines naming {posixpath.basename(IN_IMAGE)} after each FROM in its Dockerfile.",
-]
+    f"COPY and two ARG lines naming {posixpath.basename(IN_IMAGE)} after each FROM in its Dockerfile.")
+_PULLED_IMAGES = (
+    "An image *Images* says is pulled comes from its registry and is never built here. A build context beside one is "
+    "there to read or rebuild, and a deploy builds from it only when it can't pull the image.")
 _SHARE_IT = [
     "## Share it",
     "",
@@ -247,7 +257,8 @@ def _needs_lines(imported: BundleImport) -> list[str]:
     lines = [f"- The plugins it uses: `{'`, `'.join(plugins)}`."] if plugins else []
     if configured:
         lines.append("- The configuration that registers what *Needs beyond core* says configuration registers.")
-    registries = sorted({host for pulled in imported.pulled if (host := registry_host_from_ref(pulled.image))})
+    refs = [pulled.image for pulled in imported.pulled] + [image.ref for image in imported.images if image.ref]
+    registries = sorted({host for ref in refs if (host := registry_host_from_ref(ref))})
     if registries:
         lines.append(f"- Access to the registries its pulled images are in: `{'`, `'.join(registries)}`. agent-env reads "
                      "a private one only through its configured image store, such as an ECR store for an ECR registry.")

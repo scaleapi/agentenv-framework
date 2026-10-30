@@ -26,6 +26,8 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
               help="Override default_service_db_env_id (on Modal its images must be in the configured image store)")
 @click.option("--gateway", "gateway_env_id", default=None,
               help="Override default_gateway_env_id")
+@click.option("--website-browser", "website_browser_env_id", default=None,
+              help="Override default_website_browser_env_id, the browser a deploy with websites adds")
 @click.option("--disk-size-gb", type=float, default=10.0, show_default=True,
               help="Sandbox VM disk size in GB. Large universes (e.g. github/gdrive "
                    "root file trees) need more than the 10GB default.")
@@ -46,7 +48,7 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
 @click.option("--env-state-instance-id", default=None,
               help="Attach against an EXISTING env state instance instead of creating a fresh store "
                    "(its own type selects the provider).")
-def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode: str, sandbox: str, service_db_env_id: str | None, gateway_env_id: str | None, disk_size_gb: float, cpu: float | None, memory_mb: int | None, env_state_type: str | None, env_state_instance_id: str | None):
+def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode: str, sandbox: str, service_db_env_id: str | None, gateway_env_id: str | None, website_browser_env_id: str | None, disk_size_gb: float, cpu: float | None, memory_mb: int | None, env_state_type: str | None, env_state_instance_id: str | None):
     """Deploy an MCP server environment."""
     from agent_env.providers import build_sandbox_provider
     from agent_env.config import get_config
@@ -64,6 +66,9 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
     if gateway_env_id:
         get_config().default_gateway_env_id = gateway_env_id
         click.echo(f"Override default_gateway_env_id: {gateway_env_id}")
+    if website_browser_env_id:
+        get_config().default_website_browser_env_id = website_browser_env_id
+        click.echo(f"Override default_website_browser_env_id: {website_browser_env_id}")
 
     click.echo(f"Fetching env: id={env_id} version={env_version or 'latest'}...")
     env = Env.get(env_id, version=env_version)

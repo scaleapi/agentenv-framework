@@ -758,12 +758,13 @@ async def test_export_service_to_file_materializes_filepart_zip(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "same-origin"])
 async def test_export_service_to_file_resolves_relative_uri_and_streams(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, absolute
 ):
     """A FilePart with a RELATIVE uri (e.g. "export-snapshot") is resolved against
     the service base_url and streamed to disk — so multi-GB bundles never ride
-    inline in the JSON-RPC response."""
+    inline in the JSON-RPC response. An absolute uri on that address streams the same."""
     from agentenv_protocol import FilePart
     from agentenv_protocol.client import GetDataResponse
     from agentenv_protocol import client as protocol_v1
@@ -771,8 +772,10 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
     from agent_env.task_step.task_steps import snapshot_env as mod
 
     zip_bytes = b"PK\x03\x04streamed-from-export-snapshot"
+    expected_base = legacy_protocol.environment_base_url("https://gw", "gdrive", mcp=True)
+    uri = f"{expected_base.rstrip('/')}/export-snapshot" if absolute else "export-snapshot"
     part = FilePart(
-        file={"uri": "export-snapshot", "name": "gdrive.zip", "mimeType": "application/zip"}
+        file={"uri": uri, "name": "gdrive.zip", "mimeType": "application/zip"}
     )
 
     async def fake_supports_v1(base_url):
@@ -826,7 +829,6 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
     assert suffix == ".zip"
     with open(out, "rb") as f:
         assert f.read() == zip_bytes
-    expected_base = legacy_protocol.environment_base_url("https://gw", "gdrive", mcp=True)
     assert captured["method"] == "GET"
     assert captured["url"] == f"{expected_base.rstrip('/')}/export-snapshot"
 
@@ -865,6 +867,25 @@ async def test_export_service_to_file_returns_an_object_url_as_the_services_uplo
     result = await SnapshotEnvTaskStep._export_environment_to_file("https://gw", "gdrive", str(out), 30)
 
     assert result == uploaded
+    assert not out.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uri", [
+    "http://127.0.0.1:8234/api/runs",
+    "http://169.254.169.254/latest/meta-data/",
+    "https://internal.example/export-snapshot",
+    "https://gw@internal.example/export-snapshot",
+    "https://gw:8443/export-snapshot",
+    "http://gw/export-snapshot",
+])
+async def test_export_service_to_file_refuses_an_absolute_uri_off_its_service_address(monkeypatch, tmp_path, uri):
+    """This process makes the request, from where it sits, so a service names only its own address."""
+    _serve_filepart_uri(monkeypatch, uri)
+
+    out = tmp_path / "export-tmp"
+    with pytest.raises(ValueError, match="not on its service's address"):
+        await SnapshotEnvTaskStep._export_environment_to_file("https://gw", "gdrive", str(out), 30)
     assert not out.exists()
 
 
