@@ -89,6 +89,18 @@ def import_task(task_id: str, dest: Path | str, *, version: int | None = None,
                                                                                          "version": task.version})
 
 
+def task_images(task_id: str, *, version: int | None = None,
+                include_scopes: Collection[FieldScope] = ()) -> tuple[DockerImageArtifact, ...]:
+    """The images ``import_task`` writes for the stored task ``task_id``, at ``version`` or its latest, each once in the
+    order it reaches them, found without downloading anything: what an export pushes to a registry before importing the
+    task with ``image_refs`` naming them there. Raises BundleError when the import would fail on what it reads."""
+    importer = _Importer(None, include_scopes)
+    importer.add_task(Task.get(task_id, version))
+    if importer.problems:
+        raise BundleError(importer.problems)
+    return tuple(importer.images_named.values())
+
+
 def import_eval(eval_id: str, dest: Path | str, *, version: int | None = None,
                 include_scopes: Collection[FieldScope] = (), image_refs: Mapping[str, str] | None = None,
                 progress: Callable[[str], None] | None = None) -> BundleImport:
@@ -158,13 +170,15 @@ class _EntityOut(ExportContext):
 
 
 class _Importer:
-    def __init__(self, dest: Path, include_scopes: Collection[FieldScope] = (),
+    def __init__(self, dest: Path | None, include_scopes: Collection[FieldScope] = (),
                  progress: Callable[[str], None] | None = None, image_refs: Mapping[str, str] | None = None):
-        self.dest = Path(os.path.abspath(dest.expanduser()))  # so ``.`` has a name, and a sibling to stage in
+        # So ``.`` has a name, and a sibling to stage in; none when the import is only read, never written.
+        self.dest = Path(os.path.abspath(dest.expanduser())) if dest is not None else None
         self.include_scopes = frozenset({FieldScope.TASK, *include_scopes})
         self.image_refs = dict(image_refs or {})  # the registry image to write for an image, by its store id
         self.refs_used: set[str] = set()
         self.refs_pinned: dict[str, str] = {}  # each given ref as pinned to its digest, by image store id
+        self.images_named: dict[tuple[str, int], DockerImageArtifact] = {}  # each image a folder names, in order
         self.progress = progress or (lambda message: None)
         self.files: dict[str, str] = {}
         self.taken: dict[str, set[str]] = {kind.value: set() for kind in BundleKind}  # folded names, per folder
@@ -188,7 +202,8 @@ class _Importer:
         self.jobs: list[ImageJob] = []
         self.providers = Providers()
         self.installed: tuple[InstalledBundle, ...] | None = None
-        _check_destination(self.dest)
+        if self.dest is not None:
+            _check_destination(self.dest)
 
     def add_task(self, task: Task) -> str:
         """Write ``task`` under a name taken from its id, and what it references in folders of their own; return its
@@ -268,6 +283,7 @@ class _Importer:
         """The toml value of an image a folder is built from: its stored context, pruned into the folder, else its
         registry ref, else a pinned store image. Given a registry reference for it, that reference, its tag pinned to
         the digest the registry serves now when it gives none, with the context kept beside it when it has one."""
+        self.images_named.setdefault((artifact.id, artifact.version), artifact)
         ref = self.image_refs.get(artifact.id)
         if ref is not None:
             self.refs_used.add(artifact.id)
