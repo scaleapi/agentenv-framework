@@ -662,7 +662,8 @@ class MultiEnv(Env):
         environment_names = list(dict.fromkeys(
             [env.environment_name for env in self.mcp_server_envs] + [env.environment_name for env in self.website_envs]
         ))
-        svc_list = " ".join(map(shlex.quote, (name for name in yaml.safe_load(compose)["services"]
+        # BaseLoader keeps every name a string: safe_load reads a service named `on` as True and `123` as an int.
+        svc_list = " ".join(map(shlex.quote, (name for name in yaml.load(compose, Loader=yaml.BaseLoader)["services"]
                                               if name != DATABASE_SERVICE_NAME)))
         logger.info(f"Recreating services: {svc_list}")
         await gw._compose_up(self._sandbox, f"--force-recreate {svc_list}")

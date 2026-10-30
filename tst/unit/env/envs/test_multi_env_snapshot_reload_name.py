@@ -94,6 +94,17 @@ async def test_the_reload_recreates_every_service_but_the_servicedb_the_browser_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["on", "123", "null"])
+async def test_a_service_whose_name_yaml_reads_as_another_type_is_recreated_by_its_name(name):
+    env = _env(_deployed_compose().replace("slack", name))
+
+    _, up, _ = await _reload(env)
+
+    (args,) = [call.args[1] for call in up.await_args_list]
+    assert name in shlex.split(args.removeprefix("--force-recreate "))
+
+
+@pytest.mark.asyncio
 async def test_the_reload_writes_its_compose_as_one_argument():
     env = _env(_deployed_compose().replace("  slack:\n", "  slack:\n    labels:\n      note: \"$(touch pwned) 'q' `x`\"\n", 1))
 
