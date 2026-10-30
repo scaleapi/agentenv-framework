@@ -88,6 +88,7 @@ class Rollout:
     system: str | None = None
     done: bool = False
     reward: float | None = None
+    scores: dict[str, float] | None = None
     failure: str | None = None
     misgrouped: bool = False
 
@@ -196,7 +197,7 @@ class Session:
             if (observation.get("metadata") or {}).get("status") == "error":
                 rollout.failure = error_of(observation)
                 return FAILED
-            rollout.reward = result.reward
+            rollout.reward, rollout.scores = result.reward, (observation.get("metadata") or {}).get("scores")
             return ENDED
         answer = observation.get("result") or {}
         if name == END_TURN:

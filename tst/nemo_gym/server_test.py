@@ -40,6 +40,7 @@ def test_a_rows_seed_plays_its_task_and_verify_ends_its_turn_with_the_last_reply
 
     assert (verified["reward"], verified["mask_sample"], verified["failure_reason"], verified["task_id"]) == (
         1.0, False, None, "a")
+    assert "reward_components" not in verified
     assert (unanswered["reward"], unanswered["mask_sample"]) == (0.0, False)
     assert len(teardowns.finished) == 2
 
@@ -74,6 +75,19 @@ def test_a_rollout_the_environment_fails_or_that_isnt_its_rows_is_masked(serve, 
     assert answer == "The environment failed to answer, so this episode won't be scored."
     assert (verified["reward"], verified["mask_sample"]) == (0.0, True)
     assert why in verified["failure_reason"]
+
+
+def test_reward_components_answer_each_score_by_step_id_and_make_the_reward_their_sum(serve):
+    server = serve({"a": [*PLAYED, {**REPLIES, "id": "style", "verifier_id": "style"}]})
+
+    with TestClient(_app(url=server.url, reward_components=True)) as client:
+        client.post("/seed_session", json=_row())
+        verified = _verify(client, _row(), "Added a crate.")
+        client.post("/seed_session", json=_row(task_id="b"))
+        masked = _verify(client, _row(task_id="b"), "Added a crate.")
+
+    assert (verified["reward"], verified["reward_components"]) == (2.0, {"replies": 1.0, "style": 1.0})
+    assert (masked["reward"], masked["mask_sample"], "reward_components" in masked) == (0.0, True, False)
 
 
 def test_a_closed_session_ends_its_episode_and_a_session_with_none_answers_so(serve, teardowns):
@@ -132,10 +146,14 @@ def test_a_rollout_gym_stopped_before_verifying_has_its_episode_ended_once_idle(
     assert len(teardowns.finished) == 1
 
 
-def test_a_config_with_more_than_one_worker_is_refused():
-    with pytest.raises(pydantic.ValidationError, match="the server runs with one worker"):
+@pytest.mark.parametrize(("config", "why"), [
+    ({"num_workers": 2}, "the server runs with one worker"),
+    ({"reward": "replies", "reward_components": True}, "reward_components makes the reward the sum"),
+])
+def test_a_config_with_more_than_one_worker_or_a_reward_beside_its_components_is_refused(config, why):
+    with pytest.raises(pydantic.ValidationError, match=why):
         server.AgentEnvResourcesServerConfig(host="127.0.0.1", port=0, entrypoint="app.py", name="dock",
-                                             url="http://127.0.0.1:8000", num_workers=2)
+                                             url="http://127.0.0.1:8000", **config)
 
 
 def test_a_bundle_named_in_the_config_is_served_while_the_server_runs(tmp_path, monkeypatch, teardowns):

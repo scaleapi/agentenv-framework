@@ -36,6 +36,7 @@ except ModuleNotFoundError as exc:
 
 from agent_env.openenv import build_app
 from agent_env.training._openenv import STOP_SECONDS, Server, Session, Shared
+from agent_env.training.nemo_gym.prepare import REWARD_AND_COMPONENTS
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,9 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     seconds, and ``reset_timeout`` how long an episode may take to deploy and open its first turn, and each turn to be
     ended; the server ends an episode that misses one, and the rollout is masked. ``idle_timeout`` is how long a
     session may go without a request before its episode is ended, freeing its slot: Gym never verifies a rollout whose
-    run failed or was cancelled. It runs with one worker, since a rollout's session lives in its process."""
+    run failed or was cancelled. ``reward_components`` has verify also answer with each of the task's scores by step id,
+    as NeMo RL's GDPO takes them, and makes the reward their sum, as NeMo RL requires of a reward with components; it
+    takes no ``reward``. It runs with one worker, since a rollout's session lives in its process."""
 
     url: str | None = None
     bundle: str | None = None
@@ -61,11 +64,14 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     tool_timeout: float = 60.0
     reset_timeout: float = 600.0
     idle_timeout: float = 600.0
+    reward_components: bool = False
 
     @model_validator(mode="after")
     def _checked(self) -> "AgentEnvResourcesServerConfig":
         if (self.url is None) == (self.bundle is None):
             raise ValueError("name the bundle's server as url, or the bundle this server serves as bundle; not both")
+        if self.reward_components and self.reward is not None:
+            raise ValueError(REWARD_AND_COMPONENTS)
         if (self.num_workers or 1) != 1:
             raise ValueError("the server runs with one worker, since a rollout's session lives in its process; "
                              "set num_workers to 1")
@@ -138,17 +144,21 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         return PlainTextResponse(await session.call(tool, arguments))
 
     async def verify(self, request: Request, body: AgentEnvVerifyRequest) -> AgentEnvVerifyResponse:
-        """The episode's reward, once the turns the model left open are ended; a rollout with none, as one the
-        environment failed or that offered tools its row doesn't show the model has, is masked."""
+        """The episode's reward, once the turns the model left open are ended, with its scores as the reward's
+        components when the config asks for them; a rollout with none, as one the environment failed or that offered
+        tools its row doesn't show the model has, is masked."""
         session = self._sessions.pop(request.session.get(SESSION_ID_KEY), None)
         if session is None:
-            reward, failure = None, "the rollout has no episode: its session wasn't seeded, or was closed"
+            reward, scores, failure = None, None, "the rollout has no episode: its session wasn't seeded, or was closed"
         else:
-            reward, failure = await session.result(_reply(body.response))
+            reward, scores, failure = await session.result(_reply(body.response))
         if failure is not None:
             logger.warning("rollout masked: %s", failure)
+        components = scores if self.config.reward_components and failure is None else None
+        if components:
+            reward = sum(components.values())
         return AgentEnvVerifyResponse(**body.model_dump(), reward=reward or 0.0, mask_sample=failure is not None,
-                                      failure_reason=failure)
+                                      failure_reason=failure, **({"reward_components": components} if components else {}))
 
     async def close_resources_session(self, request: Request,
                                       body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
@@ -213,19 +223,19 @@ class _Session(Session):
         """How long the session has gone with no request, in seconds; none while one is in flight."""
         return 0.0 if self._lock.locked() else now - self._seen
 
-    async def result(self, reply: str) -> tuple[float | None, str | None]:
-        """The episode's reward, or why it has none, once the turns left open are ended, ``reply`` ending the first;
-        closes the session."""
+    async def result(self, reply: str) -> tuple[float | None, dict[str, float] | None, str | None]:
+        """The episode's reward and scores, or why it has none, once the turns left open are ended, ``reply`` ending
+        the first; closes the session."""
         rollout = self._rollout
         if rollout is None:
-            return None, "the rollout has no episode"
+            return None, None, "the rollout has no episode"
         try:
             await self._finish(rollout, reply)
         finally:
             await self._close()
         if rollout.failure is None and rollout.reward is None:
-            return None, "the episode ended without a reward"
-        return rollout.reward, rollout.failure
+            return None, None, "the episode ended without a reward"
+        return rollout.reward, rollout.scores, rollout.failure
 
 
 def _reply(response: Any) -> str:

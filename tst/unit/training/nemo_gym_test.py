@@ -92,6 +92,12 @@ def test_a_split_whose_name_isnt_a_file_name_is_refused_before_anything_is_writt
     assert list(tmp_path.iterdir()) == []
 
 
+def test_reward_components_take_no_reward(tmp_path):
+    with pytest.raises(ValueError, match="reward_components makes the reward the sum"):
+        write_server("http://127.0.0.1:1", tmp_path, reward="replies", reward_components=True)
+    assert not (tmp_path / "resources_servers").exists()
+
+
 def test_a_tool_named_after_a_route_gym_serves_is_refused(serve, tmp_path, tools):
     tools("verify")
     server = serve({"a": PLAYED})
@@ -107,13 +113,13 @@ def test_a_bundle_is_served_while_the_rows_are_written_and_the_config_has_the_se
     bundle = layout(tmp_path / "dock", {"tasks/a.json": json.dumps([ITEMS, unbound, TURN, REPLIES])})
 
     result = CliRunner().invoke(main, [str(bundle), str(tmp_path / "gym"), "--name", "dock", "--sandbox", "local",
-                                       "--max-concurrent-envs", "32"])
+                                       "--max-concurrent-envs", "32", "--reward-components"])
 
     assert result.exit_code == 0, result.output
     config = yaml.safe_load((tmp_path / "gym" / "resources_servers" / "dock" / "configs" / "dock.yaml").read_text())
     assert {key: value for key, value in config["dock"]["resources_servers"]["dock"].items()
-            if key in ("bundle", "max_concurrent_envs", "sandbox", "url")} == {
-        "bundle": str(bundle.resolve()), "max_concurrent_envs": 32, "sandbox": "local"}
+            if key in ("bundle", "max_concurrent_envs", "sandbox", "url", "reward_components")} == {
+        "bundle": str(bundle.resolve()), "max_concurrent_envs": 32, "sandbox": "local", "reward_components": True}
     assert len(_rows(tmp_path / "gym" / "resources_servers" / "dock" / "data" / "all.jsonl")) == 1
     assert len(teardowns.finished) == 1
 
