@@ -583,7 +583,8 @@ class MultiEnv(Env):
         from agent_env.env.env import Env
         from agent_env.env.envs.service_db import DB_USER
         from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
-        from agent_env.providers import EnvironmentGatewayProvider, MCPServerConfig, WebsiteConfig
+        from agent_env.providers import EnvironmentGatewayProvider, MCPServerConfig
+        from agent_env.providers.env_providers.env_gateway_provider import website_config
         from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME, DB_MCP_SERVICE_NAME, PGWEB_SERVICE_NAME
         from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
         from agent_env.providers.env_state import LocalPostgresStateProvider
@@ -612,10 +613,7 @@ class MultiEnv(Env):
         gw._state_provider = LocalPostgresStateProvider(service_db_config=service_db_config)
         gw._state_instance = LocalPostgresStateProvider.default_instance()
         mcp_servers = [MCPServerConfig(image=env.docker_image_artifact.image_name, environment_name=env.environment_name) for env in self.mcp_server_envs]
-        website_configs = [
-            WebsiteConfig(backend_image=env.backend_docker_image_artifact.image_name, frontend_image=env.frontend_docker_image_artifact.image_name, environment_name=env.environment_name)
-            for env in self.website_envs
-        ]
+        website_configs = [website_config(env) for env in self.website_envs]
         if website_configs:
             website_browser_env = Env.get(website_browser_env_id(config))
             mcp_servers = list(mcp_servers) + [MCPServerConfig(image=website_browser_env.docker_image_artifact.image_name, environment_name=website_browser_env.environment_name,

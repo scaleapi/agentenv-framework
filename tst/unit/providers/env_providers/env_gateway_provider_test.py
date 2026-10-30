@@ -2426,3 +2426,38 @@ async def test_a_service_listing_that_stalls_gives_way_to_composes_own_error(mon
 
     assert raised.value is _COMPOSE_ERROR
     assert "Can't list the stack's services: no answer in 0s" in caplog.text
+
+
+def test_a_one_image_site_runs_alone_on_its_port_checked_at_its_health_path_and_its_route_reaches_it():
+    """A site whose server image serves its pages gets one container: the gateway's /website/<name>/ and /svc/<name>/
+    both reach it, checked at its declared health path; a site still built on a frontend image keeps both."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[],
+        gateway_image="agent-gateway",
+        website_configs=[WebsiteConfig(backend_image="mail-server", frontend_image=None, environment_name="mail",
+                                       health_path="/healthz"),
+                         WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    assert {"mail-website-backend", "shop-website-backend", "shop-website-frontend"} <= set(services)
+    assert "mail-website-frontend" not in services
+    assert "http://localhost:8000/healthz" in services["mail-website-backend"]["healthcheck"]["test"]
+    assert "http://localhost:8000/api/health" in services["shop-website-backend"]["healthcheck"]["test"]
+    gateway = dict(item.split("=", 1) for item in services[GATEWAY_SERVICE_NAME]["environment"])
+    assert gateway["WEBSITE_URLS"] == "mail=http://mail-website-backend:8000,shop=http://shop-website-frontend:80"
+    assert gateway["REST_PROXY_URLS"] == "mail=http://mail-website-backend:8000,shop=http://shop-website-backend:8000"
+
+
+def test_a_one_image_website_env_is_fronted_with_only_its_server_image():
+    server = MagicMock(image_name="mail-server")
+    env = WebsiteEnv(id="web-mail", version=1, server_docker_image_artifact=server, environment_name="mail",
+                     health_path="/healthz")
+    topology = env_gateway_provider._gateway_topology(env)
+    assert topology.website_configs == [WebsiteConfig(backend_image="mail-server", frontend_image=None,
+                                                      environment_name="mail", health_path="/healthz")]
+    assert topology.website_images == [server]
