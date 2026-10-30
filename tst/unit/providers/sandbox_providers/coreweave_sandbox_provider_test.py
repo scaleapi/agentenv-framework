@@ -340,6 +340,26 @@ async def test_a_start_that_answers_after_cleanup_stopped_waiting_has_its_sandbo
     assert sandbox_cls.server.deleted == ["sb-1"]
 
 
+@pytest.mark.asyncio
+async def test_a_start_that_fails_after_cleanup_stopped_waiting_has_the_sandbox_it_made_found_by_its_tag_then(
+        sandbox_cls, monkeypatch):
+    monkeypatch.setattr(provider_module, "_START_SETTLE_SEC", 0.01)
+    sandbox_cls.server.start_delay = 0.1
+    sandbox_cls.server.start_error = ConnectionError("connection reset")
+    sandbox_cls.server.start_commits = True
+    create = asyncio.ensure_future(_provider(sandbox_cls).create_vm())
+    await asyncio.sleep(0.02)
+    create.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    create_tag = sandbox_cls.server.created[0].kwargs["tags"][1]
+    assert sandbox_cls.server.listed == [[create_tag]]
+    assert sandbox_cls.server.deleted == []
+    await asyncio.sleep(0.2)
+    assert sandbox_cls.server.listed == [[create_tag], [create_tag]]
+    assert sandbox_cls.server.deleted == ["sb-1"]
+
+
 def _slow_round_trips(sandbox_cls) -> None:
     """List and delete take a network round trip, as the SDK's do."""
     listed, deleted = sandbox_cls.list.__func__, sandbox_cls.delete.__func__

@@ -178,19 +178,10 @@ async def _reclaim(client: Client, raw: Any, create_tag: str, starting: asyncio.
     if not starting.done():
         logger.warning("A cancelled CoreWeave create's start request is still unanswered after %ss; looking for its "
                        "sandbox by its tag %s", _START_SETTLE_SEC, create_tag)
-        starting.add_done_callback(lambda done: _reap_late_start(client, raw, done))
+        starting.add_done_callback(lambda done: _reap_late_start(client, raw, create_tag, done))
     elif not starting.cancelled():
         starting.exception()
-    if raw.sandbox_id:
-        await _reap(client, raw.sandbox_id)
-        return
-    try:
-        found = await client.list([create_tag])
-    except Exception as exc:  # noqa: BLE001 - best effort; the sandbox still stops at its max lifetime
-        logger.warning("Could not look for a CoreWeave sandbox tagged %s left by a failed create: %s", create_tag, exc)
-        return
-    for sandbox in found:
-        await _reap(client, sandbox.sandbox_id)
+    await _reap_created(client, raw, create_tag)
 
 
 class CoreWeaveSandboxProvider(SandboxProvider):
@@ -490,11 +481,28 @@ def _remember_egress_host(host: str) -> None:
 _late_reaps: set[asyncio.Task] = set()
 
 
-def _reap_late_start(client: Client, raw: Any, starting: asyncio.Future) -> None:
-    """Delete the sandbox a start request made after its create's cleanup stopped waiting for it. This runs only while
-    the event loop does; a sandbox made after it closes stops at its max lifetime."""
-    if starting.cancelled() or starting.exception() is not None or not raw.sandbox_id:
+def _reap_late_start(client: Client, raw: Any, create_tag: str, starting: asyncio.Future) -> None:
+    """Delete the sandbox a start request made after its create's cleanup stopped waiting for it, whether the request
+    answered with its id or failed with its response lost. This runs only while the event loop does; a sandbox made
+    after it closes stops at its max lifetime."""
+    if starting.cancelled():
         return
-    task = asyncio.ensure_future(_reap(client, raw.sandbox_id))
+    starting.exception()
+    task = asyncio.ensure_future(_reap_created(client, raw, create_tag))
     _late_reaps.add(task)
     task.add_done_callback(_late_reaps.discard)
+
+
+async def _reap_created(client: Client, raw: Any, create_tag: str) -> None:
+    """Delete the sandbox a create made: the one with the id its start request answered, or else the one tagged with
+    the create's unique tag."""
+    if raw.sandbox_id:
+        await _reap(client, raw.sandbox_id)
+        return
+    try:
+        found = await client.list([create_tag])
+    except Exception as exc:  # noqa: BLE001 - best effort; the sandbox still stops at its max lifetime
+        logger.warning("Could not look for a CoreWeave sandbox tagged %s left by a failed create: %s", create_tag, exc)
+        return
+    for sandbox in found:
+        await _reap(client, sandbox.sandbox_id)
