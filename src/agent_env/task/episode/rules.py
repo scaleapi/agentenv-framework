@@ -151,7 +151,7 @@ UNAFFECTED = frozenset({
     "deploy_sandbox", "end_computer_recording", "start_computer_recording", "env_outcome_verifier", "modify_env_tool_access", "reset_env", "review",
     "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "sync_env_clock",
     "validation_gate_aggregator", "verify_env_card", "verify_env_core_protocol", "verify_mcp_tool_schema",
-    "verify_spec_conformance", "verify_universe_load_export_roundtrip",
+    "verify_spec_conformance", "verify_universe_load_export_roundtrip", "website_state_verifier",
     # They read only what an outside turn leaves: its reply.
     "agent_prompt_response_verifier", "verify_mcp_env_assessment",
     # It skips an agent that isn't deployed.

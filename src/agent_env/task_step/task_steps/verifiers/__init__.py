@@ -10,6 +10,7 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVer
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import AgentPromptResponseVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
+from agent_env.task_step.task_steps.verifiers.website_state_verifier import WebsiteStateVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "ScoreAggregator",
     "Turn",
     "VerifySandboxTaskStep",
+    "WebsiteStateVerifierTaskStep",
     "aggregate_score",
 ]

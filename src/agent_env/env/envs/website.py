@@ -315,6 +315,7 @@ class WebsiteEnv(Env):
         on_frontend_progress: ProgressCallback | None = None,
         github_token: str | None = None,
         env_provider_type: str = "gateway",
+        health_path: str = DEFAULT_HEALTH_PATH,
     ) -> WebsiteEnv:
         """Build the server image, from ``backend_dockerfile_github_url``, and any deprecated frontend image from
         GitHub in parallel, and create a WebsiteEnv."""
@@ -363,6 +364,7 @@ class WebsiteEnv(Env):
             environment_name=environment_name,
             metadata=combined_metadata,
             env_provider_type=env_provider_type,
+            health_path=health_path,
         )
         return env
 
