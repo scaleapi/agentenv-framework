@@ -578,3 +578,18 @@ def _mock_gateway_by_path(monkeypatch, scripted: dict[str, list]) -> list[httpx.
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
     return sent
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_without_notify_refuses_it(monkeypatch):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "added": ["n"], "all": ["n"]})
+    notify = [{"id": "n", "when": {"type": "action", "tool": "t"},
+               "actions": [{"type": "notify", "channel": "Gmail", "text": "New email"}]}]
+    context = TaskStepContext(deployed_envs=[_record(_with_features("named_executors", "provoking_roles"))],
+                              deployed_agents=[], metadata={})
+    with pytest.raises(RuntimeError, match=r"does not declare \['notify'\]"):
+        await _step(triggers=notify).execute(context)
+    assert sent == []
+    context.deployed_envs = [_record()]
+    await _step(triggers=notify).execute(context)
+    assert json.loads(sent[0].content)["triggers"] == notify

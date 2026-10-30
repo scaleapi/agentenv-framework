@@ -78,6 +78,7 @@ EXT_TRAJECTORY_URI = "urn:agentenv:trajectory/v1"
 EXT_STEP_URI = "urn:agentenv:step/v1"
 EXT_STATE_URI = "urn:agentenv:state/v1"
 EXT_CHANGES_URI = "urn:agentenv:changes/v1"
+EXT_NOTIFICATIONS_URI = "urn:agentenv:notifications/v1"
 
 # Rows per GET /changes page: the default, and the most a client may ask for.
 CHANGES_PAGE_DEFAULT = 1000
@@ -122,8 +123,10 @@ TRIGGER_UNLESS = "unless"
 TRIGGER_WEBSITE = "website"
 TRIGGER_EXECUTOR_HOURS_TIME_ZONE = "executor_hours_time_zone"
 TRIGGER_NEXT_EVENT_AT = "next_event_at"
+TRIGGER_NOTIFY = "notify"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
-                    TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT)
+                    TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT,
+                    TRIGGER_NOTIFY)
 
 # The one `source` a /step call may name instead of step_api, with the id of the hook artifact that made it.
 STEP_SOURCE_POST_TURN_HOOK = "post_turn_hook"
@@ -242,6 +245,20 @@ GATEWAY_EXTENSIONS = [
             "get": {"method": "GET", "endpoint": "/changes", "request": {"type": "object", "properties": {
                 "after_id": {"type": "integer", "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": CHANGES_PAGE_MAX}}}}}},
+        "required": False,
+    },
+    {
+        "uri": EXT_NOTIFICATIONS_URI,
+        "description": "Notifications (urn:agentenv:notifications/v1): what comes due for a role between its turns, on the virtual clock, each for one recipient (`to`): checks a role scheduled for itself (schedule_check, which only the roles config names see) and notifications triggers sent (the notify action, to the default role unless it names another). state says when the next is due; take hands a recipient each due one once (harness control path), every item one shape: id, to, at, times, source (scheduled_check or trigger), source_id, channel (the label the agent sees) and parts. config replaces all settings (omitted fields reset to defaults, so one without roles turns checks off) and leaves existing checks as they are unless it drops their role: lowering max_active leaves extra active checks in place, and raising min_interval leaves existing repeats unchanged. clear resets the settings to their defaults and drops every check and notification. Unrelated to A2A push notifications.",
+        "params": {"endpoint": "/notifications/state", "methods": {
+            "config": {"method": "POST", "endpoint": "/notifications/config", "request": {"type": "object", "properties": {
+                "roles": {"type": "array", "items": {"type": "string"}}, "max_active": {"type": "integer", "minimum": 1},
+                "min_interval": {"type": "string"}}}},
+            "state": {"method": "GET", "endpoint": "/notifications/state", "request": {"type": "object", "properties": {
+                "to": {"type": "string"}}}},
+            "take": {"method": "POST", "endpoint": "/notifications/take", "request": {"type": "object", "properties": {
+                "to": {"type": "string"}, "until": {"type": "string"}}}},
+            "clear": {"method": "POST", "endpoint": "/notifications/clear", "request": {"type": "object", "properties": {}}}}},
         "required": False,
     },
 ]
