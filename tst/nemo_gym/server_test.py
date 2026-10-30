@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import httpx
 import pydantic
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from agent_env.training.nemo_gym.prepare import write_server
@@ -179,15 +180,24 @@ def test_a_bundle_named_in_the_config_is_served_while_the_server_runs(tmp_path, 
     assert len(teardowns.finished) == 2
 
 
+@pytest.mark.parametrize(("flags", "written", "as_error"), [
+    ([], {}, False),
+    (["--masked-as-error"], {}, True),
+    ([], {"masked_as_error": True, "port": 1}, True),
+], ids=["default", "flag", "config"])
 def test_serve_runs_a_written_server_on_its_own_at_the_port_it_is_given_answering_a_masked_rollout_as_asked(
-        serve, tmp_path, teardowns):
+        serve, tmp_path, teardowns, flags, written, as_error):
     bundle_server = serve({"a": PLAYED})
     folder = write_server(bundle_server.url, tmp_path)
+    configured = folder / "configs" / f"{folder.name}.yaml"
+    config = yaml.safe_load(configured.read_text())
+    config[folder.name]["resources_servers"][folder.name].update(written)
+    configured.write_text(yaml.safe_dump(config))
     row = json.loads((folder / "data" / "all.jsonl").read_text().splitlines()[0])
     port = _free_port()
 
     served = subprocess.Popen([sys.executable, "-m", "agent_env.training.nemo_gym", "serve", ".", "--port", str(port),
-                               "--masked-as-error"],
+                               *flags],
                               cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         with httpx.Client(base_url=_up(served, f"http://127.0.0.1:{port}")) as client:
@@ -202,8 +212,14 @@ def test_serve_runs_a_written_server_on_its_own_at_the_port_it_is_given_answerin
     bundle_server.stop()
 
     assert (verified["reward"], verified["mask_sample"], verified["task_id"]) == (1.0, False, "a")
-    assert masked.status_code == 503
-    assert "the episode plays task 'a', not the row's 'b'" in masked.json()["detail"]
+    why = "the episode plays task 'a', not the row's 'b'"
+    if as_error:
+        assert masked.status_code == 503
+        assert why in masked.json()["detail"]
+    else:
+        assert masked.status_code == 200
+        assert (masked.json()["reward"], masked.json()["mask_sample"]) == (0.0, True)
+        assert why in masked.json()["failure_reason"]
     assert len(teardowns.finished) == 3
 
 

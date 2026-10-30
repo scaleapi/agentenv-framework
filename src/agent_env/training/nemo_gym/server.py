@@ -214,14 +214,16 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
 def serve(folder: str | Path, *, host: str, port: int, masked_as_error: bool = False) -> None:
     """Runs the resources server ``write_server`` wrote into ``folder`` on its own, at ``host``:``port``, without Gym's
     head server or the agent servers its config names, for a trainer that plays the folder's rows against the server's
-    URL; ``masked_as_error`` as the config takes it. As verifiers' launcher for Gym's own servers does, its client names
-    a head server nothing calls."""
+    URL. ``host`` and ``port`` win over any the folder's config names, and ``masked_as_error``, as the config takes it,
+    is on when either it or the config sets it. As verifiers' launcher for Gym's own servers does, its client names a
+    head server nothing calls."""
     folder = Path(folder).resolve()
     written = yaml.safe_load((folder / "configs" / f"{folder.name}.yaml").read_text())
     config = written[folder.name]["resources_servers"][folder.name]
+    masked_as_error = masked_as_error or config.get("masked_as_error", False)
     resources = AgentEnvResourcesServer(
-        config=AgentEnvResourcesServerConfig(**config, name=folder.name, host=host, port=port,
-                                             masked_as_error=masked_as_error),
+        config=AgentEnvResourcesServerConfig(**{**config, "name": folder.name, "host": host, "port": port,
+                                                "masked_as_error": masked_as_error}),
         server_client=ServerClient(head_server_config=BaseServerConfig(host=host, port=port),
                                    global_config_dict=OmegaConf.create({})),
     )
