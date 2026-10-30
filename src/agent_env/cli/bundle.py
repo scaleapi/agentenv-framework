@@ -125,7 +125,7 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
     if dry_run:
         click.echo("Nothing was written: --dry-run.")
         return
-    if all(done.reused for done in planned.materialization.writes):
+    if all(done.reused for done in planned.materialization.writes) and not planned.materialization.composing:
         click.echo("Nothing to write: every version is registered already.")
         return
     if planned.shared and not yes:
