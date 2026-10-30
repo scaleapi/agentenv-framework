@@ -240,6 +240,69 @@ at the gateway.
 
 Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
 
+### Tools served on another server's behalf
+
+An environment can serve tools another server defines, each with that server's own schema:
+`forwarded_tools()` returns `ForwardedTool(tool, call, annotations, output_schema)` entries, where
+`tool` is an `EnvironmentTool` carrying the other server's `inputSchema`, and `call` takes the
+call's arguments as keywords, untouched, and returns that server's `CallToolResult`, which reaches
+the caller as it is. An `output_schema` is listed as the tool's `outputSchema` and isn't checked
+here, so `call` answers every result, its errors too, in a shape that schema admits. They're listed
+on the card beside the `@tool` methods, chosen by `served_tools` and under tool access like them;
+one named like another tool is refused. They need mcp's FastMCP. The cua-driver driver serves
+cua-driver's own tools this way.
+
+### Resources
+
+Mark a method that serves MCP resources with `@resource`; an env may mark several, and each read
+calls the method, which returns text or bytes. The URI decides what's served:
+
+```python
+@environment_card(name="orders")
+class Orders(AgentEnvEnvironment):
+    @resource("docs://orders/refund-policy", mime_type="text/markdown")
+    def refund_policy(self) -> str:
+        """When a refund is allowed and who approves it."""
+        return POLICY.read_text()
+
+    @resource("orders://{order_id}")
+    async def order(self, order_id: str) -> str:
+        return json.dumps(await self.db.order(order_id))
+
+    @resource("skill://upstream/{file}", listed=lambda env: UPSTREAM["resources"])
+    async def upstream_file(self, file: str) -> str:
+        return await read_upstream(f"skill://upstream/{file}")
+```
+
+- A fixed URI is one resource. Its name defaults to the method's name and its description to the
+  docstring.
+- A template such as `orders://{order_id}` is an MCP resource template; the method takes its parts.
+- A template with `listed` serves the resources `listed` returns, each as MCP lists one (`uri`,
+  `name`, `description`, `mimeType`), and only those. Each is read through the method with its
+  URI's parts. That's how an env serves another server's resources from a list: the cua-driver
+  driver serves cua-driver's skill files this way.
+
+A URI served twice, a listed URI that doesn't match its template, and a method that doesn't take
+exactly the template's parts are refused. Resources need mcp's FastMCP.
+
+### Instructions at connect
+
+An MCP server may answer `initialize` with `instructions`: how to use it, which a client may put in
+the agent's context, as Claude Code does. Mark the plain method that returns them with
+`@server_instructions`:
+
+```python
+@environment_card(name="orders")
+class Orders(AgentEnvEnvironment):
+    @server_instructions
+    def how_to(self) -> str:
+        return "Look an order up with get_order before refunding it; refunds can't be undone."
+```
+
+They're read once, when the SDK builds the app (`create_app`, `serve`, `create_fastmcp_app`), and
+every session gets the same text. An env has at most one such method. An app you build yourself
+and pass to `mount` keeps its own instructions: set them when you construct it.
+
 ### Getting part of the data
 
 A `@get_data` handler that takes a `paths` parameter returns only the data under the paths a caller
@@ -262,9 +325,11 @@ def guide(self):
 The card then declares `urn:agentenv:skill/v1` (`SKILL_EXTENSION_URI`), whose `get {name}`
 answers `{name, description, skill_md}`, the shape `skill-config/v1` takes, with the frontmatter
 written under the name the caller gives; a name that isn't lowercase letters, digits and single
-hyphens, up to 64, is refused `invalid_argument`. agent-env's `add_skills` step installs it on
-an agent through `env_ids`, named after the env's environment name; for an env behind a gateway,
-whose card nests its servers' cards, it installs each server's skill under that server's name.
+hyphens, up to 64, is refused `invalid_argument`. A skill with other files beside its SKILL.md
+returns them as a third value, `{relative path: text}`, and `get` answers them as `files`.
+agent-env's `add_skills` step installs it on an agent through `env_ids`, named after the env's
+environment name, a skill with files as a bundle of them; for an env behind a gateway, whose card
+nests its servers' cards, it installs each server's skill under that server's name.
 
 ### Uploading an export through a grant
 
@@ -426,7 +491,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
   the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
-  class's `notes`, markdown for what its card can't say.
+  class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
+  its own returns it from `bundled_skill()` (its description, body and other files), and the
+  computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
   capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
   own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
