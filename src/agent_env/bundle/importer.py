@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import unicodedata
 import uuid
@@ -63,6 +64,7 @@ from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX
 from agent_env.store.image_store.oci_registry_credentials import names_registry
+from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.paths import os_reason
@@ -74,11 +76,13 @@ _FOLDERS = {EntityKind.ENV: BundleKind.ENV, EntityKind.AGENT: BundleKind.AGENT, 
 
 
 def import_task(task_id: str, dest: Path | str, *, version: int | None = None,
-                include_scopes: Collection[FieldScope] = (),
+                include_scopes: Collection[FieldScope] = (), image_refs: Mapping[str, str] | None = None,
                 progress: Callable[[str], None] | None = None) -> BundleImport:
     """Write the stored task ``task_id``, at ``version`` or its latest, and every entity it uses as a bundle at
-    ``dest``. Its steps' scoped fields are left out unless ``include_scopes`` names their scope."""
-    importer = _Importer(Path(dest), include_scopes, progress)
+    ``dest``. Its steps' scoped fields are left out unless ``include_scopes`` names their scope. An image whose store id
+    ``image_refs`` maps to a registry reference is written as that reference, which a run pulls, its tag pinned to the
+    digest its registry serves now when it gives none, with its build context beside it."""
+    importer = _Importer(Path(dest), include_scopes, progress, image_refs)
     task = Task.get(task_id, version)
     importer.add_task(task)
     return importer.write(f"Imported from the store's task {task.id} v{task.version}.", {"task": task.id,
@@ -86,11 +90,11 @@ def import_task(task_id: str, dest: Path | str, *, version: int | None = None,
 
 
 def import_eval(eval_id: str, dest: Path | str, *, version: int | None = None,
-                include_scopes: Collection[FieldScope] = (),
+                include_scopes: Collection[FieldScope] = (), image_refs: Mapping[str, str] | None = None,
                 progress: Callable[[str], None] | None = None) -> BundleImport:
     """Write the stored eval ``eval_id``, at ``version`` or its latest, the tasks it names and every entity they use as
-    a bundle, leaving out their steps' scoped fields as ``import_task`` does."""
-    importer = _Importer(Path(dest), include_scopes, progress)
+    a bundle, leaving out their steps' scoped fields and writing ``image_refs`` as ``import_task`` does."""
+    importer = _Importer(Path(dest), include_scopes, progress, image_refs)
     stored = Eval.get(eval_id, version)
     names, seen = [], set()
     for entry in stored.tasks:
@@ -155,9 +159,12 @@ class _EntityOut(ExportContext):
 
 class _Importer:
     def __init__(self, dest: Path, include_scopes: Collection[FieldScope] = (),
-                 progress: Callable[[str], None] | None = None):
+                 progress: Callable[[str], None] | None = None, image_refs: Mapping[str, str] | None = None):
         self.dest = Path(os.path.abspath(dest.expanduser()))  # so ``.`` has a name, and a sibling to stage in
         self.include_scopes = frozenset({FieldScope.TASK, *include_scopes})
+        self.image_refs = dict(image_refs or {})  # the registry image to write for an image, by its store id
+        self.refs_used: set[str] = set()
+        self.refs_pinned: dict[str, str] = {}  # each given ref as pinned to its digest, by image store id
         self.progress = progress or (lambda message: None)
         self.files: dict[str, str] = {}
         self.taken: dict[str, set[str]] = {kind.value: set() for kind in BundleKind}  # folded names, per folder
@@ -259,11 +266,25 @@ class _Importer:
 
     def image(self, out: _EntityOut, artifact: DockerImageArtifact, key: str) -> str | dict:
         """The toml value of an image a folder is built from: its stored context, pruned into the folder, else its
-        registry ref, else a pinned store image."""
+        registry ref, else a pinned store image. Given a registry reference for it, that reference, its tag pinned to
+        the digest the registry serves now when it gives none, with the context kept beside it when it has one."""
+        ref = self.image_refs.get(artifact.id)
+        if ref is not None:
+            self.refs_used.add(artifact.id)
+            try:
+                ref = self._pinned(artifact.id, ref)
+            except ValueError as e:
+                self.problems.append(f"{out.folder}: {key}: the reference given for {artifact.id}, {ref!r}, {e}")
+                return {"ref": ref}
         if artifact.build_context_object_url:
-            job = ImageJob(artifact, out.folder, key, {"dockerfile": artifact.dockerfile_path or ""}, out.toml_name)
+            toml = {"ref": ref} if ref is not None else {}
+            job = ImageJob(artifact, out.folder, key, {**toml, "dockerfile": artifact.dockerfile_path or ""},
+                           out.toml_name, ref=ref)
             out.images.append(job)
             return job.toml
+        if ref is not None:
+            out.pulled.append(Pulled(out.folder, key, ref))
+            return {"ref": ref}
         if names_registry(artifact.image_name):
             out.pulled.append(Pulled(out.folder, key, artifact.image_name))
             return {"ref": artifact.image_name}
@@ -272,8 +293,29 @@ class _Importer:
         self._unwritable((EntityKind.ARTIFACT, artifact.id, artifact.version), f"{out.folder}: {key}", why)
         return {EntityKind.ARTIFACT.value: artifact.id, "version": artifact.version}
 
+    def _pinned(self, image_id: str, ref: str) -> str:
+        """``ref``, given for ``image_id``, pinned to a digest: as given when it pins one, else its tag pinned to the
+        digest its registry serves now, once per image. Raises ValueError when it names no registry, gives a digest
+        that isn't whole, or its registry can't pin it."""
+        if image_id not in self.refs_pinned:
+            if not isinstance(ref, str) or not names_registry(ref):
+                raise ValueError("doesn't name its registry")
+            if "@" in ref:
+                if not _PINNED.search(ref):
+                    raise ValueError("doesn't give a whole digest, as <registry>/<repo>:<tag>@sha256:<64 hex digits> "
+                                     "does")
+                self.refs_pinned[image_id] = ref
+            else:
+                try:
+                    self.refs_pinned[image_id] = pin_digest(ref, get_config().get_image_store().auth(ref))
+                except ValueError as e:
+                    raise ValueError(f"can't be pinned to a digest: {e}") from None
+        return self.refs_pinned[image_id]
+
     def write(self, description: str, source: dict) -> BundleImport:
         """Write the folder, with ``description`` as its README's first line, and say what was written."""
+        if unused := sorted(self.image_refs.keys() - self.refs_used):
+            self.problems.append(f"a reference was given for {', '.join(unused)}, which the import writes no image of")
         if self.problems:
             raise BundleError(self.problems)
         staging = self.dest.parent / f".{self.dest.name}.import-{uuid.uuid4().hex[:8]}"
@@ -317,7 +359,7 @@ class _Importer:
     def _download(self, staging: Path, scratch: Path) -> int:
         """Download every file and image the folder holds into ``staging``, saying how much first; return the bytes."""
         groups = context_groups(self.jobs)
-        saved = [job.artifact.tar_gz_object_url for job in self.jobs if job.artifact.tar_gz_object_url]
+        saved = [job.artifact.tar_gz_object_url for job in self.jobs if job.artifact.tar_gz_object_url and not job.ref]
         with ThreadPoolExecutor(_DOWNLOADS) as pool:
             sizes = [*pool.map(_size, self.downloads.values()), *pool.map(_saved_size, saved)]
         total = sum(size or 0 for size in sizes) + sum(group[0].size or 0 for group in groups)
@@ -338,12 +380,17 @@ class _Importer:
             else:
                 self.images.append(WrittenImage(job.folder, job.key, job.artifact.id, job.artifact.version,
                                                 found=not job.artifact.dockerfile_path, pruned=job.pruned,
-                                                locked=job.locked, unlocked=job.unlocked))
+                                                locked=job.locked, unlocked=job.unlocked, ref=job.ref))
         return total
 
     def _image_left_in_store(self, job: ImageJob) -> None:
         """An image whose context the folder can't hold: its registry ref when it names one, else a problem, or a pinned
-        store image when the import keeps one."""
+        store image when the import keeps one; one given a registry reference, that reference."""
+        if job.ref is not None:
+            job.toml.clear()
+            job.toml["ref"] = job.ref
+            self.pulled.append(Pulled(job.folder, job.key, job.ref, job.problem))
+            return
         if names_registry(job.artifact.image_name):
             job.toml.clear()
             job.toml["ref"] = job.artifact.image_name
@@ -517,6 +564,10 @@ def _kind_of(entity: Any) -> EntityKind:
     if isinstance(entity, Artifact):
         return EntityKind.ARTIFACT
     raise TypeError(f"{entity!r} is no env, agent or artifact")
+
+
+# A reference pinned to a whole sha256 digest, at its end.
+_PINNED = re.compile(r"@sha256:[0-9a-f]{64}$")
 
 
 def _size(url: str) -> int | None:

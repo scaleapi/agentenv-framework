@@ -244,22 +244,30 @@ def _tail(message: str) -> str:
 
 def _write_referenced_image(plan: Plan, write: Write) -> int:
     """Register the registry image an entry's image key or image folder names, its tag pinned to the digest the
-    registry serves now. Written again with the same ref, as for a new description, it keeps the digest it has."""
+    registry serves now, with the folder kept as its build context when it names a Dockerfile. Written again with the
+    same ref, as for a new description, it keeps the digest it has."""
+    image, entry = write.source, write.source.entry
     try:
-        return DockerImageArtifact.put_ref(
-            write.id, description=_image_description(plan, write), image_name=write.source.ref,
-            earlier_pin=_latest_image_name(write.id)).version
+        if image.dockerfile is None:
+            return DockerImageArtifact.put_ref(
+                write.id, description=_image_description(plan, write), image_name=image.ref,
+                earlier_pin=_latest_pin(write.id)).version
+        with staged_build_context(plan.bundle_of(entry), entry, image.dockerfile) as staged:
+            return DockerImageArtifact.put_ref(
+                write.id, description=_image_description(plan, write), image_name=image.ref,
+                earlier_pin=_latest_pin(write.id), context_path=str(staged.path),
+                dockerfile_path=staged.dockerfile).version
     except ValueError as e:  # the registry's answer, or a registry on this machine the image's store can't name
         raise BundleError([f"{_path(plan, write)}: {e}"]) from None
 
 
-def _latest_image_name(image_id: str) -> str | None:
-    """The image name ``image_id``'s latest version records, when that version is an image: a folder can change type."""
+def _latest_pin(image_id: str) -> str | None:
+    """What ``image_id``'s latest version pulls, when that version is an image: a folder can change type."""
     try:
         latest = Artifact.get(image_id)
     except NotFoundError:
         return None
-    return latest.image_name if isinstance(latest, DockerImageArtifact) else None
+    return latest.pinned_name if isinstance(latest, DockerImageArtifact) else None
 
 
 def _image_description(plan: Plan, write: Write) -> str:
