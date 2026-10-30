@@ -192,8 +192,8 @@ class _Environment(Session):
         _on_loop(self._start(split, index, task_id), CONNECT_SECONDS + CLOSE_SECONDS)
 
     def get_reward(self) -> float | None:
-        """The episode's reward, or ``None`` when it ended in an error. Raises when the episode offered other tools
-        than this class has, which no rollout fixes."""
+        """The episode's reward, or ``None`` when it ended in an error. Raises when the episode's first turn offered a
+        tool its toolset's first task doesn't, which no rollout fixes."""
         rollout, self._rollout = self._rollout, None
         if rollout is None:
             return None
@@ -202,7 +202,7 @@ class _Environment(Session):
         except Exception as e:
             rollout.failure = rollout.failure or why(e)
         if rollout.misgrouped:
-            raise RuntimeError(f"{rollout.failure}. The tasks of one toolset must offer the same tools, since TRL shows "
+            raise RuntimeError(f"{rollout.failure}. A task must offer no tool its toolset's first task doesn't, since TRL shows "
                                "the model a class's: their toolset misses what tells them apart")
         if rollout.failure is not None:
             logger.warning("rollout left unscored: %s", rollout.failure)

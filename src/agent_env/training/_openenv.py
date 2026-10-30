@@ -53,13 +53,15 @@ class NamedToolset:
 
 @dataclass(frozen=True)
 class Shared:
-    """What a session needs of its server: where it is, the tools an episode's first turn is checked against, and the
-    deadlines. The key makes it equal to its pickled copies only."""
+    """What a session needs of its server: where it is, the tools the model is shown, which an episode's first turn
+    must offer no more than, the deadlines, and how long to wait for room on the server. The key makes it equal to its
+    pickled copies only."""
 
     url: str
     offered: frozenset[str]
     tool_timeout: float
     reset_timeout: float
+    patience: float = REOPEN_PATIENCE
     key: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
@@ -76,8 +78,8 @@ class AtCapacity(RuntimeError):
 
 
 class Misgrouped(Failed):
-    """An episode offering other tools than the model is shown: a toolset that misses what tells tasks apart, which no
-    rollout fixes."""
+    """An episode offering a tool the model isn't shown: a toolset that misses what tells tasks apart, which no rollout
+    fixes."""
 
 
 @dataclass
@@ -101,19 +103,12 @@ class Session:
     #: Whether the session opens at its first ``_start``, raising when the server refuses it, rather than as the
     #: episode starts, which leaves the rollout unscored.
     opens_at_start: ClassVar[bool] = False
-    #: How long the episode waits for the server to have room for its session, in seconds; ``None`` waits until the
-    #: reset deadline.
-    patience: ClassVar[float | None] = REOPEN_PATIENCE
 
     def __init__(self) -> None:
         self._client: GenericEnvClient | None = None
         self._opened = False
         self._rollout: Rollout | None = None
         self._lock = asyncio.Lock()
-
-    def _misses(self, offered: frozenset[str]) -> bool:
-        """Whether an episode whose first turn offers ``offered`` shows the model other tools than it is shown."""
-        return offered != self._shared.offered
 
     async def _start(self, split: str, index: int, expected: str | None) -> None:
         """Starts the row's episode in the background, ending the one under way, and returns before it is deployed."""
@@ -130,9 +125,8 @@ class Session:
 
     async def _begin(self, rollout: Rollout, split: str, index: int, expected: str | None) -> None:
         if self._client is None:
-            patience = self._shared.reset_timeout if self.patience is None else self.patience
             self._client = await reopened(self._shared.url, self._shared.reset_timeout, dropped=self._opened,
-                                          patience=patience)
+                                          patience=self._shared.patience)
             self._opened = True
         reset = await self._client.reset(split=split, index=index, timeout_s=self._shared.reset_timeout)
         if reset.done:
@@ -144,7 +138,7 @@ class Session:
         listed = await list_tools(self._client)
         if listed.done:
             raise Failed(error_of(listed.observation))
-        if self._misses(offered := frozenset(tool["name"] for tool in listed.observation["tools"])):
+        if not (offered := frozenset(tool["name"] for tool in listed.observation["tools"])) <= self._shared.offered:
             raise Misgrouped(f"task {played!r} offers the tools {sorted(offered)}, not the "
                              f"{sorted(self._shared.offered)} {self.offered_by}")
 

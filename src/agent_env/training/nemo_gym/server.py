@@ -122,11 +122,12 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         the first tool call or the verify waits for it. A seed on a session that holds an episode ends that one."""
         session_id = request.session[SESSION_ID_KEY]
         offered = frozenset(tool["name"] for tool in body.responses_create_params.get("tools") or ())
-        session = _Session(Shared(self._url, offered, self.config.tool_timeout, self.config.reset_timeout))
+        session = _Session(Shared(self._url, offered, self.config.tool_timeout, self.config.reset_timeout,
+                                  patience=self.config.reset_timeout))
         if (previous := self._sessions.pop(session_id, None)) is not None:
-            await previous._close()
+            await previous.close()
         self._sessions[session_id] = session
-        await session._start(body.split, body.index, body.task_id)
+        await session.start(body.split, body.index, body.task_id)
         return BaseSeedSessionResponse()
 
     async def call_tool(self, tool: str, request: Request, arguments: dict[str, Any] = Body()) -> PlainTextResponse:
@@ -134,11 +135,7 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
         if session is None:
             raise HTTPException(status_code=400, detail="This session has no episode: seed it first.")
-        session.seen = time.monotonic()
-        try:
-            return PlainTextResponse(await session._step(tool, arguments))
-        finally:
-            session.seen = time.monotonic()
+        return PlainTextResponse(await session.call(tool, arguments))
 
     async def verify(self, request: Request, body: AgentEnvVerifyRequest) -> AgentEnvVerifyResponse:
         """The episode's reward, once the turns the model left open are ended; a rollout with none, as one the
@@ -156,7 +153,7 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
     async def close_resources_session(self, request: Request,
                                       body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         if (session := self._sessions.pop(request.session.get(SESSION_ID_KEY), None)) is not None:
-            await session._close()
+            await session.close()
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     async def _reap(self) -> None:
@@ -165,13 +162,12 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
             await asyncio.sleep(min(REAP_SECONDS, self.config.idle_timeout * REAP_SHARE))
             now = time.monotonic()
             for session_id, session in list(self._sessions.items()):
-                if session._lock.locked() or now - session.seen <= self.config.idle_timeout:
+                if session.idle_for(now) <= self.config.idle_timeout or self._sessions.get(session_id) is not session:
                     continue
-                if self._sessions.get(session_id) is session:
-                    del self._sessions[session_id]
-                    logger.warning("ended the episode of a rollout with no request for %gs: Gym stopped its run "
-                                   "without verifying it", self.config.idle_timeout)
-                    await session._close()
+                del self._sessions[session_id]
+                logger.warning("ended the episode of a rollout with no request for %gs: Gym stopped its run without "
+                               "verifying it", self.config.idle_timeout)
+                await session.close()
 
     @property
     def _url(self) -> str:
@@ -185,7 +181,7 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         """Ends the episodes left running, then stops the server this one served the bundle on, which tears down its
         episodes."""
         sessions, self._sessions = list(self._sessions.values()), {}
-        await asyncio.gather(*(session._close() for session in sessions))
+        await asyncio.gather(*(session.close() for session in sessions))
         served, self._served = self._served, None
         if served is not None and not await asyncio.to_thread(served.stop):
             logger.warning("the bundle's server at %s was still tearing down its episodes after %gs; their sandboxes "
@@ -193,19 +189,29 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
 
 
 class _Session(Session):
-    """A rollout's session, which shows the model the tools its row lists, and waits for room until its reset deadline,
-    since Gym runs every rollout of a step at once and a server at its limit makes the rest take turns."""
+    """A rollout's session, which shows the model the tools its row lists. The server gives it the reset deadline to
+    wait for room in, since Gym runs every rollout of a step at once and a server at its limit makes the rest take
+    turns."""
 
     offered_by = "the row shows the model"
-    patience = None
+    start = Session._start
+    close = Session._close
 
     def __init__(self, shared: Shared):
         super().__init__()
         self._shared = shared
-        self.seen = time.monotonic()
+        self._seen = time.monotonic()
 
-    def _misses(self, offered: frozenset[str]) -> bool:
-        return not offered <= self._shared.offered
+    async def call(self, name: str, arguments: dict[str, Any]) -> str:
+        self._seen = time.monotonic()
+        try:
+            return await self._step(name, arguments)
+        finally:
+            self._seen = time.monotonic()
+
+    def idle_for(self, now: float) -> float:
+        """How long the session has gone with no request, in seconds; none while one is in flight."""
+        return 0.0 if self._lock.locked() else now - self._seen
 
     async def result(self, reply: str) -> tuple[float | None, str | None]:
         """The episode's reward, or why it has none, once the turns left open are ended, ``reply`` ending the first;
