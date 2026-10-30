@@ -93,7 +93,8 @@ def task_images(task_id: str, *, version: int | None = None,
                 include_scopes: Collection[FieldScope] = ()) -> tuple[DockerImageArtifact, ...]:
     """The images ``import_task`` writes for the stored task ``task_id``, at ``version`` or its latest, each once in the
     order it reaches them, found without downloading anything: what an export pushes to a registry before importing the
-    task with ``image_refs`` naming them there. Raises BundleError when the import would fail on what it reads."""
+    task with ``image_refs`` naming them there. Every image is listed, however it's stored, since each is then given a
+    reference; raises BundleError when the import would fail on anything else it reads."""
     importer = _Importer(None, include_scopes)
     importer.add_task(Task.get(task_id, version))
     if importer.problems:
@@ -284,6 +285,8 @@ class _Importer:
         registry ref, else a pinned store image. Given a registry reference for it, that reference, its tag pinned to
         the digest the registry serves now when it gives none, with the context kept beside it when it has one."""
         self.images_named.setdefault((artifact.id, artifact.version), artifact)
+        if self.dest is None:  # only listed, never written: each image is given a reference before an import is
+            return {"ref": artifact.image_name}
         ref = self.image_refs.get(artifact.id)
         if ref is not None:
             self.refs_used.add(artifact.id)

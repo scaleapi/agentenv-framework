@@ -212,11 +212,21 @@ def test_the_images_a_task_writes_are_listed_once_in_order_without_downloading_a
         refs["crm-image"], refs["crm-image"], refs["mail-image"]]
 
 
-def test_listing_a_task_the_import_cant_write_fails_before_any_push_would_start(home):
+def test_an_image_the_import_writes_only_with_a_ref_is_listed_and_takes_one(home):
+    """A tarball under a bare name is what an export loads and pushes, so it's listed, not refused."""
     _stored(get_artifact_store().put_document(DockerImageArtifact(
         id="crm-image", description="d", image_name="crm-image:v1", tar_gz_s3_url="file:///nowhere/crm.tar.gz")))
+
+    (image,) = task_images("t")
+    imported = import_task("t", home / "t", image_refs={image.id: REF})
+
+    assert (image.id, _toml(imported.root, "envs/crm/env.toml")["image"]) == ("crm-image", {"ref": REF})
+
+
+def test_listing_a_task_the_import_cant_write_fails_before_any_push_would_start(home):
+    Task.put(id="t", steps=[build_step(dict(DEPLOY))])  # its env isn't in the store
 
     with pytest.raises(BundleError) as caught:
         task_images("t")
 
-    assert any("stored only as a docker save tarball" in problem for problem in caught.value.problems)
+    assert any("crm" in problem for problem in caught.value.problems)
