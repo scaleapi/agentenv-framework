@@ -12,6 +12,7 @@ from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle, plan_entities
 from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle.run import dry_run_bundle
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -105,6 +106,18 @@ def test_a_reused_computer_env_composes_what_it_has_left_on_the_runs_provider_an
     assert told == [(env.id, "would compose container/amd64, container/arm64"), (env.id, "composing")]
     assert composed == [(env.id, UBUNTU, REFERENCE, None),
                         (env.id, UBUNTU, REFERENCE, provider, [("container", "amd64"), ("container", "arm64")])]
+
+
+def test_a_dry_run_says_what_it_would_compose_of_a_reused_computer_env(tmp_path, composed):
+    root = _bundle(tmp_path / "desk")
+    materialize(_plan(root), build_here=local_builds(_plan(root)))
+    told = []
+
+    dry = dry_run_bundle(root, sandbox="local", on_progress=told.append)
+
+    env_id = f"{_plan(root).bundle.bundle.id_root}/desktop"
+    assert dry.materialization.composing == (env_id,) and len(composed) == 1
+    assert "envs/desktop: would compose container/amd64, container/arm64" in told
 
 
 def test_the_env_alone_is_planned_whatever_the_bundles_tasks_would_deploy(tmp_path, composed, monkeypatch):

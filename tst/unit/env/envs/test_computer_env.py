@@ -877,6 +877,20 @@ def test_a_builder_vm_its_provider_loses_fails_its_pair_alone_and_is_torn_down(b
     assert composed["amd64"]["status"] == "ready" and all(vm.terminated for vm in vms.vms)
 
 
+def test_with_emulation_off_an_arch_a_refused_link_runs_natively_fails_and_only_one_needing_emulation_is_skipped(
+        base, driver, docker, tmp_path):
+    vms = FakeVmProvider(docker, tmp_path / "vms")
+
+    composed = Env.get(_put(base, driver, sandbox_provider=vms, emulate=False).id).metadata["composed"]["container"]
+
+    assert (composed["amd64"]["status"], composed["amd64"]["reason"]) == (
+        "failed", "FakeVmProvider's VMs can't fetch from the object store, which signs no URLs; build on the local "
+                  "provider")
+    assert (composed["arm64"]["status"], composed["arm64"]["reason"]) == (
+        "skipped", "emulation is off, and FakeVmProvider doesn't run linux/arm64 natively")
+    assert vms.vms == []
+
+
 class Containers(SandboxProvider):
     async def create_sandbox(self, **kwargs):
         raise AssertionError("a container was created")

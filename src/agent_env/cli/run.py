@@ -92,7 +92,7 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
         if dry_run:
             click.echo(_DRY_RUN)
             _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent,
-                                           on_progress=click.echo, id_root=id_root))
+                                           on_progress=click.echo, id_root=id_root, emulate=not no_emulate))
             return
         result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
                             judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
@@ -222,6 +222,10 @@ def _report_dry_run(dry: DryRun) -> None:
         click.echo("Would set up first:")
     for build in dry.infra:
         click.echo(f"  {build}: {build.planned()}")
+    if materialization.composing:
+        click.echo("Would compose what's left of:")
+    for env_id in materialization.composing:
+        click.echo(f"  {env_id}")
     click.echo("Would run:")
     for entry in dry.runs:
         click.echo(f"  {dry.path(entry)} v{materialization.version_of('task', entry.id)}")

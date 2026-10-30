@@ -148,13 +148,17 @@ class Builds:
         self._refused = [(link, _refused(link, store_id, repository)) for link in provider.links]
 
     def link(self, platform: str) -> SandboxProvider:
-        """The link that builds ``platform``. Raises Unbuildable, or Skipped when it would emulate it and mustn't."""
+        """The link that builds ``platform``. Raises Unbuildable, or Skipped when only emulation would build it and the
+        put turned emulation off."""
         links = [link for link, problem in self._refused if problem is None]
         if native := [link for link in links if platform in link.native_platforms()]:
             return native[0]
         if not self.emulate:
+            if refused := [problem for link, problem in self._refused
+                           if problem is not None and platform in link.native_platforms()]:
+                raise Unbuildable("; ".join(refused))
             raise Skipped("emulation is off, and " + "; ".join(
-                problem or f"{type(link).__name__} doesn't run {platform} natively" for link, problem in self._refused))
+                f"{type(link).__name__} doesn't run {platform} natively" for link, _ in self._refused))
         for link in links:
             if not _docker_here(link) or platform in _emulated_platforms():
                 return link

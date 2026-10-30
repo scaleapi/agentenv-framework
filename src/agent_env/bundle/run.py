@@ -327,11 +327,13 @@ def dry_run_bundle(
     agent: str | None = None,
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
+    emulate: bool = True,
 ) -> DryRun:
     """Check what ``run_bundle`` with these arguments checks before its first task runs, and say what it would
     write and run, writing and running nothing: no entity, ledger row, lock or instance. Each write's version is
     the one it would reuse or the store's next, which another run writing the id first can take. ``on_progress``
-    is given the line ``run_bundle`` gives for each write, as it is checked.
+    is given the line ``run_bundle`` gives for each write, as it is checked, and for each computer env it reuses
+    with pairs left, what it would compose on ``sandbox`` (``emulate`` as ``run_bundle`` takes it).
 
     It raises what ``run_bundle`` raises before its first task runs, a failed preflight included. Like
     ``run_bundle``, it turns namespace routing on for the whole process while it runs, so it suits the CLI and
@@ -342,7 +344,10 @@ def dry_run_bundle(
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
         _say_plan(plan, say, declaring_for(Path(root), installed=id_root is not None, dry_run=True))
-        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
+        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
+                                      sandbox_provider=build_sandbox_provider(sandbox) if sandbox else None,
+                                      on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"),
+                                      emulate=emulate)
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
                       preflight.built_here)

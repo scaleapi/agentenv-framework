@@ -33,7 +33,7 @@ def test_a_builder_vm_resolves_stores_and_builds_an_arch_it_emulates(tmp_path):
     (driver / "requirements.txt").write_text("six==1.16.0\n")
     (driver / "start").write_text("#!/bin/sh\necho started\n")
     (driver / "start").chmod(0o755)
-    vm = builder.VmBuilder(build_sandbox_provider("modal_vm"))
+    vm = builder.VmBuilder(build_sandbox_provider("modal_vm"), emulating=True)
     try:
         vm.start(tmp_path, SimpleNamespace(image_name=BASE, pinned_name=BASE), "linux/arm64", {})
         result = vm.resolve({"apt": ["jq"], "sources": [], "python": [
