@@ -27,7 +27,8 @@ from agent_env.providers.sandbox_providers.coreweave.provider import (
 from agent_env.providers.sandbox_providers.coreweave.sandbox import CoreWeaveContainerSandbox, CoreWeaveSandbox
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM, Accepts
-from agent_env.providers.sandbox_providers.sandbox_provider import SandboxNotFoundError, _unimplemented
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxNotFoundError, SandboxProvider, _unimplemented
+from agent_env.providers.sandbox_providers.sandbox_provider import all_sandbox_egress_hosts
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from tst.unit.providers.sandbox_providers.coreweave_fakes import Result, fake_sandbox_cls
 
@@ -36,7 +37,7 @@ ALLOWLIST = NetworkMode.ALLOWLIST
 
 @pytest.fixture(autouse=True)
 def _no_endpoint_parents(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(provider_module, "_endpoint_parents", set())
+    monkeypatch.setattr(CoreWeaveSandboxProvider, "EGRESS_HOSTS", ())
 
 
 @pytest.fixture
@@ -249,6 +250,23 @@ async def test_an_image_the_image_store_holds_credentials_for_is_refused(sandbox
 
 
 @pytest.mark.asyncio
+async def test_a_container_runs_the_digest_prepared_before_its_create_began(sandbox_cls, monkeypatch):
+    """Another deploy preparing the same tag at another digest while this create awaits the image store doesn't
+    change the image this one runs."""
+    provider = _provider(sandbox_cls)
+    name, first, second = "registry.example/a:1", "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    await provider.prepare_image(SimpleNamespace(image_name=name, image_digest=first, pinned_name=f"{name}@{first}"))
+
+    def auth(ref):
+        provider._pinned_images[name] = f"{name}@{second}"
+
+    monkeypatch.setattr(provider_module, "get_config",
+                        lambda: SimpleNamespace(get_image_store_at=lambda ref: SimpleNamespace(auth=auth)))
+    await provider.create_container(image_name=name, port=8000, env={})
+    assert sandbox_cls.server.created[0].kwargs["containers"][0].image == f"{name}@{first}"
+
+
+@pytest.mark.asyncio
 async def test_a_container_whose_image_fails_to_start_is_deleted(sandbox_cls, monkeypatch):
     async def failing_wait(self):
         raise SandboxFailedError("ImagePullBackOff")
@@ -400,6 +418,15 @@ async def test_exposed_port_domains_join_later_allowlists(sandbox_cls):
     await provider.create_vm(exposed_ports=[8080], setup_for_gateway=False)
     agent = await provider.create_vm(network_policy=NetworkPolicy(mode=ALLOWLIST), setup_for_gateway=False)
     assert "*.r1abc.ep1.cwsandbox.test" in agent.network_policy.allow_hosts
+
+
+@pytest.mark.asyncio
+async def test_exposed_port_domains_join_every_providers_allowlists(sandbox_cls):
+    """A restricted agent on another provider must reach an environment a CoreWeave sandbox serves."""
+    await _provider(sandbox_cls).create_vm(exposed_ports=[8080], setup_for_gateway=False)
+    assert "*.r1abc.ep1.cwsandbox.test" in all_sandbox_egress_hosts()
+    elsewhere = SandboxProvider.effective_network_policy(NetworkPolicy(mode=ALLOWLIST))
+    assert "*.r1abc.ep1.cwsandbox.test" in elsewhere.allow_hosts
 
 
 @pytest.mark.asyncio

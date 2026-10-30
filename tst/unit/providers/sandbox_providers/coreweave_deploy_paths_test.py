@@ -15,7 +15,6 @@ from agent_env.providers.env_providers import env_server_provider
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_server_provider import EnvironmentServerProvider
 from agent_env.providers.sandbox_providers import sandbox_provider
-from agent_env.providers.sandbox_providers.coreweave import provider as provider_module
 from agent_env.providers.sandbox_providers.coreweave.provider import CoreWeaveSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, Accepts
 from tst.unit.providers.sandbox_providers.coreweave_fakes import fake_sandbox_cls
@@ -32,7 +31,7 @@ TARBALL_ONLY = DockerImageArtifact(id="solver-image", version=3, description="d"
 
 @pytest.fixture(autouse=True)
 def _no_endpoint_parents(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(provider_module, "_endpoint_parents", set())
+    monkeypatch.setattr(CoreWeaveSandboxProvider, "EGRESS_HOSTS", ())
 
 
 @pytest.fixture

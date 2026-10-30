@@ -14,7 +14,7 @@ import math
 import re
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, Self
+from typing import Any, ClassVar, Self
 from urllib.parse import urlparse
 
 import cwsandbox
@@ -81,10 +81,6 @@ _START_SETTLE_SEC = 30
 _GONE_STATUSES = frozenset({SandboxStatus.TERMINATING, SandboxStatus.COMPLETED, SandboxStatus.FAILED,
                             SandboxStatus.TERMINATED})
 
-# An exposed port's URL is <port>-<sandbox id>.<runner label>.<domain>, and a CoreWeave wildcard covers exactly one
-# label, so no one entry covers every runner. The parents seen on exposed ports are added to later allowlists, so a
-# restricted agent reaches environments served there.
-_endpoint_parents: set[str] = set()
 _MAX_ENDPOINT_PARENTS = 16
 
 
@@ -126,9 +122,8 @@ def services(ports: list[int]) -> list[Service]:
 def tunnel_urls(raw: Any) -> dict[int, str]:
     urls = {endpoint.port: endpoint.url for endpoint in raw.service_endpoints if endpoint.url}
     for url in urls.values():
-        parent = (urlparse(url).hostname or "").partition(".")[2]
-        if parent and len(_endpoint_parents) < _MAX_ENDPOINT_PARENTS:
-            _endpoint_parents.add(f"*.{parent}")
+        if parent := (urlparse(url).hostname or "").partition(".")[2]:
+            _remember_egress_host(f"*.{parent}")
     return urls
 
 
@@ -209,6 +204,10 @@ class CoreWeaveSandboxProvider(SandboxProvider):
     # The platform pulls a container's image by its name; only a VM loads a tarball or builds a context.
     CONTAINER_ACCEPTS = Accepts.NAME
     SANDBOX_ACCEPTS = Accepts.NAME
+    # An exposed port's URL is <port>-<sandbox id>.<runner label>.<domain>, and a CoreWeave wildcard covers exactly one
+    # label, so no one entry covers every runner. Each parent seen on an exposed port is added here, and every
+    # provider's allowlists include it, so a restricted agent on any provider reaches environments served there.
+    EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ()
 
     def __init__(
         self,
@@ -273,11 +272,6 @@ class CoreWeaveSandboxProvider(SandboxProvider):
             self._pinned_images[image.image_name] = image.pinned_name
         else:
             self._pinned_images.pop(image.image_name, None)
-
-    @classmethod
-    def effective_network_policy(cls, policy: NetworkPolicy | None) -> NetworkPolicy:
-        """Every platform's hosts, as on the base, and the exposed-port domains seen so far."""
-        return super().effective_network_policy(policy).with_hosts(sorted(_endpoint_parents))
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
@@ -352,6 +346,8 @@ class CoreWeaveSandboxProvider(SandboxProvider):
             raise ValueError("CoreWeave sandboxes share no private network, so containers can't be put on one")
         # Every caller passes a size, so this is info rather than a warning on each deploy.
         logger.info("Ignoring disk_size_gb=%s: a CoreWeave container sandbox has no disk size to set", disk_size_gb)
+        # Chosen before any await, so another deploy preparing this tag at another digest meanwhile can't swap it.
+        image = self._pinned_images.get(image_name, image_name)
         store = get_config().get_image_store_at(image_name)
         if (auth := await asyncio.to_thread(store.auth, image_name)) is not None:
             raise ValueError(
@@ -366,8 +362,7 @@ class CoreWeaveSandboxProvider(SandboxProvider):
             network_policy=network_policy,
             # A single container's spec, not the SDK's single-container arguments, which would replace an unset command
             # with its own default: the image's entrypoint and command must run.
-            containers=[Container(image=self._pinned_images.get(image_name, image_name),
-                                  environment_variables=dict(env), resources=resources(cpu, memory))],
+            containers=[Container(image=image, environment_variables=dict(env), resources=resources(cpu, memory))],
         )
 
     async def create_sandbox(
@@ -482,3 +477,9 @@ class CoreWeaveSandboxProvider(SandboxProvider):
 
     async def terminate_sandbox(self, sandbox_id: str) -> None:
         await self._client.delete(sandbox_id)
+
+
+def _remember_egress_host(host: str) -> None:
+    known = CoreWeaveSandboxProvider.EGRESS_HOSTS
+    if host not in known and len(known) < _MAX_ENDPOINT_PARENTS:
+        CoreWeaveSandboxProvider.EGRESS_HOSTS = (*known, host)
