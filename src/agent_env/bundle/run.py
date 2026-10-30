@@ -308,6 +308,7 @@ def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], N
         on_write=lambda done: say(_written(plan, done)),
         build_here=preflight.built_here,
         sandbox_provider=build_sandbox_provider(sandbox) if sandbox else None,
+        on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"),
     )
     if preflight.infra:
         ensure_default_envs(preflight.infra_kinds, say=say)

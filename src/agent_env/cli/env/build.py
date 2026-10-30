@@ -28,7 +28,7 @@ def build(env_id: str, version: int | None, sandbox: str | None):
     if env.computer is None:
         raise click.ClickException(f"{env_id} names no computer and driver, so it has nothing to build alone")
     if (pairs := composer.pending(env, provider)) or not composer.current(env):
-        composer.compose(env, pairs, sandbox_provider=provider)
+        composer.compose(env, pairs, on_progress=click.echo, sandbox_provider=provider)
     failed = False
     for form, by_arch in env.metadata.get("composed", {}).items():
         for arch, result in by_arch.items():

@@ -186,6 +186,11 @@ def _refused(link: SandboxProvider, store_id: str, repository: str) -> str | Non
     return None
 
 
+def where(link: SandboxProvider) -> str:
+    """Where ``link`` builds, for a person to read."""
+    return "with this machine's Docker" if _docker_here(link) else f"in a {type(link).__name__} VM"
+
+
 def _docker_here(link: SandboxProvider) -> bool:
     """Whether ``link``'s sandboxes are containers on this machine's Docker, which then builds itself."""
     return link.ON_THIS_MACHINE and link.REACHES_HOST_AT is None

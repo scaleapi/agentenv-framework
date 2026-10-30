@@ -51,8 +51,8 @@ class AuthoringContext:
 
     bundle: Bundle
     entry: BundleEntry
-    #: Called just before writing the entry builds an image, which a run says it does.
-    on_build: Callable[[], None] | None = None
+    #: Told, a line at a time, how what writing the entry does that takes long goes, such as composing a computer env.
+    on_progress: Callable[[str], None] | None = None
     #: Where writing a computer env composes it; the env's sandbox provider when None.
     sandbox_provider: SandboxProvider | None = None
 

@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import tarfile
+import time
 import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
@@ -262,14 +263,20 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     monkeypatch.setattr(builder, "docker_login", lambda signed_in: docker_calls.append(("login", signed_in)))
     monkeypatch.setattr(composer, "write_index", lambda index, images, signed_in: (
         docker_calls.append(("join", index, signed_in)), docker.joined(index, images, signed_in)))
-    announced = []
-    first = _put(base, driver, on_build=lambda: announced.append("first"))
+    first_told, second_told = [], []
+    first = _put(base, driver, on_progress=first_told.append)
     docker_calls.clear()
     second = _put(base, driver, id="@local/~/kit/other", environment_name="other", display={"width": 640, "height": 480},
-                  network={"mode": "allowlist"}, on_build=lambda: announced.append("second"))
+                  network={"mode": "allowlist"}, on_progress=second_told.append)
 
     built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
-    assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused) and announced == ["first"]
+    assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
+    assert "container/arm64: building natively with this machine's Docker" in first_told
+    assert "container/amd64: building emulated, which is slow, with this machine's Docker" in first_told
+    assert not [line for line in second_told if "building" in line or "resolving" in line]
+    assert second_told[0] == "composing container/amd64, container/arm64 on LocalSandboxProvider"
+    assert "container/amd64: reusing the image of the same key, built earlier" in second_told
+    assert any(re.fullmatch(r"container/arm64: reused, ready \(\d+ s\)", line) for line in second_told)
     assert len(docker.resolved) == 2 and {arch: r["lock"] for arch, r in reused.items()} == {
         arch: r["lock"] for arch, r in built.items()}
     assert {arch: reused[arch]["image"] for arch in reused} == {arch: built[arch]["image"] for arch in built}
@@ -277,6 +284,20 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
         "amd64": ({"mss": "10.1.0"}, True), "arm64": ({"mss": "10.1.0"}, False)}
     index = ComputerArtifact.get(f"{second.id}__computer").image().image_name.partition("@")[0]
     assert docker_calls == [("join", index, auth)]
+
+
+def test_a_stage_that_goes_on_is_said_to_go_on_and_a_failed_pair_says_why(base, driver, docker, monkeypatch):
+    docker.fail["linux/amd64"] = "#7 ERROR: pip install failed"
+    build = docker.build_image
+    monkeypatch.setattr(composer, "_HEARTBEAT_S", 0.1)
+    monkeypatch.setattr(builder, "build_image", lambda *args, **kwargs: (time.sleep(0.5), build(*args, **kwargs))[1])
+    told = []
+
+    _put(base, driver, on_progress=told.append)
+
+    assert [line for line in told if line.startswith("container/arm64: still building the image (")]
+    assert any(re.fullmatch(r"container/amd64: failed at build: the build failed: #7 ERROR: pip install failed \(\d+ s\)",
+                            line) for line in told)
 
 
 @pytest.mark.parametrize("change", ["requirements", "build-setting", "service", "display-read-at-build"])

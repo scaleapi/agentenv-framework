@@ -112,7 +112,8 @@ def register_bundle(
             registered, dry_run=dry_run, ledger=ledger,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"  {_label(registered, write)}: building with docker and pushing"),
-            on_write=lambda done: say(f"  {registered_line(registered, done)}"), sandbox_provider=provider)
+            on_write=lambda done: say(f"  {registered_line(registered, done)}"), sandbox_provider=provider,
+            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"))
     return Registration(registered, materialization, ids, tuple(_floating(registered)), identity, shared, requires)
 
 

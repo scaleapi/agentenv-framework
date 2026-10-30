@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -73,37 +74,36 @@ _WRITE_TRIES = 4
 _PROBE_TTL_S = 1800
 #: How long the probe at full may take on a computer that booted: about ten seconds on a healthy one.
 _PROBE_TIMEOUT_S = 120
+#: How often a compose says a pair is still at a stage, which can take most of an hour under emulation.
+_HEARTBEAT_S = 600
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
 
 
 def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
-            on_build: Callable[[], None] | None = None, sandbox_provider: SandboxProvider | None = None) -> None:
+            on_progress: Callable[[str], None] | None = None, sandbox_provider: SandboxProvider | None = None) -> None:
     """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel, on
     ``sandbox_provider``, by default the env's, and probe each one it runs natively (gate 3), recording each as it
-    starts and finishes, then write the env's computer over every pair built so far. ``on_build`` is called once, just
-    before the first image is built; reusing them all calls it never."""
+    starts and finishes, then write the env's computer over every pair built so far. Each pair's stages and how it
+    ended go to ``on_progress`` and the log as they happen (``_Progress``)."""
     from agent_env.providers import get_env_sandbox_provider
 
-    base, driver = env.computer, env.driver
-    building = _once(on_build)
-    builds = builder.Builds(sandbox_provider or get_env_sandbox_provider(), env.stored_id, REPOSITORY)
+    base, driver, provider = env.computer, env.driver, sandbox_provider or get_env_sandbox_provider()
+    builds = builder.Builds(provider, env.stored_id, REPOSITORY)
     pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base)
                                              for arch in gate.arches(base, driver, env.composed_apps())]
     record = _Record(env)
     record.started(pairs)
-    with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
-        futures = {pool.submit(_composed, env, base, driver, form, arch, builds, building): (form, arch)
+    with _Progress(env, on_progress) as progress, ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
+        progress.say(f"composing {', '.join(f'{form}/{arch}' for form, arch in pairs)} on "
+                     f"{' or '.join(type(link).__name__ for link in provider.links)}")
+        futures = {pool.submit(_composed, env, base, driver, form, arch, builds, progress): (form, arch)
                    for form, arch in pairs}
         for future in as_completed(futures):
             form, arch = futures[future]
             result = future.result()
-            if result["status"] == "failed":
-                logger.warning(f"{env.stored_id}: {form}/{arch} failed at {result['stage']}: {result['reason']}")
-            else:
-                logger.info(f"{env.stored_id}: {form}/{arch} {'reused' if result['reused'] else 'built'}, "
-                            f"{result['status']}: {result['image']}")
+            progress.ended(f"{form}/{arch}", result)
             record.finished(form, arch, result)
     record.computer(_computer(env, base, record.built()))
 
@@ -128,19 +128,22 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None) -
 
 
 def _composed(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
-              builds: builder.Builds, building: Callable[[], None]) -> dict:
+              builds: builder.Builds, progress: _Progress) -> dict:
     """``form`` and ``arch`` built or reused, then probed when it built (gate 3)."""
-    result = _built(env, base, driver, form, arch, builds, building)
-    return _probed(env, driver, form, arch, result, builds.provider) if result["status"] == "unverified" else result
+    result = _built(env, base, driver, form, arch, builds, progress)
+    if result["status"] != "unverified":
+        return result
+    return _probed(env, driver, form, arch, result, builds.provider, progress)
 
 
 def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,
-            sandbox_provider: SandboxProvider) -> dict:
+            sandbox_provider: SandboxProvider, progress: _Progress) -> dict:
     """Gate 3: the build of ``result`` booted on the first link of ``sandbox_provider`` that runs ``arch`` natively, and
     probed at ``full``: ready, with the driver's card, or failed at the probe; each with a summary of the probe and its
     report stored. Still unverified, saying why, when no link runs ``arch`` natively."""
     if not (links := boot.native_links(sandbox_provider, arch)):
         return {**result, "reason": f"no link of the sandbox provider runs linux/{arch} natively to probe it"}
+    progress.at(f"{form}/{arch}", "probing", f"probing on {type(links[0]).__name__}")
     try:
         report, card, provider = asyncio.run(_probe(links, env, driver, result["image"]))
     except TimeoutError:
@@ -183,10 +186,10 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
 
 
 def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
-           builds: builder.Builds, building: Callable[[], None]) -> dict:
-    """The status of ``form`` and ``arch`` once built and pushed, or reused, or the stage that failed and why. A builder
-    from ``builds`` resolves and builds it, opened when first needed, after ``building`` is called."""
-    stage, key = "build", None
+           builds: builder.Builds, progress: _Progress) -> dict:
+    """The status of ``form`` and ``arch`` once built and pushed, or reused, or the stage that failed and why, each
+    stage reported to ``progress``. A builder from ``builds`` resolves and builds it, opened when first needed."""
+    stage, key, pair = "build", None, f"{form}/{arch}"
     try:
         with tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened:
             context, fetched, from_store = Path(work) / builder.CONTEXT, {}, {}
@@ -201,7 +204,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             def on() -> builder.Builder:
                 if not held:
                     link = builds.link(platform)
-                    building()
+                    how = "natively" if platform in link.native_platforms() else "emulated, which is slow,"
+                    progress.at(pair, "starting its builder", f"building {how} {builder.where(link)}")
                     held.append(opened.enter_context(builds.open(link, platform, Path(work), base.image(), from_store)))
                 return held[0]
 
@@ -209,7 +213,10 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             lock = packages.stored(inputs, env.stored_id) if inputs is not None else None
             if inputs is not None and lock is None:
                 stage = "resolve"
-                lock, fetched = packages.resolve(inputs, wants, on(), source, arch, env.stored_id)
+                resolving = on()
+                progress.at(pair, "resolving packages")
+                lock, fetched = packages.resolve(inputs, wants, resolving, source, arch, env.stored_id)
+                progress.at(pair, "resolved", f"resolved {len(fetched)} files and stored them")
                 stage = "build"
             dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
             key = "sha256:" + hashlib.sha256(json.dumps({
@@ -221,11 +228,13 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             store.ensure_repository(REPOSITORY)
             ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
             if (pinned := _served(ref, store)) is not None:
+                progress.at(pair, "reusing", "reusing the image of the same key, built earlier")
                 kept = labels(pinned, arch, store.auth(pinned))
                 return {"status": "unverified", "key": key, "image": pinned, "reused": True,
                         "emulated": kept.get(EMULATED_LABEL) == "true", "lock": inputs,
                         "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": _now()}
             building_on = on()
+            progress.at(pair, "building the image")
             if lock is not None:
                 packages.stage(lock, building_on, env.stored_id, fetched)
             local, emulated = f"agentenv-computer:{key[7:23]}-{arch}", platform != building_on.platform
@@ -235,6 +244,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 INSTALLED_LABEL: json.dumps(installed, sort_keys=True), EMULATED_LABEL: "true" if emulated else "false",
             }, context="label")
             stage = "push"
+            progress.at(pair, "pushing the image")
             building_on.push(local, ref, store)
             return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
                     "emulated": emulated, "builder": building_on.name, "lock": inputs, "installed": installed,
@@ -252,18 +262,6 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
         return _failed(env, form, arch, stage, key, f"{' '.join(e.cmd[:2])} failed: {(e.stderr or '').strip()}")
     except (RuntimeError, ValueError, OSError) as e:
         return _failed(env, form, arch, stage, key, f"{type(e).__name__}: {e}")
-
-
-def _once(fn: Callable[[], None] | None) -> Callable[[], None]:
-    """``fn``, called at most once however many builds call it at once; nothing when it's None."""
-    lock, called = threading.Lock(), []
-
-    def once() -> None:
-        with lock:
-            if fn is not None and not called:
-                called.append(True)
-                fn()
-    return once
 
 
 def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
@@ -575,6 +573,62 @@ class _Record:
                     if attempt == _WRITE_TRIES - 1:
                         raise
                     self.env.metadata = Env.get(self.env.stored_id, self.env.version).metadata
+
+
+class _Progress:
+    """What a compose reports as it goes, to ``on_progress`` and the log: a line as each pair reaches a stage, one each
+    ``_HEARTBEAT_S`` a stage goes on, and how each pair ended, with the time since the compose began."""
+
+    def __init__(self, env: ComputerEnv, on_progress: Callable[[str], None] | None):
+        self.env, self.on_progress, self.lock = env, on_progress, threading.Lock()
+        self.began, self.stages, self.stopped = time.monotonic(), {}, threading.Event()
+
+    def __enter__(self) -> _Progress:
+        self.beating = threading.Thread(target=self._beat, daemon=True)
+        self.beating.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.stopped.set()
+        self.beating.join()
+
+    def say(self, line: str, failed: bool = False) -> None:
+        """``line`` to ``on_progress``, and the log; a failure as a warning when nothing else shows it."""
+        logger.log(logging.WARNING if failed and self.on_progress is None else logging.INFO,
+                   f"{self.env.stored_id}: {line}")
+        if self.on_progress is not None:
+            with self.lock:
+                self.on_progress(line)
+
+    def at(self, pair: str, stage: str, line: str | None = None) -> None:
+        now = time.monotonic()
+        with self.lock:
+            self.stages[pair] = (stage, now, now)
+        self.say(f"{pair}: {line or stage}")
+
+    def ended(self, pair: str, result: dict) -> None:
+        with self.lock:
+            self.stages.pop(pair, None)
+        status = f"failed at {result['stage']}" if result["status"] == "failed" else result["status"]
+        reason = f": {result['reason']}" if result.get("reason") else ""
+        self.say(f"{pair}: {'reused, ' if result.get('reused') else ''}{status}{reason} "
+                 f"({_took(time.monotonic() - self.began)})", failed=result["status"] == "failed")
+
+    def _beat(self) -> None:
+        while not self.stopped.wait(_HEARTBEAT_S / 10):
+            now = time.monotonic()
+            with self.lock:
+                due = [(pair, stage, since) for pair, (stage, since, said) in self.stages.items()
+                       if now - said >= _HEARTBEAT_S]
+                for pair, stage, since in due:
+                    self.stages[pair] = (stage, since, now)
+            for pair, stage, since in due:
+                self.say(f"{pair}: still {stage} ({_took(now - since)})")
+
+
+def _took(seconds: float) -> str:
+    minutes, seconds = divmod(round(seconds), 60)
+    return f"{minutes} min {seconds} s" if minutes else f"{seconds} s"
 
 
 def _rank(result: dict) -> int:
