@@ -209,7 +209,7 @@ def serve(folder: str | Path, *, host: str, port: int) -> None:
     """Runs the resources server ``write_server`` wrote into ``folder`` on its own, at ``host``:``port``, without Gym's
     head server or the agent servers its config names, for a trainer that plays the folder's rows against the server's
     URL. As verifiers' launcher for Gym's own servers does, its client names a head server nothing calls."""
-    folder = Path(folder)
+    folder = Path(folder).resolve()
     written = yaml.safe_load((folder / "configs" / f"{folder.name}.yaml").read_text())
     config = written[folder.name]["resources_servers"][folder.name]
     resources = AgentEnvResourcesServer(

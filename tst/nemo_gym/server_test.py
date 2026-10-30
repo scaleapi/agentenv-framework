@@ -184,8 +184,8 @@ def test_serve_runs_a_written_server_on_its_own_at_the_port_it_is_given(serve, t
     row = json.loads((folder / "data" / "all.jsonl").read_text().splitlines()[0])
     port = _free_port()
 
-    served = subprocess.Popen([sys.executable, "-m", "agent_env.training.nemo_gym", "serve", str(folder), "--port",
-                               str(port)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    served = subprocess.Popen([sys.executable, "-m", "agent_env.training.nemo_gym", "serve", ".", "--port", str(port)],
+                              cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         with httpx.Client(base_url=_up(served, f"http://127.0.0.1:{port}")) as client:
             assert client.post("/seed_session", json=row).json() == {}
