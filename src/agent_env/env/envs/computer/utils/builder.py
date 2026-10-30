@@ -48,8 +48,9 @@ RESOLVER = Path(__file__).with_name("resolve_in_base.py")
 #: since the stores keep no file modes.
 RUN_ONLY = (b"#!", b"\x7fELF")
 EXECUTABLE = 0o755
-#: What registers QEMU in a builder VM's kernel, for a platform no link runs natively.
-BINFMT = ("docker.io/tonistiigi/binfmt:qemu-v9.2.2"
+#: What registers QEMU in a builder VM's kernel, for a platform no link runs natively: Docker Hub's image through
+#: Google's mirror of it, which doesn't limit anonymous pulls by IP as Docker Hub does.
+BINFMT = ("mirror.gcr.io/tonistiigi/binfmt:qemu-v9.2.2"
           "@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6")
 #: The BuildKit client a builder VM's Docker builds with, installed where it has none, by the VM's platform.
 BUILDX = "https://github.com/docker/buildx/releases/download/v0.38.0/buildx-v0.38.0.{platform}"
