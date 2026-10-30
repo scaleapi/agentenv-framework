@@ -49,6 +49,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
     from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
     from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
+    from agent_env.task_step.task_steps.verifiers.website_state_verifier import WebsiteStateVerifierTaskStep
     from agent_env.task_step.task_steps.run_docker_container import RunDockerContainerTaskStep
     from agent_env.task_step.task_steps.mcp_env_validator.verify_mcp_tool_schema import VerifyMCPToolSchemaTaskStep
     from agent_env.task_step.task_steps.mcp_env_validator.verify_spec_conformance import VerifySpecConformanceTaskStep
@@ -103,6 +104,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(InstallAgentTaskStep): InstallAgentTaskStep,
         _get_type(RubricsVerifierTaskStep): RubricsVerifierTaskStep,
         _get_type(RunContainerUnitTestsVerifierTaskStep): RunContainerUnitTestsVerifierTaskStep,
+        _get_type(WebsiteStateVerifierTaskStep): WebsiteStateVerifierTaskStep,
         _get_type(RunDockerContainerTaskStep): RunDockerContainerTaskStep,
         _get_type(VerifyMCPToolSchemaTaskStep): VerifyMCPToolSchemaTaskStep,
         _get_type(VerifySpecConformanceTaskStep): VerifySpecConformanceTaskStep,
