@@ -13,6 +13,7 @@ import hashlib
 import importlib.metadata
 import json
 import logging
+import re
 import shlex
 import shutil
 import subprocess
@@ -78,6 +79,12 @@ _HEARTBEAT_S = 600
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
+#: Paths two parts' run scripts and install steps may both write: temporary files, logs and caches, and the files
+#: installers edit in place, so the later part's copy holds the earlier's change: the account databases, the linker's
+#: cache, the system environment and a home's shell startup files.
+SHARED = re.compile(r"^/(tmp|var/tmp|var/log|var/cache|run)/|/\.cache/|/__pycache__/|"
+                    r"^/etc/(passwd|group|shadow|gshadow|subuid|subgid|ld\.so\.cache|environment)-?$|"
+                    r"^/(root|home/[^/]+)/\.(bashrc|profile|bash_profile)$")
 
 
 @dataclass(frozen=True)
@@ -251,6 +258,12 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 packages.stage(lock, building_on, env.stored_id, fetched)
             local, emulated = f"agentenv-computer:{key[7:23]}-{arch}", platform != building_on.platform
             building_on.build(f"{dockerfile}LABEL {KEY_LABEL}={key}\n", local, platform, {KEY_LABEL: key})
+            if len(runs := {part.of: _runs(part) for part in layers if _runs(part)}) > 1:
+                progress.at(pair, "comparing the files its parts' run scripts and install steps wrote")
+                written = building_on.written(local, [command for commands in runs.values() for _, command in commands])
+                if clashes := _clashes(runs, written):
+                    return _failed(env, form, arch, stage, key, "its parts write a file differently, so the later "
+                                   "part's would hide the earlier's: " + "; ".join(clashes))
             installed = building_on.installed(local, layer.prefix)
             building_on.build(f"FROM {local}\n", local, platform, {
                 INSTALLED_LABEL: json.dumps(installed, sort_keys=True), EMULATED_LABEL: "true" if emulated else "false",
@@ -300,6 +313,7 @@ class _Layer:
     prefix: str
     install: Install
     conf: str
+    of: str
     app: bool = False
     served: str | None = None
     steps: tuple[tuple[str, str], ...] = ()
@@ -310,7 +324,7 @@ def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifa
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
     its port, its folder under ``DRIVERS`` named for its id's last part."""
     install, name = driver.install[base.os.type], gate.folder_name(driver.id, "driver")
-    layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-{name}.conf")
+    layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-{name}.conf", driver.id)
     _stage(context, layer, f"driver {driver.id}", driver.files, _services(name, install), {"MCP_PORT": driver.port},
            from_store)
     return layer
@@ -324,7 +338,8 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
     install, name = app.install[base.os.type], gate.folder_name(app.id, "app")
     file, _, cls = app.module.partition(":")
     served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
-    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app=True, served=served,
+    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app.id, app=True,
+                   served=served,
                    steps=tuple((step.name, step.scope) for step in app.declaration.install_steps
                                if step.os is None or base.os.type in step.os))
     programs = {f"app-{name}": f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
@@ -442,11 +457,8 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
                              f"--format=json > {prefix}/installed.json")
         if layer.app:
             lines.append(f"RUN mkdir -p {prefix}/{SOCKET.parent} && chown {user} {prefix}/{SOCKET.parent}")
-        for run in layer.install.run or []:
-            lines += _as(run.scope, user, f"RUN --network=none cd {prefix} && {shlex.quote('./' + run.script)}")
-        for step, scope in layer.steps:
-            lines += _as(scope, user, f"RUN --network=none cd {prefix} && venv/bin/python -m "
-                                      f"agentenv_protocol.computer.run_install_step {layer.served} {step}")
+        for scope, command in _runs(layer):
+            lines += _as(scope, user, f"RUN --network=none {command}")
         lines.append(f"COPY {layer.conf} /etc/supervisor/conf.d/{layer.conf}")
         checks = [f"test -d {prefix}", f"test -f /etc/supervisor/conf.d/{layer.conf}"]
         if _venv(layer):
@@ -454,6 +466,26 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
         lines.append(f"RUN {' && '.join(checks)}")
     lines.append(f"USER {user}")
     return "\n".join(lines) + "\n"
+
+
+def _runs(layer: _Layer) -> list[tuple[str, str]]:
+    """The commands of ``layer``'s run scripts and its install steps, each with the scope it runs as: the only steps of
+    a build that write outside the layer's folder."""
+    return [*((run.scope, f"cd {layer.prefix} && {shlex.quote('./' + run.script)}") for run in layer.install.run or []),
+            *((scope, f"cd {layer.prefix} && venv/bin/python -m agentenv_protocol.computer.run_install_step "
+                      f"{layer.served} {step}") for step, scope in layer.steps)]
+
+
+def _clashes(runs: dict[str, list[tuple[str, str]]], written: list[dict[str, str]]) -> list[str]:
+    """Each path, but a ``SHARED`` one, that two parts' ``runs`` wrote with different content, as ``written`` lists what
+    each of their commands wrote, in order, with the parts that wrote it."""
+    found, owners = iter(written), {}
+    for of, commands in runs.items():
+        for _ in commands:
+            for path, content in next(found).items():
+                if not SHARED.search(path):
+                    owners.setdefault(path, {})[of] = content
+    return [f"{path} ({' and '.join(by)})" for path, by in sorted(owners.items()) if len(set(by.values())) > 1]
 
 
 def _as(scope: str, user: str, run: str) -> list[str]:

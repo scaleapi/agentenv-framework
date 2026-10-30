@@ -1070,6 +1070,7 @@ def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_t
     assert [(app.id, app.version) for app in stored.composed_apps()] == [(notes.id, 1), (mail.id, 1)]
     assert stored.to_dict()["apps"] == [{"id": notes.id, "version": 1}, {"id": mail.id, "version": 1}]
     assert stored.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"}
+    assert docker.saved == []
     assert _put(base, driver, apps=[mail, notes]).metadata["composed"]["container"]["arm64"]["key"] != (
         stored.metadata["composed"]["container"]["arm64"]["key"])
 
@@ -1103,6 +1104,68 @@ def test_apps_that_dont_fit_together_or_on_the_computer_are_refused_before_anyth
     with pytest.raises(NotFoundError):
         Env.get("@local/~/kit/desktop")
     assert docker.builds == []
+
+
+#: An install that runs one script, setup.sh, as root.
+SETUP = {"run": [{"script": "setup.sh"}], "services": []}
+
+
+def _setting_up(tmp_path, *names):
+    """An app of each of ``names`` whose install runs setup.sh, put without a computer."""
+    return [_app(None, None, tmp_path / name, compose=False, name=name, install=SETUP,
+                 extra={"setup.sh": "#!/bin/sh\n"}) for name in names]
+
+
+@pytest.mark.parametrize("mail, notes, clash", [
+    ({"usr/local/bin/tool": b"mail's"}, {"usr/local/bin/tool": b"notes'"},
+     "/usr/local/bin/tool (@local/~/kit/mail and @local/~/kit/notes)"),
+    ({"usr/bin/tool": "/opt/agentenv/apps/mail/tool"}, {"usr/bin/tool": "/opt/agentenv/apps/notes/tool"},
+     "/usr/bin/tool (@local/~/kit/mail and @local/~/kit/notes)"),
+    ({"usr/local/bin/tool": b"same"}, {"usr/local/bin/tool": b"same"}, None),
+    *[({path: b"mail's"}, {path: b"notes'"}, None) for path in (
+        "var/log/setup.log", "tmp/x", "home/user/.cache/pip/x", "opt/x/__pycache__/m.pyc", "etc/passwd", "etc/group-",
+        "etc/ld.so.cache", "root/.bashrc", "home/user/.profile")],
+], ids=["file", "link", "same", "log", "tmp", "cache", "pycache", "passwd", "group-backup", "ld-cache", "root-rc",
+        "home-profile"])
+def test_two_apps_whose_run_scripts_write_one_file_differently_fail_at_build_naming_it(base, driver, docker, tmp_path,
+                                                                                      mail, notes, clash):
+    docker.writes = {"apps/mail && ": mail, "apps/notes && ": notes}
+
+    env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes")).id)
+
+    composed = env.metadata["composed"]["container"]
+    assert sorted(docker.saved) == sorted(build["tag"] for build in docker.builds)
+    if clash is None:
+        assert env.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"}
+    else:
+        assert {arch: (r["status"], r["stage"], r["reason"]) for arch, r in composed.items()} == {
+            arch: ("failed", "build", "its parts write a file differently, so the later part's would hide the "
+                   f"earlier's: {clash}") for arch in ("amd64", "arm64")}
+        assert docker.probed == [] and "computer" not in env.metadata
+
+
+def test_one_part_with_run_scripts_has_nothing_to_compare_and_its_image_isnt_saved(base, driver, docker, tmp_path):
+    docker.writes = {"apps/mail && ": {"usr/local/bin/tool": b"mail's"}}
+    mail = _setting_up(tmp_path, "mail")[0]
+
+    env = Env.get(_put(base, driver, apps=[mail, _app(None, None, tmp_path / "notes", compose=False, name="notes")]).id)
+
+    assert env.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"} and docker.saved == []
+
+
+def test_a_builder_vm_compares_what_each_part_wrote_in_a_container_of_the_image_before_pushing(base, driver, docker,
+                                                                                              signing, tmp_path):
+    docker.writes = {"apps/mail && ": {"usr/local/bin/tool": b"mail's"}, "apps/notes && ": {"usr/local/bin/tool": b"notes'"}}
+    vms = FakeVmProvider(docker, tmp_path / "vms")
+
+    env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes"), composing=Composing(vms)).id)
+
+    assert {arch: (r["status"], r["reason"].rpartition(": ")[2]) for arch, r in env.metadata["composed"]["container"].items()} == {
+        arch: ("failed", "/usr/local/bin/tool (@local/~/kit/mail and @local/~/kit/notes)") for arch in ("amd64", "arm64")}
+    compared = [line for line in vms.ran if "/layers.py" in line]
+    assert len(compared) == 2 and all("docker run --rm --network none --user root" in line for line in compared)
+    assert not [line for line in vms.ran if "docker push" in line] and all(vm.terminated for vm in vms.vms)
+    assert not list((tmp_path / "vms").rglob("image.tar"))
 
 
 def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):

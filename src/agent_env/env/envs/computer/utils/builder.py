@@ -27,6 +27,7 @@ import httpx
 
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
 from agent_env.config import get_config
+from agent_env.env.envs.computer.utils import layers_in_image
 from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
 from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 FORMAT = 1
 CONTEXT, RESOLVED = "context", "resolve"
 RESOLVER = Path(__file__).with_name("resolve_in_base.py")
+LAYERS = Path(__file__).with_name("layers_in_image.py")
 #: The shell side of a builder VM, its subcommands run there (``VmBuilder``).
 IN_VM = Path(__file__).with_name("builder_in_vm.sh")
 #: What a file starts with when it's only ever run: a script or a Linux binary, made executable where it's staged,
@@ -135,6 +137,11 @@ class Builder(ABC):
     def installed(self, tag: str, prefix: str) -> dict[str, str]:
         """The packages ``tag``'s build installed into the venv of the driver at ``prefix``, by name, read from the
         image without running it, so on any arch; none for a driver with no venv."""
+
+    @abstractmethod
+    def written(self, tag: str, commands: list[str]) -> list[dict[str, str]]:
+        """What each of ``commands``, a RUN of ``tag``'s build, wrote in its layer of ``tag``, read from the image saved
+        (``layers_in_image``)."""
 
     @abstractmethod
     def push(self, tag: str, ref: str, store) -> None:
@@ -323,6 +330,14 @@ class LocalBuilder(Builder):
         with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as archive:
             return _packages(archive.extractfile(archive.getmembers()[0]).read())
 
+    def written(self, tag: str, commands: list[str]) -> list[dict[str, str]]:
+        saved = self.work / "image.tar"
+        save_image(tag, saved)
+        try:
+            return layers_in_image.written(str(saved), commands)
+        finally:
+            saved.unlink(missing_ok=True)
+
     def push(self, tag: str, ref: str, store) -> None:
         push_local_image(tag, ref, store)
 
@@ -425,6 +440,15 @@ class VmBuilder(Builder):
         listed = self._exec(f"{self.helper} installed {shlex.quote(tag)} {shlex.quote(f'{prefix}/installed.json')}")
         return _packages(listed.encode()) if listed.strip() else {}
 
+    def written(self, tag: str, commands: list[str]) -> list[dict[str, str]]:
+        """Read in a container of ``tag``, on its own Python, so the VM needs none."""
+        image, script = f"{self.work}/image.tar", f"{self.work}/{LAYERS.name}"
+        self._write(script, LAYERS.read_bytes())
+        return json.loads(self._exec(
+            f"docker save -o {image} {shlex.quote(tag)} && docker run --rm --network none --user root "
+            f"-v {image}:/image.tar:ro -v {script}:/layers.py:ro --entrypoint python3 {shlex.quote(tag)} /layers.py "
+            f"/image.tar {shlex.quote(json.dumps(commands))} && rm -f {image}"))
+
     def push(self, tag: str, ref: str, store) -> None:
         self._login(store.auth(ref))
         self._exec(f"docker tag {shlex.quote(tag)} {shlex.quote(ref)} && docker push {shlex.quote(ref)}")
@@ -514,6 +538,10 @@ def _inline(context: Path, skip: set[str]) -> bytes:
 
 def _packages(listed: bytes) -> dict[str, str]:
     return {package["name"]: package["version"] for package in json.loads(listed)}
+
+
+def save_image(tag: str, path: Path) -> None:
+    subprocess.run(["docker", "save", "-o", str(path), tag], check=True, capture_output=True, text=True)
 
 
 def sha256_of(path: Path) -> str:
