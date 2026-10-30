@@ -8,24 +8,26 @@
       "data/add",
       "data/get"
     ],
-    "install": {
-      "linux": {
-        "files": ".",
-        "python": "requirements.txt",
-        "services": [
-          {
-            "command": "venv/bin/python serve.py",
-            "name": "notes"
-          }
-        ]
-      }
-    },
     "install_steps": [],
-    "launch": {
-      "at": "demand",
-      "command": [
-        "notes"
-      ]
+    "os": {
+      "linux": {
+        "install": {
+          "files": ".",
+          "python": "requirements.txt",
+          "services": [
+            {
+              "command": "venv/bin/python serve.py",
+              "name": "notes"
+            }
+          ]
+        },
+        "launch": {
+          "at": "demand",
+          "command": [
+            "notes"
+          ]
+        }
+      }
     },
     "permissions": [],
     "ready_checks": [],

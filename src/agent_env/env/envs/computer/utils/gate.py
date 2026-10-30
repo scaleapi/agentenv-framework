@@ -67,14 +67,16 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
     return problems
 
 
-def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str) -> list[str]:
-    """The problems with ``values``, of ``app``'s settings by name, each named from ``at``: a setting it doesn't declare,
-    a secret's given as anything but a bare reference (or null, where it's optional), a required one missing, and what
-    the schema of its ``Settings`` refuses of the rest. A secret's reference never meets the constraints on its value,
-    and its value never reaches a message."""
-    schema, secrets = app.declaration.settings, app.secret_settings()
+def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str, os_type: str) -> list[str]:
+    """The problems with ``values``, of ``app``'s settings on ``os_type`` by name, each named from ``at``: a setting it
+    doesn't declare, a secret's given as anything but a bare reference (or null, where it's optional), a required one
+    missing, and what the schema of its ``Settings`` refuses of the rest. A secret's reference never meets the
+    constraints on its value, and its value never reaches a message."""
+    schema, secrets = app.settings_schema(os_type), app.secret_settings(os_type)
     properties, required = schema.get("properties", {}), schema.get("required", [])
-    problems = [f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]
+    build = (app.build_settings_schema(os_type) or {}).get("properties", {})
+    problems = [f"{at}.{name} is one of {app.id}'s build settings, which only another image changes" if name in build
+                else f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]
     problems += [f"{at}.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME reference "
                  "with no ?default, not its value" for name in values if name in secrets
                  and not (_names_a_secret(values[name]) or values[name] is None and _optional(properties[name]))]
@@ -83,6 +85,17 @@ def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str) -> 
              "required": [name for name in required if name not in secrets]}
     return problems + [f"{'.'.join([at, *map(str, error.absolute_path)])}: {error.message}" for error in
                        Draft202012Validator(plain).iter_errors({k: v for k, v in values.items() if k not in secrets})]
+
+
+def check_app_build_settings(app: ComputerAppEnv, values: dict[str, Any], at: str, os_type: str | None) -> list[str]:
+    """The problems with ``values``, of ``app``'s build settings on ``os_type`` by name, each named from ``at``: a
+    setting it doesn't declare as one, a required one missing, and what the schema of its ``BuildSettings`` refuses of
+    the rest. With no OS type, its class's."""
+    schema = app.build_settings_schema(os_type) or {"type": "object", "properties": {}}
+    problems = [f"{at}.{name}: {app.id} declares no build setting {name!r}" for name in values
+                if name not in schema["properties"]]
+    return problems + [f"{'.'.join([at, *map(str, error.absolute_path)])}: {error.message}"
+                       for error in Draft202012Validator(schema).iter_errors(values)]
 
 
 def _optional(setting: dict) -> bool:
