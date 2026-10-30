@@ -41,8 +41,8 @@ _DRY_RUN = "Dry run: nothing is written or run."
               help="The agent the solver runs as, whatever the tasks name: an alias such as pi, an agent of this "
                    "bundle or an installed one, or the store's.")
 @click.option("--sandbox", default=None,
-              help="The sandbox provider envs, agents, sandboxes and the judge deploy on; comma-separated for a "
-                   "fallback chain.")
+              help="The sandbox provider computer envs compose on and envs, agents, sandboxes and the judge deploy "
+                   "on; comma-separated for a fallback chain.")
 @click.option("--keep", is_flag=True,
               help="Keep the sandboxes up after the runs, print their endpoints, and tear them down on Ctrl-C.")
 @click.option("--dry-run", is_flag=True,

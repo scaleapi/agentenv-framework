@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.env.env import DeployedEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
+    from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 logger = logging.getLogger(__name__)
 
@@ -82,10 +83,11 @@ class ComputerEnv(Env):
     @classmethod
     def put(cls, *, id: str, computer: ComputerArtifact, driver: ComputerDriverEnv, environment_name: str,
             apps: Any = (), display: Any = None, network: Any = None, computer_settings: Any = None,
-            compose: bool = True, on_build: Optional[Callable[[], None]] = None) -> Self:
-        """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it unless ``compose`` is
-        False, calling ``on_build`` just before it builds an image. Refused, naming every mismatch, before anything is
-        stored."""
+            compose: bool = True, on_build: Optional[Callable[[], None]] = None,
+            sandbox_provider: Optional[SandboxProvider] = None) -> Self:
+        """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it on
+        ``sandbox_provider``, by default the env's, unless ``compose`` is False, calling ``on_build`` just before it
+        builds an image. Refused, naming every mismatch, before anything is stored."""
         values, problems = gate.check(computer, driver, apps=list(apps), display=display, network=network,
                                       computer_settings=computer_settings or {})
         if problems:
@@ -94,7 +96,7 @@ class ComputerEnv(Env):
             id=id, version=None, environment_name=environment_name,
             computer=computer, driver=driver, display=display, network=network, computer_settings=values))
         if compose:
-            composer.compose(env, on_build=on_build)
+            composer.compose(env, on_build=on_build, sandbox_provider=sandbox_provider)
         return env
 
     @classmethod
@@ -111,7 +113,8 @@ class ComputerEnv(Env):
                                                                                        ComputerDriverEnv)
         try:
             return cls.put(id=ctx.id, computer=base, driver=driver,
-                           environment_name=fields.pop("environment_name", ctx.name), on_build=ctx.on_build, **fields)
+                           environment_name=fields.pop("environment_name", ctx.name), on_build=ctx.on_build,
+                           sandbox_provider=ctx.sandbox_provider, **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
 

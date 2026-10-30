@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn, TypeVar, overload
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
 
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -26,6 +26,9 @@ from agent_env.utils.paths import os_reason
 
 from ._fs import relative, show, with_article
 from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError
+
+if TYPE_CHECKING:
+    from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 A = TypeVar("A", bound=Artifact)
 E = TypeVar("E", bound=Env)
@@ -48,8 +51,10 @@ class AuthoringContext:
 
     bundle: Bundle
     entry: BundleEntry
-    #: Called just before writing the entry builds an image with this machine's Docker, which a run says it does.
+    #: Called just before writing the entry builds an image, which a run says it does.
     on_build: Callable[[], None] | None = None
+    #: Where writing a computer env composes it; the env's sandbox provider when None.
+    sandbox_provider: SandboxProvider | None = None
 
     @property
     def id(self) -> str:

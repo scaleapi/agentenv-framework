@@ -218,7 +218,7 @@ def run_bundle(
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
     user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
-    tasks as written; ``sandbox`` is the provider that envs,
+    tasks as written; ``sandbox`` is the provider that computer envs compose on and that envs,
     agents, sandboxes and the judge deploy on. ``on_progress`` is given a line of text
     at each write and step. ``id_root`` roots the ids of a bundle an installed package provides
     (``InstalledBundle.id_root``); a folder's ids otherwise come from its path.
@@ -297,14 +297,17 @@ def _write_bundle(
         return _written_with_infra(plan, preflight, say)
 
 
-def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None]) -> Materialization:
-    """Write ``plan``, then set up the infra envs its runs deploy on."""
+def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None],
+                        sandbox: str | None = None) -> Materialization:
+    """Write ``plan``, its computer envs composed on ``sandbox`` when given, then set up the infra envs its runs deploy
+    on."""
     materialization = materialize(
         plan,
         on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
         on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
         on_write=lambda done: say(_written(plan, done)),
         build_here=preflight.built_here,
+        sandbox_provider=build_sandbox_provider(sandbox) if sandbox else None,
     )
     if preflight.infra:
         ensure_default_envs(preflight.infra_kinds, say=say)
@@ -366,7 +369,7 @@ def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandb
              agent: str | None, played: bool, say: Callable[[str], None], declaring: Declaring) -> PreparedBundle:
     plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played)
     _say_plan(plan, say, declaring)
-    materialization = _written_with_infra(plan, preflight, say)
+    materialization = _written_with_infra(plan, preflight, say, sandbox)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
     return PreparedBundle(plan, materialization, to_run)
 

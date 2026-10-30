@@ -15,6 +15,7 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.unit.bundle._support import layout, local_builds
 
 UBUNTU = "@local/agentenv-framework/computers/ubuntu-24.04"
@@ -35,9 +36,9 @@ def composed(tmp_path, monkeypatch, local_stores, cli_routing, builds):
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: None)
     calls = []
 
-    def compose(env, on_build=None):
+    def compose(env, on_build=None, sandbox_provider=None):
         on_build()
-        calls.append((env.id, env.computer.id, env.driver.id))
+        calls.append((env.id, env.computer.id, env.driver.id, sandbox_provider))
 
     monkeypatch.setattr(composer, "compose", compose)
     return calls
@@ -69,17 +70,18 @@ def _plan_env(root):
 
 @pytest.mark.parametrize("planned", [_plan, _plan_env], ids=["a-run", "the-env-alone"])
 def test_a_computer_env_naming_shipped_aliases_is_written_over_them_and_composed(tmp_path, composed, planned):
-    plan = planned(_bundle(tmp_path / "desk"))
+    plan, provider = planned(_bundle(tmp_path / "desk")), LocalSandboxProvider()
     building = []
 
-    done = materialize(plan, build_here=local_builds(plan), on_build=lambda write: building.append(write.id))
+    done = materialize(plan, build_here=local_builds(plan), on_build=lambda write: building.append(write.id),
+                       sandbox_provider=provider)
 
     env = Env.get(f"{plan.bundle.bundle.id_root}/desktop")
     written = {item.write.id for item in done.writes}
     assert isinstance(env, ComputerEnv) and {UBUNTU, REFERENCE} <= written
     assert (env.computer.id, env.driver.id, env.environment_name) == (UBUNTU, REFERENCE, "desktop")
     assert env.computer_settings == {"timezone": "Europe/Paris"} and env.display == {"width": 1600, "height": 900}
-    assert composed == [(env.id, UBUNTU, REFERENCE)] and env.id in building
+    assert composed == [(env.id, UBUNTU, REFERENCE, provider)] and env.id in building
 
 
 def test_the_env_alone_is_planned_whatever_the_bundles_tasks_would_deploy(tmp_path, composed, monkeypatch):

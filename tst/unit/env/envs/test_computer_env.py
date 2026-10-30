@@ -11,6 +11,8 @@ import io
 import json
 import logging
 import re
+import shlex
+import shutil
 import subprocess
 import tarfile
 import urllib.parse
@@ -35,7 +37,7 @@ from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.envs.computer.utils import boot, composer, gate, inside, packages, resolve_in_base
+from agent_env.env.envs.computer.utils import boot, builder, composer, gate, inside, packages, resolve_in_base
 from agent_env.env.envs.computer.utils.composer import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
@@ -47,6 +49,9 @@ from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.store.base import NotFoundError
 from agent_env.task import teardown
 from agent_env.task_step.context import TaskStepContext
@@ -80,6 +85,7 @@ class FakeDocker:
         """The resolver in the base: each apt package as one .deb, each venv's requirements as one wheel."""
         self.resolved.append((arch, request))
         out, result = work / "out", {"apt": [], "wheels": {}}
+        out.mkdir(parents=True, exist_ok=True)
         for name in (re.split("[=/]", wanted)[0] for wanted in request["apt"]):
             (out / "apt").mkdir(parents=True, exist_ok=True)
             (out / "apt" / f"{name}_1.0_{arch}.deb").write_bytes(f"{name} for {arch}".encode())
@@ -92,7 +98,12 @@ class FakeDocker:
             (out / "wheels" / layer["name"]).mkdir(parents=True)
             (out / "wheels" / layer["name"] / "mss-10.1.0-py3-none-any.whl").write_bytes(b"mss")
             result["wheels"][layer["name"]] = ["mss-10.1.0-py3-none-any.whl"]
-        return result, out
+        return result
+
+    def resolving(self, resolve=None):
+        """A LocalBuilder.resolve that runs ``resolve``, by default this one's, on the builder's context and resolve."""
+        return lambda on, request, source, arch, timeout: (resolve or self.resolve)(
+            request, on.work / builder.CONTEXT, source, arch, on.work / builder.RESOLVED)
 
     async def probe(self, links, env, driver, image):
         arch = self._arch(self.registry.manifests[image.rpartition("@")[2]]["config"]["digest"])
@@ -104,6 +115,9 @@ class FakeDocker:
         return ProbeReport.of("full", "desk", checks, [CARD_EXTENSION]), CARD, "LocalSandboxProvider"
 
     def build_image(self, dockerfile, context, tag, *, platform, labels=None, build_args=None):
+        if context.name == "label":
+            self.labels[tag] = labels
+            return
         if platform in self.fail:
             raise DockerBuildError(self.fail[platform])
         self.builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
@@ -113,18 +127,13 @@ class FakeDocker:
                             "build_settings": {path.parent.parent.name: json.loads(path.read_text())
                                                for path in context.glob("apps/*/.agentenv/build_settings.json")}})
 
-    def label(self, local, platform, extra):
-        self.labels[local] = extra
-
     def push(self, local, ref, store):
         self.registry.tags[ref] = self.registry.image(UBUNTU_LAYER, arch=local.rsplit("-", 1)[1],
                                                       labels=self.labels.get(local))
 
-    def joined(self, index, images):
-        manifests = {self.registry.manifests[image.rpartition("@")[2]]["config"]["digest"]: image.rpartition("@")[2]
-                     for image in images}
-        arches = {self._arch(config): digest for config, digest in manifests.items()}
-        self.registry.tags[index] = self.registry.index(**arches)
+    def joined(self, index, images, auth):
+        self.registry.tags[index] = self.registry.index(**{
+            platform.rsplit("/", 1)[1]: image.rpartition("@")[2] for platform, image in images.items()})
 
     def _arch(self, config_digest):
         return json.loads(self.registry.blobs[config_digest])["architecture"]
@@ -134,20 +143,19 @@ class FakeDocker:
 def docker(local_stores, cli_routing, monkeypatch):
     registry = Registry().serve(monkeypatch)
     fake = FakeDocker(registry)
-    monkeypatch.setattr(composer, "build_image", fake.build_image)
-    monkeypatch.setattr(composer, "push_local_image", fake.push)
-    monkeypatch.setattr(composer, "_label", fake.label)
-    monkeypatch.setattr(composer, "docker_login", lambda auth: None)
-    monkeypatch.setattr(composer, "_joined", fake.joined)
+    monkeypatch.setattr(builder, "build_image", fake.build_image)
+    monkeypatch.setattr(builder, "push_local_image", fake.push)
+    monkeypatch.setattr(builder, "docker_login", lambda auth: None)
+    monkeypatch.setattr(composer, "write_index", fake.joined)
     monkeypatch.setattr(composer, "pin_digest", registry.pin_digest)
     monkeypatch.setattr(docker_image, "pin_digest", registry.pin_digest)
-    monkeypatch.setattr(composer, "host_platform", lambda: "linux/arm64")
+    monkeypatch.setattr(builder, "host_platform", lambda: "linux/arm64")
     monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/arm64")
     monkeypatch.setattr(composer, "_probe", fake.probe)
-    monkeypatch.setattr(composer, "_emulated_platforms", lambda: {"linux/arm64", *fake.emulates})
-    monkeypatch.setattr(composer, "_installed", lambda local, layer: {"mss": "10.1.0"})
+    monkeypatch.setattr(builder, "_emulated_platforms", lambda: {"linux/arm64", *fake.emulates})
+    monkeypatch.setattr(builder.LocalBuilder, "installed", lambda self, tag, prefix: {"mss": "10.1.0"})
     monkeypatch.setattr(composer, "_protocol_source", lambda: None)
-    monkeypatch.setattr(packages, "_run_resolver", fake.resolve)
+    monkeypatch.setattr(builder.LocalBuilder, "resolve", fake.resolving())
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
     return fake
 
@@ -206,7 +214,7 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     composed = stored.metadata["composed"]["container"]
     assert {arch: (r["status"], r["reused"], r["emulated"]) for arch, r in composed.items()} == {
         "amd64": ("unverified", False, True), "arm64": ("ready", False, False)}
-    assert composed["amd64"]["reason"] == "no configured sandbox provider runs linux/amd64 natively to probe it"
+    assert composed["amd64"]["reason"] == "no link of the sandbox provider runs linux/amd64 natively to probe it"
     assert docker.probed == [("arm64", composed["arm64"]["image"])] and composed["arm64"]["card"] == CARD
     probe = composed["arm64"]["probe"]
     assert (probe["level"], probe["passed"], probe["provider"], probe["extensions"]) == (
@@ -251,9 +259,9 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
                                                                                                     docker, monkeypatch):
     auth, docker_calls = RegistryAuth("localhost:5000", "user", "token"), []
     monkeypatch.setattr(LocalRegistryImageStore, "auth", lambda self, ref: auth)
-    monkeypatch.setattr(composer, "docker_login", lambda signed_in: docker_calls.append(("login", signed_in)))
-    monkeypatch.setattr(composer, "_joined", lambda index, images: (docker_calls.append(("join", index)),
-                                                                    docker.joined(index, images)))
+    monkeypatch.setattr(builder, "docker_login", lambda signed_in: docker_calls.append(("login", signed_in)))
+    monkeypatch.setattr(composer, "write_index", lambda index, images, signed_in: (
+        docker_calls.append(("join", index, signed_in)), docker.joined(index, images, signed_in)))
     announced = []
     first = _put(base, driver, on_build=lambda: announced.append("first"))
     docker_calls.clear()
@@ -268,7 +276,7 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     assert {arch: (r["installed"], r["emulated"]) for arch, r in reused.items()} == {
         "amd64": ({"mss": "10.1.0"}, True), "arm64": ({"mss": "10.1.0"}, False)}
     index = ComputerArtifact.get(f"{second.id}__computer").image().image_name.partition("@")[0]
-    assert docker_calls == [("login", auth), ("join", index)]
+    assert docker_calls == [("join", index, auth)]
 
 
 @pytest.mark.parametrize("change", ["requirements", "build-setting", "service", "display-read-at-build"])
@@ -340,7 +348,7 @@ def test_a_build_that_cant_run_the_other_archs_programs_says_its_emulation_is_mi
 
     amd64 = Env.get(_put(base, driver).id).metadata["composed"]["container"]["amd64"]
 
-    assert amd64["reason"].startswith("this machine can't run linux/amd64 programs: its Docker has no emulation for it:")
+    assert amd64["reason"].startswith("the builder can't run linux/amd64 programs: its Docker has no emulation for it:")
     assert amd64["log"]
 
 
@@ -350,7 +358,7 @@ def test_a_base_built_from_its_context_is_built_here_for_each_arch_and_keyed_by_
         id="base-image", description="", image_name="local/base-1234:abcd", build_context_object_url="file:///c.tar.gz",
         dockerfile_path="Dockerfile", source_digest="sha256:" + "c" * 64))
     built_for = []
-    monkeypatch.setattr(composer, "build_for", lambda image, platform: built_for.append(platform) or
+    monkeypatch.setattr(builder, "build_for", lambda image, platform: built_for.append(platform) or
                         f"{image.image_name}-{platform.rsplit('/', 1)[1]}")
 
     env = Env.get(_put(_base(image), driver).id)
@@ -476,7 +484,7 @@ def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, doc
     again = runner.invoke(cli, ["env", "build", "--id", env.id])
 
     assert failed.exit_code == 1 and "container/amd64: failed (the build failed: boom)" in failed.output
-    assert built.exit_code == 0 and ("container/amd64: unverified (no configured sandbox provider runs linux/amd64 "
+    assert built.exit_code == 0 and ("container/amd64: unverified (no link of the sandbox provider runs linux/amd64 "
                                      "natively to probe it)") in built.output
     assert "container/arm64: ready (localhost:5000" in built.output and len(docker.builds) == 2
     assert again.exit_code == 0 and len(docker.builds) == 2
@@ -563,7 +571,7 @@ def test_the_platforms_this_machine_builds_are_read_from_its_builder(monkeypatch
                  "Platforms:        linux/arm64, linux/amd64, linux/amd64/v2, linux/riscv64*\nLabels:\n")
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=inspected, returncode=0))
 
-    assert composer._emulated_platforms() == {"linux/arm64", "linux/amd64", "linux/amd64/v2", "linux/riscv64"}
+    assert builder._emulated_platforms() == {"linux/arm64", "linux/amd64", "linux/amd64/v2", "linux/riscv64"}
 
 
 @pytest.mark.parametrize("direct_url, expected", [
@@ -599,7 +607,7 @@ def test_the_packages_a_build_installed_are_read_from_its_image_without_running_
 
     monkeypatch.setattr(subprocess, "run", run)
 
-    assert composer._installed("agentenv-computer:abc-arm64", "reference") == {
+    assert builder.LocalBuilder.installed(None, "agentenv-computer:abc-arm64", "reference") == {
         "mss": "10.2.0", "agentenv-framework-protocol": "0.1.382"}
     assert calls == [["docker", "create"], ["docker", "cp"], ["docker", "rm"]]
 
@@ -611,8 +619,9 @@ def test_a_script_or_binary_in_the_drivers_files_stays_executable_in_the_image(b
     (folder / "start").write_text("#!/bin/sh\nexec venv/bin/python -m agentenv_protocol.computer.serve driver.py:Desk\n")
     (folder / "helper").write_bytes(b"\x7fELF\x02\x01\x01")
     modes = {}
-    monkeypatch.setattr(composer, "build_image", lambda dockerfile, context, tag, **kw: modes.update(
-        {path.name: path.stat().st_mode & 0o111 for path in (context / "driver").iterdir()}))
+    monkeypatch.setattr(builder, "build_image", lambda dockerfile, context, tag, **kw: modes.update(
+        {path.name: path.stat().st_mode & 0o111 for path in (context / "driver").iterdir()}) if context.name == "context"
+        else None)
     files = FileArtifactUniverse.put_bundled("@local/~/kit/scripted__files", files={
         name: folder / name for name in ("driver.py", "start", "helper")})
     driver = ComputerDriverEnv.put(
@@ -624,14 +633,241 @@ def test_a_script_or_binary_in_the_drivers_files_stays_executable_in_the_image(b
     assert modes == {"driver.py": 0, "start": 0o111, "helper": 0o111}
 
 
-def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on_and_the_store_before_the_index(base, driver,
-                                                                                                     docker, monkeypatch):
+def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on(base, driver, docker, monkeypatch):
     signed = []
-    monkeypatch.setattr(composer, "docker_login", signed.append)
+    monkeypatch.setattr(builder, "docker_login", signed.append)
 
     _put(base, driver)
 
-    assert len(signed) == 3 and len(docker.builds) == 2
+    assert len(signed) == 2 and len(docker.builds) == 2
+
+
+class FakeVm:
+    """A builder VM, amd64: its files under ``root``, each line of a script it's given run as a VM's shell runs it, its
+    Docker the fake's."""
+
+    platform, _WFT_CHUNK_BYTES = "linux/amd64", 96 * 1024
+
+    def __init__(self, provider, root):
+        self.provider, self.root, self.terminated = provider, root, False
+
+    def at(self, path):
+        return self.root / str(path).lstrip("/")
+
+    async def write_host_file(self, data, path):
+        self.at(path).parent.mkdir(parents=True, exist_ok=True)
+        self.at(path).write_bytes(data)
+
+    async def load_object_file(self, url, path):
+        self.provider.fetched.append(url)
+        self.at(path).parent.mkdir(parents=True, exist_ok=True)
+        get_config().get_object_store_at(url).download_to_file(url, str(self.at(path)))
+
+    async def exec_script(self, script, max_retries=0):
+        code, out, _ = await self.exec_with_output("sudo", "bash", "-c", script)
+        if code:
+            raise RuntimeError(f"Script failed (exit {code}):\nstdout: {out}")
+        return out
+
+    async def exec_with_output(self, *argv):
+        printed = []
+        for line in argv[-1].splitlines():
+            if line.strip() and line != "set -e":
+                code, out = self._line(line)
+                printed.append(out)
+                if code:
+                    return code, "".join(printed), ""
+        return 0, "".join(printed), ""
+
+    async def terminate(self):
+        self.terminated = True
+
+    def _line(self, line):
+        self.provider.ran.append(line)
+        if line.startswith("case "):
+            path = self.at(shlex.split(line.split("$(head -c 4 ", 1)[1].split(" |", 1)[0])[0])
+            if path.read_bytes()[:4].startswith((b"#!", b"\x7fELF")):
+                path.chmod(0o755)
+            return 0, ""
+        if line.startswith("c=$(docker create"):
+            return 0, json.dumps([{"name": "mss", "version": "10.1.0"}])
+        if line.startswith(("docker buildx version", "mountpoint ")):
+            return 0, ""
+        if "docker login" in line:
+            self.provider.logins.append(shlex.split(line)[-1])
+            return 0, ""
+        if "find . -type f" in line:
+            folder = self.at(shlex.split(line)[1])
+            return 0, "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()} {path.stat().st_size} "
+                              f"{path.relative_to(folder).as_posix()}\0" for path in sorted(folder.rglob("*"))
+                              if path.is_file() and not path.is_symlink())
+        cwd, printed = None, ""
+        for command in " ".join(shlex.split(line, posix=False)).split(" && "):
+            words = shlex.split(command)
+            if words[0] == "cd":
+                cwd = self.at(words[1])
+                continue
+            code, printed = self._command(words, cwd)
+            if code:
+                return code, printed
+        return 0, printed
+
+    def _command(self, words, cwd):
+        docker = self.provider.docker
+        if words[0] == "mkdir":
+            for folder in words[2:]:
+                self.at(folder).mkdir(parents=True, exist_ok=True)
+        elif words[0] == "tar":
+            with tarfile.open(self.at(words[2])) as archive:
+                archive.extractall(self.at(words[words.index("-C") + 1]), filter="data")
+        elif words[0] == "rm":
+            self.at(words[-1]).unlink()
+        elif words[0] == "ln":
+            self.at(words[3]).unlink(missing_ok=True)
+            self.at(words[3]).hardlink_to(self.at(words[2]))
+        elif words[0] == "chmod":
+            self.at(words[2]).chmod(0o755)
+        elif words[0] == "cat":
+            return 0, self.at(words[1]).read_text()
+        elif words[:2] == ["sha256sum", "--check"]:
+            for listed in (cwd / words[-1]).read_text().splitlines():
+                sha256, path = listed.split("  ", 1)
+                if hashlib.sha256((cwd / path).read_bytes()).hexdigest() != sha256:
+                    return 1, f"{path}: FAILED\n"
+        elif words[:2] == ["curl", "-fsSL"] and "--upload-file" in words:
+            url = urllib.parse.unquote(words[-1].partition("?")[2])
+            get_config().get_object_store_at(url).put_file_at(url, str(self.at(words[-2])))
+            self.provider.uploaded.append(url)
+        elif words[0] == "timeout":
+            out, platform = self.at(words[words.index("-v", 13) + 1].split(":")[0]), words[words.index("--platform") + 1]
+            context = self.at(words[words.index("-v") + 1].split(":")[0])
+            result = docker.resolve(json.loads((out / "request.json").read_text()), context, words[-4],
+                                    platform.split("/")[1], out.parent)
+            (out / "result.json").write_text(json.dumps(result))
+        elif words[:2] == ["docker", "run"]:
+            self.provider.binfmt.append(words[-1])
+        elif words[:2] == ["docker", "build"]:
+            labels = dict(words[i + 1].split("=", 1) for i, word in enumerate(words) if word == "--label")
+            try:
+                docker.build_image(cwd / "Dockerfile", cwd, words[words.index("-t") + 1],
+                                   platform=words[words.index("--platform") + 1], labels=labels)
+            except DockerBuildError as e:
+                return 1, str(e)
+        elif words[:2] == ["docker", "tag"]:
+            self.provider.tagged[words[3]] = words[2]
+        elif words[:2] == ["docker", "push"]:
+            docker.push(self.provider.tagged[words[2]], words[2], None)
+        else:
+            raise AssertionError(f"a builder VM was asked to run {words}")
+        return 0, ""
+
+
+class FakeVmProvider(SandboxProvider):
+    """A sandbox provider whose VMs run amd64, recording what each was asked to do."""
+
+    def __init__(self, docker, root):
+        self.docker, self.root, self.vms, self.sizes = docker, root, [], []
+        self.ran, self.fetched, self.uploaded, self.binfmt, self.logins, self.tagged = [], [], [], [], [], {}
+
+    async def create_vm(self, **size):
+        self.sizes.append(size)
+        self.vms.append(vm := FakeVm(self, self.root / str(len(self.vms))))
+        return vm
+
+
+@pytest.fixture
+def signing(local_stores, monkeypatch):
+    """Stores a remote VM reaches: the object store signs URLs to its objects, and the registry isn't this machine's."""
+    images = OciRegistryImageStore("registry.example")
+    monkeypatch.setattr(type(local_stores), "get_image_store_for", lambda self, entity_id: images)
+    monkeypatch.setattr(OciRegistryImageStore, "ensure_repository", lambda self, repository: None)
+    monkeypatch.setattr(LocalFilesystemObjectStore, "signed_get_url", lambda self, url, expires_in=3600:
+                        f"https://signed.example/get?{urllib.parse.quote(url)}")
+    monkeypatch.setattr(LocalFilesystemObjectStore, "signed_put_url", lambda self, url, expires_in=3600:
+                        f"https://signed.example/put?{urllib.parse.quote(url)}")
+
+
+def test_a_put_on_a_vm_provider_builds_each_arch_in_a_vm_of_its_own_and_its_images_are_reused_by_key_here(
+        base, driver, docker, signing, tmp_path, monkeypatch):
+    vms = FakeVmProvider(docker, tmp_path / "vms")
+    for name in ("build_image", "push_local_image", "docker_login", "_emulated_platforms"):
+        monkeypatch.setattr(builder, name, lambda *args, **kwargs: pytest.fail("this machine's Docker was used"))
+
+    composed = Env.get(_put(base, driver, sandbox_provider=vms).id).metadata["composed"]["container"]
+
+    assert {arch: (r["status"], r["builder"], r["emulated"]) for arch, r in composed.items()} == {
+        "amd64": ("ready", "FakeVmProvider", False), "arm64": ("unverified", "FakeVmProvider", True)}
+    assert composed["arm64"]["reason"] == "no link of the sandbox provider runs linux/arm64 natively to probe it"
+    assert len(vms.vms) == 2 and all(vm.terminated for vm in vms.vms) and vms.binfmt == ["arm64"]
+    assert vms.sizes == [{"exposed_ports": [], **builder._VM}] * 2
+    driver_files = {artifact.object_url for artifact in driver.files.get_file_artifacts().values()}
+    assert sorted(vms.fetched) == sorted([*driver_files, *driver_files])
+    assert vms.uploaded and all(f"{packages.PREFIX}/files/" in url for url in vms.uploaded)
+    builds = {build["platform"]: build for build in docker.builds}
+    assert builds["linux/amd64"]["files"] == ["Dockerfile", "agentenv-desk.conf", "driver/driver.py",
+                                              "driver/requirements.txt", "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"]
+    assert composed["amd64"]["installed"] == {"mss": "10.1.0"}
+    assert docker.labels[f"agentenv-computer:{composed['arm64']['key'][7:23]}-arm64"]["dev.agentenv.emulated"] == "true"
+
+    again = Env.get(_put(base, driver, id="@local/~/kit/other", environment_name="other").id)
+
+    assert {arch: (r["reused"], r["key"]) for arch, r in again.metadata["composed"]["container"].items()} == {
+        arch: (True, r["key"]) for arch, r in composed.items()}
+
+
+def test_a_chain_builds_each_arch_on_the_first_link_that_runs_it_natively(base, driver, docker, signing, tmp_path):
+    vms = FakeVmProvider(docker, tmp_path / "vms")
+
+    composed = Env.get(_put(base, driver, sandbox_provider=ChainedSandboxProvider(
+        [vms, LocalSandboxProvider()])).id).metadata["composed"]["container"]
+
+    assert {arch: (r["builder"], r["emulated"]) for arch, r in composed.items()} == {
+        "amd64": ("FakeVmProvider", False), "arm64": ("LocalSandboxProvider", False)}
+    assert len(vms.vms) == 1 and vms.binfmt == []
+
+
+def test_a_builder_vm_its_provider_loses_fails_its_pair_alone_and_is_torn_down(base, driver, docker, signing, tmp_path,
+                                                                              monkeypatch):
+    vms, real = FakeVmProvider(docker, tmp_path / "vms"), FakeVm._command
+
+    class Gone(Exception):
+        pass
+
+    def command(vm, words, cwd):
+        if words[0] == "timeout" and "linux/arm64" in words:
+            raise Gone("the sandbox is shutting down")
+        return real(vm, words, cwd)
+    monkeypatch.setattr(FakeVm, "_command", command)
+
+    composed = Env.get(_put(base, driver, sandbox_provider=vms).id).metadata["composed"]["container"]
+
+    assert (composed["arm64"]["status"], composed["arm64"]["stage"], composed["arm64"]["reason"]) == (
+        "failed", "resolve", "RuntimeError: FakeVmProvider's VM failed: Gone: the sandbox is shutting down")
+    assert composed["amd64"]["status"] == "ready" and all(vm.terminated for vm in vms.vms)
+
+
+class Containers(SandboxProvider):
+    async def create_sandbox(self, **kwargs):
+        raise AssertionError("a container was created")
+
+
+@pytest.mark.parametrize("links, reason", [
+    (["vms"], "FakeVmProvider's VMs can't fetch from the object store, which signs no URLs; build on the local provider"),
+    (["containers"], "Containers gives no VM to build in"),
+    (["containers", "local"], "Containers gives no VM to build in; this machine can't build linux/amd64: its Docker has "
+                              "no emulation for it"),
+])
+def test_an_arch_no_link_can_build_fails_saying_why_for_each_link(base, driver, docker, tmp_path, links, reason):
+    docker.emulates = set()
+    made = {"vms": FakeVmProvider(docker, tmp_path / "vms"), "containers": Containers(),
+            "local": LocalSandboxProvider()}
+
+    composed = Env.get(_put(base, driver, sandbox_provider=ChainedSandboxProvider(
+        [made[link] for link in links])).id).metadata["composed"]["container"]
+
+    assert (composed["amd64"]["status"], composed["amd64"]["stage"], composed["amd64"]["reason"]) == (
+        "failed", "resolve", reason)
+    assert made["vms"].vms == []
 
 
 def test_env_build_writes_the_computer_again_when_it_isnt_over_every_pair_built(base, driver, docker, caplog):
@@ -641,8 +877,10 @@ def test_env_build_writes_the_computer_again_when_it_isnt_over_every_pair_built(
     stored.update_metadata({**stored.metadata, "computer": stale})
 
     assert not composer.current(Env.get(stored.id))
-    rebuilt = CliRunner().invoke(cli, ["env", "build", "--id", stored.id])
+    unknown = CliRunner().invoke(cli, ["env", "build", "--id", stored.id, "--sandbox", "nosuch"])
+    rebuilt = CliRunner().invoke(cli, ["env", "build", "--id", stored.id, "--sandbox", "local"])
 
+    assert unknown.exit_code == 1 and "Unknown sandbox backend: 'nosuch'" in unknown.output
     assert rebuilt.exit_code == 0 and composer.current(Env.get(stored.id)) and len(docker.builds) == 2
     assert Env.get(stored.id).metadata["computer"]["version"] == stale["version"] + 1
 
@@ -1065,7 +1303,7 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
 def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,
                                                                                                tmp_path, monkeypatch):
     tool = b"#!/bin/sh\necho tool\n"
-    monkeypatch.setattr(packages.httpx, "stream", _serving({"https://example.com/tool": tool}))
+    monkeypatch.setattr(builder.httpx, "stream", _serving({"https://example.com/tool": tool}))
     install = {"python": "requirements.txt", "packages": {"apt": ["hello", "xdotool/noble"]},
                "sources": [{"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": ["main"],
                             "key": "ppa.asc"}],
@@ -1106,19 +1344,19 @@ def test_a_resolve_or_download_that_fails_fails_its_arch_at_the_resolve_stage(ba
                                                                              monkeypatch, failing):
     if failing == "resolver":
         def refuse(request, context, source, arch, work):
-            raise packages.ResolveError("resolving the packages failed", "E: Unable to locate package nosuch\n")
-        monkeypatch.setattr(packages, "_run_resolver", refuse)
+            raise builder.ResolveError("resolving the packages failed", "E: Unable to locate package nosuch\n")
+        monkeypatch.setattr(builder.LocalBuilder, "resolve", docker.resolving(refuse))
     if failing == "link":
         (tmp_path / "credentials").write_text("secret")
 
         def linking(request, context, source, arch, work):
-            result, out = docker.resolve(request, context, source, arch, work)
-            wheel = out / "wheels" / "driver" / "mss-10.1.0-py3-none-any.whl"
+            result = docker.resolve(request, context, source, arch, work)
+            wheel = work / "out" / "wheels" / "driver" / "mss-10.1.0-py3-none-any.whl"
             wheel.unlink()
             wheel.symlink_to(tmp_path / "credentials")
-            return result, out
-        monkeypatch.setattr(packages, "_run_resolver", linking)
-    monkeypatch.setattr(packages.httpx, "stream", _serving({"https://example.com/tool": b"something else"}))
+            return result
+        monkeypatch.setattr(builder.LocalBuilder, "resolve", docker.resolving(linking))
+    monkeypatch.setattr(builder.httpx, "stream", _serving({"https://example.com/tool": b"something else"}))
     install = {"python": "requirements.txt", "services": [],
                "downloads": [{"url": "https://example.com/tool", "sha256": "a" * 64, "to": "tool"}]}
 
@@ -1147,8 +1385,8 @@ def test_a_stored_file_that_isnt_the_one_its_lock_names_fails_the_build_that_sta
     again = Env.get(_put(base, driver, computer_settings={"theme": "dark"}).id).metadata["composed"]["container"]["arm64"]
 
     assert (again["status"], again["stage"]) == ("failed", "build")
-    assert again["reason"].endswith(f"agentenv-packages/files/{sha256} isn't the file the lock names: its sha256 is "
-                                    f"{hashlib.sha256(b'tampered').hexdigest()}")
+    assert again["reason"].endswith(f"agentenv-packages/files/{sha256} isn't the file this build stages: its sha256 "
+                                    f"is {hashlib.sha256(b'tampered').hexdigest()}")
 
 
 def test_a_venv_whose_requirements_resolve_to_nothing_is_made_empty(base, docker, tmp_path):
@@ -1168,19 +1406,27 @@ def test_two_puts_resolving_the_same_inputs_at_once_both_get_the_first_stored_lo
     (folder / "requirements.txt").write_text("mss\n")
     wants = [packages.Want("driver", Install(python="requirements.txt", services=[Service(name="d", command="x")]), True)]
     inputs = packages.inputs_digest(wants, tmp_path / "ctx", "base", "arm64")
-    first, _ = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop", tmp_path / "1")
+    first, _ = packages.resolve(inputs, wants, _local(tmp_path / "1", tmp_path / "ctx"), "base", "arm64",
+                                "@local/~/kit/desktop")
 
     def newer(request, context, source, arch, work):
-        result, out = docker.resolve(request, context, source, arch, work)
-        (out / "wheels" / "driver" / "mss-10.1.0-py3-none-any.whl").write_bytes(b"mss, published again")
-        return result, out
-    monkeypatch.setattr(packages, "_run_resolver", newer)
-    second, _ = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop",
-                                 tmp_path / "2")
-    monkeypatch.setattr(packages.os, "getuid", lambda: 4242)
+        result = docker.resolve(request, context, source, arch, work)
+        (work / "out" / "wheels" / "driver" / "mss-10.1.0-py3-none-any.whl").write_bytes(b"mss, published again")
+        return result
+    monkeypatch.setattr(builder.LocalBuilder, "resolve", docker.resolving(newer))
+    second, _ = packages.resolve(inputs, wants, _local(tmp_path / "2", tmp_path / "ctx"), "base", "arm64",
+                                 "@local/~/kit/desktop")
+    monkeypatch.setattr(builder.os, "getuid", lambda: 4242)
 
     assert second == first == packages.stored(inputs, "@local/~/kit/desktop")
     assert packages.inputs_digest(wants, tmp_path / "ctx", "base", "arm64") == inputs
+
+
+def _local(work, context):
+    """A builder of this machine's Docker in ``work``, its build context ``context``'s files."""
+    shutil.copytree(context, work / builder.CONTEXT)
+    base = SimpleNamespace(image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1")
+    return builder.LocalBuilder("LocalSandboxProvider", work, base, "linux/arm64")
 
 
 def test_the_resolver_installs_the_apt_packages_it_downloads_before_building_wheels(tmp_path, monkeypatch):

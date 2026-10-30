@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 
 class ComputerAppEnv(ComputerEnv):
@@ -98,10 +99,11 @@ class ComputerAppEnv(ComputerEnv):
     def put(cls, *, id: str, environment_name: str, module: str, files: FileArtifactUniverse,
             declaration: AppDeclaration, computer: Optional[ComputerArtifact] = None,
             driver: Optional[ComputerDriverEnv] = None, build_settings: Optional[dict[str, Any]] = None,
-            compose: bool = True, on_build: Optional[Callable[[], None]] = None) -> Self:
+            compose: bool = True, on_build: Optional[Callable[[], None]] = None,
+            sandbox_provider: Optional[SandboxProvider] = None) -> Self:
         """Write the app once what it declares and ``build_settings``, its build settings' values, check out, and with
-        a computer and a driver, once it fits them (gate 1); then compose it with them unless ``compose`` is False.
-        Refused, naming every problem, before anything is stored."""
+        a computer and a driver, once it fits them (gate 1); then compose it with them on ``sandbox_provider``, by
+        default the env's, unless ``compose`` is False. Refused, naming every problem, before anything is stored."""
         app = cls(id=id, version=None, environment_name=environment_name, module=module, files=files,
                   declaration=declaration, computer=computer, driver=driver, build_settings=build_settings)
         _, problems = _installs(declaration)
@@ -117,7 +119,7 @@ class ComputerAppEnv(ComputerEnv):
             raise ValueError(f"computer app env {id!r}: " + "; ".join(problems))
         app = get_env_store().put_document(app)
         if computer is not None and compose:
-            composer.compose(app, on_build=on_build)
+            composer.compose(app, on_build=on_build, sandbox_provider=sandbox_provider)
         return app
 
     @classmethod
@@ -143,7 +145,8 @@ class ComputerAppEnv(ComputerEnv):
         try:
             return cls.put(id=ctx.id, environment_name=fields.get("environment_name", ctx.name),
                            module=fields["module"], files=universe, declaration=declaration, computer=computer,
-                           driver=driver, build_settings=fields.get("build_settings"), on_build=ctx.on_build)
+                           driver=driver, build_settings=fields.get("build_settings"), on_build=ctx.on_build,
+                           sandbox_provider=ctx.sandbox_provider)
         except ValueError as e:
             ctx.refuse([str(e)])
 

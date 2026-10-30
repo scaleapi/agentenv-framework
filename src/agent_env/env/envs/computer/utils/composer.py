@@ -1,23 +1,22 @@
-"""The composer: a computer env's base, driver and apps built into one image for each form and arch with this machine's
-Docker, tagged in the env's image store by a key of everything that goes into it, so an image of that key, built for any
-env, is reused.
+"""The composer: a computer env's base, driver and apps built into one image for each form and arch, on a builder the
+put's sandbox provider gives (``builder``), tagged in the env's image store by a key of everything that goes into it, so
+an image of that key, built for any env and on any builder, is reused.
 Each result is recorded in the env's metadata as it finishes (``composed``), and the arches that built are written as
 the env's computer, a ``computer`` artifact over an index of their images."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import importlib.metadata
-import io
 import json
 import logging
 import re
 import shlex
 import shutil
 import subprocess
-import tarfile
 import tempfile
 import threading
 import urllib.parse
@@ -33,21 +32,21 @@ from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 from agentenv_protocol.computer.conformance import run_probe
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, docker_login, push_local_image
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils import boot, gate, packages
+from agent_env.env.envs.computer.utils import boot, builder, gate, packages
 from agent_env.env.envs.computer.utils.install import Install
-from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
+from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.base import ConcurrentModificationError
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest
-from agent_env.utils.docker.build import DockerBuildError, build_image
+from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, write_index
+from agent_env.utils.docker.build import DockerBuildError
 
 if TYPE_CHECKING:
     from agentenv_protocol.computer.conformance import ProbeReport
@@ -80,19 +79,23 @@ _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PA
 
 
 def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
-            on_build: Callable[[], None] | None = None) -> None:
-    """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel, and probe
-    each one a configured sandbox provider runs natively (gate 3), recording each as it starts and finishes, then write
-    the env's computer over every pair built so far. ``on_build`` is called once, just before the first image is built
-    here; reusing them all calls it never."""
+            on_build: Callable[[], None] | None = None, sandbox_provider: SandboxProvider | None = None) -> None:
+    """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel, on
+    ``sandbox_provider``, by default the env's, and probe each one it runs natively (gate 3), recording each as it
+    starts and finishes, then write the env's computer over every pair built so far. ``on_build`` is called once, just
+    before the first image is built; reusing them all calls it never."""
+    from agent_env.providers import get_env_sandbox_provider
+
     base, driver = env.computer, env.driver
     building = _once(on_build)
+    builds = builder.Builds(sandbox_provider or get_env_sandbox_provider(), env.stored_id, REPOSITORY)
     pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base)
                                              for arch in gate.arches(base, driver, env.composed_apps())]
     record = _Record(env)
     record.started(pairs)
     with ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
-        futures = {pool.submit(_composed, env, base, driver, form, arch, building): (form, arch) for form, arch in pairs}
+        futures = {pool.submit(_composed, env, base, driver, form, arch, builds, building): (form, arch)
+                   for form, arch in pairs}
         for future in as_completed(futures):
             form, arch = futures[future]
             result = future.result()
@@ -111,12 +114,12 @@ def current(env: ComputerEnv) -> bool:
     return "computer" in env.metadata and env.metadata["computer"].get("images") == _Record(env).built()
 
 
-def pending(env: ComputerEnv) -> list[tuple[str, str]]:
+def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None) -> list[tuple[str, str]]:
     """The forms and arches of ``env`` left to compose: never started, failed, left building by a put that stopped, or
-    built but unprobed though a configured sandbox provider runs the arch natively."""
+    built but unprobed though ``sandbox_provider``, by default the env's, runs the arch natively."""
     from agent_env.providers import get_env_sandbox_provider
 
-    composed, provider = env.metadata.get("composed", {}), get_env_sandbox_provider()
+    composed, provider = env.metadata.get("composed", {}), sandbox_provider or get_env_sandbox_provider()
     statuses = {(form, arch): composed.get(form, {}).get(arch, {}).get("status")
                 for form in gate.forms(env.computer)
                 for arch in gate.arches(env.computer, env.driver, env.composed_apps())}
@@ -125,20 +128,19 @@ def pending(env: ComputerEnv) -> list[tuple[str, str]]:
 
 
 def _composed(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
-              building: Callable[[], None]) -> dict:
+              builds: builder.Builds, building: Callable[[], None]) -> dict:
     """``form`` and ``arch`` built or reused, then probed when it built (gate 3)."""
-    result = _built(env, base, driver, form, arch, building)
-    return _probed(env, driver, form, arch, result) if result["status"] == "unverified" else result
+    result = _built(env, base, driver, form, arch, builds, building)
+    return _probed(env, driver, form, arch, result, builds.provider) if result["status"] == "unverified" else result
 
 
-def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict) -> dict:
-    """Gate 3: the build of ``result`` booted on the first configured sandbox provider that runs ``arch`` natively, and
+def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,
+            sandbox_provider: SandboxProvider) -> dict:
+    """Gate 3: the build of ``result`` booted on the first link of ``sandbox_provider`` that runs ``arch`` natively, and
     probed at ``full``: ready, with the driver's card, or failed at the probe; each with a summary of the probe and its
-    report stored. Still unverified, saying why, when no configured provider runs ``arch`` natively."""
-    from agent_env.providers import get_env_sandbox_provider
-
-    if not (links := boot.native_links(get_env_sandbox_provider(), arch)):
-        return {**result, "reason": f"no configured sandbox provider runs linux/{arch} natively to probe it"}
+    report stored. Still unverified, saying why, when no link runs ``arch`` natively."""
+    if not (links := boot.native_links(sandbox_provider, arch)):
+        return {**result, "reason": f"no link of the sandbox provider runs linux/{arch} natively to probe it"}
     try:
         report, card, provider = asyncio.run(_probe(links, env, driver, result["image"]))
     except TimeoutError:
@@ -181,34 +183,33 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
 
 
 def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
-           building: Callable[[], None]) -> dict:
-    """The status of ``form`` and ``arch`` once built and pushed, or reused, or the stage that failed and why;
-    ``building`` is called before anything builds."""
+           builds: builder.Builds, building: Callable[[], None]) -> dict:
+    """The status of ``form`` and ``arch`` once built and pushed, or reused, or the stage that failed and why. A builder
+    from ``builds`` resolves and builds it, opened when first needed, after ``building`` is called."""
     stage, key = "build", None
     try:
-        with tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work:
-            context, fetched = Path(work) / "context", {}
+        with tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened:
+            context, fetched, from_store = Path(work) / builder.CONTEXT, {}, {}
             context.mkdir()
             source, base_identity = _base(base, arch)
-            layer = _stage_driver(context, driver, base)
-            apps = [_stage_app(context, app, base) for app in env.composed_apps()]
+            layer = _stage_driver(context, driver, base, from_store)
+            apps = [_stage_app(context, app, base, from_store) for app in env.composed_apps()]
             layers = [layer, *apps]
             wants = _wants(layers, _stage_protocol(context))
-            platform = f"linux/{arch}"
-            emulated = platform != host_platform()
-            unemulated = f"this machine can't build {platform}: its Docker has no emulation for it" if (
-                emulated and platform not in _emulated_platforms()) else None
-            ready = _once(lambda: _ready_base(base, arch))
+            platform, held = f"linux/{arch}", []
+
+            def on() -> builder.Builder:
+                if not held:
+                    link = builds.link(platform)
+                    building()
+                    held.append(opened.enter_context(builds.open(link, platform, Path(work), base.image(), from_store)))
+                return held[0]
+
             inputs = packages.inputs_digest(wants, context, base_identity, arch)
             lock = packages.stored(inputs, env.stored_id) if inputs is not None else None
             if inputs is not None and lock is None:
-                if unemulated:
-                    return _failed(env, form, arch, "resolve", None, unemulated)
                 stage = "resolve"
-                building()
-                ready()
-                lock, fetched = packages.resolve(inputs, wants, context, source, arch, env.stored_id,
-                                                 Path(work) / "resolve")
+                lock, fetched = packages.resolve(inputs, wants, on(), source, arch, env.stored_id)
                 stage = "build"
             dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
             key = "sha256:" + hashlib.sha256(json.dumps({
@@ -224,28 +225,28 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 return {"status": "unverified", "key": key, "image": pinned, "reused": True,
                         "emulated": kept.get(EMULATED_LABEL) == "true", "lock": inputs,
                         "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": _now()}
-            if unemulated:
-                return _failed(env, form, arch, "build", key, unemulated)
-            building()
-            ready()
+            building_on = on()
             if lock is not None:
-                packages.stage(lock, context, env.stored_id, fetched)
-            (context / "Dockerfile").write_text(f"{dockerfile}LABEL {KEY_LABEL}={key}\n")
-            local = f"agentenv-computer:{key[7:23]}-{arch}"
-            build_image(context / "Dockerfile", context, local, platform=platform, labels={KEY_LABEL: key})
-            installed = _installed(local, layer.prefix)
-            _label(local, platform, {INSTALLED_LABEL: json.dumps(installed, sort_keys=True),
-                                     EMULATED_LABEL: "true" if emulated else "false"})
+                packages.stage(lock, building_on, env.stored_id, fetched)
+            local, emulated = f"agentenv-computer:{key[7:23]}-{arch}", platform != building_on.platform
+            building_on.build(f"{dockerfile}LABEL {KEY_LABEL}={key}\n", local, platform, {KEY_LABEL: key})
+            installed = building_on.installed(local, layer.prefix)
+            building_on.build(f"FROM {local}\n", local, platform, {
+                INSTALLED_LABEL: json.dumps(installed, sort_keys=True), EMULATED_LABEL: "true" if emulated else "false",
+            }, context="label")
             stage = "push"
-            push_local_image(local, ref, store)
+            building_on.push(local, ref, store)
             return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
-                    "emulated": emulated, "lock": inputs, "installed": installed, "built_at": _now()}
-    except packages.ResolveError as e:
+                    "emulated": emulated, "builder": building_on.name, "lock": inputs, "installed": installed,
+                    "built_at": _now()}
+    except builder.Unbuildable as e:
+        return _failed(env, form, arch, stage, key, str(e))
+    except builder.ResolveError as e:
         return _failed(env, form, arch, "resolve", None, str(e), log=e.log or None)
     except DockerBuildError as e:
         # Docker can list a platform it has lost the emulation for, until it restarts; the build says so.
         unemulated = "exec format error" in str(e)
-        return _failed(env, form, arch, stage, key, f"this machine can't run linux/{arch} programs: its Docker has no "
+        return _failed(env, form, arch, stage, key, f"the builder can't run linux/{arch} programs: its Docker has no "
                        "emulation for it" if unemulated else "the build failed", log=str(e))
     except subprocess.CalledProcessError as e:
         return _failed(env, form, arch, stage, key, f"{' '.join(e.cmd[:2])} failed: {(e.stderr or '').strip()}")
@@ -277,16 +278,6 @@ def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
     return platform_tag(image, f"linux/{arch}"), f"sources:{image.source_digest}"
 
 
-def _ready_base(base: ComputerArtifact, arch: str) -> None:
-    """Have this machine's Docker able to build ``FROM`` the base for ``arch``: signed in to its registry with the image
-    store's credentials for it, or holding it built from its stored build context."""
-    image = base.image()
-    if names_registry(image.image_name):
-        docker_login(get_config().get_image_store().auth(image.pinned_name))
-    else:
-        build_for(image, f"linux/{arch}")
-
-
 @dataclass(frozen=True)
 class _Layer:
     """A driver's or an app's part of a build: its folder in the build context, its prefix in the image, what it
@@ -302,16 +293,19 @@ class _Layer:
     steps: tuple[tuple[str, str], ...] = ()
 
 
-def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact) -> _Layer:
+def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact,
+                  from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
     its port, its folder under ``DRIVERS`` named for its id's last part."""
     install, name = driver.install[base.os.type], _name(driver.id, "driver")
     layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-{name}.conf")
-    _stage(context, layer, f"driver {driver.id}", driver.files, _services(name, install), {"MCP_PORT": driver.port})
+    _stage(context, layer, f"driver {driver.id}", driver.files, _services(name, install), {"MCP_PORT": driver.port},
+           from_store)
     return layer
 
 
-def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact) -> _Layer:
+def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
+               from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the app's install files under ``context/apps/<name>/``, with the values of its build settings the env
     fixes, and its supervisord programs beside them, run under its name: its services and its own server, which serves
     its class from its venv and launches the app. Its folder under ``APPS`` is named for its id's last part."""
@@ -323,7 +317,8 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact) -> _L
                                if step.os is None or base.os.type in step.os))
     programs = {f"app-{name}": f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
                 **_services(f"app-{name}", install)}
-    _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name})
+    _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name},
+           from_store)
     if app.build_settings:
         (context / layer.folder / BUILD_SETTINGS).parent.mkdir(exist_ok=True)
         (context / layer.folder / BUILD_SETTINGS).write_text(json.dumps(app.build_settings, sort_keys=True))
@@ -340,9 +335,10 @@ def _services(name: str, install: Install) -> dict[str, str]:
 
 
 def _stage(context: Path, layer: _Layer, what: str, files: FileArtifactUniverse, programs: dict[str, str],
-           environment: dict[str, Any]) -> None:
+           environment: dict[str, Any], from_store: dict[str, tuple[str, str]]) -> None:
     """Write the ``files`` of ``what``'s folder its install names to ``layer``'s folder, a script, a binary or a file its
-    install runs executable, and ``programs``, commands by name, as its supervisord programs, with ``environment``."""
+    install runs executable, each added to ``from_store`` by its path with its object URL and sha256, for a builder to
+    fetch; and ``programs``, commands by name, as its supervisord programs, with ``environment``."""
     folder = PurePosixPath(layer.install.files)
     runs = {PurePosixPath(run.script) for run in layer.install.run or []}
     for name, artifact in files.get_file_artifacts().items():
@@ -354,8 +350,9 @@ def _stage(context: Path, layer: _Layer, what: str, files: FileArtifactUniverse,
             target = context / layer.folder / path.relative_to(folder)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data := artifact.load())
-            if data.startswith(packages.RUN_ONLY) or path.relative_to(folder) in runs:
-                target.chmod(packages.EXECUTABLE)
+            from_store[target.relative_to(context).as_posix()] = (artifact.object_url, hashlib.sha256(data).hexdigest())
+            if data.startswith(builder.RUN_ONLY) or path.relative_to(folder) in runs:
+                target.chmod(builder.EXECUTABLE)
     (context / layer.folder).mkdir(parents=True, exist_ok=True)
     (context / layer.conf).write_text(_programs(programs, layer.prefix, environment))
 
@@ -471,46 +468,12 @@ def _wants(layers: list[_Layer], protocol: bool) -> list[packages.Want]:
     return wants
 
 
-def _installed(local: str, prefix: str) -> dict[str, str]:
-    """The packages ``local``'s build installed into the venv of the driver at ``prefix``, by name, read from the image
-    without running it, so on any arch; none for a driver with no venv."""
-    created = subprocess.run(["docker", "create", local], capture_output=True, text=True, check=True).stdout.strip()
-    try:
-        copied = subprocess.run(["docker", "cp", f"{created}:{prefix}/installed.json", "-"],
-                                capture_output=True)
-    finally:
-        subprocess.run(["docker", "rm", created], capture_output=True)
-    if copied.returncode != 0:
-        return {}
-    with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as archive:
-        listed = json.loads(archive.extractfile(archive.getmembers()[0]).read())
-    return {package["name"]: package["version"] for package in listed}
-
-
-def _label(local: str, platform: str, extra: dict[str, str]) -> None:
-    """Add ``extra``'s labels to this machine's image ``local``, which adds no layer."""
-    with tempfile.TemporaryDirectory(prefix="agentenv-label-") as work:
-        dockerfile = Path(work) / "Dockerfile"
-        dockerfile.write_text(f"FROM {local}\n")
-        build_image(dockerfile, Path(work), local, platform=platform, labels=extra)
-
-
 def _served(ref: str, store) -> str | None:
     """``ref`` pinned to the digest the image store serves for it, or None when it serves none."""
     try:
         return pin_digest(ref, store.auth(ref))
     except NoSuchImageError:
         return None
-
-
-def _emulated_platforms() -> set[str]:
-    """The platforms this machine's Docker builds, its own and those it emulates."""
-    inspected = subprocess.run(["docker", "buildx", "inspect", "--bootstrap"], capture_output=True, text=True)
-    platforms = set()
-    for line in inspected.stdout.splitlines():
-        if line.strip().startswith("Platforms:"):
-            platforms |= {item.strip().rstrip("*") for item in line.split(":", 1)[1].split(",")}
-    return platforms
 
 
 def _failed(env: ComputerEnv, form: str, arch: str, stage: str, key: str | None, reason: str,
@@ -537,8 +500,7 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
     store = get_config().get_image_store_for(env.stored_id)
     index = store.image_ref(REPOSITORY, "index-" + hashlib.sha256(
         ",".join(built[arch] for arch in arches).encode()).hexdigest())
-    docker_login(store.auth(index))
-    _joined(index, [built[arch] for arch in arches])
+    write_index(index, {f"linux/{arch}": built[arch] for arch in arches}, store.auth(index))
     image = DockerImageArtifact.put_ref(derive_id(env.stored_id, "computer_image"), description=(
         f"{env.stored_id}'s composed computer"), image_name=index)
     config = {name: setting.model_dump() for name, setting in base.config.items()}
@@ -555,14 +517,6 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
     return {"id": computer.id, "version": computer.version}
 
 
-def _joined(index: str, images: list[str]) -> None:
-    """Push one index of ``images`` to ``index``, as the release joins its platforms' images."""
-    joined = subprocess.run(["docker", "buildx", "imagetools", "create", "-t", index, *images],
-                            capture_output=True, text=True)
-    if joined.returncode != 0:
-        raise RuntimeError(f"joining {', '.join(images)} into {index} failed: {joined.stderr.strip()}")
-
-
 def _digest(folder: Path) -> str:
     """A digest of the files under ``folder``, by their paths and bytes."""
     hashed = hashlib.sha256()
@@ -572,7 +526,8 @@ def _digest(folder: Path) -> str:
 
 
 def _composer_digest() -> str:
-    return "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    """A digest of the composer and its builders, which say what a build makes of its inputs."""
+    return "sha256:" + hashlib.sha256(Path(__file__).read_bytes() + Path(builder.__file__).read_bytes()).hexdigest()
 
 
 def _now() -> str:
