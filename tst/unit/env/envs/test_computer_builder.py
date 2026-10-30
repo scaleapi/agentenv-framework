@@ -114,25 +114,31 @@ def test_the_packages_a_build_installed_are_read_from_its_image_without_running_
     assert calls == [["docker", "create"], ["docker", "cp"], ["docker", "rm"]]
 
 
-def test_what_each_run_wrote_is_read_from_the_layer_its_command_made_in_a_saved_images_history(tmp_path):
+def test_what_each_run_wrote_is_read_from_the_next_layer_a_shell_ran_its_command_for_in_a_saved_images_history(
+        tmp_path):
     saved_image(tmp_path / "image.tar", [
         (None, {"etc/os-release": b"ubuntu"}),
         ("USER root", None),
         ("RUN /bin/sh -c cd /opt/a && ./setup.sh # buildkit", {
             "usr/local/bin/tool": b"a", "usr/bin/tool": "/usr/local/bin/tool", "etc/.wh.gone": b"", "./etc/a": b"a"}),
+        ("RUN /bin/sh -c cd /opt/a && ./setup.sh.extra # buildkit", {"etc/extra": b"extra"}),
         ("COPY apps/b/ /opt/b/ # buildkit", {"opt/b/x": b"x"}),
-        ("RUN /bin/sh -c cd /opt/b && ./setup.sh # buildkit", {"usr/local/bin/tool": b"b"})])
-    commands = ["cd /opt/b && ./setup.sh", "cd /opt/a && ./setup.sh"]
+        ("RUN /bin/sh -c cd /opt/b && ./setup.sh # buildkit", {"usr/local/bin/tool": b"b"}),
+        ("RUN /bin/sh -c cd /opt/b && ./setup.sh # buildkit", {"etc/again": b"again"})])
+    commands = ["cd /opt/a && ./setup.sh", "cd /opt/a && ./setup.sh.extra", "cd /opt/b && ./setup.sh",
+                "cd /opt/b && ./setup.sh"]
 
     ran = subprocess.run([sys.executable, "-I", str(builder.LAYERS), str(tmp_path / "image.tar"), json.dumps(commands)],
                          capture_output=True, text=True)
 
+    sha = lambda data: hashlib.sha256(data).hexdigest()
     assert json.loads(ran.stdout) == layers_in_image.written(str(tmp_path / "image.tar"), commands) == [
-        {"/usr/local/bin/tool": hashlib.sha256(b"b").hexdigest()},
-        {"/usr/local/bin/tool": hashlib.sha256(b"a").hexdigest(), "/usr/bin/tool": "-> /usr/local/bin/tool",
-         "/etc/a": hashlib.sha256(b"a").hexdigest()}]
-    with pytest.raises(ValueError, match=r"no layer of the image was made by 'cd /opt/c && \./setup\.sh'"):
-        layers_in_image.written(str(tmp_path / "image.tar"), ["cd /opt/c && ./setup.sh"])
+        {"/usr/local/bin/tool": sha(b"a"), "/usr/bin/tool": "-> /usr/local/bin/tool", "/etc/a": sha(b"a")},
+        {"/etc/extra": sha(b"extra")}, {"/usr/local/bin/tool": sha(b"b")}, {"/etc/again": sha(b"again")}]
+    for missing in (["cd /opt/c && ./setup.sh"], ["cd /opt/b && ./setup.sh", "cd /opt/a && ./setup.sh"],
+                    [*commands, "cd /opt/b && ./setup.sh"]):
+        with pytest.raises(ValueError, match="no layer of the image after the last one found was made by"):
+            layers_in_image.written(str(tmp_path / "image.tar"), missing)
 
 
 def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on(base, driver, docker, monkeypatch):

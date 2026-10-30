@@ -1057,7 +1057,7 @@ def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_t
     notes = _app(base, driver, tmp_path / "notes", compose=False, name="notes",
                  install={"ports": [8025], "services": [{"name": "sync", "command": "venv/bin/python sync.py"}]})
 
-    env = _put(base, driver, apps=[notes, mail])
+    env = _put(base, driver, apps=iter([notes, mail]))
 
     assert sorted(build["platform"] for build in docker.builds) == ["linux/amd64", "linux/arm64"]
     dockerfile, confs = docker.builds[0]["dockerfile"], docker.builds[0]["confs"]
@@ -1089,7 +1089,13 @@ def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_t
     (lambda mail, other: [mail, other(name="arm", supports=[{"os": {"type": "linux", "display": ["x11"]},
                                                               "arch": ["riscv64"]}])],
      "apps[1]: no architecture @local/~/kit/ubuntu-24.04, @local/~/kit/desk and @local/~/kit/arm all run"),
-], ids=["twice", "environment-name", "folder", "app-port", "driver-port", "arch"])
+    (lambda mail, other: [other(name=arch, supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": [arch]}])
+                          for arch in ("amd64", "arm64")],
+     "apps: no architecture @local/~/kit/ubuntu-24.04, @local/~/kit/desk and every app all run"),
+    (lambda mail, other: [other(name="mail", install={"services": [{"name": "sync", "command": "venv/bin/sync"}]}),
+                          other(name="mail-sync", install={"services": []})],
+     "apps: @local/~/kit/mail and @local/~/kit/mail-sync would share the program 'app-mail-sync'"),
+], ids=["twice", "environment-name", "folder", "app-port", "driver-port", "arch", "no-shared-arch", "program"])
 def test_apps_that_dont_fit_together_or_on_the_computer_are_refused_before_anything_is_stored(base, driver, docker,
                                                                                               tmp_path, apps, problem):
     def other(name="other", **changes):

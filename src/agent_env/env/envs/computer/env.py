@@ -93,12 +93,13 @@ class ComputerEnv(Env):
         """Write a computer env of ``computer``, ``driver`` and ``apps``, computer app envs built into it in their
         order, once gate 1 passes, then compose it as ``composing`` says unless ``compose`` is False. Refused, naming
         every mismatch, before anything is stored."""
-        values, problems = gate.check(computer, driver, apps=list(apps), display=display, network=network,
+        apps = list(apps)
+        values, problems = gate.check(computer, driver, apps=apps, display=display, network=network,
                                       computer_settings=computer_settings or {})
         if problems:
             raise ValueError(f"computer env {id!r}: " + "; ".join(problems))
         env = get_env_store().put_document(cls(
-            id=id, version=None, environment_name=environment_name, computer=computer, driver=driver, apps=list(apps),
+            id=id, version=None, environment_name=environment_name, computer=computer, driver=driver, apps=apps,
             display=display, network=network, computer_settings=values))
         if compose:
             composer.compose(env, composing=composing)

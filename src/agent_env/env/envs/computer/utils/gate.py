@@ -75,14 +75,18 @@ def folder_name(env_id: str, fallback: str) -> str:
 
 
 def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[ComputerAppEnv]) -> list[str]:
-    """Every way ``apps`` don't fit together on ``base`` and ``driver``: each one's own (``check_app``), one listed
-    twice, two in one folder or under one environment name, and a port two of them listen on."""
+    """Every way ``apps`` don't fit together on ``base`` and ``driver``: each one's own (``check_app``), no architecture
+    they all run, one listed twice, and two in one folder, under one environment name, with one program name or
+    listening on one port."""
     problems = [problem for i, app in enumerate(apps) for problem in check_app(base, driver, app, f"apps[{i}]")]
+    if not problems and apps and not arches(base, driver, apps):
+        problems.append(f"apps: no architecture {base.id}, {driver.id} and every app all run")
     ids = [app.id for app in apps]
     problems += [f"apps: {app_id} is listed twice" for app_id in sorted({i for i in ids if ids.count(i) > 1})]
     distinct = list({app.id: app for app in apps}.values())
     for kind, keys in (("folder", lambda app: [f"{APPS}/{folder_name(app.id, 'app')}"]),
                        ("environment name", lambda app: [app.environment_name]),
+                       ("program", lambda app: programs(app, base.os.type)),
                        ("port", lambda app: _ports(app, base.os.type))):
         claims: dict[object, list[str]] = {}
         for app in distinct:
@@ -91,6 +95,13 @@ def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[Computer
         problems += [f"apps: {' and '.join(owners)} would share the {kind} {key!r}" for key, owners in claims.items()
                      if len(owners) > 1]
     return problems
+
+
+def programs(app: ComputerAppEnv, os_type: str) -> list[str]:
+    """The names of the supervisord programs ``app`` runs on ``os_type``: its own server's, then its services'."""
+    server = f"app-{folder_name(app.id, 'app')}"
+    install = app.install.get(os_type)
+    return [server, *(f"{server}-{service.name}" for service in (install.services if install is not None else []))]
 
 
 def _ports(app: ComputerAppEnv, os_type: str) -> list[int]:

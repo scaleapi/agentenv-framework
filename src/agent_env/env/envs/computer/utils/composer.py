@@ -342,8 +342,9 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
                    served=served,
                    steps=tuple((step.name, step.scope) for step in app.declaration.install_steps
                                if step.os is None or base.os.type in step.os))
-    programs = {f"app-{name}": f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
-                **_services(f"app-{name}", install)}
+    programs = dict(zip(gate.programs(app, base.os.type), [
+        f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
+        *(service.command for service in install.services)]))
     _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name},
            from_store)
     if app.build_settings:
