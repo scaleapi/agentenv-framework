@@ -12,13 +12,14 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError
 from agent_env.bundle import importer as importer_module
-from agent_env.bundle.importer import import_task
+from agent_env.bundle.importer import import_task, task_images
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from agent_env.task import Task
 from tst.unit.bundle._support import context_image, local_builds, plan_of
 
@@ -187,3 +188,35 @@ def test_the_cli_takes_each_ref_as_id_equals_ref(home):
     assert written.exit_code == 0, written.output
     assert _toml(home / "t", "envs/crm/env.toml")["image"]["ref"] == REF
     assert refused.exit_code == 2 and "--image-ref takes ID=REF" in refused.output
+
+
+def test_the_images_a_task_writes_are_listed_once_in_order_without_downloading_and_take_refs(home, monkeypatch):
+    shared, registry_image = context_image(home, "crm-image"), get_artifact_store().put_document(DockerImageArtifact(
+        id="mail-image", description="d", image_name="ghcr.io/acme/mail:1"))
+    MCPServerEnv.put(id="crm", docker_image_artifact=shared, environment_name="crm")
+    MCPServerEnv.put(id="crm-eu", docker_image_artifact=shared, environment_name="crm")
+    MCPServerEnv.put(id="inbox", docker_image_artifact=registry_image, environment_name="inbox")
+    Task.put(id="t", steps=[build_step({**DEPLOY, "id": f"env-{env}", "env_id": env})
+                            for env in ("crm", "crm-eu", "inbox")])
+    downloads = []
+    real_download = LocalFilesystemObjectStore.download_to_file
+    monkeypatch.setattr(LocalFilesystemObjectStore, "download_to_file",
+                        lambda self, url, dest: downloads.append(url) or real_download(self, url, dest))
+
+    images = task_images("t")
+
+    assert ([(image.id, image.version) for image in images], downloads) == ([("crm-image", 1), ("mail-image", 1)], [])
+    refs = {image.id: f"ghcr.io/acme/delivery/{image.id}:1@sha256:" + "e" * 64 for image in images}
+    imported = import_task("t", home / "t", image_refs=refs)
+    assert [_toml(imported.root, f"envs/{env}/env.toml")["image"]["ref"] for env in ("crm", "crm-eu", "inbox")] == [
+        refs["crm-image"], refs["crm-image"], refs["mail-image"]]
+
+
+def test_listing_a_task_the_import_cant_write_fails_before_any_push_would_start(home):
+    _stored(get_artifact_store().put_document(DockerImageArtifact(
+        id="crm-image", description="d", image_name="crm-image:v1", tar_gz_s3_url="file:///nowhere/crm.tar.gz")))
+
+    with pytest.raises(BundleError) as caught:
+        task_images("t")
+
+    assert any("stored only as a docker save tarball" in problem for problem in caught.value.problems)
