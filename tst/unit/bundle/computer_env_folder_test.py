@@ -36,7 +36,7 @@ def composed(tmp_path, monkeypatch, local_stores, cli_routing, builds):
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: None)
     calls = []
 
-    def compose(env, pairs=None, on_progress=None, sandbox_provider=None):
+    def compose(env, pairs=None, on_progress=None, sandbox_provider=None, emulate=True):
         if on_progress is not None:
             on_progress("composing")
         calls.append((env.id, env.computer.id, env.driver.id, sandbox_provider) + ((pairs,) if pairs is not None else ()))

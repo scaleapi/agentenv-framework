@@ -24,7 +24,8 @@ from agent_env.store.base import ObjectAlreadyExistsError
 PREFIX = "agentenv-packages"
 #: Where a build's context holds a lock's .debs; each venv's wheels are at ``staged_wheels``.
 STAGED_APT = "packages/apt"
-_RESOLVE_TIMEOUT_S = 3600
+#: How long the resolver may take, natively and under emulation, which runs some 10-20 times slower.
+_RESOLVE_TIMEOUT_S, _EMULATED_RESOLVE_TIMEOUT_S = 3600, 10800
 
 
 class LockedFile(BaseModel):
@@ -107,7 +108,8 @@ def resolve(inputs: str, wants: list[Want], builder: Builder, source: str, arch:
     lock, and where on the builder each file this resolve fetched is, by its sha256, for a build that follows to stage
     it from there rather than the store."""
     (store, prefix), fetched = _store(store_id), {}
-    result = builder.resolve(_request(wants, arch), source, arch, _RESOLVE_TIMEOUT_S)
+    timeout = _RESOLVE_TIMEOUT_S if builder.platform == f"linux/{arch}" else _EMULATED_RESOLVE_TIMEOUT_S
+    result = builder.resolve(_request(wants, arch), source, arch, timeout)
     written = builder.files(f"{RESOLVED}/out")
 
     def put(folder: str, path: str) -> dict:

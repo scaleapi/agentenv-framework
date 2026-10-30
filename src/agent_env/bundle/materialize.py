@@ -91,6 +91,7 @@ def materialize(
     ledger: Ledger | None = None,
     sandbox_provider: SandboxProvider | None = None,
     on_progress: Callable[[Write, str], None] | None = None,
+    emulate: bool = True,
 ) -> Materialization:
     """Write ``plan``'s entities, tasks and evals. The first write that fails stops it, and every earlier
     one stays: they're in the ledger, so the next run reuses them. ``on_wait`` is called when another run
@@ -105,8 +106,8 @@ def materialize(
     reading what the run would write first isn't preflighted, since the store doesn't hold it yet.
 
     ``sandbox_provider`` composes each computer env written, and what one reused has left, as ``agent-env env
-    build`` does: the env's sandbox provider when None. ``on_progress`` is told how each compose goes, a line at a
-    time.
+    build`` does: the env's sandbox provider when None, emulating an arch no link runs natively unless ``emulate`` is
+    False. ``on_progress`` is told how each compose goes, a line at a time.
 
     ``ledger`` keeps the rows, this run's in the ``@local`` namespace's store unless given; it also says whether each
     task and eval names the versions it reads (``Ledger.pins_references``) and whether each image the bundle builds is
@@ -144,11 +145,11 @@ def materialize(
                 through_ledger(write, lambda: _write_pushed_image(plan, write, on_build))
             else:
                 through_ledger(write, lambda: _write_entity(plan, write, here, on_build, sandbox_provider,
-                                                            on_progress))
+                                                            on_progress, emulate))
             if here and done[_key(write)].reused:
                 _build_reused(plan, write, done[_key(write)].version, on_build)
             if write.kind is BundleKind.ENV and done[_key(write)].reused and _compose_reused(
-                    write, done[_key(write)].version, sandbox_provider, on_progress, dry_run):
+                    write, done[_key(write)].version, sandbox_provider, on_progress, emulate, dry_run):
                 composing.append(write.id)
         unwritten = {_key(item.write) for item in done.values() if not item.reused} if dry_run else set()
         written = done if ledger.pins_references else None
@@ -170,7 +171,8 @@ def materialize(
 
 
 def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Write], None] | None,
-                  sandbox_provider: SandboxProvider | None, on_progress: Callable[[Write, str], None] | None) -> int:
+                  sandbox_provider: SandboxProvider | None, on_progress: Callable[[Write, str], None] | None,
+                  emulate: bool) -> int:
     if isinstance(write.source, ReferencedImage):
         return _write_referenced_image(plan, write)
     if isinstance(write.source, BuiltImage):
@@ -179,7 +181,7 @@ def _write_entity(plan: Plan, write: Write, here: bool, on_build: Callable[[Writ
         return _write_build_context(plan, write, here, on_build)
     if write.kind is BundleKind.ENV:
         return _write_env(plan, write, sandbox_provider,
-                          None if on_progress is None else lambda line: on_progress(write, line))
+                          None if on_progress is None else lambda line: on_progress(write, line), emulate)
     return _WRITERS[write.kind](plan, write)
 
 
@@ -314,7 +316,7 @@ def _write_agent(plan: Plan, write: Write) -> int:
 
 
 def _compose_reused(write: Write, version: int, sandbox_provider: SandboxProvider | None,
-                    on_progress: Callable[[Write, str], None] | None, dry_run: bool) -> bool:
+                    on_progress: Callable[[Write, str], None] | None, emulate: bool, dry_run: bool) -> bool:
     """Whether the computer env ``write`` reuses has pairs left to compose on ``sandbox_provider`` (``pending``: failed,
     stopped, or built but unprobed though it runs their arch natively) or its computer to write again; composed unless
     ``dry_run``, which says what it would compose."""
@@ -326,18 +328,19 @@ def _compose_reused(write: Write, version: int, sandbox_provider: SandboxProvide
     if not pairs and composer.current(env):
         return False
     if not dry_run:
-        composer.compose(env, pairs, told, sandbox_provider)
+        composer.compose(env, pairs, told, sandbox_provider, emulate)
     elif told is not None:
         told(f"would compose {', '.join(f'{form}/{arch}' for form, arch in pairs) or 'its computer again'}")
     return True
 
 
 def _write_env(plan: Plan, write: Write, sandbox_provider: SandboxProvider | None = None,
-               on_progress: Callable[[str], None] | None = None) -> int:
+               on_progress: Callable[[str], None] | None = None, emulate: bool = True) -> int:
     entry = write.source.entry
     cls = get_env_registry()[entry.type]
     return cls.from_toml(_pinned(plan, write, cls.toml_refs), AuthoringContext(
-        plan.bundle_of(entry), entry, on_progress=on_progress, sandbox_provider=sandbox_provider)).version
+        plan.bundle_of(entry), entry, on_progress=on_progress, sandbox_provider=sandbox_provider,
+        emulate=emulate)).version
 
 
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:

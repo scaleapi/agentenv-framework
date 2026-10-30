@@ -214,12 +214,14 @@ def run_bundle(
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
     keep: bool = False,
+    emulate: bool = True,
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
     user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
     tasks as written; ``sandbox`` is the provider that computer envs compose on and that envs,
-    agents, sandboxes and the judge deploy on. ``on_progress`` is given a line of text
+    agents, sandboxes and the judge deploy on; a computer env composing there emulates an arch no link runs natively
+    unless ``emulate`` is False, which leaves it skipped. ``on_progress`` is given a line of text
     at each write and step. ``id_root`` roots the ids of a bundle an installed package provides
     (``InstalledBundle.id_root``); a folder's ids otherwise come from its path.
 
@@ -244,7 +246,7 @@ def run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         prepared = _prepare(root, tasks, evals, sandbox, id_root, agent, False, say,
-                            declaring_for(Path(root), installed=id_root is not None, dry_run=False))
+                            declaring_for(Path(root), installed=id_root is not None, dry_run=False), emulate)
         plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
             overrides = _overrides(sandbox, user_model, judge_model)
@@ -298,7 +300,7 @@ def _write_bundle(
 
 
 def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None],
-                        sandbox: str | None = None) -> Materialization:
+                        sandbox: str | None = None, emulate: bool = True) -> Materialization:
     """Write ``plan``, its computer envs composed on ``sandbox`` when given, then set up the infra envs its runs deploy
     on."""
     materialization = materialize(
@@ -309,6 +311,7 @@ def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], N
         build_here=preflight.built_here,
         sandbox_provider=build_sandbox_provider(sandbox) if sandbox else None,
         on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"),
+        emulate=emulate,
     )
     if preflight.infra:
         ensure_default_envs(preflight.infra_kinds, say=say)
@@ -367,10 +370,11 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 
 
 def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandbox: str | None, id_root: str | None,
-             agent: str | None, played: bool, say: Callable[[str], None], declaring: Declaring) -> PreparedBundle:
+             agent: str | None, played: bool, say: Callable[[str], None], declaring: Declaring,
+             emulate: bool = True) -> PreparedBundle:
     plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played)
     _say_plan(plan, say, declaring)
-    materialization = _written_with_infra(plan, preflight, say, sandbox)
+    materialization = _written_with_infra(plan, preflight, say, sandbox, emulate)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
     return PreparedBundle(plan, materialization, to_run)
 

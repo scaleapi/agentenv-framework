@@ -81,7 +81,7 @@ class FakeDocker:
 
     def __init__(self, registry: Registry):
         self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
-        self.probed, self.probe_fails, self.resolved = [], {}, []
+        self.probed, self.probe_fails, self.resolved, self.timeouts = [], {}, [], {}
 
     def resolve(self, request, context, source, arch, work):
         """The resolver in the base: each apt package as one .deb, each venv's requirements as one wheel."""
@@ -104,8 +104,10 @@ class FakeDocker:
 
     def resolving(self, resolve=None):
         """A LocalBuilder.resolve that runs ``resolve``, by default this one's, on the builder's context and resolve."""
-        return lambda on, request, source, arch, timeout: (resolve or self.resolve)(
-            request, on.work / builder.CONTEXT, source, arch, on.work / builder.RESOLVED)
+        def resolving(on, request, source, arch, timeout):
+            self.timeouts[arch] = timeout
+            return (resolve or self.resolve)(request, on.work / builder.CONTEXT, source, arch, on.work / builder.RESOLVED)
+        return resolving
 
     async def probe(self, links, env, driver, image):
         arch = self._arch(self.registry.manifests[image.rpartition("@")[2]]["config"]["digest"])
@@ -247,6 +249,7 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert arm64["files"] == ["Dockerfile", "agentenv-desk.conf", "driver/driver.py", "driver/requirements.txt",
                               "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"]
     assert sorted(arch for arch, _ in docker.resolved) == ["amd64", "arm64"]
+    assert docker.timeouts == {"arm64": 3600, "amd64": 10800}
     assert docker.resolved[0][1]["python"] == [{"name": "driver", "folder": "/ctx/driver",
                                                 "requirements": "requirements.txt", "add": []}]
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
@@ -821,7 +824,8 @@ def test_a_put_on_a_vm_provider_builds_each_arch_in_a_vm_of_its_own_and_its_imag
         "amd64": ("ready", "FakeVmProvider", False), "arm64": ("unverified", "FakeVmProvider", True)}
     assert composed["arm64"]["reason"] == "no link of the sandbox provider runs linux/arm64 natively to probe it"
     assert len(vms.vms) == 2 and all(vm.terminated for vm in vms.vms) and vms.binfmt == ["arm64"]
-    assert vms.sizes == [{"exposed_ports": [], **builder._VM}] * 2
+    assert sorted(vms.sizes, key=lambda size: size["timeout"]) == [
+        {"exposed_ports": [], "timeout": 7200, **builder._VM}, {"exposed_ports": [], "timeout": 21600, **builder._VM}]
     driver_files = {artifact.object_url for artifact in driver.files.get_file_artifacts().values()}
     assert sorted(vms.fetched) == sorted([*driver_files, *driver_files])
     assert vms.uploaded and all(f"{packages.PREFIX}/files/" in url for url in vms.uploaded)
@@ -905,6 +909,21 @@ def test_env_build_writes_the_computer_again_when_it_isnt_over_every_pair_built(
     assert unknown.exit_code == 1 and "Unknown sandbox backend: 'nosuch'" in unknown.output
     assert rebuilt.exit_code == 0 and composer.current(Env.get(stored.id)) and len(docker.builds) == 2
     assert Env.get(stored.id).metadata["computer"]["version"] == stale["version"] + 1
+
+
+def test_a_put_that_wont_emulate_skips_an_arch_no_link_runs_natively_and_a_later_build_that_will_builds_it(
+        base, driver, docker, caplog):
+    caplog.set_level(logging.ERROR, logger=composer.__name__)
+    env = _put(base, driver, emulate=False)
+    skipped = CliRunner().invoke(cli, ["env", "build", "--id", env.id, "--no-emulate"])
+    built = CliRunner().invoke(cli, ["env", "build", "--id", env.id])
+
+    reason = "emulation is off, and LocalSandboxProvider doesn't run linux/amd64 natively"
+    assert skipped.exit_code == 0 and f"container/amd64: skipped ({reason})" in skipped.output
+    assert [build["platform"] for build in docker.builds] == ["linux/arm64", "linux/amd64"]
+    assert built.exit_code == 0 and "container/amd64: building emulated, which is slow," in built.output
+    composed = Env.get(env.id).metadata["composed"]["container"]
+    assert {arch: r["status"] for arch, r in composed.items()} == {"amd64": "unverified", "arm64": "ready"}
 
 
 def test_env_build_by_an_installed_alias_composes_under_the_id_of_the_env_it_names(base, driver, docker, local_stores,

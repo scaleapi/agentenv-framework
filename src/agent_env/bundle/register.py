@@ -79,6 +79,7 @@ def register_bundle(
     declaring: Declaring | None = None,
     on_progress: Callable[[str], None] | None = None,
     sandbox: str | None = None,
+    emulate: bool = True,
 ) -> Registration:
     """Register the bundle at ``root``: ``tasks`` and ``evals`` by name, or with neither every task and eval it has,
     or every entity when it has none, with what they reference. ``prefix`` opens each entry's registry id, the folder's
@@ -86,7 +87,7 @@ def register_bundle(
     is given a line for each write, as it's checked or written, and before each image is built. A folder with no
     bundle.toml that uses plugin packages is given one, or told what to declare, as ``declaring`` says: by default as a
     run of the folder would (``declaring_for``). ``sandbox`` is the provider its computer envs compose on, by default
-    the env's.
+    the env's, emulating an arch no link runs natively unless ``emulate`` is False, which leaves it skipped.
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
     written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse."""
@@ -113,7 +114,7 @@ def register_bundle(
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"  {_label(registered, write)}: building with docker and pushing"),
             on_write=lambda done: say(f"  {registered_line(registered, done)}"), sandbox_provider=provider,
-            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"))
+            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"), emulate=emulate)
     return Registration(registered, materialization, ids, tuple(_floating(registered)), identity, shared, requires)
 
 

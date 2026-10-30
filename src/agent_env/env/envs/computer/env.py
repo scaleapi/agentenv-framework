@@ -84,10 +84,11 @@ class ComputerEnv(Env):
     def put(cls, *, id: str, computer: ComputerArtifact, driver: ComputerDriverEnv, environment_name: str,
             apps: Any = (), display: Any = None, network: Any = None, computer_settings: Any = None,
             compose: bool = True, on_progress: Optional[Callable[[str], None]] = None,
-            sandbox_provider: Optional[SandboxProvider] = None) -> Self:
+            sandbox_provider: Optional[SandboxProvider] = None, emulate: bool = True) -> Self:
         """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it on
-        ``sandbox_provider``, by default the env's, unless ``compose`` is False, telling ``on_progress`` how it goes.
-        Refused, naming every mismatch, before anything is stored."""
+        ``sandbox_provider``, by default the env's, emulating an arch no link runs natively unless ``emulate`` is False,
+        unless ``compose`` is False, telling ``on_progress`` how it goes. Refused, naming every mismatch, before
+        anything is stored."""
         values, problems = gate.check(computer, driver, apps=list(apps), display=display, network=network,
                                       computer_settings=computer_settings or {})
         if problems:
@@ -96,7 +97,7 @@ class ComputerEnv(Env):
             id=id, version=None, environment_name=environment_name,
             computer=computer, driver=driver, display=display, network=network, computer_settings=values))
         if compose:
-            composer.compose(env, on_progress=on_progress, sandbox_provider=sandbox_provider)
+            composer.compose(env, on_progress=on_progress, sandbox_provider=sandbox_provider, emulate=emulate)
         return env
 
     @classmethod
@@ -114,7 +115,7 @@ class ComputerEnv(Env):
         try:
             return cls.put(id=ctx.id, computer=base, driver=driver,
                            environment_name=fields.pop("environment_name", ctx.name), on_progress=ctx.on_progress,
-                           sandbox_provider=ctx.sandbox_provider, **fields)
+                           sandbox_provider=ctx.sandbox_provider, emulate=ctx.emulate, **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
 

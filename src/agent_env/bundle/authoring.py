@@ -55,6 +55,8 @@ class AuthoringContext:
     on_progress: Callable[[str], None] | None = None
     #: Where writing a computer env composes it; the env's sandbox provider when None.
     sandbox_provider: SandboxProvider | None = None
+    #: Whether composing it emulates an arch no link of that provider runs natively, rather than skip it.
+    emulate: bool = True
 
     @property
     def id(self) -> str:

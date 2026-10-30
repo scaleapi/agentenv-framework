@@ -82,15 +82,17 @@ _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PA
 
 
 def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
-            on_progress: Callable[[str], None] | None = None, sandbox_provider: SandboxProvider | None = None) -> None:
+            on_progress: Callable[[str], None] | None = None, sandbox_provider: SandboxProvider | None = None,
+            emulate: bool = True) -> None:
     """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel, on
     ``sandbox_provider``, by default the env's, and probe each one it runs natively (gate 3), recording each as it
-    starts and finishes, then write the env's computer over every pair built so far. Each pair's stages and how it
+    starts and finishes, then write the env's computer over every pair built so far. An arch no link runs natively is
+    emulated, or with ``emulate`` False skipped, which leaves it for a later compose. Each pair's stages and how it
     ended go to ``on_progress`` and the log as they happen (``_Progress``)."""
     from agent_env.providers import get_env_sandbox_provider
 
     base, driver, provider = env.computer, env.driver, sandbox_provider or get_env_sandbox_provider()
-    builds = builder.Builds(provider, env.stored_id, REPOSITORY)
+    builds = builder.Builds(provider, env.stored_id, REPOSITORY, emulate)
     pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base)
                                              for arch in gate.arches(base, driver, env.composed_apps())]
     record = _Record(env)
@@ -249,6 +251,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
                     "emulated": emulated, "builder": building_on.name, "lock": inputs, "installed": installed,
                     "built_at": _now()}
+    except builder.Skipped as e:
+        return {"status": "skipped", "reason": str(e), "skipped_at": _now()}
     except builder.Unbuildable as e:
         return _failed(env, form, arch, stage, key, str(e))
     except builder.ResolveError as e:

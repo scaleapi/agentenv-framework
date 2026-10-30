@@ -57,7 +57,9 @@ BUILDX_SHA256 = {"linux/amd64": "4fe4cc38adf48169132749b6ca22a990928db0118e34075
                  "linux/arm64": "38e890e1a162bfdbf32fbe91404991dc4fc28e55b0de901b34374a061bab4d2c"}
 _PLUGINS = "/usr/local/lib/docker/cli-plugins"
 #: A builder VM: a build runs apt, pip and an app's install steps, and holds the base, the lock's files and the image.
-_VM = {"cpu": 4.0, "memory": 8192, "disk_size_gb": 40, "timeout": 7200}
+_VM = {"cpu": 4.0, "memory": 8192, "disk_size_gb": 40}
+#: How long a builder VM may run, natively and when it emulates the arch, which runs some 10-20 times slower.
+VM_TIMEOUT_S, EMULATED_VM_TIMEOUT_S = 7200, 21600
 _DOWNLOAD_TIMEOUT_S = 600
 _FETCHES_IN_FLIGHT = 8
 _CHUNK = 1 << 20
@@ -73,6 +75,10 @@ class ResolveError(RuntimeError):
 
 class Unbuildable(RuntimeError):
     """No link of the put's sandbox provider builds a platform; the message says why for each."""
+
+
+class Skipped(Exception):
+    """No link of the put's sandbox provider runs a platform natively, and the put turned emulation off."""
 
 
 @dataclass(frozen=True)
@@ -133,18 +139,21 @@ class Builder(ABC):
 
 class Builds:
     """The builders the put's sandbox provider gives: for each platform, from the first of its links that runs the
-    platform natively, else from the first that emulates it. A link builds when it's this machine's Docker, or gives VMs
-    that reach the stores ``store_id`` routes to and the registry ``repository`` is in."""
+    platform natively, else, unless ``emulate`` is False, from the first that emulates it. A link builds when it's this
+    machine's Docker, or gives VMs that reach the stores ``store_id`` routes to and the registry ``repository`` is in."""
 
-    def __init__(self, provider: SandboxProvider, store_id: str, repository: str):
-        self.provider = provider
+    def __init__(self, provider: SandboxProvider, store_id: str, repository: str, emulate: bool = True):
+        self.provider, self.emulate = provider, emulate
         self._refused = [(link, _refused(link, store_id, repository)) for link in provider.links]
 
     def link(self, platform: str) -> SandboxProvider:
-        """The link that builds ``platform``. Raises Unbuildable."""
+        """The link that builds ``platform``. Raises Unbuildable, or Skipped when it would emulate it and mustn't."""
         links = [link for link, problem in self._refused if problem is None]
         if native := [link for link in links if platform in link.native_platforms()]:
             return native[0]
+        if not self.emulate:
+            raise Skipped("emulation is off, and " + "; ".join(
+                problem or f"{type(link).__name__} doesn't run {platform} natively" for link, problem in self._refused))
         for link in links:
             if not _docker_here(link) or platform in _emulated_platforms():
                 return link
@@ -160,7 +169,7 @@ class Builds:
         if _docker_here(link):
             yield LocalBuilder(type(link).__name__, work, base, platform)
             return
-        vm = VmBuilder(link)
+        vm = VmBuilder(link, emulating=platform not in link.native_platforms())
         try:
             vm.start(work, base, platform, from_store)
             yield vm
@@ -303,11 +312,12 @@ class VmBuilder(Builder):
     """A VM of a sandbox provider with Docker in it, building in a folder of its own there. Its calls run on an event
     loop of its own, in the thread that made it."""
 
-    def __init__(self, link: SandboxProvider):
+    def __init__(self, link: SandboxProvider, emulating: bool):
         self.name, self._runner = type(link).__name__, asyncio.Runner()
         self.work = f"/tmp/agentenv-compose-{uuid.uuid4().hex[:12]}"
+        timeout = EMULATED_VM_TIMEOUT_S if emulating else VM_TIMEOUT_S
         try:
-            self.sandbox: VmSandbox = self._run(link.create_vm(exposed_ports=[], **_VM))
+            self.sandbox: VmSandbox = self._run(link.create_vm(exposed_ports=[], timeout=timeout, **_VM))
         except BaseException:
             self._runner.close()
             raise

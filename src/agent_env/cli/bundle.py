@@ -87,8 +87,11 @@ def _report(imported: BundleImport, folder: Path) -> None:
 @click.option("--sandbox", default=None,
               help="The sandbox provider the bundle's computer envs compose on, by default the env's; comma-separated "
                    "for a chain, each arch going to the first link that runs it natively.")
+@click.option("--no-emulate", is_flag=True,
+              help="Skip, rather than emulate, an arch no link of the sandbox provider runs natively; a later register "
+                   "or env build builds it.")
 def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefix: str | None,
-             dry_run: bool, yes: bool, sandbox: str | None):
+             dry_run: bool, yes: bool, sandbox: str | None, no_emulate: bool):
     """Write the bundle at FOLDER into the configured stores under registry ids, so whatever runs the stores' tasks
     runs what the folder runs.
 
@@ -105,7 +108,7 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
     with no bundle.toml that uses plugin packages is given one. An id the store holds already takes a new version,
     whoever wrote it. A store other than this machine's is written only after you confirm, or with --yes. Registering
     again writes only what changed since."""
-    options = {"tasks": tasks, "evals": evals, "prefix": prefix, "sandbox": sandbox}
+    options = {"tasks": tasks, "evals": evals, "prefix": prefix, "sandbox": sandbox, "emulate": not no_emulate}
     click.echo(f"Registering {folder} into:")
     for line in describe_target():
         click.echo(f"  {line}")

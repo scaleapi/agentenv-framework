@@ -15,7 +15,8 @@ from agent_env.store.base import NotFoundError
 @click.option("--version", type=int, default=None, help="Its version; the latest when left out")
 @click.option("--sandbox", default=None, help="The sandbox provider that resolves, builds and probes, by default the "
               "env's; comma-separated for a chain, each arch going to the first link that runs it natively")
-def build(env_id: str, version: int | None, sandbox: str | None):
+@click.option("--no-emulate", is_flag=True, help="Skip, rather than emulate, an arch no link runs natively")
+def build(env_id: str, version: int | None, sandbox: str | None, no_emulate: bool):
     """Build a computer env's forms and arches not built yet, reusing any image of the same key, and print each one's
     status; exits 1 when one failed."""
     try:
@@ -28,7 +29,7 @@ def build(env_id: str, version: int | None, sandbox: str | None):
     if env.computer is None:
         raise click.ClickException(f"{env_id} names no computer and driver, so it has nothing to build alone")
     if (pairs := composer.pending(env, provider)) or not composer.current(env):
-        composer.compose(env, pairs, on_progress=click.echo, sandbox_provider=provider)
+        composer.compose(env, pairs, on_progress=click.echo, sandbox_provider=provider, emulate=not no_emulate)
     failed = False
     for form, by_arch in env.metadata.get("composed", {}).items():
         for arch, result in by_arch.items():
