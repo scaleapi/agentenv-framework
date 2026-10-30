@@ -118,9 +118,22 @@ def folder_problems(os_type: str, install: Install, files: dict[str, Path]) -> l
     if requirements in files:
         problems += [f"install.{os_type}.python: {requirements!r} line {number}, {line.strip()!r}, names another file, "
                      "which the lock of a requirements file doesn't cover; list what it installs in the file itself"
-                     for number, line in enumerate(files[requirements].read_text().splitlines(), 1)
-                     if _names_a_file(line)]
+                     for number, line in _joined(files[requirements].read_text()) if _names_a_file(line)]
     return problems
+
+
+def _joined(text: str) -> list[tuple[int, str]]:
+    """``text``'s lines as pip reads them, a line ending in a backslash joined to the next, each with the number of the
+    line it starts on."""
+    lines, start, parts = [], None, []
+    for number, line in enumerate(text.splitlines(), 1):
+        start = start or number
+        if line.endswith("\\") and not line.lstrip().startswith("#"):
+            parts.append(line[:-1])
+            continue
+        lines.append((start, "".join(parts) + line))
+        start, parts = None, []
+    return lines + ([(start, "".join(parts))] if parts else [])
 
 
 def _names_a_file(line: str) -> bool:

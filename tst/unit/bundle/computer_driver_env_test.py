@@ -111,6 +111,7 @@ def test_a_driver_folder_is_written_with_its_files_and_what_its_class_declares(b
 #: Lines a requirements file may have: none names another file of the folder.
 REQUIREMENTS = ("# what the venv installs\nmss>=9,<11  # -r is fine in a comment\n"
                 "--extra-index-url https://pypi.example/simple\n--find-links https://wheels.example/\n"
+                "--find-links \\\n    https://mirror.example/wheels/\n"
                 "xlib @ https://example.com/python_xlib-0.33-py2.py3-none-any.whl\n--require-hashes\n")
 
 
