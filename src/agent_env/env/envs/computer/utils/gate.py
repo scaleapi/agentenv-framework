@@ -6,6 +6,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+import re
+
+from agentenv_protocol.computer.apps import APPS
 from agentenv_protocol.computer.platform import Platform, supported
 from jsonschema import Draft202012Validator
 
@@ -26,10 +29,7 @@ def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, disp
           computer_settings: Any) -> tuple[dict[str, SettingValue], list[str]]:
     """The env's values of the base's settings, and every way ``base``, ``driver`` and what the env declares don't
     compose."""
-    problems = []
-    if apps:
-        problems.append("apps: computer app envs aren't supported yet")
-    problems += _platform(base, driver)
+    problems = _platform(base, driver) + _apps(base, driver, apps)
     problems += _image(base)
     problems += _display(base, display, computer_settings)
     problems += _network(network)
@@ -51,20 +51,56 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
     return [arch for arch in base.arch if arch in matching]
 
 
-def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv) -> list[str]:
-    """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``: a platform it doesn't support, no
-    architecture in common, or no install for the base's OS."""
+def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
+    """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
+    doesn't support, no architecture in common, no install for the base's OS, or a port the driver listens on too."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
-        return [f"app: {app.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
+        return [f"{at}: {app.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
                 f"{os.display}); it supports {named or 'none'}"]
     problems = []
     if not arches(base, driver, [app]):
-        problems.append(f"app: no architecture {base.id}, {driver.id} and {app.id} all run")
+        problems.append(f"{at}: no architecture {base.id}, {driver.id} and {app.id} all run")
     if os.type not in app.install:
-        problems.append(f"app: {app.id} declares no install for {os.type}")
+        problems.append(f"{at}: {app.id} declares no install for {os.type}")
+    elif taken := sorted(set(_ports(app, os.type)) & set(_driver_ports(driver, os.type))):
+        problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
     return problems
+
+
+def folder_name(env_id: str, fallback: str) -> str:
+    """The name of the folder a driver or an app is installed in: its id's last part, lowercased, as a slug."""
+    return re.sub(r"[^a-z0-9-]+", "-", env_id.rsplit("/", 1)[-1].lower()).strip("-") or fallback
+
+
+def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[ComputerAppEnv]) -> list[str]:
+    """Every way ``apps`` don't fit together on ``base`` and ``driver``: each one's own (``check_app``), one listed
+    twice, two in one folder or under one environment name, and a port two of them listen on."""
+    problems = [problem for i, app in enumerate(apps) for problem in check_app(base, driver, app, f"apps[{i}]")]
+    ids = [app.id for app in apps]
+    problems += [f"apps: {app_id} is listed twice" for app_id in sorted({i for i in ids if ids.count(i) > 1})]
+    distinct = list({app.id: app for app in apps}.values())
+    for kind, keys in (("folder", lambda app: [f"{APPS}/{folder_name(app.id, 'app')}"]),
+                       ("environment name", lambda app: [app.environment_name]),
+                       ("port", lambda app: _ports(app, base.os.type))):
+        claims: dict[object, list[str]] = {}
+        for app in distinct:
+            for key in keys(app):
+                claims.setdefault(key, []).append(app.id)
+        problems += [f"apps: {' and '.join(owners)} would share the {kind} {key!r}" for key, owners in claims.items()
+                     if len(owners) > 1]
+    return problems
+
+
+def _ports(app: ComputerAppEnv, os_type: str) -> list[int]:
+    install = app.install.get(os_type)
+    return list(install.ports or []) if install is not None else []
+
+
+def _driver_ports(driver: ComputerDriverEnv, os_type: str) -> list[int]:
+    install = driver.install.get(os_type)
+    return [driver.port, *(install.ports or [] if install is not None else [])]
 
 
 def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str, os_type: str) -> list[str]:

@@ -17,7 +17,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.utils import composer, gate
 from agent_env.env.envs.computer.utils.composer import Composing
-from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer.env import APP_TYPE, ComputerEnv
 from agent_env.env.envs.computer.utils.install import AppInstall, folder_problems, installs
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv, declared
 from agent_env.env.store import get_env_store
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 class ComputerAppEnv(ComputerEnv):
-    type: ClassVar[str] = "computer_app"
+    type: ClassVar[str] = APP_TYPE
     description = ("A computer app: software and its settings on a computer, read from its ComputerAppEnvironment "
                    "class at put; deployed alone, a computer of its own")
 

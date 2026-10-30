@@ -330,7 +330,6 @@ async def test_a_computer_env_with_no_ready_build_is_refused_at_deploy_naming_it
 
 
 @pytest.mark.parametrize("changes, problem", [
-    ({"apps": [{"env": "mail"}]}, "apps: computer app envs aren't supported yet"),
     ({"display": {"width": 0, "height": 800}}, "display is { width = <n>, height = <n> }, each 1 to 32767 pixels"),
     ({"display": {"width": 1280}}, "display is { width = <n>, height = <n> }"),
     ({"display": {"width": 1280, "height": 800}, "computer_settings": {"resolution": "800x600"}},
@@ -342,7 +341,7 @@ async def test_a_computer_env_with_no_ready_build_is_refused_at_deploy_naming_it
      "computer_settings.wallpaper: @local/~/kit/ubuntu-24.04 declares no setting 'wallpaper'"),
     ({"computer_settings": {"timezone": 3}}, "computer_settings.timezone must be a str, like its default 'UTC', not 3"),
     ({"computer_settings": ["timezone"]}, "computer_settings must be a table of the computer's setting values"),
-], ids=["apps", "display-zero", "display-side", "display-and-resolution", "network", "network-key",
+], ids=["display-zero", "display-side", "display-and-resolution", "network", "network-key",
         "settings-name", "settings-type", "settings-table"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
@@ -783,25 +782,26 @@ PROTOCOL_VERSION = importlib.metadata.version("agentenv-framework-protocol")
 
 
 def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
-         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, **changes):
+         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
     them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
-    its build settings, and ``linux_settings``, that of its settings on Linux."""
+    its build settings, ``linux_settings``, that of its settings on Linux, and ``name``, its id's last part and its
+    environment name."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
-    for name, text in (extra or {}).items():
-        (folder / name).parent.mkdir(parents=True, exist_ok=True)
-        (folder / name).write_text(text)
-    files = FileArtifactUniverse.put_bundled("@local/~/kit/mail__files", files={
-        name: folder / name for name in ("app.py", "requirements.txt", *(extra or {}))})
+    for path, text in (extra or {}).items():
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_text(text)
+    files = FileArtifactUniverse.put_bundled(f"@local/~/kit/{name}__files", files={
+        path: folder / path for path in ("app.py", "requirements.txt", *(extra or {}))})
     declaration = AppDeclaration.model_validate({
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
         "permissions": [], "settings": settings, "build_settings": build, "skill": None,
         "data": [], "install_steps": [{"name": name, "scope": scope, "os": os or None} for name, scope, *os in steps],
         "ready_checks": [], "os": {"linux": {"launch": launch, "settings": linux_settings, "install": install or {
             "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
-    return ComputerAppEnv.put(**{"id": "@local/~/kit/mail", "environment_name": "mail", "module": "app.py:Mail",
+    return ComputerAppEnv.put(**{"id": f"@local/~/kit/{name}", "environment_name": name, "module": "app.py:Mail",
                                  "files": files, "declaration": declaration, "computer": base, "driver": driver,
                                  "compose": compose, **changes})
 
@@ -1050,6 +1050,59 @@ def test_build_settings_an_app_doesnt_declare_or_its_schema_refuses_are_refused_
     assert docker.builds == []
     with pytest.raises(NotFoundError):
         Env.get("@local/~/kit/mail")
+
+
+def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_them(base, driver, docker, tmp_path):
+    mail = _app(base, driver, tmp_path / "mail", compose=False)
+    notes = _app(base, driver, tmp_path / "notes", compose=False, name="notes",
+                 install={"ports": [8025], "services": [{"name": "sync", "command": "venv/bin/python sync.py"}]})
+
+    env = _put(base, driver, apps=[notes, mail])
+
+    assert sorted(build["platform"] for build in docker.builds) == ["linux/amd64", "linux/arm64"]
+    dockerfile, confs = docker.builds[0]["dockerfile"], docker.builds[0]["confs"]
+    assert dockerfile.index("COPY driver/") < dockerfile.index("COPY apps/notes/") < dockerfile.index(
+        "COPY apps/mail/") < dockerfile.index("USER user")
+    assert [layer["name"] for layer in docker.resolved[0][1]["python"]][-2:] == ["apps-notes", "apps-mail"]
+    assert confs["agentenv-app-mail.conf"].startswith(MAIL_SERVER) and "[program:app-notes-sync]" in confs[
+        "agentenv-app-notes.conf"]
+    stored = Env.get(env.id)
+    assert [(app.id, app.version) for app in stored.composed_apps()] == [(notes.id, 1), (mail.id, 1)]
+    assert stored.to_dict()["apps"] == [{"id": notes.id, "version": 1}, {"id": mail.id, "version": 1}]
+    assert stored.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"}
+    assert _put(base, driver, apps=[mail, notes]).metadata["composed"]["container"]["arm64"]["key"] != (
+        stored.metadata["composed"]["container"]["arm64"]["key"])
+
+
+@pytest.mark.parametrize("apps, problem", [
+    (lambda mail, other: [mail, mail], "apps: @local/~/kit/mail is listed twice"),
+    (lambda mail, other: [mail, other(name="mail-2", environment_name="mail")],
+     "apps: @local/~/kit/mail and @local/~/kit/mail-2 would share the environment name 'mail'"),
+    (lambda mail, other: [mail, other(id="@local/other/mail")],
+     "apps: @local/~/kit/mail and @local/other/mail would share the folder '/opt/agentenv/apps/mail'"),
+    (lambda mail, other: [other(name="a", install={"ports": [8025], "services": []}),
+                          other(name="b", install={"ports": [8025, 9000], "services": []})],
+     "apps: @local/~/kit/a and @local/~/kit/b would share the port 8025"),
+    (lambda mail, other: [mail, other(name="desk-port", install={"ports": [18765], "services": []})],
+     "apps[1]: @local/~/kit/desk-port listens on 18765, as @local/~/kit/desk does"),
+    (lambda mail, other: [mail, other(name="arm", supports=[{"os": {"type": "linux", "display": ["x11"]},
+                                                              "arch": ["riscv64"]}])],
+     "apps[1]: no architecture @local/~/kit/ubuntu-24.04, @local/~/kit/desk and @local/~/kit/arm all run"),
+], ids=["twice", "environment-name", "folder", "app-port", "driver-port", "arch"])
+def test_apps_that_dont_fit_together_or_on_the_computer_are_refused_before_anything_is_stored(base, driver, docker,
+                                                                                              tmp_path, apps, problem):
+    def other(name="other", **changes):
+        return _app(None, None, tmp_path / name, compose=False, name=name, **changes)
+
+    listed = apps(_app(base, driver, tmp_path / "mail", compose=False), other)
+
+    with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
+        _put(base, driver, apps=listed)
+
+    assert problem in str(refused.value)
+    with pytest.raises(NotFoundError):
+        Env.get("@local/~/kit/desktop")
+    assert docker.builds == []
 
 
 def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):

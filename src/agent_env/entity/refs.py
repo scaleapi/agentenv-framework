@@ -53,8 +53,10 @@ class RefRole(StrEnum):
 class EntityRef:
     """One ref-holding field. ``path`` is dotted keys into the step dict or toml, ``[]`` meaning each
     element of a list (``env_ids[]``, ``artifacts[].id``); ``version_field`` is the key beside the
-    ref, in the same dict, that pins its version. ``walk``, for a shape a path cannot spell, maps
-    the value at the path's parent to the dicts that hold the last key, each with its path parts.
+    ref, in the same dict, that pins its version. ``beside`` names the keys a toml table holding the
+    ref may carry next to it, which its type reads (a computer env's app takes ``install``). ``walk``,
+    for a shape a path cannot spell, maps the value at the path's parent to the dicts that hold the
+    last key, each with its path parts.
     Declarations build one with ``EntityRef.env``, ``EntityRef.agent`` or ``EntityRef.artifact``,
     passing the keyword fields."""
 
@@ -65,6 +67,7 @@ class EntityRef:
     role: RefRole = RefRole.INPUT
     artifact_type: str | None = None
     env_type: str | None = None
+    beside: tuple[str, ...] = ()
     walk: Walker | None = None
 
     @classmethod
@@ -134,12 +137,13 @@ def default_agent_refs(refs: Iterable[EntityRef], step: dict) -> list[EntityRef]
             and step.get(ref.field) is None]
 
 
-def parse_toml_ref(kind: EntityKind, value: Any) -> tuple[str, int | None]:
+def parse_toml_ref(kind: EntityKind, value: Any, beside: tuple[str, ...] = ()) -> tuple[str, int | None]:
     """The id and version a toml ref names: an id, or ``{ <kind> = "<id>", version = <n> }`` with the
-    version optional. Raises ValueError naming the expected form."""
+    version optional, and the keys of ``beside`` allowed in the table too. Raises ValueError naming the
+    expected form."""
     table = isinstance(value, dict)
     entity_id, version = (value.get(kind.value), value.get("version")) if table else (value, None)
-    known_keys = not table or value.keys() <= {kind.value, "version"}
+    known_keys = not table or value.keys() <= {kind.value, "version", *beside}
     positive = version is None or (isinstance(version, int) and not isinstance(version, bool) and version >= 1)
     if not (known_keys and isinstance(entity_id, str) and entity_id and positive):
         raise ValueError(f'expected an id or {{ {kind.value} = "<id>", version = <n> }}, the version optional, '

@@ -13,7 +13,6 @@ import hashlib
 import importlib.metadata
 import json
 import logging
-import re
 import shlex
 import shutil
 import subprocess
@@ -310,7 +309,7 @@ def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifa
                   from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
     its port, its folder under ``DRIVERS`` named for its id's last part."""
-    install, name = driver.install[base.os.type], _name(driver.id, "driver")
+    install, name = driver.install[base.os.type], gate.folder_name(driver.id, "driver")
     layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-{name}.conf")
     _stage(context, layer, f"driver {driver.id}", driver.files, _services(name, install), {"MCP_PORT": driver.port},
            from_store)
@@ -322,7 +321,7 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
     """Write the app's install files under ``context/apps/<name>/``, with the values of its build settings the env
     fixes, and its supervisord programs beside them, run under its name: its services and its own server, which serves
     its class from its venv and launches the app. Its folder under ``APPS`` is named for its id's last part."""
-    install, name = app.install[base.os.type], _name(app.id, "app")
+    install, name = app.install[base.os.type], gate.folder_name(app.id, "app")
     file, _, cls = app.module.partition(":")
     served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
     layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app=True, served=served,
@@ -338,10 +337,6 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
         # Inline, over any the app's files hold, as an app stored before that folder was refused can.
         from_store.pop(f"{layer.folder}/{BUILD_SETTINGS.as_posix()}", None)
     return layer
-
-
-def _name(env_id: str, fallback: str) -> str:
-    return re.sub(r"[^a-z0-9-]+", "-", env_id.rsplit("/", 1)[-1].lower()).strip("-") or fallback
 
 
 def _services(name: str, install: Install) -> dict[str, str]:

@@ -201,7 +201,8 @@ class _Resolver:
                 refs.append(ref)
         for site in ref_sites(refs, config, inline_pins=True):
             try:
-                name, version = parse_toml_ref(site.ref.kind, site.owner if site.version_key else site.value)
+                name, version = parse_toml_ref(site.ref.kind, site.owner if site.version_key else site.value,
+                                               site.ref.beside)
             except ValueError as e:
                 self._problem(entry, f"{site.path}: {e}")
                 continue
