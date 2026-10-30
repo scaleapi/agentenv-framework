@@ -14,15 +14,18 @@ from agent_env.training.nemo_gym.prepare import write_server
 @click.option("--reward-components", is_flag=True,
               help="Answer verify with each of a task's scores as the reward's components, for NeMo RL's GDPO; the "
                    "reward is then their sum.")
+@click.option("--images", is_flag=True,
+              help="Show the model the images its tools return, as NeMo RL's vision models take them: the server "
+                   "answers a tool's image as a data URL, and the rows name AgentEnvAgent, which shows it the model.")
 @click.option("--max-concurrent-envs", type=int, default=8, show_default=True,
               help="The episodes the server runs at once, which should cover a step's rollouts: the rest wait their turn.")
 def main(source: str, root: str, name: str | None, sandbox: str | None, reward: str | None, reward_components: bool,
-         max_concurrent_envs: int) -> None:
+         images: bool, max_concurrent_envs: int) -> None:
     """Writes the resources server for SOURCE, a bundle or the URL of an OpenEnv server serving one, into the Gym root
     ROOT, with its config and a JSONL file of rows per split. Playing one task of each toolset to find its tools
     deploys its envs."""
     server = write_server(source, root, name=name, sandbox=sandbox, reward=reward, reward_components=reward_components,
-                          max_concurrent_envs=max_concurrent_envs)
+                          images=images, max_concurrent_envs=max_concurrent_envs)
     click.echo(f"wrote {server}")
 
 

@@ -22,12 +22,19 @@ APP = """from agent_env.training.nemo_gym.server import AgentEnvResourcesServer
 if __name__ == "__main__":
     AgentEnvResourcesServer.run_webserver()
 """
-#: The server's project. Gym installs it into the server's venv, with nemo-gym from the checkout at ``../..`` when the
+AGENT_APP = """from agent_env.training.nemo_gym.agent import AgentEnvAgent
+
+if __name__ == "__main__":
+    AgentEnvAgent.run_webserver()
+"""
+#: The folder under ``responses_api_agents`` that ``AgentEnvAgent`` runs from, which every server with images shares.
+AGENT = "agentenv_agent"
+#: The project of the server, and of the agent. Gym installs it into the server's venv, with nemo-gym from the checkout at ``../..`` when the
 #: root is one; it is a project rather than a requirements file because uv applies the ``[tool.uv]`` settings of the
 #: nearest ``pyproject.toml``, and a Gym checkout's own exclude packages the framework imports from the venvs of the
 #: servers under it.
 PYPROJECT = """[project]
-name = "{name}-resources-server"
+name = "{name}"
 version = "0.0.0"
 dependencies = ["nemo-gym", "agentenv-framework[nemo-gym]=={version}"]
 
@@ -49,8 +56,8 @@ _FILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 
 
 def write_server(source: str | Path, root: str | Path, *, name: str | None = None, sandbox: str | None = None,
-                 reward: str | None = None, reward_components: bool = False, max_concurrent_envs: int = 8,
-                 reset_timeout: float = 600.0) -> Path:
+                 reward: str | None = None, reward_components: bool = False, images: bool = False,
+                 max_concurrent_envs: int = 8, reset_timeout: float = 600.0) -> Path:
     """``source``'s tasks as NeMo Gym's resources server ``name``, the bundle's env name by default, under the Gym root
     ``root``, returning the server's folder ``resources_servers/<name>``. It holds the server's ``app.py`` and
     ``pyproject.toml``; ``configs/<name>.yaml``, which runs the server, ``simple_agent`` to play its rows and the
@@ -60,9 +67,10 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
     ``source`` is the URL of an OpenEnv server serving the bundle, which the config names, or a bundle, a folder or an
     installed bundle's name, which the resources server serves itself, deploying where ``sandbox`` names, at most
     ``max_concurrent_envs`` episodes at once. ``reward_components`` has the server answer verify with each of a task's
-    scores, for NeMo RL's GDPO, their sum the reward, so it takes no ``reward``. A row's tools are every tool its
-    task's turns offer, found by playing one task of each toolset to its last turn, unscored, so writing deploys
-    those."""
+    scores, for NeMo RL's GDPO, their sum the reward, so it takes no ``reward``. ``images`` has the server answer a
+    tool's image as a data URL and the rows name ``AgentEnvAgent``, written to ``responses_api_agents/agentenv_agent``,
+    which shows it the model, as NeMo RL's vision models take it. A row's tools are every tool its task's turns offer,
+    found by playing one task of each toolset to its last turn, unscored, so writing deploys those."""
     if reward is not None and reward_components:
         raise ValueError(REWARD_AND_COMPONENTS)
     url = str(source) if str(source).startswith(("http://", "https://")) else None
@@ -89,14 +97,23 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
                  **({"sandbox": sandbox} if sandbox else {}), **({"reward": reward} if reward else {})}
     if reward_components:
         where["reward_components"] = True
+    if images:
+        where["images"] = True
+        agent_folder = Path(root) / "responses_api_agents" / AGENT
+        agent_folder.mkdir(parents=True, exist_ok=True)
+        (agent_folder / "app.py").write_text(AGENT_APP)
+        (agent_folder / "pyproject.toml").write_text(PYPROJECT.format(name=AGENT.replace("_", "-"),
+                                                                      version=version("agentenv-framework")))
     server = Path(root) / "resources_servers" / name
     (server / "configs").mkdir(parents=True, exist_ok=True)
     (server / "data").mkdir(exist_ok=True)
     (server / "app.py").write_text(APP)
-    (server / "pyproject.toml").write_text(PYPROJECT.format(name=name.replace("_", "-"),
+    (server / "pyproject.toml").write_text(PYPROJECT.format(name=f"{name.replace('_', '-')}-resources-server",
                                                             version=version("agentenv-framework")))
-    (server / "configs" / f"{name}.yaml").write_text(yaml.safe_dump(_config(name, env_name, where), sort_keys=False))
-    agent = {"type": "responses_api_agents", "name": f"{name}_simple_agent"}
+    agent_type = AGENT if images else "simple_agent"
+    config = _config(name, env_name, where, agent_type)
+    (server / "configs" / f"{name}.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    agent = {"type": "responses_api_agents", "name": f"{name}_{agent_type}"}
     for split, described in tasks.items():
         (server / "data" / f"{split}.jsonl").write_text("".join(json.dumps({
             "responses_create_params": {"input": messages(task["system_prompt"], task["prompt"]),
@@ -122,14 +139,14 @@ def _function(tool: dict[str, Any]) -> dict[str, Any]:
             "parameters": tool.get("input_schema") or {"type": "object", "properties": {}}, "strict": False}
 
 
-def _config(name: str, env_name: str, where: dict[str, Any]) -> dict[str, Any]:
-    agent = f"{name}_simple_agent"
+def _config(name: str, env_name: str, where: dict[str, Any], agent_type: str) -> dict[str, Any]:
+    agent = f"{name}_{agent_type}"
     return {
         name: {"resources_servers": {name: {
             "entrypoint": "app.py", "domain": "agent", "description": f"{env_name}'s tasks, served by AgentEnv",
             **where,
         }}},
-        agent: {"responses_api_agents": {"simple_agent": {
+        agent: {"responses_api_agents": {agent_type: {
             "entrypoint": "app.py", "resources_server": {"type": "resources_servers", "name": name},
             "model_server": {"type": "responses_api_models", "name": "policy_model"},
         }}},

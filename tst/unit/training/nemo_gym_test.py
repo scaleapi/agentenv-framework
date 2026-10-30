@@ -11,7 +11,7 @@ from click.testing import CliRunner
 
 from agent_env.openenv.environment import END_TURN
 from agent_env.training.nemo_gym.__main__ import main
-from agent_env.training.nemo_gym.prepare import APP, write_server
+from agent_env.training.nemo_gym.prepare import AGENT_APP, APP, write_server
 from tst.unit.bundle._support import layout
 from tst.unit.task.episode.run_test import (
     ALICE,
@@ -68,6 +68,7 @@ def test_a_servers_tasks_become_a_resources_server_its_config_and_a_row_per_task
     }]
     assert [(row["split"], row["index"], row["task_id"]) for row in _rows(folder / "data" / "all.jsonl")] == [
         ("all", 0, "a"), ("all", 1, "b")]
+    assert not (tmp_path / "responses_api_agents").exists()
     assert len(teardowns.finished) == 1
 
 
@@ -114,14 +115,23 @@ def test_a_bundle_is_served_while_the_rows_are_written_and_the_config_has_the_se
     bundle = layout(tmp_path / "dock", {"tasks/a.json": json.dumps([ITEMS, unbound, TURN, REPLIES, STYLE])})
 
     result = CliRunner().invoke(main, [str(bundle), str(tmp_path / "gym"), "--name", "dock", "--sandbox", "local",
-                                       "--max-concurrent-envs", "32", "--reward-components"])
+                                       "--max-concurrent-envs", "32", "--reward-components", "--images"])
 
     assert result.exit_code == 0, result.output
     config = yaml.safe_load((tmp_path / "gym" / "resources_servers" / "dock" / "configs" / "dock.yaml").read_text())
     assert {key: value for key, value in config["dock"]["resources_servers"]["dock"].items()
-            if key in ("bundle", "max_concurrent_envs", "sandbox", "url", "reward_components")} == {
-        "bundle": str(bundle.resolve()), "max_concurrent_envs": 32, "sandbox": "local", "reward_components": True}
-    assert len(_rows(tmp_path / "gym" / "resources_servers" / "dock" / "data" / "all.jsonl")) == 1
+            if key in ("bundle", "max_concurrent_envs", "sandbox", "url", "reward_components", "images")} == {
+        "bundle": str(bundle.resolve()), "max_concurrent_envs": 32, "sandbox": "local", "reward_components": True,
+        "images": True}
+    assert config["dock_agentenv_agent"]["responses_api_agents"]["agentenv_agent"]["resources_server"] == {
+        "type": "resources_servers", "name": "dock"}
+    assert config["dock_environment_server"]["environment_servers"]["legacy_agent"]["agent_server"]["name"] == (
+        "dock_agentenv_agent")
+    agent = tmp_path / "gym" / "responses_api_agents" / "agentenv_agent"
+    assert (agent / "app.py").read_text() == AGENT_APP
+    assert tomllib.loads((agent / "pyproject.toml").read_text())["project"]["name"] == "agentenv-agent"
+    [row] = _rows(tmp_path / "gym" / "resources_servers" / "dock" / "data" / "all.jsonl")
+    assert row["agent_ref"] == {"type": "responses_api_agents", "name": "dock_agentenv_agent"}
     assert len(teardowns.finished) == 1
 
 

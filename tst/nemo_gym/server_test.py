@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 import httpx
 import pydantic
 import pytest
+from agentenv_protocol import ToolResult
 from fastapi.testclient import TestClient
 
 from tst.unit.bundle._support import layout
@@ -75,6 +76,22 @@ def test_a_rollout_the_environment_fails_or_that_isnt_its_rows_is_masked(serve, 
     assert answer == "The environment failed to answer, so this episode won't be scored."
     assert (verified["reward"], verified["mask_sample"]) == (0.0, True)
     assert why in verified["failure_reason"]
+
+
+@pytest.mark.parametrize(("images", "answer"), [(True, "data:image/png;base64,iVBORw0KGgo="), (False, "Took one.")])
+def test_with_images_a_tools_last_image_is_its_answer_as_a_data_url_and_without_its_text_is(serve, tools, images,
+                                                                                            answer):
+    tools("add_item", add_item=ToolResult(content=[
+        {"type": "text", "text": "Took one."}, {"type": "image", "data": "aGVsbG8=", "mimeType": "image/jpeg"},
+        {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}]))
+    server = serve({"a": PLAYED})
+
+    with TestClient(_app(url=server.url, images=images)) as client:
+        client.post("/seed_session", json=_row())
+        answered = client.post("/add_item", json={"item": "crate"}).text
+        verified = _verify(client, _row(), "Added a crate.")
+
+    assert (answered, verified["reward"]) == (answer, 1.0)
 
 
 def test_reward_components_answer_each_score_by_step_id_and_make_the_reward_their_sum(serve):

@@ -35,7 +35,7 @@ except ModuleNotFoundError as exc:
                       "Python 3.13.14 or later as NeMo Gym is") from exc
 
 from agent_env.openenv import build_app
-from agent_env.training._openenv import STOP_SECONDS, Server, Session, Shared
+from agent_env.training._openenv import STOP_SECONDS, Rollout, Server, Session, Shared
 from agent_env.training.nemo_gym.prepare import REWARD_AND_COMPONENTS, summed
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,9 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     session may go without a request before its episode is ended, freeing its slot: Gym never verifies a rollout whose
     run failed or was cancelled. ``reward_components`` has verify also answer with each of the task's scores by step id,
     as NeMo RL's GDPO takes them, and makes the reward their sum, as NeMo RL requires of a reward with components; it
-    takes no ``reward``. It runs with one worker, since a rollout's session lives in its process."""
+    takes no ``reward``. ``images`` answers a tool call whose result holds an image with that image as a data URL,
+    which NeMo RL counts as the turn's image, for ``AgentEnvAgent`` to show the model. It runs with one worker, since a
+    rollout's session lives in its process."""
 
     url: str | None = None
     bundle: str | None = None
@@ -65,6 +67,7 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     reset_timeout: float = 600.0
     idle_timeout: float = 600.0
     reward_components: bool = False
+    images: bool = False
 
     @model_validator(mode="after")
     def _checked(self) -> "AgentEnvResourcesServerConfig":
@@ -129,7 +132,7 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         offered = frozenset(tool["name"] for tool in body.responses_create_params.get("tools") or ())
         session = _Session(Shared(self._url, offered, self.config.tool_timeout, self.config.reset_timeout,
-                                  patience=self.config.reset_timeout))
+                                  patience=self.config.reset_timeout), images=self.config.images)
         if (previous := self._sessions.pop(session_id, None)) is not None:
             await previous.close()
         self._sessions[session_id] = session
@@ -208,9 +211,10 @@ class _Session(Session):
     start = Session._start
     close = Session._close
 
-    def __init__(self, shared: Shared):
+    def __init__(self, shared: Shared, images: bool = False):
         super().__init__()
         self._shared = shared
+        self._images = images
         self._seen = time.monotonic()
 
     async def call(self, name: str, arguments: dict[str, Any]) -> str:
@@ -219,6 +223,13 @@ class _Session(Session):
             return await self._step(name, arguments)
         finally:
             self._seen = time.monotonic()
+
+    def _answer(self, rollout: Rollout, name: str, result: Any) -> str:
+        """With ``images``, the last image a tool's result holds, as a data URL, in place of its text; otherwise what
+        the shared session answers."""
+        if self._images and not result.done and (image := _image(result.observation.get("result") or {})):
+            return image
+        return super()._answer(rollout, name, result)
 
     def idle_for(self, now: float) -> float:
         """How long the session has gone with no request, in seconds; none while one is in flight."""
@@ -237,6 +248,12 @@ class _Session(Session):
         if rollout.failure is None and rollout.reward is None:
             return None, None, "the episode ended without a reward"
         return rollout.reward, rollout.scores, rollout.failure
+
+
+def _image(answer: dict[str, Any]) -> str | None:
+    """The last image block of a tool's result, as a data URL."""
+    images = [block for block in answer.get("content") or () if block.get("type") == "image"]
+    return f"data:{images[-1]['mimeType']};base64,{images[-1]['data']}" if images else None
 
 
 def _reply(response: Any) -> str:
