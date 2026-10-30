@@ -46,7 +46,8 @@ def _git_clone_command(owner: str, repo: str, ref: str | None, credentials: str 
     """The command that clones ``owner/repo`` at ``ref`` into /tmp/repo, failing rather than prompting: signed in from
     the ``credentials`` file when there is one, with git's other credential helpers off so none keeps a copy."""
     ref_flag = f"--branch {ref}" if ref else ""
-    helpers = f"-c credential.helper= -c {shlex.quote(f'credential.helper=store --file={credentials}')} " if credentials else ""
+    helper = f"store --file={shlex.quote(credentials)}" if credentials else None
+    helpers = f"-c credential.helper= -c {shlex.quote(f'credential.helper={helper}')} " if helper else ""
     return f"GIT_TERMINAL_PROMPT=0 git {helpers}clone --depth 1 {ref_flag} https://github.com/{owner}/{repo}.git /tmp/repo"
 
 

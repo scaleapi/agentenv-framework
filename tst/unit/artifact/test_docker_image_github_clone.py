@@ -4,21 +4,24 @@ import os
 import shlex
 import subprocess
 
+import pytest
+
 from agent_env.artifact.artifacts.docker_image import _git_clone_command, _github_credentials
 
 
-def test_a_token_signs_the_clone_in_from_its_credentials_file_and_no_other_helper_keeps_it(tmp_path):
-    credentials = tmp_path / "credentials"
+@pytest.mark.parametrize("folder", ["secrets", "secret files"])
+def test_a_token_signs_the_clone_in_from_its_credentials_file_and_no_other_helper_keeps_it(tmp_path, folder):
+    credentials = tmp_path / folder / "credentials"
+    credentials.parent.mkdir()
     credentials.write_bytes(_github_credentials("ghs_s3cret"))
     kept = tmp_path / "kept"
     (tmp_path / ".gitconfig").write_text(f"[credential]\n\thelper = \"!f() {{ cat >> {kept}; }}; f\"\n")
     command = _git_clone_command("example-org", "example-repo", "main", str(credentials))
 
-    assert command == (
-        f"GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c 'credential.helper=store --file={credentials}' "
-        "clone --depth 1 --branch main https://github.com/example-org/example-repo.git /tmp/repo"
-    )
     words = shlex.split(command)
+    assert words[:2] == ["GIT_TERMINAL_PROMPT=0", "git"] and words[words.index("clone"):] == [
+        "clone", "--depth", "1", "--branch", "main", "https://github.com/example-org/example-repo.git", "/tmp/repo",
+    ]
     options = words[words.index("git") + 1:words.index("clone")]
     env = {**os.environ, "HOME": str(tmp_path), "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
     asked = "protocol=https\nhost=github.com\n\n"
