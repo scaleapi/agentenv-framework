@@ -39,6 +39,10 @@ from agent_env.training._openenv import STOP_SECONDS, Server, Session, Shared
 
 logger = logging.getLogger(__name__)
 
+#: How often the server looks for idle sessions, in seconds: every ``REAP_SECONDS``, or ``REAP_SHARE`` of
+#: ``idle_timeout`` when that is sooner.
+REAP_SECONDS, REAP_SHARE = 30.0, 0.25
+
 
 class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     """Where the bundle is served: ``url``, an OpenEnv server's, or ``bundle``, a folder or an installed bundle's name,
@@ -158,7 +162,7 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
     async def _reap(self) -> None:
         """Ends the episode of each session with no request in flight and none for ``idle_timeout`` seconds."""
         while True:
-            await asyncio.sleep(min(30.0, self.config.idle_timeout / 4))
+            await asyncio.sleep(min(REAP_SECONDS, self.config.idle_timeout * REAP_SHARE))
             now = time.monotonic()
             for session_id, session in list(self._sessions.items()):
                 if session._lock.locked() or now - session.seen <= self.config.idle_timeout:
