@@ -7,17 +7,18 @@ import shutil
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
+from typing import Any, NoReturn, TypeVar, overload
 
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, environment_name_problem
 from agent_env.providers.env_providers.env_provider import _env_provider_class
@@ -26,9 +27,6 @@ from agent_env.utils.paths import os_reason
 
 from ._fs import relative, show, with_article
 from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError
-
-if TYPE_CHECKING:
-    from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 A = TypeVar("A", bound=Artifact)
 E = TypeVar("E", bound=Env)
@@ -51,12 +49,8 @@ class AuthoringContext:
 
     bundle: Bundle
     entry: BundleEntry
-    #: Told, a line at a time, how what writing the entry does that takes long goes, such as composing a computer env.
-    on_progress: Callable[[str], None] | None = None
-    #: Where writing a computer env composes it; the env's sandbox provider when None.
-    sandbox_provider: SandboxProvider | None = None
-    #: Whether composing it emulates an arch no link of that provider runs natively, rather than skip it.
-    emulate: bool = True
+    #: How writing a computer env composes it.
+    composing: Composing = Composing()
 
     @property
     def id(self) -> str:

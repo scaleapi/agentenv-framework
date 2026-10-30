@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from agent_env.config import get_config
 from agent_env.entity.refs import RefRole, ref_sites
 from agent_env.plugins._bundles import AGENT_ALIASES
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
@@ -91,7 +92,7 @@ def register_bundle(
 
     It turns namespace routing on while it runs. Raises BundleError listing every problem found before anything is
     written; a write that fails stops it, and every earlier one stays, in the ledger, for the next run to reuse."""
-    provider = build_sandbox_provider(sandbox) if sandbox else None
+    composing = Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
     with namespace_routing():
         bundle = parse_bundle(Path(root))
         resolved = resolve_bundle(bundle)
@@ -113,8 +114,8 @@ def register_bundle(
             registered, dry_run=dry_run, ledger=ledger,
             on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
             on_build=lambda write: say(f"  {_label(registered, write)}: building with docker and pushing"),
-            on_write=lambda done: say(f"  {registered_line(registered, done)}"), sandbox_provider=provider,
-            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"), emulate=emulate)
+            on_write=lambda done: say(f"  {registered_line(registered, done)}"), composing=composing,
+            on_progress=lambda write, line: say(f"  {_label(registered, write)}: {line}"))
     return Registration(registered, materialization, ids, tuple(_floating(registered)), identity, shared, requires)
 
 

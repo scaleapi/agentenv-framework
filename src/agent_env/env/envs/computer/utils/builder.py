@@ -42,6 +42,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: What the builders make of a build context, which the build key covers in place of their source: raise it with a
+#: change that alters what an image holds (its files, their modes, its labels, how it's built), and leave it for one
+#: that changes only how a build gets there, so images aren't built again for nothing.
+FORMAT = 1
 CONTEXT, RESOLVED = "context", "resolve"
 RESOLVER = Path(__file__).with_name("resolve_in_base.py")
 #: What a file starts with when it's only ever run: a script or a Linux binary, made executable where it's staged,

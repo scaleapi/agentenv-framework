@@ -25,6 +25,7 @@ from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
@@ -241,12 +242,11 @@ def run_bundle(
     written, before any task is. Building an infra env the run needs raises what the build raises, before any task
     runs."""
     _refuse_a_running_loop()
-    if sandbox:
-        build_sandbox_provider(sandbox)
+    composing = _composing(sandbox, emulate)
     say = _progress(on_progress)
     with namespace_routing():
         prepared = _prepare(root, tasks, evals, sandbox, id_root, agent, False, say,
-                            declaring_for(Path(root), installed=id_root is not None, dry_run=False), emulate)
+                            declaring_for(Path(root), installed=id_root is not None, dry_run=False), composing)
         plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
             overrides = _overrides(sandbox, user_model, judge_model)
@@ -282,9 +282,9 @@ def prepare_bundle(
     It doesn't turn namespace routing on: the caller keeps it on for as long as it runs the tasks
     (``agent_env.store.routing.namespace_routing``), which suits a service that runs nothing else. Raises what
     ``run_bundle`` raises before its first task runs, except for a running event loop, which it doesn't need."""
-    if sandbox:
-        build_sandbox_provider(sandbox)
-    return _prepare(root, tasks, evals, sandbox, id_root, None, played, _progress(on_progress), _hint(id_root))
+    composing = _composing(sandbox)
+    return _prepare(root, tasks, evals, sandbox, id_root, None, played, _progress(on_progress), _hint(id_root),
+                    composing)
 
 
 def _write_bundle(
@@ -300,8 +300,8 @@ def _write_bundle(
 
 
 def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None],
-                        sandbox: str | None = None, emulate: bool = True) -> Materialization:
-    """Write ``plan``, its computer envs composed on ``sandbox`` when given, then set up the infra envs its runs deploy
+                        composing: Composing = Composing()) -> Materialization:
+    """Write ``plan``, its computer envs composed as ``composing`` says, then set up the infra envs its runs deploy
     on."""
     materialization = materialize(
         plan,
@@ -309,9 +309,8 @@ def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], N
         on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
         on_write=lambda done: say(_written(plan, done)),
         build_here=preflight.built_here,
-        sandbox_provider=build_sandbox_provider(sandbox) if sandbox else None,
+        composing=composing,
         on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"),
-        emulate=emulate,
     )
     if preflight.infra:
         ensure_default_envs(preflight.infra_kinds, say=say)
@@ -338,16 +337,14 @@ def dry_run_bundle(
     It raises what ``run_bundle`` raises before its first task runs, a failed preflight included. Like
     ``run_bundle``, it turns namespace routing on for the whole process while it runs, so it suits the CLI and
     scripts, not a service; it runs no event loop, so a running one isn't refused."""
-    if sandbox:
-        build_sandbox_provider(sandbox)
+    composing = _composing(sandbox, emulate)
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
         _say_plan(plan, say, declaring_for(Path(root), installed=id_root is not None, dry_run=True))
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
-                                      sandbox_provider=build_sandbox_provider(sandbox) if sandbox else None,
-                                      on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"),
-                                      emulate=emulate)
+                                      composing=composing,
+                                      on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"))
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
                       preflight.built_here)
@@ -376,10 +373,10 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 
 def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandbox: str | None, id_root: str | None,
              agent: str | None, played: bool, say: Callable[[str], None], declaring: Declaring,
-             emulate: bool = True) -> PreparedBundle:
+             composing: Composing = Composing()) -> PreparedBundle:
     plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played)
     _say_plan(plan, say, declaring)
-    materialization = _written_with_infra(plan, preflight, say, sandbox, emulate)
+    materialization = _written_with_infra(plan, preflight, say, composing)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
     return PreparedBundle(plan, materialization, to_run)
 
@@ -394,6 +391,12 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
     return plan, preflight_run(plan, [write.source for write in plan.writes
                                       if write.kind is BundleKind.TASK and write.source.entry in to_run], sandbox,
                                played=played)
+
+
+def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
+    """How a run composes its computer envs: on the provider ``sandbox`` names, and emulating unless ``emulate`` is
+    False. Raises ValueError when ``sandbox`` names no provider."""
+    return Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
 
 
 def _to_run(plan: Plan) -> tuple[BundleEntry, ...]:

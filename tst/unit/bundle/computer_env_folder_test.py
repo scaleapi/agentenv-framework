@@ -15,6 +15,7 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle.run import dry_run_bundle
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import composer
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.unit.bundle._support import layout, local_builds
@@ -37,10 +38,11 @@ def composed(tmp_path, monkeypatch, local_stores, cli_routing, builds):
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: None)
     calls = []
 
-    def compose(env, pairs=None, on_progress=None, sandbox_provider=None, emulate=True):
-        if on_progress is not None:
-            on_progress("composing")
-        calls.append((env.id, env.computer.id, env.driver.id, sandbox_provider) + ((pairs,) if pairs is not None else ()))
+    def compose(env, pairs=None, composing=Composing()):
+        if composing.on_progress is not None:
+            composing.on_progress("composing")
+        calls.append((env.id, env.computer.id, env.driver.id, composing.sandbox_provider)
+                     + ((pairs,) if pairs is not None else ()))
 
     monkeypatch.setattr(composer, "compose", compose)
     return calls
@@ -75,7 +77,7 @@ def test_a_computer_env_naming_shipped_aliases_is_written_over_them_and_composed
     plan, provider = planned(_bundle(tmp_path / "desk")), LocalSandboxProvider()
     told = []
 
-    done = materialize(plan, build_here=local_builds(plan), sandbox_provider=provider,
+    done = materialize(plan, build_here=local_builds(plan), composing=Composing(provider),
                        on_progress=lambda write, line: told.append((write.id, line)))
 
     env = Env.get(f"{plan.bundle.bundle.id_root}/desktop")
@@ -93,14 +95,14 @@ def test_a_reused_computer_env_composes_what_it_has_left_on_the_runs_provider_an
     env = Env.get(f"{_plan(root).bundle.bundle.id_root}/desktop")
     told = []
 
-    checked = materialize(_plan(root), dry_run=True, sandbox_provider=provider,
+    checked = materialize(_plan(root), dry_run=True, composing=Composing(provider),
                           on_progress=lambda write, line: told.append((write.id, line)))
-    again = materialize(_plan(root), build_here=local_builds(_plan(root)), sandbox_provider=provider,
+    again = materialize(_plan(root), build_here=local_builds(_plan(root)), composing=Composing(provider),
                         on_progress=lambda write, line: told.append((write.id, line)))
     env.update_metadata({**env.metadata, "computer": {"id": "c", "version": 1, "images": {"amd64": "a", "arm64": "b"}},
                          "composed": {"container": {"amd64": {"status": "ready", "image": "a"},
                                                     "arm64": {"status": "ready", "image": "b"}}}})
-    built = materialize(_plan(root), build_here=local_builds(_plan(root)), sandbox_provider=provider)
+    built = materialize(_plan(root), build_here=local_builds(_plan(root)), composing=Composing(provider))
 
     assert built.composing == () and checked.composing == again.composing == (env.id,) and all(item.reused for item in again.writes)
     assert told == [(env.id, "would compose container/amd64, container/arm64"), (env.id, "composing")]

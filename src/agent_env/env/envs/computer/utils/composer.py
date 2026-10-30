@@ -81,23 +81,32 @@ _PROTOCOL = "agentenv-framework-protocol"
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
 
 
-def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
-            on_progress: Callable[[str], None] | None = None, sandbox_provider: SandboxProvider | None = None,
-            emulate: bool = True) -> None:
-    """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel, on
-    ``sandbox_provider``, by default the env's, and probe each one it runs natively (gate 3), recording each as it
-    starts and finishes, then write the env's computer over every pair built so far. An arch no link runs natively is
-    emulated, or with ``emulate`` False skipped, which leaves it for a later compose. Each pair's stages and how it
-    ended go to ``on_progress`` and the log as they happen (``_Progress``)."""
+@dataclass(frozen=True)
+class Composing:
+    """How a put composes a computer env: on ``sandbox_provider``, by default the env's; emulating an arch no link of
+    it runs natively unless ``emulate`` is False, which leaves the arch skipped for a later compose; each pair's
+    stages told to ``on_progress``, a line at a time."""
+
+    sandbox_provider: SandboxProvider | None = None
+    emulate: bool = True
+    on_progress: Callable[[str], None] | None = None
+
+
+def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, composing: Composing = Composing()) -> None:
+    """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel, as
+    ``composing`` says, and probe each one its provider runs natively (gate 3), recording each as it starts and
+    finishes, then write the env's computer over every pair built so far. Each pair's stages and how it ended go to the
+    log too (``_Progress``)."""
     from agent_env.providers import get_env_sandbox_provider
 
-    base, driver, provider = env.computer, env.driver, sandbox_provider or get_env_sandbox_provider()
-    builds = builder.Builds(provider, env.stored_id, REPOSITORY, emulate)
+    base, driver = env.computer, env.driver
+    provider = composing.sandbox_provider or get_env_sandbox_provider()
+    builds = builder.Builds(provider, env.stored_id, REPOSITORY, composing.emulate)
     pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base)
                                              for arch in gate.arches(base, driver, env.composed_apps())]
     record = _Record(env)
     record.started(pairs)
-    with _Progress(env, on_progress) as progress, ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
+    with _Progress(env, composing.on_progress) as progress, ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
         progress.say(f"composing {', '.join(f'{form}/{arch}' for form, arch in pairs)} on "
                      f"{' or '.join(type(link).__name__ for link in provider.links)}")
         futures = {pool.submit(_composed, env, base, driver, form, arch, builds, progress): (form, arch)
@@ -532,8 +541,8 @@ def _digest(folder: Path) -> str:
 
 
 def _composer_digest() -> str:
-    """A digest of the composer and its builders, which say what a build makes of its inputs."""
-    return "sha256:" + hashlib.sha256(Path(__file__).read_bytes() + Path(builder.__file__).read_bytes()).hexdigest()
+    """A digest of the composer, which says what a build makes of its inputs, and of its builders' ``FORMAT``."""
+    return "sha256:" + hashlib.sha256(Path(__file__).read_bytes() + f"builder {builder.FORMAT}".encode()).hexdigest()
 
 
 def _now() -> str:

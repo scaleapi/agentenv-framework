@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import posixpath
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
@@ -22,6 +21,7 @@ from agent_env.env.envs._deployment import (
     provider_or_class,
 )
 from agent_env.env.envs.computer.utils import composer, gate, inside
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.env.env import DeployedEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
-    from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +82,9 @@ class ComputerEnv(Env):
     @classmethod
     def put(cls, *, id: str, computer: ComputerArtifact, driver: ComputerDriverEnv, environment_name: str,
             apps: Any = (), display: Any = None, network: Any = None, computer_settings: Any = None,
-            compose: bool = True, on_progress: Optional[Callable[[str], None]] = None,
-            sandbox_provider: Optional[SandboxProvider] = None, emulate: bool = True) -> Self:
-        """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it on
-        ``sandbox_provider``, by default the env's, emulating an arch no link runs natively unless ``emulate`` is False,
-        unless ``compose`` is False, telling ``on_progress`` how it goes. Refused, naming every mismatch, before
-        anything is stored."""
+            compose: bool = True, composing: Composing = Composing()) -> Self:
+        """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it as ``composing``
+        says unless ``compose`` is False. Refused, naming every mismatch, before anything is stored."""
         values, problems = gate.check(computer, driver, apps=list(apps), display=display, network=network,
                                       computer_settings=computer_settings or {})
         if problems:
@@ -97,7 +93,7 @@ class ComputerEnv(Env):
             id=id, version=None, environment_name=environment_name,
             computer=computer, driver=driver, display=display, network=network, computer_settings=values))
         if compose:
-            composer.compose(env, on_progress=on_progress, sandbox_provider=sandbox_provider, emulate=emulate)
+            composer.compose(env, composing=composing)
         return env
 
     @classmethod
@@ -114,8 +110,8 @@ class ComputerEnv(Env):
                                                                                        ComputerDriverEnv)
         try:
             return cls.put(id=ctx.id, computer=base, driver=driver,
-                           environment_name=fields.pop("environment_name", ctx.name), on_progress=ctx.on_progress,
-                           sandbox_provider=ctx.sandbox_provider, emulate=ctx.emulate, **fields)
+                           environment_name=fields.pop("environment_name", ctx.name), composing=ctx.composing,
+                           **fields)
         except ValueError as e:
             ctx.refuse([str(e)])
 

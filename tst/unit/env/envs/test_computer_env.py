@@ -39,7 +39,7 @@ from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
 from agent_env.env.envs.computer.utils import boot, builder, composer, gate, inside, packages, resolve_in_base
-from agent_env.env.envs.computer.utils.composer import _probe
+from agent_env.env.envs.computer.utils.composer import Composing, _probe
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer import app_env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
@@ -268,10 +268,10 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     monkeypatch.setattr(composer, "write_index", lambda index, images, signed_in: (
         docker_calls.append(("join", index, signed_in)), docker.joined(index, images, signed_in)))
     first_told, second_told = [], []
-    first = _put(base, driver, on_progress=first_told.append)
+    first = _put(base, driver, composing=Composing(on_progress=first_told.append))
     docker_calls.clear()
     second = _put(base, driver, id="@local/~/kit/other", environment_name="other", display={"width": 640, "height": 480},
-                  network={"mode": "allowlist"}, on_progress=second_told.append)
+                  network={"mode": "allowlist"}, composing=Composing(on_progress=second_told.append))
 
     built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
     assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
@@ -298,7 +298,7 @@ def test_a_stage_that_goes_on_is_said_to_go_on_and_a_failed_pair_says_why(base, 
     monkeypatch.setattr(builder, "build_image", lambda *args, **kwargs: (time.sleep(0.5), build(*args, **kwargs))[1])
     told = []
 
-    _put(base, driver, on_progress=told.append)
+    _put(base, driver, composing=Composing(on_progress=told.append))
 
     assert [line for line in told if line.startswith("container/arm64: still building the image (")]
     assert any(re.fullmatch(r"container/amd64: failed at build: the build failed: #7 ERROR: pip install failed \(\d+ s\)",
@@ -820,7 +820,7 @@ def test_a_put_on_a_vm_provider_builds_each_arch_in_a_vm_of_its_own_and_its_imag
         monkeypatch.setattr(builder, name, lambda *args, **kwargs: pytest.fail("this machine's Docker was used"))
 
     told = []
-    composed = Env.get(_put(base, driver, sandbox_provider=vms, on_progress=told.append).id).metadata["composed"][
+    composed = Env.get(_put(base, driver, composing=Composing(vms, on_progress=told.append)).id).metadata["composed"][
         "container"]
 
     assert ("container/arm64: building emulated, which is slow, in a FakeVmProvider VM; add local to --sandbox to build "
@@ -849,8 +849,8 @@ def test_a_put_on_a_vm_provider_builds_each_arch_in_a_vm_of_its_own_and_its_imag
 def test_a_chain_builds_each_arch_on_the_first_link_that_runs_it_natively(base, driver, docker, signing, tmp_path):
     vms = FakeVmProvider(docker, tmp_path / "vms")
 
-    composed = Env.get(_put(base, driver, sandbox_provider=ChainedSandboxProvider(
-        [vms, LocalSandboxProvider()])).id).metadata["composed"]["container"]
+    composed = Env.get(_put(base, driver, composing=Composing(ChainedSandboxProvider(
+        [vms, LocalSandboxProvider()]))).id).metadata["composed"]["container"]
 
     assert {arch: (r["builder"], r["emulated"]) for arch, r in composed.items()} == {
         "amd64": ("FakeVmProvider", False), "arm64": ("LocalSandboxProvider", False)}
@@ -870,7 +870,7 @@ def test_a_builder_vm_its_provider_loses_fails_its_pair_alone_and_is_torn_down(b
         return real(vm, words, cwd)
     monkeypatch.setattr(FakeVm, "_command", command)
 
-    composed = Env.get(_put(base, driver, sandbox_provider=vms).id).metadata["composed"]["container"]
+    composed = Env.get(_put(base, driver, composing=Composing(vms)).id).metadata["composed"]["container"]
 
     assert (composed["arm64"]["status"], composed["arm64"]["stage"], composed["arm64"]["reason"]) == (
         "failed", "resolve", "RuntimeError: FakeVmProvider's VM failed: Gone: the sandbox is shutting down")
@@ -881,7 +881,7 @@ def test_with_emulation_off_an_arch_a_refused_link_runs_natively_fails_and_only_
         base, driver, docker, tmp_path):
     vms = FakeVmProvider(docker, tmp_path / "vms")
 
-    composed = Env.get(_put(base, driver, sandbox_provider=vms, emulate=False).id).metadata["composed"]["container"]
+    composed = Env.get(_put(base, driver, composing=Composing(vms, emulate=False)).id).metadata["composed"]["container"]
 
     assert (composed["amd64"]["status"], composed["amd64"]["reason"]) == (
         "failed", "FakeVmProvider's VMs can't fetch from the object store, which signs no URLs; build on the local "
@@ -907,8 +907,8 @@ def test_an_arch_no_link_can_build_fails_saying_why_for_each_link(base, driver, 
     made = {"vms": FakeVmProvider(docker, tmp_path / "vms"), "containers": Containers(),
             "local": LocalSandboxProvider()}
 
-    composed = Env.get(_put(base, driver, sandbox_provider=ChainedSandboxProvider(
-        [made[link] for link in links])).id).metadata["composed"]["container"]
+    composed = Env.get(_put(base, driver, composing=Composing(ChainedSandboxProvider(
+        [made[link] for link in links]))).id).metadata["composed"]["container"]
 
     assert (composed["amd64"]["status"], composed["amd64"]["stage"], composed["amd64"]["reason"]) == (
         "failed", "resolve", reason)
@@ -933,7 +933,7 @@ def test_env_build_writes_the_computer_again_when_it_isnt_over_every_pair_built(
 def test_a_put_that_wont_emulate_skips_an_arch_no_link_runs_natively_and_a_later_build_that_will_builds_it(
         base, driver, docker, caplog):
     caplog.set_level(logging.ERROR, logger=composer.__name__)
-    env = _put(base, driver, emulate=False)
+    env = _put(base, driver, composing=Composing(emulate=False))
     skipped = CliRunner().invoke(cli, ["env", "build", "--id", env.id, "--no-emulate"])
     built = CliRunner().invoke(cli, ["env", "build", "--id", env.id])
 
@@ -1541,7 +1541,7 @@ def test_an_apps_file_in_its_servers_folder_is_refused_and_one_stored_before_is_
         _app(base, driver, tmp_path / "mail", extra=own, build_settings={"locale": "fr_FR"})
     monkeypatch.setattr(app_env, "_in_server_folder", lambda declaration, names: [])
     stored = _app(base, driver, tmp_path / "mail", extra=own, build_settings={"locale": "fr_FR"}, compose=False)
-    composer.compose(stored, sandbox_provider=FakeVmProvider(docker, tmp_path / "vms"))
+    composer.compose(stored, composing=Composing(FakeVmProvider(docker, tmp_path / "vms")))
 
     assert [build["build_settings"] for build in docker.builds] == [{"mail": {"locale": "fr_FR"}}] * 2
 
