@@ -415,6 +415,24 @@ def test_an_image_key_naming_a_registry_image_has_the_bundle_reference_it(make):
     assert refs(judge) == [(EntityKind.ARTIFACT, f"{ROOT}/judge__agent_image", None, "ghcr.io/acme/judge:2")]
 
 
+def test_a_registry_image_beside_its_dockerfile_keeps_the_folder_as_its_build_context(make):
+    result = resolve_bundle(make(files={
+        "envs/web/Dockerfile": "FROM scratch\n",
+        "envs/web/env.toml": 'type = "composite_test"\nimage = { ref = "ghcr.io/acme/web:1@sha256:' + "a" * 64 + '", '
+                             'dockerfile = "Dockerfile" }\nbackend_image = { ref = "ghcr.io/acme/api:1" }\n',
+        "artifacts/crm/Dockerfile": "FROM scratch\n",
+        "artifacts/crm/artifact.toml": 'ref = "ghcr.io/acme/crm:2"\n',
+    }))
+    web = next(e for e in result.entries if e.entry.name == "web")
+    crm = next(entry for entry in result.bundle.entries if entry.name == "crm")
+
+    assert web.config["image"] == f"{ROOT}/web__env_image"
+    assert [image for image in result.images if image.entry in (web.entry, crm)] == [
+        ReferencedImage(f"{ROOT}/web__env_image", web.entry, "ghcr.io/acme/web:1@sha256:" + "a" * 64, "Dockerfile"),
+        ReferencedImage(f"{ROOT}/web__backend_image", web.entry, "ghcr.io/acme/api:1"),
+        ReferencedImage(f"{ROOT}/crm", crm, "ghcr.io/acme/crm:2", "Dockerfile"),
+    ]
+
 def test_an_image_folder_is_the_image_built_from_its_dockerfile_or_the_registry_image_its_toml_names(make):
     result = resolve_bundle(make(files={
         "artifacts/base-mcp/artifact.toml": 'description = "the shared server image"\n',
@@ -437,9 +455,6 @@ def test_an_image_folder_is_the_image_built_from_its_dockerfile_or_the_registry_
 @pytest.mark.parametrize("files, problem", [
     ({"artifacts/img/artifact.toml": 'type = "docker_image"\n'},
      'artifacts/img: an image folder needs a Dockerfile, or ref = "<image>" in its artifact.toml'),
-    ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": 'ref = "ghcr.io/acme/img:1"\n'},
-     "artifacts/img: artifact.toml: ref names a registry image, so this folder builds none; remove ref or its "
-     "Dockerfile"),
     ({"artifacts/img/artifact.toml": 'type = "docker_image"\nref = "img:1"\n'},
      "artifacts/img: artifact.toml: ref: 'img:1' doesn't name its registry; spell it out, as in "
      "docker.io/library/img:1"),
@@ -448,7 +463,7 @@ def test_an_image_folder_is_the_image_built_from_its_dockerfile_or_the_registry_
      "and id"),
     ({"artifacts/img/Dockerfile": "FROM scratch\n", "artifacts/img/artifact.toml": "description = 1\n"},
      "artifacts/img: artifact.toml: description must be a string, not 1"),
-], ids=["nothing to build", "both", "no registry", "unknown key", "description type"])
+], ids=["nothing to build", "no registry", "unknown key", "description type"])
 def test_an_image_folder_its_toml_cant_describe_is_a_problem(make, files, problem):
     assert problem in problems(make(files=files))
 
@@ -470,7 +485,9 @@ def test_an_agent_names_a_store_image_or_builds_its_folder(make):
     ('image = "base-mcp"\nbackend_image = { dockerfile = "Dockerfile.missing" }', "backend_image: there is no 'Dockerfile.missing' in "
      "this folder to build"),
     ('image = { ref = "ghcr.io/acme/web:1", platform = "linux/amd64" }',
-     "image: a registry image takes only ref, not platform"),
+     "image: a registry image takes ref and dockerfile, not platform"),
+    ('image = { ref = "ghcr.io/acme/web:1", dockerfile = "Dockerfile.web" }',
+     "image: there is no 'Dockerfile.web' in this folder to keep as its build context"),
     ('image = { ref = "web:1" }',
      "image: 'web:1' doesn't name its registry; spell it out, as in docker.io/library/web:1"),
     ('image = "greeting"', "image: 'greeting' is this bundle's file_artifact_universe, but this field takes "

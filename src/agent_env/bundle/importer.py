@@ -74,11 +74,13 @@ _FOLDERS = {EntityKind.ENV: BundleKind.ENV, EntityKind.AGENT: BundleKind.AGENT, 
 
 
 def import_task(task_id: str, dest: Path | str, *, version: int | None = None,
-                include_scopes: Collection[FieldScope] = (),
+                include_scopes: Collection[FieldScope] = (), image_refs: Mapping[str, str] | None = None,
                 progress: Callable[[str], None] | None = None) -> BundleImport:
     """Write the stored task ``task_id``, at ``version`` or its latest, and every entity it uses as a bundle at
-    ``dest``. Its steps' scoped fields are left out unless ``include_scopes`` names their scope."""
-    importer = _Importer(Path(dest), include_scopes, progress)
+    ``dest``. Its steps' scoped fields are left out unless ``include_scopes`` names their scope. An image whose store id
+    ``image_refs`` maps to a registry reference pinned by digest is written as that reference, which a run pulls, with
+    its build context beside it."""
+    importer = _Importer(Path(dest), include_scopes, progress, image_refs)
     task = Task.get(task_id, version)
     importer.add_task(task)
     return importer.write(f"Imported from the store's task {task.id} v{task.version}.", {"task": task.id,
@@ -86,11 +88,11 @@ def import_task(task_id: str, dest: Path | str, *, version: int | None = None,
 
 
 def import_eval(eval_id: str, dest: Path | str, *, version: int | None = None,
-                include_scopes: Collection[FieldScope] = (),
+                include_scopes: Collection[FieldScope] = (), image_refs: Mapping[str, str] | None = None,
                 progress: Callable[[str], None] | None = None) -> BundleImport:
     """Write the stored eval ``eval_id``, at ``version`` or its latest, the tasks it names and every entity they use as
-    a bundle, leaving out their steps' scoped fields as ``import_task`` does."""
-    importer = _Importer(Path(dest), include_scopes, progress)
+    a bundle, leaving out their steps' scoped fields and writing ``image_refs`` as ``import_task`` does."""
+    importer = _Importer(Path(dest), include_scopes, progress, image_refs)
     stored = Eval.get(eval_id, version)
     names, seen = [], set()
     for entry in stored.tasks:
@@ -155,9 +157,11 @@ class _EntityOut(ExportContext):
 
 class _Importer:
     def __init__(self, dest: Path, include_scopes: Collection[FieldScope] = (),
-                 progress: Callable[[str], None] | None = None):
+                 progress: Callable[[str], None] | None = None, image_refs: Mapping[str, str] | None = None):
         self.dest = Path(os.path.abspath(dest.expanduser()))  # so ``.`` has a name, and a sibling to stage in
         self.include_scopes = frozenset({FieldScope.TASK, *include_scopes})
+        self.image_refs = dict(image_refs or {})  # the registry image to write for an image, by its store id
+        self.refs_used: set[str] = set()
         self.progress = progress or (lambda message: None)
         self.files: dict[str, str] = {}
         self.taken: dict[str, set[str]] = {kind.value: set() for kind in BundleKind}  # folded names, per folder
@@ -259,11 +263,23 @@ class _Importer:
 
     def image(self, out: _EntityOut, artifact: DockerImageArtifact, key: str) -> str | dict:
         """The toml value of an image a folder is built from: its stored context, pruned into the folder, else its
-        registry ref, else a pinned store image."""
+        registry ref, else a pinned store image. Given a registry reference for it, that reference, with the context
+        kept beside it when it has one."""
+        ref = self.image_refs.get(artifact.id)
+        if ref is not None:
+            self.refs_used.add(artifact.id)
+            if problem := _given_ref_problem(ref):
+                self.problems.append(f"{out.folder}: {key}: the reference given for {artifact.id}, {ref!r}, {problem}")
+                return {"ref": ref}
         if artifact.build_context_object_url:
-            job = ImageJob(artifact, out.folder, key, {"dockerfile": artifact.dockerfile_path or ""}, out.toml_name)
+            toml = {"ref": ref} if ref is not None else {}
+            job = ImageJob(artifact, out.folder, key, {**toml, "dockerfile": artifact.dockerfile_path or ""},
+                           out.toml_name, ref=ref)
             out.images.append(job)
             return job.toml
+        if ref is not None:
+            out.pulled.append(Pulled(out.folder, key, ref))
+            return {"ref": ref}
         if names_registry(artifact.image_name):
             out.pulled.append(Pulled(out.folder, key, artifact.image_name))
             return {"ref": artifact.image_name}
@@ -274,6 +290,8 @@ class _Importer:
 
     def write(self, description: str, source: dict) -> BundleImport:
         """Write the folder, with ``description`` as its README's first line, and say what was written."""
+        if unused := sorted(self.image_refs.keys() - self.refs_used):
+            self.problems.append(f"a reference was given for {', '.join(unused)}, which the import writes no image of")
         if self.problems:
             raise BundleError(self.problems)
         staging = self.dest.parent / f".{self.dest.name}.import-{uuid.uuid4().hex[:8]}"
@@ -317,7 +335,7 @@ class _Importer:
     def _download(self, staging: Path, scratch: Path) -> int:
         """Download every file and image the folder holds into ``staging``, saying how much first; return the bytes."""
         groups = context_groups(self.jobs)
-        saved = [job.artifact.tar_gz_object_url for job in self.jobs if job.artifact.tar_gz_object_url]
+        saved = [job.artifact.tar_gz_object_url for job in self.jobs if job.artifact.tar_gz_object_url and not job.ref]
         with ThreadPoolExecutor(_DOWNLOADS) as pool:
             sizes = [*pool.map(_size, self.downloads.values()), *pool.map(_saved_size, saved)]
         total = sum(size or 0 for size in sizes) + sum(group[0].size or 0 for group in groups)
@@ -338,12 +356,17 @@ class _Importer:
             else:
                 self.images.append(WrittenImage(job.folder, job.key, job.artifact.id, job.artifact.version,
                                                 found=not job.artifact.dockerfile_path, pruned=job.pruned,
-                                                locked=job.locked, unlocked=job.unlocked))
+                                                locked=job.locked, unlocked=job.unlocked, ref=job.ref))
         return total
 
     def _image_left_in_store(self, job: ImageJob) -> None:
         """An image whose context the folder can't hold: its registry ref when it names one, else a problem, or a pinned
-        store image when the import keeps one."""
+        store image when the import keeps one; one given a registry reference, that reference."""
+        if job.ref is not None:
+            job.toml.clear()
+            job.toml["ref"] = job.ref
+            self.pulled.append(Pulled(job.folder, job.key, job.ref, job.problem))
+            return
         if names_registry(job.artifact.image_name):
             job.toml.clear()
             job.toml["ref"] = job.artifact.image_name
@@ -517,6 +540,15 @@ def _kind_of(entity: Any) -> EntityKind:
     if isinstance(entity, Artifact):
         return EntityKind.ARTIFACT
     raise TypeError(f"{entity!r} is no env, agent or artifact")
+
+
+def _given_ref_problem(ref: str) -> str | None:
+    """Why ``ref``, given for an image, can't be written: it must name its registry and pin a digest."""
+    if not isinstance(ref, str) or not names_registry(ref):
+        return "doesn't name its registry"
+    if "@sha256:" not in ref:
+        return "doesn't pin a digest, as <registry>/<repo>:<tag>@sha256:<digest> does"
+    return None
 
 
 def _size(url: str) -> int | None:

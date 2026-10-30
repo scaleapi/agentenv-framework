@@ -29,8 +29,12 @@ def bundle():
               type=click.Choice([scope.value for scope in FieldScope if scope is not FieldScope.TASK]),
               help="Keep the fields of this scope as stored, and leave in the store what the folder can't hold, for a "
                    "folder run against the same store. Repeatable.")
+@click.option("--image-ref", "image_refs", multiple=True, metavar="ID=REF",
+              help="Write the stored image ID as the registry image REF, pinned by its digest "
+                   "(<registry>/<repo>:<tag>@sha256:<digest>), which a run pulls, with its build context beside it. "
+                   "Repeatable.")
 def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | None,
-         include_scopes: tuple[str, ...]):
+         include_scopes: tuple[str, ...], image_refs: tuple[str, ...]):
     """Write a stored task, or an eval and its tasks, as a bundle at FOLDER, which must be new or empty.
 
     Each task is written as the store holds it, and every env, agent and artifact it uses is written into a folder of
@@ -42,11 +46,16 @@ def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | 
     import that fails writes nothing."""
     if (task_id is None) == (eval_id is None):
         raise click.UsageError("give one of --from-task or --from-eval")
+    if bad := [given for given in image_refs if "=" not in given]:
+        raise click.UsageError(f"--image-ref takes ID=REF, not {bad[0]!r}")
     scopes = [FieldScope(scope) for scope in include_scopes]
+    refs = dict(given.split("=", 1) for given in image_refs)
     with interruptible():
-        imported = (import_task(task_id, folder, version=version, include_scopes=scopes, progress=click.echo)
+        imported = (import_task(task_id, folder, version=version, include_scopes=scopes, image_refs=refs,
+                                progress=click.echo)
                     if task_id is not None
-                    else import_eval(eval_id, folder, version=version, include_scopes=scopes, progress=click.echo))
+                    else import_eval(eval_id, folder, version=version, include_scopes=scopes, image_refs=refs,
+                                     progress=click.echo))
     _report(imported, folder)
 
 

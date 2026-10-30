@@ -168,6 +168,8 @@ class DryRun:
         return tuple(
             f"{_label(plan, done.write)} v{done.version}: "
             + ("pulled from its registry, its tag pinned to a digest when it's written"
+               + (", with its build context beside it, which a deploy builds only when it can't pull it"
+                  if done.write.source.dockerfile else "")
                if isinstance(done.write.source, ReferencedImage)
                else f"{plan.published[done.write.id].ref}, published for its sources, which each deploy pulls by its "
                     "digest, or builds from its build context when it can't"
@@ -578,7 +580,7 @@ def _pinned(done: Materialized) -> str:
     if not isinstance(done.write.source, ReferencedImage) or "@" in done.write.source.ref:
         return ""
     try:
-        name = DockerImageArtifact.get(done.write.id, done.version).image_name
+        name = DockerImageArtifact.get(done.write.id, done.version).pinned_name
     except NotFoundError:  # a dry run's image, not yet written
         return ""
     algorithm, _, digest = name.rpartition("@")[2].partition(":")

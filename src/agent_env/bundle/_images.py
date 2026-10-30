@@ -34,6 +34,7 @@ class ImageJob:
     problem: str | None = None  # why it can't be written
     locked: Locked | None = None
     unlocked: str | None = None  # why its versions weren't pinned
+    ref: str | None = None  # the registry image the folder names, given for it, its context beside it
 
 
 def context_groups(jobs: list[ImageJob]) -> list[list[ImageJob]]:
@@ -89,7 +90,8 @@ def write_images(groups: list[list[ImageJob]], staging: Path, scratch: Path,
     # Pinning rewrites a Dockerfile, which another image placed in the same folder may hold too: so only once all are.
     sharing: dict[tuple[str, str], list[ImageJob]] = {}
     for job in placed:
-        sharing.setdefault((job.folder, job.pruned.dockerfile), []).append(job)
+        if job.ref is None:  # a run pulls an image given its ref, so nothing pins its context's installs
+            sharing.setdefault((job.folder, job.pruned.dockerfile), []).append(job)
     for (folder, dockerfile), jobs in sharing.items():
         _lock(jobs, staging / folder, dockerfile)
 
