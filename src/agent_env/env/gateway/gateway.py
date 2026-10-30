@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import posixpath
 import socket
 import subprocess
 from contextlib import asynccontextmanager
@@ -565,7 +566,11 @@ class Gateway:
                              on_done=log_write)
 
     async def _proxy_website_request(self, request: Request) -> Response:
-        """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers."""
+        """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
+        A site's data plane and card are never reached through its route, so an agent browsing the site can't read
+        what grades it; agentenv reaches them through /svc/<name>/."""
+        if reserved_site_path("/" + request.path_params.get("path", "")):
+            return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
         engine = self._trigger_engine
@@ -1389,3 +1394,9 @@ def _call_never_reached_child(exc: BaseException) -> bool:
     if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
         return True
     return isinstance(exc, McpError) and exc.error.code == 32600
+
+
+def reserved_site_path(path: str) -> bool:
+    """Whether ``path``, as a site's server would route it, is its data plane or its env card."""
+    normalized = posixpath.normpath("/" + path.lstrip("/"))
+    return normalized == RPC_PATH or normalized.startswith(RPC_PATH + "/") or normalized == WELL_KNOWN_PATH

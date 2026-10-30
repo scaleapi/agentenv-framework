@@ -25,6 +25,7 @@ from agent_env.env.envs._deployment import (
 )
 from agent_env.env.gateway import GatewayMode
 from agent_env.attribution import Attribution
+from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_HEALTH_PATH
 from agent_env.utils.paths import validate_file_name
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HEALTH_PATH = "/api/health"
+DEFAULT_HEALTH_PATH = AGENT_ENV_WEBSITE_HEALTH_PATH
 _HEALTH_PATH = re.compile(r"/[A-Za-z0-9._~/-]*")
 
 
@@ -174,9 +175,6 @@ class WebsiteEnv(Env):
     def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
         """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
         ``sandbox_type`` is deploy()'s own, which no provider takes."""
-        if self.frontend_docker_image_artifact is None:
-            return (f"website env '{self.id}' has no frontend image, and its server serving its own pages deploys "
-                    "once the gateway serves a one-image site")
         return deploy_refusal(self, provider_or_class(self), options)
 
     @classmethod

@@ -40,6 +40,7 @@ from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
     AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
+    AGENT_ENV_WEBSITE_HEALTH_PATH,
     DOCKER_COMPOSE_PATH,
     GATEWAY_APP_DIR,
     GATEWAY_SERVICE_NAME,
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
 
     from agent_env.artifact import DockerImageArtifact
     from agent_env.env.env import DeployedEnv, Env
+    from agent_env.env.envs.website import WebsiteEnv
     from agent_env.providers.env_state import DatabaseStateProvider, EnvStateInstance, LocalPostgresStoreSpec
 
 logger = logging.getLogger(__name__)
@@ -115,11 +117,13 @@ class DeployedGateway:
 
 @dataclass
 class WebsiteConfig:
-    """Configuration for a website (frontend + backend) in a gateway deployment."""
+    """Configuration for a website in a gateway deployment: its server image, which serves the site's pages and API and
+    answers at ``health_path`` once usable, and a deprecated separate frontend image for a site built on one."""
 
     backend_image: str
-    frontend_image: str
+    frontend_image: str | None
     environment_name: str
+    health_path: str = AGENT_ENV_WEBSITE_HEALTH_PATH
 
 
 @dataclass
@@ -467,6 +471,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if website_configs:
             website_urls = ",".join(
                 f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_FRONTEND_SUFFIX}:80"
+                if wc.frontend_image else
+                f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}:{AGENT_ENV_WEBSITE_BACKEND_PORT}"
                 for wc in website_configs
             )
             gateway_env.append(f"      - WEBSITE_URLS={website_urls}")
@@ -524,7 +530,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
                 "      - PYTHONUNBUFFERED=1",
                 "    healthcheck:",
-                f'      test: ["CMD", "curl", "-f", "http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}/api/health"]',
+                f'      test: ["CMD", "curl", "-f", "http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
                 "      interval: 10s",
                 "      timeout: 5s",
                 "      start_period: 30s",
@@ -532,6 +538,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "    networks:",
                 "      - env-network",
                 "",
+            ])
+            if not wc.frontend_image:
+                continue
+            lines.extend([
                 f"  {frontend_name}:",
                 f"    image: {wc.frontend_image}",
                 "    depends_on:",
@@ -1482,6 +1492,14 @@ class _GatewayTopology:
     names_gateway_on_vm: bool  # a MultiEnv's record names its gateway sandbox even on a VM
 
 
+def website_config(env: WebsiteEnv) -> WebsiteConfig:
+    """A website env as the gateway runs it: its server image, any deprecated frontend image, and its health path."""
+    frontend = env.frontend_docker_image_artifact
+    return WebsiteConfig(backend_image=env.server_docker_image_artifact.image_name,
+                         frontend_image=frontend.image_name if frontend else None,
+                         environment_name=env.environment_name, health_path=env.health_path)
+
+
 def _gateway_topology(env: Env) -> _GatewayTopology:
     """What a gateway fronts for env: a MultiEnv's MCP servers and websites (whatever their own env_provider_type) under its
     name, a WebsiteEnv's website, or else the env's one MCP server."""
@@ -1498,12 +1516,9 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
     return _GatewayTopology(
         mcp_servers=[MCPServerConfig(image=s.docker_image_artifact.image_name, environment_name=s.environment_name) for s in servers],
         mcp_server_images=[s.docker_image_artifact for s in servers],
-        website_configs=[
-            WebsiteConfig(backend_image=w.backend_docker_image_artifact.image_name, frontend_image=w.frontend_docker_image_artifact.image_name,
-                          environment_name=w.environment_name)
-            for w in websites
-        ] or None,
-        website_images=[image for w in websites for image in (w.backend_docker_image_artifact, w.frontend_docker_image_artifact)] or None,
+        website_configs=[website_config(w) for w in websites] or None,
+        website_images=[image for w in websites
+                        for image in (w.server_docker_image_artifact, w.frontend_docker_image_artifact) if image] or None,
         mcp_server_name=name,
         names_gateway_on_vm=is_multi,
     )
@@ -1529,7 +1544,7 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
     MCP server's name), or one is a service every gateway deploy runs."""
     names = [c.environment_name for c in [*mcp_servers, *(website_configs or []), *(sidecars or [])]]
     refs = [*images, *(s.image for s in mcp_servers), *(s.image for s in sidecars or []),
-            *(ref for w in website_configs or [] for ref in (w.backend_image, w.frontend_image))]
+            *(ref for w in website_configs or [] for ref in (w.backend_image, w.frontend_image) if ref is not None)]
     problems = [problem for problem in [*map(environment_name_problem, names), *map(image_reference_problem, refs)]
                 if problem]
     services = Counter([*(c.environment_name for c in [*mcp_servers, *(sidecars or [])]),
