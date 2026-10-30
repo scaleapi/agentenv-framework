@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import gzip
 import hashlib
 import logging
@@ -27,6 +26,7 @@ from agent_env.store.image_store.oci_registry_credentials import image_reference
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
 from agent_env.utils.docker.context import BuildContext
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image, normalize_platform
+from agent_env.utils.docker.untag import write_untagged
 
 logger = logging.getLogger(__name__)
 
@@ -288,9 +288,10 @@ class DockerImageArtifact(Artifact):
     def put_archive(cls, id: str, *, description: str, archive_path: str, context_path: str | None = None,
                     dockerfile_path: str | None = None, platform: str | None = None) -> "DockerImageArtifact":
         """Register the image ``docker save`` wrote to ``archive_path``, stored as its tar.gz, which a deploy loads, so
-        no Docker is needed here; with the build context at ``context_path`` kept beside it when given. Its
-        ``image_name``, ``local/<slug>-<hash>:<archive>``, the same for the same archive, names no registry: each load
-        tags the image with it, whatever name the archive gives it."""
+        no Docker is needed here; with the build context at ``context_path`` kept beside it when given. It's stored
+        naming no image, so a load tags nothing the archive names; its ``image_name``,
+        ``local/<slug>-<hash>:<archive>``, the same for the same archive, names no registry, and each load tags the
+        image with it. Raises ValueError when the archive isn't one docker save writes."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
@@ -299,9 +300,12 @@ class DockerImageArtifact(Artifact):
         store = get_artifact_store()
         prefix = store.attempt_prefix("docker_image", id)
         objects = get_config().get_object_store_to_write(prefix, id)
+        digest = _sha256(Path(archive_path))
         with tempfile.TemporaryDirectory(prefix="agent-env-archive-") as tmp:
-            gzipped, digest = _gzipped(Path(archive_path), Path(tmp) / "image.tar.gz")
-            tar_gz_object_url = objects.put_file_at(f"{prefix}{fs_safe(id)}.tar.gz", str(gzipped), "application/gzip")
+            untagged = Path(tmp) / "image.tar.gz"
+            with open(archive_path, "rb") as saved, untagged.open("wb") as out:
+                write_untagged(saved, out, gzip_level=1)
+            tar_gz_object_url = objects.put_file_at(f"{prefix}{fs_safe(id)}.tar.gz", str(untagged), "application/gzip")
         return cls.put_tar(
             id,
             description=description,
@@ -707,20 +711,12 @@ def _context_image_name(id: str, source_digest: str) -> str:
     return f"{local_image_repository(id)}:{source_digest.removeprefix('sha256:')[:_SOURCES_TAG_CHARS]}"
 
 
-def _gzipped(archive: Path, dest: Path) -> tuple[Path, str]:
-    """``archive`` as a tar.gz: itself when it is one, else gzipped to ``dest``; and the sha256 of ``archive`` as
-    given, hex."""
+def _sha256(path: Path) -> str:
     hashed = hashlib.sha256()
-    with archive.open("rb") as source:
-        compressed = source.read(2) == b"\x1f\x8b"
-        source.seek(0)
-        out = contextlib.nullcontext() if compressed else gzip.open(dest, "wb", compresslevel=1)
-        with out as sink:
-            while chunk := source.read(1 << 20):
-                hashed.update(chunk)
-                if sink is not None:
-                    sink.write(chunk)
-    return (archive if compressed else dest), hashed.hexdigest()
+    with path.open("rb") as file:
+        while chunk := file.read(1 << 20):
+            hashed.update(chunk)
+    return hashed.hexdigest()
 
 
 def _upload_context(objects, prefix: str, context: BuildContext) -> str:

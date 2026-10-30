@@ -265,7 +265,7 @@ def _write_archived_image(plan: Plan, write: Write) -> int:
     try:
         if image.dockerfile is None:
             return put().version
-        with staged_build_context(plan.bundle_of(entry), entry, image.dockerfile, {image.archive}) as staged:
+        with staged_build_context(plan.bundle_of(entry), entry, image.dockerfile) as staged:
             return put(context_path=str(staged.path), dockerfile_path=staged.dockerfile).version
     except (ValueError, RuntimeError, OSError) as e:  # a context it can't write, or the object store
         raise BundleError([f"{_path(plan, write)}: {e}"]) from None

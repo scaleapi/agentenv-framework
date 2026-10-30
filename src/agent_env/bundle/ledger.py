@@ -338,7 +338,7 @@ def _archived_files(bundle: Bundle, image: ArchivedImage) -> dict[str, str]:
     keeps one."""
     files = {image.archive: _file_sha256(image.entry.path / image.archive)}
     if image.dockerfile is not None:
-        for key, path in build_context_files(bundle, image.entry, {image.archive}).items():
+        for key, path in build_context_files(bundle, image.entry).items():
             files[key] = _file_sha256(path) + _mode(path)
     return files
 

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import shutil
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,7 @@ from agent_env.utils.card_naming import card_names_in_files
 from agent_env.utils.paths import os_reason
 
 from ._fs import relative, show, with_article
-from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError
+from .parse import CONFIG_FILES, LEAVINGS, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind
 
 A = TypeVar("A", bound=Artifact)
 E = TypeVar("E", bound=Env)
@@ -248,20 +249,37 @@ class AuthoringContext:
 
 def entry_files(bundle: Bundle, entry: BundleEntry, *, empty_ok: bool = False) -> dict[str, Path]:
     """The files in an entry's folder, keyed by POSIX path in NFC and sorted: regular files, dot files
-    included, through links that stay inside the bundle, less what the OS or Python leaves behind and
-    the entry's own toml. Raises BundleError listing every problem found, a folder with no files among
-    them unless ``empty_ok``."""
+    included, through links that stay inside the bundle, less what the OS or Python leaves behind, the
+    entry's own toml and the image archives it names. Raises BundleError listing every problem found, a
+    folder with no files among them unless ``empty_ok``."""
     return _Walk(bundle, entry, empty_ok).files()
 
 
-def build_context_files(bundle: Bundle, entry: BundleEntry, exclude: Collection[str] = ()) -> dict[str, Path]:
+def entry_archives(entry: BundleEntry) -> frozenset[str]:
+    """The image archives ``entry``'s toml names, by an image table's ``archive``, or an image folder's, as POSIX paths
+    in its folder in NFC: what an image loads, which no build context or file the entry writes holds."""
+    named, pending = set(), [entry.config or {}]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            # A top-level key names an archive only in an image folder's toml, which is its image's table.
+            image_table = value is not entry.config or entry.kind is BundleKind.ARTIFACT
+            if image_table and isinstance(value.get("archive"), str):
+                named.add(unicodedata.normalize("NFC", posixpath.normpath(value["archive"])))
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return frozenset(named)
+
+
+def build_context_files(bundle: Bundle, entry: BundleEntry) -> dict[str, Path]:
     """What an image built from an entry's folder is built from: its ``entry_files`` and its own toml, which
-    the Dockerfile can copy too, but for the paths in ``exclude``, such as an archived image's own archive."""
+    the Dockerfile can copy too."""
     files = entry_files(bundle, entry)
     toml = entry.path / CONFIG_FILES[entry.kind]
     if toml.is_file():
         files[toml.name] = toml
-    return {key: path for key, path in sorted(files.items()) if key not in exclude}
+    return dict(sorted(files.items()))
 
 
 @dataclass(frozen=True)
@@ -279,13 +297,11 @@ class StagedContext:
 
 
 @contextmanager
-def staged_build_context(bundle: Bundle, entry: BundleEntry, dockerfile: str,
-                         exclude: Collection[str] = ()) -> Iterator[StagedContext]:
-    """``entry``'s ``StagedContext`` for its ``dockerfile``, a path in its folder, removed on leaving; without the paths
-    in ``exclude``."""
+def staged_build_context(bundle: Bundle, entry: BundleEntry, dockerfile: str) -> Iterator[StagedContext]:
+    """``entry``'s ``StagedContext`` for its ``dockerfile``, a path in its folder, removed on leaving."""
     with tempfile.TemporaryDirectory(prefix="agent-env-build-") as staged:
         context = Path(staged)
-        for key, path in build_context_files(bundle, entry, exclude).items():
+        for key, path in build_context_files(bundle, entry).items():
             (context / key).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, context / key)
         yield StagedContext(context, str(context / dockerfile))
@@ -339,6 +355,8 @@ class _Walk:
             self._problem(top, f"{how} {show(os.path.realpath(top))}, outside the bundle; {_BRING_IT_IN}")
         else:
             self._walk(top)
+        for archive in entry_archives(self.entry):
+            self.found.pop(archive, None)
         if not self.found and not self.problems and not self.empty_ok:
             self._problem(top, f"has no files to write ({', '.join(sorted(LEAVINGS))} don't count)")
         if self.problems:

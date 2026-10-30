@@ -3,19 +3,24 @@ for a VM here to load; and published ones pulled here by their digest."""
 
 import gzip
 import io
+import json
 import logging
 import subprocess
+import tarfile
 import threading
 import time
 
 import pytest
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.store import get_artifact_store
+from agent_env.config import get_config
 from agent_env.providers.sandbox_providers import host_images
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.utils.docker.build import DockerBuildError
+from tst.util.docker_save import saved_image, tar_bytes
 
 
 @pytest.fixture
@@ -304,21 +309,41 @@ def test_a_published_image_with_no_build_context_that_cant_be_pulled_says_why(mo
 
 
 
+_TAGGED = saved_image([{"app/hello.txt": "hi\n"}], oci=True, tags=["acme/crm:1"])
+_LOADED_ID = "sha256:" + "c" * 64
+
+
 def _archived(tmp_path):
     archive = tmp_path / "image.tar"
-    archive.write_bytes(b"the tar docker save wrote")
+    archive.write_bytes(_TAGGED)
     return DockerImageArtifact.put_archive("crm_image", description="d", archive_path=str(archive))
 
 
-def _docker_load(monkeypatch, *, held=(), printed="Loaded image: acme/crm:1\n", failure=None):
-    """The docker commands ``load`` runs, each recorded with the bytes it was given to load; Docker holds ``held``, and
-    its load prints ``printed``, or exits 1 saying ``failure``."""
+def _stored_tarball(tmp_path, data):
+    """A tar.gz another writer stored under a bare tag, as it saved it: naming whatever images it names."""
+    path = tmp_path / "saved.tar.gz"
+    path.write_bytes(gzip.compress(data))
+    prefix = get_artifact_store().attempt_prefix("docker_image", "crm_image")
+    url = get_config().get_object_store_to_write(prefix, "crm_image").put_file_at(
+        f"{prefix}crm.tar.gz", str(path), "application/gzip")
+    return DockerImageArtifact.put_tar("crm_image", description="d", image_name="local/crm:v1", tar_gz_object_url=url)
+
+
+def _docker_load(monkeypatch, *, held=(), printed=f"Loaded image ID: {_LOADED_ID}\n", failure=None):
+    """The docker commands ``load`` runs, each load recorded with the names the archive it was given gives its image;
+    Docker holds ``held``, and its load prints ``printed``, or exits 1 saying ``failure``."""
     ran = []
 
     def run(argv, **kwargs):
         if argv[1:3] == ["image", "inspect"]:
             return subprocess.CompletedProcess(argv, int(argv[3] not in held), "", "")
-        ran.append(argv[1:] if argv[1] != "load" else ["load", gzip.decompress(open(argv[3], "rb").read())])
+        if argv[1] == "load":
+            with tarfile.open(argv[3]) as tar:
+                names = [entry["RepoTags"] for entry in json.load(tar.extractfile("manifest.json"))]
+                names += [d.get("annotations") for d in json.load(tar.extractfile("index.json"))["manifests"]]
+            ran.append(["load", names])
+        else:
+            ran.append(argv[1:])
         if argv[1] == "load" and failure:
             return subprocess.CompletedProcess(argv, 1, "", failure)
         return subprocess.CompletedProcess(argv, 0, printed if argv[1] == "load" else "", "")
@@ -327,13 +352,24 @@ def _docker_load(monkeypatch, *, held=(), printed="Loaded image: acme/crm:1\n", 
     return ran
 
 
-def test_a_saved_image_is_loaded_from_its_store_and_tagged_with_its_name(local_stores, tmp_path, monkeypatch):
+def test_a_saved_image_is_loaded_naming_no_image_and_tagged_with_its_name_by_its_id(local_stores, tmp_path,
+                                                                                    monkeypatch):
     image = _archived(tmp_path)
     ran = _docker_load(monkeypatch)
 
     host_images.load(image)
 
-    assert ran == [["load", b"the tar docker save wrote"], ["tag", "acme/crm:1", image.image_name]]
+    assert ran == [["load", [None, {"org.example.kept": "yes"}]], ["tag", _LOADED_ID, image.image_name]]
+
+
+def test_a_stored_tarball_naming_images_is_given_to_docker_naming_none(local_stores, tmp_path, monkeypatch):
+    """Docker would otherwise tag what it loads with every name the tarball gives, over images it holds."""
+    image = _stored_tarball(tmp_path, _TAGGED)
+    ran = _docker_load(monkeypatch)
+
+    host_images.load(image)
+
+    assert ran == [["load", [None, {"org.example.kept": "yes"}]], ["tag", _LOADED_ID, "local/crm:v1"]]
 
 
 def test_a_saved_image_docker_holds_isnt_loaded_again(local_stores, tmp_path, monkeypatch):
@@ -345,26 +381,27 @@ def test_a_saved_image_docker_holds_isnt_loaded_again(local_stores, tmp_path, mo
     assert ran == []
 
 
-def test_a_saved_image_holding_only_an_untagged_image_is_tagged_by_its_id(local_stores, tmp_path, monkeypatch):
-    image = _archived(tmp_path)
-    ran = _docker_load(monkeypatch, printed="Loaded image ID: sha256:" + "c" * 64 + "\n")
-
-    host_images.load(image)
-
-    assert ran[1] == ["tag", "sha256:" + "c" * 64, image.image_name]
-
-
 @pytest.mark.parametrize("load, problem", [
     ({"failure": "open /x: no space left on device\n"},
      "Couldn't load 'crm_image' v1's saved image: open /x: no space"),
-    ({"printed": ""}, "'crm_image' v1's saved image holds no image to load"),
-], ids=["refused", "empty"])
+    ({"printed": "Loaded image: acme/crm:1\n"}, "'crm_image' v1's saved image holds no image to load"),
+], ids=["refused", "no id"])
 def test_a_saved_image_docker_cant_load_says_why(local_stores, tmp_path, monkeypatch, load, problem):
     image = _archived(tmp_path)
     _docker_load(monkeypatch, **load)
 
     with pytest.raises(RuntimeError, match=problem):
         host_images.load(image)
+
+
+def test_a_stored_tarball_docker_save_didnt_write_isnt_given_to_docker(local_stores, tmp_path, monkeypatch):
+    image = _stored_tarball(tmp_path, tar_bytes({"hello.txt": "hi"}))
+    ran = _docker_load(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="Couldn't load 'crm_image' v1's saved image: it holds no manifest.json"):
+        host_images.load(image)
+    assert ran == []
+
 
 @pytest.mark.asyncio
 async def test_the_local_provider_pulls_a_published_image_builds_a_context_and_loads_a_saved_one(local_stores, context,
