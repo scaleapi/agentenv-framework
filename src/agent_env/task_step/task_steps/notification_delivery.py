@@ -5,8 +5,10 @@ Every item ``take`` returns has one shape (``id``, ``to``, ``at``, ``times``, ``
 ``parts``), so each is delivered the same way, whatever its source: its text labelled with when and through what
 (``channel``), so nothing poses as the person, and "came due N times" when ``times`` is more than one:
 
-    [Mon Feb 1, 3:00 PM · your scheduled check] See if Dana replied about the 2BR on Alder St
-    [Mon Feb 1, 3:10 PM · Curbfinch alert] New listing: 2BR on Ivy St, $3,050/mo
+    [Mon Feb 1, 3:00 PM UTC · your scheduled check] See if Dana replied about the 2BR on Alder St
+    [Mon Feb 1, 3:10 PM UTC · Curbfinch alert] New listing: 2BR on Ivy St, $3,050/mo
+
+Times are in UTC, and say so, like everything else the agent reads about time (``get_time``, ``schedule_check``).
 
 Each delivered part carries ``metadata.agentenv``, the item without its parts (``source`` and ``source_id`` among
 them), so a verifier reading the stored conversation can tell a delivered line from what the person wrote in the same
@@ -29,49 +31,39 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
-from zoneinfo import ZoneInfo
 
 from agent_env.env.gateway.constants import EXT_NOTIFICATIONS_URI
 
-DEFAULT_TIME_ZONE = "UTC"
 _TAKE_ATTEMPTS = 3
 _TAKE_RETRY_BASE_DELAY_S = 0.5  # seconds; the nth retry waits n times this
 _EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
 
 
-def label_zone(name: Optional[str]) -> ZoneInfo:
-    """The IANA zone delivered lines show their times in; UTC when none is named."""
-    try:
-        return ZoneInfo(name or DEFAULT_TIME_ZONE)
-    except Exception as e:  # ZoneInfoNotFoundError, or a ValueError for a malformed key
-        raise ValueError(f"time_zone must be an IANA name such as 'America/Los_Angeles', got {name!r}") from e
-
-
-def label_time(at: Optional[str], zone: ZoneInfo) -> str:
-    """'Mon Feb 1, 3:00 PM' in ``zone``; 'now' for an item with no time (queued while the env clock was unset)."""
+def label_time(at: Optional[str]) -> str:
+    """'Mon Feb 1, 3:00 PM UTC'; 'now' for an item with no time (queued while the env clock was unset)."""
     if not at:
         return "now"
-    local = _utc(at).astimezone(zone)
-    return f"{local.strftime('%a %b')} {local.day}, {local.strftime('%I:%M %p').lstrip('0')}"
+    at = _utc(at)
+    return f"{at.strftime('%a %b')} {at.day}, {at.strftime('%I:%M %p').lstrip('0')} UTC"
 
 
-def delivered_line(item: dict, zone: ZoneInfo) -> str:
+def delivered_line(item: dict) -> str:
     """A taken item's text as the agent reads it: ``[when · channel]``, then its text parts."""
-    when = label_time(item.get("at"), zone)
+    when = label_time(item.get("at"))
     times = item.get("times", 1)
     again = f" (it came due {times} times while you were away)" if times > 1 else ""
     text = "\n\n".join(p["text"] for p in item["parts"] if p.get("kind") == "text")
     return f"[{when} · {item['channel']}] {text}{again}"
 
 
-def delivered_parts(items: Iterable[dict], zone: ZoneInfo) -> list[dict]:
+def delivered_parts(items: Iterable[dict]) -> list[dict]:
     """Per taken item, oldest first: one text part, its ``delivered_line``, then any parts that aren't text, as they
     are. Each carries ``metadata.agentenv``: the item without its parts, with the ``env_id`` it came from when the
     item has one."""
     parts = []
     for item in sorted(items, key=_oldest_first):
         meta = {"agentenv": {k: v for k, v in item.items() if k != "parts"}}
-        parts.append({"kind": "text", "text": delivered_line(item, zone), "metadata": meta})
+        parts.append({"kind": "text", "text": delivered_line(item), "metadata": meta})
         parts.extend({**p, "metadata": meta} for p in item["parts"] if p.get("kind") != "text")
     return parts
 

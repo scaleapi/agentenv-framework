@@ -14,7 +14,7 @@ from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.constants import EXT_NOTIFICATIONS_URI
 from agent_env.env.gateway.notifications import Notifications
 from agent_env.task_step.task_steps import notification_delivery
-from agent_env.task_step.task_steps.notification_delivery import delivered_line, label_zone, next_message
+from agent_env.task_step.task_steps.notification_delivery import delivered_line, next_message
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.unit.task_step.test_prompt_agent_post_turn_hooks import EnvPeers, _env, _hook
 from tst.unit.task_step.test_prompt_agent_user_side import AGENT, ENV, USER, _USER_SIM_CARD, _context, sim, text
@@ -88,14 +88,14 @@ async def test_what_came_due_opens_the_next_message_ahead_of_the_user_sims_reply
     _alder_and_ivy_due(peers)
     ctx = _ctx()
 
-    await _step(time_zone="America/Los_Angeles").execute(ctx)
+    await _step().execute(ctx)
 
     assert _to_agent(ctx)[1] == [
-        {"kind": "text", "text": f"[Mon Feb 1, 3:00 PM · your scheduled check] {ALDER}",
+        {"kind": "text", "text": f"[Mon Feb 1, 11:00 PM UTC · your scheduled check] {ALDER}",
          "metadata": {"agentenv": {"id": "check-1", "to": "default", "at": "2027-02-01T23:00:00Z", "times": 1,
                                    "source": "scheduled_check", "source_id": "check-1",
                                    "channel": "your scheduled check", "env_id": "env"}}},
-        {"kind": "text", "text": f"[Mon Feb 1, 3:10 PM · Curbfinch alert] {IVY}",
+        {"kind": "text", "text": f"[Mon Feb 1, 11:10 PM UTC · Curbfinch alert] {IVY}",
          "metadata": {"agentenv": {"id": "notification-2", "to": "default", "at": "2027-02-01T23:10:00Z", "times": 1,
                                    "source": "trigger", "source_id": "ivy-listed", "channel": "Curbfinch alert",
                                    "env_id": "env"}}},
@@ -140,15 +140,15 @@ async def test_the_last_turn_takes_nothing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_labels_are_in_utc_unless_the_step_names_a_time_zone(monkeypatch):
+async def test_labels_are_in_utc_and_say_so(monkeypatch):
     peers = GatewayQueue(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim("ok"), sim("bye", done=True)]})
     _alder_and_ivy_due(peers)
     ctx = _ctx()
 
     await _step().execute(ctx)
 
-    assert [p["text"] for p in _to_agent(ctx)[1]] == [f"[Mon Feb 1, 11:00 PM · your scheduled check] {ALDER}",
-                                                      f"[Mon Feb 1, 11:10 PM · Curbfinch alert] {IVY}", "ok"]
+    assert [p["text"] for p in _to_agent(ctx)[1]] == [f"[Mon Feb 1, 11:00 PM UTC · your scheduled check] {ALDER}",
+                                                      f"[Mon Feb 1, 11:10 PM UTC · Curbfinch alert] {IVY}", "ok"]
 
 
 @pytest.mark.asyncio
@@ -161,7 +161,7 @@ async def test_only_what_is_due_for_the_agents_own_role_reaches_it(monkeypatch):
     await _step().execute(ctx)
 
     assert peers.takes == [{"to": "planner"}]
-    assert [p["text"] for p in _to_agent(ctx)[1]] == ["[Mon Feb 1, 3:00 PM · Calendar] for the planner", "ok"]
+    assert [p["text"] for p in _to_agent(ctx)[1]] == ["[Mon Feb 1, 3:00 PM UTC · Calendar] for the planner", "ok"]
     assert [n["text"] for n in peers.queue.state("default")["pending_notifications"]] == ["for the solver role"]
 
 
@@ -196,7 +196,7 @@ async def test_a_hook_that_says_nothing_sends_only_what_came_due_and_the_run_end
 
     assert [[p["text"] for p in parts] for parts in _to_agent(ctx)] == [
         ["find me a 2BR"],
-        [f"[Mon Feb 1, 11:00 PM · your scheduled check] {ALDER}", f"[Mon Feb 1, 11:10 PM · Curbfinch alert] {IVY}"],
+        [f"[Mon Feb 1, 11:00 PM UTC · your scheduled check] {ALDER}", f"[Mon Feb 1, 11:10 PM UTC · Curbfinch alert] {IVY}"],
     ]
     assert peers.takes == [{"to": "default"}, {"to": "default"}]  # the second found nothing, so the run ended
     doc = conversation_store.get_conversation(ctx.metadata["a2a_conversations"]["talk"])
@@ -211,7 +211,7 @@ async def test_what_came_due_goes_ahead_of_a_hooks_message(monkeypatch):
     await _step(turns=2, **_hook_spec(_hook("says", SAYS_SOMETHING))).execute(ctx)
 
     assert [p["text"] for p in _to_agent(ctx)[1]] == [
-        "[Mon Feb 1, 3:00 PM · Messages] Jamie: did the rug thing get sorted?", "[Tue] the person writes"]
+        "[Mon Feb 1, 3:00 PM UTC · Messages] Jamie: did the rug thing get sorted?", "[Tue] the person writes"]
 
 
 def _hook_spec(hook_id: str) -> dict:
@@ -220,12 +220,9 @@ def _hook_spec(hook_id: str) -> dict:
 
 # ---- the step field and the message builder -------------------------------------------------------------------------
 
-def test_time_zone_round_trips_is_stored_only_when_set_and_is_checked_when_built():
-    assert "time_zone" not in _step().to_dict()
-    stored = _step(time_zone="America/Los_Angeles").to_dict()
-    assert PromptAgentTaskStep.from_dict(stored).time_zone == "America/Los_Angeles"
-    with pytest.raises(ValueError, match="IANA name"):
-        _step(time_zone="Pacific Time")
+def test_time_zone_is_not_a_step_field():
+    with pytest.raises(TypeError):
+        _step(time_zone="America/Los_Angeles")
 
 
 def _item(source: str, channel: str, text: str, at: str | None = MONDAY, times: int = 1) -> dict:
@@ -235,20 +232,20 @@ def _item(source: str, channel: str, text: str, at: str | None = MONDAY, times: 
 
 def test_every_item_is_labelled_with_its_channel_and_one_that_came_due_more_than_once_says_so():
     check = _item("scheduled_check", "your scheduled check", "check rugs", times=4)
-    assert delivered_line(check, label_zone(None)) == (
-        "[Mon Feb 1, 3:00 PM · your scheduled check] check rugs (it came due 4 times while you were away)")
+    assert delivered_line(check) == (
+        "[Mon Feb 1, 3:00 PM UTC · your scheduled check] check rugs (it came due 4 times while you were away)")
     queued_unclocked = _item("trigger", "Gmail", "hi", at=None)
-    assert delivered_line(queued_unclocked, label_zone(None)) == "[now · Gmail] hi"
+    assert delivered_line(queued_unclocked) == "[now · Gmail] hi"
     unknown_source = _item("calendar", "Calendar", "Standup in 10 minutes")
-    assert delivered_line(unknown_source, label_zone(None)) == "[Mon Feb 1, 3:00 PM · Calendar] Standup in 10 minutes"
+    assert delivered_line(unknown_source) == "[Mon Feb 1, 3:00 PM UTC · Calendar] Standup in 10 minutes"
 
 
 def test_a_delivered_part_carries_the_item_without_its_parts_and_a_part_that_is_not_text_follows_as_it_is():
     item = {**_item("trigger", "Gmail", "New email"), "env_id": "env"}
     item["parts"].append({"kind": "data", "data": {"thread": "t-9"}})
     meta = {"agentenv": {k: v for k, v in item.items() if k != "parts"}}
-    assert notification_delivery.delivered_parts([item], label_zone(None)) == [
-        {"kind": "text", "text": "[Mon Feb 1, 3:00 PM · Gmail] New email", "metadata": meta},
+    assert notification_delivery.delivered_parts([item]) == [
+        {"kind": "text", "text": "[Mon Feb 1, 3:00 PM UTC · Gmail] New email", "metadata": meta},
         {"kind": "data", "data": {"thread": "t-9"}, "metadata": meta},
     ]
 

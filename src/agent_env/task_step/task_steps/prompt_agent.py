@@ -39,7 +39,7 @@ from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepC
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
-from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_zone, next_message, take_due
+from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
@@ -177,7 +177,6 @@ class PromptAgentTaskStep(TaskStep):
         snapshot_config: Optional[SnapshotConfig] = None,
         live_trajectory: bool = False,
         post_turn_hooks: Optional[list[dict]] = None,
-        time_zone: Optional[str] = None,
     ):
         # `prompt` is the legacy text-only field; `parts` is the multimodal
         # form that's the authoritative A2A wire shape. Exactly one must be set:
@@ -193,7 +192,6 @@ class PromptAgentTaskStep(TaskStep):
             raise ValueError("max_conversation_turns must be >= 1")
         if post_turn_hooks is not None:
             validate_hook_specs(post_turn_hooks)
-        label_zone(time_zone)  # the zone delivered notifications are labelled in; refused here if it isn't one
         if model_params:
             reserved = set(model_params) & MODEL_PARAMS_RESERVED
             if reserved:
@@ -225,7 +223,6 @@ class PromptAgentTaskStep(TaskStep):
         self.snapshot_config = snapshot_config
         self.live_trajectory = live_trajectory
         self.post_turn_hooks = post_turn_hooks
-        self.time_zone = time_zone
 
     @staticmethod
     def _validate_parts(parts: list[dict]) -> None:
@@ -303,8 +300,6 @@ class PromptAgentTaskStep(TaskStep):
             base["live_trajectory"] = True
         if self.post_turn_hooks is not None:
             base["post_turn_hooks"] = self.post_turn_hooks
-        if self.time_zone is not None:
-            base["time_zone"] = self.time_zone
         return base
 
     @classmethod
@@ -342,7 +337,6 @@ class PromptAgentTaskStep(TaskStep):
             ),
             live_trajectory=data.get("live_trajectory", False),
             post_turn_hooks=data.get("post_turn_hooks"),
-            time_zone=data.get("time_zone"),
         )
 
     def _trajectory_prefix(self) -> str:
@@ -557,7 +551,6 @@ class PromptAgentTaskStep(TaskStep):
         # What comes due for the agent's role on these envs (notifications/v1) opens its next message.
         notification_envs = [d for d in context.deployed_envs if d.supports(EXT_NOTIFICATIONS_URI, "take")]
         recipient = agent.role or DEFAULT_ROLE
-        zone = label_zone(self.time_zone)
         final_terminal = protocol.TerminalResponse(response_text="")
         # Each turn's terminal reports only that turn's tool calls, so the conversation's count is
         # their sum. None until a turn reports one, so agents that don't report it stay None.
@@ -689,7 +682,7 @@ class PromptAgentTaskStep(TaskStep):
                 # The conversation goes on: what came due for the agent goes first, the user side's reply after it.
                 # An answer that ended it, or the last turn, takes nothing, so what is due stays queued on the env.
                 due = await take_due(notification_envs, recipient) if notification_envs else []
-                current_user_parts = next_message(delivered_parts(due, zone), answer["message"])
+                current_user_parts = next_message(delivered_parts(due), answer["message"])
                 if not current_user_parts:  # a hook said nothing ([]) and nothing came due
                     logger.info(f"Turn {turn+1}: nothing to send the agent; ending multi-turn (nothing_to_send)")
                     conversation_store.mark_closed(conversation_id)
