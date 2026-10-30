@@ -41,6 +41,10 @@ TRL = "trl_installed"
 #: isn't in the dev extra, and only that tier's CI job installs it.
 NEMO_GYM = "nemo_gym_installed"
 
+#: The verifiers tier (``tst/verifiers``) runs ``vf-eval`` from verifiers' own venv, since verifiers pins mcp 2 and the
+#: framework mcp 1; only that tier's CI job installs it and puts ``vf-eval`` on PATH.
+VERIFIERS = "verifiers_installed"
+
 #: ``collect_artifacts`` sizes a file with ``stat -c %s``, which only GNU stat takes (macOS ships BSD stat),
 #: so collecting off a local sandbox needs GNU stat first on PATH.
 GNU_STAT = "gnu_stat"
