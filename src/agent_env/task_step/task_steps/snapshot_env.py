@@ -469,7 +469,7 @@ class SnapshotEnvTaskStep(TaskStep):
 
         v1 ``get_data``, handed a namespace grant when the service takes the data-objects
         form: an upload through it → its object url; ``DataPart`` → json; ``FilePart`` →
-        object url (no download) / base64 ``bytes`` / streamed relative-or-http ``uri`` →
+        object url (no download) / base64 ``bytes`` / streamed relative-or-same-origin ``uri`` →
         ".zip"; else legacy ``GET /export-state`` streamed to disk with a first-byte JSON
         guard. Errors are caught by the caller (fails just this service)."""
         from agent_env.env import legacy_protocol
@@ -510,9 +510,14 @@ class SnapshotEnvTaskStep(TaskStep):
                         return uri
                     # A relative uri (e.g. "export-snapshot") means "stream it from
                     # my service endpoint" — resolve against the service base_url so
-                    # multi-GB bundles never ride inline in the JSON-RPC response.
+                    # multi-GB bundles never ride inline in the JSON-RPC response. An
+                    # absolute one must be on that same origin: this process fetches it.
                     if not scheme:
                         uri = f"{base_url.rstrip('/')}/{uri.lstrip('/')}"
+                    elif urlparse(uri)[:2] != urlparse(base_url)[:2]:
+                        raise ValueError(
+                            f"FilePart for '{environment_name}' names {uri!r}, which is not on its service's address {base_url}"
+                        )
                     async with httpx.AsyncClient() as client:
                         async with client.stream(
                             "GET",
