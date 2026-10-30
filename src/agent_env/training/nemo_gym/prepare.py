@@ -66,7 +66,8 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
     if reward is not None and reward_components:
         raise ValueError(REWARD_AND_COMPONENTS)
     url = str(source) if str(source).startswith(("http://", "https://")) else None
-    served = None if url else Server(build_app(source, reward=reward, sandbox=sandbox, max_concurrent_envs=1))
+    served = None if url else Server(build_app(source, reward=summed if reward_components else reward, sandbox=sandbox,
+                                               max_concurrent_envs=1))
     try:
         env_name, tasks = read_tasks(url or served.url, local="name the bundle's folder instead of its server")
         if unfit := [split for split in tasks if not _FILE.fullmatch(split)]:
@@ -103,6 +104,11 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
             "agent_ref": agent, "split": split, "index": task["index"], "task_id": task["id"],
         }) + "\n" for task in described))
     return server
+
+
+def summed(scores: dict[str, float]) -> float:
+    """The reward of a task whose scores are its components: their sum, as NeMo RL requires."""
+    return sum(scores.values())
 
 
 def _function(tool: dict[str, Any]) -> dict[str, Any]:

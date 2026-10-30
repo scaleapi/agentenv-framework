@@ -25,6 +25,7 @@ from tst.unit.task.episode.run_test import (
 )
 
 PLAYED = [ITEMS, ALICE, TURN, REPLIES]
+STYLE = {**REPLIES, "id": "style", "verifier_id": "style"}
 ADD_ITEM = {"type": "function", "name": "add_item", "description": "add_item.", "parameters": {"type": "object"},
             "strict": False}
 FUNCTION_END_TURN = {"type": "function", "name": "end_turn", "description": END_TURN.description,
@@ -110,7 +111,7 @@ def test_a_bundle_is_served_while_the_rows_are_written_and_the_config_has_the_se
                                                                                                teardowns):
     monkeypatch.setenv("HOME", str(tmp_path))
     unbound = {key: value for key, value in ALICE.items() if key not in ("env_ids", "role")}
-    bundle = layout(tmp_path / "dock", {"tasks/a.json": json.dumps([ITEMS, unbound, TURN, REPLIES])})
+    bundle = layout(tmp_path / "dock", {"tasks/a.json": json.dumps([ITEMS, unbound, TURN, REPLIES, STYLE])})
 
     result = CliRunner().invoke(main, [str(bundle), str(tmp_path / "gym"), "--name", "dock", "--sandbox", "local",
                                        "--max-concurrent-envs", "32", "--reward-components"])

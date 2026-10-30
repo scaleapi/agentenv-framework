@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
-from tst.unit.training.nemo_gym_test import ADD_ITEM, FUNCTION_END_TURN, PLAYED
+from tst.unit.training.nemo_gym_test import ADD_ITEM, FUNCTION_END_TURN, PLAYED, STYLE
 from tst.util.capabilities import NEMO_GYM, missing_capability_reason
 
 server = pytest.importorskip("agent_env.training.nemo_gym.server", reason=missing_capability_reason(NEMO_GYM),
@@ -78,7 +78,7 @@ def test_a_rollout_the_environment_fails_or_that_isnt_its_rows_is_masked(serve, 
 
 
 def test_reward_components_answer_each_score_by_step_id_and_make_the_reward_their_sum(serve):
-    server = serve({"a": [*PLAYED, {**REPLIES, "id": "style", "verifier_id": "style"}]})
+    server = serve({"a": [*PLAYED, STYLE]})
 
     with TestClient(_app(url=server.url, reward_components=True)) as client:
         client.post("/seed_session", json=_row())
@@ -159,18 +159,18 @@ def test_a_config_with_more_than_one_worker_or_a_reward_beside_its_components_is
 def test_a_bundle_named_in_the_config_is_served_while_the_server_runs(tmp_path, monkeypatch, teardowns):
     monkeypatch.setenv("HOME", str(tmp_path))
     unbound = {key: value for key, value in ALICE.items() if key not in ("env_ids", "role")}
-    bundle = layout(tmp_path / "dock", {"tasks/a.json": json.dumps([ITEMS, unbound, TURN, REPLIES])})
+    bundle = layout(tmp_path / "dock", {"tasks/a.json": json.dumps([ITEMS, unbound, TURN, REPLIES, STYLE])})
 
     row = _row(task_id="@local/~/dock/a")
 
-    with TestClient(_app(bundle=str(bundle), max_concurrent_envs=2)) as client:
+    with TestClient(_app(bundle=str(bundle), max_concurrent_envs=2, reward_components=True)) as client:
         client.post("/seed_session", json=row)
         client.post("/add_item", json={"item": "crate"})
         verified = _verify(client, row, "Added a crate.")
         client.post("/seed_session", json=row)
         client.post("/add_item", json={"item": "crate"})
 
-    assert verified["reward"] == 1.0
+    assert (verified["reward"], verified["reward_components"]) == (2.0, {"replies": 1.0, "style": 1.0})
     assert len(teardowns.finished) == 2
 
 

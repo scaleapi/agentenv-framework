@@ -36,7 +36,7 @@ except ModuleNotFoundError as exc:
 
 from agent_env.openenv import build_app
 from agent_env.training._openenv import STOP_SECONDS, Server, Session, Shared
-from agent_env.training.nemo_gym.prepare import REWARD_AND_COMPONENTS
+from agent_env.training.nemo_gym.prepare import REWARD_AND_COMPONENTS, summed
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +184,8 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         return self._served.url if self._served is not None else self.config.url
 
     def _serve(self) -> Server:
-        return Server(build_app(self.config.bundle, reward=self.config.reward, sandbox=self.config.sandbox,
+        reward = summed if self.config.reward_components else self.config.reward
+        return Server(build_app(self.config.bundle, reward=reward, sandbox=self.config.sandbox,
                                 max_concurrent_envs=self.config.max_concurrent_envs))
 
     async def _shut_down(self) -> None:
