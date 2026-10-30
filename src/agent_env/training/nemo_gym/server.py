@@ -6,6 +6,7 @@ training. It runs in the venv Gym builds for it, with one worker, since a rollou
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -42,9 +43,11 @@ logger = logging.getLogger(__name__)
 class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     """Where the bundle is served: ``url``, an OpenEnv server's, or ``bundle``, a folder or an installed bundle's name,
     which this server serves on a loopback port, deploying where ``sandbox`` names, at most ``max_concurrent_envs``
-    episodes at once; the rollouts past it wait for room. ``tool_timeout`` is one tool call's deadline in
+    episodes at once, which should cover a step's rollouts: the rest wait their turn. ``tool_timeout`` is one tool call's deadline in
     seconds, and ``reset_timeout`` how long an episode may take to deploy and open its first turn, and each turn to be
-    ended; the server ends an episode that misses one, and the rollout is masked."""
+    ended; the server ends an episode that misses one, and the rollout is masked. ``idle_timeout`` is how long a
+    session may go without a request before its episode is ended, freeing its slot: Gym never verifies a rollout whose
+    run failed or was cancelled. It runs with one worker, since a rollout's session lives in its process."""
 
     url: str | None = None
     bundle: str | None = None
@@ -53,11 +56,15 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     max_concurrent_envs: int = 8
     tool_timeout: float = 60.0
     reset_timeout: float = 600.0
+    idle_timeout: float = 600.0
 
     @model_validator(mode="after")
-    def _one_source(self) -> "AgentEnvResourcesServerConfig":
+    def _checked(self) -> "AgentEnvResourcesServerConfig":
         if (self.url is None) == (self.bundle is None):
             raise ValueError("name the bundle's server as url, or the bundle this server serves as bundle; not both")
+        if (self.num_workers or 1) != 1:
+            raise ValueError("the server runs with one worker, since a rollout's session lives in its process; "
+                             "set num_workers to 1")
         return self
 
 
@@ -95,10 +102,12 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         async def serving(app: FastAPI) -> AsyncIterator[Any]:
             if self.config.bundle is not None:
                 self._served = await asyncio.to_thread(self._serve)
+            reaping = asyncio.create_task(self._reap())
             try:
                 async with lifespan(app) as state:
                     yield state
             finally:
+                reaping.cancel()
                 await self._shut_down()
 
         app.router.lifespan_context = serving
@@ -121,7 +130,11 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
         if session is None:
             raise HTTPException(status_code=400, detail="This session has no episode: seed it first.")
-        return PlainTextResponse(await session._step(tool, arguments))
+        session.seen = time.monotonic()
+        try:
+            return PlainTextResponse(await session._step(tool, arguments))
+        finally:
+            session.seen = time.monotonic()
 
     async def verify(self, request: Request, body: AgentEnvVerifyRequest) -> AgentEnvVerifyResponse:
         """The episode's reward, once the turns the model left open are ended; a rollout with none, as one the
@@ -141,6 +154,20 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
         if (session := self._sessions.pop(request.session.get(SESSION_ID_KEY), None)) is not None:
             await session._close()
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+
+    async def _reap(self) -> None:
+        """Ends the episode of each session with no request in flight and none for ``idle_timeout`` seconds."""
+        while True:
+            await asyncio.sleep(min(30.0, self.config.idle_timeout / 4))
+            now = time.monotonic()
+            for session_id, session in list(self._sessions.items()):
+                if session._lock.locked() or now - session.seen <= self.config.idle_timeout:
+                    continue
+                if self._sessions.get(session_id) is session:
+                    del self._sessions[session_id]
+                    logger.warning("ended the episode of a rollout with no request for %gs: Gym stopped its run "
+                                   "without verifying it", self.config.idle_timeout)
+                    await session._close()
 
     @property
     def _url(self) -> str:
@@ -171,6 +198,7 @@ class _Session(Session):
     def __init__(self, shared: Shared):
         super().__init__()
         self._shared = shared
+        self.seen = time.monotonic()
 
     def _misses(self, offered: frozenset[str]) -> bool:
         return not offered <= self._shared.offered

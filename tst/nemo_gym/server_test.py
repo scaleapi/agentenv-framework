@@ -1,14 +1,18 @@
 """``AgentEnvResourcesServer`` driven as NeMo Gym's ``simple_agent`` drives it, through a client that keeps the session
 cookie Gym keeps per rollout, over the bundle the unit tier serves on loopback: a row's seed starts its task's episode,
-the tool routes answer as text, verify ends the turns left open and scores the episode or masks the rollout, a closed
-session ends its episode, and a bundle named in the config is served for the server's lifetime. CI runs it on the
-nemo-gym ``uv.lock`` pins."""
+the tool routes answer as text, verify ends the turns left open and scores the episode or masks the rollout, a rollout
+waits its turn at the server's limit, a closed or idle session ends its episode, the server takes one worker, and a
+bundle named in the config is served for the server's lifetime. CI runs it on the nemo-gym ``uv.lock`` pins and on the
+latest nemo-gym."""
 
 import asyncio
 import json
+import logging
+import time
 from unittest.mock import MagicMock
 
 import httpx
+import pydantic
 import pytest
 from fastapi.testclient import TestClient
 
@@ -89,9 +93,10 @@ def test_a_closed_session_ends_its_episode_and_a_session_with_none_answers_so(se
 
 
 @pytest.mark.asyncio
-async def test_a_rollout_waits_for_room_while_the_server_is_at_its_limit(served, teardowns):
+async def test_a_rollout_waits_for_room_while_the_server_is_at_its_limit_saying_so_once(served, teardowns, caplog):
     server = served({"a": PLAYED}, max_concurrent_envs=1)
     app = _app(url=server.url)
+    caplog.set_level(logging.WARNING, logger="agent_env.training._openenv")
 
     async with _client(app) as first, _client(app) as second:
         await first.post("/seed_session", json=_row())
@@ -107,6 +112,30 @@ async def test_a_rollout_waits_for_room_while_the_server_is_at_its_limit(served,
 
     assert [(each["reward"], each["mask_sample"]) for each in (first_verified, second_verified)] == [(1.0, False)] * 2
     assert len(teardowns.finished) == 2
+    assert [record.getMessage() for record in caplog.records if record.name == "agent_env.training._openenv"] == [
+        f"the server at {server.url} is at its limit of 1 sessions at once, so rollouts wait their turn: serve the "
+        "bundle with a higher MAX_CONCURRENT_ENVS (or max_concurrent_envs=) to run more at once"]
+
+
+def test_a_rollout_gym_stopped_before_verifying_has_its_episode_ended_once_idle(served, teardowns, caplog):
+    server = served({"a": PLAYED})
+
+    with TestClient(_app(url=server.url, idle_timeout=1)) as client:
+        client.post("/seed_session", json=_row())
+        time.sleep(2.5)
+        refused = client.post("/add_item", json={"item": "crate"})
+        verified = _verify(client, _row(), "Added a crate.")
+    server.stop()
+
+    assert (refused.status_code, verified["mask_sample"]) == (400, True)
+    assert "ended the episode of a rollout with no request for 1s" in caplog.text
+    assert len(teardowns.finished) == 1
+
+
+def test_a_config_with_more_than_one_worker_is_refused():
+    with pytest.raises(pydantic.ValidationError, match="the server runs with one worker"):
+        server.AgentEnvResourcesServerConfig(host="127.0.0.1", port=0, entrypoint="app.py", name="dock",
+                                             url="http://127.0.0.1:8000", num_workers=2)
 
 
 def test_a_bundle_named_in_the_config_is_served_while_the_server_runs(tmp_path, monkeypatch, teardowns):

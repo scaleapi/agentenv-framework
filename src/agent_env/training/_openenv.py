@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import re
 import threading
 import time
@@ -39,6 +40,9 @@ STOP_SECONDS = 3 * TERMINATE_TIMEOUT_SECONDS + 60.0
 REOPEN_PATIENCE, REOPEN_SECONDS = 4.0, 1.0
 
 _CAPACITY = re.compile(r"Server at capacity: \d+/(\d+)")
+
+logger = logging.getLogger(__name__)
+_waited: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -276,6 +280,11 @@ async def reopened(url: str, timeout: float, *, dropped: bool, patience: float) 
             if time.monotonic() + REOPEN_SECONDS > deadline:
                 raise Failed(f"{lead}the server stayed at its limit of {e.limit} sessions for "
                              f"{patience:g}s{' after' if dropped else ''}") from e
+            if url not in _waited:
+                _waited.add(url)
+                logger.warning("the server at %s is at its limit of %s sessions at once, so rollouts wait their turn: "
+                               "serve the bundle with a higher MAX_CONCURRENT_ENVS (or max_concurrent_envs=) to run "
+                               "more at once", url, e.limit)
             await asyncio.sleep(REOPEN_SECONDS)
         except ConnectionError as e:
             raise Failed(f"{lead}{e}") from e
