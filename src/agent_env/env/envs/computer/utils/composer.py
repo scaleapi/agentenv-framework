@@ -168,7 +168,7 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
         try:
             booted = await boot.boot(link, image=image, port=driver.port, environment=environment,
                                      network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
-                                     ready_s=boot.ready_timeout(env.composed_apps()))
+                                     ready_s=boot.ready_timeout(env.composed_apps(), env.computer.os.type))
         except Exception as e:
             problems.append(f"{type(link).__name__}: {e}")
             continue
@@ -319,7 +319,8 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact) -> _L
     file, _, cls = app.module.partition(":")
     served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
     layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app=True, served=served,
-                   steps=tuple((step.name, step.scope) for step in app.declaration.install_steps))
+                   steps=tuple((step.name, step.scope) for step in app.declaration.install_steps
+                               if step.os is None or base.os.type in step.os))
     programs = {f"app-{name}": f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
                 **_services(f"app-{name}", install)}
     _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name})

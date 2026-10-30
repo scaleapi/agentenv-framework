@@ -3,6 +3,7 @@ inert stub, the class is read without running it, and what it declares comes bac
 supports, an app's as ComputerAppEnvironment says. An app's code needs only the plain package."""
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -16,7 +17,11 @@ pytest.importorskip("PIL")
 
 from agentenv_protocol.computer import AppDeclaration  # noqa: E402
 from agentenv_protocol.computer._declare import _Stub, _StubModule, declare, main  # noqa: E402
+from agentenv_protocol.computer import (APP_SETTINGS_ENV, ComputerAppEnvironment, Launch, Linux,  # noqa: E402
+                                        install, linux)
+from agentenv_protocol.computer import app as app_module  # noqa: E402
 from agentenv_protocol.computer.app import BUILD_SETTINGS  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
 
 DRIVER = '''import not_installed_here
@@ -62,20 +67,37 @@ APP = '''import not_installed_here
 from pydantic import BaseModel, SecretStr
 
 from agentenv_protocol import add_data, agent_skill, reset_data
-from agentenv_protocol.computer import (AptSource, ComputerAppEnvironment, Download, Launch, Linux, Packages, Ready,
-                                        RunScript, Service, computer_app, install_step, ready_check)
+from agentenv_protocol.computer import (AptSource, ComputerAppEnvironment, Download, Launch, Packages, Ready,
+                                        RunScript, Service, computer_app, install, install_step, linux, ready_check)
+
+
+class FreeBSD(BaseModel):
+    ports: list[str] = []
+
+
+class LinuxSettings(BaseModel):
+    font: str = "DejaVu Sans"
+
+
+class LinuxBuildSettings(BaseModel):
+    fonts: list[str] = []
+
+
+class LeakyBuildSettings(BaseModel):
+    key: SecretStr = SecretStr("")
 
 
 @computer_app(supports={supports}, permissions=["camera"])
+@linux(files="linux", python="requirements.txt", packages=Packages(apt=["dovecot-imapd"]),
+       sources=[AptSource(apt="https://ppa.example/ubuntu", suite="noble", key="ppa.asc")],
+       downloads=[Download(url="https://example.com/mbox", sha256="{sha}", to="data/mbox", arch="arm64")],
+       run=[RunScript(script="setup.sh"), RunScript(script="profile.sh", scope="session")],
+       services=[Service(name="imap", command="bin/imap")], ports=[143],
+       launch=Launch(at="demand", command=["thunderbird"], window={{"class": "Thunderbird"}},
+                     ready=Ready(window=True, timeout_s=30)),
+       skill="skill-linux.md", settings=LinuxSettings, build_settings=LinuxBuildSettings)
+@install("freebsd", FreeBSD(ports=["mail/thunderbird"]), launch=Launch(command=["thunderbird"]))
 class Mail(ComputerAppEnvironment):
-    linux = Linux(files="linux", python="requirements.txt", packages=Packages(apt=["dovecot-imapd"]),
-                  sources=[AptSource(apt="https://ppa.example/ubuntu", suite="noble", key="ppa.asc")],
-                  downloads=[Download(url="https://example.com/mbox", sha256="{sha}", to="data/mbox", arch="arm64")],
-                  run=[RunScript(script="setup.sh"), RunScript(script="profile.sh", scope="session")],
-                  services=[Service(name="imap", command="bin/imap")], ports=[143])
-    launch = Launch(at="demand", command=["thunderbird"], window={{"class": "Thunderbird"}},
-                    ready=Ready(window=True, timeout_s=30))
-
     class Settings(BaseModel):
         account: str = "user@example.com"
         password: SecretStr = SecretStr("")
@@ -88,11 +110,14 @@ class Mail(ComputerAppEnvironment):
     @install_step()
     def packages(self): not_installed_here.apt()
 
-    @install_step(scope="session")
+    @install_step(scope="session", os="linux")
     def profile(self): pass
 
     @ready_check
     def inbox_open(self): return True
+
+    @ready_check(os=["freebsd"])
+    def ports_built(self): return True
 
     @agent_skill
     def guide(self): return "Mail", "Read mail."
@@ -181,21 +206,35 @@ def test_an_app_class_whose_imports_arent_installed_declares_what_it_is_to_a_com
 
     assert isinstance(declared, AppDeclaration)
     settings = declared.settings
-    assert declared.model_dump(mode="json", exclude_none=True, exclude={"settings", "build_settings"}) == {
+    schemas = {"settings", "build_settings"}
+    assert declared.model_dump(mode="json", exclude_none=True, exclude={**dict.fromkeys(schemas, True), "os": {
+            "__all__": schemas}}) == {
         "supports": LINUX, "permissions": ["camera"],
-        "install": {"linux": {
-            "files": "linux", "packages": {"apt": ["dovecot-imapd"]}, "python": "requirements.txt",
-            "sources": [{"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": [], "key": "ppa.asc"}],
-            "downloads": [{"url": "https://example.com/mbox", "sha256": "a" * 64, "to": "data/mbox", "arch": "arm64"}],
-            "run": [{"script": "setup.sh", "scope": "system"}, {"script": "profile.sh", "scope": "session"}],
-            "services": [{"name": "imap", "command": "bin/imap"}], "ports": [143]}},
-        "launch": {"at": "demand", "command": ["thunderbird"], "window": {"class": "Thunderbird"},
-                   "ready": {"window": True, "timeout_s": 30.0}},
+        "os": {
+            "linux": {
+                "install": {
+                    "files": "linux", "packages": {"apt": ["dovecot-imapd"]}, "python": "requirements.txt",
+                    "sources": [{"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": [],
+                                 "key": "ppa.asc"}],
+                    "downloads": [{"url": "https://example.com/mbox", "sha256": "a" * 64, "to": "data/mbox",
+                                   "arch": "arm64"}],
+                    "run": [{"script": "setup.sh", "scope": "system"}, {"script": "profile.sh", "scope": "session"}],
+                    "services": [{"name": "imap", "command": "bin/imap"}], "ports": [143]},
+                "launch": {"at": "demand", "command": ["thunderbird"], "window": {"class": "Thunderbird"},
+                           "ready": {"window": True, "timeout_s": 30.0}},
+                "skill": {"file": "skill-linux.md"}},
+            "freebsd": {"install": {"ports": ["mail/thunderbird"]},
+                        "launch": {"at": "boot", "command": ["thunderbird"]}}},
         "skill": {"method": "guide"}, "data": ["data/add", "data/reset"],
-        "install_steps": [{"name": "packages", "scope": "system"}, {"name": "profile", "scope": "session"}],
-        "ready_checks": ["inbox_open"]}
+        "install_steps": [{"name": "packages", "scope": "system"},
+                          {"name": "profile", "scope": "session", "os": ["linux"]}],
+        "ready_checks": [{"name": "inbox_open"}, {"name": "ports_built", "os": ["freebsd"]}]}
     assert list(settings["properties"]) == ["account", "password"] and settings["properties"]["password"]["writeOnly"]
     assert list(declared.build_settings["properties"]) == ["locale", "writeOnly", "flags"]
+    linux = declared.os["linux"]
+    assert set(linux.settings["properties"]) == {"account", "password", "font"}
+    assert set(linux.build_settings["properties"]) == {"locale", "writeOnly", "flags", "fonts"}
+    assert (declared.os["freebsd"].settings, declared.os["freebsd"].build_settings) == (None, None)
 
 
 def test_an_app_declaring_its_skill_twice_is_refused(folder):
@@ -207,13 +246,22 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
 
 
 @pytest.mark.parametrize("change, problem", [
-    ('launch = Launch(command=["mail"], ready=Ready(timeout_s=5))', "Ready waits on nothing: set window, port or command"),
-    ('launch = Launch(command=["mail"], ready=Ready(window=True))', "ready waits on a window: name it with Launch(window="),
-    ('launch = Launch(command=["mail"], window={"role": "main"})', "window matches by class, instance, title, not"),
-    ('linux = Linux(downloads=[Download(url="https://example.com/t", sha256="abc", to="t")])',
+    ('@linux(launch=Launch(command=["mail"], ready=Ready(timeout_s=5)))',
+     "Ready waits on nothing: set window, port or command"),
+    ('@linux(launch=Launch(command=["mail"], ready=Ready(window=True)))',
+     "ready waits on a window: name it with Launch(window="),
+    ('@linux(launch=Launch(command=["mail"], window={"role": "main"}))',
+     "window matches by class, instance, title, not"),
+    ('@linux(downloads=[Download(url="https://example.com/t", sha256="abc", to="t")])',
      "Download.sha256: String should match pattern '^[0-9a-f]{64}$'"),
-    ('linux = Linux(run=[RunScript(script="../setup.sh")])',
+    ('@linux(run=[RunScript(script="../setup.sh")])',
      "RunScript.script: '../setup.sh' must be a path inside the layer's folder"),
+    ('@linux(build_settings=LeakyBuildSettings)',
+     "LeakyBuildSettings holds a secret at properties.key, which its computer's image would keep"),
+    ('@install_step(os="windows")\n    def fonts(self): pass',
+     "Changed.fonts runs on 'windows', which Changed declares no install for; it declares freebsd, linux"),
+    ('@ready_check(os="macos")\n    def window_shown(self): return True',
+     "Changed.window_shown runs on 'macos', which Changed declares no install for"),
     ('class BuildSettings(BaseModel): key: SecretStr = SecretStr("")',
      "Changed.BuildSettings holds a secret at properties.key, which its computer's image would keep; declare it in "
      "Settings"),
@@ -221,27 +269,33 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.BuildSettings holds a secret at properties.keys.items, which"),
     ('class BuildSettings(BaseModel): mail: Mail.Settings = Mail.Settings()',
      "Changed.BuildSettings holds a secret at $defs.Settings.properties.password, which"),
-], ids=["no-wait", "no-window", "window-key", "download-sha", "script-escape", "build-secret", "build-secrets-listed",
-        "build-secret-nested"])
-def test_an_app_whose_launch_readiness_or_build_settings_cant_be_checked_is_refused_saying_why(folder, capsys, change,
-                                                                                                problem):
+], ids=["no-wait", "no-window", "window-key", "download-sha", "script-escape", "os-build-secret", "step-os",
+        "check-os", "build-secret", "build-secrets-listed", "build-secret-nested"])
+def test_an_app_whose_declaration_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
+    decorator, body = (change, "pass") if change.startswith("@linux") else ("", change)
     (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64) + f"""
 
 @computer_app(supports={LINUX})
+{decorator}
 class Changed(Mail):
-    {change}
+    {body}
 """)
 
     assert main([str(folder), "app.py", "Changed"]) == 1
     assert problem in capsys.readouterr().err.splitlines()[-1]
 
 
-def test_an_app_reads_the_settings_its_computer_gives_it_by_its_name_and_its_build_settings_in_its_folder(
-        monkeypatch, tmp_path):
-    from pydantic import BaseModel
+@pytest.mark.parametrize("os_type", ["linux", "macos"])
+def test_an_app_reads_its_settings_build_settings_and_launch_as_declared_for_the_os_it_runs_on(monkeypatch, tmp_path,
+                                                                                               os_type):
+    class LinuxSettings(BaseModel):
+        font: str = "DejaVu Sans"
 
-    from agentenv_protocol.computer import APP_SETTINGS_ENV, ComputerAppEnvironment
+    class LinuxBuildSettings(BaseModel):
+        edition: str = "linux"
 
+    @install("linux", Linux(), launch=Launch(command=["notes"]), settings=LinuxSettings,
+             build_settings=LinuxBuildSettings)
     class Notes(ComputerAppEnvironment):
         class Settings(BaseModel):
             signature: str = ""
@@ -251,17 +305,28 @@ def test_an_app_reads_the_settings_its_computer_gives_it_by_its_name_and_its_bui
             edition: str = "home"
             locale: str = "en_US"
 
+    monkeypatch.setattr(app_module, "detect", lambda: Platform(os=os_type))
     monkeypatch.setenv("ENVIRONMENT_NAME", "notes")
     monkeypatch.setenv(APP_SETTINGS_ENV, json.dumps({"notes": {"signature": "-- Ada"}, "mail": {"lines": 9}}))
     monkeypatch.chdir(tmp_path)
-    assert Notes().build_settings == Notes.BuildSettings()
+    assert Notes().build_settings.edition == ("linux" if os_type == "linux" else "home")
     (tmp_path / BUILD_SETTINGS).parent.mkdir()
-    (tmp_path / BUILD_SETTINGS).write_text(json.dumps({"edition": "pro"}))
+    (tmp_path / BUILD_SETTINGS).write_text(json.dumps({"locale": "fr_FR"}))
 
     notes = Notes()
 
-    assert notes.settings == Notes.Settings(signature="-- Ada", lines=1)
-    assert notes.build_settings == Notes.BuildSettings(edition="pro", locale="en_US")
+    assert (notes.settings.signature, notes.settings.lines, notes.build_settings.locale) == ("-- Ada", 1, "fr_FR")
+    if os_type == "linux":
+        assert (notes.settings.font, notes.build_settings.edition, notes.launch.command) == (
+            "DejaVu Sans", "linux", ["notes"])
+    else:
+        assert (type(notes.settings), notes.build_settings.edition, notes.launch) == (Notes.Settings, "home", None)
+
+
+def test_linux_takes_every_field_of_a_linux_install_and_what_install_adds_for_an_os():
+    added = set(inspect.signature(install).parameters) - {"os_type", "spec"}
+
+    assert set(inspect.signature(linux).parameters) == set(Linux.model_fields) | added
 
 
 def test_an_apps_code_needs_only_the_plain_package():

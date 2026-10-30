@@ -68,14 +68,16 @@ def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, 
     return environment
 
 
-def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str, dict]) -> dict[str, str]:
-    """The environment that hands each of ``apps`` the values ``app_settings`` gives it, by its name, in
-    ``APP_SETTINGS_ENV``, a secret's resolved through the secret store; nothing when none has any."""
+def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str, dict],
+                             os_type: str) -> dict[str, str]:
+    """The environment that hands each of ``apps``, on a computer of ``os_type``, the values ``app_settings`` gives it,
+    by its name, in ``APP_SETTINGS_ENV``, a secret's resolved through the secret store; nothing when none has any."""
     given = [(app, app_settings[app.environment_name]) for app in apps if app_settings.get(app.environment_name)]
     if not given:
         return {}
     return {APP_SETTINGS_ENV: json.dumps({app.environment_name: {
-        name: get_config().resolve_reference(value) if name in app.secret_settings() and value is not None else value
+        name: get_config().resolve_reference(value) if name in app.secret_settings(os_type) and value is not None
+        else value
         for name, value in values.items()} for app, values in given})}
 
 
@@ -115,11 +117,11 @@ async def discard(sandbox: Sandbox) -> None:
             await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
 
 
-def ready_timeout(apps: list[ComputerAppEnv]) -> float:
-    """How long a computer of ``apps`` may take to be ready: ``READY_TIMEOUT_S``, or longer when an app that starts with
-    it gives itself longer."""
+def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
+    """How long a computer of ``os_type`` and ``apps`` may take to be ready: ``READY_TIMEOUT_S``, or longer when an app
+    that starts with it there gives itself longer."""
     return max([READY_TIMEOUT_S, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in apps
-                                   if (launch := app.declaration.launch) and launch.at == "boot" and launch.ready)])
+                                   if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
 
 
 async def ready(url: str, timeout: float) -> dict:

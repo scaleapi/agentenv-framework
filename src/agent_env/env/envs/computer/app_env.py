@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
-from agentenv_protocol.computer import AppDeclaration
+from agentenv_protocol.computer import AppDeclaration, Launch
 
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -49,11 +49,29 @@ class ComputerAppEnv(ComputerEnv):
     def composed_apps(self) -> list[ComputerAppEnv]:
         return [self]
 
-    def secret_settings(self) -> set[str]:
-        """The names of its settings that are secrets: a ``SecretStr``, optional or not, which its schema marks
-        ``writeOnly``."""
-        return {name for name, schema in self.declaration.settings.get("properties", {}).items()
+    def settings_schema(self, os_type: str | None) -> dict[str, Any]:
+        """The JSON schema of its settings on ``os_type``: its class's, with the fields that OS adds; with no OS type,
+        its class's."""
+        on = self.declaration.os.get(os_type)
+        own = on.settings if on is not None else None
+        return own if own is not None else self.declaration.settings
+
+    def build_settings_schema(self, os_type: str | None) -> dict[str, Any] | None:
+        """The JSON schema of its build settings on ``os_type``, as ``settings_schema``; None when it declares none."""
+        on = self.declaration.os.get(os_type)
+        own = on.build_settings if on is not None else None
+        return own if own is not None else self.declaration.build_settings
+
+    def secret_settings(self, os_type: str | None) -> set[str]:
+        """The names of its settings on ``os_type`` that are secrets: a ``SecretStr``, optional or not, which its schema
+        marks ``writeOnly``."""
+        return {name for name, schema in self.settings_schema(os_type).get("properties", {}).items()
                 if any(option.get("writeOnly") for option in [schema, *schema.get("anyOf", [])])}
+
+    def launch(self, os_type: str) -> Launch | None:
+        """How it launches on ``os_type``."""
+        on = self.declaration.os.get(os_type)
+        return on.launch if on is not None else None
 
     def to_dict(self) -> dict:
         return {**Env.to_dict(self), "service_name": self.environment_name,
@@ -88,7 +106,8 @@ class ComputerAppEnv(ComputerEnv):
                   declaration=declaration, computer=computer, driver=driver, build_settings=build_settings)
         _, problems = _installs(declaration)
         problems += _class_beyond_reach(module, declaration)
-        problems += gate.check_app_build_settings(app, app.build_settings, "build_settings")
+        problems += gate.check_app_build_settings(app, app.build_settings, "build_settings",
+                                                  computer.os.type if computer is not None else None)
         if (computer is None) != (driver is None):
             problems.append("a computer app deploys alone on a computer and a driver; name both or neither")
         elif computer is not None and not problems:
@@ -112,8 +131,10 @@ class ComputerAppEnv(ComputerEnv):
         found, problems = _installs(declaration)
         problems += [problem for os_type, install in found.items()
                      for problem in folder_problems(os_type, install, files)]
-        if (skill := declaration.skill and declaration.skill.file) is not None and skill not in files:
-            problems.append(f"skill: {skill!r} isn't in this folder")
+        skills = [("skill", declaration.skill),
+                  *((f"{os_type}.skill", on.skill) for os_type, on in declaration.os.items())]
+        problems += [f"{where}: {skill.file!r} isn't in this folder" for where, skill in skills
+                     if skill is not None and skill.file is not None and skill.file not in files]
         if problems:
             ctx.refuse(list(map(ctx.config_problem, problems)))
         computer = ctx.artifact(fields["computer"], ComputerArtifact) if "computer" in fields else None
@@ -153,12 +174,13 @@ class ComputerAppEnv(ComputerEnv):
 
 def _installs(declaration: AppDeclaration) -> tuple[dict[str, AppInstall], list[str]]:
     """Its installs by OS type, each checked as the composer installs it, and the problems with them."""
-    return installs({os_type: linux.model_dump() for os_type, linux in declaration.install.items()}, AppInstall)
+    return installs({os_type: on.install for os_type, on in declaration.os.items()}, AppInstall)
 
 
 def _class_beyond_reach(module: str, declaration: AppDeclaration) -> list[str]:
     """An install that leaves out the class's file, which the app's own server serves from the app's folder."""
     file = PurePosixPath(module.partition(":")[0])
+    folders = {os_type: on.install.get("files", ".") for os_type, on in declaration.os.items()}
     return [f"install.{os_type}.files: the app's server serves its class from the app's folder, which needs "
-            f"{str(file)!r} in {linux.files!r}" for os_type, linux in declaration.install.items()
-            if linux.files != "." and not file.is_relative_to(linux.files)]
+            f"{str(file)!r} in {folder!r}" for os_type, folder in folders.items()
+            if folder != "." and not file.is_relative_to(folder)]

@@ -27,7 +27,7 @@ from agentenv_protocol.computer import (
     scroll,
     type_text,
 )
-from agentenv_protocol.computer import linux
+from agentenv_protocol.computer import _linux as linux
 from agentenv_protocol.computer.conformance.checks import STAGE
 
 CLIPBOARD = "agentenv-probe clipboard"

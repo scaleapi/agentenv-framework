@@ -994,9 +994,10 @@ PROTOCOL_VERSION = importlib.metadata.version("agentenv-framework-protocol")
 
 
 def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
-         extra=None, steps=(), build=MAIL_BUILD, **changes):
+         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
-    them, by name, ``steps``, its install steps by name and scope, and ``build``, the schema of its build settings."""
+    them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
+    its build settings, and ``linux_settings``, that of its settings on Linux."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
@@ -1006,10 +1007,10 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
         name: folder / name for name in ("app.py", "requirements.txt", *(extra or {}))})
     declaration = AppDeclaration.model_validate({
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
-        "permissions": [], "launch": launch, "settings": settings, "build_settings": build, "skill": None,
-        "data": [], "install_steps": [{"name": name, "scope": scope} for name, scope in steps], "ready_checks": [],
-        "install": {"linux": install or {"python": "requirements.txt", "services": [
-            {"name": "imap", "command": "venv/bin/python imap.py"}]}}})
+        "permissions": [], "settings": settings, "build_settings": build, "skill": None,
+        "data": [], "install_steps": [{"name": name, "scope": scope, "os": os or None} for name, scope, *os in steps],
+        "ready_checks": [], "os": {"linux": {"launch": launch, "settings": linux_settings, "install": install or {
+            "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
     return ComputerAppEnv.put(**{"id": "@local/~/kit/mail", "environment_name": "mail", "module": "app.py:Mail",
                                  "files": files, "declaration": declaration, "computer": base, "driver": driver,
                                  "compose": compose, **changes})
@@ -1057,7 +1058,8 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
     assert "/opt/agentenv/apps/mail/venv/bin/pip install --no-index --no-deps /tmp/agentenv-packages/wheels/apps-mail/*.whl" in (
         build["dockerfile"])
     assert build["confs"]["agentenv-app-mail.conf"] == MAIL_SERVER
-    assert boot.ready_timeout([app]) == (270.0 if at == "boot" else boot.READY_TIMEOUT_S)
+    assert boot.ready_timeout([app], "linux") == (270.0 if at == "boot" else boot.READY_TIMEOUT_S)
+    assert boot.ready_timeout([app], "windows") == boot.READY_TIMEOUT_S
 
 
 def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,
@@ -1071,7 +1073,8 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
                               "to": "bin/tool", "arch": "arm64"}],
                "run": [{"script": "set up.sh"}, {"script": "profile.sh", "scope": "session"}], "services": []}
 
-    app = _app(base, driver, tmp_path / "mail", install=install, steps=[("index_mail", "session")],
+    app = _app(base, driver, tmp_path / "mail", install=install,
+               steps=[("index_mail", "session"), ("register_codecs", "system", "windows")],
                extra={"ppa.asc": "key", "set up.sh": "mkdir -p /srv/mail\n", "profile.sh": "#!/bin/sh\n"})
 
     requests = dict(docker.resolved)
@@ -1090,6 +1093,7 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
         "USER user", "RUN --network=none cd /opt/agentenv/apps/mail && ./profile.sh", "USER root",
         "USER user", "RUN --network=none cd /opt/agentenv/apps/mail && venv/bin/python -m "
         "agentenv_protocol.computer.run_install_step app.py:Mail index_mail", "USER root"]
+    assert "register_codecs" not in builds["linux/arm64"]["dockerfile"]
     assert {"packages/apt/hello_1.0_arm64.deb", "packages/apt/xdotool_1.0_arm64.deb", "apps/mail/bin/tool"} <= set(
         builds["linux/arm64"]["files"])
     assert "apps/mail/bin/tool" not in builds["linux/amd64"]["files"]
@@ -1313,6 +1317,19 @@ async def test_a_load_whose_connection_to_the_driver_breaks_says_so(base, driver
             f"env '{env.id}': the connection to its driver broke during data/add, so some of the files it carried "
             "may be written, each whole (ReadError)")):
         await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}))
+
+
+def test_a_deploys_app_settings_are_checked_against_its_settings_on_its_computers_os(base, driver, docker, tmp_path):
+    linux = {**MAIL_SETTINGS, "properties": {**MAIL_SETTINGS["properties"], "font": {"type": "string", "default": ""}}}
+    app = _app(base, driver, tmp_path / "mail", linux_settings=linux)
+
+    def saved(values):
+        return DeployEnvTaskStep(id="d", version=None, env_id=app.id,
+                                 env_params={"app_settings": {"mail": values}}).preflight()
+
+    assert saved({"font": "Mono"}) == [] and (app.settings_schema("linux"), app.settings_schema("windows")) == (
+        linux, MAIL_SETTINGS)
+    assert "env_params.app_settings.mail.font: 3 is not of type 'string'" in saved({"font": 3})[0]
 
 
 @pytest.mark.asyncio

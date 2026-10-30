@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from .app import (
     APP_SETTINGS_ENV,
     AppDeclaration,
+    AppOs,
     AptSource,
     ComputerAppEnvironment,
     Download,
@@ -21,7 +22,9 @@ from .app import (
     RunScript,
     Service,
     computer_app,
+    install,
     install_step,
+    linux,
     ready_check,
 )
 from .errors import (
@@ -101,9 +104,9 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration",
-    "ComputerAppEnvironment", "computer_app", "install_step", "ready_check", "Linux", "Service", "Launch", "Ready",
-    "Packages", "AptSource", "Download", "RunScript",
-    "AppDeclaration",
+    "ComputerAppEnvironment", "computer_app", "install", "linux", "install_step", "ready_check", "Linux", "Service",
+    "Launch", "Ready", "Packages", "AptSource", "Download", "RunScript",
+    "AppDeclaration", "AppOs",
     "APP_SETTINGS_ENV",
     "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV",
     "PRINTABLE_KEYS",

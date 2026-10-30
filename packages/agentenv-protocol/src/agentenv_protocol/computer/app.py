@@ -1,23 +1,27 @@
 """ComputerAppEnvironment: software on a computer, an AgentEnvEnvironment whose class also declares what it is for a
-computer: the platforms it supports and the permissions it needs (``@computer_app``), how each OS installs it
-(``linux = Linux(...)``), how it launches (``launch``), its install steps and ready checks, its skill, its typed
-``Settings`` and its ``BuildSettings``. A ``computer_app`` env's put reads that declaration from the class; its data
-hooks are the base class's. Its name is its env's ``environment_name``. On the computer the class runs as the app's own
-server (``serve_app``), which launches the app, adds its launcher and says whether it's ready (``computer-app/v1``)."""
+computer: the platforms it supports and the permissions it needs (``@computer_app``); for each OS, how it installs and
+launches there and what differs there (``@linux``, or ``@install`` for any OS type); its install steps and ready checks,
+each on every OS or on those it names; its skill, its typed ``Settings`` and its ``BuildSettings``. A ``computer_app``
+env's put reads that declaration from the class; its data hooks are the base class's. Its name is its env's
+``environment_name``. On the computer the class runs as the app's own server (``serve_app``), which launches the app,
+adds its launcher and says whether it's ready (``computer-app/v1``), as declared for the OS it runs on."""
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Callable, ClassVar, Literal, Optional
+from typing import Annotated, Any, Callable, ClassVar, Literal, Optional, Union
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
 
 from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment, extension
 from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI
 from .app_runtime import AppRuntime
 from .errors import InvalidArgument
+from .platform import detect
 
 #: The environment variable a computer delivers its apps' settings in: JSON of each app's values by its name.
 APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
@@ -182,32 +186,67 @@ class AppSkill(BaseModel):
 
 
 class InstallStep(BaseModel):
-    """An ``@install_step`` method, by name, and whom it runs as."""
+    """An ``@install_step`` method, by name, whom it runs as, and the OS types it runs on: every one when ``os`` is
+    None."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     scope: Literal["system", "session"]
+    os: Optional[list[str]] = None
+
+
+class AppReadyCheck(BaseModel):
+    """A ``@ready_check`` method, by name, and the OS types it runs on: every one when ``os`` is None."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    os: Optional[list[str]] = None
+
+
+class AppOs(BaseModel):
+    """What an app declares for one OS type: ``install``, how that OS installs it, as the OS type's install model gives
+    it; its ``launch`` there; and its ``skill``, ``settings`` and ``build_settings`` there when they differ from the
+    class's, the schemas with the class's fields added."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    install: dict[str, Any]
+    launch: Optional[Launch] = None
+    skill: Optional[AppSkill] = None
+    settings: Optional[dict[str, Any]] = None
+    build_settings: Optional[dict[str, Any]] = None
 
 
 class AppDeclaration(BaseModel):
     """What a ComputerAppEnvironment class declares, as a ``computer_app`` env stores it: the platforms it ``supports``,
-    as a driver names them; its ``install`` by OS type; ``settings`` and ``build_settings``, the JSON schemas of its
-    ``Settings`` and of its ``BuildSettings`` when it declares any; and the ``data`` methods, ``install_steps`` and
-    ``ready_checks`` it serves, by name."""
+    as a driver names them; ``os``, what it declares for each OS type; ``settings`` and ``build_settings``, the JSON
+    schemas of its ``Settings`` and of its ``BuildSettings`` when it declares any; its ``skill``; and the ``data``
+    methods, ``install_steps`` and ``ready_checks`` it serves, by name."""
 
     model_config = ConfigDict(extra="forbid")
 
     supports: list[dict[str, Any]]
     permissions: list[str]
-    install: dict[str, Linux]
-    launch: Optional[Launch] = None
+    os: dict[str, AppOs]
     settings: dict[str, Any]
     build_settings: Optional[dict[str, Any]] = None
     skill: Optional[AppSkill] = None
     data: list[str]
     install_steps: list[InstallStep]
-    ready_checks: list[str]
+    ready_checks: list[AppReadyCheck]
+
+
+@dataclass(frozen=True)
+class _OsDeclared:
+    """What ``@install`` declares for one OS type, as the class keeps it."""
+
+    install: BaseModel
+    launch: Optional[Launch]
+    skill: Optional[str]
+    settings: Optional[type[BaseModel]]
+    build_settings: Optional[type[BaseModel]]
 
 
 def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[str]] = None) -> Callable:
@@ -221,31 +260,67 @@ def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[
     return deco
 
 
-def install_step(scope: Literal["system", "session"] = "system") -> Callable:
+def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, skill: Optional[str] = None,
+            settings: Optional[type[BaseModel]] = None,
+            build_settings: Optional[type[BaseModel]] = None) -> Callable:
+    """Declare how a computer of ``os_type`` installs the app, ``spec`` being that OS type's install model, and what is
+    the app's own there: its ``launch``; its ``skill``, a file of its folder, instead of the class's; and ``settings``
+    and ``build_settings``, models whose fields add to the class's ``Settings`` and ``BuildSettings`` there. ``@linux``
+    is this for Linux; an OS type a plugin adds is declared with it."""
+    def deco(cls: type) -> type:
+        if not (isinstance(cls, type) and issubclass(cls, ComputerAppEnvironment)):
+            raise TypeError("@install decorates a ComputerAppEnvironment subclass")
+        cls._installs = {**cls._installs, os_type: _OsDeclared(spec, launch, skill, settings, build_settings)}
+        return cls
+    return deco
+
+
+def linux(*, files: str = ".", packages: Optional[Packages] = None, python: Optional[str] = None,
+          sources: Optional[list[AptSource]] = None, downloads: Optional[list[Download]] = None,
+          run: Optional[list[RunScript]] = None, services: Optional[list[Service]] = None,
+          ports: Optional[list[int]] = None, launch: Optional[Launch] = None, skill: Optional[str] = None,
+          settings: Optional[type[BaseModel]] = None, build_settings: Optional[type[BaseModel]] = None) -> Callable:
+    """``@install`` for Linux: how a Linux computer installs the app, ``Linux``'s fields, and what is its own there."""
+    return install("linux", Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads,
+                                  run=run, services=services or [], ports=ports),
+                   launch=launch, skill=skill, settings=settings, build_settings=build_settings)
+
+
+def install_step(scope: Literal["system", "session"] = "system", *,
+                 os: Union[str, list[str], None] = None) -> Callable:
     """Mark a method a computer runs as it installs the app, after its files, packages, venv and run scripts, in the
-    order the class defines them: as root, or for ``session``, as the session user. It runs offline, at build, without
-    the class's ``__init__``, on ``self.build_settings``; a deploy's ``self.settings`` aren't known yet."""
+    order the class defines them: as root, or for ``session``, as the session user; on every OS the app installs on,
+    or on the ``os`` types named. It runs offline, at build, without the class's ``__init__``, on
+    ``self.build_settings``; a deploy's ``self.settings`` aren't known yet."""
     def deco(fn: Callable) -> Callable:
-        setattr(fn, _INSTALL_STEP_ATTR, scope)
+        setattr(fn, _INSTALL_STEP_ATTR, (scope, _named(os)))
         return fn
     return deco
 
 
-def ready_check(fn: Callable) -> Callable:
-    """Mark a method that says whether the app is ready, when ``launch``'s ``ready`` can't."""
-    setattr(fn, _READY_CHECK_ATTR, True)
-    return fn
+def ready_check(fn: Optional[Callable] = None, *, os: Union[str, list[str], None] = None) -> Callable:
+    """Mark a method that says whether the app is ready, when its launch's ``ready`` can't: on every OS the app
+    installs on, or on the ``os`` types named; ``@ready_check`` or ``@ready_check(os=...)``."""
+    def mark(fn: Callable) -> Callable:
+        setattr(fn, _READY_CHECK_ATTR, _named(os))
+        return fn
+    return mark(fn) if fn is not None else mark
+
+
+def _named(os_types: Union[str, list[str], None]) -> Optional[list[str]]:
+    return None if os_types is None else [os_types] if isinstance(os_types, str) else list(os_types)
 
 
 class ComputerAppEnvironment(AgentEnvEnvironment):
-    """Subclass it, declare it with ``@computer_app``, and set ``linux``, ``launch`` and ``skill`` as class attributes;
-    a deploy's settings arrive as ``self.settings``, and those its env fixes at build as ``self.build_settings``."""
+    """Subclass it, declare it with ``@computer_app`` and an OS decorator for each OS (``@linux``), and set ``skill`` as
+    a class attribute; a deploy's settings arrive as ``self.settings``, those its env fixes at build as
+    ``self.build_settings``, and its launch as ``self.launch``, each as declared for the OS it runs on."""
 
     supports: ClassVar[list] = []
     permissions: ClassVar[list[str]] = []
+    _installs: ClassVar[dict[str, _OsDeclared]] = {}
     _computer_app: Optional[AppRuntime] = None
-    linux: ClassVar[Optional[Linux]] = None
-    launch: ClassVar[Optional[Launch]] = None
+    launch: Optional[Launch] = None
     #: A file of the app's folder holding its skill for agents, when no ``@agent_skill`` method writes it.
     skill: ClassVar[Optional[str]] = None
 
@@ -257,14 +332,28 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         app declares its own, which its install steps read too. None is a secret, since the image keeps them."""
 
     def __init__(self) -> None:
+        cls, on = type(self), detect().os
         values = json.loads(os.environ.get(APP_SETTINGS_ENV) or "{}").get(os.environ.get("ENVIRONMENT_NAME"), {})
-        self.settings = self.Settings.model_validate(values)
-        self.build_settings = _built_settings(type(self))
+        self.settings = cls.settings_on(on).model_validate(values)
+        self.build_settings = _built_settings(cls, on)
+        self.launch = declared.launch if (declared := cls._installs.get(on)) is not None else None
         ready = self.launch.ready if self.launch is not None else None
         self._computer_app = AppRuntime(
-            self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(type(self))
-                          if hasattr(fn, _READY_CHECK_ATTR)},
+            self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(cls)
+                          if hasattr(fn, _READY_CHECK_ATTR) and _runs_on(getattr(fn, _READY_CHECK_ATTR), on)},
             ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S)
+
+    @classmethod
+    def settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
+        """Its ``Settings`` on ``os_type``, with the fields its OS adds."""
+        added = declared.settings if (declared := cls._installs.get(os_type)) is not None else None
+        return _added(added, cls.Settings) if added is not None else cls.Settings
+
+    @classmethod
+    def build_settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
+        """Its ``BuildSettings`` on ``os_type``, with the fields its OS adds."""
+        added = declared.build_settings if (declared := cls._installs.get(os_type)) is not None else None
+        return _added(added, cls.BuildSettings) if added is not None else cls.BuildSettings
 
     @extension(COMPUTER_APP, op="launch", description=(
         "The app's own server: launch launches the app from its folder, as its launcher and a boot do; ready says "
@@ -290,31 +379,43 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     @classmethod
     def declaration(cls) -> AppDeclaration:
-        """What the class declares. Raises ValueError for a skill declared twice, an install that isn't a ``Linux``,
-        or a build setting that's a secret."""
-        if cls.linux is not None and not isinstance(cls.linux, Linux):
-            raise ValueError(f"{cls.__name__}.linux is a Linux(...), not {cls.linux!r}")
+        """What the class declares. Raises ValueError for a skill declared twice, a build setting that's a secret, or
+        an install step or ready check on an OS type the class declares no install for."""
         build = cls.BuildSettings.model_json_schema()
-        if (secret := _secret_at(build)) is not None:
-            raise ValueError(f"{cls.__name__}.BuildSettings holds a secret at {secret}, which its computer's image would "
-                             "keep; declare it in Settings")
+        for name, schema in [(f"{cls.__name__}.BuildSettings", build),
+                             *((declared.build_settings.__name__, declared.build_settings.model_json_schema())
+                               for declared in cls._installs.values() if declared.build_settings is not None)]:
+            if (secret := _secret_at(schema)) is not None:
+                raise ValueError(f"{name} holds a secret at {secret}, which its computer's image would keep; declare "
+                                 "it in Settings")
         methods = _methods(cls)
         skill_methods = [fn.__name__ for fn in methods
                          if getattr(getattr(fn, _EXT_ATTR, None), "uri", None) == SKILL_EXTENSION_URI]
         if cls.skill is not None and skill_methods:
             raise ValueError(f"{cls.__name__} declares its skill twice: skill = {cls.skill!r} and @agent_skill "
                              f"{skill_methods[0]}")
+        steps = [InstallStep(name=fn.__name__, scope=scope, os=os_types) for fn in methods
+                 if hasattr(fn, _INSTALL_STEP_ATTR) for scope, os_types in [getattr(fn, _INSTALL_STEP_ATTR)]]
+        checks = [AppReadyCheck(name=fn.__name__, os=getattr(fn, _READY_CHECK_ATTR)) for fn in methods
+                  if hasattr(fn, _READY_CHECK_ATTR)]
+        for method in [*steps, *checks]:
+            if unknown := [os_type for os_type in method.os or [] if os_type not in cls._installs]:
+                raise ValueError(f"{cls.__name__}.{method.name} runs on {unknown[0]!r}, which {cls.__name__} declares "
+                                 f"no install for; it declares {', '.join(cls._installs) or 'none'}")
         return AppDeclaration(
             supports=cls.supports, permissions=cls.permissions,
-            install={"linux": cls.linux} if cls.linux is not None else {},
-            launch=cls.launch, settings=cls.Settings.model_json_schema(),
-            build_settings=build if build.get("properties") else None,
+            os={os_type: AppOs(
+                install=declared.install.model_dump(mode="json", exclude_none=True), launch=declared.launch,
+                skill=AppSkill(file=declared.skill) if declared.skill is not None else None,
+                settings=cls.settings_on(os_type).model_json_schema() if declared.settings is not None else None,
+                build_settings=(cls.build_settings_on(os_type).model_json_schema()
+                                if declared.build_settings is not None else None))
+                for os_type, declared in cls._installs.items()},
+            settings=cls.Settings.model_json_schema(), build_settings=build if build.get("properties") else None,
             skill=AppSkill(file=cls.skill) if cls.skill is not None else
                   AppSkill(method=skill_methods[0]) if skill_methods else None,
             data=sorted({_DATA_METHODS[op] for fn in methods if (op := getattr(fn, _OP_ATTR, None)) in _DATA_METHODS}),
-            install_steps=[InstallStep(name=fn.__name__, scope=getattr(fn, _INSTALL_STEP_ATTR)) for fn in methods
-                           if hasattr(fn, _INSTALL_STEP_ATTR)],
-            ready_checks=[fn.__name__ for fn in methods if hasattr(fn, _READY_CHECK_ATTR)],
+            install_steps=steps, ready_checks=checks,
         )
 
 
@@ -337,10 +438,21 @@ def _joined(path: str, part: str) -> str:
     return f"{path}.{part}" if path else part
 
 
-def _built_settings(cls: type[ComputerAppEnvironment]) -> BaseModel:
-    """The app's build settings, as its env fixed them in its computer's image, read in the app's folder: the values
-    the env gives, over the defaults."""
-    return cls.BuildSettings.model_validate(json.loads(BUILD_SETTINGS.read_text()) if BUILD_SETTINGS.is_file() else {})
+def _built_settings(cls: type[ComputerAppEnvironment], os_type: Optional[str]) -> BaseModel:
+    """The app's build settings on ``os_type``, as its env fixed them in its computer's image, read in the app's folder:
+    the values the env gives, over the defaults."""
+    values = json.loads(BUILD_SETTINGS.read_text()) if BUILD_SETTINGS.is_file() else {}
+    return cls.build_settings_on(os_type).model_validate(values)
+
+
+def _runs_on(os_types: Optional[list[str]], os_type: Optional[str]) -> bool:
+    return os_types is None or os_type in os_types
+
+
+@functools.cache
+def _added(added: type[BaseModel], base: type[BaseModel]) -> type[BaseModel]:
+    """``base`` with the fields of ``added``, whose win where both declare one."""
+    return create_model(added.__name__, __base__=(added, base))
 
 
 def _methods(cls: type) -> list[Callable]:

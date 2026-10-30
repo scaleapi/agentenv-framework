@@ -7,6 +7,6 @@ from app import Notes
 notes = Notes()
 Path.home().joinpath(".notes.json").write_text(json.dumps(
     {"signature": notes.settings.signature, "token": notes.settings.token.get_secret_value(),
-     "edition": notes.build_settings.edition}))
+     "edition": notes.build_settings.edition, "font": notes.settings.font}))
 while True:
     time.sleep(3600)

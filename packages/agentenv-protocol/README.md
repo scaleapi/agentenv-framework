@@ -615,12 +615,17 @@ server, which needs the `app` extra (below).
 
 ```python
 from pydantic import BaseModel, SecretStr
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Linux, Service, computer_app
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Packages, Service, computer_app,
+                                        install_step, linux)
+
+class LinuxSettings(BaseModel):
+    font: str = "DejaVu Sans"
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+@linux(packages=Packages(apt=["thunderbird"]), python="requirements.txt",
+       services=[Service(name="imap", command="venv/bin/python imap.py")],
+       launch=Launch(command=["thunderbird"], window={"class": "thunderbird"}), settings=LinuxSettings)
 class MailApp(ComputerAppEnvironment):
-    linux = Linux(python="requirements.txt", services=[Service(name="imap", command="venv/bin/python imap.py")])
-    launch = Launch(command=["thunderbird"], window={"class": "thunderbird"})
     skill = "skill.md"
 
     class Settings(BaseModel):
@@ -629,13 +634,16 @@ class MailApp(ComputerAppEnvironment):
 
     class BuildSettings(BaseModel):
         locale: str = "en_US"
+
+    @install_step(scope="session")
+    def profile(self) -> None: ...
 ```
 
 - **`@computer_app`** names the platforms the app supports, as a driver names them, and the
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
   (`environment_name`), the `computer` and `driver` it deploys alone on, and `build_settings`, its
   build settings' values (`build_settings = { locale = "fr_FR" }`).
-- **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
+- **`@linux(...)`** is how a Linux computer installs it, `Linux`'s fields: `files`, a folder of the app's
   copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
   (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
   installed into the venv every app gets beside them; `sources`, extra apt repositories
@@ -649,12 +657,21 @@ class MailApp(ComputerAppEnvironment):
   the wheels resolved for it (`pip install --no-deps`). A requirements file lists everything itself,
   since its lock covers that file alone: a line including another file (`-r`, `-c`), an editable
   install (`-e`), a local path or a local folder of wheels is refused at put.
-- **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
+- **Each OS has its own decorator,** and what differs by OS goes in it: `launch=` always; and
+  optionally `skill=`, a file used instead of the class's, and `settings=` and `build_settings=`,
+  models whose fields add to the class's `Settings` and `BuildSettings` on that OS. What's on the
+  class applies to every OS. `@install(os_type, spec, launch=..., ...)` is the generic form, for an
+  OS type a plugin adds, with that OS type's own install model as `spec`; `@linux(...)` is
+  `@install("linux", Linux(...), ...)`. On the computer the class reads what's declared for the OS
+  it runs on (`platform.detect()`).
+- **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title, a port answering on
   loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
-  app, after its run scripts, offline and without the class's `__init__`. A step reads
+  app, after its run scripts, offline and without the class's `__init__`. Each runs on every OS the
+  app installs on, or on those its `os=` names (`@install_step(os="linux")`, `@ready_check(os=[...])`);
+  naming one the app declares no install for is refused when the class is read. A step reads
   `self.build_settings`; a deploy's `self.settings` aren't known at build, and reading one raises
   `AttributeError` (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
 - **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;

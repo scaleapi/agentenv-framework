@@ -31,7 +31,7 @@ def test_an_app_deployed_alone_runs_its_service_on_its_settings_on_a_computer_na
     version, fastfetch = service.pop("fastfetch")
     assert version.endswith("~noble") and fastfetch.startswith("fastfetch ")
     assert service == {
-        "signature": "-- Ada", "token": "t0ken", "edition": "pro", "card": "notes",
+        "signature": "-- Ada", "token": "t0ken", "edition": "pro", "font": "DejaVu Sans", "card": "notes",
         "app_ready": [{"name": "app notes", "ok": True, "detail": "ready"}],
         "launchers": ["agentenv-app-notes.desktop"], "launched": ["notes"], "hello": "Hello, world!", "license": True,
         "installed": "pro"}

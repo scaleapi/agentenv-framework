@@ -1,11 +1,11 @@
 """What a computer's layer installs on one OS, as a driver's env.toml declares it under ``[install.<os>]`` or an app's
-class as ``linux = Linux(...)``: ``files``, a folder of its own copied under the layer's prefix; ``packages``, the OS's
+class with ``@linux(...)``: ``files``, a folder of its own copied under the layer's prefix; ``packages``, the OS's
 packages, as apt takes them; ``python``, a requirements file in that folder installed into a venv beside them;
 ``sources``, extra apt repositories to resolve from; ``downloads``, files fetched by URL and checked by sha256;
 ``run``, scripts of the folder run once those are installed; ``services``, the programs the base's init runs from the
 prefix; and ``ports``, those it listens on. Everything but the files is resolved and fetched once at put, and every
 build installs only what was stored then (``packages`` module). The models of packages, sources, downloads and run
-scripts are the protocol's, which an app's ``Linux(...)`` uses too."""
+scripts are the protocol's, which an app's ``@linux(...)`` uses too."""
 
 from __future__ import annotations
 
