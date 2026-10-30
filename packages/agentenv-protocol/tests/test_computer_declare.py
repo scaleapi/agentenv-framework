@@ -210,6 +210,10 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
     ('launch = Launch(command=["mail"], ready=Ready(timeout_s=5))', "Ready waits on nothing: set window, port or command"),
     ('launch = Launch(command=["mail"], ready=Ready(window=True))', "ready waits on a window: name it with Launch(window="),
     ('launch = Launch(command=["mail"], window={"role": "main"})', "window matches by class, instance, title, not"),
+    ('linux = Linux(downloads=[Download(url="https://example.com/t", sha256="abc", to="t")])',
+     "Download.sha256: String should match pattern '^[0-9a-f]{64}$'"),
+    ('linux = Linux(run=[RunScript(script="../setup.sh")])',
+     "RunScript.script: '../setup.sh' must be a path inside the layer's folder"),
     ('class BuildSettings(BaseModel): key: SecretStr = SecretStr("")',
      "Changed.BuildSettings holds a secret at properties.key, which its computer's image would keep; declare it in "
      "Settings"),
@@ -217,7 +221,8 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.BuildSettings holds a secret at properties.keys.items, which"),
     ('class BuildSettings(BaseModel): mail: Mail.Settings = Mail.Settings()',
      "Changed.BuildSettings holds a secret at $defs.Settings.properties.password, which"),
-], ids=["no-wait", "no-window", "window-key", "build-secret", "build-secrets-listed", "build-secret-nested"])
+], ids=["no-wait", "no-window", "window-key", "download-sha", "script-escape", "build-secret", "build-secrets-listed",
+        "build-secret-nested"])
 def test_an_app_whose_launch_readiness_or_build_settings_cant_be_checked_is_refused_saying_why(folder, capsys, change,
                                                                                                 problem):
     (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64) + f"""

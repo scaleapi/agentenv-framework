@@ -225,10 +225,11 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     arm64 = next(build for build in docker.builds if build["platform"] == "linux/arm64")
     assert arm64["dockerfile"].splitlines() == [
         f"FROM {base.image().image_name}", "USER root", 'ENV AGENTENV_SETTING_THEME="dark"',
-        "COPY driver/ /opt/agentenv/drivers/desk/", "COPY packages/wheels/driver/ /tmp/agentenv-wheels/driver/",
+        "COPY driver/ /opt/agentenv/drivers/desk/",
+        "COPY packages/wheels/driver/ /tmp/agentenv-packages/wheels/driver/",
         "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip "
-        "install --no-index --no-deps /tmp/agentenv-wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
-        "--format=json > /opt/agentenv/drivers/desk/installed.json && rm -rf /tmp/agentenv-wheels/driver",
+        "install --no-index --no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
+        "--format=json > /opt/agentenv/drivers/desk/installed.json && rm -rf /tmp/agentenv-packages/wheels/driver",
         "COPY agentenv-desk.conf /etc/supervisor/conf.d/agentenv-desk.conf",
         "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-desk.conf && test -x "
         "/opt/agentenv/drivers/desk/venv/bin/python",
@@ -1027,7 +1028,7 @@ def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_unde
         "add": [f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"]}
     for line in ("COPY apps/mail/ /opt/agentenv/apps/mail/",
                  "RUN --network=none python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip"
-                 " install --no-index --no-deps /tmp/agentenv-wheels/apps-mail/*.whl",
+                 " install --no-index --no-deps /tmp/agentenv-packages/wheels/apps-mail/*.whl",
                  "RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv",
                  "COPY agentenv-app-mail.conf /etc/supervisor/conf.d/agentenv-app-mail.conf"):
         assert line in dockerfile
@@ -1053,7 +1054,7 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
     protocol = "/ctx/protocol[app]" if checkout else f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"
     assert {layer["name"]: (layer["requirements"], layer["add"]) for _, request in docker.resolved
             for layer in request["python"]}["apps-mail"] == (None, [protocol])
-    assert "/opt/agentenv/apps/mail/venv/bin/pip install --no-index --no-deps /tmp/agentenv-wheels/apps-mail/*.whl" in (
+    assert "/opt/agentenv/apps/mail/venv/bin/pip install --no-index --no-deps /tmp/agentenv-packages/wheels/apps-mail/*.whl" in (
         build["dockerfile"])
     assert build["confs"]["agentenv-app-mail.conf"] == MAIL_SERVER
     assert boot.ready_timeout([app]) == (270.0 if at == "boot" else boot.READY_TIMEOUT_S)
@@ -1078,11 +1079,11 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
         {"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": ["main"], "key": "/ctx/apps/mail/ppa.asc"}]
     builds = {build["platform"]: build for build in docker.builds}
     lines = builds["linux/arm64"]["dockerfile"].splitlines()
-    first = lines.index("COPY packages/apt/ /tmp/agentenv-apt/")
+    first = lines.index("COPY packages/apt/ /tmp/agentenv-packages/apt/")
     assert lines[first:first + 3] == [
-        "COPY packages/apt/ /tmp/agentenv-apt/",
-        "RUN --network=none apt-get install -y --no-install-recommends /tmp/agentenv-apt/*.deb && rm -rf "
-        "/tmp/agentenv-apt", "COPY driver/ /opt/agentenv/drivers/desk/"]
+        "COPY packages/apt/ /tmp/agentenv-packages/apt/",
+        "RUN --network=none apt-get install -y --no-install-recommends /tmp/agentenv-packages/apt/*.deb && rm -rf "
+        "/tmp/agentenv-packages/apt", "COPY driver/ /opt/agentenv/drivers/desk/"]
     steps = lines.index("RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv")
     assert lines[steps + 1:steps + 8] == [
         "RUN --network=none cd /opt/agentenv/apps/mail && './set up.sh'",
@@ -1135,7 +1136,7 @@ def test_a_stored_file_that_isnt_the_one_its_lock_names_fails_the_build_that_sta
                                                                                         tmp_path):
     lock = packages.stored(Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]["lock"],
                            "@local/~/kit/desktop")
-    sha256 = lock["wheels"]["driver"][0]["sha256"]
+    sha256 = lock.wheels["driver"][0].sha256
     store, prefix = packages._store("@local/~/kit/desktop")
     Path(urllib.parse.urlparse(store.object_url(f"{prefix}/files/{sha256}")).path).write_bytes(b"tampered")
 
@@ -1154,7 +1155,7 @@ def test_a_venv_whose_requirements_resolve_to_nothing_is_made_empty(base, docker
     lines = docker.builds[0]["dockerfile"].splitlines()
     assert "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip " \
            "list --format=json > /opt/agentenv/drivers/desk/installed.json" in lines
-    assert not [line for line in lines if "agentenv-wheels" in line]
+    assert not [line for line in lines if "agentenv-packages" in line]
 
 
 def test_two_puts_resolving_the_same_inputs_at_once_both_get_the_first_stored_lock(docker, tmp_path, monkeypatch):
@@ -1172,8 +1173,10 @@ def test_two_puts_resolving_the_same_inputs_at_once_both_get_the_first_stored_lo
     monkeypatch.setattr(packages, "_run_resolver", newer)
     second, _ = packages.resolve(inputs, wants, tmp_path / "ctx", "base", "arm64", "@local/~/kit/desktop",
                                  tmp_path / "2")
+    monkeypatch.setattr(packages.os, "getuid", lambda: 4242)
 
     assert second == first == packages.stored(inputs, "@local/~/kit/desktop")
+    assert packages.inputs_digest(wants, tmp_path / "ctx", "base", "arm64") == inputs
 
 
 def test_the_resolver_installs_the_apt_packages_it_downloads_before_building_wheels(tmp_path, monkeypatch):

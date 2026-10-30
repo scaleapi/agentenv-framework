@@ -14,7 +14,7 @@ from agentenv_protocol.computer.driver import DriverDeclaration
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils.install import Install, installs, missing, unlocked
+from agent_env.env.envs.computer.utils.install import Install, folder_problems, installs
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ class ComputerDriverEnv(Env):
             problems.append(f"port must be 1 to {MAX_PORT}, not {fields['port']}")
         fields["install"], invalid = installs(fields.get("install", {}))
         problems += invalid + [problem for os_type, install in fields["install"].items()
-                               for problem in [*missing(os_type, install, files), *unlocked(os_type, install, files)]]
+                               for problem in folder_problems(os_type, install, files)]
         if refused or problems:
             ctx.refuse([*refused, *map(ctx.config_problem, problems)])
         return fields

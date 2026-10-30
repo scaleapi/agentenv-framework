@@ -98,7 +98,8 @@ def main(argv: list[str]) -> int:
         with contextlib.redirect_stdout(sys.stderr):
             declared = declare(Path(folder), file, name)
     except ValidationError as e:
-        print("ValueError: " + "; ".join(error["msg"].removeprefix("Value error, ") for error in e.errors()),
+        print("ValueError: " + "; ".join(f"{'.'.join([e.title, *map(str, error['loc'])])}: "
+                                         f"{error['msg'].removeprefix('Value error, ')}" for error in e.errors()),
               file=sys.stderr)
         return 1
     except Exception as e:

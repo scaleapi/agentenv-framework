@@ -4,7 +4,8 @@ packages, as apt takes them; ``python``, a requirements file in that folder inst
 ``sources``, extra apt repositories to resolve from; ``downloads``, files fetched by URL and checked by sha256;
 ``run``, scripts of the folder run once those are installed; ``services``, the programs the base's init runs from the
 prefix; and ``ports``, those it listens on. Everything but the files is resolved and fetched once at put, and every
-build installs only what was stored then (``packages`` module)."""
+build installs only what was stored then (``packages`` module). The models of packages, sources, downloads and run
+scripts are the protocol's, which an app's ``Linux(...)`` uses too."""
 
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+from agentenv_protocol.computer.app import AptSource, Download, LayerPath, Packages, RunScript
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from agent_env.artifact.artifacts.computer import OS_TYPES
@@ -34,87 +36,17 @@ class Service(BaseModel):
     scope: Literal["session", "system"] = "session"
 
 
-class Packages(BaseModel):
-    """The OS's packages, each as its package manager takes it: for apt, ``name``, ``name=version`` or
-    ``name/suite``."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    apt: list[str] = Field(default_factory=list)
-
-    @field_validator("apt")
-    @classmethod
-    def _one_word_each(cls, value: list[str]) -> list[str]:
-        if bad := [name for name in value if not name or name.split() != [name] or name.startswith("-")]:
-            raise ValueError(f"each package is one word, as apt takes it, not {bad}")
-        return value
-
-
-class AptSource(BaseModel):
-    """An apt repository resolved from besides the OS's own: its URL, suite and components, and its signing key, a file
-    of the layer's folder."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    apt: str = Field(pattern=r"^https?://")
-    suite: str = Field(min_length=1)
-    components: list[str] = Field(default_factory=list)
-    key: str
-
-    @field_validator("key")
-    @classmethod
-    def _relative(cls, value: str) -> str:
-        return _inside(value)
-
-
-class Download(BaseModel):
-    """A file fetched by its URL and checked against its sha256, put at ``to`` under the layer's prefix; for one arch
-    only, when ``arch`` names it."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    url: str = Field(pattern=r"^https?://")
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    to: str
-    arch: Literal["amd64", "arm64"] | None = None
-
-    @field_validator("to")
-    @classmethod
-    def _relative(cls, value: str) -> str:
-        return _inside(value)
-
-
-class RunScript(BaseModel):
-    """A script of the layer's folder run as root, or for ``session``, as the session user, once files, packages and the
-    venv are in."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    script: str
-    scope: Literal["system", "session"] = "system"
-
-    @field_validator("script")
-    @classmethod
-    def _relative(cls, value: str) -> str:
-        return _inside(value)
-
-
 class Install(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    files: str = "."
+    files: LayerPath = "."
     packages: Packages | None = None
-    python: str | None = None
+    python: LayerPath | None = None
     sources: list[AptSource] | None = None
     downloads: list[Download] | None = None
     run: list[RunScript] | None = None
     services: list[Service] = Field(min_length=1)
     ports: list[int] | None = None
-
-    @field_validator("files", "python")
-    @classmethod
-    def _relative(cls, value: str | None) -> str | None:
-        return value if value is None else _inside(value)
 
     @field_validator("ports")
     @classmethod
@@ -168,9 +100,12 @@ def installs(data: Any, model: type[Install] = Install) -> tuple[dict[str, Insta
     return found, problems
 
 
-def missing(os_type: str, install: Install, files: dict) -> list[str]:
-    """What ``install`` names that the layer's folder, ``files`` by path, doesn't hold: its folder, its requirements, its
-    sources' keys and its scripts, each inside the folder it installs."""
+def folder_problems(os_type: str, install: Install, files: dict[str, Path]) -> list[str]:
+    """What's wrong with ``install`` against the layer's folder, ``files`` by path: what it names that the folder
+    doesn't hold (its folder, its requirements, its sources' keys and its scripts, each inside the folder it installs),
+    and each line of its requirements file that names another file: an included requirements or constraints file, an
+    editable install, a local path or ``file:`` URL, or a local folder of wheels. A lock's inputs are the requirements
+    file alone, so it would be reused when one of those changed."""
     folder = PurePosixPath(install.files)
     problems = []
     if folder != PurePosixPath(".") and not any(PurePosixPath(path).is_relative_to(folder) for path in files):
@@ -179,19 +114,13 @@ def missing(os_type: str, install: Install, files: dict) -> list[str]:
              *(("run", run.script) for run in install.run or [])]
     problems += [f"install.{os_type}.{field}: {(folder / path).as_posix()!r} isn't in this folder"
                  for field, path in named if path is not None and (folder / path).as_posix() not in files]
+    requirements = (folder / install.python).as_posix() if install.python is not None else None
+    if requirements in files:
+        problems += [f"install.{os_type}.python: {requirements!r} line {number}, {line.strip()!r}, names another file, "
+                     "which the lock of a requirements file doesn't cover; list what it installs in the file itself"
+                     for number, line in enumerate(files[requirements].read_text().splitlines(), 1)
+                     if _names_a_file(line)]
     return problems
-
-
-def unlocked(os_type: str, install: Install, files: dict[str, Path]) -> list[str]:
-    """The lines of ``install``'s requirements file, in the layer's folder ``files`` by path, that name another file:
-    an included requirements or constraints file, an editable install, a local path or ``file:`` URL, or a local folder
-    of wheels. A lock's inputs are the requirements file alone, so it would be reused when one of those changed."""
-    path = (PurePosixPath(install.files) / install.python).as_posix() if install.python is not None else None
-    if path not in files:
-        return []
-    return [f"install.{os_type}.python: {path!r} line {number}, {line.strip()!r}, names another file, which the lock "
-            "of a requirements file doesn't cover; list what it installs in the file itself"
-            for number, line in enumerate(files[path].read_text().splitlines(), 1) if _names_a_file(line)]
 
 
 def _names_a_file(line: str) -> bool:
@@ -203,9 +132,3 @@ def _names_a_file(line: str) -> bool:
     if _FIND_LINKS.match(words[0]):
         return "://" not in line
     return words[0].startswith((".", "/", "~", "file:")) or re.search(r"@\s*file:", line) is not None
-
-
-def _inside(path: str) -> str:
-    if not path or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts:
-        raise ValueError(f"{path!r} must be a path inside the layer's folder")
-    return path

@@ -9,10 +9,10 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from pathlib import Path
-from typing import Any, Callable, ClassVar, Literal, Optional
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Any, Callable, ClassVar, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment, extension
 from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI
@@ -41,6 +41,16 @@ _SUBSCHEMA_MAPS = ("properties", "$defs", "patternProperties")
 DEFAULT_TIMEOUT_S = 60.0
 
 
+def _inside(path: str) -> str:
+    if not path or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts:
+        raise ValueError(f"{path!r} must be a path inside the layer's folder")
+    return path
+
+
+#: A path relative to the folder an app or a driver installs from, which never leaves it.
+LayerPath = Annotated[str, AfterValidator(_inside)]
+
+
 class Service(BaseModel):
     """A program the computer's init runs from the app's folder as the session user; a relative program names one
     there."""
@@ -59,37 +69,45 @@ class Packages(BaseModel):
 
     apt: list[str] = Field(default_factory=list)
 
+    @field_validator("apt")
+    @classmethod
+    def _one_word_each(cls, value: list[str]) -> list[str]:
+        if bad := [name for name in value if not name or name.split() != [name] or name.startswith("-")]:
+            raise ValueError(f"each package is one word, as apt takes it, not {bad}")
+        return value
+
 
 class AptSource(BaseModel):
     """An apt repository resolved from besides the OS's own: its URL, suite and components, and its signing key, a file
-    of the app's folder."""
+    of the folder it installs from."""
 
     model_config = ConfigDict(extra="forbid")
 
-    apt: str
-    suite: str
+    apt: str = Field(pattern=r"^https?://")
+    suite: str = Field(min_length=1)
     components: list[str] = Field(default_factory=list)
-    key: str
+    key: LayerPath
 
 
 class Download(BaseModel):
-    """A file fetched by its URL and checked against its sha256, put at ``to`` under the app's prefix; for one arch
-    only, when ``arch`` names it."""
+    """A file fetched by its URL and checked against its sha256, put at ``to`` under the prefix it installs to; for one
+    arch only, when ``arch`` names it."""
 
     model_config = ConfigDict(extra="forbid")
 
-    url: str
-    sha256: str
-    to: str
+    url: str = Field(pattern=r"^https?://")
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    to: LayerPath
     arch: Optional[Literal["amd64", "arm64"]] = None
 
 
 class RunScript(BaseModel):
-    """A script of the app's folder run as root, or for ``session``, as the session user, before its install steps."""
+    """A script of the folder it installs from, run as root, or for ``session``, as the session user, once its files,
+    packages and venv are in."""
 
     model_config = ConfigDict(extra="forbid")
 
-    script: str
+    script: LayerPath
     scope: Literal["system", "session"] = "system"
 
 
@@ -101,9 +119,9 @@ class Linux(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    files: str = "."
+    files: LayerPath = "."
     packages: Optional[Packages] = None
-    python: Optional[str] = None
+    python: Optional[LayerPath] = None
     sources: Optional[list[AptSource]] = None
     downloads: Optional[list[Download]] = None
     run: Optional[list[RunScript]] = None

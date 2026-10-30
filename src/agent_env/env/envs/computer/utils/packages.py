@@ -1,9 +1,9 @@
 """Fetch at put, install from the store: what a computer env's layers ask for beyond their own files (apt packages,
 Python requirements and downloads) is resolved once for each arch in a container of the base (``resolve_in_base``),
-every file is stored in the object store by its sha256, and a lock lists them. The lock is stored by a digest of what
-it was resolved from (each layer's packages, sources, requirements file and downloads, the base, the arch and this
-resolver), so any env with the same inputs reuses it. A build stages only the lock's files and installs them with the
-network closed (``composer``)."""
+every file is stored in the object store by its sha256, and a lock lists them (``Lock``). The lock is stored by a
+digest of what it was resolved from (each layer's packages, sources, requirements file and downloads, the base, the
+arch, the request the resolver is given, the resolver itself and the lock's own shape), so any env with the same inputs
+reuses it. A build stages only the lock's files and installs them with the network closed (``composer``)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+from pydantic import BaseModel
 
 from agent_env.config import get_config
 from agent_env.env.envs.computer.utils.install import Install
@@ -24,8 +25,8 @@ from agent_env.store.base import ObjectAlreadyExistsError
 #: Where locks and their files are kept, under the configured key prefix, in the store the env's id routes to.
 PREFIX = "agentenv-packages"
 RESOLVER = Path(__file__).with_name("resolve_in_base.py")
-#: What a build stages the lock's .debs and wheels under, in its context.
-STAGED = "packages"
+#: Where a build's context holds a lock's .debs; each venv's wheels are at ``staged_wheels``.
+STAGED_APT = "packages/apt"
 _RESOLVE_TIMEOUT_S = 3600
 _DOWNLOAD_TIMEOUT_S = 600
 _CHUNK = 1 << 20
@@ -43,6 +44,35 @@ class ResolveError(RuntimeError):
         self.log = log
 
 
+class LockedFile(BaseModel):
+    file: str
+    sha256: str
+    size: int
+
+
+class LockedDeb(LockedFile):
+    package: str
+    version: str
+    arch: str
+
+
+class LockedDownload(LockedFile):
+    url: str
+    to: str
+
+
+class Lock(BaseModel):
+    inputs: str
+    arch: str
+    apt: list[LockedDeb]
+    wheels: dict[str, list[LockedFile]]
+    downloads: dict[str, list[LockedDownload]]
+
+    def digest(self) -> str:
+        """The part of a build key that says exactly what the lock installs."""
+        return "sha256:" + hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class Want:
     """A layer's part of a lock: its folder in the build context, its install, and when it has a venv, the requirements
@@ -55,7 +85,7 @@ class Want:
 
     @property
     def name(self) -> str:
-        return self.folder.replace("/", "-")
+        return _slug(self.folder)
 
 
 def inputs_digest(wants: list[Want], context: Path, base: str, arch: str) -> str | None:
@@ -74,66 +104,66 @@ def inputs_digest(wants: list[Want], context: Path, base: str, arch: str) -> str
             "downloads": [download.model_dump() for download in _downloads(install, arch)]})
     protocol = context / "protocol"
     return "sha256:" + hashlib.sha256(json.dumps({
-        "layers": layers, "base": base, "arch": arch, "resolver": _resolver_digest(),
-        "protocol": _folder_digest(protocol) if protocol.is_dir() else None,
+        "layers": layers, "base": base, "arch": arch, "request": _request(wants, arch), "resolver": _sha256(RESOLVER),
+        "lock": _lock_shape(), "protocol": _folder_digest(protocol) if protocol.is_dir() else None,
     }, sort_keys=True).encode()).hexdigest()
 
 
-def stored(inputs: str, store_id: str) -> dict | None:
+def stored(inputs: str, store_id: str) -> Lock | None:
     """The lock resolved from ``inputs``, when one is stored."""
     store, prefix = _store(store_id)
-    key = f"{prefix}/locks/{inputs.removeprefix('sha256:')}.json"
-    return json.loads(store.read(key)) if store.exists(key) else None
+    key = _lock_key(prefix, inputs)
+    return Lock.model_validate_json(store.read(key)) if store.exists(key) else None
 
 
 def resolve(inputs: str, wants: list[Want], context: Path, source: str, arch: str, store_id: str,
-            work: Path) -> tuple[dict, dict[str, Path]]:
+            work: Path) -> tuple[Lock, dict[str, Path]]:
     """Resolve ``wants`` for ``arch`` in a container of ``source``, the base's image, with their folders and the
     protocol's source from ``context``, into ``work``; fetch their downloads; store every file and the lock. The lock,
     and where each file this resolve fetched is under ``work``, by its sha256, for a build that follows to stage it from
     there rather than the store."""
     (store, prefix), fetched = _store(store_id), {}
     result, out = _run_resolver(_request(wants, arch), context, source, arch, work)
-    apt = [{**deb, **_put(store, prefix, fetched, _written(out, "apt", deb["file"]))} for deb in result["apt"]]
-    wheels = {want.folder: [_put(store, prefix, fetched, _written(out, "wheels", want.name, wheel))
+    apt = [LockedDeb(**{**deb, **_put(store, prefix, fetched, _written(out, "apt", deb["file"]))})
+           for deb in result["apt"]]
+    wheels = {want.folder: [LockedFile(**_put(store, prefix, fetched, _written(out, "wheels", want.name, wheel)))
                             for wheel in result["wheels"][want.name]] for want in wants if want.venv}
-    downloads = {want.folder: [{"url": download.url, "to": download.to,
-                                **_put(store, prefix, fetched, _fetch(download.url, download.sha256, work))}
+    downloads = {want.folder: [LockedDownload(url=download.url, to=download.to, **_put(
+                                   store, prefix, fetched, _fetch(download.url, download.sha256, work)))
                                for download in _downloads(want.install, arch)]
                  for want in wants if _downloads(want.install, arch)}
-    lock = {"inputs": inputs, "arch": arch, "apt": apt, "wheels": wheels, "downloads": downloads}
-    key = f"{prefix}/locks/{inputs.removeprefix('sha256:')}.json"
+    lock = Lock(inputs=inputs, arch=arch, apt=apt, wheels=wheels, downloads=downloads)
+    key = _lock_key(prefix, inputs)
     try:
-        store.put(key, json.dumps(lock, sort_keys=True).encode(), content_type="application/json")
+        store.put(key, lock.model_dump_json().encode(), content_type="application/json")
     except ObjectAlreadyExistsError:
-        return json.loads(store.read(key)), fetched
+        return Lock.model_validate_json(store.read(key)), fetched
     return lock, fetched
 
 
-def digest(lock: dict | None) -> str | None:
-    """The digest of ``lock``, the part of a build key that says exactly what it installs."""
-    return None if lock is None else "sha256:" + hashlib.sha256(json.dumps(lock, sort_keys=True).encode()).hexdigest()
-
-
-def stage(lock: dict, context: Path, store_id: str, fetched: dict[str, Path]) -> None:
-    """Write the lock's files into ``context`` for a build: .debs under ``packages/apt``, each layer's wheels under
-    ``packages/wheels/<name>``, and its downloads at their places in its folder, a script or binary executable; each
+def stage(lock: Lock, context: Path, store_id: str, fetched: dict[str, Path]) -> None:
+    """Write the lock's files into ``context`` for a build: .debs under ``STAGED_APT``, each venv's wheels under
+    ``staged_wheels``, and each layer's downloads at their places in its folder, a script or binary executable; each
     linked from ``fetched``, the files a resolve just fetched by sha256, or else downloaded from the store and refused
     unless its sha256 is the one the lock names."""
     store, prefix = _store(store_id)
-    for deb in lock["apt"]:
-        _get(store, prefix, fetched, deb["sha256"], context / STAGED / "apt" / deb["file"])
-    for folder, wheels in lock["wheels"].items():
+    for deb in lock.apt:
+        _get(store, prefix, fetched, deb.sha256, context / STAGED_APT / deb.file)
+    for folder, wheels in lock.wheels.items():
         for wheel in wheels:
-            _get(store, prefix, fetched, wheel["sha256"],
-                 context / STAGED / "wheels" / folder.replace("/", "-") / wheel["file"])
-    for folder, downloads in lock["downloads"].items():
+            _get(store, prefix, fetched, wheel.sha256, context / staged_wheels(folder) / wheel.file)
+    for folder, downloads in lock.downloads.items():
         for download in downloads:
-            target = context / folder / download["to"]
-            _get(store, prefix, fetched, download["sha256"], target)
+            target = context / folder / download.to
+            _get(store, prefix, fetched, download.sha256, target)
             with target.open("rb") as file:
                 if file.read(4).startswith(RUN_ONLY):
                     target.chmod(EXECUTABLE)
+
+
+def staged_wheels(folder: str) -> str:
+    """Where a build's context holds the wheels of the venv of the layer in ``folder``."""
+    return f"packages/wheels/{_slug(folder)}"
 
 
 def _request(wants: list[Want], arch: str) -> dict:
@@ -144,7 +174,7 @@ def _request(wants: list[Want], arch: str) -> dict:
                for want in wants for source in want.install.sources or []]
     python = [{"name": want.name, "folder": f"/ctx/{want.folder}", "requirements": want.install.python,
                "add": list(want.adds)} for want in wants if want.venv]
-    return {"apt": apt, "sources": sources, "python": python, "owner": [os.getuid(), os.getgid()]}
+    return {"apt": apt, "sources": sources, "python": python}
 
 
 def _run_resolver(request: dict, context: Path, source: str, arch: str, work: Path) -> tuple[dict, Path]:
@@ -152,7 +182,7 @@ def _run_resolver(request: dict, context: Path, source: str, arch: str, work: Pa
     what it wrote, and the folder it wrote it in."""
     out = work / "out"
     out.mkdir(parents=True)
-    (out / "request.json").write_text(json.dumps(request))
+    (out / "request.json").write_text(json.dumps({**request, "owner": [os.getuid(), os.getgid()]}))
     shutil.copy(RESOLVER, out / "resolve.py")
     try:
         ran = subprocess.run(["docker", "run", "--rm", "--platform", f"linux/{arch}", "--user", "root",
@@ -243,5 +273,15 @@ def _folder_digest(folder: Path) -> str:
     return hashed.hexdigest()
 
 
-def _resolver_digest() -> str:
-    return hashlib.sha256(RESOLVER.read_bytes() + Path(__file__).read_bytes()).hexdigest()
+def _lock_shape() -> dict[str, dict[str, str]]:
+    """The fields of a lock and their types, one of its inputs, so a lock stored in another shape is resolved again."""
+    return {model.__name__: {name: str(field.annotation) for name, field in model.model_fields.items()}
+            for model in (Lock, LockedFile, LockedDeb, LockedDownload)}
+
+
+def _lock_key(prefix: str, inputs: str) -> str:
+    return f"{prefix}/locks/{inputs.removeprefix('sha256:')}.json"
+
+
+def _slug(folder: str) -> str:
+    return folder.replace("/", "-")

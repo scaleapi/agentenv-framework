@@ -212,8 +212,9 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 stage = "build"
             dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
             key = "sha256:" + hashlib.sha256(json.dumps({
-                "base": base_identity, "dockerfile": dockerfile, "context": _digest(context), "lock": packages.digest(lock),
-                "form": form, "arch": arch, "composer": _composer_digest(),
+                "base": base_identity, "dockerfile": dockerfile, "context": _digest(context),
+                "lock": lock.digest() if lock is not None else None, "form": form, "arch": arch,
+                "composer": _composer_digest(),
             }, sort_keys=True).encode()).hexdigest()
             store = get_config().get_image_store_for(env.stored_id)
             store.ensure_repository(REPOSITORY)
@@ -404,7 +405,8 @@ def _values(env: ComputerEnv) -> dict[str, Any]:
     return {**env.computer_settings, **({"resolution": f"{display['width']}x{display['height']}"} if display else {})}
 
 
-def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict, lock: dict | None) -> str:
+def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict,
+                lock: packages.Lock | None) -> str:
     """The composed image's Dockerfile but its key's label, which the key is a digest of: the build-phase settings, the
     lock's .debs, then each layer's files under its prefix, its venv beside them from the lock's wheels, its run scripts
     and an app's install steps, each run as root or the session user, every install with the network closed; then its
@@ -412,18 +414,18 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
     user = base.session.user
     lines = [f"FROM {source}", "USER root",
              *(f"ENV AGENTENV_SETTING_{name.upper()}={json.dumps(str(value))}" for name, value in build_settings.items())]
-    if lock is not None and lock["apt"]:
-        lines += [f"COPY {packages.STAGED}/apt/ /tmp/agentenv-apt/",
-                  "RUN --network=none apt-get install -y --no-install-recommends /tmp/agentenv-apt/*.deb && "
-                  "rm -rf /tmp/agentenv-apt"]
+    if lock is not None and lock.apt:
+        debs = f"/tmp/agentenv-{packages.STAGED_APT}"
+        lines += [f"COPY {packages.STAGED_APT}/ {debs}/",
+                  f"RUN --network=none apt-get install -y --no-install-recommends {debs}/*.deb && rm -rf {debs}"]
     for layer in layers:
         prefix = layer.prefix
         lines.append(f"COPY {layer.folder}/ {prefix}/")
         if _venv(layer):
-            slug = layer.folder.replace("/", "-")
-            wheels = f"/tmp/agentenv-wheels/{slug}"
-            if lock is not None and lock["wheels"].get(layer.folder):
-                lines += [f"COPY {packages.STAGED}/wheels/{slug}/ {wheels}/",
+            staged = packages.staged_wheels(layer.folder)
+            wheels = f"/tmp/agentenv-{staged}"
+            if lock is not None and lock.wheels.get(layer.folder):
+                lines += [f"COPY {staged}/ {wheels}/",
                           f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install "
                           f"--no-index --no-deps {wheels}/*.whl && {prefix}/venv/bin/pip list --format=json > "
                           f"{prefix}/installed.json && rm -rf {wheels}"]

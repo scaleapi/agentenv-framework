@@ -16,7 +16,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.utils import composer, gate
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer.utils.install import AppInstall, installs, missing, unlocked
+from agent_env.env.envs.computer.utils.install import AppInstall, folder_problems, installs
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv, declared
 from agent_env.env.store import get_env_store
 from agent_env.store.ids import derive_id
@@ -111,7 +111,7 @@ class ComputerAppEnv(ComputerEnv):
         files = ctx.files()
         found, problems = _installs(declaration)
         problems += [problem for os_type, install in found.items()
-                     for problem in [*missing(os_type, install, files), *unlocked(os_type, install, files)]]
+                     for problem in folder_problems(os_type, install, files)]
         if (skill := declaration.skill and declaration.skill.file) is not None and skill not in files:
             problems.append(f"skill: {skill!r} isn't in this folder")
         if problems:
