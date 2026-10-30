@@ -37,6 +37,10 @@ MCP_SERVER_SOURCES = "mcp_server_sources"
 #: tier's CI job installs them.
 TRL = "trl_installed"
 
+#: The NeMo Gym tier (``tst/nemo_gym``) runs the resources server in-process; nemo-gym needs Python 3.13.14 or later and
+#: isn't in the dev extra, and only that tier's CI job installs it.
+NEMO_GYM = "nemo_gym_installed"
+
 #: ``collect_artifacts`` sizes a file with ``stat -c %s``, which only GNU stat takes (macOS ships BSD stat),
 #: so collecting off a local sandbox needs GNU stat first on PATH.
 GNU_STAT = "gnu_stat"
