@@ -60,7 +60,10 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     session may go without a request before its episode is ended, freeing its slot: Gym never verifies a rollout whose
     run failed or was cancelled. ``reward_components`` has verify also answer with each of the task's scores by step id,
     as NeMo RL's GDPO takes them, and makes the reward their sum, as NeMo RL requires of a reward with components; it
-    takes no ``reward``. It runs with one worker, since a rollout's session lives in its process."""
+    takes no ``reward``. ``masked_as_error`` answers verify for a masked rollout with HTTP 503 and why, rather than with
+    ``mask_sample``, for a client that doesn't read ``mask_sample``: verifiers' NeMo Gym taskset then fails the
+    rollout, which prime-rl leaves out of the loss and its group's baseline. It runs with one worker, since a rollout's
+    session lives in its process."""
 
     url: str | None = None
     bundle: str | None = None
@@ -71,6 +74,7 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     reset_timeout: float = 600.0
     idle_timeout: float = 600.0
     reward_components: bool = False
+    masked_as_error: bool = False
 
     @model_validator(mode="after")
     def _checked(self) -> "AgentEnvResourcesServerConfig":
@@ -160,6 +164,8 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
             reward, scores, failure = await session.result(_reply(body.response))
         if failure is not None:
             logger.warning("rollout masked: %s", failure)
+            if self.config.masked_as_error:
+                raise HTTPException(status_code=503, detail=failure)
         components = scores if self.config.reward_components and failure is None else None
         if components:
             reward = sum(components.values())
@@ -205,15 +211,17 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
                            "may be left running", served.url, STOP_SECONDS)
 
 
-def serve(folder: str | Path, *, host: str, port: int) -> None:
+def serve(folder: str | Path, *, host: str, port: int, masked_as_error: bool = False) -> None:
     """Runs the resources server ``write_server`` wrote into ``folder`` on its own, at ``host``:``port``, without Gym's
     head server or the agent servers its config names, for a trainer that plays the folder's rows against the server's
-    URL. As verifiers' launcher for Gym's own servers does, its client names a head server nothing calls."""
+    URL; ``masked_as_error`` as the config takes it. As verifiers' launcher for Gym's own servers does, its client names
+    a head server nothing calls."""
     folder = Path(folder).resolve()
     written = yaml.safe_load((folder / "configs" / f"{folder.name}.yaml").read_text())
     config = written[folder.name]["resources_servers"][folder.name]
     resources = AgentEnvResourcesServer(
-        config=AgentEnvResourcesServerConfig(**config, name=folder.name, host=host, port=port),
+        config=AgentEnvResourcesServerConfig(**config, name=folder.name, host=host, port=port,
+                                             masked_as_error=masked_as_error),
         server_client=ServerClient(head_server_config=BaseServerConfig(host=host, port=port),
                                    global_config_dict=OmegaConf.create({})),
     )
