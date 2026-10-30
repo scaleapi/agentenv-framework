@@ -8,13 +8,13 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
-from agent_env.task_step.task_steps.notification_delivery import label_time, label_zone
+from agent_env.task_step.task_steps.notification_delivery import label_time
 
 CLOCK = "urn:agentenv:clock/v1"
 TRIGGERS = "urn:agentenv:triggers/v1"
 NOTIFICATIONS = "urn:agentenv:notifications/v1"
 IN_FLIGHT = ("firing", "queued")
-PARAMS = ("end_time", "role", "time_zone", "person_messages", "settle_timeout_seconds", "max_jumps_per_turn")
+PARAMS = ("end_time", "role", "person_messages", "settle_timeout_seconds", "max_jumps_per_turn")
 POLL_SECONDS = 0.5
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ async def post_turn(turn, params):
     """A firing agent trigger answers first; else move the clock, silently, to the next thing due for the agent."""
     if turn.last:
         return None
-    end_time, role, zone, person, settle_timeout, max_jumps = _params(params)
+    end_time, role, person, settle_timeout, max_jumps = _params(params)
     envs = await _armed(turn.envs)
     if not envs:
         return _end(turn, "no_armed_env_with_clock_and_notifications")
@@ -44,7 +44,7 @@ async def post_turn(turn, params):
             turn.record({"woke_at": _iso(now), "for": due + ["person"] * len(due_person),
                          **({"person_at": [_iso(m["at"]) for m in due_person]} if due_person else {})})
             # prompt_agent puts what came due on notifications/v1 ahead of this; [] sends only that
-            return {"message": _person_message(due_person, zone) if due_person else []}
+            return {"message": _person_message(due_person) if due_person else []}
         if jump == max_jumps:  # checked above: what the last jump made due still wakes the agent
             return _end(turn, "max_jumps_per_turn", at=_iso(now))
         nxt = await _next(envs, role, person, now, sent)
@@ -68,7 +68,6 @@ def _params(params):
     role = params.get("role", "default")
     if not isinstance(role, str) or not role.strip():
         raise ValueError(f"role must name the agent's AgentEnv-Role, e.g. 'default', got {role!r}")
-    zone = label_zone(params.get("time_zone"))
     person = []
     for m in params.get("person_messages", []):
         if not isinstance(m, dict) or not isinstance(m.get("at"), str) or not isinstance(m.get("text"), str):
@@ -80,7 +79,7 @@ def _params(params):
     max_jumps = params.get("max_jumps_per_turn", 500)
     if isinstance(max_jumps, bool) or not isinstance(max_jumps, int) or max_jumps < 1:
         raise ValueError(f"max_jumps_per_turn must be a positive integer, got {max_jumps!r}")
-    return end_time, role.strip(), zone, sorted(person, key=lambda m: m["at"]), timeout, max_jumps
+    return end_time, role.strip(), sorted(person, key=lambda m: m["at"]), timeout, max_jumps
 
 
 async def _armed(envs):
@@ -135,9 +134,9 @@ def _delivered_person(turn):
     return sent
 
 
-def _person_message(person, zone):
+def _person_message(person):
     """One line per message, oldest first, each saying when it was written."""
-    return "\n".join(f"[{label_time(_iso(m['at']), zone)}] {m['text']}" for m in person)
+    return "\n".join(f"[{label_time(_iso(m['at']))}] {m['text']}" for m in person)
 
 
 async def _advance(env, target):

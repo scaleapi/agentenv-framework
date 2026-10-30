@@ -17,8 +17,8 @@ each line saying when and through what, so nothing poses as the person. A person
 after those lines:
 
 ```
-[Tue Feb 2, 9:00 AM · Curbfinch alert] New for "rug 8x10": 1970s wool rug · $360
-[Tue Feb 2, 6:00 PM · your scheduled check] Look for new 8x10 rugs under $300.
+[Tue Feb 2, 9:00 AM UTC · Curbfinch alert] New for "rug 8x10": 1970s wool rug · $360
+[Tue Feb 2, 6:00 PM UTC · your scheduled check] Look for new 8x10 rugs under $300.
 ```
 
 The conversation ends when nothing can wake the agent any more, or the next thing is past `end_time`. It also ends,
@@ -26,14 +26,13 @@ recorded as `triggers_still_firing`, if triggers are still running when `settle_
 than treat unfinished work as nothing left to happen. Envs whose clock was never armed are left out.
 
 Reference the hook from a `prompt_agent` step, after `sync_env_clock` (frozen: `virtual_seconds_per_real_second: 0`)
-and `configure_scheduled_checks` (`"roles": ["default"]`). `time_zone` on `prompt_agent` sets the zone the delivered
-lines show:
+and `configure_scheduled_checks` (`"roles": ["default"]`). Delivered lines, the person's included, are labelled in UTC:
 
 ```json
 {"id": "week", "type": "prompt_agent", "prompt": "Keep an eye on curbfinch this week for an 8x10 rug.",
- "max_conversation_turns": 20, "time_zone": "America/Los_Angeles",
+ "max_conversation_turns": 20,
  "post_turn_hooks": [{"file_artifact_id": "@local/agentenv-framework/advance-to-next-event/advance-to-next-event",
-                      "params": {"end_time": "P5D", "time_zone": "America/Los_Angeles"}}]}
+                      "params": {"end_time": "P5D"}}]}
 ```
 
 `tasks/week.json` runs it on `next-env-event`'s inbox: a school email that alerts the agent, a dentist email
@@ -43,7 +42,6 @@ Its params, all optional:
 
 - `end_time`: an RFC 3339 instant with an offset, or an ISO 8601 duration from the clock's t0 (`P5D`).
 - `role`: the agent's AgentEnv-Role, whose checks and notifications it moves the clock to; `default` by default.
-- `time_zone`: the IANA zone the person's messages show their times in; UTC by default.
 - `person_messages`: `[{"at": RFC 3339 instant, "text": "..."}]`, what the person writes and when.
 - `settle_timeout_seconds`: how long to wait for triggers to settle before ending the run, 300 by default.
 - `max_jumps_per_turn`: silent world events it may pass between two wakes, 500 by default.

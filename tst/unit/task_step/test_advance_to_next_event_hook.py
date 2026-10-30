@@ -18,7 +18,7 @@ from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.constants import GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from agent_env.env.gateway.gateway import Gateway
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_zone, next_message, take_due
+from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHook, PostTurnHooks, Turn, _Answer, run_post_turn_hooks
 
 HOOK = Path(agent_env.__file__).parent / "examples" / "advance-to-next-event" / "artifacts" / "advance-to-next-event" / "hook.py"
@@ -66,7 +66,7 @@ def _context() -> TaskStepContext:
     return TaskStepContext(deployed_envs=[env])
 
 
-async def _turns(hook, context, params=None, on_turn=None, triggers=None, time_zone=None) -> list:
+async def _turns(hook, context, params=None, on_turn=None, triggers=None) -> list:
     """What prompt_agent sends the agent after each turn until the conversation ends: each message's part texts (what
     came due for the solver's role first, then the hook's or a trigger's reply), then the end. ``on_turn(n)`` plays
     the agent's turn n first."""
@@ -93,7 +93,7 @@ async def _turns(hook, context, params=None, on_turn=None, triggers=None, time_z
             sent.append(answer)
             continue
         due = await take_due(context.deployed_envs, "default")
-        message = next_message(delivered_parts(due, label_zone(time_zone)), answer["message"])
+        message = next_message(delivered_parts(due), answer["message"])
         sent.append([p["text"] for p in message] if message else {"end": "nothing_to_send"})
     return sent
 
@@ -135,7 +135,7 @@ async def test_a_world_event_with_no_channel_happens_silently_and_the_agent_s_ow
 
     sent = await _turns(hook, _context(), on_turn=agent)
 
-    assert sent == [["[Tue Mar 3, 6:00 PM · your scheduled check] check for new rugs"],
+    assert sent == [["[Tue Mar 3, 6:00 PM UTC · your scheduled check] check for new rugs"],
                     {"end": "nothing_can_wake_the_agent"}]
     assert gateway.calls == [("rug listed", "2026-03-03T09:00:00Z")]
 
@@ -145,8 +145,8 @@ async def test_a_notify_action_wakes_the_agent_when_it_fires_with_its_channel(ho
     _register(gateway, {"id": "w-2", "when": {"type": "time", "at": "2026-03-03T09:00:00Z"},
                         "actions": [{"type": "notify", "channel": "Curbfinch alert",
                                      "text": 'New for "rug 8x10": 1970s wool rug · $360'}]})
-    sent = await _turns(hook, _context(), time_zone="America/Los_Angeles")
-    assert sent == [['[Tue Mar 3, 1:00 AM · Curbfinch alert] New for "rug 8x10": 1970s wool rug · $360'],
+    sent = await _turns(hook, _context())
+    assert sent == [['[Tue Mar 3, 9:00 AM UTC · Curbfinch alert] New for "rug 8x10": 1970s wool rug · $360'],
                     {"end": "nothing_can_wake_the_agent"}]
 
 
@@ -158,7 +158,7 @@ async def test_only_what_is_due_for_the_agent_s_role_wakes_it(hook, gateway):
 
     sent = await _turns(hook, _context())
 
-    assert sent == [["[Wed Mar 4, 9:00 AM · your scheduled check] check for new rugs"],
+    assert sent == [["[Wed Mar 4, 9:00 AM UTC · your scheduled check] check for new rugs"],
                     {"end": "nothing_can_wake_the_agent"}]
     assert [n["to"] for n in gateway._notifications.state()["pending_notifications"]] == ["landlord"]
 
@@ -168,8 +168,8 @@ async def test_the_person_s_messages_arrive_at_their_times_once_each(hook, gatew
     params = {"person_messages": [{"at": "2026-03-04T16:30:00Z", "text": "got Leo, we're home"},
                                   {"at": "2026-03-03T15:00:00Z", "text": "I'm up"}]}
     sent = await _turns(hook, _context(), params=params)
-    assert sent == [["[Tue Mar 3, 3:00 PM] I'm up"],
-                    ["[Wed Mar 4, 4:30 PM] got Leo, we're home"],
+    assert sent == [["[Tue Mar 3, 3:00 PM UTC] I'm up"],
+                    ["[Wed Mar 4, 4:30 PM UTC] got Leo, we're home"],
                     {"end": "nothing_can_wake_the_agent"}]
 
 
@@ -184,9 +184,9 @@ async def test_what_comes_due_together_goes_in_one_message_oldest_first(hook, ga
 
     [first, end] = await _turns(hook, _context(), on_turn=agent,
                                 params={"person_messages": [{"at": "2026-03-03T09:00:00Z", "text": "pick up Leo?"}]})
-    assert first == ["[Tue Mar 3, 9:00 AM · your scheduled check] morning sweep",
-                     "[Tue Mar 3, 9:00 AM · Gmail] School: early dismissal",
-                     "[Tue Mar 3, 9:00 AM] pick up Leo?"]
+    assert first == ["[Tue Mar 3, 9:00 AM UTC · your scheduled check] morning sweep",
+                     "[Tue Mar 3, 9:00 AM UTC · Gmail] School: early dismissal",
+                     "[Tue Mar 3, 9:00 AM UTC] pick up Leo?"]
 
 
 @pytest.mark.asyncio
@@ -217,7 +217,7 @@ async def test_a_firing_agent_trigger_answers_before_any_jump(hook, gateway):
     pushback = {"message": [{"kind": "text", "text": "the person pushes back"}]}
     sent = await _turns(hook, _context(), triggers=[pushback])
     assert sent[0] == ["the person pushes back"]
-    assert sent[1] == ["[Tue Mar 3, 9:00 AM · your scheduled check] later"]
+    assert sent[1] == ["[Tue Mar 3, 9:00 AM UTC · your scheduled check] later"]
 
 
 @pytest.mark.asyncio
@@ -225,8 +225,8 @@ async def test_a_repeating_check_wakes_once_per_time_and_the_record_names_why(ho
     gateway._notifications.schedule("sweep", every="P1D", until="P2D")
     context = _context()
     sent = await _turns(hook, context)
-    assert sent == [["[Tue Mar 3, 8:00 AM · your scheduled check] sweep"],
-                    ["[Wed Mar 4, 8:00 AM · your scheduled check] sweep"],
+    assert sent == [["[Tue Mar 3, 8:00 AM UTC · your scheduled check] sweep"],
+                    ["[Wed Mar 4, 8:00 AM UTC · your scheduled check] sweep"],
                     {"end": "nothing_can_wake_the_agent"}]
     records = context.metadata["post_turn_hooks"]["week"]
     assert [r.get("for") for r in records[:2]] == [["scheduled_check"], ["scheduled_check"]]
@@ -236,7 +236,7 @@ async def test_a_repeating_check_wakes_once_per_time_and_the_record_names_why(ho
 async def test_what_the_last_allowed_jump_makes_due_still_wakes_the_agent(hook, gateway):
     gateway._notifications.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
     sent = await _turns(hook, _context(), params={"max_jumps_per_turn": 1})
-    assert sent[0] == ["[Tue Mar 3, 6:00 PM · your scheduled check] check for new rugs"]
+    assert sent[0] == ["[Tue Mar 3, 6:00 PM UTC · your scheduled check] check for new rugs"]
 
 
 @pytest.mark.asyncio

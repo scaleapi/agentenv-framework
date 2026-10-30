@@ -15,10 +15,10 @@
        "subject": "Your appointment", "body": "Your check-up is moved to Friday at 10:00. Reply if that doesn't work."}}]}
   ]},
   {"id": "agent", "type": "deploy_agent", "env_ids": ["@local/agentenv-framework/next-env-event/inbox"]},
-  {"id": "week", "type": "prompt_agent", "max_conversation_turns": 8, "time_zone": "Europe/London",
+  {"id": "week", "type": "prompt_agent", "max_conversation_turns": 8,
    "prompt": "You look after my inbox this week. Mail from the school alerts you; nothing else does, so check the inbox yourself when it makes sense. Answer what needs an answer, and tell me in one line what you did.",
    "post_turn_hooks": [{"file_artifact_id": "advance-to-next-event",
-                        "params": {"end_time": "P5D", "time_zone": "Europe/London",
+                        "params": {"end_time": "P5D",
                                    "person_messages": [{"at": "2026-03-04T18:00:00Z",
                                                         "text": "Anything from the dentist yet?"}]}}]}
 ]
