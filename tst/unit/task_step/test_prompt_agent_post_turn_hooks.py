@@ -423,6 +423,142 @@ async def test_a_hook_that_asked_and_returns_another_answer_fails_the_step(monke
         await _step(hook).execute(_context(user_card=_USER_SIM_CARD))
 
 
+# ---- a user sim that may leave a message unanswered (USER_SIM_OUTCOMES) ---------------------------------------------
+
+OUTCOME_FORMAT = {"type": "json_schema", "schema": {"type": "object", "properties": {
+    "outcome": {"type": "string", "enum": ["reply", "no_reply", "done"],
+                "description": "reply: you write back now. no_reply: you leave this message unanswered, and the "
+                               "assistant sees nothing. done: you're satisfied and the conversation should end."},
+    "message": {"type": "string", "description": "What you write back when outcome is reply; empty otherwise."},
+}, "required": ["outcome", "message"]}}
+OUTCOME_CONFIG = ("POST", f"{USER}/ext/agent-config", {"output_format": OUTCOME_FORMAT}, 60)
+
+# Asks the user sim; on no_reply wakes the agent itself, saying so, after telling the sim what "she" sent.
+OUTCOMES = """
+    USER_SIM_OUTCOMES = True
+
+    async def post_turn(turn, params):
+        if turn.last:
+            return None
+        answer = await turn.ask_user()
+        turn.record({"answer": answer})
+        if not answer.get("no_reply"):
+            return answer
+        turn.record({"told": await turn.tell_user_sim("You just sent: are we on for Friday?")})
+        return {"message": "are we on for Friday?"}
+"""
+
+
+def outcome(value: str, message: str = "", **extra) -> list[dict]:
+    return text(json.dumps({"outcome": value, "message": message, **extra}))
+
+
+@pytest.mark.asyncio
+async def test_a_hook_declaring_user_sim_outcomes_has_the_sim_reply_or_leave_a_message_unanswered(monkeypatch):
+    peers = EnvPeers(monkeypatch, {AGENT: [text("Friday at 10?"), text("Booked."), text("Yes.")],
+                                   USER: [outcome("reply", "10 works"), outcome("no_reply"), outcome("no_reply")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _step(_hook("outcomes", OUTCOMES), turns=3).execute(ctx)
+
+    assert peers.requests(ctx) == [
+        OUTCOME_CONFIG,
+        *exchange(AGENT, text("plan my week"), "<id1>", "<ctx>", "task-1"),
+        *exchange(USER, text("Friday at 10?"), "<id2>", "<ctx>", "task-2"),
+        *exchange(AGENT, text("10 works"), "<id3>", "<ctx>", "task-3"),
+        *exchange(USER, text("Booked."), "<id4>", "<ctx>", "task-4"),
+        *exchange(USER, text("You just sent: are we on for Friday?"), "<id5>", "<ctx>", "task-5"),
+        *exchange(AGENT, text("are we on for Friday?"), "<id6>", "<ctx>", "task-6"),
+    ]
+    assert [e.get("answer", e.get("told")) for e in _recorded(ctx)] == [
+        {"message": text("10 works")}, {"no_reply": True}, {"no_reply": True}]
+    stored = [m["parts"] for m in _stored(ctx, peers)["messages"]]
+    assert text("You just sent: are we on for Friday?") not in stored  # the agent never sees what only she is told
+
+
+@pytest.mark.asyncio
+async def test_her_done_ends_the_run_and_her_extra_fields_are_recorded(monkeypatch):
+    peers = EnvPeers(monkeypatch, {AGENT: [text("Booked Friday 10:00.")], USER: [outcome("done", mood="relieved")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _step(_hook("outcomes", OUTCOMES), turns=3).execute(ctx)
+
+    assert _stored(ctx, peers)["status"] == "closed"
+    assert _recorded(ctx) == [{"hook": "outcomes", "turn": 1, "answer": {"end": "user_done"}}]
+    assert ctx.metadata["usersim_turn_outputs"] == {"talk": [{"turn": 1, "fields": {"mood": "relieved"}}]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [text("10 works"), outcome("reply", "  "), outcome("maybe", "hm"),
+                                    text(json.dumps(["reply"]))])
+async def test_an_empty_or_broken_sim_answer_ends_the_run_as_an_error(monkeypatch, answer):
+    EnvPeers(monkeypatch, {AGENT: [text("Friday at 10?")], USER: [answer]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _step(_hook("outcomes", OUTCOMES), turns=3).execute(ctx)
+
+    assert _recorded(ctx) == [{"hook": "outcomes", "turn": 1, "answer": {"end": "user_malformed"}}]
+
+
+@pytest.mark.asyncio
+async def test_a_sim_sending_no_parts_still_ends_the_run_as_today(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("Friday at 10?")], USER: [[]]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _step(_hook("outcomes", OUTCOMES), turns=3).execute(ctx)
+
+    assert _recorded(ctx)[0]["answer"] == {"end": "user_no_parts"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned", ["answer", "None"])
+async def test_a_hook_that_got_no_reply_must_return_a_decision_of_its_own(monkeypatch, returned):
+    EnvPeers(monkeypatch, {AGENT: [text("Booked.")], USER: [outcome("no_reply")]})
+    hook = _hook("passes", f"""
+        USER_SIM_OUTCOMES = True
+
+        async def post_turn(turn, params):
+            answer = await turn.ask_user()
+            return {returned}
+    """)
+
+    with pytest.raises(RuntimeError, match="chose not to reply, and must return a decision of its own"):
+        await _step(hook).execute(_context(user_card=_USER_SIM_CARD))
+
+
+@pytest.mark.asyncio
+async def test_without_user_sim_outcomes_the_sim_has_today_s_format_and_cannot_be_told_anything(monkeypatch):
+    peers = EnvPeers(monkeypatch, {AGENT: [text("one")], USER: []})
+    ctx = _context(user_card=_USER_SIM_CARD)
+    hook = _hook("tells", """
+        async def post_turn(turn, params):
+            turn.record({"outcomes": turn.user_sim_outcomes})
+            await turn.tell_user_sim("hello")
+    """)
+
+    with pytest.raises(RuntimeError, match="tell_user_sim needs a user sim"):
+        await _step(hook, turns=2).execute(ctx)
+    assert peers.requests(ctx)[0] == USER_SIM_CONFIG
+    assert _recorded(ctx) == [{"hook": "tells", "turn": 1, "outcomes": False}]
+
+
+@pytest.mark.asyncio
+async def test_a_hook_declaring_user_sim_outcomes_with_no_user_sim_deployed_sees_none(monkeypatch):
+    EnvPeers(monkeypatch, {AGENT: [text("one")]})
+    ctx = _context()
+    hook = _hook("looks", """
+        USER_SIM_OUTCOMES = True
+
+        async def post_turn(turn, params):
+            turn.record({"outcomes": turn.user_sim_outcomes})
+            return {"end": "looked"}
+    """)
+
+    await _step(hook).execute(ctx)
+
+    assert _recorded(ctx) == [{"hook": "looks", "turn": 1, "outcomes": False}]
+
+
 # ---- what a hook is handed ------------------------------------------------------------------------------------------
 
 @pytest.mark.asyncio

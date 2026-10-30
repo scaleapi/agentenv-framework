@@ -21,6 +21,24 @@ after those lines:
 [Tue Feb 2, 6:00 PM · your scheduled check] Look for new 8x10 rugs under $300.
 ```
 
+With a user sim (the step's `user_agent_name` deployed), the person lives in the same chat as the agent. After each
+agent turn with text, the sim reads it and answers with one of three outcomes:
+
+- `reply`: her `message` is the agent's next message, and the clock stays where it is;
+- `no_reply`: she leaves it unanswered. The agent never sees this, and the clock moves on as above;
+- `done`: the conversation ends, even if checks are still scheduled.
+
+The hook declares `USER_SIM_OUTCOMES = True`, so `prompt_agent` sets up the sim to answer
+`{"outcome": "reply" | "no_reply" | "done", "message": "..."}` (a `user_output_format` on the step replaces that
+format, and then needs those two fields). A blank reply or an answer without a known outcome ends the run, recorded as
+`user_malformed`. An agent turn with no text is silence: the sim isn't asked, and the clock moves on. When to reply is
+up to the sim's own description of the person; by default she answers questions and decisions only she can make, and
+leaves plain updates unanswered. Each `person_messages` line still goes to the agent word for word, and as it is sent
+the sim is told `You just sent your assistant this message: "..."`, so the line is in her history as hers. Her
+answer to that is recorded and decides nothing unless it is an error. Each turn's outcome is recorded under
+`metadata["post_turn_hooks"]` as `person` (`reply`, `no_reply`, `done`, `not_asked`, or the error). Without a user
+sim the hook behaves as before.
+
 The conversation ends when nothing can wake the agent any more, or the next thing is past `end_time`. It also ends,
 recorded as `triggers_still_firing`, if triggers are still running when `settle_timeout_seconds` runs out, rather
 than treat unfinished work as nothing left to happen. Envs whose clock was never armed are left out.

@@ -36,6 +36,8 @@ _SPEC_KEYS = ("file_artifact_id", "file_artifact_version", "params")
 _RECORD_TAGS = ("hook", "turn")
 _INVOKABLE = (EXT_CLOCK_URI, EXT_TRIGGERS_URI, EXT_NOTIFICATIONS_URI)
 _TOOL_CALL_TIMEOUT_S = 600
+# A user sim's no_reply: the agent never sees it, so a hook that asked returns a decision of its own.
+NO_REPLY = "no_reply"
 
 Answer = dict[str, Any]
 
@@ -66,6 +68,7 @@ class PostTurnHook:
     version: Optional[int]
     params: dict
     post_turn: Callable[..., Awaitable[Optional[dict]]]
+    user_sim_outcomes: bool = False
 
 
 class PostTurnHooks:
@@ -75,6 +78,12 @@ class PostTurnHooks:
         self.hooks: list[PostTurnHook] = []
         self._paths: list[str] = []
         self._modules: list[str] = []
+
+    @property
+    def user_sim_outcomes(self) -> bool:
+        """A hook declared ``USER_SIM_OUTCOMES = True``: a user sim then answers each time with reply, no_reply or
+        done, so it may leave a message unanswered."""
+        return any(hook.user_sim_outcomes for hook in self.hooks)
 
     @classmethod
     async def load(cls, specs: list[dict], step_id: str) -> PostTurnHooks:
@@ -106,7 +115,7 @@ class PostTurnHooks:
             raise ValueError(f"post-turn hook '{spec['file_artifact_id']}' must define "
                              "`async def post_turn(turn, params)`: steps and runs share one event loop")
         return PostTurnHook(spec["file_artifact_id"], spec.get("file_artifact_version"), spec.get("params") or {},
-                            post_turn)
+                            post_turn, getattr(module, "USER_SIM_OUTCOMES", False) is True)
 
     def close(self) -> None:
         for path in self._paths:
@@ -186,7 +195,8 @@ class Turn:
     """What a hook is handed after an agent turn; ``last`` after the final one, when a returned message is ignored."""
 
     def __init__(self, *, context: TaskStepContext, step_id: str, hook: PostTurnHook, answer: _Answer, number: int,
-                 last: bool, agent_reply: str, agent_parts: list[dict]) -> None:
+                 last: bool, agent_reply: str, agent_parts: list[dict], user_sim_outcomes: bool = False,
+                 tell_user_sim: Optional[Callable[[list[dict]], Awaitable[Answer]]] = None) -> None:
         self.number = number
         self.last = last
         self.agent_reply = agent_reply
@@ -197,6 +207,9 @@ class Turn:
         self._step_id = step_id
         self._hook = hook
         self._answer = answer
+        # True when a user sim plays the user and answers reply ({"message"}), no_reply ({NO_REPLY: True}) or done.
+        self.user_sim_outcomes = user_sim_outcomes
+        self._tell_user_sim = tell_user_sim
 
     @functools.cached_property
     def metadata(self) -> Mapping[str, Any]:
@@ -210,6 +223,14 @@ class Turn:
     async def user_triggers(self) -> Optional[Answer]:
         """Agent triggers alone; None, leaving no trace, when none fires."""
         return await self._answer.user_triggers()
+
+    async def tell_user_sim(self, message: Any) -> Answer:
+        """Send the user sim ``message`` (text or parts) that the agent never sees, as ``user_sim_outcomes`` lets a
+        hook, e.g. to put a line she sent into her history; returns her answer, which decides nothing by itself."""
+        if not self.user_sim_outcomes:
+            raise RuntimeError("tell_user_sim needs a user sim that answers reply, no_reply or done "
+                               "(a hook declaring USER_SIM_OUTCOMES = True)")
+        return await self._tell_user_sim(_parts(message, self._hook))
 
     def record(self, entry: dict) -> None:
         """Append ``entry`` to ``metadata["post_turn_hooks"][step_id]``, tagged with this hook and turn."""
@@ -257,13 +278,24 @@ def _parts(message: Any, hook: PostTurnHook) -> list[dict]:
 async def run_post_turn_hooks(hooks: PostTurnHooks, *, context: TaskStepContext, step_id: str, number: int, last: bool,
                               agent_reply: str, agent_parts: list[dict],
                               ask_user: Callable[[], Awaitable[Answer]],
-                              user_triggers: Callable[[], Awaitable[Optional[Answer]]]) -> Optional[Answer]:
-    """Run the hooks in order; the first to return a message or an end decides, and one that asked returns that."""
+                              user_triggers: Callable[[], Awaitable[Optional[Answer]]],
+                              user_sim_outcomes: bool = False,
+                              tell_user_sim: Optional[Callable[[list[dict]], Awaitable[Answer]]] = None,
+                              ) -> Optional[Answer]:
+    """Run the hooks in order; the first to return a message or an end decides, and one that asked returns that, or,
+    when the user sim chose not to reply, a decision of its own."""
     answer = _Answer(ask_user, user_triggers)
     for hook in hooks.hooks:
         turn = Turn(context=context, step_id=step_id, hook=hook, answer=answer, number=number, last=last,
-                    agent_reply=agent_reply, agent_parts=agent_parts)
+                    agent_reply=agent_reply, agent_parts=agent_parts, user_sim_outcomes=user_sim_outcomes,
+                    tell_user_sim=tell_user_sim)
         returned = await hook.post_turn(turn, copy.deepcopy(hook.params))
+        if answer.value is not None and answer.value.get(NO_REPLY):
+            decision = None if returned == answer.value else _decision(returned, hook)
+            if decision is None:
+                raise RuntimeError(f"post-turn hook '{hook.artifact_id}' asked the user side at turn {number}, which "
+                                   "chose not to reply, and must return a decision of its own")
+            return decision
         if answer.value is not None:
             if returned != answer.value:
                 raise RuntimeError(f"post-turn hook '{hook.artifact_id}' asked the user side at turn {number} and "

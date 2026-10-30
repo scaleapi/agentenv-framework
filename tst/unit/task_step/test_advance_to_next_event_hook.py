@@ -66,17 +66,36 @@ def _context() -> TaskStepContext:
     return TaskStepContext(deployed_envs=[env])
 
 
-async def _turns(hook, context, params=None, on_turn=None, triggers=None, time_zone=None) -> list:
+class Nora:
+    """A scripted user sim: each message she reads, the agent's or one telling her what she sent, goes into her
+    ``history`` and gets the next of her ``answers``, as prompt_agent reads a sim's reply, no_reply or done."""
+
+    def __init__(self, *answers: dict):
+        self.answers = list(answers)
+        self.history: list[str] = []
+
+    async def read(self, parts: list[dict]) -> dict:
+        self.history.append("".join(p["text"] for p in parts))
+        assert self.answers, f"Nora has no answer left for {self.history[-1]!r}"
+        return self.answers.pop(0)
+
+
+def reply(message: str) -> dict:
+    return {"message": [{"kind": "text", "text": message}]}
+
+
+NO_REPLY = {"no_reply": True}
+DONE = {"end": "user_done"}
+
+
+async def _turns(hook, context, params=None, on_turn=None, triggers=None, time_zone=None, nora=None) -> list:
     """What prompt_agent sends the agent after each turn until the conversation ends: each message's part texts (what
     came due for the solver's role first, then the hook's or a trigger's reply), then the end. ``on_turn(n)`` plays
-    the agent's turn n first."""
+    the agent's turn n first and returns what it wrote, "ok" when it returns None. ``nora`` plays the user sim."""
     answers = list(triggers or [])
 
     async def user_triggers():
         return answers.pop(0) if answers else None
-
-    async def ask_user():
-        raise AssertionError("the hook never asks the user side")
 
     hooks = PostTurnHooks()
     hooks.hooks.append(PostTurnHook("advance-to-next-event", None, dict(params or {}), hook.post_turn))
@@ -84,11 +103,19 @@ async def _turns(hook, context, params=None, on_turn=None, triggers=None, time_z
     while not sent or not isinstance(sent[-1], dict):
         assert len(sent) < 12, sent
         number = len(sent) + 1
-        if on_turn:
-            on_turn(number)
+        wrote = (on_turn(number) if on_turn else None)
+        parts = [{"kind": "text", "text": "ok" if wrote is None else wrote}]
+
+        async def ask_user(parts=parts):
+            if nora is None:
+                raise AssertionError("the hook never asks the user side")
+            return await nora.read(parts)
+
         answer = await run_post_turn_hooks(hooks, context=context, step_id="week", number=number, last=False,
-                                           agent_reply="ok", agent_parts=[{"kind": "text", "text": "ok"}],
-                                           ask_user=ask_user, user_triggers=user_triggers)
+                                           agent_reply=parts[0]["text"], agent_parts=parts,
+                                           ask_user=ask_user, user_triggers=user_triggers,
+                                           user_sim_outcomes=nora is not None,
+                                           tell_user_sim=nora.read if nora is not None else None)
         if "end" in answer:
             sent.append(answer)
             continue
@@ -266,6 +293,91 @@ async def test_an_env_whose_clock_was_never_armed_is_left_out(hook, gateway):
     assert await hook._armed([armed, _UnarmedEnv()]) == [armed]
     gateway._clock = Clock()
     assert await _turns(hook, _context()) == [{"end": "no_armed_env_with_clock_and_notifications"}]
+
+
+# ---- the person in the chat (a user sim that answers reply, no_reply or done) ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_when_she_leaves_the_agent_s_message_unanswered_the_clock_jumps(hook, gateway):
+    gateway._notifications.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
+    nora = Nora(NO_REPLY, NO_REPLY)
+    context = _context()
+
+    sent = await _turns(hook, context, nora=nora, on_turn=lambda n: "Watching curbfinch for you." if n == 1 else None)
+
+    assert sent[0] == ["[Tue Mar 3, 6:00 PM · your scheduled check] check for new rugs"]
+    assert nora.history == ["Watching curbfinch for you.", "ok"]
+    assert context.metadata["post_turn_hooks"]["week"][0] == {"hook": "advance-to-next-event", "turn": 1,
+                                                              "person": "no_reply"}
+
+
+@pytest.mark.asyncio
+async def test_her_reply_is_the_agent_s_next_message_and_the_clock_stays(hook, gateway):
+    gateway._notifications.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
+    nora = Nora(reply("the wool one, under $300"), NO_REPLY, NO_REPLY)
+    clock_at = []
+
+    def agent(n):
+        clock_at.append(gateway._clock.read()["virtual_time"])
+        return "Two 8x10 rugs: wool or jute?" if n == 1 else "Watching for wool ones."
+
+    sent = await _turns(hook, _context(), nora=nora, on_turn=agent)
+
+    assert sent[0] == ["the wool one, under $300"]
+    assert clock_at[:2] == [MONDAY, MONDAY]
+    assert sent[1] == ["[Tue Mar 3, 6:00 PM · your scheduled check] check for new rugs"]
+    assert nora.history[:2] == ["Two 8x10 rugs: wool or jute?", "Watching for wool ones."]
+
+
+@pytest.mark.asyncio
+async def test_a_scripted_line_goes_to_the_agent_word_for_word_and_into_her_history_as_it_is_sent(hook, gateway):
+    params = {"person_messages": [{"at": "2026-03-04T18:00:00Z", "text": "Anything from the dentist yet?"}]}
+    nora = Nora(NO_REPLY, NO_REPLY, NO_REPLY)
+    seen_at_turn_2 = []
+
+    def agent(n):
+        if n == 2:
+            seen_at_turn_2.extend(nora.history)
+        return ["Inbox is quiet.", "Nothing from the dentist yet.", None][n - 1]
+
+    sent = await _turns(hook, _context(), params=params, nora=nora, on_turn=agent)
+
+    assert sent[0] == ["[Wed Mar 4, 6:00 PM] Anything from the dentist yet?"]
+    assert seen_at_turn_2 == ["Inbox is quiet.", 'You just sent your assistant this message: "Anything from the dentist yet?"']
+    assert nora.history[2] == "Nothing from the dentist yet."
+
+
+@pytest.mark.asyncio
+async def test_her_done_ends_the_run_with_checks_still_scheduled(hook, gateway):
+    gateway._notifications.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
+
+    sent = await _turns(hook, _context(), nora=Nora(DONE), on_turn=lambda n: "Bought the wool rug for $280.")
+
+    assert sent == [{"end": "user_done"}]
+    assert gateway._clock.read()["virtual_time"] == MONDAY
+    assert [c["status"] for c in gateway._notifications.state("default")["checks"]] == ["active"]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_turn_with_no_text_is_silence_and_she_is_not_asked(hook, gateway):
+    gateway._notifications.schedule("check for new rugs", at="2026-03-03T18:00:00Z")
+    nora = Nora(NO_REPLY)
+    context = _context()
+
+    sent = await _turns(hook, context, nora=nora, on_turn=lambda n: "  " if n == 1 else None)
+
+    assert sent[0] == ["[Tue Mar 3, 6:00 PM · your scheduled check] check for new rugs"]
+    assert nora.history == ["ok"]  # what the woken agent wrote next, not the empty turn
+    assert context.metadata["post_turn_hooks"]["week"][0]["person"] == "not_asked"
+
+
+@pytest.mark.asyncio
+async def test_an_error_from_her_when_told_of_her_line_ends_the_run(hook, gateway):
+    params = {"person_messages": [{"at": "2026-03-04T18:00:00Z", "text": "Anything from the dentist yet?"}]}
+
+    sent = await _turns(hook, _context(), params=params, nora=Nora(NO_REPLY, {"end": "user_malformed"}))
+
+    assert sent == [{"end": "user_malformed"}]
 
 
 def test_unknown_params_are_refused(hook):

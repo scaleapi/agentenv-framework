@@ -1,7 +1,8 @@
 """A prompt_agent post-turn hook that runs a conversation over simulated days by moving a frozen clock to the next
 thing due for the agent: a check it scheduled for itself or a notification a trigger sent it (notifications/v1, which
 prompt_agent delivers), or a message the person writes at a set time (which this hook sends). Everything else the
-world does happens silently on the way, while the agent is away."""
+world does happens silently on the way, while the agent is away. With a user sim, she reads each agent message first,
+and the clock moves only when she leaves it unanswered."""
 import asyncio
 import logging
 import re
@@ -9,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from agent_env.task_step.task_steps.notification_delivery import label_time, label_zone
+from agent_env.task_step.task_steps.post_turn_hooks import NO_REPLY
 
 CLOCK = "urn:agentenv:clock/v1"
 TRIGGERS = "urn:agentenv:triggers/v1"
@@ -16,12 +18,15 @@ NOTIFICATIONS = "urn:agentenv:notifications/v1"
 IN_FLIGHT = ("firing", "queued")
 PARAMS = ("end_time", "role", "time_zone", "person_messages", "settle_timeout_seconds", "max_jumps_per_turn")
 POLL_SECONDS = 0.5
+# prompt_agent then has a user sim answer reply, no_reply or done, not always reply.
+USER_SIM_OUTCOMES = True
 
 logger = logging.getLogger(__name__)
 
 
 async def post_turn(turn, params):
-    """A firing agent trigger answers first; else move the clock, silently, to the next thing due for the agent."""
+    """A firing agent trigger or the user sim's reply answers first; else move the clock, silently, to the next thing
+    due for the agent."""
     if turn.last:
         return None
     end_time, role, zone, person, settle_timeout, max_jumps = _params(params)
@@ -30,7 +35,7 @@ async def post_turn(turn, params):
         return _end(turn, "no_armed_env_with_clock_and_notifications")
     if (stuck := await _settle(turn, envs, settle_timeout)):
         return _end(turn, "triggers_still_firing", envs=stuck)
-    answer = await turn.user_triggers()
+    answer = await _person_answers(turn)
     if answer is not None:
         return answer
     t0 = min([_utc((await env.invoke(CLOCK, "state"))["t0"]) for env in envs])
@@ -43,6 +48,9 @@ async def post_turn(turn, params):
         if due or due_person:
             turn.record({"woke_at": _iso(now), "for": due + ["person"] * len(due_person),
                          **({"person_at": [_iso(m["at"]) for m in due_person]} if due_person else {})})
+            ended = await _tell_person(turn, due_person)
+            if ended is not None:
+                return ended
             # prompt_agent puts what came due on notifications/v1 ahead of this; [] sends only that
             return {"message": _person_message(due_person, zone) if due_person else []}
         if jump == max_jumps:  # checked above: what the last jump made due still wakes the agent
@@ -57,6 +65,42 @@ async def post_turn(turn, params):
         if (stuck := await _settle(turn, envs, settle_timeout)):
             # ending here would read unfinished work as nothing left to happen, and lose what it sends
             return _end(turn, "triggers_still_firing", envs=stuck, at=_iso(nxt))
+
+
+async def _person_answers(turn):
+    """The answer that keeps the clock where it is: a firing agent trigger's, or the user sim's reply or done to an
+    agent message with text. None when she leaves it unanswered, or an agent turn with no text leaves her nothing to
+    read."""
+    if not turn.user_sim_outcomes:
+        return await turn.user_triggers()
+    if not any(p.get("kind") == "text" and p.get("text", "").strip() for p in turn.agent_parts):
+        turn.record({"person": "not_asked"})
+        return await turn.user_triggers()
+    answer = await turn.ask_user()
+    turn.record({"person": _outcome(answer)})
+    return None if answer.get(NO_REPLY) else answer
+
+
+async def _tell_person(turn, person):
+    """Put each scripted line into the user sim's history as hers as it is sent. Her answer to it is recorded and
+    decides nothing, unless it is an error, which ends the run."""
+    if not turn.user_sim_outcomes:
+        return None
+    for m in person:
+        answer = await turn.tell_user_sim(f'You just sent your assistant this message: "{m["text"]}"')
+        turn.record({"told_person_at": _iso(m["at"]), "person": _outcome(answer)})
+        if answer.get("end") not in (None, "user_done"):
+            return answer
+    return None
+
+
+def _outcome(answer):
+    if answer.get(NO_REPLY):
+        return NO_REPLY
+    if answer.get("end") == "user_done":
+        return "done"
+    return answer["end"] if "end" in answer else "reply"
+
 
 def _params(params):
     unknown = sorted(set(params) - set(PARAMS))

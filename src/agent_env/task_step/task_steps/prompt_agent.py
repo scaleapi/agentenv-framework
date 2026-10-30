@@ -40,7 +40,12 @@ from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_zone, next_message, take_due
-from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
+from agent_env.task_step.task_steps.post_turn_hooks import (
+    NO_REPLY,
+    PostTurnHooks,
+    run_post_turn_hooks,
+    validate_hook_specs,
+)
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -124,6 +129,21 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
             "done": {"type": "boolean", "description": "Set true when you're satisfied and the conversation should end."},
         },
         "required": ["message", "done"],
+    },
+}
+# For a hook that declares USER_SIM_OUTCOMES: she may leave a message unanswered, which the agent never sees.
+_OUTCOME_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "outcome": {"type": "string", "enum": ["reply", "no_reply", "done"],
+                        "description": "reply: you write back now. no_reply: you leave this message unanswered, and "
+                                       "the assistant sees nothing. done: you're satisfied and the conversation "
+                                       "should end."},
+            "message": {"type": "string", "description": "What you write back when outcome is reply; empty otherwise."},
+        },
+        "required": ["outcome", "message"],
     },
 }
 
@@ -504,8 +524,10 @@ class PromptAgentTaskStep(TaskStep):
         context.record_model("solver", self.id, negotiated.fields.get("model") if negotiated else None)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
+        outcomes = is_user_sim and hooks is not None and hooks.user_sim_outcomes
         if is_user_sim:
-            user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
+            user_output_format = self.user_output_format or (
+                _OUTCOME_USER_SIM_OUTPUT_FORMAT if outcomes else _DEFAULT_USER_SIM_OUTPUT_FORMAT)
             user_model = self._resolve_user_model(context)
             user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
@@ -579,6 +601,7 @@ class PromptAgentTaskStep(TaskStep):
             self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
             decide_url=decide_url, shareable=sent_to_target,
             decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
+            outcomes=outcomes,
         )
 
         try:
@@ -674,6 +697,7 @@ class PromptAgentTaskStep(TaskStep):
                         agent_parts=agent_response_parts,
                         ask_user=functools.partial(user_side.ask, turn + 1, reply, agent_response_parts),
                         user_triggers=functools.partial(user_side.triggers, turn + 1, reply),
+                        user_sim_outcomes=outcomes, tell_user_sim=functools.partial(user_side.tell, turn + 1),
                     )
                 if answer is None and not last:
                     answer = await user_side.ask(turn + 1, final_terminal.response_text, agent_response_parts)
@@ -1036,7 +1060,7 @@ class _UserSide:
 
     def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
                  user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
-                 decide_url: Optional[str], decides_quietly: bool, shareable: set[str]) -> None:
+                 decide_url: Optional[str], decides_quietly: bool, shareable: set[str], outcomes: bool = False) -> None:
         self._step = step
         self._context = context
         self._url = url
@@ -1046,9 +1070,11 @@ class _UserSide:
         self._decide_url = decide_url
         self._decides_quietly = decides_quietly
         self._shareable = shareable
+        self._outcomes = outcomes
 
     async def ask(self, number: int, solver_message: str, agent_parts: list[dict]) -> dict:
-        """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record."""
+        """The user side's answer: ``{"message": parts}``, ``{"end": reason}`` with any closing message to record, or,
+        from a user sim answering outcomes, ``{NO_REPLY: True}``."""
         if self._decide_url is not None:
             env_triggers = await self._step._read_env_triggers(self._context)
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
@@ -1079,6 +1105,10 @@ class _UserSide:
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
         return answer
+
+    async def tell(self, number: int, parts: list[dict]) -> dict:
+        """Send the user sim ``parts`` the agent never sees; her answer, as ``ask`` reads one."""
+        return await self._ask_peer(number, parts)
 
     async def _ask_peer(self, number: int, agent_parts: list[dict]) -> dict:
         step = self._step
@@ -1113,6 +1143,8 @@ class _UserSide:
         if not self._is_user_sim:
             return {"message": parts}
         raw_text = next((p["text"] for p in parts if p.get("kind") == "text"), "")
+        if self._outcomes:
+            return self._outcome(number, raw_text)
         try:
             parsed = json.loads(raw_text)
             message_text = parsed["message"]
@@ -1127,6 +1159,27 @@ class _UserSide:
             logger.info(f"user-sim signaled done=true at turn {number}; ending multi-turn")
             return {"end": "user_done"}
         return {"message": [{"kind": "text", "text": message_text}]}
+
+    def _outcome(self, number: int, raw_text: str) -> dict:
+        """A user sim's reply ({"message"}), no_reply ({NO_REPLY: True}) or done; anything else ends the run."""
+        try:
+            parsed = json.loads(raw_text)
+            outcome, message = parsed["outcome"], parsed.get("message")
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning(f"user-sim returned no outcome ({e}); ending multi-turn; raw={raw_text[:200]!r}")
+            return {"end": "user_malformed"}
+        extras = {k: v for k, v in parsed.items() if k not in ("outcome", "message")}
+        if extras:
+            self._record("usersim_turn_outputs", {"turn": number, "fields": extras})
+        if outcome == "done":
+            logger.info(f"user-sim signaled done at turn {number}; ending multi-turn")
+            return {"end": "user_done"}
+        if outcome == "no_reply":
+            return {NO_REPLY: True}
+        if outcome == "reply" and isinstance(message, str) and message.strip():
+            return {"message": [{"kind": "text", "text": message}]}
+        logger.warning(f"user-sim returned outcome {outcome!r} with message {message!r}; ending multi-turn")
+        return {"end": "user_malformed"}
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
