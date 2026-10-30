@@ -6,6 +6,8 @@ import difflib
 
 from .errors import InvalidArgument, Unsupported
 
+#: The printable ASCII characters but the space, each the key value it types.
+PRINTABLE_KEYS = tuple(chr(code) for code in range(0x21, 0x7F))
 NAMED = (
     "Alt", "AltGraph", "CapsLock", "Control", "Fn", "FnLock", "Hyper", "Meta", "NumLock", "ScrollLock", "Shift",
     "Super", "Symbol", "SymbolLock",

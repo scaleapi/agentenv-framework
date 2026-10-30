@@ -111,6 +111,11 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         """Checks of the driver's own, run with the base class's by computer-ready/v1; never sends input."""
         return []
 
+    async def bundled_skill(self) -> tuple[str, str, dict[str, str]] | None:
+        """The skill the software this driver drives ships for agents, as its description, its SKILL.md body without
+        frontmatter, and its other files by relative path; the computer skill leads with it. None by default."""
+        return None
+
     def create_app(self) -> Any:
         self._computer_require_init()
         return super().create_app()

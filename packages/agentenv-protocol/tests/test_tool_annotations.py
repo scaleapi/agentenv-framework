@@ -1,6 +1,8 @@
-"""@tool annotations, structured output and _meta on both FastMCPs, served_tools choosing what a handler serves, and\nupdate_tool changing a served description."""
+"""@tool annotations, structured output and _meta on both FastMCPs, served_tools choosing what a handler serves,\nupdate_tool changing a served description, and forwarded tools served with their own schemas."""
 from __future__ import annotations
 
+import base64
+import re
 from typing import Annotated
 
 import anyio
@@ -20,7 +22,11 @@ from agentenv_protocol import (  # noqa: E402
     AgentEnvFastMCPApplication,
     EnvironmentCard,
     EnvironmentTool,
+    ForwardedTool,
+    create_fastmcp_app,
     environment_card,
+    resource,
+    server_instructions,
     tool,
 )
 
@@ -209,3 +215,151 @@ async def test_update_tool_needs_a_mounted_env_and_a_served_tool():
     env.create_app()
     with pytest.raises(ValueError, match="no served tool is named 'secret'"):
         await env.update_tool("secret", description="x")
+
+
+_CLICK = {"type": "object", "additionalProperties": False, "properties": {
+    "element_token": {"type": "string"}, "x": {"type": "integer"}, "count": {"type": "integer", "minimum": 1}}}
+_FOUND = {"type": "object", "required": ["rows"], "properties": {"rows": {"type": "array"}}}
+
+
+@environment_card(name="forwarding")
+class _Forwarding(AgentEnvEnvironment):
+    def __init__(self, calls: list) -> None:
+        self.calls = calls
+
+    @tool()
+    def look(self) -> str:
+        return "looked"
+
+    def forwarded_tools(self) -> list[ForwardedTool]:
+        async def click(**arguments) -> CallToolResult:
+            self.calls.append(arguments)
+            return CallToolResult(content=[TextContent(type="text", text="clicked"),
+                                           ImageContent(type="image", data="aGk=", mimeType="image/png")],
+                                  structuredContent={"hit": "button OK"})
+
+        async def find(**arguments) -> CallToolResult:
+            return CallToolResult(isError=True, content=[TextContent(type="text", text="the daemon isn't answering")])
+
+        return [ForwardedTool(EnvironmentTool(name="click", description="Click an element.", inputSchema=_CLICK), click,
+                              {"readOnlyHint": False, "destructiveHint": False}),
+                ForwardedTool(EnvironmentTool(name="find", inputSchema={"type": "object"}), find, None, _FOUND)]
+
+    @server_instructions
+    def guide_first(self) -> str:
+        return "Read the guide first."
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_tool_is_listed_with_its_own_schema_and_called_with_its_arguments_as_they_came():
+    calls = []
+    env = _Forwarding(calls)
+    with anyio.fail_after(30):
+        async with create_connected_server_and_client_session(env.create_app()) as session:
+            listed = {t.name: t for t in (await session.list_tools()).tools}
+            result = await session.call_tool("click", {"element_token": "s1:4", "count": 2})
+            found = await session.call_tool("find", {})
+
+    assert listed["click"].inputSchema == _CLICK and listed["click"].description == "Click an element."
+    assert listed["click"].annotations.readOnlyHint is False and listed["click"].outputSchema is None
+    assert listed["find"].outputSchema == _FOUND and found.isError and found.content[0].text == "the daemon isn't answering"
+    assert calls == [{"element_token": "s1:4", "count": 2}]
+    assert [c.type for c in result.content] == ["text", "image"] and result.structuredContent == {"hit": "button OK"}
+    assert {t.name: t.inputSchema for t in env.mounted_card().capabilities.tools}["click"] == _CLICK
+
+
+_OTHER_FILES = [
+    {"uri": "skill://other/SKILL.md", "name": "other", "description": "The skill.", "mimeType": "text/markdown"},
+    {"uri": "skill://other/LINUX.md", "name": "LINUX.md", "mimeType": "text/markdown"},
+]
+
+
+@environment_card(name="library")
+class _Library(AgentEnvEnvironment):
+    @resource("docs://library/guide", mime_type="text/markdown")
+    def guide(self) -> str:
+        """How to use it."""
+        return "# Guide"
+
+    @resource("skill://other/{file}", listed=lambda env: _OTHER_FILES)
+    async def other_file(self, file: str) -> str:
+        return f"# {file}"
+
+    @resource("orders://{order_id}", mime_type="application/octet-stream")
+    def order(self, order_id: str) -> bytes:
+        return order_id.encode()
+
+
+@pytest.mark.asyncio
+async def test_fixed_listed_and_templated_resources_are_served_by_their_methods():
+    with anyio.fail_after(30):
+        async with create_connected_server_and_client_session(_Library().create_app()) as session:
+            listed = (await session.list_resources()).resources
+            templates = (await session.list_resource_templates()).resourceTemplates
+            guide = await session.read_resource("docs://library/guide")
+            linux = await session.read_resource("skill://other/LINUX.md")
+            order = await session.read_resource("orders://42")
+
+    assert [(str(r.uri), r.name, r.description, r.mimeType) for r in listed] == [
+        ("docs://library/guide", "guide", "How to use it.", "text/markdown"),
+        ("skill://other/SKILL.md", "other", "The skill.", "text/markdown"),
+        ("skill://other/LINUX.md", "LINUX.md", None, "text/markdown")]
+    assert [(t.uriTemplate, t.name) for t in templates] == [("orders://{order_id}", "order")]
+    assert guide.contents[0].text == "# Guide" and linux.contents[0].text == "# LINUX.md"
+    assert base64.b64decode(order.contents[0].blob) == b"42"
+
+
+def test_a_resource_served_twice_listed_off_its_template_or_taking_other_parts_is_refused():
+    class Twice(_Library):
+        @resource("docs://library/guide")
+        def again(self) -> str:
+            return "again"
+
+    class Elsewhere(_Library):
+        @resource("skill://more/{file}", listed=lambda env: [{"uri": "skill://elsewhere/A.md", "name": "A.md"}])
+        def more(self, file: str) -> str:
+            return file
+
+    def nothing(self) -> str:
+        return ""
+
+    with pytest.raises(ValueError, match=re.escape("resources served twice: ['docs://library/guide']")):
+        Twice().create_app()
+    with pytest.raises(ValueError, match=re.escape("'skill://elsewhere/A.md' doesn't match 'skill://more/{file}'")):
+        Elsewhere().create_app()
+    with pytest.raises(ValueError, match=re.escape("needs a method taking ['order_id'] besides self, not []")):
+        resource("orders://{order_id}")(nothing)
+    with pytest.raises(ValueError, match="lists resources only from a template URI"):
+        resource("docs://library/all", listed=lambda env: [])(nothing)
+    with pytest.raises(RuntimeError, match="the resource 'docs://library/guide' needs mcp's FastMCP"):
+        _Library().mount(fastmcp.FastMCP("library"))
+
+
+def test_server_instructions_are_one_plain_method_and_reach_an_app_built_from_the_handler():
+    class Twice(_Forwarding):
+        @server_instructions
+        def again(self) -> str:
+            return "Or this."
+
+    with pytest.raises(ValueError, match="one @server_instructions method, not \\['again', 'guide_first'\\]"):
+        Twice([]).create_app()
+    with pytest.raises(TypeError, match="a plain method, not the coroutine 'later'"):
+        @server_instructions
+        async def later(self) -> str:
+            return "Later."
+    assert create_fastmcp_app(_Forwarding([]), card=EnvironmentCard(name="forwarding")).instructions == "Read the guide first."
+
+
+def test_a_forwarded_tool_named_like_a_tool_is_refused():
+    class Clashing(_Forwarding):
+        @tool()
+        def click(self) -> str:
+            return "mine"
+
+    with pytest.raises(ValueError, match="forwarded tools named like another tool: \\['click'\\]"):
+        Clashing([]).create_app()
+
+
+def test_a_forwarded_tool_needs_mcps_fastmcp():
+    with pytest.raises(RuntimeError, match="the forwarded tool 'click' needs mcp's FastMCP"):
+        _Forwarding([]).mount(fastmcp.FastMCP("forwarding"))

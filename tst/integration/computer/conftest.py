@@ -1,6 +1,6 @@
 """The ubuntu-24.04 base computer, built from its folder once for the tests here and tagged for the local registry; the
-shipped desktop example's computer env, composed once for a module's tests; ``state``, local stores for a test that
-runs a bundle; and ``docker``, which runs the docker CLI for them."""
+shipped desktop example's computer env, and the cua-driver test bundle's, each composed once for a module's tests;
+``state``, local stores for a test that runs a bundle; and ``docker``, which runs the docker CLI for them."""
 
 import logging
 import re
@@ -24,6 +24,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task.store import get_task_instance_store
 
 BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04"
+CUA_DRIVER = Path(__file__).parent / "cua-driver"
 
 
 @pytest.fixture(scope="session")
@@ -38,7 +39,18 @@ def base():
 def desktop(tmp_path_factory):
     """The shipped desktop example's computer env, composed for the module in stores of the module's own: an image for
     each arch this machine's Docker builds, the native one probed by gate 3."""
-    root = tmp_path_factory.mktemp("desktop")
+    bundle = find_bundle("desktop")
+    yield from _composed(tmp_path_factory.mktemp("desktop"), parse_bundle(bundle.root, id_root=bundle.id_root))
+
+
+@pytest.fixture(scope="module")
+def cua_desktop(tmp_path_factory):
+    """The cua-driver test bundle's desktop, the ubuntu-24.04 base with the cua-driver driver, composed as ``desktop``
+    is."""
+    yield from _composed(tmp_path_factory.mktemp("cua-desktop"), parse_bundle(CUA_DRIVER))
+
+
+def _composed(root: Path, bundle):
     patch = pytest.MonkeyPatch()
     patch.chdir(root)
     patch.setenv("XDG_STATE_HOME", str(root / "state"))
@@ -46,9 +58,8 @@ def desktop(tmp_path_factory):
     patch.setenv("AGENT_ENV_OBJECT_STORE", "local")
     configure()
     reset_artifact_store()
-    bundle = find_bundle("desktop")
     with namespace_routing():
-        plan = plan_bundle(resolve_bundle(parse_bundle(bundle.root, id_root=bundle.id_root)), installed=installed_bundles)
+        plan = plan_bundle(resolve_bundle(bundle), installed=installed_bundles)
         materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)))
         yield Env.get(f"{bundle.id_root}/desktop")
     reset_artifact_store()

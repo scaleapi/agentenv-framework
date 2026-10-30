@@ -38,6 +38,9 @@ _EXT_OP_ATTR = "_aee_ext_op"
 _TOOL_ATTR = "_aee_tool"
 _HIDDEN_BY_DEFAULT_ATTR = "_aee_hidden_by_default"
 _TOOL_OPTIONS_ATTR = "_aee_tool_options"
+_FORWARDED_ATTR = "_aee_forwarded"
+_INSTRUCTIONS_ATTR = "_aee_instructions"
+_RESOURCE_ATTR = "_aee_resource"
 _CARD_CONFIG_ATTR = "_aee_card_config"
 #: Set on the tool dispatch installed by ``_bind_tool_calls``; a guard downstream checks it at boot.
 _TOOL_CONTEXT_BOUND_ATTR = "__agentenv_tool_context__"
@@ -128,21 +131,56 @@ def extension(uri: str, *, op: str | None = None, description: str | None = None
     return deco
 
 
+def resource(uri: str, *, name: str | None = None, description: str | None = None, mime_type: str = "text/plain",
+             listed: Callable[[Any], list[dict]] | None = None) -> Callable:
+    """Mark a method that serves MCP resources, returning their text or bytes; an env may mark several, and each read
+    calls the method. A fixed ``uri`` is one resource. A template such as ``orders://{order_id}`` is an MCP resource
+    template, the method taking its parts, unless ``listed`` is given: it takes the env and returns the resources to
+    list, each as MCP lists one (``uri``, ``name``, ``description``, ``mimeType``), each read through the method with
+    its URI's parts. ``name`` defaults to the method's name and ``description`` to its docstring."""
+    parts = set(re.findall(r"{(\w+)}", uri))
+
+    def mark(fn: Callable) -> Callable:
+        params = set(list(inspect.signature(fn).parameters)[1:])
+        if params != parts:
+            raise ValueError(f"@resource {uri!r} needs a method taking {sorted(parts) or 'nothing'} besides self, "
+                             f"not {sorted(params)}")
+        if listed is not None and not parts:
+            raise ValueError(f"@resource {uri!r} lists resources only from a template URI")
+        setattr(fn, _RESOURCE_ATTR, _ResourceMarker(uri, name, description, mime_type, listed))
+        return fn
+
+    return mark
+
+
+def server_instructions(fn: Callable) -> Callable:
+    """Mark the plain method that returns what this env's MCP server tells an agent when it connects, the
+    ``instructions`` of its initialize result, which clients may put in the agent's context. It's read once, when the
+    SDK builds the app (``create_app``, ``serve``, ``create_fastmcp_app``); an app passed to ``mount`` keeps its own."""
+    if inspect.iscoroutinefunction(fn):
+        raise TypeError(f"@server_instructions marks a plain method, not the coroutine {fn.__name__!r}")
+    setattr(fn, _INSTRUCTIONS_ATTR, True)
+    return fn
+
+
 def agent_skill(fn: Callable) -> Callable:
-    """Mark the method that writes this env's skill for agents, returning its description and its markdown body; it
-    is served under ``SKILL_EXTENSION_URI`` as ``get {name}``, which writes the SKILL.md under the name asked for."""
+    """Mark the method that writes this env's skill for agents, returning its description, its markdown body and,
+    optionally, its other files by relative path; it is served under ``SKILL_EXTENSION_URI`` as ``get {name}``, which
+    writes the SKILL.md under the name asked for and returns the files beside it."""
 
     async def get(self, name: str) -> dict:
         if len(name) > 64 or not _SKILL_NAME.fullmatch(name):
             raise AgentEnvError("invalid_argument",
                                 f"a skill's name is lowercase letters, digits and single hyphens, up to 64, not {name!r}")
-        description, body = await fn(self) if inspect.iscoroutinefunction(fn) else fn(self)
+        description, body, *files = await fn(self) if inspect.iscoroutinefunction(fn) else fn(self)
         frontmatter = f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n"
-        return {"name": name, "description": description, "skill_md": f"{frontmatter}\n{body}"}
+        return {"name": name, "description": description, "skill_md": f"{frontmatter}\n{body}",
+                **({"files": files[0]} if files and files[0] else {})}
 
     get.__name__ = fn.__name__
     return extension(SKILL_EXTENSION_URI, op="get", method="GET",
-                     description="get returns a SKILL.md for agents under the name it's given.")(get)
+                     description="get returns a SKILL.md for agents under the name it's given, and the skill's other "
+                                 "files when it has any.")(get)
 
 
 def _extension_slug(uri: str) -> str:
@@ -202,6 +240,36 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
     return deco
 
 
+class ForwardedTool(NamedTuple):
+    """A tool an environment serves on another server's behalf, as that server lists it: its descriptor, its own
+    schema included, its MCP ``annotations`` and its ``output_schema``; ``call`` takes the call's arguments as keywords
+    and returns the other server's ``CallToolResult``, which reaches the caller as it is."""
+
+    tool: EnvironmentTool
+    call: Callable[..., Any]
+    annotations: dict | None = None
+    output_schema: dict | None = None
+
+
+class _ResourceMarker(NamedTuple):
+    uri: str
+    name: str | None
+    description: str | None
+    mime_type: str
+    listed: Callable[[Any], list[dict]] | None
+
+
+class _ServedResource(NamedTuple):
+    """One resource, or a resource template when ``template``, as it is registered: ``read`` returns its content."""
+
+    uri: str
+    name: str
+    description: str | None
+    mime_type: str
+    read: Callable
+    template: bool
+
+
 class _ToolOptions(NamedTuple):
     annotations: dict | None
     structured_output: bool | None
@@ -239,9 +307,13 @@ class AgentEnvApplication(ABC):
         self._app: Any = None
         ext_handlers = _served_extensions(handler, _discover_extensions(handler))
         environment_card = _merge_extensions(environment_card, ext_handlers + _declared_extensions(handler, ext_handlers))
-        tool_handlers = _served_tools(handler, _discover_tools(handler, environment_card.name))
+        tool_handlers = _served_tools(handler, _with_forwarded(_discover_tools(handler, environment_card.name), handler))
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
+        self._resources = _discover_resources(handler)
+        if self._resources and not self.supports_tools:
+            raise ValueError(f"@resource methods require a FastMCP-backed application; {type(self).__name__} cannot "
+                             "serve MCP resources")
         environment_card = _merge_tools(environment_card, tool_handlers)
         self._tool_access = (
             ToolAccess(descriptor.name for descriptor, fn in tool_handlers if getattr(fn, _HIDDEN_BY_DEFAULT_ATTR, False))
@@ -276,6 +348,8 @@ class AgentEnvApplication(ABC):
             self._add_route(app, path, [method], handler)
         for descriptor, fn in self._tools:
             self._register_tool(app, descriptor, fn)
+        for resource in self._resources:
+            self._register_resource(app, resource)
         # Last, so it is the outermost layer: a dispatch guard the handler installed before mounting
         # then runs under the bound ToolContext instead of outside it.
         self._bind_tool_calls(app)
@@ -286,6 +360,9 @@ class AgentEnvApplication(ABC):
 
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
         raise NotImplementedError(f"{type(self).__name__} does not serve MCP tools")
+
+    def _register_resource(self, app: Any, resource: _ServedResource) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not serve MCP resources")
 
     def _check_tool_binding(self, app: Any) -> None:
         """Everything that can refuse the mount, before the app is touched; nothing to refuse without a tool dispatch."""
@@ -329,6 +406,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         app.custom_route(path, methods=methods)(handler)
 
     def _register_tool(self, app: Any, descriptor: EnvironmentTool, fn: Callable) -> None:
+        if (forwarded := getattr(fn, _FORWARDED_ATTR, None)) is not None:
+            return self._register_forwarded(app, descriptor, fn, forwarded)
         # passed only when set, so a FastMCP-shaped target without the parameters still mounts plain tools
         options = getattr(fn, _TOOL_OPTIONS_ATTR, None) or _ToolOptions(None, None, None)
         fastmcp = self._binding == "middleware"
@@ -347,6 +426,38 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             registered, schema = _fastmcp_returning(registered)
             extra["output_schema"] = None if options.structured_output is False else schema
         app.tool(name=descriptor.name, description=descriptor.description, **extra)(registered)
+
+    def _register_forwarded(self, app: Any, descriptor: EnvironmentTool, fn: Callable, forwarded: ForwardedTool) -> None:
+        """Put a forwarded tool into mcp's FastMCP tool manager as it is, with its own schema and its arguments passed
+        through untouched, since FastMCP's ``tool`` builds a schema from a signature."""
+        from mcp.server.fastmcp.tools.base import Tool
+        from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+
+        if self._binding != "dispatch":
+            raise RuntimeError(f"the forwarded tool {descriptor.name!r} needs mcp's FastMCP, whose tool manager takes a "
+                               "tool with its own schema")
+        schema = forwarded.output_schema
+        app._tool_manager._tools[descriptor.name] = Tool(
+            fn=fn, name=descriptor.name, description=descriptor.description or "",
+            parameters=descriptor.inputSchema or {"type": "object"},
+            fn_metadata=FuncMetadata(arg_model=_passed_through(), output_schema=schema,
+                                     output_model=_as_it_came() if schema is not None else None),
+            is_async=True,
+            annotations=_mcp_tool_annotations(forwarded.annotations) if forwarded.annotations is not None else None)
+
+    def _register_resource(self, app: Any, resource: _ServedResource) -> None:
+        """A resource as it is, its description absent when it has none, or a template through FastMCP's own
+        decorator."""
+        from mcp.server.fastmcp.resources import FunctionResource
+
+        if self._binding != "dispatch":
+            raise RuntimeError(f"the resource {resource.uri!r} needs mcp's FastMCP")
+        if resource.template:
+            app.resource(resource.uri, name=resource.name, description=resource.description,
+                         mime_type=resource.mime_type)(resource.read)
+            return
+        app.add_resource(FunctionResource(uri=resource.uri, name=resource.name, description=resource.description,
+                                          mime_type=resource.mime_type, fn=resource.read))
 
     def _check_tool_binding(self, app: Any) -> None:
         """Decide, before any route or tool is added, how every tools/call on ``app`` gets its ToolContext, and
@@ -480,7 +591,7 @@ def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs:
         from mcp.server.fastmcp import FastMCP
     except ImportError as e:
         raise ImportError("create_fastmcp_app requires the 'mcp' package: pip install 'mcp>=1.25,<2'") from e
-    app = FastMCP(card.name, **fastmcp_kwargs)
+    app = FastMCP(card.name, **{"instructions": _instructions(handler), **fastmcp_kwargs})
     app.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
     app.settings.port = int(os.environ.get("MCP_PORT", "18765"))
     app.settings.transport_security.enable_dns_rebinding_protection = False
@@ -563,6 +674,11 @@ class AgentEnvEnvironment:
     def served_tools(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
         """The ``@tool`` methods to serve, chosen at mount; a returned descriptor's description replaces the marked one."""
         return tools
+
+    def forwarded_tools(self) -> list[ForwardedTool]:
+        """Tools served on another server's behalf, each with its own schema, beside the ``@tool`` methods: listed on
+        the card, chosen by ``served_tools`` and under tool access like them. Needs mcp's FastMCP."""
+        return []
 
     def on_tool_call(self, context: ToolContext) -> Any:
         """Runs before every tools/call on this environment's app, under the bound ``context``.
@@ -932,6 +1048,47 @@ def _marked_members(handler: Any, marker_attr: str):
             yield attr, marker
 
 
+def _discover_resources(handler: Any) -> list[_ServedResource]:
+    """The resources and resource templates the handler's @resource methods serve; a URI served twice is refused."""
+    served: list[_ServedResource] = []
+    for method, marker in _marked_members(handler, _RESOURCE_ATTR):
+        name, description = marker.name or method.__name__, marker.description or inspect.getdoc(method)
+        if marker.listed is None:
+            served.append(_ServedResource(marker.uri, name, description, marker.mime_type, method, "{" in marker.uri))
+            continue
+        for entry in marker.listed(handler):
+            parts = _template_parts(marker.uri, entry["uri"])
+            if parts is None:
+                raise ValueError(f"the listed resource {entry['uri']!r} doesn't match {marker.uri!r}")
+            served.append(_ServedResource(entry["uri"], entry["name"], entry.get("description"),
+                                          entry.get("mimeType") or marker.mime_type, _with_parts(method, parts), False))
+    uris = [resource.uri for resource in served]
+    if duplicated := sorted({uri for uri in uris if uris.count(uri) > 1}):
+        raise ValueError(f"resources served twice: {duplicated}")
+    return served
+
+
+def _template_parts(template: str, uri: str) -> dict[str, str] | None:
+    """The parts of ``uri`` that ``template``'s ``{name}`` slots match, each within one path segment."""
+    match = re.fullmatch(re.sub(r"\\\{(\w+)\\\}", r"(?P<\1>[^/]+)", re.escape(template)), uri)
+    return match.groupdict() if match else None
+
+
+def _with_parts(method: Callable, parts: dict[str, str]) -> Callable:
+    def read() -> Any:
+        return method(**parts)
+
+    return read
+
+
+def _instructions(handler: Any) -> str | None:
+    """What the handler's @server_instructions method returns; None without one."""
+    marked = [method for method, _marker in _marked_members(handler, _INSTRUCTIONS_ATTR)]
+    if len(marked) > 1:
+        raise ValueError(f"an environment has one @server_instructions method, not {sorted(m.__name__ for m in marked)}")
+    return marked[0]() if marked else None
+
+
 def _discover_methods(handler: Any) -> dict:
     found: dict[str, Callable] = {}
     for attr, op in _marked_members(handler, _OP_ATTR):
@@ -1078,6 +1235,48 @@ def _served_operations(handler: Any, methods: dict) -> dict:
     if unknown:
         raise ValueError(f"served_operations returned operations with no handler: {unknown}")
     return {name: entry for name, entry in methods.items() if name in chosen}
+
+
+def _with_forwarded(tool_handlers: list, handler: Any) -> list:
+    """The ``@tool`` handlers and then the handler's forwarded tools, each as (descriptor, call), the call marked so it
+    registers with its own schema; a forwarded tool named like another tool is refused."""
+    hook = getattr(handler, "forwarded_tools", None)
+    forwarded = [(entry.tool, _forwarding(entry)) for entry in (hook() if hook is not None else [])]
+    names = [descriptor.name for descriptor, _fn in tool_handlers + forwarded]
+    if len(set(names)) != len(names):
+        raise ValueError(f"forwarded tools named like another tool: {sorted({n for n in names if names.count(n) > 1})}")
+    return tool_handlers + forwarded
+
+
+def _forwarding(forwarded: ForwardedTool) -> Callable:
+    async def call(**arguments: Any) -> Any:
+        return await forwarded.call(**arguments)
+
+    setattr(call, _FORWARDED_ATTR, forwarded)
+    return call
+
+
+@functools.cache
+def _as_it_came() -> type:
+    """mcp's FastMCP output model for a forwarded tool with an output schema: the other server's result, unchecked."""
+    from pydantic import RootModel
+
+    return RootModel[Any]
+
+
+@functools.cache
+def _passed_through() -> type:
+    """mcp's FastMCP argument model for a forwarded tool: any arguments, each passed to the call as it came."""
+    from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
+    from pydantic import ConfigDict
+
+    class PassedThrough(ArgModelBase):
+        model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+
+        def model_dump_one_level(self) -> dict[str, Any]:
+            return dict(self.__pydantic_extra__ or {})
+
+    return PassedThrough
 
 
 def _served_tools(handler: Any, tool_handlers: list) -> list:

@@ -60,6 +60,7 @@ from .operations import (
     type_text,
     write_files,
 )
+from .keys import PRINTABLE_KEYS
 from .manifest import ManifestSegment, RecordingManifest
 from .platform import Platform
 from .settings import SETTINGS_ENV, ComputerSettings
@@ -100,6 +101,7 @@ __all__ = [
     "AppDeclaration",
     "APP_SETTINGS_ENV",
     "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV",
+    "PRINTABLE_KEYS",
     "display", "set_display", "capture", "click", "drag", "scroll", "type_text", "press",
     "pointer_move", "pointer_down", "pointer_up", "pointer_position", "key_down", "key_up",
     "run_in_session", "write_files", "record", "Recording", "RecordHints", "RecordedFrame", "RecordedSegment",
