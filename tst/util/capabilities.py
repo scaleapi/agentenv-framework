@@ -21,8 +21,8 @@ MISSING_CAPABILITY_PREFIX = "agentenv-capability-missing: "
 MODEL_ENDPOINT = "model_endpoint_configured"
 
 #: The remote sandbox providers (``modal``, ``modal_vm``, ``e2b``, ``sail_vm``, ``tensorlake``, ``tenki``,
-#: ``vercel``, ``boxd``, ``daytona``, ``boat``) need credentials the resolved config may not carry; the local default
-#: never does.
+#: ``vercel``, ``boxd``, ``coreweave``, ``daytona``, ``boat``) need credentials the resolved config may not carry; the
+#: local default never does.
 REMOTE_SANDBOX = "remote_sandbox"
 
 #: The A2A agent a ``deploy_agent`` step without an id resolves to (``default_a2a_agent_id``); the
@@ -86,17 +86,17 @@ def skip_without_model_endpoint() -> pytest.MarkDecorator:
 
 def remote_sandbox_is_available(provider: str) -> bool:
     """Whether the resolved config can build the ``modal`` / ``modal_vm`` / ``e2b`` / ``sail_vm`` /
-    ``tensorlake`` / ``tenki`` / ``vercel`` / ``boxd`` / ``daytona`` / ``boat`` sandbox provider, credentials included.
+    ``tensorlake`` / ``tenki`` / ``vercel`` / ``boxd`` / ``coreweave`` / ``daytona`` / ``boat`` sandbox provider, credentials included.
 
     Modal: any failure to resolve the credentials answers False. E2B, Sail, Tensorlake, Tenki, Vercel, boxd,
-    Daytona and boat: building the provider resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references;
+    CoreWeave, Daytona and boat: building the provider resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references;
     only a ``ConfigError`` (absent or incomplete config, or the provider's extra not installed) answers
     False, any other failure answers True and lets the test fail on the real problem, as
     ``model_endpoint_is_configured`` does. Vercel, which builds without credentials, also needs them in
     its config or the environment."""
-    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "daytona", "boat"):
+    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat"):
         raise ValueError(f"unknown remote sandbox provider {provider!r}")
-    if provider in ("e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "daytona", "boat"):
+    if provider in ("e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat"):
         from agent_env.config.errors import ConfigError
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 

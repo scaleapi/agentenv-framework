@@ -83,6 +83,9 @@ boat = [
 boxd = [
     { name = "boxd" },
 ]
+coreweave = [
+    { name = "cwsandbox" },
+]
 daytona = [
     { name = "daytona" },
 ]
@@ -95,6 +98,7 @@ dev = [
     { name = "boto3" },
     { name = "botocore" },
     { name = "boxd" },
+    { name = "cwsandbox" },
     { name = "datasets" },
     { name = "daytona" },
     { name = "fastmcp" },
@@ -166,7 +170,7 @@ vercel = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "daytona", "gcp", "openenv", "sail", "tensorlake", "tenki", "trl", "vercel"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "openenv", "sail", "tensorlake", "tenki", "trl", "vercel"], marker = "extra == 'dev'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'nemo-gym'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'trl'" },
     { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
@@ -179,6 +183,7 @@ requires-dist = [
     { name = "certifi", specifier = ">=2024.2.2" },
     { name = "click", specifier = ">=8.0.0" },
     { name = "cryptography", specifier = ">=42" },
+    { name = "cwsandbox", marker = "extra == 'coreweave'", specifier = ">=1.19.6,<2" },
     { name = "datasets", marker = "extra == 'trl'", specifier = ">=3" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = "~=0.224.0" },
     { name = "e2b", specifier = "~=2.46.4" },
@@ -225,7 +230,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["openenv", "trl", "nemo-gym", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "dev", "smol"]
+provides-extras = ["openenv", "trl", "nemo-gym", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
@@ -1441,6 +1446,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/91/82/d176b1832e6632c5ebdabbbb943655902f3ff867a18262a0b6cb0e9bf560/cwevals-0.0.1b1.tar.gz", hash = "sha256:2ae997369ff44941925e4db1bd07eb4e13c05de412e615636fd12881d63f8a13", size = 258563, upload-time = "2026-09-28T18:21:23.442Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/96/b3b348954f88915e60e2f1fbe6d09250584e53a20d949e55786f31dbaeb0/cwevals-0.0.1b1-py3-none-any.whl", hash = "sha256:6936baf0ccdc5d9092abd5c2ab628cedcdae9bb72edfdf730f7aaac19118855a", size = 176544, upload-time = "2026-09-28T18:21:21.957Z" },
+]
+
+[[package]]
+name = "cwsandbox"
+version = "1.19.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "googleapis-common-protos" },
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/74/64/e771f3767a3812b1f28809e9c96ba22062fb569932e562e6d266b13ecb5c/cwsandbox-1.19.6.tar.gz", hash = "sha256:cab64a199672c28217ddcf1be26703020d50cd4fc1eb339d8ef7fa2e30625160", size = 671647, upload-time = "2026-10-23T19:03:14.869Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/ed/1d985250537b72c3d14da94ffaaf866ac78ae694fb5e65014f4a38ee659e/cwsandbox-1.19.6-py3-none-any.whl", hash = "sha256:b308fafbfa35cb95177be1a60c9bc7185ab2afad531c68957b1b5b2b4a42135e", size = 261122, upload-time = "2026-10-23T19:03:13.108Z" },
 ]
 
 [[package]]

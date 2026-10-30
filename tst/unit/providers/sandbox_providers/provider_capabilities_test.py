@@ -16,6 +16,8 @@ from agent_env.providers.sandbox_providers.boat.sandbox import BoatSandbox
 from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
 from agent_env.providers.sandbox_providers.boxd.sandbox import BoxdSandbox
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.coreweave.provider import CoreWeaveSandboxProvider
+from agent_env.providers.sandbox_providers.coreweave.sandbox import CoreWeaveSandbox
 from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.daytona.sandbox import DaytonaSandbox
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
@@ -44,7 +46,7 @@ PROVIDERS = SRC / "providers" / "sandbox_providers"
 LOADABLE, NAME, NAME_OR_CONTEXT = Accepts.LOADABLE, Accepts.NAME, Accepts.NAME_OR_CONTEXT
 PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxProvider, E2BSandboxProvider,
                     SailVmSandboxProvider, TensorlakeSandboxProvider, TenkiSandboxProvider, BoxdSandboxProvider,
-                    DaytonaSandboxProvider, BoatSandboxProvider, ChainedSandboxProvider]
+                    CoreWeaveSandboxProvider, DaytonaSandboxProvider, BoatSandboxProvider, ChainedSandboxProvider]
 
 
 @pytest.mark.parametrize("cls, on_this_machine, creates_vms, sandbox, container, private_network", [
@@ -56,9 +58,10 @@ PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxPr
     (TensorlakeSandboxProvider, False, True, LOADABLE, NAME, False),
     (TenkiSandboxProvider, False, True, LOADABLE, NAME, False),
     (BoxdSandboxProvider, False, True, LOADABLE, NAME, False),
+    (CoreWeaveSandboxProvider, False, True, NAME, NAME, False),
     (DaytonaSandboxProvider, False, True, LOADABLE, NAME, False),
     (BoatSandboxProvider, False, True, LOADABLE, NAME, False),
-], ids=["local", "modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "boxd", "daytona", "boat"])
+], ids=["local", "modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "boxd", "coreweave", "daytona", "boat"])
 def test_each_provider_declares_where_it_runs_and_the_images_it_runs(cls, on_this_machine, creates_vms, sandbox,
                                                                     container, private_network):
     assert ((cls.ON_THIS_MACHINE, SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES, cls.PRIVATE_NETWORK)
@@ -280,7 +283,7 @@ def test_an_image_that_records_no_platform_isnt_checked():
 
 
 @pytest.mark.parametrize("sandbox", [Sandbox, ModalSandbox, ModalVmSandbox, E2BSandbox, SailVmSandbox, TensorlakeSandbox,
-                                     TenkiSandbox, BoxdSandbox, DaytonaSandbox, BoatSandbox])
+                                     TenkiSandbox, BoxdSandbox, CoreWeaveSandbox, DaytonaSandbox, BoatSandbox])
 def test_a_sandbox_runs_linux_amd64_unless_its_provider_sets_another(sandbox):
     assert sandbox.platform == "linux/amd64"
 

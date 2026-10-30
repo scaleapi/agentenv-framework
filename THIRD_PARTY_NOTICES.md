@@ -14,7 +14,7 @@ marks, or contributor names to endorse or promote Scale AI, or related products.
 
 ## Python dependencies
 
-The runtime dependencies of `agentenv-framework` and its `aws`, `gcp`, `sail`, `tensorlake`, `tenki`, `boxd`, `daytona`, `boat`, `openenv` and `trl` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
+The runtime dependencies of `agentenv-framework` and its `aws`, `gcp`, `sail`, `tensorlake`, `tenki`, `boxd`, `coreweave`, `daytona`, `boat`, `openenv` and `trl` extras, at the versions resolved in `uv.lock`. Development-only dependencies are not listed.
 
 ### a2a-sdk 0.3.26
 
@@ -256,6 +256,14 @@ The runtime dependencies of `agentenv-framework` and its `aws`, `gcp`, `sail`, `
 - Copyright: Copyright (c) Individual contributors.
 - Source: <https://github.com/pyca/cryptography/>
 - [License text 14](#license-text-14), [License text 15](#license-text-15), [License text 16](#license-text-16)
+
+### cwsandbox 1.19.6
+
+- License: Apache-2.0
+- Copyright: Copyright 2025 CoreWeave, Inc.
+- Author: CoreWeave, Inc.
+- Source: <https://pypi.org/project/cwsandbox/1.19.6/>
+- [License text 1](#license-text-1), [License text 12](#license-text-12)
 
 ### cyclopts 5.2.0
 
