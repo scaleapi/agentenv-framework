@@ -1,7 +1,7 @@
-"""snapshot_env on an env deployed without a gateway, a computer env say: reached through the card its deployment
-recorded, its environments the card's children or the env itself, and each environment's export kept as data/get
-returned it, a file tree's files as parts by their paths, inline or uploaded under the grant without a download, and
-more data/get params handed to the environment they name (snapshot_computer_env names a computer's files so)."""
+"""snapshot_env on an env deployed without a gateway: reached through the card its deployment recorded, its
+environments the card's children or the env itself, each kept as one file as through a gateway; an environment whose
+data/get returns a file tree, a computer's, refused for snapshot_computer_env; and an env that fails under the upload
+grant asked again without it."""
 
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from agentenv_protocol import (DATA_OBJECTS_EXTENSION_URI, IntakeDeclaration, IntakeFormat, intake_extension,
-                               uploaded_file_part)
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, IntakeDeclaration, IntakeFormat, intake_extension
 
 from agent_env.artifact import EnvironmentUniverseArtifact
 from agent_env.config import set_object_store
@@ -26,6 +25,8 @@ COMPUTER = "http://127.0.0.1:18765"
 FILE_TREE = intake_extension(IntakeDeclaration(get=[IntakeFormat(part="file", format="file-tree")])).model_dump(
     mode="json", exclude_none=True)
 DATA_OBJECTS = {"uri": DATA_OBJECTS_EXTENSION_URI}
+UNREACHABLE = {"error": {"code": -32000, "message": "The object store is temporarily unavailable.",
+                         "data": "get_failed"}}
 
 
 class _Desk:
@@ -40,6 +41,10 @@ def _record(card: dict) -> DeployedSandboxEnv:
 
 def _computer(*extensions) -> dict:
     return {"name": "desktop", "capabilities": {"extensions": [FILE_TREE, *extensions]}}
+
+
+def _server(*extensions) -> dict:
+    return {"name": "desktop", "capabilities": {"extensions": list(extensions)}}
 
 
 def _inline(path: str, data: bytes) -> dict:
@@ -64,69 +69,61 @@ def _serve(monkeypatch, answers: dict) -> list[tuple[str, dict]]:
     return sent
 
 
-async def _snapshot(card: dict, **options) -> EnvironmentUniverseArtifact:
+async def _snapshot(card: dict) -> EnvironmentUniverseArtifact:
     result = await SnapshotEnvTaskStep.snapshot_env_state(env=_Desk(), gateway_url=None, snapshot_id="snap-d",
-                                                          deployed=_record(card), **options)
+                                                          deployed=_record(card))
     return EnvironmentUniverseArtifact.get(result.environment_universe_artifact_id)
 
 
+def _kept(universe: EnvironmentUniverseArtifact) -> dict[str, bytes]:
+    """Each environment's one file's bytes, by the environment's name."""
+    return {name.split("/", 1)[0]: file.load() for name, file in universe.get_file_artifacts().items()}
+
+
 @pytest.mark.asyncio
-async def test_a_computer_keeps_each_file_its_data_get_returns_as_a_part_by_its_path(local_stores, monkeypatch):
-    sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/notes.txt", b"hello"),
-                                                             _inline("Downloads/b/c.bin", b"\x00\x01")]})
+async def test_each_child_on_the_recorded_card_is_reached_and_kept_as_one_file(local_stores, monkeypatch):
+    card = {"name": "desk", "children_environments": [
+        {"name": "mail", "url": "/svc/mail/agentenv", "capabilities": {"extensions": []}},
+        {"name": "notes", "url": "/svc/notes/agentenv", "capabilities": {"extensions": []}}]}
+    sent = _serve(monkeypatch, {"/svc/mail/agentenv": lambda params: [{"kind": "data", "data": {"inbox": 2}}],
+                                "/svc/notes/agentenv": lambda params: [_inline("notes.zip", b"PK")]})
 
-    universe = await _snapshot(_computer())
+    universe = await _snapshot(card)
 
-    (desk,) = universe.get_environment_artifacts()
-    assert (desk.environment_name, desk.file_artifact_ref) == ("desktop", None)
-    assert [(part.kind, part.path, part.name, part.mime_type, file.filename, file.load())
-            for part, file in desk.get_parts()] == [
-        ("file", "Documents/notes.txt", "notes.txt", "text/plain", "notes.txt", b"hello"),
-        ("file", "Downloads/b/c.bin", "c.bin", "text/plain", "c.bin", b"\x00\x01")]
-    assert sorted(universe.get_file_artifacts()) == ["desktop/Documents/notes.txt", "desktop/Downloads/b/c.bin"]
+    assert _kept(universe) == {"mail": b'{"inbox": 2}', "notes": b"PK"}
+    assert sorted(path for path, _ in sent) == ["/svc/mail/agentenv", "/svc/notes/agentenv"]
+
+
+@pytest.mark.asyncio
+async def test_the_env_itself_is_reached_when_its_card_has_no_children(local_stores, monkeypatch):
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: [{"kind": "data", "data": {"rows": 1}}]})
+
+    universe = await _snapshot(_server())
+
+    assert _kept(universe) == {"desktop": b'{"rows": 1}'}
     assert sent == [("/agentenv", {})]
 
 
 @pytest.mark.asyncio
-async def test_files_uploaded_under_the_grant_are_written_where_the_computer_put_them_without_a_download(
-        local_stores, tmp_path, monkeypatch):
-    store = GrantingObjectStore(str(tmp_path / "objects"))
-    set_object_store(store)
-    files = {"Documents/notes.txt": b"hello", "Downloads/c.bin": b"\x00"}
+async def test_a_file_tree_is_refused_for_snapshot_computer_env_before_its_data_get(local_stores, monkeypatch):
+    sent = _serve(monkeypatch, {})
 
-    def uploading(params):
-        root = params["write_namespace"]["root_path"]
-        for path, data in files.items():
-            store.put(f"{root}/{path}", data, content_type="application/octet-stream")
-        return [uploaded_file_part(path, name=Path(path).name, mime_type="text/plain").model_dump(
-            mode="json", exclude_none=True) for path in files]
-
-    sent = _serve(monkeypatch, {"/agentenv": uploading})
-
-    (desk,) = (await _snapshot(_computer(DATA_OBJECTS))).get_environment_artifacts()
-
-    ((path, params),) = sent
-    root = params["write_namespace"]["root_path"]
-    assert params["write_namespace"]["max_objects"] == 100_000
-    assert [(part.path, file.object_url, file.load()) for part, file in desk.get_parts()] == [
-        (path, store.object_url(f"{root}/{path}"), data) for path, data in files.items()]
-
-
-UNREACHABLE = {"error": {"code": -32000, "message": "The object store is temporarily unavailable.",
-                          "data": "get_failed"}}
+    with pytest.raises(RuntimeError, match="'desktop' returns a file tree from data/get, which one file can't keep; "
+                                           "snapshot_computer_env snapshots a computer env's files"):
+        await _snapshot(_computer())
+    assert sent == []
 
 
 @pytest.mark.asyncio
-async def test_an_env_that_fails_under_the_grant_is_asked_again_without_one_and_returns_its_files_inline(
-        local_stores, tmp_path, monkeypatch):
+async def test_an_env_that_fails_under_the_grant_is_asked_again_without_one(local_stores, tmp_path, monkeypatch):
     set_object_store(GrantingObjectStore(str(tmp_path / "objects")))
     sent = _serve(monkeypatch, {"/agentenv": lambda params: UNREACHABLE if "write_namespace" in params
-                                else [_inline("Desktop/left.txt", b"x")]})
+                                else [{"kind": "data", "data": {"rows": 1}}]})
 
-    (desk,) = (await _snapshot(_computer(DATA_OBJECTS))).get_environment_artifacts()
+    universe = await _snapshot(_server(DATA_OBJECTS))
 
+    assert _kept(universe) == {"desktop": b'{"rows": 1}'}
     assert [(path, sorted(params)) for path, params in sent] == [("/agentenv", ["write_namespace"]), ("/agentenv", [])]
-    assert [(part.path, file.load()) for part, file in desk.get_parts()] == [("Desktop/left.txt", b"x")]
 
 
 @pytest.mark.asyncio
@@ -134,68 +131,19 @@ async def test_an_env_that_fails_with_no_grant_is_asked_once(local_stores, monke
     sent = _serve(monkeypatch, {"/agentenv": lambda params: UNREACHABLE})
 
     with pytest.raises(RuntimeError, match="data/get failed: The object store is temporarily unavailable"):
-        await _snapshot(_computer())
+        await _snapshot(_server())
     assert sent == [("/agentenv", {})]
-
-
-@pytest.mark.asyncio
-async def test_data_get_params_go_to_the_environment_they_name_and_each_child_on_its_card_is_snapshotted(
-        local_stores, monkeypatch):
-    card = {"name": "desktop", "children_environments": [
-        {"name": "desktop", "url": "/agentenv", "capabilities": {"extensions": [FILE_TREE]}},
-        {"name": "mail", "url": "/svc/mail/agentenv", "capabilities": {"extensions": []}}]}
-    sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/notes.txt", b"hello")],
-                                "/svc/mail/agentenv": lambda params: [{"kind": "data", "data": {"inbox": 2}}]})
-
-    universe = await _snapshot(card, data_get_params={"desktop": {"paths": ["Documents"]}})
-
-    desk, mail = sorted(universe.get_environment_artifacts(), key=lambda environment: environment.environment_name)
-    assert sorted(sent) == [("/agentenv", {"paths": ["Documents"]}), ("/svc/mail/agentenv", {})]
-    assert [part.path for part, _ in desk.get_parts()] == ["Documents/notes.txt"]
-    assert mail.parts is None and json.loads(mail.get_file_artifact().load()) == {"inbox": 2}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("card, answer, kept", [
-    (_computer(), [], []),
-    ({"name": "desktop", "capabilities": {"extensions": []}},
-     [{"kind": "data", "data": {"a": 1}}, {"kind": "data", "data": {"b": 2}}],
-     [("data", "part-0.json", b'{"a": 1}'), ("data", "part-1.json", b'{"b": 2}')]),
-    ({"name": "desktop", "capabilities": {"extensions": []}},
-     [{"kind": "data", "data": {"a": 1}}, {"kind": "text", "text": "hello"}],
-     [("data", "part-0.json", b'{"a": 1}'), ("text", "part-1.txt", b"hello")]),
-    ({"name": "desktop", "capabilities": {"extensions": []}}, [{"kind": "text", "text": "hello"}],
-     [("text", "part-0.txt", b"hello")]),
-], ids=["a-file-tree-of-no-files", "several-parts-of-no-file-tree", "a-data-part-then-a-text-part",
-        "one-text-part"])
-async def test_an_export_one_file_cant_keep_is_kept_as_its_parts(local_stores, monkeypatch, card, answer, kept):
-    _serve(monkeypatch, {"/agentenv": lambda params: answer})
-
-    (desk,) = (await _snapshot(card)).get_environment_artifacts()
-
-    assert [(part.kind, file.filename, file.load()) for part, file in desk.get_parts()] == kept and desk.parts == [
-        part for part, _ in desk.get_parts()]
-
-
-@pytest.mark.asyncio
-async def test_data_get_params_never_set_what_the_snapshot_sets_itself(local_stores, monkeypatch):
-    sent = _serve(monkeypatch, {"/agentenv": lambda params: []})
-
-    with pytest.raises(ValueError, match="data_get_params sets write_namespace, which the snapshot sets itself"):
-        await _snapshot(_computer(), data_get_params={"desktop": {"write_namespace": {}}})
-    assert sent == []
 
 
 @pytest.mark.asyncio
 async def test_execute_snapshots_an_env_deployed_without_a_gateway_through_its_recorded_card(local_stores,
                                                                                             monkeypatch):
-    sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/notes.txt", b"hello")]})
+    _serve(monkeypatch, {"/agentenv": lambda params: [{"kind": "data", "data": {"rows": 1}}]})
     monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: _Desk()))
-    context = _ctx(_record(_computer()))
+    context = _ctx(_record(_server()))
 
     await SnapshotEnvTaskStep(id="snap", version=None, env_id="desk").execute(context)
 
     snapshotted = context.metadata["env_snapshotted_universes"]["snap"]
-    universe = EnvironmentUniverseArtifact.get(snapshotted["id"], version=snapshotted["version"])
-    assert sorted(universe.get_file_artifacts()) == ["desktop/Documents/notes.txt"]
-    assert sent == [("/agentenv", {})]
+    assert _kept(EnvironmentUniverseArtifact.get(snapshotted["id"], version=snapshotted["version"])) == {
+        "desktop": b'{"rows": 1}'}

@@ -1,17 +1,24 @@
-"""snapshot_computer_env: snapshot_env for a computer env, its file_paths, relative to the session user's home, the
-data/get params of the computer's own environment and of nothing else; refused for an env that isn't a computer, and
-for paths that aren't relative, before a run."""
+"""snapshot_computer_env: a computer env's files kept as a FileArtifactUniverse by their paths, returned inline or
+uploaded under the grant and written where they were put, the computer asked again without the grant when it fails
+under it, and file_paths sent to its data/get; refused for an env that isn't a computer, for paths that aren't
+relative, and with no files to keep."""
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
-from agent_env.artifact import EnvironmentUniverseArtifact
+import pytest
+from agentenv_protocol import uploaded_file_part
+
+from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.config import set_object_store
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
-from tst.unit.task_step.snapshot_env_without_gateway_test import _computer, _inline, _record, _serve
+from tst.unit.task_step.snapshot_env_without_gateway_test import (DATA_OBJECTS, UNREACHABLE, _computer, _inline, _record,
+                                                                   _serve)
 from tst.unit.task_step.test_snapshot_env import _ctx
+from tst.util.granting_object_store import GrantingObjectStore
 
 
 class _Desk(ComputerEnv):
@@ -25,15 +32,29 @@ class _Mail:
     id, version, type, environment_name = "mail", 1, "mcp_server", "mail"
 
 
-def test_its_file_paths_round_trip_and_its_type_is_registered():
+async def _snapshot(monkeypatch, card: dict, env=None, **fields) -> FileArtifactUniverse:
+    monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: env or _Desk()))
+    context = _ctx(_record(card))
+    await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="desk", **fields).execute(context)
+    snapshotted = context.metadata["env_snapshotted_universes"]["snap"]
+    return FileArtifactUniverse.get(snapshotted["id"], version=snapshotted["version"])
+
+
+def _kept(universe: FileArtifactUniverse) -> dict[str, bytes]:
+    return {path: file.load() for path, file in universe.get_file_artifacts().items()}
+
+
+def test_its_fields_round_trip_and_its_type_is_registered():
     step = SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="desk", file_paths=["Documents", "Desktop/a.pdf"],
-                                       include_env_trajectory=True)
+                                       export_timeout_seconds=60)
 
-    restored = get_task_step_registry()["snapshot_computer_env"].from_dict(step.to_dict())
+    data = step.to_dict()
+    restored = get_task_step_registry()["snapshot_computer_env"].from_dict(data)
 
-    assert isinstance(restored, SnapshotComputerEnvTaskStep) and step.to_dict()["type"] == "snapshot_computer_env"
-    assert (restored.env_id, restored.file_paths, restored.include_env_trajectory) == (
-        "desk", ["Documents", "Desktop/a.pdf"], True)
+    assert isinstance(restored, SnapshotComputerEnvTaskStep) and data["type"] == "snapshot_computer_env"
+    assert (restored.env_id, restored.file_paths, restored.export_timeout_seconds) == (
+        "desk", ["Documents", "Desktop/a.pdf"], 60)
+    assert not {"gateway_url", "include_env_trajectory", "include_env_changes"} & set(data)
 
 
 @pytest.mark.parametrize("paths", [["/etc/passwd"], ["../outside"], ["Documents/../.."]],
@@ -57,24 +78,62 @@ def test_an_env_that_isnt_a_computer_is_refused_before_a_run(monkeypatch, stored
 @pytest.mark.asyncio
 @pytest.mark.parametrize("file_paths, params", [(["Documents"], {"paths": ["Documents"]}), (None, {})],
                          ids=["file-paths", "the-cards-folders"])
-async def test_its_file_paths_are_the_computers_own_data_get_params(local_stores, monkeypatch, file_paths, params):
-    sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/notes.txt", b"hello")]})
-    monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: _Desk()))
-    context = _ctx(_record(_computer()))
+async def test_each_file_returned_inline_is_kept_by_its_path(local_stores, monkeypatch, file_paths, params):
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/notes.txt", b"hello"),
+                                                             _inline("Documents/b/c.bin", b"\x00\x01")]})
 
-    await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="desk", file_paths=file_paths).execute(context)
+    universe = await _snapshot(monkeypatch, _computer(), file_paths=file_paths)
 
-    snapshotted = context.metadata["env_snapshotted_universes"]["snap"]
-    universe = EnvironmentUniverseArtifact.get(snapshotted["id"], version=snapshotted["version"])
-    assert sorted(universe.get_file_artifacts()) == ["desktop/Documents/notes.txt"]
+    assert _kept(universe) == {"Documents/notes.txt": b"hello", "Documents/b/c.bin": b"\x00\x01"}
+    assert universe.get_file_artifacts()["Documents/b/c.bin"].filename == "c.bin"
     assert sent == [("/agentenv", params)]
 
 
 @pytest.mark.asyncio
-async def test_a_run_on_an_env_that_isnt_a_computer_is_refused_before_any_export(local_stores, monkeypatch):
-    sent = _serve(monkeypatch, {})
-    monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: _Mail()))
+async def test_files_uploaded_under_the_grant_are_written_where_the_computer_put_them_without_a_download(
+        local_stores, tmp_path, monkeypatch):
+    store = GrantingObjectStore(str(tmp_path / "objects"))
+    set_object_store(store)
+    files = {"Documents/notes.txt": b"hello", "Downloads/c.bin": b"\x00"}
 
-    with pytest.raises(RuntimeError, match="snapshots a computer env, and mail is a mcp_server env"):
-        await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="desk").execute(_ctx(_record(_computer())))
-    assert sent == []
+    def uploading(params):
+        root = params["write_namespace"]["root_path"]
+        for path, data in files.items():
+            store.put(f"{root}/{path}", data, content_type="application/octet-stream")
+        return [uploaded_file_part(path, name=Path(path).name, mime_type="text/plain").model_dump(
+            mode="json", exclude_none=True) for path in files]
+
+    sent = _serve(monkeypatch, {"/agentenv": uploading})
+
+    universe = await _snapshot(monkeypatch, _computer(DATA_OBJECTS))
+
+    ((_, params),) = sent
+    root = params["write_namespace"]["root_path"]
+    assert params["write_namespace"]["max_objects"] == 100_000
+    assert {path: (file.object_url, file.load()) for path, file in universe.get_file_artifacts().items()} == {
+        path: (store.object_url(f"{root}/{path}"), data) for path, data in files.items()}
+
+
+@pytest.mark.asyncio
+async def test_a_computer_that_fails_under_the_grant_is_asked_again_without_one(local_stores, tmp_path, monkeypatch):
+    set_object_store(GrantingObjectStore(str(tmp_path / "objects")))
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: UNREACHABLE if "write_namespace" in params
+                                else [_inline("Desktop/left.txt", b"x")]})
+
+    universe = await _snapshot(monkeypatch, _computer(DATA_OBJECTS))
+
+    assert _kept(universe) == {"Desktop/left.txt": b"x"}
+    assert [sorted(params) for _, params in sent] == [["write_namespace"], []]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env, answers, refused", [
+    (_Mail(), {}, "snapshots a computer env, and mail is a mcp_server env"),
+    (None, {"/agentenv": lambda params: []}, "computer env desk has no files under Documents to snapshot"),
+], ids=["not-a-computer", "no-files"])
+async def test_a_run_with_nothing_a_computer_snapshot_can_keep_is_refused(local_stores, monkeypatch, env, answers,
+                                                                          refused):
+    _serve(monkeypatch, answers)
+
+    with pytest.raises(RuntimeError, match=refused):
+        await _snapshot(monkeypatch, _computer(), env=env, file_paths=["Documents"])

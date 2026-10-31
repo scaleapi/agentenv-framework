@@ -200,12 +200,10 @@ async def test_get_data_sends_no_params_without_a_grant_or_paths_and_each_it_is_
     await protocol_v1.get_data("http://env")
     await protocol_v1.get_data("http://env", write_namespace=grant)
     await protocol_v1.get_data("http://env", paths=["Documents"])
-    await protocol_v1.get_data("http://env", paths=["Documents"], extra={"paths": ["Desktop"], "tables": ["mail"]})
 
     assert sent[0]["params"] == {}
     assert WriteNamespaceGrant.model_validate(sent[1]["params"]["write_namespace"]) == grant
     assert sent[2]["params"] == {"paths": ["Documents"]}
-    assert sent[3]["params"] == {"paths": ["Documents"], "tables": ["mail"]}
 
 
 @pytest.mark.asyncio
