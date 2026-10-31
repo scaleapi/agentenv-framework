@@ -1,4 +1,5 @@
-"""Environment artifact for wrapping a FileArtifact with environment identity."""
+"""Environment artifact for wrapping a FileArtifact with environment identity, or the parts an environment's data/get
+returned."""
 
 from __future__ import annotations
 
@@ -6,15 +7,20 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
-from pydantic import ConfigDict, Field, model_serializer
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
+from agent_env.entity.export import Unwritable
 from agent_env.entity.refs import EntityRef
 from agent_env.store.ids import derive_id
 
 logger = logging.getLogger(__name__)
+
+#: Why an environment of parts has no artifact folder yet: a folder holds one file per environment.
+PARTS_UNWRITABLE = "holds the parts its data/get returned, which an artifact folder can't hold yet"
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -32,8 +38,28 @@ class SeedsEnvironments(ABC):
         path ``""`` for the folder itself. Raises BundleError when the folder can't be read."""
 
 
+class EnvironmentPart(BaseModel):
+    """One part of an environment's data as its data/get returned it, which data/add can be handed back: a file part
+    or a data part, its content stored as a file artifact, with the part's name, media type and metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["file", "data"]
+    file_artifact_ref: ArtifactRef
+    name: Optional[str] = None
+    mime_type: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+
+    @property
+    def path(self) -> Optional[str]:
+        """The path its metadata names it by under the data-objects marker, as a computer names each file."""
+        marker = (self.metadata or {}).get(DATA_OBJECTS_EXTENSION_URI)
+        return marker.get("path") if isinstance(marker, dict) else None
+
+
 class EnvironmentArtifact(Artifact, SeedsEnvironments):
-    """A FileArtifact wrapped with the name of the environment it seeds."""
+    """A FileArtifact wrapped with the name of the environment it seeds, or the ``parts`` its data/get returned when
+    one file would lose some of them: several parts, or the files of an environment that returns a file tree."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -56,6 +82,10 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         alias="file_artifact_id",
         description="Legacy unpinned wrapped-FileArtifact id",
     )
+    parts: Optional[list[EnvironmentPart]] = Field(
+        default=None,
+        description="The parts the environment's data/get returned, in order, in place of one wrapped FileArtifact",
+    )
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
@@ -65,8 +95,10 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         data = handler(self)
         if "legacy_file_artifact_id" in data:
             data["file_artifact_id"] = data.pop("legacy_file_artifact_id")
-        if self.file_artifact_ref is not None:  # new doc
+        if self.file_artifact_ref is not None or self.parts is not None:  # new doc
             data.pop("file_artifact_id", None)
+        if self.parts is None:
+            data.pop("parts", None)
         # Dual-write. Sourced from the attribute, not from `data`,
         # because `alias=` emits exactly one spelling and which one depends on the
         # caller's `by_alias` — the store persists with by_alias=True
@@ -81,16 +113,22 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         id: str,
         *,
         environment_name: Optional[str] = None,
-        file_artifact: FileArtifact,
+        file_artifact: Optional[FileArtifact] = None,
+        parts: Optional[list[EnvironmentPart]] = None,
     ) -> EnvironmentArtifact:
+        """Write the environment of ``environment_name`` over ``file_artifact``, or over ``parts``, the parts its
+        data/get returned."""
         from agent_env.artifact.store import get_artifact_store
 
         if not environment_name:
             raise ValueError("environment_name cannot be empty")
+        if (file_artifact is None) == (parts is None):
+            raise ValueError("an environment artifact wraps a file_artifact or holds parts, one of the two")
         instance = cls(
             id=id,
             environment_name=environment_name,
-            file_artifact_ref=file_artifact.as_ref(),
+            file_artifact_ref=file_artifact.as_ref() if file_artifact is not None else None,
+            parts=parts,
         )
         return get_artifact_store().put_document(instance)
 
@@ -115,6 +153,8 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
 
     def to_toml(self, out: ExportContext) -> dict:
         """The artifact.toml of a folder holding the environment's file, which ``from_toml`` reads back as this."""
+        if self.parts is not None:
+            raise Unwritable(f"it {PARTS_UNWRITABLE}")
         file = self.get_file_artifact()
         out.file(file.filename, file.object_url)
         described = {} if file.description == file.filename else {"description": file.description}
@@ -159,6 +199,9 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         return (("", name),) if isinstance(name, str) and name else ()
 
     def get_file_artifact(self) -> FileArtifact:
+        if self.parts is not None:
+            raise ValueError(f"EnvironmentArtifact {self.id} v{self.version} holds the {len(self.parts)} parts its "
+                             "environment's data/get returned, not one file")
         if self.file_artifact_ref is not None:
             return FileArtifact.get(
                 self.file_artifact_ref.id, version=self.file_artifact_ref.version
@@ -173,3 +216,12 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
             f"malformed EnvironmentArtifact {self.id} v{self.version}: "
             "neither file_artifact_ref nor file_artifact_id present"
         )
+
+    def get_parts(self) -> list[tuple[EnvironmentPart, FileArtifact]]:
+        """Each part and its content's file artifact, in order: the one file the environment wraps as a file part named
+        for it, or the parts its data/get returned."""
+        if self.parts is None:
+            file = self.get_file_artifact()
+            return [(EnvironmentPart(kind="file", file_artifact_ref=file.as_ref(), name=file.filename), file)]
+        return [(part, FileArtifact.get(part.file_artifact_ref.id, version=part.file_artifact_ref.version))
+                for part in self.parts]

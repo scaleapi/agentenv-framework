@@ -1,8 +1,10 @@
-"""Snapshot a deployed env's live service state into a new EnvironmentUniverseArtifact."""
+"""Snapshot a deployed env's live service state into a new EnvironmentUniverseArtifact: through its gateway, or without
+one through the card its deployment recorded."""
 from __future__ import annotations
 
 import asyncio
 import base64
+import glob
 import json
 import logging
 import mimetypes
@@ -11,16 +13,18 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import ClassVar, Optional
+from pathlib import Path
+from typing import ClassVar, Optional, Union
 from urllib.parse import urlparse
 
 import httpx
 
-from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object_path
-from agentenv_protocol.client import find_extension, find_extension_method
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, Part, uploaded_object_path
+from agentenv_protocol.client import find_extension, find_extension_method, intake_declaration
 from agentenv_protocol.transfers import WriteNamespaceGrant
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
+from agent_env.env.envs.computer.utils.inside import egress_open
 from agent_env.env.gateway.constants import CHANGES_PAGE_MAX, EXT_CHANGES_URI, EXT_TRAJECTORY_URI
 from agent_env.store import get_config
 from agent_env.store.base import GrantUnavailableError
@@ -45,9 +49,9 @@ _CHANGES_CAPTURE_BUDGET_SECONDS = 300
 # Must match the S3 credentials extension URI the server-side credentials mixin advertises.
 _S3_CREDENTIALS_EXTENSION_URI = "urn:agentenv:add-s3-credentials/v1"
 
-# What a service may upload through its snapshot grant: one bundle, as large as one upload to the
-# store can be up to this.
-ENV_SNAPSHOT_LIMITS = ObjectLimits(max_objects=1, max_object_bytes=50 * 1024**3, max_total_bytes=50 * 1024**3)
+# What a service may upload through its snapshot grant: one bundle, or the files of a file tree, each as large as one
+# upload to the store can be, up to this in all.
+ENV_SNAPSHOT_LIMITS = ObjectLimits(max_objects=100_000, max_object_bytes=50 * 1024**3, max_total_bytes=50 * 1024**3)
 _SNAPSHOT_KEY_PREFIX = "agentenv-snapshots"
 
 
@@ -157,6 +161,12 @@ class SnapshotEnvTaskStep(TaskStep):
     ``{"id", "version"}``. Fails the step if any service fails to export.
 
     ``include_env_changes`` also stores who changed what (urn:agentenv:changes/v1) under ``metadata["env_changes"]``.
+
+    An env deployed without a gateway, a computer env say, is reached through the card its deployment recorded, its
+    environments the card's children, or itself. Each environment's export is kept as data/get returned it: one file
+    when it's one part, else its parts (``EnvironmentArtifact.parts``), as for a computer, whose data/get returns a
+    file tree. ``computer_file_paths``, relative to the session user's home, names what a computer env's own
+    data/get returns, by default the folders its card declares.
     """
 
     type: ClassVar[str] = "snapshot_env"
@@ -182,6 +192,7 @@ class SnapshotEnvTaskStep(TaskStep):
         export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         include_env_trajectory: bool = False,
         include_env_changes: bool = False,
+        computer_file_paths: Optional[list[str]] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
@@ -195,6 +206,7 @@ class SnapshotEnvTaskStep(TaskStep):
         self.export_timeout_seconds = export_timeout_seconds
         self.include_env_trajectory = include_env_trajectory
         self.include_env_changes = include_env_changes
+        self.computer_file_paths = computer_file_paths
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -207,6 +219,8 @@ class SnapshotEnvTaskStep(TaskStep):
         base["export_timeout_seconds"] = self.export_timeout_seconds
         base["include_env_trajectory"] = self.include_env_trajectory
         base["include_env_changes"] = self.include_env_changes
+        if self.computer_file_paths is not None:
+            base["computer_file_paths"] = self.computer_file_paths
         return base
 
     @classmethod
@@ -224,6 +238,7 @@ class SnapshotEnvTaskStep(TaskStep):
             ),
             include_env_trajectory=data.get("include_env_trajectory", False),
             include_env_changes=data.get("include_env_changes", False),
+            computer_file_paths=data.get("computer_file_paths"),
         )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -238,9 +253,10 @@ class SnapshotEnvTaskStep(TaskStep):
         if not env_id:
             raise RuntimeError("snapshot_env could not resolve an env_id")
         gateway_url = self.gateway_url or gateway_url_of(deployed)
-        if not gateway_url:
+        if not gateway_url and not (deployed is not None and deployed.environment_card):
             raise RuntimeError(
-                f"Deployed env '{env_id}' has no gateway_url and no override was provided"
+                f"Deployed env '{env_id}' has no gateway_url, no recorded card to reach it through, and no override "
+                "was provided"
             )
 
         if self.include_env_trajectory:
@@ -276,6 +292,7 @@ class SnapshotEnvTaskStep(TaskStep):
             deployed=deployed,
             original_universe_artifact_id=self.original_universe_artifact_id,
             export_timeout_seconds=self.export_timeout_seconds,
+            computer_file_paths=self.computer_file_paths,
         )
 
         logger.info(
@@ -461,11 +478,15 @@ class SnapshotEnvTaskStep(TaskStep):
 
     @staticmethod
     async def _export_environment_to_file(
-        gateway_url: str, environment_name: str, tmp_path: str, timeout_seconds: float, deployed=None
-    ) -> str:
+        gateway_url: Optional[str], environment_name: str, tmp_path: str, timeout_seconds: float, deployed=None,
+        paths: Optional[list[str]] = None,
+    ) -> Union[str, list[tuple[Part, str]]]:
         """Export one service; return the suffix written (".json"/".zip") to
         ``tmp_path``, or the object url a FilePart names when the service uploaded the
         bundle itself (nothing written to ``tmp_path`` then — export_one registers it).
+        When its data/get returns several parts, or a file tree (``_returns_file_tree``),
+        each part with the same for it, its file at ``<tmp_path>-<index>``; ``paths``
+        goes to a data/get that takes it, a computer's.
 
         v1 ``get_data``, handed a namespace grant when the service takes the data-objects
         form: an upload through it → its object url; ``DataPart`` → json; ``FilePart`` →
@@ -478,63 +499,21 @@ class SnapshotEnvTaskStep(TaskStep):
         base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=True)
         if base_url is not None:
             card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
-            upload = await asyncio.to_thread(
+            # A grant is no use to an env whose network keeps it from the store, a closed computer say.
+            upload = None if deployed is not None and not egress_open(deployed) else await asyncio.to_thread(
                 _snapshot_upload, card or {}, timeout_seconds, getattr(deployed, "sandbox_type", None)
             )
             # Push S3 creds (no-op unless the service advertises the extension), with a grant too: a
             # bundle the grant cannot hold can still be uploaded with them.
             await _push_s3_credentials(card_base, card or {}, timeout_seconds)
             grant = {} if upload is None else {"write_namespace": upload.grant}
-            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **grant)
-            part = resp.parts[0] if resp.parts else None
-            if upload is not None and (path := uploaded_object_path(part)) is not None:
-                return upload.object_url(path)
-            if isinstance(part, FilePart):
-                raw = getattr(part.file, "bytes", None)
-                if raw is not None:
-                    with open(tmp_path, "wb") as f:
-                        f.write(base64.b64decode(raw))
-                else:
-                    uri = getattr(part.file, "uri", None)
-                    if not uri:
-                        # ValueError, not TypeError, so export_one catches it and
-                        # fails only this service — not the whole snapshot.
-                        raise ValueError(
-                            f"FilePart for '{environment_name}' has neither bytes nor uri"
-                        )
-                    # Any url but http(s) is an object the service uploaded itself — hand
-                    # it back as-is; export_one registers it directly (no download). Its
-                    # last segment carries the shape (e.g. gdrive.zip).
-                    scheme = urlparse(uri).scheme
-                    if scheme and scheme not in ("http", "https"):
-                        return uri
-                    # A relative uri (e.g. "export-snapshot") means "stream it from
-                    # my service endpoint" — resolve against the service base_url so
-                    # multi-GB bundles never ride inline in the JSON-RPC response. An
-                    # absolute one must be on that same origin: this process fetches it.
-                    if not scheme:
-                        uri = f"{base_url.rstrip('/')}/{uri.lstrip('/')}"
-                    elif urlparse(uri)[:2] != urlparse(base_url)[:2]:
-                        raise ValueError(
-                            f"FilePart for '{environment_name}' names {uri!r}, which is not on its service's address {base_url}"
-                        )
-                    async with httpx.AsyncClient() as client:
-                        async with client.stream(
-                            "GET",
-                            uri,
-                            timeout=httpx.Timeout(
-                                timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS
-                            ),
-                        ) as resp_file:
-                            resp_file.raise_for_status()
-                            with open(tmp_path, "wb") as f:
-                                async for chunk in resp_file.aiter_bytes():
-                                    f.write(chunk)
-                return os.path.splitext(getattr(part.file, "name", "") or "")[1] or ".zip"
-            state = part.data if part is not None else {}
-            with open(tmp_path, "w") as f:
-                json.dump(state, f, default=str)
-            return ".json"
+            named = {} if paths is None else {"paths": paths}
+            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **named, **grant)
+            if len(resp.parts) > 1 or _returns_file_tree(card or {}):
+                return [(part, await _materialize(part, upload, base_url, f"{tmp_path}-{index}", environment_name,
+                                                  timeout_seconds)) for index, part in enumerate(resp.parts)]
+            return await _materialize(resp.parts[0] if resp.parts else None, upload, base_url, tmp_path,
+                                      environment_name, timeout_seconds)
 
         legacy_url = f"{legacy_protocol.environment_base_url(gateway_url, environment_name, mcp=True)}/export-state"
         async with httpx.AsyncClient() as client:
@@ -562,27 +541,29 @@ class SnapshotEnvTaskStep(TaskStep):
         cls,
         *,
         env,
-        gateway_url: str,
+        gateway_url: Optional[str],
         snapshot_id: str,
         deployed=None,
         original_universe_artifact_id: Optional[str] = None,
         export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         concurrency: int = DEFAULT_EXPORT_CONCURRENCY,
+        computer_file_paths: Optional[list[str]] = None,
     ) -> EnvSnapshotResult:
-        """Export all services via the gateway into a new EnvironmentUniverseArtifact
-        ``snapshot_id``. All-or-nothing; the raised error carries public
-        per-service summaries (verbose details go to the log).
+        """Export all services via the gateway, or without one (``gateway_url`` None) through
+        ``deployed``'s recorded card, into a new EnvironmentUniverseArtifact ``snapshot_id``.
+        All-or-nothing; the raised error carries public per-service summaries (verbose details
+        go to the log). ``computer_file_paths`` goes to the data/get of the env's own environment.
 
         A classmethod so callers that have no step instance can reuse it."""
         from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
         from agent_env.env.env import gateway_url_of
 
-        services = cls._enumerate_environments(env)
-        gateway = gateway_url.rstrip("/")
+        services = cls._enumerate_environments(env) if gateway_url else _card_environments(deployed)
+        gateway = gateway_url.rstrip("/") if gateway_url else None
         # `gateway` identifies which deployment was exported: env= alone doesn't when one env_id has several.
         logger.info(
             f"snapshot_env: env={env.id} v{env.version} snapshot_id={snapshot_id} "
-            f"gateway={gateway} services={services}"
+            f"gateway={gateway or 'none, through its recorded card'} services={services}"
         )
 
         # Carry the source universe's metadata into the snapshot: explicit
@@ -607,7 +588,7 @@ class SnapshotEnvTaskStep(TaskStep):
                 logger.warning("snapshot_env: failed to carry metadata from %s", source_id, exc_info=True)
 
         # The stored card describes the deployment's own gateway; an override pointing elsewhere keeps the live probe.
-        card_record = deployed if deployed is not None and (gateway_url_of(deployed) or "").rstrip("/") == gateway else None
+        card_record = deployed if deployed is not None and (gateway is None or (gateway_url_of(deployed) or "").rstrip("/") == gateway) else None
         sem = asyncio.Semaphore(concurrency)
 
         async def export_one(environment_name: str):
@@ -620,9 +601,11 @@ class SnapshotEnvTaskStep(TaskStep):
                 artifact_path = tmp_path
                 try:
                     try:
+                        named = ({"paths": computer_file_paths} if computer_file_paths is not None
+                                 and environment_name == getattr(env, "environment_name", None) else {})
                         result = await cls._export_environment_to_file(
                             gateway, environment_name, tmp_path, export_timeout_seconds,
-                            deployed=card_record,
+                            deployed=card_record, **named,
                         )
                     except httpx.HTTPStatusError as e:
                         body_snippet = ""
@@ -638,31 +621,34 @@ class SnapshotEnvTaskStep(TaskStep):
                     except ValueError as e:
                         return str(e), str(e)
 
+                    if isinstance(result, list):
+                        try:
+                            parts = await asyncio.to_thread(
+                                _put_parts, result, tmp_path, f"{snapshot_id}-{environment_name}",
+                                f"State snapshot of {environment_name} from env {env.id}",
+                            )
+                            return await asyncio.to_thread(
+                                EnvironmentArtifact.put, id=f"{snapshot_id}-{environment_name}",
+                                environment_name=environment_name, parts=parts,
+                            )
+                        except Exception as e:
+                            public = f"failed to create artifacts ({type(e).__name__})"
+                            return public, f"{public} for {environment_name}: {e}"
+
                     # Service uploaded the bundle itself — register a FileArtifact
                     # pointing at it directly (no download). Derive filename/content_type
                     # from the url's last segment (the extension drives load-time parsing),
                     # like FileArtifact.put.
                     if urlparse(result).scheme:
-                        from agent_env.artifact.store import get_artifact_store
-
                         object_url = result
                         filename = object_url.rsplit("/", 1)[-1] or f"{environment_name}.zip"
                         content_type = mimetypes.guess_type(filename)[0] or "application/zip"
 
                         def _register_uploaded_bundle():
-                            if get_config().get_object_store().get_object_metadata_at(object_url) is None:
-                                raise FileNotFoundError(f"snapshot bundle not found at {object_url}")
-                            store = get_artifact_store()
-                            fa_id = f"{snapshot_id}-{environment_name}-file"
-                            get_config().check_object_url(fa_id, object_url)
-                            fa = FileArtifact(
-                                id=fa_id,
-                                description=f"State snapshot of {environment_name} from env {env.id}",
-                                filename=filename,
-                                content_type=content_type,
-                                object_url=object_url,
+                            fa = _registered_upload(
+                                object_url, f"{snapshot_id}-{environment_name}-file", filename, content_type,
+                                f"State snapshot of {environment_name} from env {env.id}",
                             )
-                            fa = store.put_document(fa)
                             return EnvironmentArtifact.put(
                                 id=f"{snapshot_id}-{environment_name}",
                                 environment_name=environment_name,
@@ -700,7 +686,7 @@ class SnapshotEnvTaskStep(TaskStep):
                         public = f"failed to create artifacts ({type(e).__name__})"
                         return public, f"{public}: {e}"
                 finally:
-                    for path in cleanup_paths:
+                    for path in [*cleanup_paths, *glob.glob(f"{glob.escape(tmp_path)}-*")]:
                         try:
                             os.unlink(path)
                         except OSError:
@@ -746,6 +732,118 @@ class SnapshotEnvTaskStep(TaskStep):
             environments_snapshotted=[sa.environment_name for sa in environment_artifacts],
             total=len(services),
         )
+
+
+async def _materialize(part: Optional[Part], upload: Optional[_SnapshotUpload], base_url: str, tmp_path: str,
+                       environment_name: str, timeout_seconds: float) -> str:
+    """One part of a service's export: the object url it was uploaded to under ``upload``, else the suffix written to
+    ``tmp_path`` (".json" for a data part or none, else its file's)."""
+    if upload is not None and (path := uploaded_object_path(part)) is not None:
+        return upload.object_url(path)
+    if isinstance(part, FilePart):
+        raw = getattr(part.file, "bytes", None)
+        if raw is not None:
+            with open(tmp_path, "wb") as f:
+                f.write(base64.b64decode(raw))
+        else:
+            uri = getattr(part.file, "uri", None)
+            if not uri:
+                # ValueError, not TypeError, so export_one catches it and
+                # fails only this service — not the whole snapshot.
+                raise ValueError(
+                    f"FilePart for '{environment_name}' has neither bytes nor uri"
+                )
+            # Any url but http(s) is an object the service uploaded itself — hand
+            # it back as-is; export_one registers it directly (no download). Its
+            # last segment carries the shape (e.g. gdrive.zip).
+            scheme = urlparse(uri).scheme
+            if scheme and scheme not in ("http", "https"):
+                return uri
+            # A relative uri (e.g. "export-snapshot") means "stream it from
+            # my service endpoint" — resolve against the service base_url so
+            # multi-GB bundles never ride inline in the JSON-RPC response. An
+            # absolute one must be on that same origin: this process fetches it.
+            if not scheme:
+                uri = f"{base_url.rstrip('/')}/{uri.lstrip('/')}"
+            elif urlparse(uri)[:2] != urlparse(base_url)[:2]:
+                raise ValueError(
+                    f"FilePart for '{environment_name}' names {uri!r}, which is not on its service's address {base_url}"
+                )
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "GET",
+                    uri,
+                    timeout=httpx.Timeout(
+                        timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS
+                    ),
+                ) as resp_file:
+                    resp_file.raise_for_status()
+                    with open(tmp_path, "wb") as f:
+                        async for chunk in resp_file.aiter_bytes():
+                            f.write(chunk)
+        return os.path.splitext(getattr(part.file, "name", "") or "")[1] or ".zip"
+    state = part.data if part is not None else {}
+    with open(tmp_path, "w") as f:
+        json.dump(state, f, default=str)
+    return ".json"
+
+
+def _card_environments(deployed) -> list[str]:
+    """The environments a deployment without a gateway serves, as the card it recorded names them: its children, or
+    the env itself."""
+    card = deployed.environment_card or {}
+    children = card.get("children_environments")
+    names = [child.get("name") for child in children] if isinstance(children, list) else [card.get("name")]
+    if not all(names):
+        raise RuntimeError(f"Deployed env '{deployed.env_id}' recorded a card naming no environment to snapshot")
+    return names
+
+
+def _returns_file_tree(card: dict) -> bool:
+    """Whether ``card`` declares its data/get returns a file tree, each file a part named by its path, which one file
+    can't keep."""
+    return any(returned.get("format") == "file-tree" for returned in (intake_declaration(card) or {}).get("get") or [])
+
+
+def _registered_upload(object_url: str, file_id: str, filename: str, content_type: str, description: str):
+    """A file artifact ``file_id`` over ``object_url``, an object a service uploaded itself, written without
+    downloading it; refused when the store holds no object there."""
+    from agent_env.artifact import FileArtifact
+    from agent_env.artifact.store import get_artifact_store
+
+    if get_config().get_object_store().get_object_metadata_at(object_url) is None:
+        raise FileNotFoundError(f"snapshot bundle not found at {object_url}")
+    get_config().check_object_url(file_id, object_url)
+    return get_artifact_store().put_document(FileArtifact(
+        id=file_id, description=description, filename=filename, content_type=content_type, object_url=object_url))
+
+
+def _put_parts(exported: list[tuple[Part, str]], tmp_path: str, id: str, description: str) -> list:
+    """An ``EnvironmentPart`` of each part a service exported, in order, with what ``_materialize`` made of it: an
+    object it uploaded, written in place, or the file at ``<tmp_path>-<index>``, written as ``<id>-part-<index>``
+    under the part's own name."""
+    from agent_env.artifact import FileArtifact
+    from agent_env.artifact.artifacts.environment import EnvironmentPart
+
+    parts = []
+    with tempfile.TemporaryDirectory(prefix="agentenv-snapshot-parts-") as named:
+        for index, (part, result) in enumerate(exported):
+            file = part.file if isinstance(part, FilePart) else None
+            file_id = f"{id}-part-{index}"
+            if urlparse(result).scheme:
+                filename = getattr(file, "name", None) or result.rsplit("/", 1)[-1] or f"part-{index}"
+                stored = _registered_upload(result, file_id, filename,
+                                            mimetypes.guess_type(filename)[0] or "application/octet-stream",
+                                            description)
+            else:
+                path = Path(named, str(index), Path(getattr(file, "name", None) or f"part-{index}{result}").name)
+                path.parent.mkdir()
+                os.replace(f"{tmp_path}-{index}", path)
+                stored = FileArtifact.put(file_id, description=description, file_path=str(path))
+            parts.append(EnvironmentPart(kind="file" if file is not None else "data", file_artifact_ref=stored.as_ref(),
+                                         name=getattr(file, "name", None), mime_type=getattr(file, "mimeType", None),
+                                         metadata=part.metadata or None))
+    return parts
 
 
 def _changes_route(deployed, override_url: Optional[str]) -> tuple[str, str]:

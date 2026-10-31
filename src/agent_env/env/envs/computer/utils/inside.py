@@ -24,7 +24,7 @@ from agent_env.store.object_store.object_store import issues_grants_to
 
 if TYPE_CHECKING:
     from agent_env.artifact import FileArtifact
-    from agent_env.env.env import DeployedSandboxEnv
+    from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
 
 #: The most bytes one ``data/add`` carries: the driver reads a call's files into memory before it writes them. A file
 #: bigger than this goes alone.
@@ -52,10 +52,16 @@ def loopback(deployed: DeployedSandboxEnv) -> dict:
     return {"id": deployed.env_id, "url": url, "mcp_url": url + deployed.mcp_url.removeprefix(deployed.environment_url)}
 
 
+def egress_open(deployed: DeployedEnv) -> bool:
+    """Whether the network a computer's deploy recorded lets it reach the object store, to read or write through a
+    grant: one that allows everything, or none recorded, as for any env but a computer."""
+    network = (deployed.metadata or {}).get("computer", {}).get("network")
+    return not (network and NetworkPolicy.from_dict(network).restricts_egress)
+
+
 async def add_artifacts(deployed: DeployedSandboxEnv, files: dict[str, FileArtifact]) -> None:
     """Write each file artifact at its path."""
-    network = (deployed.metadata or {}).get("computer", {}).get("network")
-    granted = not (network and NetworkPolicy.from_dict(network).restricts_egress)
+    granted = egress_open(deployed)
     batch: list[FilePart] = []
     size = 0
     for path, artifact in files.items():
