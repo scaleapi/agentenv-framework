@@ -37,16 +37,23 @@ def tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER)
 
 
-def test_a_played_rows_reward_is_its_episodes(serve, tmp_path, tokenizer, teardowns):
+def test_a_played_rows_reward_is_its_episodes_and_its_last_reply_ends_the_turn(serve, tmp_path, tokenizer,
+                                                                                 monkeypatch, teardowns):
     server = serve({"a": PLAYED})
     row = _row(write_dataset(server.url, tmp_path))
     model = _Model(tokenizer)
+    finish, replies = verl_loop._Session._finish, []
 
+    async def finishing(self, rollout, response=""):
+        replies.append(response)
+        await finish(self, rollout, response)
+
+    monkeypatch.setattr(verl_loop._Session, "_finish", finishing)
     output = asyncio.run(_play(server.url, row, model, tokenizer))
     server.stop()
 
     assert (output.reward_score, output.extra_fields["agentenv"]) == (1.0, {"attempts": 1, "scores": {"replies": 1.0}})
-    assert model.calls == 2
+    assert (model.calls, replies) == (2, ["Added a crate."])
     assert 0 in output.response_mask and 1 in output.response_mask
     assert "Added a crate." in tokenizer.decode(output.response_ids)
     assert len(teardowns.finished) == 2

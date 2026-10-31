@@ -90,7 +90,12 @@ class AgentEnvAgentLoop(ToolAgentLoop):
         return output, rollout
 
     def _build_assistant_message(self, content: str, agent_data: Any) -> dict[str, Any]:
-        self._reply = content or ""
+        """Keeps the turn's text, without the special tokens the parser leaves in it, as the reply to end the turn
+        with."""
+        reply = content or ""
+        for token in self.tokenizer.all_special_tokens:
+            reply = reply.replace(token, "")
+        self._reply = reply.strip()
         return super()._build_assistant_message(content, agent_data)
 
 
