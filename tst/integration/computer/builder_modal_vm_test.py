@@ -1,7 +1,8 @@
 """A builder VM on Modal, amd64, building for arm64 through the emulation it registers: the build context sent inline,
 an apt package and a requirement resolved in a container of the base, a file it wrote stored off the VM, an image built
-from them with the network closed, and the packages it installed read back, each in the VM. The stores stay local,
-which a compose on Modal refuses, so the builder is driven directly."""
+from them with the network closed, the packages it installed read back, and what each of its RUNs wrote read from its
+layers in a container of the image, under emulation too, each in the VM. The stores stay local, which a compose on Modal
+refuses, so the builder is driven directly."""
 
 import hashlib
 from pathlib import Path
@@ -25,6 +26,9 @@ RUN --network=none python3 -m venv /opt/driver/venv && /opt/driver/venv/bin/pip 
 /tmp/packages/wheels/*.whl && /opt/driver/venv/bin/pip list --format=json > /opt/driver/installed.json && \
 /opt/driver/start && jq --version
 """
+#: Each RUN's command, as the image's history records it once the Dockerfile's continued lines are joined.
+RUNS = [line.removeprefix("RUN --network=none ") for line in DOCKERFILE.replace("\\\n", "").splitlines()
+        if line.startswith("RUN ")]
 
 
 def test_a_builder_vm_resolves_stores_and_builds_an_arch_it_emulates(tmp_path):
@@ -50,6 +54,7 @@ def test_a_builder_vm_resolves_stores_and_builds_an_arch_it_emulates(tmp_path):
                                                f"{builder.RESOLVED}/out/wheels/driver/{wheel}"}, {})
         vm.build(DOCKERFILE, "agentenv-builder-test:arm64", "linux/arm64", {"dev.agentenv.test": "builder"})
         installed = vm.installed("agentenv-builder-test:arm64", "/opt/driver")
+        packaged, venv = vm.written("agentenv-builder-test:arm64", RUNS)
     finally:
         vm.close()
 
@@ -58,3 +63,5 @@ def test_a_builder_vm_resolves_stores_and_builds_an_arch_it_emulates(tmp_path):
     assert {deb["arch"] for deb in result["apt"]} == {"arm64"}
     assert hashlib.sha256(stored.read_bytes()).hexdigest() == written[f"wheels/driver/{wheel}"].sha256
     assert vm.sandbox.platform == "linux/amd64" and Path(stored).stat().st_size == written[f"wheels/driver/{wheel}"].size
+    assert packaged["/usr/bin/jq"].startswith("exec ") and venv["/opt/driver/installed.json"].startswith("file ")
+    assert venv["/opt/driver/venv/bin/python"].startswith("link ") and "/opt/driver/start" not in venv
