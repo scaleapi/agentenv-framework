@@ -23,6 +23,7 @@ MINIMAL = {
     "rubrics_verifier": {"prompt_id": "prompt", "criteria": [{"id": "c1", "description": "says hi"}]},
     "run_docker_container": {"sandbox_name": "box"},
     "snapshot_env": {},
+    "snapshot_computer_env": {},
 }
 # What a step without a user-scoped field that has no default says it needs, before a run starts.
 UNSOURCED = {

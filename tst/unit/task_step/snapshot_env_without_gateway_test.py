@@ -1,7 +1,7 @@
 """snapshot_env on an env deployed without a gateway, a computer env say: reached through the card its deployment
 recorded, its environments the card's children or the env itself, and each environment's export kept as data/get
 returned it, a file tree's files as parts by their paths, inline or uploaded under the grant without a download, and
-what the env's own data/get returns named by computer_file_paths."""
+more data/get params handed to the environment they name (snapshot_computer_env names a computer's files so)."""
 
 from __future__ import annotations
 
@@ -124,15 +124,15 @@ async def test_a_computer_whose_network_keeps_it_from_the_store_is_handed_no_gra
 
 
 @pytest.mark.asyncio
-async def test_its_own_data_get_takes_computer_file_paths_and_each_child_on_its_card_is_snapshotted(local_stores,
-                                                                                                   monkeypatch):
+async def test_data_get_params_go_to_the_environment_they_name_and_each_child_on_its_card_is_snapshotted(
+        local_stores, monkeypatch):
     card = {"name": "desktop", "children_environments": [
         {"name": "desktop", "url": "/agentenv", "capabilities": {"extensions": [FILE_TREE]}},
         {"name": "mail", "url": "/svc/mail/agentenv", "capabilities": {"extensions": []}}]}
     sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/notes.txt", b"hello")],
                                 "/svc/mail/agentenv": lambda params: [{"kind": "data", "data": {"inbox": 2}}]})
 
-    universe = await _snapshot(card, computer_file_paths=["Documents"])
+    universe = await _snapshot(card, data_get_params={"desktop": {"paths": ["Documents"]}})
 
     desk, mail = sorted(universe.get_environment_artifacts(), key=lambda environment: environment.environment_name)
     assert sorted(sent) == [("/agentenv", {"paths": ["Documents"]}), ("/svc/mail/agentenv", {})]
@@ -163,16 +163,24 @@ async def test_an_export_one_file_cant_keep_is_kept_as_its_parts(local_stores, m
 
 
 @pytest.mark.asyncio
+async def test_data_get_params_never_set_what_the_snapshot_sets_itself(local_stores, monkeypatch):
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: []})
+
+    with pytest.raises(ValueError, match="data_get_params sets write_namespace, which the snapshot sets itself"):
+        await _snapshot(_computer(), data_get_params={"desktop": {"write_namespace": {}}})
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_execute_snapshots_an_env_deployed_without_a_gateway_through_its_recorded_card(local_stores,
                                                                                             monkeypatch):
     sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/notes.txt", b"hello")]})
     monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: _Desk()))
     context = _ctx(_record(_computer()))
 
-    await SnapshotEnvTaskStep(id="snap", version=None, env_id="desk", computer_file_paths=["Documents"]).execute(
-        context)
+    await SnapshotEnvTaskStep(id="snap", version=None, env_id="desk").execute(context)
 
     snapshotted = context.metadata["env_snapshotted_universes"]["snap"]
     universe = EnvironmentUniverseArtifact.get(snapshotted["id"], version=snapshotted["version"])
     assert sorted(universe.get_file_artifacts()) == ["desktop/Documents/notes.txt"]
-    assert sent == [("/agentenv", {"paths": ["Documents"]})]
+    assert sent == [("/agentenv", {})]

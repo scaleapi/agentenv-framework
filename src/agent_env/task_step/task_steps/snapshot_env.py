@@ -53,6 +53,8 @@ _S3_CREDENTIALS_EXTENSION_URI = "urn:agentenv:add-s3-credentials/v1"
 # upload to the store can be, up to this in all.
 ENV_SNAPSHOT_LIMITS = ObjectLimits(max_objects=100_000, max_object_bytes=50 * 1024**3, max_total_bytes=50 * 1024**3)
 _SNAPSHOT_KEY_PREFIX = "agentenv-snapshots"
+# The data/get params the snapshot sets itself, which data_get_params can't.
+_SETS_ITSELF = {"write_namespace"}
 
 
 @dataclass(frozen=True)
@@ -165,8 +167,8 @@ class SnapshotEnvTaskStep(TaskStep):
     An env deployed without a gateway, a computer env say, is reached through the card its deployment recorded, its
     environments the card's children, or itself. Each environment's export is kept as data/get returned it: one file
     when it's one part, else its parts (``EnvironmentArtifact.parts``), as for a computer, whose data/get returns a
-    file tree. ``computer_file_paths``, relative to the session user's home, names what a computer env's own
-    data/get returns, by default the folders its card declares.
+    file tree. A step for one kind of env can hand an environment's data/get more params (``_data_get_params``), as
+    ``snapshot_computer_env`` names a computer's files.
     """
 
     type: ClassVar[str] = "snapshot_env"
@@ -192,7 +194,6 @@ class SnapshotEnvTaskStep(TaskStep):
         export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         include_env_trajectory: bool = False,
         include_env_changes: bool = False,
-        computer_file_paths: Optional[list[str]] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
@@ -206,7 +207,6 @@ class SnapshotEnvTaskStep(TaskStep):
         self.export_timeout_seconds = export_timeout_seconds
         self.include_env_trajectory = include_env_trajectory
         self.include_env_changes = include_env_changes
-        self.computer_file_paths = computer_file_paths
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -219,8 +219,6 @@ class SnapshotEnvTaskStep(TaskStep):
         base["export_timeout_seconds"] = self.export_timeout_seconds
         base["include_env_trajectory"] = self.include_env_trajectory
         base["include_env_changes"] = self.include_env_changes
-        if self.computer_file_paths is not None:
-            base["computer_file_paths"] = self.computer_file_paths
         return base
 
     @classmethod
@@ -238,7 +236,6 @@ class SnapshotEnvTaskStep(TaskStep):
             ),
             include_env_trajectory=data.get("include_env_trajectory", False),
             include_env_changes=data.get("include_env_changes", False),
-            computer_file_paths=data.get("computer_file_paths"),
         )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -292,7 +289,7 @@ class SnapshotEnvTaskStep(TaskStep):
             deployed=deployed,
             original_universe_artifact_id=self.original_universe_artifact_id,
             export_timeout_seconds=self.export_timeout_seconds,
-            computer_file_paths=self.computer_file_paths,
+            data_get_params=self._data_get_params(env),
         )
 
         logger.info(
@@ -306,6 +303,11 @@ class SnapshotEnvTaskStep(TaskStep):
             "version": result.environment_universe_artifact_version,
         }
         return context
+
+    def _data_get_params(self, env) -> dict[str, dict]:
+        """More params for the data/get of each of ``env``'s environments, by name, sent as they are: none here, as
+        for any env; a step for one kind of env names its own."""
+        return {}
 
     # ── internals ────────────────────────────────────────────────────────────
 
@@ -479,14 +481,14 @@ class SnapshotEnvTaskStep(TaskStep):
     @staticmethod
     async def _export_environment_to_file(
         gateway_url: Optional[str], environment_name: str, tmp_path: str, timeout_seconds: float, deployed=None,
-        paths: Optional[list[str]] = None,
+        extra: Optional[dict] = None,
     ) -> Union[str, list[tuple[Part, str]]]:
         """Export one service; return the suffix written (".json"/".zip") to
         ``tmp_path``, or the object url a FilePart names when the service uploaded the
         bundle itself (nothing written to ``tmp_path`` then — export_one registers it).
         When its data/get returns several parts, or a file tree (``_returns_file_tree``),
-        each part with the same for it, its file at ``<tmp_path>-<index>``; ``paths``
-        goes to a data/get that takes it, a computer's.
+        each part with the same for it, its file at ``<tmp_path>-<index>``; ``extra``
+        holds more params for its data/get, sent as they are.
 
         v1 ``get_data``, handed a namespace grant when the service takes the data-objects
         form: an upload through it → its object url; ``DataPart`` → json; ``FilePart`` →
@@ -507,8 +509,8 @@ class SnapshotEnvTaskStep(TaskStep):
             # bundle the grant cannot hold can still be uploaded with them.
             await _push_s3_credentials(card_base, card or {}, timeout_seconds)
             grant = {} if upload is None else {"write_namespace": upload.grant}
-            named = {} if paths is None else {"paths": paths}
-            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **named, **grant)
+            more = {} if extra is None else {"extra": extra}
+            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **more, **grant)
             if len(resp.parts) > 1 or _returns_file_tree(card or {}) or any(isinstance(part, TextPart)
                                                                              for part in resp.parts):
                 return [(part, await _materialize(part, upload, base_url, f"{tmp_path}-{index}", environment_name,
@@ -548,18 +550,21 @@ class SnapshotEnvTaskStep(TaskStep):
         original_universe_artifact_id: Optional[str] = None,
         export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         concurrency: int = DEFAULT_EXPORT_CONCURRENCY,
-        computer_file_paths: Optional[list[str]] = None,
+        data_get_params: Optional[dict[str, dict]] = None,
     ) -> EnvSnapshotResult:
         """Export all services via the gateway, or without one (``gateway_url`` None) through
         ``deployed``'s recorded card, into a new EnvironmentUniverseArtifact ``snapshot_id``.
         All-or-nothing; the raised error carries public per-service summaries (verbose details
-        go to the log). ``computer_file_paths`` goes to the data/get of the env's own environment.
+        go to the log). ``data_get_params`` holds more params for the data/get of each environment, by name, sent
+        as they are, never the ones the snapshot sets itself.
 
         A classmethod so callers that have no step instance can reuse it."""
         from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
         from agent_env.env.env import gateway_url_of
 
         services = cls._enumerate_environments(env) if gateway_url else _card_environments(deployed)
+        if reserved := sorted({key for params in (data_get_params or {}).values() for key in params} & _SETS_ITSELF):
+            raise ValueError(f"data_get_params sets {', '.join(reserved)}, which the snapshot sets itself")
         gateway = gateway_url.rstrip("/") if gateway_url else None
         # `gateway` identifies which deployment was exported: env= alone doesn't when one env_id has several.
         logger.info(
@@ -602,11 +607,10 @@ class SnapshotEnvTaskStep(TaskStep):
                 artifact_path = tmp_path
                 try:
                     try:
-                        named = ({"paths": computer_file_paths} if computer_file_paths is not None
-                                 and environment_name == getattr(env, "environment_name", None) else {})
+                        extra = (data_get_params or {}).get(environment_name)
                         result = await cls._export_environment_to_file(
                             gateway, environment_name, tmp_path, export_timeout_seconds,
-                            deployed=card_record, **named,
+                            deployed=card_record, **({"extra": extra} if extra else {}),
                         )
                     except httpx.HTTPStatusError as e:
                         body_snippet = ""

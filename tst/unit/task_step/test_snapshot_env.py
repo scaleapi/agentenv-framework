@@ -62,7 +62,6 @@ def test_dict_roundtrip_and_registry():
         export_timeout_seconds=120,
         include_env_trajectory=True,
         include_env_changes=True,
-        computer_file_paths=["Documents", "Desktop/report.pdf"],
     )
     data = step.to_dict()
     assert data["type"] == "snapshot_env"
@@ -72,7 +71,7 @@ def test_dict_roundtrip_and_registry():
     for attr in (
         "env_id", "env_instance_id", "gateway_url", "snapshot_id",
         "original_universe_artifact_id", "export_timeout_seconds",
-        "include_env_trajectory", "include_env_changes", "computer_file_paths",
+        "include_env_trajectory", "include_env_changes",
     ):
         assert getattr(restored, attr) == getattr(step, attr)
 
@@ -83,7 +82,6 @@ def test_from_dict_defaults():
     assert step.export_timeout_seconds == SnapshotEnvTaskStep.DEFAULT_EXPORT_TIMEOUT_SECONDS
     assert step.include_env_trajectory is False
     assert step.include_env_changes is False
-    assert step.computer_file_paths is None and "computer_file_paths" not in step.to_dict()
 
 
 # ── env resolution ───────────────────────────────────────────────────────────

@@ -3,8 +3,8 @@ builds an image for each arch this machine's Docker can build, pushed to the loc
 computer, and gate 3 makes the image of this machine's arch ready; that image boots with everything running as the
 session user and passes the conformance probe at full three times in a row; another env that changes only what doesn't
 change the image reuses it; one with no network, deployed, is reached but reaches nothing, takes a file and runs
-code that reaches its driver on loopback, is snapshotted without a gateway, each file under the paths named a part by its
-path, comes back from a reset fresh, and leaves nothing once torn down; an open one uploads each file under the
+code that reaches its driver on loopback, is snapshotted without a gateway by snapshot_computer_env, each file under the
+paths it names a part by its path, comes back from a reset fresh, and leaves nothing once torn down; an open one uploads each file under the
 snapshot's grant, kept where it was put; and a recording open when the computer resets or is torn down is ended by
 the computer and registered whole. Needs Docker and the local registry on localhost:5000."""
 
@@ -37,6 +37,7 @@ from agent_env.task_step.task_steps.computer_recording import (
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
+from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 from tst.integration.computer.conftest import docker
 
@@ -121,9 +122,9 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
             driver = await Driver.connect(deployed.environment_url, 30)
             egress = await driver.run("python3", "-c", "import urllib.request; urllib.request.urlopen('http://1.1.1.1', timeout=5)")
             await driver.run("sh", "-c", "echo x > Desktop/left.txt")
-            context = await SnapshotEnvTaskStep(id="snapshot", version=None, env_id=closed.id,
-                                                snapshot_id=f"{closed.id}-snapshot",
-                                                computer_file_paths=["Desktop", "Downloads/note.txt"]).execute(context)
+            context = await SnapshotComputerEnvTaskStep(id="snapshot", version=None, env_id=closed.id,
+                                                        snapshot_id=f"{closed.id}-snapshot",
+                                                        file_paths=["Desktop", "Downloads/note.txt"]).execute(context)
             taken = context.metadata["env_snapshotted_universes"]["snapshot"]
             (environment,) = EnvironmentUniverseArtifact.get(taken["id"], version=taken["version"]).get_environment_artifacts()
             snapshot = {part.path: file.load() for part, file in environment.get_parts()}
