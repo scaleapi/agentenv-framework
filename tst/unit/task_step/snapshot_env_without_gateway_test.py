@@ -32,10 +32,10 @@ class _Desk:
     id, version, environment_name = "desk", 1, "desktop"
 
 
-def _record(card: dict, network: dict | None = None) -> DeployedSandboxEnv:
+def _record(card: dict) -> DeployedSandboxEnv:
     return DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-1", instance_id="desk-abc",
                               environment_card_url=f"{COMPUTER}{WELL_KNOWN_PATH}", environment_card=card,
-                              sandbox_type="local", metadata={"computer": {"network": network}} if network else {})
+                              sandbox_type="local")
 
 
 def _computer(*extensions) -> dict:
@@ -49,23 +49,24 @@ def _inline(path: str, data: bytes) -> dict:
 
 
 def _serve(monkeypatch, answers: dict) -> list[tuple[str, dict]]:
-    """Answer each data/get with the parts ``answers`` gives for the path it's sent to, recording each path and its
-    params; any other request fails the test."""
+    """Answer each data/get with the parts ``answers`` gives for the path it's sent to, or the JSON-RPC error when it
+    gives one, recording each path and its params; any other request fails the test."""
     sent, real = [], httpx.AsyncClient
 
     def handle(request: httpx.Request) -> httpx.Response:
         params = json.loads(request.content)["params"]
         sent.append((request.url.path, params))
-        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
-                                         "result": {"parts": answers[request.url.path](params)}})
+        answer = answers[request.url.path](params)
+        body = {"error": answer["error"]} if isinstance(answer, dict) else {"result": {"parts": answer}}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, **body})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
     return sent
 
 
-async def _snapshot(card: dict, network: dict | None = None, **options) -> EnvironmentUniverseArtifact:
+async def _snapshot(card: dict, **options) -> EnvironmentUniverseArtifact:
     result = await SnapshotEnvTaskStep.snapshot_env_state(env=_Desk(), gateway_url=None, snapshot_id="snap-d",
-                                                          deployed=_record(card, network), **options)
+                                                          deployed=_record(card), **options)
     return EnvironmentUniverseArtifact.get(result.environment_universe_artifact_id)
 
 
@@ -111,16 +112,30 @@ async def test_files_uploaded_under_the_grant_are_written_where_the_computer_put
         (path, store.object_url(f"{root}/{path}"), data) for path, data in files.items()]
 
 
+UNREACHABLE = {"error": {"code": -32000, "message": "The object store is temporarily unavailable.",
+                          "data": "get_failed"}}
+
+
 @pytest.mark.asyncio
-async def test_a_computer_whose_network_keeps_it_from_the_store_is_handed_no_grant_and_returns_its_files_inline(
+async def test_an_env_that_fails_under_the_grant_is_asked_again_without_one_and_returns_its_files_inline(
         local_stores, tmp_path, monkeypatch):
     set_object_store(GrantingObjectStore(str(tmp_path / "objects")))
-    sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Desktop/left.txt", b"x")]})
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: UNREACHABLE if "write_namespace" in params
+                                else [_inline("Desktop/left.txt", b"x")]})
 
-    (desk,) = (await _snapshot(_computer(DATA_OBJECTS), network={"mode": "allowlist"})).get_environment_artifacts()
+    (desk,) = (await _snapshot(_computer(DATA_OBJECTS))).get_environment_artifacts()
 
-    assert sent == [("/agentenv", {})]
+    assert [(path, sorted(params)) for path, params in sent] == [("/agentenv", ["write_namespace"]), ("/agentenv", [])]
     assert [(part.path, file.load()) for part, file in desk.get_parts()] == [("Desktop/left.txt", b"x")]
+
+
+@pytest.mark.asyncio
+async def test_an_env_that_fails_with_no_grant_is_asked_once(local_stores, monkeypatch):
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: UNREACHABLE})
+
+    with pytest.raises(RuntimeError, match="data/get failed: The object store is temporarily unavailable"):
+        await _snapshot(_computer())
+    assert sent == [("/agentenv", {})]
 
 
 @pytest.mark.asyncio

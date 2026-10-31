@@ -24,7 +24,6 @@ from agentenv_protocol.client import find_extension, find_extension_method, inta
 from agentenv_protocol.transfers import WriteNamespaceGrant
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
-from agent_env.env.envs.computer.utils.inside import egress_open
 from agent_env.env.gateway.constants import CHANGES_PAGE_MAX, EXT_CHANGES_URI, EXT_TRAJECTORY_URI
 from agent_env.store import get_config
 from agent_env.store.base import GrantUnavailableError
@@ -501,8 +500,7 @@ class SnapshotEnvTaskStep(TaskStep):
         base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=True)
         if base_url is not None:
             card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
-            # A grant is no use to an env whose network keeps it from the store, a closed computer say.
-            upload = None if deployed is not None and not egress_open(deployed) else await asyncio.to_thread(
+            upload = await asyncio.to_thread(
                 _snapshot_upload, card or {}, timeout_seconds, getattr(deployed, "sandbox_type", None)
             )
             # Push S3 creds (no-op unless the service advertises the extension), with a grant too: a
@@ -510,7 +508,17 @@ class SnapshotEnvTaskStep(TaskStep):
             await _push_s3_credentials(card_base, card or {}, timeout_seconds)
             grant = {} if upload is None else {"write_namespace": upload.grant}
             more = {} if extra is None else {"extra": extra}
-            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **more, **grant)
+            try:
+                resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **more, **grant)
+            except RuntimeError as e:
+                if upload is None:
+                    raise
+                # An env that can't reach the store under the grant, a computer whose network is closed say, fails
+                # there; asked again without one, it returns its export inline.
+                logger.info("snapshot_env: %s's data/get failed under the upload grant (%s); asking again without one",
+                            environment_name, e)
+                upload = None
+                resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **more)
             if len(resp.parts) > 1 or _returns_file_tree(card or {}) or any(isinstance(part, TextPart)
                                                                              for part in resp.parts):
                 return [(part, await _materialize(part, upload, base_url, f"{tmp_path}-{index}", environment_name,
