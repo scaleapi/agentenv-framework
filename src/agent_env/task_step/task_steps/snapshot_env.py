@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, Part, uploaded_object_path
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, Part, TextPart, uploaded_object_path
 from agentenv_protocol.client import find_extension, find_extension_method, intake_declaration
 from agentenv_protocol.transfers import WriteNamespaceGrant
 
@@ -509,7 +509,8 @@ class SnapshotEnvTaskStep(TaskStep):
             grant = {} if upload is None else {"write_namespace": upload.grant}
             named = {} if paths is None else {"paths": paths}
             resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **named, **grant)
-            if len(resp.parts) > 1 or _returns_file_tree(card or {}):
+            if len(resp.parts) > 1 or _returns_file_tree(card or {}) or any(isinstance(part, TextPart)
+                                                                             for part in resp.parts):
                 return [(part, await _materialize(part, upload, base_url, f"{tmp_path}-{index}", environment_name,
                                                   timeout_seconds)) for index, part in enumerate(resp.parts)]
             return await _materialize(resp.parts[0] if resp.parts else None, upload, base_url, tmp_path,
@@ -737,9 +738,12 @@ class SnapshotEnvTaskStep(TaskStep):
 async def _materialize(part: Optional[Part], upload: Optional[_SnapshotUpload], base_url: str, tmp_path: str,
                        environment_name: str, timeout_seconds: float) -> str:
     """One part of a service's export: the object url it was uploaded to under ``upload``, else the suffix written to
-    ``tmp_path`` (".json" for a data part or none, else its file's)."""
+    ``tmp_path`` (".json" for a data part or none, ".txt" for a text part, else its file's)."""
     if upload is not None and (path := uploaded_object_path(part)) is not None:
         return upload.object_url(path)
+    if isinstance(part, TextPart):
+        Path(tmp_path).write_text(part.text)
+        return ".txt"
     if isinstance(part, FilePart):
         raw = getattr(part.file, "bytes", None)
         if raw is not None:
@@ -840,7 +844,8 @@ def _put_parts(exported: list[tuple[Part, str]], tmp_path: str, id: str, descrip
                 path.parent.mkdir()
                 os.replace(f"{tmp_path}-{index}", path)
                 stored = FileArtifact.put(file_id, description=description, file_path=str(path))
-            parts.append(EnvironmentPart(kind="file" if file is not None else "data", file_artifact_ref=stored.as_ref(),
+            kind = "file" if file is not None else "text" if isinstance(part, TextPart) else "data"
+            parts.append(EnvironmentPart(kind=kind, file_artifact_ref=stored.as_ref(),
                                          name=getattr(file, "name", None), mime_type=getattr(file, "mimeType", None),
                                          metadata=part.metadata or None))
     return parts

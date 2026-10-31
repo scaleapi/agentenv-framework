@@ -39,12 +39,12 @@ class SeedsEnvironments(ABC):
 
 
 class EnvironmentPart(BaseModel):
-    """One part of an environment's data as its data/get returned it, which data/add can be handed back: a file part
-    or a data part, its content stored as a file artifact, with the part's name, media type and metadata."""
+    """One part of an environment's data as its data/get returned it, which data/add can be handed back: a file part,
+    a data part or a text part, its content stored as a file artifact, with the part's name, media type and metadata."""
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["file", "data"]
+    kind: Literal["file", "data", "text"]
     file_artifact_ref: ArtifactRef
     name: Optional[str] = None
     mime_type: Optional[str] = None

@@ -146,7 +146,13 @@ async def test_its_own_data_get_takes_computer_file_paths_and_each_child_on_its_
     ({"name": "desktop", "capabilities": {"extensions": []}},
      [{"kind": "data", "data": {"a": 1}}, {"kind": "data", "data": {"b": 2}}],
      [("data", "part-0.json", b'{"a": 1}'), ("data", "part-1.json", b'{"b": 2}')]),
-], ids=["a-file-tree-of-no-files", "several-parts-of-no-file-tree"])
+    ({"name": "desktop", "capabilities": {"extensions": []}},
+     [{"kind": "data", "data": {"a": 1}}, {"kind": "text", "text": "hello"}],
+     [("data", "part-0.json", b'{"a": 1}'), ("text", "part-1.txt", b"hello")]),
+    ({"name": "desktop", "capabilities": {"extensions": []}}, [{"kind": "text", "text": "hello"}],
+     [("text", "part-0.txt", b"hello")]),
+], ids=["a-file-tree-of-no-files", "several-parts-of-no-file-tree", "a-data-part-then-a-text-part",
+        "one-text-part"])
 async def test_an_export_one_file_cant_keep_is_kept_as_its_parts(local_stores, monkeypatch, card, answer, kept):
     _serve(monkeypatch, {"/agentenv": lambda params: answer})
 
