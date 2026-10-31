@@ -184,6 +184,9 @@ class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
             name = environment.environment_name
             if name.split("/", 1)[0] == METADATA:
                 raise Unwritable(f"its environment {name!r} would read back as metadata, from its {METADATA}/ folder")
+            if environment.file_artifact_refs is not None:
+                raise Unwritable(f"its environment {name!r} holds several files, and a universe's folder holds one per "
+                                 f"environment; write environment artifact {environment.id} to a folder of its own")
             file = environment.get_file_artifact()
             out.file(environment_path(Path(), name, file.filename).as_posix(), file.object_url)
         for key, file in (self.get_metadata() or {}).items():
@@ -255,7 +258,8 @@ class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
         )
 
     def get_file_artifacts(self) -> dict[str, FileArtifact]:
-        """``{relative filename: FileArtifact}`` — a plain-file view of this universe.
+        """``{<environment_name>/<path>: FileArtifact}`` — a plain-file view of this universe, each environment's
+        files at their paths (one file's at its filename).
 
         Matching ``FileArtifactUniverse.get_file_artifacts()`` is what lets the same
         loaders stage a service universe as a file tree (grading a frozen snapshot)
@@ -264,14 +268,14 @@ class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
         """
         out: dict[str, FileArtifact] = {}
         for sa in self.get_environment_artifacts():
-            fa = sa.get_file_artifact()
-            name = f"{sa.environment_name}/{fa.filename}"
-            if name in out:
-                raise ValueError(
-                    f"EnvironmentUniverseArtifact {self.id} v{self.version} has duplicate "
-                    f"environment '{sa.environment_name}'; cannot stage it as a file tree"
-                )
-            out[name] = fa
+            for path, fa in sa.get_file_artifacts().items():
+                name = f"{sa.environment_name}/{path}"
+                if name in out:
+                    raise ValueError(
+                        f"EnvironmentUniverseArtifact {self.id} v{self.version} has duplicate "
+                        f"environment '{sa.environment_name}'; cannot stage it as a file tree"
+                    )
+                out[name] = fa
         return out
 
     def get_metadata(self) -> dict[str, FileArtifact]:

@@ -135,8 +135,9 @@ async def _deploy(env, **kwargs):
 
 
 def _artifact(name: str):
-    return SimpleNamespace(environment_name=name, get_file_artifact=lambda: SimpleNamespace(
-        filename=f"{name}.json", object_url=f"s3://bucket/{name}.json", content_type="application/json"))
+    file = SimpleNamespace(filename=f"{name}.json", object_url=f"s3://bucket/{name}.json", content_type="application/json")
+    return SimpleNamespace(environment_name=name, file_artifact_refs=None, get_file_artifact=lambda: file,
+                           get_file_artifacts=lambda: {file.filename: file})
 
 
 def _universe(*names: str, metadata=None):

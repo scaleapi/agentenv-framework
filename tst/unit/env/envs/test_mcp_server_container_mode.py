@@ -1,7 +1,8 @@
 """A standalone MCPServerEnv on Modal containers stages into its server's own container and records every container it
 created, so a later process can reattach them: loads stage into the server again, and close() and the reapers reach
 them all. A dead servicedb or sidecar is skipped on restore; a dead server fails it. A VM deploy's record is unchanged.
-A load is timed by the size its object store holds for the payload it stages.
+A load is timed by the size its object store holds for the payload it stages. An environment of several files has each
+staged at its path and sent with it, and the load is timed by their total size.
 Deployed without a gateway, the server is the env: its own card and container are the record's, and loads go straight to it.
 Only the sandboxes, the HTTP boundary and each topology's deploy path are faked."""
 
@@ -9,13 +10,15 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import json
+import posixpath
 import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from agentenv_protocol import WELL_KNOWN_PATH
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, WELL_KNOWN_PATH
 
 from agent_env.artifact import Artifact
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
@@ -79,6 +82,27 @@ async def test_a_load_is_timed_by_the_size_its_store_holds_for_the_payload(sent,
     store.get_object_metadata_at.assert_called_once_with("s3://bucket/email.json")
     assert sent and {r.extensions["timeout"]["read"] for r in sent} == {data_plane_load_timeout_s(size)}
     assert data_plane_load_timeout_s(size) > data_plane_load_timeout_s(None)
+
+
+@pytest.mark.asyncio
+async def test_an_environment_of_several_files_stages_each_at_its_path_and_sends_it_with_the_path(sent, monkeypatch):
+    env, sandboxes = _env(), _containers()
+    store = _store_reporting(ObjectMetadata(size=1_000))
+    monkeypatch.setattr(mcp_server, "get_config", lambda: MagicMock(get_object_store_at=MagicMock(return_value=store)))
+
+    await _deploy(env, sandboxes)
+    await env.load_environment_artifact(_artifact("inbox/a.json", "sent.json"))
+
+    server = sandboxes["srv"]
+    assert [c.args for c in server.write_file_from_object.await_args_list] == [
+        ("s3://bucket/inbox/a.json", "/data/inbox/a.json"), ("s3://bucket/sent.json", "/data/sent.json")]
+    server.exec_with_output.assert_awaited_once_with("mkdir", "-p", "/data/inbox")
+    assert [json.loads(r.content)["method"] for r in sent] == ["data/reset", "data/add"]
+    assert json.loads(sent[1].content)["params"]["parts"] == [
+        {"kind": "file", "file": {"uri": f"file:///data/{path}", "mimeType": "application/json", "name": name},
+         "metadata": {DATA_OBJECTS_EXTENSION_URI: {"path": path}}}
+        for path, name in (("inbox/a.json", "a.json"), ("sent.json", "sent.json"))]
+    assert {r.extensions["timeout"]["read"] for r in sent} == {data_plane_load_timeout_s(2_000)}
 
 
 @pytest.mark.asyncio
@@ -313,7 +337,8 @@ def _env(env_provider_type: str = "gateway") -> MCPServerEnv:
 
 
 def _sandbox(sandbox_id: str, mode: str = SANDBOX_MODE_CONTAINER, sandbox_type: str = "modal") -> MagicMock:
-    return MagicMock(sandbox_id=sandbox_id, mode=mode, type=sandbox_type, terminate=AsyncMock(), write_file_from_object=AsyncMock())
+    return MagicMock(sandbox_id=sandbox_id, mode=mode, type=sandbox_type, terminate=AsyncMock(), write_file_from_object=AsyncMock(),
+                     exec_with_output=AsyncMock())
 
 
 def _containers() -> dict[str, MagicMock]:
@@ -371,6 +396,9 @@ async def _restore(record: DeployedEnv, sandboxes: dict[str, MagicMock], dead: t
         return await MCPServerEnv.from_deployed_env(record)
 
 
-def _artifact():
-    return MagicMock(environment_name="email", **{"get_file_artifact.return_value": SimpleNamespace(
-        filename="email.json", object_url="s3://bucket/email.json", content_type="application/json")})
+def _artifact(*paths: str):
+    """The email environment's artifact: its one file, email.json, or a file at each of ``paths``."""
+    files = {path: SimpleNamespace(filename=posixpath.basename(path), object_url=f"s3://bucket/{path}",
+                                   content_type="application/json") for path in paths or ("email.json",)}
+    return SimpleNamespace(environment_name="email", file_artifact_refs=dict.fromkeys(paths) if paths else None,
+                           get_file_artifact=lambda: files["email.json"], get_file_artifacts=lambda: files)

@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import posixpath
 import shlex
 import uuid
 from importlib.metadata import version as pkg_version
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
-from agentenv_protocol import FilePart, client as protocol_v1
+from agentenv_protocol import client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
 from agent_env.config import get_config
@@ -20,12 +21,12 @@ from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class,
+    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class,
 )
 from agent_env.env.gateway import GatewayMode
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
-from agent_env.utils.paths import validate_file_name
+from agent_env.utils.paths import validate_file_path
 
 if TYPE_CHECKING:
     from agent_env.artifact import CliArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
@@ -158,29 +159,26 @@ class MCPServerEnv(Env):
                 f"EnvironmentArtifact environment_name '{environment_artifact.environment_name}' "
                 f"does not match env environment_name '{self.environment_name}'"
             )
-        file_artifact = environment_artifact.get_file_artifact()
         if builtin is None:
-            await load_by_signed_url(self, file_artifact)
+            await load_by_signed_url(self, environment_artifact)
             return
         base_url = await legacy_protocol.v1_base_url(self._deployed, self._gateway_url, self.environment_name, mcp=True)
         if base_url is not None:
             from agent_env.env.gateway.constants import data_plane_load_timeout_s
-            container_path = await self._copy_artifact_into_container(file_artifact)
+            files = environment_artifact.get_file_artifacts()
+            staged = {path: f"file://{await self._copy_artifact_into_container(file, path)}" for path, file in files.items()}
             # Sized from the payload rather than a flat constant: a 3.5GB service and a 30KB one
             # were previously given the same 600s, which killed healthy large loads. The size is
-            # the store's for the object staging copied, not whatever the artifact document claims.
-            timeout = data_plane_load_timeout_s(await self._staged_artifact_size(file_artifact))
+            # the store's for the objects staging copied, not whatever the artifact document claims.
+            sizes = [await self._staged_artifact_size(file) for file in files.values()]
+            timeout = data_plane_load_timeout_s(None if None in sizes else sum(sizes))
             # reset_data previously took the client default (30s), tighter than the load it
             # precedes -- dropping and recreating a large service's schemas can plausibly
             # exceed that. Give it the same budget as the load it belongs to.
             await protocol_v1.reset_data(base_url, timeout=timeout)
-            await protocol_v1.add_data(base_url, [FilePart(file={
-                "uri": f"file://{container_path}",
-                "mimeType": file_artifact.content_type,
-                "name": file_artifact.filename,
-            })], timeout=timeout)
+            await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, staged), timeout=timeout)
         else:
-            await self._load_environment_artifact_legacy(file_artifact)
+            await self._load_environment_artifact_legacy(legacy_load_file(self, environment_artifact))
         await builtin.install_changelog_triggers(self.environment_name)
 
     async def load_file_artifact_universe(self, file_artifact_universe: "Any", destination_path: Optional[str] = None,
@@ -233,10 +231,13 @@ class MCPServerEnv(Env):
             return None
         return metadata.size if metadata is not None else None
 
-    async def _copy_artifact_into_container(self, file_artifact) -> str:
-        validate_file_name(file_artifact.filename)
-        container_path = f"/data/{file_artifact.filename}"
+    async def _copy_artifact_into_container(self, file_artifact, path: str) -> str:
+        validate_file_path(path)
+        container_path = f"/data/{path}"
+        folder = posixpath.dirname(container_path)
         if self._sandbox.mode == SANDBOX_MODE_CONTAINER:
+            if folder != "/data":
+                await self._sandbox.exec_with_output("mkdir", "-p", folder)
             await self._sandbox.write_file_from_object(file_artifact.object_url, container_path)
         else:
             # Stage on the disk-backed app dir, not /tmp (tmpfs/RAM): a large
@@ -244,16 +245,16 @@ class MCPServerEnv(Env):
             # Random suffix avoids collisions between concurrent loads.
             from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR
             stage_dir = f"{GATEWAY_APP_DIR}/_artifact_staging"
-            vm_temp_path = f"{stage_dir}/{self.environment_name}-{uuid.uuid4().hex[:8]}-{file_artifact.filename}"
+            vm_temp_path = f"{stage_dir}/{self.environment_name}-{uuid.uuid4().hex[:8]}-{posixpath.basename(path)}"
             await self._sandbox.exec_script(f"mkdir -p {shlex.quote(stage_dir)}")
             await self._sandbox.load_object_file(file_artifact.object_url, vm_temp_path)
             container_id = await self._env_provider._get_container_id(self._sandbox, self.environment_name)
-            await self._sandbox.exec_script(f"docker exec {shlex.quote(container_id)} mkdir -p /data")
+            await self._sandbox.exec_script(f"docker exec {shlex.quote(container_id)} mkdir -p {shlex.quote(folder)}")
             await self._sandbox.docker_cp(vm_temp_path, f"{container_id}:{container_path}", remove_source=True)
         return container_path
 
     async def _load_environment_artifact_legacy(self, file_artifact) -> None:
-        container_path = await self._copy_artifact_into_container(file_artifact)
+        container_path = await self._copy_artifact_into_container(file_artifact, file_artifact.filename)
         await legacy_protocol.reset(
             self._gateway_url, self.environment_name, container_path, max_retries=self._MCP_MAX_RETRIES
         )

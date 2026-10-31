@@ -1,7 +1,8 @@
 """Loads find each child env's data plane in the stored env card.
 
 A child env the card lists is loaded through its v1 data plane at the card's own `url`, with no live
-card read. One the card doesn't list, a server that serves no card, takes the legacy REST path. Without
+card read. One the card doesn't list, a server that serves no card, takes the legacy REST path, which takes one file
+and refuses an environment of several before sending anything. Without
 a stored card (no deployed record, or a record with none), the live probe decides. Every env keeps the
 record it deploys or reattaches to, and MultiEnv hands it to every child env except a name an MCP
 server and a website share.
@@ -61,6 +62,16 @@ async def test_a_child_env_missing_from_the_card_takes_the_legacy_path(sent):
     [request] = sent
     assert (request.method, str(request.url)) == ("POST", f"{_GW}/svc/mcp-email/api/reset")
     assert json.loads(request.content) == {"mock_data_path": "/data/email.json"}
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_path_refuses_an_environment_of_several_files_before_sending_anything(sent):
+    several = SimpleNamespace(environment_name="email", id="mail-seed", file_artifact_refs={"a.json": None, "b.json": None})
+
+    with pytest.raises(RuntimeError, match="'email' takes one file through its pre-v1 load, and environment artifact "
+                                           "'mail-seed' holds 2"):
+        await _mcp(_record(await _card("mcp-slack"))).load_environment_artifact(several)
+    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -220,7 +231,8 @@ def _record(card: dict | None) -> DeployedEnv:
 
 def _artifact(name: str) -> SimpleNamespace:
     file = SimpleNamespace(content_type="application/json", filename=f"{name}.json")
-    return SimpleNamespace(environment_name=name, get_file_artifact=lambda: file)
+    return SimpleNamespace(environment_name=name, file_artifact_refs=None, get_file_artifact=lambda: file,
+                           get_file_artifacts=lambda: {file.filename: file})
 
 
 def _mcp_env(name: str = "email") -> MCPServerEnv:
