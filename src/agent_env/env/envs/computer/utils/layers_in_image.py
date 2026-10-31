@@ -3,7 +3,8 @@ RUN, given by its command in build order, is found in the image's history from t
 in the newest layer below the one found before it that a shell ran exactly that command for, so a base's layers of the
 same command never stand in for the build's own; and each entry of its layer listed by path, as ``<kind> <what>``:
 ``file`` or ``exec`` (a file any can run) with its sha256, ``link`` with its target, ``dir``, ``deleted``, or ``opaque``
-for a folder whose earlier contents the layer hides. A hard link is listed as its target is. Standard library only, since a builder VM runs it on the image's own Python. Usage: ``python3 layers_in_image.py
+for a folder whose earlier contents the layer hides. A hard link is listed as its target is in the same layer, else
+with ``=> <target>`` in place of a sha256, since an earlier layer isn't read. Standard library only, since a builder VM runs it on the image's own Python. Usage: ``python3 layers_in_image.py
 <image.tar> <commands as JSON>``; it prints what each wrote, in order, as JSON."""
 
 import hashlib

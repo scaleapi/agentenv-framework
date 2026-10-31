@@ -91,11 +91,11 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
         "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip "
         "install --no-index --no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
         "--format=json > /opt/agentenv/drivers/desk/installed.json && rm -rf /tmp/agentenv-packages/wheels/driver",
-        "COPY agentenv-desk.conf /etc/supervisor/conf.d/agentenv-desk.conf",
-        "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-desk.conf && test -x "
+        "COPY agentenv-driver-desk.conf /etc/supervisor/conf.d/agentenv-driver-desk.conf",
+        "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-driver-desk.conf && test -x "
         "/opt/agentenv/drivers/desk/venv/bin/python",
         "USER user", f"LABEL dev.agentenv.computer-key={composed['arm64']['key']}"]
-    assert arm64["files"] == ["Dockerfile", "agentenv-desk.conf", "driver/driver.py", "driver/requirements.txt",
+    assert arm64["files"] == ["Dockerfile", "agentenv-driver-desk.conf", "driver/driver.py", "driver/requirements.txt",
                               "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"]
     assert sorted(arch for arch, _ in docker.resolved) == ["amd64", "arm64"]
     assert docker.timeouts == {"arm64": 3600, "amd64": 10800}
@@ -103,9 +103,9 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
                                                 "requirements": "requirements.txt", "add": []}]
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
-        "[program:desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
+        "[program:driver-desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
         'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
-        "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/desk-driver.log\n")
+        "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/driver-desk-driver.log\n")
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
 
 

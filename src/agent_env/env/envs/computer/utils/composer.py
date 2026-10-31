@@ -338,11 +338,12 @@ class _Layer:
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact,
                   from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
-    its port, its folder under ``DRIVERS`` named for its id's last part."""
+    its port, its folder under ``DRIVERS`` named for its id's last part, its programs and their file under ``driver-``
+    as an app's are under ``app-``, so neither ever takes the other's."""
     install, name = driver.install[base.os.type], gate.folder_name(driver.id, "driver")
-    layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-{name}.conf", driver.id)
-    _stage(context, layer, f"driver {driver.id}", driver.files, _services(name, install), {"MCP_PORT": driver.port},
-           from_store)
+    layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-driver-{name}.conf", driver.id)
+    _stage(context, layer, f"driver {driver.id}", driver.files, _services(f"driver-{name}", install),
+           {"MCP_PORT": driver.port}, from_store)
     return layer
 
 

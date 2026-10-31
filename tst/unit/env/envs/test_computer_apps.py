@@ -29,6 +29,7 @@ def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_t
     assert [layer["name"] for layer in docker.resolved[0][1]["python"]][-2:] == ["apps-notes", "apps-mail"]
     assert confs["agentenv-app-mail.conf"].startswith(MAIL_SERVER) and "[program:app-notes-sync]" in confs[
         "agentenv-app-notes.conf"]
+    assert sorted(confs) == ["agentenv-app-mail.conf", "agentenv-app-notes.conf", "agentenv-driver-desk.conf"]
     stored = Env.get(env.id)
     assert [(app.id, app.version) for app in stored.composed_apps()] == [(notes.id, 1), (mail.id, 1)]
     assert stored.to_dict()["apps"] == [{"id": notes.id, "version": 1}, {"id": mail.id, "version": 1}]
@@ -102,8 +103,10 @@ def _setting_up(tmp_path, *names, scripts=("setup.sh",)):
      [f"/o/data: {B} deletes {A}'s file"]),
     ([(A, {"/t": "exec 1"}), (B, {"/t": "exec 2"}), (C, {"/t": "deleted"})],
      [f"/t: {B} replaces {A}'s program", f"/t: {C} deletes {B}'s file"]),
+    ([(A, {"/opt/s": "dir", "/opt/s/t": "exec 1"}), (B, {"/opt/s": "deleted"}), (B, {"/opt/s/t": "exec 2"})],
+     [f"/opt/s: {B} deletes {A}'s folder"]),
 ], ids=["deleted", "opaque", "link", "kind", "folder", "program", "kept-then-deleted", "kept-then-pointed",
-        "opaque-then-written", "after-a-loss"])
+        "opaque-then-written", "after-a-loss", "a-folder-deleted"])
 def test_a_part_that_certainly_undoes_what_another_left_is_a_loss(layers, lost):
     assert clashes.compare(layers) == (lost, [])
 
@@ -121,8 +124,11 @@ def test_a_part_that_certainly_undoes_what_another_left_is_a_loss(layers, lost):
     ([(A, {"/t": "exec 1"}), (A, {"/t": "deleted"}), (B, {"/t": "exec 2"}), (B, {"/t": "deleted"})], []),
     ([(A, {"/o/t": "exec 1"}), (A, {"/o": "opaque"}), (B, {"/o/t": "exec 2"}), (B, {"/o/t": "deleted"})], []),
     ([(A, {"/a": "file 1"}), (B, {"/b": "file 2"})], []),
+    ([(A, {"/o/t": "exec 1"}), (A, {"/o": "deleted"}), (B, {"/o/t": "exec 2"}), (B, {"/o/t": "deleted"})], []),
+    ([(A, {"/usr/local/bin/tool": "exec => /usr/bin/tool"}), (B, {"/usr/local/bin/tool": "exec 9"})],
+     [f"/usr/local/bin/tool ({A}, {B})"]),
 ], ids=["edited", "made-a-program", "same", "scratch", "own", "deleted-before-opaque", "recreated",
-        "recreated-after-opaque", "apart"])
+        "recreated-after-opaque", "apart", "recreated-after-its-folder-was-deleted", "hard-link-to-an-earlier-layer"])
 def test_what_isnt_certainly_lost_isnt_a_loss_and_only_a_file_two_parts_wrote_differently_is_said(layers, differ):
     assert clashes.compare(layers) == ([], differ)
 

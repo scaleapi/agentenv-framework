@@ -22,6 +22,11 @@ class Entry(NamedTuple):
     kind: str
     what: str = ""
 
+    @property
+    def known(self) -> bool:
+        """Whether its content is known: not a hard link to a file of an earlier layer, which the reader doesn't read."""
+        return not self.what.startswith("=> ")
+
     @classmethod
     def listed(cls, entry: str) -> Entry:
         kind, _, what = entry.partition(" ")
@@ -45,6 +50,9 @@ def compare(layers: list[tuple[str, dict[str, str]]]) -> tuple[list[str], list[s
                         lost.append(f"{hidden}: {of} deletes {by}'s file")
                     entries[hidden], writers[hidden] = Entry("deleted"), []
                 entry = Entry("dir")
+            if entry.kind == "deleted":
+                for gone in [gone for gone in entries if gone.startswith(f"{path}/") and gone not in listed]:
+                    entries[gone], writers[gone] = Entry("deleted"), []
             reason = None
             if path in entries and (by := _other(writers[path], of)):
                 if reason := _lost(path, of, entry, by, entries[path]):
@@ -73,10 +81,13 @@ def _lost(path: str, of: str, entry: Entry, by: str, was: Entry) -> str | None:
         return f"{path}: {of} makes {by}'s {_KINDS[was.kind]} a {_KINDS[entry.kind]}"
     if was.kind == "link" and entry.what != was.what:
         return f"{path}: {of} points {by}'s link elsewhere"
-    if was.kind == "exec" and entry.what != was.what:
+    if was.kind == "exec" and entry.what != was.what and entry.known and was.known:
         return f"{path}: {of} replaces {by}'s program"
     return None
 
 
 def _differs(entry: Entry, was: Entry) -> bool:
-    return entry.kind in ("file", "exec") and was.kind == "file" and entry.what != was.what
+    """Whether ``entry`` is a file that may hold other content than ``was``, a file, or a program whose content isn't
+    known."""
+    return (entry.kind in ("file", "exec") and entry.what != was.what
+            and (was.kind == "file" or (was.kind == "exec" and not (entry.known and was.known))))
