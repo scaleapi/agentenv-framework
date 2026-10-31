@@ -1,6 +1,6 @@
 """``build_app`` over bundle folders, served in process: the splits it serves and the tasks it leaves out, the reward
-and bundles it refuses, an episode played over OpenEnv's own WebSocket after a step before reset is refused, and
-namespace routing for each of the app's runs."""
+and bundles it refuses, an episode played over OpenEnv's own WebSocket after a step before reset is refused,
+namespace routing for each of the app's runs, and the token a server given one asks of every request and WebSocket."""
 
 import json
 import logging
@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from starlette.websockets import WebSocketDisconnect
 
 from agent_env.bundle import BundleError
 from agent_env.openenv import build_app
@@ -138,3 +139,24 @@ def test_a_dotted_bundle_name_is_served_dashed_as_openenvs_web_interface_reads_a
 
     with TestClient(build_app(root)) as client:
         assert [split["name"] for split in client.get("/dock-v1/splits").json()] == ["all"]
+
+
+def test_a_server_given_a_token_asks_it_of_every_request_and_websocket_but_health(bundles):
+    root = bundles("dock", {"tasks/a.json": PLAYED})
+
+    with TestClient(build_app(str(root), token="s3cret")) as client:
+        bare = client.get("/list_environments")
+        wrong = client.get("/list_environments", headers={"Authorization": "Bearer guess"})
+        right = client.get("/list_environments", headers={"Authorization": "Bearer s3cret"})
+        health = client.get("/health")
+        with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect("/ws"):
+            pass
+        with client.websocket_connect("/ws", headers={"Authorization": "Bearer s3cret"}) as ws:
+            ws.send_json({"type": "reset", "data": {"split": "all", "index": 0}})
+            reset = ws.receive_json()["data"]
+
+    assert (bare.status_code, wrong.status_code, right.status_code, health.status_code) == (401, 401, 200, 200)
+    assert bare.json() == {"detail": "this server needs Authorization: Bearer <its token>"}
+    assert right.json() == ["dock"]
+    assert refused.value.code == 1008
+    assert reset["observation"]["metadata"]["prompt"] == "Add a crate."

@@ -18,7 +18,7 @@ def test_a_session_is_tried_again_while_its_server_is_busy_and_given_up_at_once_
                                                                                                   opens, attempts):
     tried = []
 
-    async def flaky(url, timeout):
+    async def flaky(url, timeout, *, token=None):
         tried.append(url)
         if len(tried) < 3:
             client_error = ConnectionError(f"Failed to connect to {url}/ws: {cause}")

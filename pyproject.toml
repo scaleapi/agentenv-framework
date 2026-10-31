@@ -70,10 +70,12 @@ nemo-gym = [
     "omegaconf>=2.3; python_full_version >= '3.13.14'",
 ]
 # agent_env.training.verl: verl's trainers on a bundle served as an OpenEnv env; installed into verl's own environment,
-# whose verl, vLLM and torch are the trainer's to pin. pyarrow writes the parquet rows verl reads.
+# whose verl, vLLM and torch are the trainer's to pin. pyarrow writes the parquet rows verl reads; transformers counts a
+# row's prompt with its tools as the model's chat template renders them.
 verl = [
     "agentenv-framework[openenv]",
     "pyarrow>=19",
+    "transformers>=5",
 ]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [

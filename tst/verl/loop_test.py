@@ -1,11 +1,15 @@
 """``AgentEnvAgentLoop`` on verl itself: verl's ``ToolAgentLoop`` plays a row ``write_dataset`` wrote, with Qwen3's
 tokenizer and chat template and a stand-in rollout server, on the unit tier's bundle served on loopback. A played row's
-reward is its episode's, through verl's hermes and qwen3_coder parsers; a rollout the env fails is played again on a new
-episode, but not once its time is up, and one it fails every time is kept out of the loss; a prompt that doesn't fit, an
-episode that ends unscored without failing and a loop run twice raise. CI runs it on verl 0.9.1 and main."""
+reward is its episode's, through verl's hermes and qwen3_coder parsers and from a server that asks for a token; a
+rollout the env fails is played again on a new episode, but not once its time is up, and one it fails every time raises,
+which verl's V1 trainer leaves out; a prompt that doesn't fit, an episode that ends unscored without failing and a loop
+run twice raise; an answer verl cuts is warned of; and the writer counts prompts with their tools in the model's tokens.
+CI runs it on verl 0.9.1 and main."""
 
 import asyncio
 import json
+import logging
+import re
 
 import pyarrow.parquet as pq
 import pytest
@@ -100,18 +104,16 @@ def test_a_rollout_the_env_fails_is_played_again_on_a_new_episode(serve, tmp_pat
     assert (output.reward_score, output.extra_fields["agentenv"]["attempts"], len(deploys)) == (1.0, 2, 2)
 
 
-def test_a_rollout_the_env_fails_every_time_is_kept_out_of_the_loss(serve, tmp_path, tokenizer):
+def test_a_rollout_the_env_fails_every_time_raises_so_verl_leaves_it_out(serve, tmp_path, tokenizer):
     healthy = serve({"a": PLAYED})
     row = _row(write_dataset(healthy.url, tmp_path))
     healthy.stop()
     broken = serve({"a": [{**PLAYED[0], "fail": True}, *PLAYED[1:]]})
 
-    output = asyncio.run(_play(broken.url, row, _Model(tokenizer), tokenizer, attempts=2))
+    with pytest.raises(verl_loop.RolloutFailed, match=r"task a of split all: the env failed it on 2 attempts, so it's "
+                                                       r"left out of training: .*the env didn't come up"):
+        asyncio.run(_play(broken.url, row, _Model(tokenizer), tokenizer, attempts=2))
     broken.stop()
-
-    assert (output.reward_score, output.extra_fields["agentenv"]["attempts"]) == (0.0, 2)
-    assert "the env didn't come up" in output.extra_fields["agentenv"]["failure"]
-    assert output.response_mask and set(output.response_mask) == {0}
 
 
 def test_a_rollout_isnt_played_again_once_its_time_is_up(serve, tmp_path, tokenizer, monkeypatch):
@@ -124,10 +126,9 @@ def test_a_rollout_isnt_played_again_once_its_time_is_up(serve, tmp_path, tokeni
         return await deploy(self, context)
 
     monkeypatch.setattr(run_test._Env, "execute", hanging)
-    output = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, reset_timeout=0.5))
+    with pytest.raises(verl_loop.RolloutFailed, match="the env failed it on 1 attempt, so"):
+        asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, reset_timeout=0.5))
     server.stop()
-
-    assert (output.reward_score, output.extra_fields["agentenv"]["attempts"]) == (0.0, 1)
 
 
 def test_a_prompt_that_doesnt_fit_with_its_tools_is_refused_rather_than_cut(serve, tmp_path, tokenizer):
@@ -166,6 +167,52 @@ def test_an_agent_loop_plays_one_rollout(serve, tmp_path, tokenizer):
     server.stop()
 
 
+def test_a_server_that_asks_for_a_token_is_played_with_the_one_its_variable_holds(serve, tmp_path, tokenizer,
+                                                                                 monkeypatch):
+    server = serve({"a": PLAYED}, token="s3cret")
+    monkeypatch.setenv("DOCK_TOKEN", "s3cret")
+    row = _row(write_dataset(server.url, tmp_path, token_var="DOCK_TOKEN"))
+
+    played = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, token_var="DOCK_TOKEN"))
+    with pytest.raises(verl_loop.RolloutFailed, match="couldn't open a session on the server"):
+        asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, attempts=1))
+    server.stop()
+
+    assert played.reward_score == 1.0
+
+
+def test_an_answer_verl_cuts_is_warned_of_once_a_tool(serve, tmp_path, tokenizer, monkeypatch, caplog):
+    server = serve({"a": PLAYED})
+    row = _row(write_dataset(server.url, tmp_path))
+    monkeypatch.setattr(verl_loop, "_cut", set())
+
+    with caplog.at_level(logging.WARNING, logger=verl_loop.__name__):
+        for _ in range(2):
+            asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, max_tool_response_length=4))
+    server.stop()
+
+    [warning] = [record.getMessage() for record in caplog.records if "verl cuts" in record.getMessage()]
+    assert re.fullmatch(r"add_item answered \d+ characters, which verl cuts to actor_rollout_ref\.rollout\.multi_turn\."
+                        r"max_tool_response_length=4, so the model doesn't see all of it: raise it to cover the env's "
+                        r"answers", warning)
+
+
+def test_the_writer_counts_each_prompt_with_its_tools_and_refuses_one_over_the_limit(serve, tmp_path, tokenizer):
+    server = serve({"a": PLAYED})
+
+    written = write_dataset(server.url, tmp_path / "data", tokenizer=TOKENIZER)
+    row = _row(written)
+    with pytest.raises(ValueError, match=r"1 rows' prompts are over max_prompt_length=16 tokens with their tools, the "
+                                         r"longest task a of split all at \d+, which verl would cut"):
+        write_dataset(server.url, tmp_path / "refused", tokenizer=TOKENIZER, max_prompt_length=16)
+    server.stop()
+
+    rendered = tokenizer.apply_chat_template(row["prompt"], tools=json.loads(row["extra_info"]["tools"]),
+                                             add_generation_prompt=True, tokenize=True, return_dict=True)
+    assert written.longest_prompt == len(rendered["input_ids"]) > 16
+    assert not (tmp_path / "refused").exists()
+
+
 def test_the_rows_config_names_this_agent_loop():
     assert LOOP == f"{verl_loop.AgentEnvAgentLoop.__module__}.{verl_loop.AgentEnvAgentLoop.__qualname__}"
 
@@ -188,16 +235,17 @@ async def _play(url, row, model, tokenizer, **options):
     return await _run(_loop(url, model, tokenizer, **options), row)
 
 
-def _loop(url, model, tokenizer, *, parser="hermes", prompt_length=2048, reset_timeout=60.0, attempts=3):
+def _loop(url, model, tokenizer, *, parser="hermes", prompt_length=2048, max_tool_response_length=2048,
+          reset_timeout=60.0, attempts=3, token_var=None):
     config = omegaconf.OmegaConf.create({"actor_rollout_ref": {"rollout": {
         "prompt_length": prompt_length, "response_length": 1024, "full_determinism": False,
         "multi_turn": {"format": parser, "max_user_turns": None, "max_assistant_turns": 4, "max_parallel_calls": 1,
-                       "max_tool_response_length": 2048, "tool_response_truncate_side": "middle"},
+                       "max_tool_response_length": max_tool_response_length, "tool_response_truncate_side": "middle"},
     }}})
     return verl_loop.AgentEnvAgentLoop(
         trainer_config=agent_loop.DictConfigWrap(config), server_manager=model, tokenizer=tokenizer, processor=None,
         dataset_cls=rl_dataset.RLHFDataset, data_config=agent_loop.DictConfigWrap(DATA), hf_model_type="qwen3",
-        url=url, reset_timeout=reset_timeout, attempts=attempts)
+        url=url, reset_timeout=reset_timeout, attempts=attempts, token_var=token_var)
 
 
 async def _run(played, row):
@@ -205,7 +253,7 @@ async def _run(played, row):
                             tools_kwargs={}, index=0, agent_name="agentenv")
 
 
-def _row(folder):
-    [row] = pq.read_table(folder / "all.parquet").to_pylist()
+def _row(written):
+    [row] = pq.read_table(written.folder / "all.parquet").to_pylist()
     assert json.loads(row["extra_info"]["tools"])[0]["function"]["name"] == "add_item"
     return row

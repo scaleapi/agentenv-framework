@@ -172,6 +172,7 @@ verl = [
     { name = "openenv" },
     { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13.14'" },
     { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13.14'" },
+    { name = "transformers" },
 ]
 
 [package.metadata]
@@ -235,6 +236,7 @@ requires-dist = [
     { name = "tensorlake", marker = "extra == 'tensorlake'", specifier = "~=0.5.140" },
     { name = "tomli-w", marker = "extra == 'dev'", specifier = "==1.2.0" },
     { name = "transformers", marker = "extra == 'trl'", specifier = ">=5.2" },
+    { name = "transformers", marker = "extra == 'verl'", specifier = ">=5" },
     { name = "urllib3", marker = "extra == 'boat'", specifier = ">=2.1.0,<3" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
