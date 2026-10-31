@@ -491,8 +491,9 @@ def _runs(layer: _Layer) -> list[tuple[str, str]]:
 def _clashes(runs: dict[str, list[tuple[str, str]]], written: list[dict[str, str]]) -> tuple[list[str], list[str]]:
     """What a part's ``runs`` did to what an earlier part's left, as ``written`` lists what each of their commands wrote
     (``layers_in_image``), in order, but under ``SCRATCH``: first each certain loss (``_lost``), then each other file
-    the two wrote differently, which may be an edit that kept the earlier part's change."""
-    found, latest, lost, differ = iter(written), {}, [], []
+    the two wrote differently, which may be an edit that kept the earlier part's change. A path stays an earlier part's
+    for every later command, whoever wrote it since, until it's deleted."""
+    found, entries, writers, lost, differ = iter(written), {}, {}, [], []
     for of, commands in runs.items():
         for _ in commands:
             wrote = next(found)
@@ -500,16 +501,27 @@ def _clashes(runs: dict[str, list[tuple[str, str]]], written: list[dict[str, str
                 if SCRATCH.search(path):
                     continue
                 if entry == "opaque":
-                    lost += [f"{hidden}: {of} deletes {by}'s file" for hidden, (by, was) in sorted(latest.items())
-                             if hidden.startswith(f"{path}/") and by != of and hidden not in wrote and was != "dir"]
+                    for hidden in [hidden for hidden in sorted(entries) if hidden.startswith(f"{path}/")
+                                   and hidden not in wrote]:
+                        if entries[hidden] not in ("dir", "deleted") and (by := _other(writers[hidden], of)):
+                            lost.append(f"{hidden}: {of} deletes {by}'s file")
+                        entries[hidden] = "deleted"
                     entry = "dir"
-                if path in latest and (earlier := latest[path])[0] != of:
-                    if reason := _lost(path, of, entry, *earlier):
+                if path in entries and (by := _other(writers[path], of)):
+                    if reason := _lost(path, of, entry, by, entries[path]):
                         lost.append(reason)
-                    elif _differs(entry, earlier[1]):
-                        differ.append(f"{path} ({earlier[0]}, {of})")
-                latest[path] = (of, entry)
+                    elif _differs(entry, entries[path]):
+                        differ.append(f"{path} ({by}, {of})")
+                entries[path] = entry
+                writers.setdefault(path, [])
+                if of not in writers[path]:
+                    writers[path].append(of)
     return lost, differ
+
+
+def _other(writers: list[str], of: str) -> str | None:
+    """The part of ``writers``, in the order they first wrote a path, that wrote it last before ``of``."""
+    return next((writer for writer in reversed(writers) if writer != of), None)
 
 
 def _lost(path: str, of: str, entry: str, by: str, was: str) -> str | None:

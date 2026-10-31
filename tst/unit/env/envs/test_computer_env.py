@@ -1134,10 +1134,11 @@ def test_apps_that_dont_fit_together_or_on_the_computer_are_refused_before_anyth
 SETUP = {"run": [{"script": "setup.sh"}], "services": []}
 
 
-def _setting_up(tmp_path, *names):
-    """An app of each of ``names`` whose install runs setup.sh, put without a computer."""
-    return [_app(None, None, tmp_path / name, compose=False, name=name, install=SETUP,
-                 extra={"setup.sh": "#!/bin/sh\n"}) for name in names]
+def _setting_up(tmp_path, *names, scripts=("setup.sh",)):
+    """An app of each of ``names`` whose install runs ``scripts`` as root, put without a computer."""
+    return [_app(None, None, tmp_path / name, compose=False, name=name,
+                 install={"run": [{"script": script} for script in scripts], "services": []},
+                 extra={script: "#!/bin/sh\n" for script in scripts}) for name in names]
 
 
 MAIL, NOTES = "@local/~/kit/mail", "@local/~/kit/notes"
@@ -1164,6 +1165,31 @@ def test_a_part_that_certainly_undoes_what_an_earlier_one_installed_fails_its_pa
     assert {arch: (r["status"], r["stage"], r["reason"]) for arch, r in env.metadata["composed"]["container"].items()} == {
         arch: ("failed", "build", f"a part undoes what an earlier one installed: {lost}") for arch in ("amd64", "arm64")}
     assert docker.probed == [] and "computer" not in env.metadata
+
+
+@pytest.mark.parametrize("writes, lost", [
+    ({"apps/mail && ./setup.sh": {"usr/local/bin/tool": (b"mail's", 0o755)},
+      "apps/notes && ./setup.sh": {"usr/local/bin/tool": (b"mail's", 0o755)},
+      "apps/notes && ./again.sh": {"usr/local/bin/.wh.tool": b""}}, f"/usr/local/bin/tool: {NOTES} deletes {MAIL}'s file"),
+    ({"apps/mail && ./setup.sh": {"usr/bin/tool": "/opt/agentenv/apps/mail/tool"},
+      "apps/notes && ./setup.sh": {"usr/bin/tool": "/opt/agentenv/apps/mail/tool"},
+      "apps/notes && ./again.sh": {"usr/bin/tool": "/opt/agentenv/apps/notes/tool"}},
+     f"/usr/bin/tool: {NOTES} points {MAIL}'s link elsewhere"),
+    ({"apps/mail && ./setup.sh": {"opt/shared/data": b"mail's"}, "apps/mail && ./again.sh": {"opt/shared/.wh.data": b""},
+      "apps/notes && ./setup.sh": {"opt/shared/.wh..wh..opq": b"", "opt/shared/other": b"notes'"}}, None),
+    ({"apps/mail && ./setup.sh": {"opt/shared/data": b"mail's"},
+      "apps/notes && ./setup.sh": {"opt/shared/.wh..wh..opq": b"", "opt/shared/other": b"notes'"},
+      "apps/notes && ./again.sh": {"opt/shared/data": b"notes'"}}, f"/opt/shared/data: {NOTES} deletes {MAIL}'s file"),
+], ids=["kept-then-deleted", "kept-then-pointed", "deleted-before-opaque", "opaque-then-written"])
+def test_each_command_of_a_part_is_checked_against_what_earlier_parts_left_whoever_wrote_it_since(
+        base, driver, docker, tmp_path, writes, lost):
+    docker.writes = writes
+
+    env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes", scripts=("setup.sh", "again.sh"))).id)
+
+    composed = env.metadata["composed"]["container"].values()
+    assert ({(r["status"], r["reason"]) for r in composed} == {("failed", f"a part undoes what an earlier one installed: {lost}")}
+            if lost else env.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"})
 
 
 @pytest.mark.parametrize("mail, notes, told", [
