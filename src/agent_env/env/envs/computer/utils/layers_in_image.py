@@ -1,6 +1,7 @@
 """What RUN instructions of a saved image wrote, read by the composer after a build (``builder.Builder.written``): each
-RUN, given by its command in build order, is found in the image's history, the next layer a shell ran exactly that
-command for, and each file and link of its layer listed by path, as the
+RUN, given by its command in build order, is found in the image's history from the top, the last command first, each
+in the newest layer below the one found before it that a shell ran exactly that command for, so a base's layers of the
+same command never stand in for the build's own; and each file and link of its layer listed by path, as the
 file's sha256, ``-> <target>`` for a link, or what its target has for a hard link; folders and deletions are left out.
 Standard library only, since a builder VM runs it on the image's own Python. Usage: ``python3 layers_in_image.py
 <image.tar> <commands as JSON>``; it prints what each wrote, in order, as JSON."""
@@ -21,14 +22,13 @@ def written(image: str, commands: list[str]) -> list[dict[str, str]]:
         made = [entry.get("created_by", "") for entry in history if not entry.get("empty_layer")]
         # Matched from the top: a base built without history has fewer entries than layers.
         count = min(len(made), len(manifest["Layers"]))
-        layers, found, at = list(zip(made[-count:], manifest["Layers"][-count:])), [], 0
-        for command in commands:
-            at = next((i for i in range(at, len(layers)) if _ran(layers[i][0], command)), None)
+        layers, found, at = list(zip(made[-count:], manifest["Layers"][-count:])), [], count
+        for command in reversed(commands):
+            at = next((i for i in range(at - 1, -1, -1) if _ran(layers[i][0], command)), None)
             if at is None:
-                raise ValueError(f"no layer of the image after the last one found was made by {command!r}")
+                raise ValueError(f"no layer of the image below the last one found was made by {command!r}")
             found.append(_files(saved, layers[at][1]))
-            at += 1
-        return found
+        return found[::-1]
 
 
 def _ran(made_by: str, command: str) -> bool:

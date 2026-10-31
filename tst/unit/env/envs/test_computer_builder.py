@@ -114,10 +114,11 @@ def test_the_packages_a_build_installed_are_read_from_its_image_without_running_
     assert calls == [["docker", "create"], ["docker", "cp"], ["docker", "rm"]]
 
 
-def test_what_each_run_wrote_is_read_from_the_next_layer_a_shell_ran_its_command_for_in_a_saved_images_history(
+def test_what_each_run_wrote_is_read_from_the_newest_layer_a_shell_ran_its_command_for_in_a_saved_images_history(
         tmp_path):
     saved_image(tmp_path / "image.tar", [
         (None, {"etc/os-release": b"ubuntu"}),
+        ("RUN /bin/sh -c cd /opt/a && ./setup.sh # buildkit", {"usr/local/bin/tool": b"the base's"}),
         ("USER root", None),
         ("RUN /bin/sh -c cd /opt/a && ./setup.sh # buildkit", {
             "usr/local/bin/tool": b"a", "usr/bin/tool": "/usr/local/bin/tool", "etc/.wh.gone": b"", "./etc/a": b"a"}),
@@ -137,7 +138,7 @@ def test_what_each_run_wrote_is_read_from_the_next_layer_a_shell_ran_its_command
         {"/etc/extra": sha(b"extra")}, {"/usr/local/bin/tool": sha(b"b")}, {"/etc/again": sha(b"again")}]
     for missing in (["cd /opt/c && ./setup.sh"], ["cd /opt/b && ./setup.sh", "cd /opt/a && ./setup.sh"],
                     [*commands, "cd /opt/b && ./setup.sh"]):
-        with pytest.raises(ValueError, match="no layer of the image after the last one found was made by"):
+        with pytest.raises(ValueError, match="no layer of the image below the last one found was made by"):
             layers_in_image.written(str(tmp_path / "image.tar"), missing)
 
 
