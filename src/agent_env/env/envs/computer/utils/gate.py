@@ -69,37 +69,45 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
     return problems
 
 
-def folder_name(env_id: str, fallback: str) -> str:
-    """The name of the folder a driver or an app is installed in: its id's last part, lowercased, as a slug."""
-    return re.sub(r"[^a-z0-9-]+", "-", env_id.rsplit("/", 1)[-1].lower()).strip("-") or fallback
+def folder_name(name: str, fallback: str) -> str:
+    """``name``'s last part, lowercased, as a slug: the name of a folder a part is installed in."""
+    return re.sub(r"[^a-z0-9-]+", "-", name.rsplit("/", 1)[-1].lower()).strip("-") or fallback
+
+
+def app_folder(app: ComputerAppEnv) -> str:
+    """The name of the folder ``app`` is installed in, under ``APPS``, and of its programs: its environment name's, the
+    one name a computer knows it by."""
+    return folder_name(app.environment_name, "app")
 
 
 def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[ComputerAppEnv]) -> list[str]:
     """Every way ``apps`` don't fit together on ``base`` and ``driver``: each one's own (``check_app``), no architecture
-    they all run, one listed twice, and two in one folder, under one environment name, with one program name or
-    listening on one port."""
+    they all run, one listed twice, and two under one environment name, in one folder, with one program name or
+    listening on one port, each pair of apps named for the first they'd share."""
     problems = [problem for i, app in enumerate(apps) for problem in check_app(base, driver, app, f"apps[{i}]")]
     if not problems and apps and not arches(base, driver, apps):
         problems.append(f"apps: no architecture {base.id}, {driver.id} and every app all run")
     ids = [app.id for app in apps]
     problems += [f"apps: {app_id} is listed twice" for app_id in sorted({i for i in ids if ids.count(i) > 1})]
-    distinct = list({app.id: app for app in apps}.values())
-    for kind, keys in (("folder", lambda app: [f"{APPS}/{folder_name(app.id, 'app')}"]),
-                       ("environment name", lambda app: [app.environment_name]),
+    distinct, named = list({app.id: app for app in apps}.values()), set()
+    for kind, keys in (("environment name", lambda app: [app.environment_name]),
+                       ("folder", lambda app: [f"{APPS}/{app_folder(app)}"]),
                        ("program", lambda app: programs(app, base.os.type)),
                        ("port", lambda app: _ports(app, base.os.type))):
         claims: dict[object, list[str]] = {}
         for app in distinct:
             for key in keys(app):
                 claims.setdefault(key, []).append(app.id)
-        problems += [f"apps: {' and '.join(owners)} would share the {kind} {key!r}" for key, owners in claims.items()
-                     if len(owners) > 1]
+        for key, owners in claims.items():
+            if len(owners) > 1 and frozenset(owners) not in named:
+                named.add(frozenset(owners))
+                problems.append(f"apps: {' and '.join(owners)} would share the {kind} {key!r}")
     return problems
 
 
 def programs(app: ComputerAppEnv, os_type: str) -> list[str]:
     """The names of the supervisord programs ``app`` runs on ``os_type``: its own server's, then its services'."""
-    server = f"app-{folder_name(app.id, 'app')}"
+    server = f"app-{app_folder(app)}"
     install = app.install.get(os_type)
     return [server, *(f"{server}-{service.name}" for service in (install.services if install is not None else []))]
 

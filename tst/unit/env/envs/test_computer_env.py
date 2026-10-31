@@ -1072,7 +1072,7 @@ def test_build_settings_an_app_doesnt_declare_or_its_schema_refuses_are_refused_
 
 def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_them(base, driver, docker, tmp_path):
     mail = _app(base, driver, tmp_path / "mail", compose=False)
-    notes = _app(base, driver, tmp_path / "notes", compose=False, name="notes",
+    notes = _app(base, driver, tmp_path / "notes", compose=False, name="notes", id="@local/~/other/mail",
                  install={"ports": [8025], "services": [{"name": "sync", "command": "venv/bin/python sync.py"}]})
 
     env = _put(base, driver, apps=iter([notes, mail]))
@@ -1097,8 +1097,8 @@ def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_t
     (lambda mail, other: [mail, mail], "apps: @local/~/kit/mail is listed twice"),
     (lambda mail, other: [mail, other(name="mail-2", environment_name="mail")],
      "apps: @local/~/kit/mail and @local/~/kit/mail-2 would share the environment name 'mail'"),
-    (lambda mail, other: [mail, other(id="@local/other/mail")],
-     "apps: @local/~/kit/mail and @local/other/mail would share the folder '/opt/agentenv/apps/mail'"),
+    (lambda mail, other: [mail, other(name="x", environment_name="Mail")],
+     "apps: @local/~/kit/mail and @local/~/kit/x would share the folder '/opt/agentenv/apps/mail'"),
     (lambda mail, other: [other(name="a", install={"ports": [8025], "services": []}),
                           other(name="b", install={"ports": [8025, 9000], "services": []})],
      "apps: @local/~/kit/a and @local/~/kit/b would share the port 8025"),
@@ -1124,7 +1124,7 @@ def test_apps_that_dont_fit_together_or_on_the_computer_are_refused_before_anyth
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
         _put(base, driver, apps=listed)
 
-    assert problem in str(refused.value)
+    assert problem in str(refused.value) and str(refused.value).count(" would share ") <= 1
     with pytest.raises(NotFoundError):
         Env.get("@local/~/kit/desktop")
     assert docker.builds == []

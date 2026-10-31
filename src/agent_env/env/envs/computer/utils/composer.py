@@ -345,8 +345,8 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
                from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the app's install files under ``context/apps/<name>/``, with the values of its build settings the env
     fixes, and its supervisord programs beside them, run under its name: its services and its own server, which serves
-    its class from its venv and launches the app. Its folder under ``APPS`` is named for its id's last part."""
-    install, name = app.install[base.os.type], gate.folder_name(app.id, "app")
+    its class from its venv and launches the app. Its folder under ``APPS`` is named for its environment name."""
+    install, name = app.install[base.os.type], gate.app_folder(app)
     file, _, cls = app.module.partition(":")
     served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
     layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app.id, app=True,
