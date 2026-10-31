@@ -121,7 +121,8 @@ def test_what_each_run_wrote_is_read_from_the_newest_layer_a_shell_ran_its_comma
         ("RUN /bin/sh -c cd /opt/a && ./setup.sh # buildkit", {"usr/local/bin/tool": b"the base's"}),
         ("USER root", None),
         ("RUN /bin/sh -c cd /opt/a && ./setup.sh # buildkit", {
-            "usr/local/bin/tool": b"a", "usr/bin/tool": "/usr/local/bin/tool", "etc/.wh.gone": b"", "./etc/a": b"a"}),
+            "usr/local/bin/tool": (b"a", 0o755), "usr/bin/tool": "/usr/local/bin/tool", "etc/.wh.gone": b"",
+            "./etc/a": b"a", "opt/shared/.wh..wh..opq": b""}),
         ("RUN /bin/sh -c cd /opt/a && ./setup.sh.extra # buildkit", {"etc/extra": b"extra"}),
         ("COPY apps/b/ /opt/b/ # buildkit", {"opt/b/x": b"x"}),
         ("RUN /bin/sh -c cd /opt/b && ./setup.sh # buildkit", {"usr/local/bin/tool": b"b"}),
@@ -134,8 +135,10 @@ def test_what_each_run_wrote_is_read_from_the_newest_layer_a_shell_ran_its_comma
 
     sha = lambda data: hashlib.sha256(data).hexdigest()
     assert json.loads(ran.stdout) == layers_in_image.written(str(tmp_path / "image.tar"), commands) == [
-        {"/usr/local/bin/tool": sha(b"a"), "/usr/bin/tool": "-> /usr/local/bin/tool", "/etc/a": sha(b"a")},
-        {"/etc/extra": sha(b"extra")}, {"/usr/local/bin/tool": sha(b"b")}, {"/etc/again": sha(b"again")}]
+        {"/usr/local/bin/tool": f"exec {sha(b'a')}", "/usr/bin/tool": "link /usr/local/bin/tool", "/etc/gone": "deleted",
+         "/etc/a": f"file {sha(b'a')}", "/opt/shared": "opaque"},
+        {"/etc/extra": f"file {sha(b'extra')}"}, {"/usr/local/bin/tool": f"file {sha(b'b')}"},
+        {"/etc/again": f"file {sha(b'again')}"}]
     for missing in (["cd /opt/c && ./setup.sh"], ["cd /opt/b && ./setup.sh", "cd /opt/a && ./setup.sh"],
                     [*commands, "cd /opt/b && ./setup.sh"]):
         with pytest.raises(ValueError, match="no layer of the image below the last one found was made by"):

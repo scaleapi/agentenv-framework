@@ -134,8 +134,9 @@ class FakeDocker:
 
 def saved_image(path, layers):
     """A tar of an image as ``docker save`` writes one: each of ``layers``, bottom first, its history's ``created_by``
-    (None for a layer with no entry) and its files by path, a file's content as bytes and a link's target as text, or
-    None for an entry that made no layer; the last layer gzipped, as some savers keep them."""
+    (None for a layer with no entry) and its files by path, a file's content as bytes, or with its mode as (bytes, mode),
+    and a link's target as text, or None for an entry that made no layer; the last layer gzipped, as some savers keep
+    them."""
     blobs, history, made = {}, [], []
     for i, (created_by, files) in enumerate(layers):
         if created_by is not None:
@@ -146,12 +147,13 @@ def saved_image(path, layers):
         with tarfile.open(fileobj=layer, mode="w") as tar:
             for name, content in files.items():
                 entry = tarfile.TarInfo(name)
-                if isinstance(content, bytes):
-                    entry.size = len(content)
-                    tar.addfile(entry, io.BytesIO(content))
-                else:
+                if isinstance(content, str):
                     entry.type, entry.linkname = tarfile.SYMTYPE, content
                     tar.addfile(entry)
+                else:
+                    data, entry.mode = content if isinstance(content, tuple) else (content, 0o644)
+                    entry.size = len(data)
+                    tar.addfile(entry, io.BytesIO(data))
         data = gzip.compress(layer.getvalue()) if i == len(layers) - 1 else layer.getvalue()
         made.append(digest := f"blobs/sha256/{hashlib.sha256(data).hexdigest()}")
         blobs[digest] = data

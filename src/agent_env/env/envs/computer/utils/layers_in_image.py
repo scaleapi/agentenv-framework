@@ -1,9 +1,9 @@
 """What RUN instructions of a saved image wrote, read by the composer after a build (``builder.Builder.written``): each
 RUN, given by its command in build order, is found in the image's history from the top, the last command first, each
 in the newest layer below the one found before it that a shell ran exactly that command for, so a base's layers of the
-same command never stand in for the build's own; and each file and link of its layer listed by path, as the
-file's sha256, ``-> <target>`` for a link, or what its target has for a hard link; folders and deletions are left out.
-Standard library only, since a builder VM runs it on the image's own Python. Usage: ``python3 layers_in_image.py
+same command never stand in for the build's own; and each entry of its layer listed by path, as ``<kind> <what>``:
+``file`` or ``exec`` (a file any can run) with its sha256, ``link`` with its target, ``dir``, ``deleted``, or ``opaque``
+for a folder whose earlier contents the layer hides. A hard link is listed as its target is. Standard library only, since a builder VM runs it on the image's own Python. Usage: ``python3 layers_in_image.py
 <image.tar> <commands as JSON>``; it prints what each wrote, in order, as JSON."""
 
 import hashlib
@@ -41,16 +41,21 @@ def _files(saved: tarfile.TarFile, member: str) -> dict[str, str]:
     files: dict[str, str] = {}
     with tarfile.open(fileobj=saved.extractfile(member), mode="r|*") as layer:
         for entry in layer:
-            path = "/" + entry.name.removeprefix("./").rstrip("/")
-            if PurePosixPath(path).name.startswith(".wh."):
-                continue
-            if entry.isreg():
-                files[path] = _sha256(layer.extractfile(entry))
+            path = PurePosixPath("/" + entry.name.removeprefix("./").rstrip("/"))
+            kind = "exec" if entry.mode & 0o111 else "file"
+            if path.name == ".wh..wh..opq":
+                files[str(path.parent)] = "opaque"
+            elif path.name.startswith(".wh."):
+                files[str(path.with_name(path.name.removeprefix(".wh.")))] = "deleted"
+            elif entry.isreg():
+                files[str(path)] = f"{kind} {_sha256(layer.extractfile(entry))}"
             elif entry.issym():
-                files[path] = f"-> {entry.linkname}"
+                files[str(path)] = f"link {entry.linkname}"
             elif entry.islnk():
                 target = "/" + entry.linkname.removeprefix("./")
-                files[path] = files.get(target, f"=> {target}")
+                files[str(path)] = files.get(target, f"{kind} => {target}")
+            elif entry.isdir():
+                files[str(path)] = "dir"
     return files
 
 

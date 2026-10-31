@@ -1122,32 +1122,56 @@ def _setting_up(tmp_path, *names):
                  extra={"setup.sh": "#!/bin/sh\n"}) for name in names]
 
 
-@pytest.mark.parametrize("mail, notes, clash", [
-    ({"usr/local/bin/tool": b"mail's"}, {"usr/local/bin/tool": b"notes'"},
-     "/usr/local/bin/tool (@local/~/kit/mail and @local/~/kit/notes)"),
+MAIL, NOTES = "@local/~/kit/mail", "@local/~/kit/notes"
+
+
+@pytest.mark.parametrize("mail, notes, lost", [
+    ({"usr/local/bin/tool": b"mail's"}, {"usr/local/bin/.wh.tool": b""}, f"/usr/local/bin/tool: {NOTES} deletes {MAIL}'s file"),
+    ({"opt/shared/data": b"mail's"}, {"opt/shared/.wh..wh..opq": b"", "opt/shared/other": b"notes'"},
+     f"/opt/shared/data: {NOTES} deletes {MAIL}'s file"),
     ({"usr/bin/tool": "/opt/agentenv/apps/mail/tool"}, {"usr/bin/tool": "/opt/agentenv/apps/notes/tool"},
-     "/usr/bin/tool (@local/~/kit/mail and @local/~/kit/notes)"),
-    ({"usr/local/bin/tool": b"same"}, {"usr/local/bin/tool": b"same"}, None),
-    *[({path: b"mail's"}, {path: b"notes'"}, None) for path in (
-        "var/log/setup.log", "tmp/x", "home/user/.cache/pip/x", "opt/x/__pycache__/m.pyc", "etc/passwd", "etc/group-",
-        "etc/ld.so.cache", "root/.bashrc", "home/user/.profile")],
-], ids=["file", "link", "same", "log", "tmp", "cache", "pycache", "passwd", "group-backup", "ld-cache", "root-rc",
-        "home-profile"])
-def test_two_apps_whose_run_scripts_write_one_file_differently_fail_at_build_naming_it(base, driver, docker, tmp_path,
-                                                                                      mail, notes, clash):
+     f"/usr/bin/tool: {NOTES} points {MAIL}'s link elsewhere"),
+    ({"usr/bin/tool": b"mail's"}, {"usr/bin/tool": "/opt/agentenv/apps/notes/tool"},
+     f"/usr/bin/tool: {NOTES} makes {MAIL}'s file a link"),
+    ({"usr/local/bin/tool": (b"mail's", 0o755)}, {"usr/local/bin/tool": (b"notes'", 0o755)},
+     f"/usr/local/bin/tool: {NOTES} replaces {MAIL}'s program"),
+], ids=["deleted", "opaque", "link", "kind", "program"])
+def test_a_part_that_certainly_undoes_what_an_earlier_one_installed_fails_its_pairs_at_build_naming_it(
+        base, driver, docker, tmp_path, mail, notes, lost):
     docker.writes = {"apps/mail && ": mail, "apps/notes && ": notes}
 
     env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes")).id)
 
-    composed = env.metadata["composed"]["container"]
     assert sorted(docker.saved) == sorted(build["tag"] for build in docker.builds)
-    if clash is None:
-        assert env.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"}
-    else:
-        assert {arch: (r["status"], r["stage"], r["reason"]) for arch, r in composed.items()} == {
-            arch: ("failed", "build", "its parts write a file differently, so the later part's would hide the "
-                   f"earlier's: {clash}") for arch in ("amd64", "arm64")}
-        assert docker.probed == [] and "computer" not in env.metadata
+    assert {arch: (r["status"], r["stage"], r["reason"]) for arch, r in env.metadata["composed"]["container"].items()} == {
+        arch: ("failed", "build", f"a part undoes what an earlier one installed: {lost}") for arch in ("amd64", "arm64")}
+    assert docker.probed == [] and "computer" not in env.metadata
+
+
+@pytest.mark.parametrize("mail, notes, told", [
+    ({"etc/passwd": b"root\nmail\n", "usr/share/icons/hicolor/icon-theme.cache": b"\x00mail"},
+     {"etc/passwd": b"root\nmail\nnotes\n", "usr/share/icons/hicolor/icon-theme.cache": b"\x00mail notes"},
+     f"/etc/passwd ({MAIL}, {NOTES}), /usr/share/icons/hicolor/icon-theme.cache ({MAIL}, {NOTES})"),
+    ({f"etc/conf.d/{i:02}": b"mail's" for i in range(12)}, {f"etc/conf.d/{i:02}": b"notes'" for i in range(12)},
+     ", ".join(f"/etc/conf.d/{i:02} ({MAIL}, {NOTES})" for i in range(10)) + " and 2 more"),
+    ({"usr/local/bin/tool": (b"same", 0o755), "usr/bin/tool": "/opt/tool", "etc/x": b"same"},
+     {"usr/local/bin/tool": (b"same", 0o755), "usr/bin/tool": "/opt/tool", "etc/x": b"same"}, None),
+    ({path: b"mail's" for path in ("var/log/setup.log", "tmp/x", "run/x", "home/user/.cache/pip/x", "opt/x/__pycache__/m.pyc")},
+     {"var/log/.wh.setup.log": b"", "tmp/x": b"notes'", "run/x": (b"notes'", 0o755), "home/user/.cache/pip/x": "/x",
+      "opt/x/__pycache__/m.pyc": b"notes'"}, None),
+    ({"etc/notes.conf": b"mail's"}, {}, None),
+], ids=["edited", "many", "same", "scratch", "apart"])
+def test_files_two_parts_wrote_differently_but_not_certainly_lost_are_said_and_not_refused(base, driver, docker, tmp_path,
+                                                                                          mail, notes, told):
+    docker.writes, said = {"apps/mail && ": mail, "apps/notes && ": notes}, []
+
+    env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes"),
+                       composing=Composing(on_progress=said.append)).id)
+
+    assert env.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"}
+    compared = [line.partition(": ")[2] for line in said if line.startswith("container/arm64: not refused")]
+    assert compared == ([f"not refused, as each may keep the earlier part's change: two parts wrote {told}"]
+                        if told else [])
 
 
 def test_one_part_with_run_scripts_has_nothing_to_compare_and_its_image_isnt_saved(base, driver, docker, tmp_path):
@@ -1161,13 +1185,14 @@ def test_one_part_with_run_scripts_has_nothing_to_compare_and_its_image_isnt_sav
 
 def test_a_builder_vm_compares_what_each_part_wrote_in_a_container_of_the_image_before_pushing(base, driver, docker,
                                                                                               signing, tmp_path):
-    docker.writes = {"apps/mail && ": {"usr/local/bin/tool": b"mail's"}, "apps/notes && ": {"usr/local/bin/tool": b"notes'"}}
+    docker.writes = {"apps/mail && ": {"usr/local/bin/tool": (b"mail's", 0o755)},
+                     "apps/notes && ": {"usr/local/bin/tool": (b"notes'", 0o755)}}
     vms = FakeVmProvider(docker, tmp_path / "vms")
 
     env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes"), composing=Composing(vms)).id)
 
-    assert {arch: (r["status"], r["reason"].rpartition(": ")[2]) for arch, r in env.metadata["composed"]["container"].items()} == {
-        arch: ("failed", "/usr/local/bin/tool (@local/~/kit/mail and @local/~/kit/notes)") for arch in ("amd64", "arm64")}
+    assert {arch: (r["status"], r["reason"].partition(": ")[2]) for arch, r in env.metadata["composed"]["container"].items()} == {
+        arch: ("failed", f"/usr/local/bin/tool: {NOTES} replaces {MAIL}'s program") for arch in ("amd64", "arm64")}
     compared = [line for line in vms.ran if "/layers.py" in line]
     assert len(compared) == 2 and all("docker run --rm --network none --user root" in line for line in compared)
     assert not [line for line in vms.ran if "docker push" in line] and all(vm.terminated for vm in vms.vms)
