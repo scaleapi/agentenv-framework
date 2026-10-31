@@ -155,8 +155,11 @@ def test_a_rollout_gym_stopped_before_verifying_has_its_episode_ended_once_idle(
 @pytest.mark.parametrize(("config", "why"), [
     ({"num_workers": 2}, "the server runs with one worker"),
     ({"reward": "replies", "reward_components": True}, "reward_components makes the reward the sum"),
+    ({"idle_timeout": 0}, "greater than 0"),
+    ({"idle_timeout": float("nan")}, "finite number"),
 ])
-def test_a_config_with_more_than_one_worker_or_a_reward_beside_its_components_is_refused(config, why):
+def test_a_config_with_more_than_one_worker_a_reward_beside_its_components_or_no_finite_idle_timeout_is_refused(config,
+                                                                                                             why):
     with pytest.raises(pydantic.ValidationError, match=why):
         server.AgentEnvResourcesServerConfig(host="127.0.0.1", port=0, entrypoint="app.py", name="dock",
                                              url="http://127.0.0.1:8000", **config)

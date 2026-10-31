@@ -17,7 +17,7 @@ import uvicorn
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import ConfigDict, PrivateAttr, model_validator
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 try:
     from nemo_gym.base_resources_server import (
@@ -72,7 +72,7 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     max_concurrent_envs: int = 8
     tool_timeout: float = 60.0
     reset_timeout: float = 600.0
-    idle_timeout: float = 600.0
+    idle_timeout: float = Field(600.0, gt=0, allow_inf_nan=False)
     reward_components: bool = False
     masked_as_error: bool = False
 
