@@ -4,7 +4,6 @@ takes."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -13,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
-from agent_env.training._openenv import check_split_names, key, messages, probe, read_tasks, toolsets
+from agent_env.training._openenv import key, messages, tasks_and_tools
 
 #: The ``agent_name`` every row plays under, and the name ``agent_loop.yaml`` registers the loop at.
 AGENT = "agentenv"
@@ -38,10 +37,9 @@ def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, rese
     if attempts < 1:
         raise ValueError(f"attempts must be at least 1, not {attempts}")
     url = url.rstrip("/")
-    env_name, tasks = read_tasks(url, local="serve the bundle with agent_env.openenv.build_app first")
-    check_split_names(tasks)
-    tools = {each: [_function(tool) for tool in asyncio.run(probe(url, toolset, reset_timeout))[1]]
-             for each, toolset in toolsets(env_name, tasks).items()}
+    env_name, tasks, probed = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app first",
+                                              timeout=reset_timeout)
+    tools = {each: [_function(tool) for tool in found] for each, found in probed.items()}
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     for split, described in tasks.items():

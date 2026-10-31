@@ -2,7 +2,8 @@
 ``ToolAgentLoop``, which generates on verl's rollout server, parses the model's tool calls with
 ``multi_turn.format``'s parser and adds their answers to the context, with the row's tools in place of verl's own: each
 call is a call to the tool on the row's episode, the model's last reply ends the turn it left open, and the episode's
-reward is the rollout's ``reward_score``, so verl's reward function isn't called. Verified with verl 0.9.1."""
+reward is the rollout's ``reward_score``, so verl's reward function isn't called. CI checks it on verl 0.9.1 and
+main."""
 
 from __future__ import annotations
 
@@ -27,14 +28,6 @@ from agent_env.training._openenv import Rollout, Session, Shared
 logger = logging.getLogger(__name__)
 
 
-class _Session(Session):
-    offered_by = "its row lists"
-
-    def __init__(self, shared: Shared):
-        super().__init__()
-        self._shared = shared
-
-
 class AgentEnvAgentLoop(ToolAgentLoop):
     """Plays a row's task as one episode on the OpenEnv server at ``url``. A rollout the env fails, a deploy, a call
     past its deadline or a server that went away, is played again from the start on a new episode, a fresh sample of
@@ -42,6 +35,12 @@ class AgentEnvAgentLoop(ToolAgentLoop):
     that fails every time is kept out of the loss, its response masked, with the reward 0. A task that ends unscored
     without failing, and a prompt that doesn't fit ``rollout.prompt_length`` with its tools, are configuration errors no
     replay changes, and raise. ``agent_loop.yaml`` sets the arguments; verl passes the rest.
+
+    It leans on verl internals, which CI checks on verl 0.9.1 and main: verl builds an agent loop per trajectory, so an
+    instance holds one rollout's state, and ``run`` refuses a second; ``ToolAgentLoop.run`` reads the tools from
+    ``self.tools`` and ``self.tool_schemas``; ``_build_assistant_message`` is overridden to keep the reply, and
+    ``AgentLoopBase._cap_text_prompt_length`` to refuse a prompt verl would cut; and the tools are verl's
+    ``FunctionTool`` with ``OpenAIFunctionToolSchema``.
 
     Args:
         url: The OpenEnv server's base URL.
@@ -60,6 +59,9 @@ class AgentEnvAgentLoop(ToolAgentLoop):
         self._reply = ""
 
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
+        if self._row:
+            raise RuntimeError("verl ran an AgentEnvAgentLoop a second time, but one holds a single rollout's state: "
+                               "this verl doesn't build an agent loop per trajectory, as 0.9 does")
         row = self._row = kwargs["extra_info"]
         schemas = json.loads(row["tools"])
         shared = Shared(self._url, frozenset(schema["function"]["name"] for schema in schemas), self._tool_timeout,
@@ -70,7 +72,7 @@ class AgentEnvAgentLoop(ToolAgentLoop):
             try:
                 output, rollout = await self._play(session, schemas, sampling_params, kwargs)
             finally:
-                await session._close()
+                await session.close()
             if rollout.failure is None:
                 if rollout.reward is None:
                     raise ValueError(f"{self._task()} ended without a reward: it records no score its server's reward "
@@ -88,14 +90,12 @@ class AgentEnvAgentLoop(ToolAgentLoop):
 
     async def _play(self, session: _Session, schemas: list[dict[str, Any]], sampling_params: dict[str, Any],
                     kwargs: dict[str, Any]) -> tuple[AgentLoopOutput, Rollout]:
-        await session._start(self._row["split"], int(self._row["index"]), self._row["task_id"])
-        self.tools = {schema["function"]["name"]: _tool(session, schema) for schema in schemas}
+        await session.start(self._row)
+        self.tools = {schema["function"]["name"]: session.tool(schema) for schema in schemas}
         self.tool_schemas = schemas
         self._reply = ""
         output = await super().run(sampling_params, **kwargs)
-        rollout = session._rollout
-        await session._finish(rollout, self._reply)
-        return output, rollout
+        return output, await session.finish(self._reply)
 
     def _cap_text_prompt_length(self, prompt_ids: list[int]) -> list[int]:
         """Refuses the first prompt when it doesn't fit, where verl would cut it from the left, losing the system
@@ -114,19 +114,38 @@ class AgentEnvAgentLoop(ToolAgentLoop):
         self._reply = reply.strip()
         return super()._build_assistant_message(content, agent_data)
 
-
     def _task(self) -> str:
         return f"task {self._row['task_id']} of split {self._row['split']}"
 
 
-def _tool(session: _Session, schema: dict[str, Any]) -> FunctionTool:
-    """The episode's tool as the function tool ``ToolAgentLoop`` calls."""
-    name = schema["function"]["name"]
+class _Session(Session):
+    """One rollout's session: it starts the row's episode, offers the row's tools as verl's function tools, and ends
+    the turn left open with the model's reply."""
 
-    async def call(**arguments: Any) -> str:
-        return await session._step(name, arguments)
+    offered_by = "its row lists"
 
-    return FunctionTool(name=name, fn=call, tool_schema=_parser_schema(schema), is_async=True)
+    def __init__(self, shared: Shared):
+        super().__init__()
+        self._shared = shared
+
+    async def start(self, row: dict[str, Any]) -> None:
+        await self._start(row["split"], int(row["index"]), row["task_id"])
+
+    def tool(self, schema: dict[str, Any]) -> FunctionTool:
+        name = schema["function"]["name"]
+
+        async def call(**arguments: Any) -> str:
+            return await self._step(name, arguments)
+
+        return FunctionTool(name=name, fn=call, tool_schema=_parser_schema(schema), is_async=True)
+
+    async def finish(self, reply: str) -> Rollout:
+        rollout = self._rollout
+        await self._finish(rollout, reply)
+        return rollout
+
+    async def close(self) -> None:
+        await self._close()
 
 
 def _parser_schema(schema: dict[str, Any]) -> OpenAIFunctionToolSchema:

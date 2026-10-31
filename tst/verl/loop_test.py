@@ -1,8 +1,8 @@
 """``AgentEnvAgentLoop`` on verl itself: verl's ``ToolAgentLoop`` plays a row ``write_dataset`` wrote, with Qwen3's
 tokenizer and chat template and a stand-in rollout server, on the unit tier's bundle served on loopback. A played row's
 reward is its episode's, through verl's hermes and qwen3_coder parsers; a rollout the env fails is played again on a new
-episode, but not once its time is up, and one it fails every time is kept out of the loss; a prompt that doesn't fit and
-an episode that ends unscored without failing raise. CI runs it on verl 0.9.1 and main."""
+episode, but not once its time is up, and one it fails every time is kept out of the loss; a prompt that doesn't fit, an
+episode that ends unscored without failing and a loop run twice raise. CI runs it on verl 0.9.1 and main."""
 
 import asyncio
 import json
@@ -11,8 +11,8 @@ import pyarrow.parquet as pq
 import pytest
 from transformers import AutoTokenizer
 
-from agent_env.training._openenv import Failed
-from agent_env.training.verl.prepare import write_dataset
+from agent_env.training.verl.prepare import LOOP, write_dataset
+from tst.unit.task.episode import run_test
 from tst.unit.training.nemo_gym_test import PLAYED
 from tst.util.capabilities import VERL, missing_capability_reason
 
@@ -50,13 +50,13 @@ def test_a_played_rows_reward_is_its_episodes_and_its_last_reply_ends_the_turn(s
     server = serve({"a": PLAYED})
     row = _row(write_dataset(server.url, tmp_path))
     model = _Model(tokenizer, parser)
-    finish, replies = verl_loop._Session._finish, []
+    finish, replies = verl_loop._Session.finish, []
 
-    async def finishing(self, rollout, response=""):
-        replies.append(response)
-        await finish(self, rollout, response)
+    async def finishing(self, reply):
+        replies.append(reply)
+        return await finish(self, reply)
 
-    monkeypatch.setattr(verl_loop._Session, "_finish", finishing)
+    monkeypatch.setattr(verl_loop._Session, "finish", finishing)
     output = asyncio.run(_play(server.url, row, model, tokenizer, parser=parser))
     server.stop()
 
@@ -82,55 +82,52 @@ def test_a_tools_parameters_reach_verls_parsers_with_their_types(tokenizer):
         "submit_schedule", {"schedule": [1, 0, -1], "hour": 7, "note": "none today"})
 
 
-def test_a_rollout_the_env_fails_is_played_again_on_a_new_episode(serve, tmp_path, tokenizer, monkeypatch, teardowns):
+def test_a_rollout_the_env_fails_is_played_again_on_a_new_episode(serve, tmp_path, tokenizer, monkeypatch):
     server = serve({"a": PLAYED})
     row = _row(write_dataset(server.url, tmp_path))
-    begin, began = verl_loop._Session._begin, []
+    deploy, deploys = run_test._Env.execute, []
 
-    async def failing_once(self, rollout, *args):
-        began.append(1)
-        if len(began) == 1:
-            raise Failed("the env's deploy failed")
-        return await begin(self, rollout, *args)
+    async def failing_once(self, context):
+        deploys.append(self.id)
+        if len(deploys) == 1:
+            raise RuntimeError("the env didn't come up")
+        return await deploy(self, context)
 
-    monkeypatch.setattr(verl_loop._Session, "_begin", failing_once)
+    monkeypatch.setattr(run_test._Env, "execute", failing_once)
     output = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer))
     server.stop()
 
-    assert (output.reward_score, output.extra_fields["agentenv"]["attempts"]) == (1.0, 2)
-    assert len(began) == 2
+    assert (output.reward_score, output.extra_fields["agentenv"]["attempts"], len(deploys)) == (1.0, 2, 2)
 
 
-def test_a_rollout_the_env_fails_every_time_is_kept_out_of_the_loss(serve, tmp_path, tokenizer, monkeypatch):
-    server = serve({"a": PLAYED})
-    row = _row(write_dataset(server.url, tmp_path))
+def test_a_rollout_the_env_fails_every_time_is_kept_out_of_the_loss(serve, tmp_path, tokenizer):
+    healthy = serve({"a": PLAYED})
+    row = _row(write_dataset(healthy.url, tmp_path))
+    healthy.stop()
+    broken = serve({"a": [{**PLAYED[0], "fail": True}, *PLAYED[1:]]})
 
-    async def failing(self, rollout, *args):
-        raise Failed("the env's deploy failed")
+    output = asyncio.run(_play(broken.url, row, _Model(tokenizer), tokenizer, attempts=2))
+    broken.stop()
 
-    monkeypatch.setattr(verl_loop._Session, "_begin", failing)
-    output = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, attempts=2))
-    server.stop()
-
-    assert (output.reward_score, output.extra_fields["agentenv"]) == (
-        0.0, {"attempts": 2, "failure": "the env's deploy failed"})
+    assert (output.reward_score, output.extra_fields["agentenv"]["attempts"]) == (0.0, 2)
+    assert "the env didn't come up" in output.extra_fields["agentenv"]["failure"]
     assert output.response_mask and set(output.response_mask) == {0}
 
 
 def test_a_rollout_isnt_played_again_once_its_time_is_up(serve, tmp_path, tokenizer, monkeypatch):
     server = serve({"a": PLAYED})
     row = _row(write_dataset(server.url, tmp_path))
+    deploy = run_test._Env.execute
 
-    async def failing_late(self, rollout, *args):
-        await asyncio.sleep(0.3)
-        raise Failed("the env's deploy missed its deadline")
+    async def hanging(self, context):
+        await asyncio.sleep(2)
+        return await deploy(self, context)
 
-    monkeypatch.setattr(verl_loop._Session, "_begin", failing_late)
-    output = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, reset_timeout=0.2))
+    monkeypatch.setattr(run_test._Env, "execute", hanging)
+    output = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer, reset_timeout=0.5))
     server.stop()
 
-    assert (output.reward_score, output.extra_fields["agentenv"]) == (
-        0.0, {"attempts": 1, "failure": "the env's deploy missed its deadline"})
+    assert (output.reward_score, output.extra_fields["agentenv"]["attempts"]) == (0.0, 1)
 
 
 def test_a_prompt_that_doesnt_fit_with_its_tools_is_refused_rather_than_cut(serve, tmp_path, tokenizer):
@@ -143,22 +140,34 @@ def test_a_prompt_that_doesnt_fit_with_its_tools_is_refused_rather_than_cut(serv
     server.stop()
 
 
-def test_an_episode_that_ends_without_failing_or_a_reward_raises(serve, tmp_path, tokenizer, monkeypatch):
-    server = serve({"a": PLAYED})
+def test_an_episode_that_ends_without_failing_or_a_reward_raises(serve, tmp_path, tokenizer):
+    server = serve({"a": PLAYED}, reward=lambda scores: None)
     row = _row(write_dataset(server.url, tmp_path))
     model = _Model(tokenizer)
-    finish = verl_loop._Session._finish
 
-    async def unscored(self, rollout, response=""):
-        await finish(self, rollout, response)
-        rollout.reward = None
-
-    monkeypatch.setattr(verl_loop._Session, "_finish", unscored)
     with pytest.raises(ValueError, match="task a of split all ended without a reward: it records no score"):
         asyncio.run(_play(server.url, row, model, tokenizer))
     server.stop()
 
     assert model.calls == 2
+
+
+def test_an_agent_loop_plays_one_rollout(serve, tmp_path, tokenizer):
+    server = serve({"a": PLAYED})
+    row = _row(write_dataset(server.url, tmp_path))
+
+    async def twice():
+        played = _loop(server.url, _Model(tokenizer), tokenizer)
+        assert (await _run(played, row)).reward_score == 1.0
+        await _run(played, row)
+
+    with pytest.raises(RuntimeError, match="verl ran an AgentEnvAgentLoop a second time"):
+        asyncio.run(twice())
+    server.stop()
+
+
+def test_the_rows_config_names_this_agent_loop():
+    assert LOOP == f"{verl_loop.AgentEnvAgentLoop.__module__}.{verl_loop.AgentEnvAgentLoop.__qualname__}"
 
 
 class _Model:
@@ -175,16 +184,23 @@ class _Model:
         return replica.TokenOutput(token_ids=self.tokenizer.encode(reply, add_special_tokens=False))
 
 
-async def _play(url, row, model, tokenizer, *, parser="hermes", prompt_length=2048, reset_timeout=60.0, attempts=3):
+async def _play(url, row, model, tokenizer, **options):
+    return await _run(_loop(url, model, tokenizer, **options), row)
+
+
+def _loop(url, model, tokenizer, *, parser="hermes", prompt_length=2048, reset_timeout=60.0, attempts=3):
     config = omegaconf.OmegaConf.create({"actor_rollout_ref": {"rollout": {
         "prompt_length": prompt_length, "response_length": 1024, "full_determinism": False,
         "multi_turn": {"format": parser, "max_user_turns": None, "max_assistant_turns": 4, "max_parallel_calls": 1,
                        "max_tool_response_length": 2048, "tool_response_truncate_side": "middle"},
     }}})
-    played = verl_loop.AgentEnvAgentLoop(
+    return verl_loop.AgentEnvAgentLoop(
         trainer_config=agent_loop.DictConfigWrap(config), server_manager=model, tokenizer=tokenizer, processor=None,
         dataset_cls=rl_dataset.RLHFDataset, data_config=agent_loop.DictConfigWrap(DATA), hf_model_type="qwen3",
         url=url, reset_timeout=reset_timeout, attempts=attempts)
+
+
+async def _run(played, row):
     return await played.run({"temperature": 1.0}, raw_prompt=row["prompt"], extra_info=row["extra_info"],
                             tools_kwargs={}, index=0, agent_name="agentenv")
 

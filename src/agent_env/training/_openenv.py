@@ -366,11 +366,17 @@ def read_tasks(url: str, *, local: str) -> tuple[str, dict[str, list[dict[str, A
     return name, tasks
 
 
-def check_split_names(tasks: Mapping[str, Any]) -> None:
-    """Refuses splits whose names can't name the data file a writer writes for each."""
+def tasks_and_tools(url: str, *, local: str, timeout: float
+                    ) -> tuple[str, dict[str, list[dict[str, Any]]], dict[str, tuple[dict[str, Any], ...]]]:
+    """What a writer of a split's rows reads: the server's env name, each split's tasks, refusing a split whose name
+    can't name a data file, and every tool each toolset's turns offer, by the toolset's key, found by playing its
+    first task through (``probe``), so reading deploys those."""
+    name, tasks = read_tasks(url, local=local)
     if unfit := [split for split in tasks if not _FILE.fullmatch(split)]:
         raise ValueError(f"the server's splits {unfit} can't name a data file: a split's name must be letters, "
                          "digits, '.', '_' and '-', not starting with '.'")
+    return name, tasks, {each: asyncio.run(probe(url, toolset, timeout))[1]
+                         for each, toolset in toolsets(name, tasks).items()}
 
 
 def toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, NamedToolset]:
