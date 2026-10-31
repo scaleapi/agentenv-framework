@@ -1,7 +1,8 @@
 """Computer envs: gate 1 refuses a base, a driver or a declaration that can't compose, naming every problem, before
 anything is stored; the composer builds each form and arch, reuses an image of the same key whichever env built it,
 records each result as it finishes, and writes the arches built as the env's computer; a deploy, a reset and a load;
-and computer apps. Where and how a pair builds is test_computer_builder. Docker and the registry are faked."""
+and computer apps. Where and how a pair builds is test_computer_builder; a computer of several apps, test_computer_apps.
+Docker and the registry are faked."""
 
 import asyncio
 import contextlib
@@ -18,7 +19,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, AppDeclaration
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
 
@@ -52,7 +53,8 @@ from agent_env.store.image_store.local_registry_image_store import LocalRegistry
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from tst.unit.computer_home import Computer
-from tst.unit.env.envs._computer import CONFIG, SERVE, CARD_EXTENSION, CARD, _base, _driver, _put, FakeVmProvider
+from tst.unit.env.envs._computer import (CONFIG, SERVE, CARD_EXTENSION, CARD, MAIL_SETTINGS, MAIL_BUILD, MAIL_SERVER, _app,
+                                         _base, _driver, _put, FakeVmProvider)
 
 
 def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_its_images_make(base, driver, docker,
@@ -780,48 +782,7 @@ async def test_a_load_outside_the_home_is_refused_before_anything_is_sent(base, 
     assert computer.calls == []
 
 
-MAIL_SETTINGS = {"properties": {
-    "signature": {"default": "", "type": "string"},
-    "password": {"default": "", "type": "string", "format": "password", "writeOnly": True, "minLength": 32},
-    "token": {"anyOf": [{"type": "string", "format": "password", "writeOnly": True}, {"type": "null"}], "default": None},
-    "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
-
-
-MAIL_BUILD = {"properties": {"edition": {"default": "home", "enum": ["home", "pro"], "type": "string"},
-                             "locale": {"default": "en_US", "type": "string"}}, "type": "object"}
-
-
-#: The program of the mail app's own server.
-MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/python -m "
-               "agentenv_protocol.computer.serve_app app.py:Mail\ndirectory=/opt/agentenv/apps/mail\n"
-               "environment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\nredirect_stderr=true\n"
-               "stdout_logfile=/var/log/agentenv/app-mail.log\n")
 PROTOCOL_VERSION = importlib.metadata.version("agentenv-framework-protocol")
-
-
-def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
-         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", **changes):
-    """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
-    them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
-    its build settings, ``linux_settings``, that of its settings on Linux, and ``name``, its id's last part and its
-    environment name."""
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "app.py").write_text("class Mail: ...\n")
-    (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
-    for path, text in (extra or {}).items():
-        (folder / path).parent.mkdir(parents=True, exist_ok=True)
-        (folder / path).write_text(text)
-    files = FileArtifactUniverse.put_bundled(f"@local/~/kit/{name}__files", files={
-        path: folder / path for path in ("app.py", "requirements.txt", *(extra or {}))})
-    declaration = AppDeclaration.model_validate({
-        "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
-        "permissions": [], "settings": settings, "build_settings": build, "skill": None,
-        "data": [], "install_steps": [{"name": name, "scope": scope, "os": os or None} for name, scope, *os in steps],
-        "ready_checks": [], "os": {"linux": {"launch": launch, "settings": linux_settings, "install": install or {
-            "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
-    return ComputerAppEnv.put(**{"id": f"@local/~/kit/{name}", "environment_name": name, "module": "app.py:Mail",
-                                 "files": files, "declaration": declaration, "computer": base, "driver": driver,
-                                 "compose": compose, **changes})
 
 
 def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_under_its_prefix(base, driver, docker,
@@ -1068,179 +1029,6 @@ def test_build_settings_an_app_doesnt_declare_or_its_schema_refuses_are_refused_
     assert docker.builds == []
     with pytest.raises(NotFoundError):
         Env.get("@local/~/kit/mail")
-
-
-def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_them(base, driver, docker, tmp_path):
-    mail = _app(base, driver, tmp_path / "mail", compose=False)
-    notes = _app(base, driver, tmp_path / "notes", compose=False, name="notes", id="@local/~/other/mail",
-                 install={"ports": [8025], "services": [{"name": "sync", "command": "venv/bin/python sync.py"}]})
-
-    env = _put(base, driver, apps=iter([notes, mail]))
-
-    assert sorted(build["platform"] for build in docker.builds) == ["linux/amd64", "linux/arm64"]
-    dockerfile, confs = docker.builds[0]["dockerfile"], docker.builds[0]["confs"]
-    assert dockerfile.index("COPY driver/") < dockerfile.index("COPY apps/notes/") < dockerfile.index(
-        "COPY apps/mail/") < dockerfile.index("USER user")
-    assert [layer["name"] for layer in docker.resolved[0][1]["python"]][-2:] == ["apps-notes", "apps-mail"]
-    assert confs["agentenv-app-mail.conf"].startswith(MAIL_SERVER) and "[program:app-notes-sync]" in confs[
-        "agentenv-app-notes.conf"]
-    stored = Env.get(env.id)
-    assert [(app.id, app.version) for app in stored.composed_apps()] == [(notes.id, 1), (mail.id, 1)]
-    assert stored.to_dict()["apps"] == [{"id": notes.id, "version": 1}, {"id": mail.id, "version": 1}]
-    assert stored.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"}
-    assert docker.saved == []
-    assert _put(base, driver, apps=[mail, notes]).metadata["composed"]["container"]["arm64"]["key"] != (
-        stored.metadata["composed"]["container"]["arm64"]["key"])
-
-
-@pytest.mark.parametrize("apps, problem", [
-    (lambda mail, other: [mail, mail], "apps: @local/~/kit/mail is listed twice"),
-    (lambda mail, other: [mail, other(name="mail-2", environment_name="mail")],
-     "apps: @local/~/kit/mail and @local/~/kit/mail-2 would share the environment name 'mail'"),
-    (lambda mail, other: [mail, other(name="x", environment_name="Mail")],
-     "apps: @local/~/kit/mail and @local/~/kit/x would share the folder '/opt/agentenv/apps/mail'"),
-    (lambda mail, other: [other(name="a", install={"ports": [8025], "services": []}),
-                          other(name="b", install={"ports": [8025, 9000], "services": []})],
-     "apps: @local/~/kit/a and @local/~/kit/b would share the port 8025"),
-    (lambda mail, other: [mail, other(name="desk-port", install={"ports": [18765], "services": []})],
-     "apps[1]: @local/~/kit/desk-port listens on 18765, as @local/~/kit/desk does"),
-    (lambda mail, other: [mail, other(name="arm", supports=[{"os": {"type": "linux", "display": ["x11"]},
-                                                              "arch": ["riscv64"]}])],
-     "apps[1]: no architecture @local/~/kit/ubuntu-24.04, @local/~/kit/desk and @local/~/kit/arm all run"),
-    (lambda mail, other: [other(name=arch, supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": [arch]}])
-                          for arch in ("amd64", "arm64")],
-     "apps: no architecture @local/~/kit/ubuntu-24.04, @local/~/kit/desk and every app all run"),
-    (lambda mail, other: [other(name="mail", install={"services": [{"name": "sync", "command": "venv/bin/sync"}]}),
-                          other(name="mail-sync", install={"services": []})],
-     "apps: @local/~/kit/mail and @local/~/kit/mail-sync would share the program 'app-mail-sync'"),
-], ids=["twice", "environment-name", "folder", "app-port", "driver-port", "arch", "no-shared-arch", "program"])
-def test_apps_that_dont_fit_together_or_on_the_computer_are_refused_before_anything_is_stored(base, driver, docker,
-                                                                                              tmp_path, apps, problem):
-    def other(name="other", **changes):
-        return _app(None, None, tmp_path / name, compose=False, name=name, **changes)
-
-    listed = apps(_app(base, driver, tmp_path / "mail", compose=False), other)
-
-    with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
-        _put(base, driver, apps=listed)
-
-    assert problem in str(refused.value) and str(refused.value).count(" would share ") <= 1
-    with pytest.raises(NotFoundError):
-        Env.get("@local/~/kit/desktop")
-    assert docker.builds == []
-
-
-#: An install that runs one script, setup.sh, as root.
-SETUP = {"run": [{"script": "setup.sh"}], "services": []}
-
-
-def _setting_up(tmp_path, *names, scripts=("setup.sh",)):
-    """An app of each of ``names`` whose install runs ``scripts`` as root, put without a computer."""
-    return [_app(None, None, tmp_path / name, compose=False, name=name,
-                 install={"run": [{"script": script} for script in scripts], "services": []},
-                 extra={script: "#!/bin/sh\n" for script in scripts}) for name in names]
-
-
-MAIL, NOTES = "@local/~/kit/mail", "@local/~/kit/notes"
-
-
-@pytest.mark.parametrize("mail, notes, lost", [
-    ({"usr/local/bin/tool": b"mail's"}, {"usr/local/bin/.wh.tool": b""}, f"/usr/local/bin/tool: {NOTES} deletes {MAIL}'s file"),
-    ({"opt/shared/data": b"mail's"}, {"opt/shared/.wh..wh..opq": b"", "opt/shared/other": b"notes'"},
-     f"/opt/shared/data: {NOTES} deletes {MAIL}'s file"),
-    ({"usr/bin/tool": "/opt/agentenv/apps/mail/tool"}, {"usr/bin/tool": "/opt/agentenv/apps/notes/tool"},
-     f"/usr/bin/tool: {NOTES} points {MAIL}'s link elsewhere"),
-    ({"usr/bin/tool": b"mail's"}, {"usr/bin/tool": "/opt/agentenv/apps/notes/tool"},
-     f"/usr/bin/tool: {NOTES} makes {MAIL}'s file a link"),
-    ({"usr/local/bin/tool": (b"mail's", 0o755)}, {"usr/local/bin/tool": (b"notes'", 0o755)},
-     f"/usr/local/bin/tool: {NOTES} replaces {MAIL}'s program"),
-], ids=["deleted", "opaque", "link", "kind", "program"])
-def test_a_part_that_certainly_undoes_what_an_earlier_one_installed_fails_its_pairs_at_build_naming_it(
-        base, driver, docker, tmp_path, mail, notes, lost):
-    docker.writes = {"apps/mail && ": mail, "apps/notes && ": notes}
-
-    env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes")).id)
-
-    assert sorted(docker.saved) == sorted(build["tag"] for build in docker.builds)
-    assert {arch: (r["status"], r["stage"], r["reason"]) for arch, r in env.metadata["composed"]["container"].items()} == {
-        arch: ("failed", "build", f"a part undoes what an earlier one installed: {lost}") for arch in ("amd64", "arm64")}
-    assert docker.probed == [] and "computer" not in env.metadata
-
-
-@pytest.mark.parametrize("writes, lost", [
-    ({"apps/mail && ./setup.sh": {"usr/local/bin/tool": (b"mail's", 0o755)},
-      "apps/notes && ./setup.sh": {"usr/local/bin/tool": (b"mail's", 0o755)},
-      "apps/notes && ./again.sh": {"usr/local/bin/.wh.tool": b""}}, f"/usr/local/bin/tool: {NOTES} deletes {MAIL}'s file"),
-    ({"apps/mail && ./setup.sh": {"usr/bin/tool": "/opt/agentenv/apps/mail/tool"},
-      "apps/notes && ./setup.sh": {"usr/bin/tool": "/opt/agentenv/apps/mail/tool"},
-      "apps/notes && ./again.sh": {"usr/bin/tool": "/opt/agentenv/apps/notes/tool"}},
-     f"/usr/bin/tool: {NOTES} points {MAIL}'s link elsewhere"),
-    ({"apps/mail && ./setup.sh": {"opt/shared/data": b"mail's"}, "apps/mail && ./again.sh": {"opt/shared/.wh.data": b""},
-      "apps/notes && ./setup.sh": {"opt/shared/.wh..wh..opq": b"", "opt/shared/other": b"notes'"}}, None),
-    ({"apps/mail && ./setup.sh": {"opt/shared/data": b"mail's"},
-      "apps/notes && ./setup.sh": {"opt/shared/.wh..wh..opq": b"", "opt/shared/other": b"notes'"},
-      "apps/notes && ./again.sh": {"opt/shared/data": b"notes'"}}, f"/opt/shared/data: {NOTES} deletes {MAIL}'s file"),
-], ids=["kept-then-deleted", "kept-then-pointed", "deleted-before-opaque", "opaque-then-written"])
-def test_each_command_of_a_part_is_checked_against_what_earlier_parts_left_whoever_wrote_it_since(
-        base, driver, docker, tmp_path, writes, lost):
-    docker.writes = writes
-
-    env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes", scripts=("setup.sh", "again.sh"))).id)
-
-    composed = env.metadata["composed"]["container"].values()
-    assert ({(r["status"], r["reason"]) for r in composed} == {("failed", f"a part undoes what an earlier one installed: {lost}")}
-            if lost else env.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"})
-
-
-@pytest.mark.parametrize("mail, notes, told", [
-    ({"etc/passwd": b"root\nmail\n", "usr/share/icons/hicolor/icon-theme.cache": b"\x00mail"},
-     {"etc/passwd": b"root\nmail\nnotes\n", "usr/share/icons/hicolor/icon-theme.cache": b"\x00mail notes"},
-     f"/etc/passwd ({MAIL}, {NOTES}), /usr/share/icons/hicolor/icon-theme.cache ({MAIL}, {NOTES})"),
-    ({f"etc/conf.d/{i:02}": b"mail's" for i in range(12)}, {f"etc/conf.d/{i:02}": b"notes'" for i in range(12)},
-     ", ".join(f"/etc/conf.d/{i:02} ({MAIL}, {NOTES})" for i in range(10)) + " and 2 more"),
-    ({"usr/local/bin/tool": (b"same", 0o755), "usr/bin/tool": "/opt/tool", "etc/x": b"same"},
-     {"usr/local/bin/tool": (b"same", 0o755), "usr/bin/tool": "/opt/tool", "etc/x": b"same"}, None),
-    ({path: b"mail's" for path in ("var/log/setup.log", "tmp/x", "run/x", "home/user/.cache/pip/x", "opt/x/__pycache__/m.pyc")},
-     {"var/log/.wh.setup.log": b"", "tmp/x": b"notes'", "run/x": (b"notes'", 0o755), "home/user/.cache/pip/x": "/x",
-      "opt/x/__pycache__/m.pyc": b"notes'"}, None),
-    ({"etc/notes.conf": b"mail's"}, {}, None),
-], ids=["edited", "many", "same", "scratch", "apart"])
-def test_files_two_parts_wrote_differently_but_not_certainly_lost_are_said_and_not_refused(base, driver, docker, tmp_path,
-                                                                                          mail, notes, told):
-    docker.writes, said = {"apps/mail && ": mail, "apps/notes && ": notes}, []
-
-    env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes"),
-                       composing=Composing(on_progress=said.append)).id)
-
-    assert env.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"}
-    compared = [line.partition(": ")[2] for line in said if line.startswith("container/arm64: not refused")]
-    assert compared == ([f"not refused, as each may keep the earlier part's change: two parts wrote {told}"]
-                        if told else [])
-
-
-def test_one_part_with_run_scripts_has_nothing_to_compare_and_its_image_isnt_saved(base, driver, docker, tmp_path):
-    docker.writes = {"apps/mail && ": {"usr/local/bin/tool": b"mail's"}}
-    mail = _setting_up(tmp_path, "mail")[0]
-
-    env = Env.get(_put(base, driver, apps=[mail, _app(None, None, tmp_path / "notes", compose=False, name="notes")]).id)
-
-    assert env.build_statuses() == {"container/amd64": "unverified", "container/arm64": "ready"} and docker.saved == []
-
-
-def test_a_builder_vm_compares_what_each_part_wrote_in_a_container_of_the_image_before_pushing(base, driver, docker,
-                                                                                              signing, tmp_path):
-    docker.writes = {"apps/mail && ": {"usr/local/bin/tool": (b"mail's", 0o755)},
-                     "apps/notes && ": {"usr/local/bin/tool": (b"notes'", 0o755)}}
-    vms = FakeVmProvider(docker, tmp_path / "vms")
-
-    env = Env.get(_put(base, driver, apps=_setting_up(tmp_path, "mail", "notes"), composing=Composing(vms)).id)
-
-    assert {arch: (r["status"], r["reason"].partition(": ")[2]) for arch, r in env.metadata["composed"]["container"].items()} == {
-        arch: ("failed", f"/usr/local/bin/tool: {NOTES} replaces {MAIL}'s program") for arch in ("amd64", "arm64")}
-    compared = [line for line in vms.ran if "/layers.py" in line]
-    assert len(compared) == 2 and all("docker run --rm --network none --user root" in line for line in compared)
-    assert not [line for line in vms.ran if "docker push" in line] and all(vm.terminated for vm in vms.vms)
-    assert not list((tmp_path / "vms").rglob("image.tar"))
 
 
 def test_an_app_is_composed_only_for_the_arches_it_supports(base, driver, docker, tmp_path):

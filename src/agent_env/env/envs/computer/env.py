@@ -118,15 +118,7 @@ class ComputerEnv(Env):
             ctx.refuse([*refused, *missing])
         base, driver = ctx.artifact(fields.pop("computer"), ComputerArtifact), ctx.env(fields.pop("driver"),
                                                                                        ComputerDriverEnv)
-        refs = fields.get("apps", [])
-        fields["apps"] = [ctx.env({key: value for key, value in ref.items() if key != "install"}
-                                  if isinstance(ref, dict) else ref) for ref in refs]
-        if problems := [*(ctx.config_problem(f"apps[{i}]: install = {ref['install']!r}: an app installs at \"build\", "
-                                             "into the computer's image; \"boot\" isn't supported yet")
-                          for i, ref in enumerate(refs) if isinstance(ref, dict) and ref.get("install", "build") != "build"),
-                        *(ctx.config_problem(f"apps[{i}]: {app.id} is a {app.type} env, not a {APP_TYPE} env")
-                          for i, app in enumerate(fields["apps"]) if app.type != APP_TYPE)]:
-            ctx.refuse(problems)
+        fields["apps"] = _listed_apps(fields.get("apps", []), ctx)
         try:
             return cls.put(id=ctx.id, computer=base, driver=driver,
                            environment_name=fields.pop("environment_name", ctx.name), composing=ctx.composing,
@@ -239,6 +231,29 @@ class ComputerEnv(Env):
 
 
 def _app(env: Env) -> ComputerAppEnv:
-    if env.type != APP_TYPE:
-        raise TypeError(f"{env.id} is a {env.type} env, not a {APP_TYPE} env")
+    if refusal := _not_an_app(env):
+        raise TypeError(refusal)
     return env
+
+
+def _listed_apps(refs: list, ctx: AuthoringContext) -> list[ComputerAppEnv]:
+    """The computer app envs an env.toml's ``apps`` names, each a ref, or a table of one with its ``install`` beside it;
+    refused, naming each problem, unless every one is a computer app env installed at build."""
+    apps, problems = [], []
+    for i, ref in enumerate(refs):
+        install = ref.get("install", "build") if isinstance(ref, dict) else "build"
+        if install != "build":
+            problems.append(ctx.config_problem(f"apps[{i}]: install = {install!r}: an app installs at \"build\", into "
+                                               "the computer's image; \"boot\" isn't supported yet"))
+            continue
+        app = ctx.env({key: value for key, value in ref.items() if key != "install"} if isinstance(ref, dict) else ref)
+        if refusal := _not_an_app(app):
+            problems.append(ctx.config_problem(f"apps[{i}]: {refusal}"))
+        apps.append(app)
+    if problems:
+        ctx.refuse(problems)
+    return apps
+
+
+def _not_an_app(env: Env) -> str | None:
+    return f"{env.id} is a {env.type} env, not a {APP_TYPE} env" if env.type != APP_TYPE else None

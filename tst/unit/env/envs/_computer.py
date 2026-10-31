@@ -11,13 +11,14 @@ import subprocess
 import tarfile
 import urllib.parse
 
-from agentenv_protocol.computer import DriverDeclaration
+from agentenv_protocol.computer import AppDeclaration, DriverDeclaration
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.config import get_config
 from agent_env.env.envs.computer.utils import builder, layers_in_image
+from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils.install import Install, Service
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -303,3 +304,46 @@ class FakeVmProvider(SandboxProvider):
         self.sizes.append(size)
         self.vms.append(vm := FakeVm(self, self.root / str(len(self.vms))))
         return vm
+
+
+MAIL_SETTINGS = {"properties": {
+    "signature": {"default": "", "type": "string"},
+    "password": {"default": "", "type": "string", "format": "password", "writeOnly": True, "minLength": 32},
+    "token": {"anyOf": [{"type": "string", "format": "password", "writeOnly": True}, {"type": "null"}], "default": None},
+    "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
+
+
+MAIL_BUILD = {"properties": {"edition": {"default": "home", "enum": ["home", "pro"], "type": "string"},
+                             "locale": {"default": "en_US", "type": "string"}}, "type": "object"}
+
+
+#: The program of the mail app's own server.
+MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/python -m "
+               "agentenv_protocol.computer.serve_app app.py:Mail\ndirectory=/opt/agentenv/apps/mail\n"
+               "environment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\nredirect_stderr=true\n"
+               "stdout_logfile=/var/log/agentenv/app-mail.log\n")
+
+
+def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
+         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", **changes):
+    """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
+    them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
+    its build settings, ``linux_settings``, that of its settings on Linux, and ``name``, its id's last part and its
+    environment name."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "app.py").write_text("class Mail: ...\n")
+    (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
+    for path, text in (extra or {}).items():
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_text(text)
+    files = FileArtifactUniverse.put_bundled(f"@local/~/kit/{name}__files", files={
+        path: folder / path for path in ("app.py", "requirements.txt", *(extra or {}))})
+    declaration = AppDeclaration.model_validate({
+        "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
+        "permissions": [], "settings": settings, "build_settings": build, "skill": None,
+        "data": [], "install_steps": [{"name": name, "scope": scope, "os": os or None} for name, scope, *os in steps],
+        "ready_checks": [], "os": {"linux": {"launch": launch, "settings": linux_settings, "install": install or {
+            "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
+    return ComputerAppEnv.put(**{"id": f"@local/~/kit/{name}", "environment_name": name, "module": "app.py:Mail",
+                                 "files": files, "declaration": declaration, "computer": base, "driver": driver,
+                                 "compose": compose, **changes})

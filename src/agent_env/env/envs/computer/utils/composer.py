@@ -13,7 +13,6 @@ import hashlib
 import importlib.metadata
 import json
 import logging
-import re
 import shlex
 import shutil
 import subprocess
@@ -39,7 +38,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils import boot, builder, gate, packages
+from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, packages
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.base import ConcurrentModificationError
@@ -84,13 +83,8 @@ _HEARTBEAT_S = 600
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
-#: Where what a run script or an install step writes may be lost, as the filesystem hierarchy standard has it:
-#: temporary files, runtime state, logs and caches. Never compared.
-SCRATCH = re.compile(r"^/(tmp|var/tmp|var/log|var/cache|run)/|/\.cache/|/__pycache__/")
 #: How many of the files two parts wrote differently a progress line names.
 _SHOWN = 10
-#: What each kind of entry ``layers_in_image`` lists is, to a reader: a program is a file.
-_KINDS = {"file": "file", "exec": "file", "link": "link", "dir": "folder"}
 
 
 @dataclass(frozen=True)
@@ -264,17 +258,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 packages.stage(lock, building_on, env.stored_id, fetched)
             local, emulated = f"agentenv-computer:{key[7:23]}-{arch}", platform != building_on.platform
             building_on.build(f"{dockerfile}LABEL {KEY_LABEL}={key}\n", local, platform, {KEY_LABEL: key})
-            if len(runs := {part.of: _runs(part) for part in layers if _runs(part)}) > 1:
-                progress.at(pair, "comparing the files its parts' run scripts and install steps wrote")
-                written = building_on.written(local, [command for commands in runs.values() for _, command in commands])
-                lost, differ = _clashes(runs, written)
-                if lost:
-                    return _failed(env, form, arch, stage, key, "a part undoes what an earlier one installed: "
-                                   + "; ".join(lost))
-                if differ:
-                    progress.at(pair, "compared", "not refused, as each may keep the earlier part's change: two parts "
-                                f"wrote {', '.join(differ[:_SHOWN])}" + (f" and {len(differ) - _SHOWN} more"
-                                                                       if len(differ) > _SHOWN else ""))
+            if reason := _compare(building_on, local, layers, pair, progress):
+                return _failed(env, form, arch, stage, key, reason)
             installed = building_on.installed(local, layer.prefix)
             building_on.build(f"FROM {local}\n", local, platform, {
                 INSTALLED_LABEL: json.dumps(installed, sort_keys=True), EMULATED_LABEL: "true" if emulated else "false",
@@ -302,6 +287,26 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
         return _failed(env, form, arch, stage, key, f"{type(e).__name__}: {e}")
 
 
+def _compare(building_on: builder.Builder, tag: str, layers: list[_Layer], pair: str,
+             progress: _Progress) -> str | None:
+    """Why ``tag`` is refused: a part's run scripts or install steps certainly undoing what an earlier part's installed
+    (``clashes``); None, with any other file two parts wrote differently said to ``progress``. Read only when two or
+    more parts have such steps, the only ones that write outside a part's folder."""
+    runs = {layer.env_id: _runs(layer) for layer in layers if _runs(layer)}
+    if len(runs) < 2:
+        return None
+    progress.at(pair, "comparing the files its parts' run scripts and install steps wrote")
+    written = building_on.written(tag, [command for commands in runs.values() for _, command in commands])
+    lost, differ = clashes.compare(list(zip([env_id for env_id, commands in runs.items() for _ in commands], written)))
+    if lost:
+        return "a part undoes what an earlier one installed: " + "; ".join(lost)
+    if differ:
+        progress.at(pair, "compared", "not refused, as each may keep the earlier part's change: two parts wrote "
+                    f"{', '.join(differ[:_SHOWN])}" + (f" and {len(differ) - _SHOWN} more" if len(differ) > _SHOWN
+                                                       else ""))
+    return None
+
+
 def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
     """What the composed image is built ``FROM`` for ``arch``, and the base's part of the key, found without building
     anything: a registry image pinned to its digest, or the tag a build of the base's stored build context for that
@@ -317,14 +322,14 @@ def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
 @dataclass(frozen=True)
 class _Layer:
     """A driver's or an app's part of a build: its folder in the build context, its prefix in the image, what it
-    installs, and the file of its supervisord programs. An app's venv also has the protocol's ``app`` extra, for the
+    installs, the file of its supervisord programs, and the id of its env. An app's venv also has the protocol's ``app`` extra, for the
     app's own server, which listens in a folder of the app's the session user owns."""
 
     folder: str
     prefix: str
     install: Install
     conf: str
-    of: str
+    env_id: str
     app: bool = False
     served: str | None = None
     steps: tuple[tuple[str, str], ...] = ()
@@ -486,66 +491,6 @@ def _runs(layer: _Layer) -> list[tuple[str, str]]:
     return [*((run.scope, f"cd {layer.prefix} && {shlex.quote('./' + run.script)}") for run in layer.install.run or []),
             *((scope, f"cd {layer.prefix} && venv/bin/python -m agentenv_protocol.computer.run_install_step "
                       f"{layer.served} {step}") for step, scope in layer.steps)]
-
-
-def _clashes(runs: dict[str, list[tuple[str, str]]], written: list[dict[str, str]]) -> tuple[list[str], list[str]]:
-    """What a part's ``runs`` did to what an earlier part's left, as ``written`` lists what each of their commands wrote
-    (``layers_in_image``), in order, but under ``SCRATCH``: first each certain loss (``_lost``), then each other file
-    the two wrote differently, which may be an edit that kept the earlier part's change. A path stays an earlier part's
-    for every later command, whoever wrote it since, until it's deleted."""
-    found, entries, writers, lost, differ = iter(written), {}, {}, [], []
-    for of, commands in runs.items():
-        for _ in commands:
-            wrote = next(found)
-            for path, entry in sorted(wrote.items()):
-                if SCRATCH.search(path):
-                    continue
-                if entry == "opaque":
-                    for hidden in [hidden for hidden in sorted(entries) if hidden.startswith(f"{path}/")
-                                   and hidden not in wrote]:
-                        if entries[hidden] not in ("dir", "deleted") and (by := _other(writers[hidden], of)):
-                            lost.append(f"{hidden}: {of} deletes {by}'s file")
-                        entries[hidden] = "deleted"
-                    entry = "dir"
-                if path in entries and (by := _other(writers[path], of)):
-                    if reason := _lost(path, of, entry, by, entries[path]):
-                        lost.append(reason)
-                    elif _differs(entry, entries[path]):
-                        differ.append(f"{path} ({by}, {of})")
-                entries[path] = entry
-                writers.setdefault(path, [])
-                if of not in writers[path]:
-                    writers[path].append(of)
-    return lost, differ
-
-
-def _other(writers: list[str], of: str) -> str | None:
-    """The part of ``writers``, in the order they first wrote a path, that wrote it last before ``of``."""
-    return next((writer for writer in reversed(writers) if writer != of), None)
-
-
-def _lost(path: str, of: str, entry: str, by: str, was: str) -> str | None:
-    """How ``of``'s ``entry`` at ``path`` certainly loses what ``by`` left there, ``was``: deleting it, making it another
-    kind, pointing its link elsewhere, or replacing its program; None when it doesn't."""
-    kind, _, what = entry.partition(" ")
-    kind_was, _, what_was = was.partition(" ")
-    if kind_was == "deleted":
-        return None
-    if kind == "deleted":
-        return f"{path}: {of} deletes {by}'s {_KINDS[kind_was]}"
-    if _KINDS[kind] != _KINDS[kind_was]:
-        return f"{path}: {of} makes {by}'s {_KINDS[kind_was]} a {_KINDS[kind]}"
-    if kind_was == "link" and what != what_was:
-        return f"{path}: {of} points {by}'s link elsewhere"
-    if kind_was == "exec" and what != what_was:
-        return f"{path}: {of} replaces {by}'s program"
-    return None
-
-
-def _differs(entry: str, was: str) -> bool:
-    kind, _, what = entry.partition(" ")
-    kind_was, _, what_was = was.partition(" ")
-    return kind in ("file", "exec") and kind_was == "file" and what != what_was
 
 
 def _as(scope: str, user: str, run: str) -> list[str]:
