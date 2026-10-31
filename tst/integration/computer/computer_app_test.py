@@ -4,7 +4,7 @@ settings the deploy gave it, a secret resolved at boot, its window launched once
 comes up, and the computer ready only once its server says its window and its @ready_check are; its apt packages,
 one from a PPA, its download, run script and install step on its build setting, fetched at put, installed offline.
 And two apps composed into one computer env, each running on its own settings from its own folder, the files their run
-scripts wrote compared before the push. Needs Docker and the local registry on localhost:5000."""
+scripts wrote compared before the push, or the image of the same key reused, as one an earlier run pushed is. Needs Docker and the local registry on localhost:5000."""
 
 from pathlib import Path
 
@@ -52,4 +52,7 @@ def test_two_apps_composed_into_one_computer_env_each_run_on_their_own_settings(
         "clock": {"zone": "Europe/Paris", "served": {"zone": "Europe/Paris", "known": True}}, "card": "desk",
         "app_ready": ["app clock", "app notes"], "launched": ["notes"], "folders": ["clock", "notes"], "hello": True,
         "paris": True}
-    assert "comparing the files its parts' run scripts and install steps wrote" in ran.output
+    for pair in ("container/amd64", "container/arm64"):
+        said = [line for line in ran.output.splitlines() if line.startswith(f"envs/desk: {pair}: ")]
+        assert any(line.endswith(("comparing the files its parts' run scripts and install steps wrote",
+                                  "reusing the image of the same key, built earlier")) for line in said), said
