@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import uuid
 from typing import TYPE_CHECKING, Optional
 
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, METHOD_ADD, METHOD_RESET, RPC_PATH, FilePart, client as protocol_v1
@@ -13,6 +14,7 @@ from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv, gateway_url_of
 from agent_env.env.store import register_env_instance
 from agent_env.store.base import ObjectNotFoundError
+from agent_env.utils.paths import validate_file_name
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -144,12 +146,26 @@ def file_parts(environment_artifact: EnvironmentArtifact, files: dict[str, FileA
             for path, file in files.items()]
 
 
+def staged_paths(environment_artifact: EnvironmentArtifact, files: dict[str, FileArtifact]) -> tuple[Optional[str], dict[str, str]]:
+    """Where a load stages each of ``files`` in the server's data folder, by path, and the folder of the load's own that
+    holds them, which the load removes after it: one file at its filename, a plain name, as it always has been, with no
+    folder; several each at its path inside a new folder, so no earlier load's files are in their way."""
+    if environment_artifact.file_artifact_refs is None:
+        filename = next(iter(files))
+        validate_file_name(filename)
+        return None, {filename: filename}
+    folder = f".agentenv-load-{uuid.uuid4().hex[:8]}"
+    return folder, {path: f"{folder}/{path}" for path in files}
+
+
 def legacy_load_file(env: MCPServerEnv | WebsiteEnv, environment_artifact: EnvironmentArtifact) -> FileArtifact:
     """The file a server's pre-v1 load takes, which is one; refused for an environment artifact holding several."""
     if environment_artifact.file_artifact_refs is not None:
         raise RuntimeError(f"'{env.environment_name}' takes one file through its pre-v1 load, and environment artifact "
                            f"'{environment_artifact.id}' holds {len(environment_artifact.file_artifact_refs)}")
-    return environment_artifact.get_file_artifact()
+    file = environment_artifact.get_file_artifact()
+    validate_file_name(file.filename)
+    return file
 
 
 async def close_deployed(deployed: DeployedEnv, env_class: type[Env]) -> None:

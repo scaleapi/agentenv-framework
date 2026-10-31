@@ -1,8 +1,8 @@
 """An environment artifact holds its environment's files by path. One file whose path is its filename is stored as the one
 wrapped file every environment artifact had, document for document; several, or one inside a folder, as
 file_artifact_refs. get_file_artifacts reads either shape, get_file_artifact refuses a collection, and a path that isn't
-plain file names joined by '/' is refused. One file inside a folder can't be written to an artifact folder, whose one file
-reads back without its folders."""
+plain file names joined by '/' is refused. One file kept at a path other than its filename can't be written to an
+artifact folder, whose one file reads back kept at its filename."""
 
 import pytest
 
@@ -69,9 +69,10 @@ def test_an_environment_holds_a_file_or_files(local_stores, given, refused):
         EnvironmentArtifact.put("crm", environment_name="crm", **given(_file("seed", "seed.json")))
 
 
-def test_one_file_inside_a_folder_cant_be_written_to_an_artifact_folder(local_stores, tmp_path):
-    environment = EnvironmentArtifact.put("crm", environment_name="crm", file_artifacts={"inbox/a.json": _file("f", "a.json")})
+@pytest.mark.parametrize("path", ["inbox/a.json", "notes.json"], ids=["inside-a-folder", "under-another-name"])
+def test_one_file_kept_at_a_path_other_than_its_filename_cant_be_written_to_an_artifact_folder(local_stores, tmp_path, path):
+    environment = EnvironmentArtifact.put("crm", environment_name="crm", file_artifacts={path: _file("f", "a.json")})
 
-    with pytest.raises(Unwritable, match="its one file is at 'inbox/a.json', and a folder holding one file reads back as "
-                                         "that file alone"):
+    with pytest.raises(Unwritable, match=f"its one file is kept at '{path}', not at its filename, and a folder's one "
+                                         "file reads back kept at its filename"):
         environment.to_toml(FolderExport(tmp_path))

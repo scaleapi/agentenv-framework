@@ -2,7 +2,8 @@
 created, so a later process can reattach them: loads stage into the server again, and close() and the reapers reach
 them all. A dead servicedb or sidecar is skipped on restore; a dead server fails it. A VM deploy's record is unchanged.
 A load is timed by the size its object store holds for the payload it stages. An environment of several files has each
-staged at its path and sent with it, and the load is timed by their total size.
+staged at its path in a folder of the load's own, removed after it however it ends, and sent with its path, the load timed
+by their total size; one file's name is still one plain name.
 Deployed without a gateway, the server is the env: its own card and container are the record's, and loads go straight to it.
 Only the sandboxes, the HTTP boundary and each topology's deploy path are faked."""
 
@@ -94,15 +95,44 @@ async def test_an_environment_of_several_files_stages_each_at_its_path_and_sends
     await env.load_environment_artifact(_artifact("inbox/a.json", "sent.json"))
 
     server = sandboxes["srv"]
-    assert [c.args for c in server.write_file_from_object.await_args_list] == [
-        ("s3://bucket/inbox/a.json", "/data/inbox/a.json"), ("s3://bucket/sent.json", "/data/sent.json")]
-    server.exec_with_output.assert_awaited_once_with("mkdir", "-p", "/data/inbox")
+    writes = [c.args for c in server.write_file_from_object.await_args_list]
+    folder = writes[0][1].removesuffix("/inbox/a.json")
+    assert re.fullmatch(r"/data/\.agentenv-load-[0-9a-f]{8}", folder)
+    assert writes == [("s3://bucket/inbox/a.json", f"{folder}/inbox/a.json"), ("s3://bucket/sent.json", f"{folder}/sent.json")]
+    assert [c.args for c in server.exec_with_output.await_args_list] == [
+        ("mkdir", "-p", f"{folder}/inbox"), ("mkdir", "-p", folder), ("rm", "-rf", folder)]
     assert [json.loads(r.content)["method"] for r in sent] == ["data/reset", "data/add"]
     assert json.loads(sent[1].content)["params"]["parts"] == [
-        {"kind": "file", "file": {"uri": f"file:///data/{path}", "mimeType": "application/json", "name": name},
+        {"kind": "file", "file": {"uri": f"file://{folder}/{path}", "mimeType": "application/json", "name": name},
          "metadata": {DATA_OBJECTS_EXTENSION_URI: {"path": path}}}
         for path, name in (("inbox/a.json", "a.json"), ("sent.json", "sent.json"))]
     assert {r.extensions["timeout"]["read"] for r in sent} == {data_plane_load_timeout_s(2_000)}
+
+
+@pytest.mark.asyncio
+async def test_a_load_of_several_files_that_fails_still_removes_its_folder(sent):
+    env, sandboxes = _env(), _containers()
+    await _deploy(env, sandboxes)
+    server = sandboxes["srv"]
+    server.write_file_from_object.side_effect = [None, RuntimeError("store unreachable")]
+
+    with pytest.raises(RuntimeError, match="store unreachable"):
+        await env.load_environment_artifact(_artifact("inbox/a.json", "sent.json"))
+
+    assert sent == []
+    assert server.exec_with_output.await_args_list[-1].args[:2] == ("rm", "-rf")
+
+
+@pytest.mark.asyncio
+async def test_one_files_name_is_still_one_plain_name(sent):
+    env, sandboxes = _env(), _containers()
+    await _deploy(env, sandboxes)
+    file = SimpleNamespace(filename="a/b.json", object_url="s3://bucket/b.json", content_type="application/json")
+    artifact = SimpleNamespace(environment_name="email", file_artifact_refs=None, get_file_artifacts=lambda: {file.filename: file})
+
+    with pytest.raises(ValueError, match="must be a single file name"):
+        await env.load_environment_artifact(artifact)
+    assert sent == [] and not sandboxes["srv"].write_file_from_object.await_count
 
 
 @pytest.mark.asyncio

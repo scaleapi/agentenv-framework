@@ -127,18 +127,24 @@ def test_a_description_names_the_folders_file(bundle_dir):
     assert EnvironmentArtifact.get(f"{ROOT}/crm-data").get_file_artifact().description == "crm rows"
 
 
-def test_an_environment_keeps_the_several_files_its_folder_holds_by_path(bundle_dir):
+def test_an_environment_keeps_the_several_files_its_folder_holds_by_path_and_is_rewritten_when_one_changes(bundle_dir):
     files = {"inbox/a.json": "{}\n", "sent.json": "[]\n"}
     _bundle(bundle_dir, {**_environment("mail", "mail"), **{f"artifacts/mail/{path}": text for path, text in files.items()}},
             "mail")
 
-    _run(bundle_dir)
+    first = _summary(_run(bundle_dir))
     kept = EnvironmentArtifact.get(f"{ROOT}/mail").get_file_artifacts()
 
+    assert first[f"{ROOT}/mail"] == (1, False, ("new",))
     assert {path: (file.filename, file.load().decode()) for path, file in kept.items()} == {
         path: (path.rsplit("/", 1)[-1], text) for path, text in files.items()}
     assert {path: file.id for path, file in kept.items()} == {
         path: f"{ROOT}/mail__{hashlib.sha256(path.encode()).hexdigest()[:16]}" for path in files}
+
+    assert all(reused for _, reused, _ in _summary(_run(bundle_dir)).values())
+    (bundle_dir / "artifacts/mail/sent.json").write_text('["x"]\n')
+    assert _summary(_run(bundle_dir))[f"{ROOT}/mail"] == (2, False, ("files changed: sent.json",))
+    assert EnvironmentArtifact.get(f"{ROOT}/mail").get_file_artifacts()["sent.json"].load() == b'["x"]\n'
 
 
 def test_a_folders_one_file_inside_a_subfolder_is_still_the_one_file_it_wraps(bundle_dir):

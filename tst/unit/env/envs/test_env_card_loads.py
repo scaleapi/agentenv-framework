@@ -2,7 +2,8 @@
 
 A child env the card lists is loaded through its v1 data plane at the card's own `url`, with no live
 card read. One the card doesn't list, a server that serves no card, takes the legacy REST path, which takes one file
-and refuses an environment of several before sending anything. Without
+and refuses an environment of several before sending anything; a website stages several in a folder of the load's own,
+which it removes after, and sends each with its path. Without
 a stored card (no deployed record, or a record with none), the live probe decides. Every env keeps the
 record it deploys or reattaches to, and MultiEnv hands it to every child env except a name an MCP
 server and a website share.
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
@@ -96,6 +98,27 @@ async def test_a_website_child_env_loads_at_its_own_card_url(sent):
     await web.load_environment_artifact(_artifact("shop"))
 
     assert [(r.method, str(r.url)) for r in sent] == [("POST", f"{_CARD}/svc/shop/agentenv")] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_website_stages_several_files_in_a_folder_of_the_loads_own_sends_each_with_its_path_and_removes_it(sent):
+    web = _website()
+    web._sandbox, web._gateway_url, web._deployed = MagicMock(exec_script=AsyncMock()), _GW, _record(await _card("shop"))
+    web._copy_artifact_into_container = AsyncMock(side_effect=lambda file, path: f"/tmp/data/{path}")
+    web._env_provider = MagicMock(spec=EnvironmentGatewayProvider, install_changelog_triggers=AsyncMock())
+    files = {path: SimpleNamespace(content_type="application/json", filename=path.rsplit("/", 1)[-1])
+             for path in ("orders/1.json", "cart.json")}
+
+    await web.load_environment_artifact(SimpleNamespace(environment_name="shop", file_artifact_refs=dict.fromkeys(files),
+                                                        get_file_artifacts=lambda: files))
+
+    staged = [c.args[1] for c in web._copy_artifact_into_container.await_args_list]
+    folder = staged[0].removesuffix("/orders/1.json")
+    assert folder.startswith(".agentenv-load-") and staged == [f"{folder}/{path}" for path in files]
+    parts = json.loads(sent[1].content)["params"]["parts"]
+    assert [(p["file"]["uri"], p["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"]) for p in parts] == [
+        (f"file:///tmp/data/{folder}/{path}", path) for path in files]
+    assert web._sandbox.exec_script.await_args.args[0].endswith(f"rm -rf /tmp/data/{folder}")
 
 
 @pytest.mark.asyncio

@@ -150,11 +150,12 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
 
     def to_toml(self, out: ExportContext) -> dict:
         """The artifact.toml of a folder holding the environment's files at their paths, which ``from_toml`` reads back
-        as this. One file inside a folder is refused: a folder's one file reads back as that file alone."""
+        as this. One file kept at a path other than its filename is refused: a folder's one file reads back at its
+        filename."""
         if self.file_artifact_refs is not None:
             if len(self.file_artifact_refs) == 1:
-                raise Unwritable(f"its one file is at {next(iter(self.file_artifact_refs))!r}, and a folder holding one "
-                                 "file reads back as that file alone, without its folders")
+                raise Unwritable(f"its one file is kept at {next(iter(self.file_artifact_refs))!r}, not at its filename, "
+                                 "and a folder's one file reads back kept at its filename")
             for path, file in self.get_file_artifacts().items():
                 out.file(path, file.object_url)
             return {"type": self.type, "environment_name": self.environment_name}

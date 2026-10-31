@@ -2,8 +2,9 @@
 
 The env deploys, a later process restores its record and loads data into the server, and the teardown step, which
 rebuilds each sandbox from disk, removes the container. A load is timed by the size of the payload it staged, through
-the deploy's own handle and a restored one; an environment of several files is staged file by file at their paths and
-handed to the server's data/add together, timed by their total size; and the server's state reads as JSON whether ``data/get`` answers with
+the deploy's own handle and a restored one; an environment of several files is staged file by file at their paths, in a
+folder of the load's own that an earlier load's file can't be in the way of, and handed to the server's data/add
+together, timed by their total size; and the server's state reads as JSON whether ``data/get`` answers with
 data or with a file bundle. A loop of one's own lists, declares and calls the server's tools through ``ToolSession``,
 and plays a task's agent as an episode, around the echo agent. Requires a docker daemon; spins up a throwaway
 ``registry:2`` and skips if it can't start.
@@ -169,11 +170,17 @@ async def test_an_environment_of_several_files_loads_each_from_its_path_in_one_a
         path: FileArtifact.put_bytes(id=f"server-items-file-{index}-{uid}", description="server env e2e",
                                      filename=path.rsplit("/", 1)[-1], content=content, content_type="application/json")
         for index, (path, content) in enumerate(contents.items())})
+    # A file an earlier load left at /data/inbox, where this load's inbox/ folder would go.
+    earlier = EnvironmentArtifact.put(id=f"server-items-inbox-{uid}", environment_name="items", file_artifact=FileArtifact.put_bytes(
+        id=f"server-items-inbox-file-{uid}", description="server env e2e", filename="inbox",
+        content=json.dumps({"items": ["earlier"]}).encode(), content_type="application/json"))
+    restored = await Env.from_instance_id(deployed.instance_id)
 
-    await (await Env.from_instance_id(deployed.instance_id)).load_environment_artifact(artifact)
+    await restored.load_environment_artifact(earlier)
+    await restored.load_environment_artifact(artifact)
 
     assert await legacy_protocol.service_state(deployed, None, "items") == {"items": ["in-a", "in-b", "top"]}
-    assert staged_sizes == [sum(map(len, contents.values()))]
+    assert staged_sizes[-1] == sum(map(len, contents.values()))
 
 
 @pytest.mark.asyncio

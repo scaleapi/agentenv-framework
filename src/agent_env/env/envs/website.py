@@ -20,7 +20,7 @@ from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class,
+    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, staged_paths,
 )
 from agent_env.env.gateway import GatewayMode
 from agent_env.attribution import Attribution
@@ -171,9 +171,16 @@ class WebsiteEnv(Env):
         if base_url is not None:
             from agent_env.env.gateway.constants import DATA_PLANE_LOAD_TIMEOUT_S
             files = environment_artifact.get_file_artifacts()
-            staged = {path: f"file://{await self._copy_artifact_into_container(file, path)}" for path, file in files.items()}
-            await protocol_v1.reset_data(base_url)
-            await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, staged), timeout=DATA_PLANE_LOAD_TIMEOUT_S)
+            folder, paths = staged_paths(environment_artifact, files)
+            try:
+                staged = {path: f"file://{await self._copy_artifact_into_container(file, paths[path])}"
+                          for path, file in files.items()}
+                await protocol_v1.reset_data(base_url)
+                await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, staged),
+                                           timeout=DATA_PLANE_LOAD_TIMEOUT_S)
+            finally:
+                if folder is not None:
+                    await self._remove_from_container(folder)
         else:
             await self._load_environment_artifact_legacy(legacy_load_file(self, environment_artifact))
         await builtin.install_changelog_triggers(self.environment_name)
@@ -200,6 +207,17 @@ class WebsiteEnv(Env):
         await self._sandbox.exec_script(f"{compose} cp {shlex.quote(vm_path)} {shlex.quote(f'{backend_service}:{container_path}')}")
         await self._sandbox.exec_script(f"rm -f {shlex.quote(vm_path)}")
         return container_path
+
+    async def _remove_from_container(self, path: str) -> None:
+        """Remove what a load staged at ``/tmp/data/<path>``, best-effort: a load that finished stands either way."""
+        from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_SUFFIX, DOCKER_COMPOSE_PATH
+        backend_service = f"{self.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}"
+        container_path = f"/tmp/data/{path}"
+        try:
+            await self._sandbox.exec_script(f"docker compose -f {shlex.quote(DOCKER_COMPOSE_PATH)} exec -T "
+                                            f"{shlex.quote(backend_service)} rm -rf {shlex.quote(container_path)}")
+        except Exception as e:  # noqa: BLE001 -- cleanup, not the load
+            logger.warning(f"[{self.environment_name}] could not remove {container_path} after a load (ignored): {e}")
 
     async def _load_environment_artifact_legacy(self, file_artifact) -> None:
         container_path = await self._copy_artifact_into_container(file_artifact, file_artifact.filename)
