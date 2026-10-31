@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from agent_env.openenv.environment import END_TURN
 from agent_env.training.verl.__main__ import main
-from agent_env.training.verl.prepare import LOOP, write_dataset
+from agent_env.training.verl.prepare import LOOP, ROW, write_dataset
 from tst.unit.task.episode.run_test import (
     ALICE,
     ITEMS,
@@ -64,6 +64,17 @@ def test_each_toolset_is_probed_once_and_a_rows_tools_are_its_tasks(serve, tmp_p
     assert [[tool["function"]["name"] for tool in row["extra_info"]["tools"]] for row in _rows(out / "all.parquet")] == [
         ["add_item", "end_turn"], ["take_item", "end_turn"], ["add_item", "end_turn"]]
     assert len(teardowns.finished) == 2
+
+
+def test_a_split_the_server_keeps_empty_has_a_rows_columns(serve, tmp_path):
+    server = serve({"a": PLAYED}, {"empty": []})
+
+    out = write_dataset(server.url, tmp_path)
+    server.stop()
+
+    empty = pq.read_table(out / "empty.parquet")
+    assert (empty.num_rows, empty.schema) == (0, ROW)
+    assert pq.read_table(out / "all.parquet").schema == ROW
 
 
 def test_a_split_whose_name_isnt_a_file_name_is_refused_before_anything_is_written(serve, tmp_path):

@@ -9,13 +9,12 @@ import importlib.util
 import json
 import subprocess
 import sys
-import tomllib
 
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from tst.unit.test_runtime_dependencies_are_imported import PYPROJECT, SELF, _module_paths, _optional_requirements
+from tst.unit.test_runtime_dependencies_are_imported import SELF, _module_paths, _optional_requirements
 
 _BLOCKING = """
 import importlib, importlib.abc, json, sys
@@ -137,20 +136,13 @@ def _only_in(extra: str) -> list[str]:
     """Module paths the extra installs and neither a core install nor any other extra does, but for an extra that
     includes it (``trl`` includes ``openenv``): a distribution two extras share (grpcio, for gcp and tensorlake) stays
     for the other's modules."""
-    others = [other for other in _optional_requirements() if other != extra and extra not in _included(other)]
+    mine = _closure(frozenset({extra}))
+    others = [other for other in _optional_requirements()
+              if other != extra and not mine <= _closure(frozenset({other}))]
     core = _closure(frozenset()) | set().union(*(_closure(frozenset({other})) for other in others))
     provided_by_core = set().union(*(_module_paths(d) for d in core))
     extra_only = _closure(frozenset({extra})) - core
     return sorted(set().union(*(_module_paths(d) for d in extra_only)) - provided_by_core)
-
-
-def _included(extra: str) -> set[str]:
-    """The extras ``extra`` declares it includes, with those they include: an extra whose distributions another's
-    happen to cover, as ``verl``'s are ``trl``'s, isn't included by it."""
-    declared = tomllib.loads(PYPROJECT.read_text())["project"]["optional-dependencies"][extra]
-    requirements = [Requirement(dep) for dep in declared]
-    return {name for requirement in requirements if canonicalize_name(requirement.name) == SELF
-            for included in requirement.extras for name in {included} | _included(included)}
 
 
 def _outside(extra: str) -> list[str]:

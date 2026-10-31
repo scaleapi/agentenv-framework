@@ -18,6 +18,14 @@ from agent_env.training._openenv import check_split_names, key, messages, probe,
 #: The ``agent_name`` every row plays under, and the name ``agent_loop.yaml`` registers the loop at.
 AGENT = "agentenv"
 LOOP = "agent_env.training.verl.loop.AgentEnvAgentLoop"
+#: A row's columns, so a split the server keeps empty still has them.
+ROW = pa.schema([
+    ("data_source", pa.string()),
+    ("prompt", pa.list_(pa.struct([("role", pa.string()), ("content", pa.string())]))),
+    ("agent_name", pa.string()),
+    ("extra_info", pa.struct([("split", pa.string()), ("index", pa.int64()), ("task_id", pa.string()),
+                              ("tools", pa.string())])),
+])
 
 
 def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, reset_timeout: float = 600.0,
@@ -43,7 +51,7 @@ def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, rese
             "agent_name": AGENT,
             "extra_info": {"split": split, "index": task["index"], "task_id": task["id"],
                            "tools": json.dumps(tools[key(task)])},
-        } for task in described]), out / f"{split}.parquet")
+        } for task in described], schema=ROW), out / f"{split}.parquet")
     (out / "agent_loop.yaml").write_text(yaml.safe_dump([{
         "name": AGENT, "_target_": LOOP, "url": url, "tool_timeout": tool_timeout, "reset_timeout": reset_timeout,
         "attempts": attempts,
