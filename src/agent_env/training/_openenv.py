@@ -43,6 +43,7 @@ _TRANSIENT = (TimeoutError, ConnectionResetError, ConnectionAbortedError, Broken
               httpx.TimeoutException, httpx.ReadError, httpx.RemoteProtocolError)
 
 _CAPACITY = re.compile(r"Server at capacity: \d+/(\d+)")
+_FILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 
 logger = logging.getLogger(__name__)
 _waited: set[str] = set()
@@ -363,6 +364,13 @@ def read_tasks(url: str, *, local: str) -> tuple[str, dict[str, list[dict[str, A
         raise ValueError(f"the server at {url} doesn't describe its tasks' toolsets and turns, so it isn't a bundle "
                          "served by agent_env.openenv.build_app from this version of agentenv-framework or later")
     return name, tasks
+
+
+def check_split_names(tasks: Mapping[str, Any]) -> None:
+    """Refuses splits whose names can't name the data file a writer writes for each."""
+    if unfit := [split for split in tasks if not _FILE.fullmatch(split)]:
+        raise ValueError(f"the server's splits {unfit} can't name a data file: a split's name must be letters, "
+                         "digits, '.', '_' and '-', not starting with '.'")
 
 
 def toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, NamedToolset]:
