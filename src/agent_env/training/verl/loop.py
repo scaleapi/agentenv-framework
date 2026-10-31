@@ -41,6 +41,9 @@ class AgentEnvAgentLoop(ToolAgentLoop):
     past its deadline or a server that went away, is played again from the start on a new episode, a fresh sample of
     the same policy, up to ``attempts`` times, but not once ``reset_timeout`` seconds have passed since it began; one
     that fails every time raises RolloutFailed, so verl's V1 trainer leaves it out of training and of the eval reward.
+    Opening its session, a rollout waits out a server at its limit or refusing connections, as one restarting does,
+    within ``reset_timeout``, so a restart delays rollouts rather than failing them: the writer read the server first,
+    so a refusal then is a server coming back, not a wrong address. A server that refuses the token fails at once.
     A task that ends unscored without failing, and a prompt that doesn't fit ``rollout.prompt_length`` with its tools,
     are configuration errors no replay changes, and raise too; the V1 trainer logs each such session and leaves it out.
     An env answer longer than ``multi_turn.max_tool_response_length``, which verl cuts, is warned of once a tool.
@@ -77,7 +80,7 @@ class AgentEnvAgentLoop(ToolAgentLoop):
         row = self._row = kwargs["extra_info"]
         schemas = json.loads(row["tools"])
         shared = Shared(self._url, frozenset(schema["function"]["name"] for schema in schemas), self._tool_timeout,
-                        self._reset_timeout, patience=self._reset_timeout, token=self._token)
+                        self._reset_timeout, patience=self._reset_timeout, waits_for_server=True, token=self._token)
         began = time.monotonic()
         for attempt in range(1, self._attempts + 1):
             session = _Session(shared)

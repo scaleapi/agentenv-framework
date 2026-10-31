@@ -58,14 +58,16 @@ class NamedToolset:
 @dataclass(frozen=True)
 class Shared:
     """What a session needs of its server: where it is, the tools the model is shown, which an episode's first turn
-    must offer no more than, the deadlines, how long to wait for room on the server, and the token it asks for. The key
-    makes it equal to its pickled copies only."""
+    must offer no more than, the deadlines, how long to wait for room on the server, whether to wait as long for a
+    server that refuses connections, as one restarting does, and the token it asks for. The key makes it equal to its
+    pickled copies only."""
 
     url: str
     offered: frozenset[str]
     tool_timeout: float
     reset_timeout: float
     patience: float = REOPEN_PATIENCE
+    waits_for_server: bool = False
     token: str | None = field(default=None, repr=False)
     key: str = field(default_factory=lambda: uuid.uuid4().hex)
 
@@ -133,7 +135,8 @@ class Session:
     async def _begin(self, rollout: Rollout, split: str, index: int, expected: str | None) -> None:
         if self._client is None:
             self._client = await reopened(self._shared.url, self._shared.reset_timeout, dropped=self._opened,
-                                          patience=self._shared.patience, token=self._shared.token)
+                                          patience=self._shared.patience, waits_for_server=self._shared.waits_for_server,
+                                          token=self._shared.token)
             self._opened = True
         reset = await self._client.reset(split=split, index=index, timeout_s=self._shared.reset_timeout)
         if reset.done:
@@ -269,11 +272,12 @@ async def opened(url: str, timeout: float, *, token: str | None = None) -> Gener
     return client
 
 
-async def reopened(url: str, timeout: float, *, dropped: bool, patience: float,
+async def reopened(url: str, timeout: float, *, dropped: bool, patience: float, waits_for_server: bool = False,
                    token: str | None = None) -> GenericEnvClient:
     """A session, tried again every ``REOPEN_SECONDS`` for ``patience`` seconds while the server is at its limit or too
-    busy to answer, in place of a ``dropped`` one or for a rollout's own; raises Failed, which leaves the rollout
-    unscored, when it can't open one, at once unless the server was at its limit or too busy to answer."""
+    busy to answer, or with ``waits_for_server`` refuses the connection, as one restarting does, in place of a
+    ``dropped`` one or for a rollout's own; raises Failed, which leaves the rollout unscored, when it can't open one, at
+    once unless it was waiting."""
     lead = "its session was dropped, and " if dropped else ""
     deadline = time.monotonic() + patience
     while True:
@@ -290,7 +294,8 @@ async def reopened(url: str, timeout: float, *, dropped: bool, patience: float,
                                "more at once", url, e.limit)
             await asyncio.sleep(REOPEN_SECONDS)
         except ConnectionError as e:
-            if not _transient(e) or time.monotonic() + REOPEN_SECONDS > deadline:
+            waits = _transient(e) or (waits_for_server and _caused_by(e, ConnectionRefusedError))
+            if not waits or time.monotonic() + REOPEN_SECONDS > deadline:
                 raise Failed(f"{lead}{e}") from e
             await asyncio.sleep(REOPEN_SECONDS)
 
@@ -298,8 +303,12 @@ async def reopened(url: str, timeout: float, *, dropped: bool, patience: float,
 def _transient(error: BaseException | None) -> bool:
     """Whether ``error`` came of a server too busy to answer in time or a connection it dropped, rather than of nothing
     listening at its address or an answer that isn't a session."""
+    return _caused_by(error, _TRANSIENT)
+
+
+def _caused_by(error: BaseException | None, causes: type[BaseException] | tuple[type[BaseException], ...]) -> bool:
     while error is not None:
-        if isinstance(error, _TRANSIENT):
+        if isinstance(error, causes):
             return True
         error = error.__cause__ or error.__context__
     return False
