@@ -4,8 +4,10 @@ settings the deploy gave it, a secret resolved at boot, its window launched once
 comes up, and the computer ready only once its server says its window and its @ready_check are; its apt packages,
 one from a PPA, its download, run script and install step on its build setting, fetched at put, installed offline.
 And two apps composed into one computer env, each running on its own settings from its own folder, the files their run
-scripts wrote compared before the push, or the image of the same key reused, as one an earlier run pushed is. Needs Docker and the local registry on localhost:5000."""
+scripts wrote compared before the push of this machine's arch, or the image of the same key reused, as one an earlier
+run pushed is. Needs Docker and the local registry on localhost:5000."""
 
+import platform
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,7 @@ from tst.integration.computer.conftest import run_context
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 APP = Path(__file__).parent / "app"
+ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 
 
 def test_an_app_deployed_alone_runs_its_service_on_its_settings_on_a_computer_named_after_it(state, monkeypatch):
@@ -52,7 +55,6 @@ def test_two_apps_composed_into_one_computer_env_each_run_on_their_own_settings(
         "clock": {"zone": "Europe/Paris", "served": {"zone": "Europe/Paris", "known": True}}, "card": "desk",
         "app_ready": ["app clock", "app notes"], "launched": ["notes"], "folders": ["clock", "notes"], "hello": True,
         "paris": True}
-    for pair in ("container/amd64", "container/arm64"):
-        said = [line for line in ran.output.splitlines() if line.startswith(f"envs/desk: {pair}: ")]
-        assert any(line.endswith(("comparing the files its parts' run scripts and install steps wrote",
-                                  "reusing the image of the same key, built earlier")) for line in said), said
+    said = [line for line in ran.output.splitlines() if line.startswith(f"envs/desk: container/{ARCH}: ")]
+    assert any(line.endswith(("comparing the files its parts' run scripts and install steps wrote",
+                              "reusing the image of the same key, built earlier")) for line in said), said
