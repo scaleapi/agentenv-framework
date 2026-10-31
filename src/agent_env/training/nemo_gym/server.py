@@ -17,7 +17,7 @@ import uvicorn
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import ConfigDict, PrivateAttr, model_validator
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 try:
     from nemo_gym.base_resources_server import (
@@ -72,7 +72,7 @@ class AgentEnvResourcesServerConfig(BaseResourcesServerConfig):
     max_concurrent_envs: int = 8
     tool_timeout: float = 60.0
     reset_timeout: float = 600.0
-    idle_timeout: float = 600.0
+    idle_timeout: float = Field(600.0, gt=0, allow_inf_nan=False)
     reward_components: bool = False
     masked_as_error: bool = False
 
@@ -211,19 +211,21 @@ class AgentEnvResourcesServer(SimpleResourcesServer):
                            "may be left running", served.url, STOP_SECONDS)
 
 
-def serve(folder: str | Path, *, host: str, port: int, masked_as_error: bool = False) -> None:
+def serve(folder: str | Path, *, host: str, port: int, masked_as_error: bool = False,
+          idle_timeout: float | None = None) -> None:
     """Runs the resources server ``write_server`` wrote into ``folder`` on its own, at ``host``:``port``, without Gym's
     head server or the agent servers its config names, for a trainer that plays the folder's rows against the server's
-    URL. ``host`` and ``port`` win over any the folder's config names, and ``masked_as_error``, as the config takes it,
-    is on when either it or the config sets it. As verifiers' launcher for Gym's own servers does, its client names a
-    head server nothing calls."""
+    URL. ``host``, ``port`` and an ``idle_timeout`` win over any the folder's config names, and ``masked_as_error``, as
+    the config takes it, is on when either it or the config sets it. As verifiers' launcher for Gym's own servers does,
+    its client names a head server nothing calls."""
     folder = Path(folder).resolve()
     written = yaml.safe_load((folder / "configs" / f"{folder.name}.yaml").read_text())
     config = written[folder.name]["resources_servers"][folder.name]
-    masked_as_error = masked_as_error or config.get("masked_as_error", False)
+    settings = {"name": folder.name, "host": host, "port": port,
+                "masked_as_error": masked_as_error or config.get("masked_as_error", False),
+                **({"idle_timeout": idle_timeout} if idle_timeout is not None else {})}
     resources = AgentEnvResourcesServer(
-        config=AgentEnvResourcesServerConfig(**{**config, "name": folder.name, "host": host, "port": port,
-                                                "masked_as_error": masked_as_error}),
+        config=AgentEnvResourcesServerConfig(**{**config, **settings}),
         server_client=ServerClient(head_server_config=BaseServerConfig(host=host, port=port),
                                    global_config_dict=OmegaConf.create({})),
     )
