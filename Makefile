@@ -1,4 +1,4 @@
-.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test nemo-gym-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test nemo-gym-test verl-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -73,6 +73,11 @@ trl-test: ## Run one GRPOTrainer step on CPU through the TRL helper (needs trl a
 # the dev extra: sync it on that Python first (uv sync --extra dev --extra nemo-gym), as .github/workflows/nemo-gym.yml does.
 nemo-gym-test: ## Play rollouts through NeMo Gym's resources server for a bundle (needs nemo-gym, on Python 3.13.14+)
 	$(PYTHON) -m pytest tst/nemo_gym --timeout=900 $(PYTEST_ARGS)
+
+# The verl tier plays a row through AgentEnvAgentLoop on verl itself, with Qwen3's tokenizer from the Hub. verl and
+# torch aren't in the dev extra: install them first, as .github/workflows/verl.yml does.
+verl-test: ## Play rows through the verl agent loop on verl itself (needs verl and CPU torch, and the Hub)
+	$(PYTHON) -m pytest tst/verl --timeout=900 $(PYTEST_ARGS)
 
 # The clean-install gate CI runs, on the same Python. The script gives every step an allowlisted
 # environment, so nothing in this shell reaches the install it checks. A failed run keeps its folder.
