@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import subprocess
+import sys
 import tarfile
 import time
 from types import SimpleNamespace
@@ -20,12 +21,12 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
 from agent_env.env import Env
-from agent_env.env.envs.computer.utils import builder, composer, packages
+from agent_env.env.envs.computer.utils import builder, composer, layers_in_image, packages
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
-from tst.unit.env.envs._computer import _base, _put, FakeVm, FakeVmProvider
+from tst.unit.env.envs._computer import _base, _put, FakeVm, FakeVmProvider, saved_image
 
 
 def test_a_stage_that_goes_on_is_said_to_go_on_and_a_failed_pair_says_why(base, driver, docker, monkeypatch):
@@ -113,6 +114,37 @@ def test_the_packages_a_build_installed_are_read_from_its_image_without_running_
     assert calls == [["docker", "create"], ["docker", "cp"], ["docker", "rm"]]
 
 
+def test_what_each_run_wrote_is_read_from_the_newest_layer_a_shell_ran_its_command_for_in_a_saved_images_history(
+        tmp_path):
+    saved_image(tmp_path / "image.tar", [
+        (None, {"etc/os-release": b"ubuntu"}),
+        ("RUN /bin/sh -c cd /opt/a && ./setup.sh # buildkit", {"usr/local/bin/tool": b"the base's"}),
+        ("USER root", None),
+        ("RUN /bin/sh -c cd /opt/a && ./setup.sh # buildkit", {
+            "usr/local/bin/tool": (b"a", 0o755), "usr/bin/tool": "/usr/local/bin/tool", "etc/.wh.gone": b"",
+            "./etc/a": b"a", "opt/shared/.wh..wh..opq": b""}),
+        ("RUN /bin/sh -c cd /opt/a && ./setup.sh.extra # buildkit", {"etc/extra": b"extra"}),
+        ("COPY apps/b/ /opt/b/ # buildkit", {"opt/b/x": b"x"}),
+        ("RUN /bin/sh -c cd /opt/b && ./setup.sh # buildkit", {"usr/local/bin/tool": b"b"}),
+        ("RUN /bin/sh -c cd /opt/b && ./setup.sh # buildkit", {"etc/again": b"again"})])
+    commands = ["cd /opt/a && ./setup.sh", "cd /opt/a && ./setup.sh.extra", "cd /opt/b && ./setup.sh",
+                "cd /opt/b && ./setup.sh"]
+
+    ran = subprocess.run([sys.executable, "-I", str(builder.LAYERS), str(tmp_path / "image.tar"), json.dumps(commands)],
+                         capture_output=True, text=True)
+
+    sha = lambda data: hashlib.sha256(data).hexdigest()
+    assert json.loads(ran.stdout) == layers_in_image.written(str(tmp_path / "image.tar"), commands) == [
+        {"/usr/local/bin/tool": f"exec {sha(b'a')}", "/usr/bin/tool": "link /usr/local/bin/tool", "/etc/gone": "deleted",
+         "/etc/a": f"file {sha(b'a')}", "/opt/shared": "opaque"},
+        {"/etc/extra": f"file {sha(b'extra')}"}, {"/usr/local/bin/tool": f"file {sha(b'b')}"},
+        {"/etc/again": f"file {sha(b'again')}"}]
+    for missing in (["cd /opt/c && ./setup.sh"], ["cd /opt/b && ./setup.sh", "cd /opt/a && ./setup.sh"],
+                    [*commands, "cd /opt/b && ./setup.sh"]):
+        with pytest.raises(ValueError, match="no layer of the image below the last one found was made by"):
+            layers_in_image.written(str(tmp_path / "image.tar"), missing)
+
+
 def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on(base, driver, docker, monkeypatch):
     signed = []
     monkeypatch.setattr(builder, "docker_login", signed.append)
@@ -172,7 +204,7 @@ def test_a_put_on_a_vm_provider_builds_each_arch_in_a_vm_of_its_own_and_its_imag
     assert sorted(vms.fetched) == sorted([*driver_files, *driver_files])
     assert vms.uploaded and all(f"{packages.PREFIX}/files/" in url for url in vms.uploaded)
     builds = {build["platform"]: build for build in docker.builds}
-    assert builds["linux/amd64"]["files"] == ["Dockerfile", "agentenv-desk.conf", "driver/driver.py",
+    assert builds["linux/amd64"]["files"] == ["Dockerfile", "agentenv-driver-desk.conf", "driver/driver.py",
                                               "driver/requirements.txt", "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"]
     assert composed["amd64"]["installed"] == {"mss": "10.1.0"}
     assert docker.labels[f"agentenv-computer:{composed['arm64']['key'][7:23]}-arm64"]["dev.agentenv.emulated"] == "true"

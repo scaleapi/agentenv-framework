@@ -32,12 +32,15 @@ from agent_env.utils.paths import validate_relative_filename
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.env.env import DeployedEnv
+    from agent_env.env.envs.computer.app_env import ComputerAppEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 
 logger = logging.getLogger(__name__)
 
 #: Where load_artifact puts files in a computer by default: one of the folders data/get returns by default.
 DEFAULT_DESTINATION = "Downloads"
+#: The computer app env's type: an app composed into a computer env, and a computer env of its own.
+APP_TYPE = "computer_app"
 
 
 class ComputerEnv(Env):
@@ -45,14 +48,16 @@ class ComputerEnv(Env):
     description = "A computer: a base computer and a driver, composed at put into an image for each form and arch"
     env_provider_type: ClassVar[str] = "computer"
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("computer", artifact_type="computer"),
-                                                  EntityRef.env("driver", env_type=ComputerDriverEnv.type))
+                                                  EntityRef.env("driver", env_type=ComputerDriverEnv.type),
+                                                  EntityRef.env("apps[]", env_type=APP_TYPE, beside=("install",)))
 
     def __init__(self, id: str, version: Optional[int], environment_name: str, computer: ComputerArtifact,
                  driver: ComputerDriverEnv, display: Optional[dict] = None, network: Optional[dict] = None,
-                 computer_settings: Optional[dict[str, SettingValue]] = None, metadata: Optional[dict[str, Any]] = None):
+                 computer_settings: Optional[dict[str, SettingValue]] = None, metadata: Optional[dict[str, Any]] = None,
+                 apps: Optional[list[ComputerAppEnv]] = None):
         super().__init__(id, version, metadata=metadata)
         self.environment_name = environment_name
-        self.computer, self.driver = computer, driver
+        self.computer, self.driver, self.apps = computer, driver, apps or []
         self.display, self.network = display, network
         self.computer_settings = computer_settings or {}
         self._sandbox = None
@@ -66,7 +71,8 @@ class ComputerEnv(Env):
                 "environment_name": self.environment_name,  # dual-write with service_name during the rename
                 "computer": {"id": self.computer.id, "version": self.computer.version},
                 "driver": {"id": self.driver.id, "version": self.driver.version}, "display": self.display,
-                "network": self.network, "computer_settings": self.computer_settings}
+                "network": self.network, "computer_settings": self.computer_settings,
+                **({"apps": [{"id": app.id, "version": app.version} for app in self.apps]} if self.apps else {})}
 
     @classmethod
     def from_dict(cls, data: dict) -> ComputerEnv:
@@ -77,29 +83,33 @@ class ComputerEnv(Env):
                    environment_name=data["environment_name"] if "environment_name" in data else data["service_name"],
                    computer=ComputerArtifact.get(data["computer"]["id"], data["computer"]["version"]), driver=driver,
                    display=data.get("display"), network=data.get("network"),
-                   computer_settings=data.get("computer_settings"), metadata=data.get("metadata") or {})
+                   computer_settings=data.get("computer_settings"), metadata=data.get("metadata") or {},
+                   apps=[_app(Env.get(ref["id"], ref["version"])) for ref in data.get("apps") or []])
 
     @classmethod
     def put(cls, *, id: str, computer: ComputerArtifact, driver: ComputerDriverEnv, environment_name: str,
             apps: Any = (), display: Any = None, network: Any = None, computer_settings: Any = None,
             compose: bool = True, composing: Composing = Composing()) -> Self:
-        """Write a computer env of ``computer`` and ``driver`` once gate 1 passes, then compose it as ``composing``
-        says unless ``compose`` is False. Refused, naming every mismatch, before anything is stored."""
-        values, problems = gate.check(computer, driver, apps=list(apps), display=display, network=network,
+        """Write a computer env of ``computer``, ``driver`` and ``apps``, computer app envs built into it in their
+        order, once gate 1 passes, then compose it as ``composing`` says unless ``compose`` is False. Refused, naming
+        every mismatch, before anything is stored."""
+        apps = list(apps)
+        values, problems = gate.check(computer, driver, apps=apps, display=display, network=network,
                                       computer_settings=computer_settings or {})
         if problems:
             raise ValueError(f"computer env {id!r}: " + "; ".join(problems))
         env = get_env_store().put_document(cls(
-            id=id, version=None, environment_name=environment_name,
-            computer=computer, driver=driver, display=display, network=network, computer_settings=values))
+            id=id, version=None, environment_name=environment_name, computer=computer, driver=driver, apps=apps,
+            display=display, network=network, computer_settings=values))
         if compose:
             composer.compose(env, composing=composing)
         return env
 
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> ComputerEnv:
-        """Write the computer env an env.toml declares, its base and driver as the bundle wrote them or the ones they
-        name, its environment_name the folder's when it sets none."""
+        """Write the computer env an env.toml declares, its base, driver and apps as the bundle wrote them or the ones
+        they name, its environment_name the folder's when it sets none. An app's ``install`` is ``"build"``, the
+        default: it's built into the computer."""
         fields, refused = ctx.accepted(data, environment_name=str, computer=object, driver=object, apps=list,
                                        display=dict, network=dict, computer_settings=dict)
         missing = [ctx.config_problem(f"{key} is required: the {what}, such as {example}") for key, what, example in (
@@ -108,6 +118,7 @@ class ComputerEnv(Env):
             ctx.refuse([*refused, *missing])
         base, driver = ctx.artifact(fields.pop("computer"), ComputerArtifact), ctx.env(fields.pop("driver"),
                                                                                        ComputerDriverEnv)
+        fields["apps"] = _listed_apps(fields.get("apps", []), ctx)
         try:
             return cls.put(id=ctx.id, computer=base, driver=driver,
                            environment_name=fields.pop("environment_name", ctx.name), composing=ctx.composing,
@@ -115,9 +126,9 @@ class ComputerEnv(Env):
         except ValueError as e:
             ctx.refuse([str(e)])
 
-    def composed_apps(self) -> list:
+    def composed_apps(self) -> list[ComputerAppEnv]:
         """The computer app envs composed into the env's computer, each installed under its prefix."""
-        return []
+        return self.apps
 
     def computer_artifact(self) -> ComputerArtifact:
         """The env's computer: its base composed with its driver, over the images built."""
@@ -217,3 +228,32 @@ class ComputerEnv(Env):
             except Exception as e:  # a cancellation propagates, and keeps the sandbox for the next close()
                 logger.warning(f"Failed to terminate sandbox {self._sandbox.sandbox_id}: {e}")
             self._sandbox = None
+
+
+def _app(env: Env) -> ComputerAppEnv:
+    if refusal := _not_an_app(env):
+        raise TypeError(refusal)
+    return env
+
+
+def _listed_apps(refs: list, ctx: AuthoringContext) -> list[ComputerAppEnv]:
+    """The computer app envs an env.toml's ``apps`` names, each a ref, or a table of one with its ``install`` beside it;
+    refused, naming each problem, unless every one is a computer app env installed at build."""
+    apps, problems = [], []
+    for i, ref in enumerate(refs):
+        install = ref.get("install", "build") if isinstance(ref, dict) else "build"
+        if install != "build":
+            problems.append(ctx.config_problem(f"apps[{i}]: install = {install!r}: an app installs at \"build\", into "
+                                               "the computer's image; \"boot\" isn't supported yet"))
+            continue
+        app = ctx.env({key: value for key, value in ref.items() if key != "install"} if isinstance(ref, dict) else ref)
+        if refusal := _not_an_app(app):
+            problems.append(ctx.config_problem(f"apps[{i}]: {refusal}"))
+        apps.append(app)
+    if problems:
+        ctx.refuse(problems)
+    return apps
+
+
+def _not_an_app(env: Env) -> str | None:
+    return f"{env.id} is a {env.type} env, not a {APP_TYPE} env" if env.type != APP_TYPE else None

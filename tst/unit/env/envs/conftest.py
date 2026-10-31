@@ -23,6 +23,7 @@ def docker(local_stores, cli_routing, monkeypatch):
     fake = FakeDocker(registry)
     monkeypatch.setattr(builder, "build_image", fake.build_image)
     monkeypatch.setattr(builder, "push_local_image", fake.push)
+    monkeypatch.setattr(builder, "save_image", fake.save)
     monkeypatch.setattr(builder, "docker_login", lambda auth: None)
     monkeypatch.setattr(composer, "write_index", fake.joined)
     monkeypatch.setattr(composer, "pin_digest", registry.pin_digest)

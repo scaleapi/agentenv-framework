@@ -1,19 +1,24 @@
 """What the computer env tests share: the fake Docker and registry the composer builds with, a fake sandbox provider
 whose VMs build, and a base, a driver and an env of them."""
 
+import gzip
+import hashlib
+import io
 import json
 import re
 import shlex
 import subprocess
+import tarfile
 import urllib.parse
 
-from agentenv_protocol.computer import DriverDeclaration
+from agentenv_protocol.computer import AppDeclaration, DriverDeclaration
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.config import get_config
-from agent_env.env.envs.computer.utils import builder
+from agent_env.env.envs.computer.utils import builder, layers_in_image
+from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils.install import Install, Service
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -48,6 +53,7 @@ class FakeDocker:
     def __init__(self, registry: Registry):
         self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
         self.probed, self.probe_fails, self.resolved, self.timeouts = [], {}, [], {}
+        self.writes, self.saved = {}, []
 
     def resolve(self, request, context, source, arch, work):
         """The resolver in the base: each apt package as one .deb, each venv's requirements as one wheel."""
@@ -97,6 +103,24 @@ class FakeDocker:
                             "build_settings": {path.parent.parent.name: json.loads(path.read_text())
                                                for path in context.glob("apps/*/.agentenv/build_settings.json")}})
 
+    def save(self, tag, path):
+        """``tag`` saved as ``docker save`` does: a base layer with no history, then a layer for each COPY and RUN of its
+        Dockerfile, a RUN's holding the files ``writes`` gives for each key its command has."""
+        self.saved.append(tag)
+        dockerfile = next(build["dockerfile"] for build in reversed(self.builds) if build["tag"] == tag)
+        layers = [(None, {"etc/os-release": b"ubuntu"})]
+        for line in dockerfile.splitlines():
+            instruction, _, rest = line.partition(" ")
+            command = rest.removeprefix("--network=none ")
+            if instruction == "RUN":
+                layers.append((f"RUN /bin/sh -c {command} # buildkit", {
+                    path: content for key, files in self.writes.items() if key in command for path, content in files.items()}))
+            elif instruction == "COPY":
+                layers.append((f"{line} # buildkit", {}))
+            elif instruction != "FROM":
+                layers.append((line, None))
+        saved_image(path, layers)
+
     def push(self, local, ref, store):
         self.registry.tags[ref] = self.registry.image(UBUNTU_LAYER, arch=local.rsplit("-", 1)[1],
                                                       labels=self.labels.get(local))
@@ -107,6 +131,41 @@ class FakeDocker:
 
     def _arch(self, config_digest):
         return json.loads(self.registry.blobs[config_digest])["architecture"]
+
+
+def saved_image(path, layers):
+    """A tar of an image as ``docker save`` writes one: each of ``layers``, bottom first, its history's ``created_by``
+    (None for a layer with no entry) and its files by path, a file's content as bytes, or with its mode as (bytes, mode),
+    and a link's target as text, or None for an entry that made no layer; the last layer gzipped, as some savers keep
+    them."""
+    blobs, history, made = {}, [], []
+    for i, (created_by, files) in enumerate(layers):
+        if created_by is not None:
+            history.append({"created_by": created_by, **({"empty_layer": True} if files is None else {})})
+        if files is None:
+            continue
+        layer = io.BytesIO()
+        with tarfile.open(fileobj=layer, mode="w") as tar:
+            for name, content in files.items():
+                entry = tarfile.TarInfo(name)
+                if isinstance(content, str):
+                    entry.type, entry.linkname = tarfile.SYMTYPE, content
+                    tar.addfile(entry)
+                else:
+                    data, entry.mode = content if isinstance(content, tuple) else (content, 0o644)
+                    entry.size = len(data)
+                    tar.addfile(entry, io.BytesIO(data))
+        data = gzip.compress(layer.getvalue()) if i == len(layers) - 1 else layer.getvalue()
+        made.append(digest := f"blobs/sha256/{hashlib.sha256(data).hexdigest()}")
+        blobs[digest] = data
+    config = json.dumps({"history": history}).encode()
+    blobs[config_path := f"blobs/sha256/{hashlib.sha256(config).hexdigest()}"] = config
+    blobs["manifest.json"] = json.dumps([{"Config": config_path, "Layers": made}]).encode()
+    with tarfile.open(path, mode="w") as tar:
+        for name, data in blobs.items():
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            tar.addfile(entry, io.BytesIO(data))
 
 
 def _base(image, **changes):
@@ -193,7 +252,7 @@ class FakeVm:
         return ran.returncode, ran.stdout + ran.stderr
 
     def _docker(self, words):
-        docker, cwd = self.provider.docker, None
+        docker, cwd, printed = self.provider.docker, None, ""
         while words:
             command, words = (words[:words.index("&&")], words[words.index("&&") + 1:]) if "&&" in words else (words, [])
             if command[0] == "cd":
@@ -214,6 +273,13 @@ class FakeVm:
                                        platform=command[command.index("--platform") + 1], labels=labels)
                 except DockerBuildError as e:
                     return 1, str(e)
+            elif command[:2] == ["docker", "save"]:
+                docker.save(command[4], self.at(command[3]))
+            elif command[:2] == ["docker", "run"] and "/layers.py" in command:
+                saved = command[command.index("-v") + 1].split(":")[0]
+                printed = json.dumps(layers_in_image.written(str(self.at(saved)), json.loads(command[-1])))
+            elif command[:2] == ["rm", "-f"]:
+                self.at(command[2]).unlink(missing_ok=True)
             elif command[:2] == ["docker", "tag"]:
                 self.provider.tagged[command[3]] = command[2]
             elif command[:2] == ["docker", "push"]:
@@ -224,7 +290,7 @@ class FakeVm:
                 self.provider.uploaded.append(url)
             else:
                 raise AssertionError(f"a builder VM was asked to run {command}")
-        return 0, ""
+        return 0, printed
 
 
 class FakeVmProvider(SandboxProvider):
@@ -238,3 +304,46 @@ class FakeVmProvider(SandboxProvider):
         self.sizes.append(size)
         self.vms.append(vm := FakeVm(self, self.root / str(len(self.vms))))
         return vm
+
+
+MAIL_SETTINGS = {"properties": {
+    "signature": {"default": "", "type": "string"},
+    "password": {"default": "", "type": "string", "format": "password", "writeOnly": True, "minLength": 32},
+    "token": {"anyOf": [{"type": "string", "format": "password", "writeOnly": True}, {"type": "null"}], "default": None},
+    "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
+
+
+MAIL_BUILD = {"properties": {"edition": {"default": "home", "enum": ["home", "pro"], "type": "string"},
+                             "locale": {"default": "en_US", "type": "string"}}, "type": "object"}
+
+
+#: The program of the mail app's own server.
+MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/python -m "
+               "agentenv_protocol.computer.serve_app app.py:Mail\ndirectory=/opt/agentenv/apps/mail\n"
+               "environment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\nredirect_stderr=true\n"
+               "stdout_logfile=/var/log/agentenv/app-mail.log\n")
+
+
+def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
+         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", **changes):
+    """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
+    them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
+    its build settings, ``linux_settings``, that of its settings on Linux, and ``name``, its id's last part and its
+    environment name."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "app.py").write_text("class Mail: ...\n")
+    (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
+    for path, text in (extra or {}).items():
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_text(text)
+    files = FileArtifactUniverse.put_bundled(f"@local/~/kit/{name}__files", files={
+        path: folder / path for path in ("app.py", "requirements.txt", *(extra or {}))})
+    declaration = AppDeclaration.model_validate({
+        "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
+        "permissions": [], "settings": settings, "build_settings": build, "skill": None,
+        "data": [], "install_steps": [{"name": name, "scope": scope, "os": os or None} for name, scope, *os in steps],
+        "ready_checks": [], "os": {"linux": {"launch": launch, "settings": linux_settings, "install": install or {
+            "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
+    return ComputerAppEnv.put(**{"id": f"@local/~/kit/{name}", "environment_name": name, "module": "app.py:Mail",
+                                 "files": files, "declaration": declaration, "computer": base, "driver": driver,
+                                 "compose": compose, **changes})

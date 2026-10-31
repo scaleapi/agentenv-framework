@@ -1,7 +1,8 @@
 """Computer envs: gate 1 refuses a base, a driver or a declaration that can't compose, naming every problem, before
 anything is stored; the composer builds each form and arch, reuses an image of the same key whichever env built it,
 records each result as it finishes, and writes the arches built as the env's computer; a deploy, a reset and a load;
-and computer apps. Where and how a pair builds is test_computer_builder. Docker and the registry are faked."""
+and computer apps. Where and how a pair builds is test_computer_builder; a computer of several apps, test_computer_apps.
+Docker and the registry are faked."""
 
 import asyncio
 import contextlib
@@ -18,7 +19,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, AppDeclaration
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
 
@@ -52,7 +53,8 @@ from agent_env.store.image_store.local_registry_image_store import LocalRegistry
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from tst.unit.computer_home import Computer
-from tst.unit.env.envs._computer import CONFIG, SERVE, CARD_EXTENSION, CARD, _base, _driver, _put, FakeVmProvider
+from tst.unit.env.envs._computer import (CONFIG, SERVE, CARD_EXTENSION, CARD, MAIL_SETTINGS, MAIL_BUILD, MAIL_SERVER, _app,
+                                         _base, _driver, _put, FakeVmProvider)
 
 
 def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_its_images_make(base, driver, docker,
@@ -89,11 +91,11 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
         "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip "
         "install --no-index --no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
         "--format=json > /opt/agentenv/drivers/desk/installed.json && rm -rf /tmp/agentenv-packages/wheels/driver",
-        "COPY agentenv-desk.conf /etc/supervisor/conf.d/agentenv-desk.conf",
-        "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-desk.conf && test -x "
+        "COPY agentenv-driver-desk.conf /etc/supervisor/conf.d/agentenv-driver-desk.conf",
+        "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-driver-desk.conf && test -x "
         "/opt/agentenv/drivers/desk/venv/bin/python",
         "USER user", f"LABEL dev.agentenv.computer-key={composed['arm64']['key']}"]
-    assert arm64["files"] == ["Dockerfile", "agentenv-desk.conf", "driver/driver.py", "driver/requirements.txt",
+    assert arm64["files"] == ["Dockerfile", "agentenv-driver-desk.conf", "driver/driver.py", "driver/requirements.txt",
                               "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"]
     assert sorted(arch for arch, _ in docker.resolved) == ["amd64", "arm64"]
     assert docker.timeouts == {"arm64": 3600, "amd64": 10800}
@@ -101,10 +103,28 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
                                                 "requirements": "requirements.txt", "add": []}]
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
-        "[program:desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
+        "[program:driver-desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
         'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
-        "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/desk-driver.log\n")
+        "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/driver-desk-driver.log\n")
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
+
+
+def test_a_key_covers_its_build_files_executable_bits_and_the_composers_format(base, driver, docker, tmp_path,
+                                                                            monkeypatch):
+    folder = tmp_path / "ctx"
+    folder.mkdir()
+    (folder / "run").write_bytes(b"echo\n")
+    plain = composer._digest(folder)
+    (folder / "run").chmod(0o755)
+    runnable = composer._digest(folder)
+    (folder / "run").chmod(0o640)
+
+    first = Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]["key"]
+    monkeypatch.setattr(composer, "FORMAT", composer.FORMAT + 1)
+    raised = Env.get(_put(base, driver, id="@local/~/kit/other", environment_name="other").id).metadata["composed"][
+        "container"]["arm64"]["key"]
+
+    assert runnable != plain == composer._digest(folder) and raised != first
 
 
 def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one_another_env_built(base, driver,
@@ -330,7 +350,6 @@ async def test_a_computer_env_with_no_ready_build_is_refused_at_deploy_naming_it
 
 
 @pytest.mark.parametrize("changes, problem", [
-    ({"apps": [{"env": "mail"}]}, "apps: computer app envs aren't supported yet"),
     ({"display": {"width": 0, "height": 800}}, "display is { width = <n>, height = <n> }, each 1 to 32767 pixels"),
     ({"display": {"width": 1280}}, "display is { width = <n>, height = <n> }"),
     ({"display": {"width": 1280, "height": 800}, "computer_settings": {"resolution": "800x600"}},
@@ -342,7 +361,7 @@ async def test_a_computer_env_with_no_ready_build_is_refused_at_deploy_naming_it
      "computer_settings.wallpaper: @local/~/kit/ubuntu-24.04 declares no setting 'wallpaper'"),
     ({"computer_settings": {"timezone": 3}}, "computer_settings.timezone must be a str, like its default 'UTC', not 3"),
     ({"computer_settings": ["timezone"]}, "computer_settings must be a table of the computer's setting values"),
-], ids=["apps", "display-zero", "display-side", "display-and-resolution", "network", "network-key",
+], ids=["display-zero", "display-side", "display-and-resolution", "network", "network-key",
         "settings-name", "settings-type", "settings-table"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
@@ -763,47 +782,7 @@ async def test_a_load_outside_the_home_is_refused_before_anything_is_sent(base, 
     assert computer.calls == []
 
 
-MAIL_SETTINGS = {"properties": {
-    "signature": {"default": "", "type": "string"},
-    "password": {"default": "", "type": "string", "format": "password", "writeOnly": True, "minLength": 32},
-    "token": {"anyOf": [{"type": "string", "format": "password", "writeOnly": True}, {"type": "null"}], "default": None},
-    "theme": {"enum": ["light", "dark"], "type": "string", "default": "light"}}, "type": "object"}
-
-
-MAIL_BUILD = {"properties": {"edition": {"default": "home", "enum": ["home", "pro"], "type": "string"},
-                             "locale": {"default": "en_US", "type": "string"}}, "type": "object"}
-
-
-#: The program of the mail app's own server.
-MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/python -m "
-               "agentenv_protocol.computer.serve_app app.py:Mail\ndirectory=/opt/agentenv/apps/mail\n"
-               "environment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\nredirect_stderr=true\n"
-               "stdout_logfile=/var/log/agentenv/app-mail.log\n")
 PROTOCOL_VERSION = importlib.metadata.version("agentenv-framework-protocol")
-
-
-def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
-         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, **changes):
-    """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
-    them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
-    its build settings, and ``linux_settings``, that of its settings on Linux."""
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "app.py").write_text("class Mail: ...\n")
-    (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
-    for name, text in (extra or {}).items():
-        (folder / name).parent.mkdir(parents=True, exist_ok=True)
-        (folder / name).write_text(text)
-    files = FileArtifactUniverse.put_bundled("@local/~/kit/mail__files", files={
-        name: folder / name for name in ("app.py", "requirements.txt", *(extra or {}))})
-    declaration = AppDeclaration.model_validate({
-        "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
-        "permissions": [], "settings": settings, "build_settings": build, "skill": None,
-        "data": [], "install_steps": [{"name": name, "scope": scope, "os": os or None} for name, scope, *os in steps],
-        "ready_checks": [], "os": {"linux": {"launch": launch, "settings": linux_settings, "install": install or {
-            "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
-    return ComputerAppEnv.put(**{"id": "@local/~/kit/mail", "environment_name": "mail", "module": "app.py:Mail",
-                                 "files": files, "declaration": declaration, "computer": base, "driver": driver,
-                                 "compose": compose, **changes})
 
 
 def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_under_its_prefix(base, driver, docker,

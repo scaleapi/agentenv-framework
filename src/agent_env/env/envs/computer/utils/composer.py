@@ -13,7 +13,6 @@ import hashlib
 import importlib.metadata
 import json
 import logging
-import re
 import shlex
 import shutil
 import subprocess
@@ -39,7 +38,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils import boot, builder, gate, packages
+from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, packages
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.base import ConcurrentModificationError
@@ -61,6 +60,11 @@ logger = logging.getLogger(__name__)
 
 #: The image store repository composed computers are pushed to, tagged by their keys.
 REPOSITORY = "agentenv-computers"
+#: What the composer and its builders make of a build's inputs beyond what its key shows of them (the base, the
+#: Dockerfile, the build files with their executable bits, the lock): raise it with a change that alters what an image
+#: holds some other way, its labels or how it's built, and leave it for any other, so images aren't built again for
+#: nothing.
+FORMAT = 1
 #: Where a driver's files go in a composed computer, in a folder named for the driver; an app's, under APPS.
 DRIVERS = "/opt/agentenv/drivers"
 APPS = str(installed_apps.APPS)
@@ -79,6 +83,8 @@ _HEARTBEAT_S = 600
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
+#: How many of the files two parts wrote differently a progress line names.
+_SHOWN = 10
 
 
 @dataclass(frozen=True)
@@ -235,7 +241,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             key = "sha256:" + hashlib.sha256(json.dumps({
                 "base": base_identity, "dockerfile": dockerfile, "context": _digest(context),
                 "lock": lock.digest() if lock is not None else None, "form": form, "arch": arch,
-                "composer": _composer_digest(),
+                "format": FORMAT,
             }, sort_keys=True).encode()).hexdigest()
             store = get_config().get_image_store_for(env.stored_id)
             store.ensure_repository(REPOSITORY)
@@ -252,6 +258,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
                 packages.stage(lock, building_on, env.stored_id, fetched)
             local, emulated = f"agentenv-computer:{key[7:23]}-{arch}", platform != building_on.platform
             building_on.build(f"{dockerfile}LABEL {KEY_LABEL}={key}\n", local, platform, {KEY_LABEL: key})
+            if reason := _compare(building_on, local, layers, pair, progress):
+                return _failed(env, form, arch, stage, key, reason)
             installed = building_on.installed(local, layer.prefix)
             building_on.build(f"FROM {local}\n", local, platform, {
                 INSTALLED_LABEL: json.dumps(installed, sort_keys=True), EMULATED_LABEL: "true" if emulated else "false",
@@ -279,6 +287,26 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
         return _failed(env, form, arch, stage, key, f"{type(e).__name__}: {e}")
 
 
+def _compare(building_on: builder.Builder, tag: str, layers: list[_Layer], pair: str,
+             progress: _Progress) -> str | None:
+    """Why ``tag`` is refused: a part's run scripts or install steps certainly undoing what an earlier part's installed
+    (``clashes``); None, with any other file two parts wrote differently said to ``progress``. Read only when two or
+    more parts have such steps, the only ones that write outside a part's folder."""
+    runs = {layer.env_id: _runs(layer) for layer in layers if _runs(layer)}
+    if len(runs) < 2:
+        return None
+    progress.at(pair, "comparing the files its parts' run scripts and install steps wrote")
+    written = building_on.written(tag, [command for commands in runs.values() for _, command in commands])
+    lost, differ = clashes.compare(list(zip([env_id for env_id, commands in runs.items() for _ in commands], written)))
+    if lost:
+        return "a part undoes what an earlier one installed: " + "; ".join(lost)
+    if differ:
+        progress.at(pair, "compared", "not refused, as each may keep the earlier part's change: two parts wrote "
+                    f"{', '.join(differ[:_SHOWN])}" + (f" and {len(differ) - _SHOWN} more" if len(differ) > _SHOWN
+                                                       else ""))
+    return None
+
+
 def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
     """What the composed image is built ``FROM`` for ``arch``, and the base's part of the key, found without building
     anything: a registry image pinned to its digest, or the tag a build of the base's stored build context for that
@@ -294,13 +322,14 @@ def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
 @dataclass(frozen=True)
 class _Layer:
     """A driver's or an app's part of a build: its folder in the build context, its prefix in the image, what it
-    installs, and the file of its supervisord programs. An app's venv also has the protocol's ``app`` extra, for the
+    installs, the file of its supervisord programs, and the id of its env. An app's venv also has the protocol's ``app`` extra, for the
     app's own server, which listens in a folder of the app's the session user owns."""
 
     folder: str
     prefix: str
     install: Install
     conf: str
+    env_id: str
     app: bool = False
     served: str | None = None
     steps: tuple[tuple[str, str], ...] = ()
@@ -309,11 +338,12 @@ class _Layer:
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact,
                   from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
-    its port, its folder under ``DRIVERS`` named for its id's last part."""
-    install, name = driver.install[base.os.type], _name(driver.id, "driver")
-    layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-{name}.conf")
-    _stage(context, layer, f"driver {driver.id}", driver.files, _services(name, install), {"MCP_PORT": driver.port},
-           from_store)
+    its port, its folder under ``DRIVERS`` named for its id's last part, its programs and their file under ``driver-``
+    as an app's are under ``app-``, so neither ever takes the other's."""
+    install, name = driver.install[base.os.type], gate.folder_name(driver.id, "driver")
+    layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-driver-{name}.conf", driver.id)
+    _stage(context, layer, f"driver {driver.id}", driver.files, _services(f"driver-{name}", install),
+           {"MCP_PORT": driver.port}, from_store)
     return layer
 
 
@@ -321,15 +351,17 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
                from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the app's install files under ``context/apps/<name>/``, with the values of its build settings the env
     fixes, and its supervisord programs beside them, run under its name: its services and its own server, which serves
-    its class from its venv and launches the app. Its folder under ``APPS`` is named for its id's last part."""
-    install, name = app.install[base.os.type], _name(app.id, "app")
+    its class from its venv and launches the app. Its folder under ``APPS`` is named for its environment name."""
+    install, name = app.install[base.os.type], gate.app_folder(app)
     file, _, cls = app.module.partition(":")
     served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
-    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app=True, served=served,
+    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app.id, app=True,
+                   served=served,
                    steps=tuple((step.name, step.scope) for step in app.declaration.install_steps
                                if step.os is None or base.os.type in step.os))
-    programs = {f"app-{name}": f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
-                **_services(f"app-{name}", install)}
+    programs = dict(zip(gate.programs(app, base.os.type), [
+        f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
+        *(service.command for service in install.services)]))
     _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name},
            from_store)
     if app.build_settings:
@@ -338,10 +370,6 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
         # Inline, over any the app's files hold, as an app stored before that folder was refused can.
         from_store.pop(f"{layer.folder}/{BUILD_SETTINGS.as_posix()}", None)
     return layer
-
-
-def _name(env_id: str, fallback: str) -> str:
-    return re.sub(r"[^a-z0-9-]+", "-", env_id.rsplit("/", 1)[-1].lower()).strip("-") or fallback
 
 
 def _services(name: str, install: Install) -> dict[str, str]:
@@ -447,11 +475,8 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
                              f"--format=json > {prefix}/installed.json")
         if layer.app:
             lines.append(f"RUN mkdir -p {prefix}/{SOCKET.parent} && chown {user} {prefix}/{SOCKET.parent}")
-        for run in layer.install.run or []:
-            lines += _as(run.scope, user, f"RUN --network=none cd {prefix} && {shlex.quote('./' + run.script)}")
-        for step, scope in layer.steps:
-            lines += _as(scope, user, f"RUN --network=none cd {prefix} && venv/bin/python -m "
-                                      f"agentenv_protocol.computer.run_install_step {layer.served} {step}")
+        for scope, command in _runs(layer):
+            lines += _as(scope, user, f"RUN --network=none {command}")
         lines.append(f"COPY {layer.conf} /etc/supervisor/conf.d/{layer.conf}")
         checks = [f"test -d {prefix}", f"test -f /etc/supervisor/conf.d/{layer.conf}"]
         if _venv(layer):
@@ -459,6 +484,14 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
         lines.append(f"RUN {' && '.join(checks)}")
     lines.append(f"USER {user}")
     return "\n".join(lines) + "\n"
+
+
+def _runs(layer: _Layer) -> list[tuple[str, str]]:
+    """The commands of ``layer``'s run scripts and its install steps, each with the scope it runs as: the only steps of
+    a build that write outside the layer's folder."""
+    return [*((run.scope, f"cd {layer.prefix} && {shlex.quote('./' + run.script)}") for run in layer.install.run or []),
+            *((scope, f"cd {layer.prefix} && venv/bin/python -m agentenv_protocol.computer.run_install_step "
+                      f"{layer.served} {step}") for step, scope in layer.steps)]
 
 
 def _as(scope: str, user: str, run: str) -> list[str]:
@@ -533,16 +566,13 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
 
 
 def _digest(folder: Path) -> str:
-    """A digest of the files under ``folder``, by their paths and bytes."""
+    """A digest of the files under ``folder``, by their paths, bytes and whether each is executable, which the composer
+    alone decides (umask never sets it)."""
     hashed = hashlib.sha256()
     for path in sorted(p for p in folder.rglob("*") if p.is_file()):
-        hashed.update(path.relative_to(folder).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+        hashed.update(path.relative_to(folder).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest()
+                      + (b"x" if path.stat().st_mode & 0o100 else b"-"))
     return "sha256:" + hashed.hexdigest()
-
-
-def _composer_digest() -> str:
-    """A digest of the composer, which says what a build makes of its inputs, and of its builders' ``FORMAT``."""
-    return "sha256:" + hashlib.sha256(Path(__file__).read_bytes() + f"builder {builder.FORMAT}".encode()).hexdigest()
 
 
 def _now() -> str:

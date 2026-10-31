@@ -19,6 +19,8 @@ from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.unit.bundle._support import layout, local_builds
+from tst.unit.bundle.computer_app_env_test import APP, TOML as APP_TOML
+from tst.unit.bundle.computer_driver_env_test import LINUX
 
 UBUNTU = "@local/agentenv-framework/computers/ubuntu-24.04"
 REFERENCE = "@local/agentenv-framework/drivers/reference"
@@ -30,6 +32,12 @@ display = { width = 1600, height = 900 }
 [computer_settings]
 timezone = "Europe/Paris"
 '''
+WITH_APPS = DESKTOP.replace("display =", 'apps = ["notes", { env = "mail", install = "build" }]\ndisplay =')
+#: Two app folders, mail and notes, of one app class.
+APPS = {f"envs/{name}/{file}": text for name in ("mail", "notes") for file, text in (
+    ("env.toml", APP_TOML), ("app.py", APP.format(supports=LINUX, skill="skill.md", linux_skill="skill-linux.md")),
+    ("requirements.txt", "agentenv-framework-protocol\n"), ("skill.md", "# Mail\n"),
+    ("skill-linux.md", "# Mail on Linux\n"))}
 
 
 @pytest.fixture
@@ -48,10 +56,10 @@ def composed(tmp_path, monkeypatch, local_stores, cli_routing, builds):
     return calls
 
 
-def _bundle(root, toml=DESKTOP):
+def _bundle(root, toml=DESKTOP, extra=None):
     return layout(root, {"envs/desktop/env.toml": toml, "tasks/t.json": json.dumps([
         {"id": "desktop", "type": "load_artifact", "env_id": "desktop", "artifact_id": "notes"}]),
-        "artifacts/notes/notes.txt": "a note\n"})
+        "artifacts/notes/notes.txt": "a note\n", **(extra or {})})
 
 
 def _installed(tmp_path, package, name):
@@ -137,17 +145,33 @@ def test_the_env_alone_is_planned_whatever_the_bundles_tasks_would_deploy(tmp_pa
     assert f"{resolved.bundle.id_root}/desktop" in {write.id for write in plan.writes}
 
 
+def test_a_computer_env_folder_names_its_apps_in_order_each_written_before_it(tmp_path, composed):
+    plan = _plan(_bundle(tmp_path / "desk", WITH_APPS, APPS))
+
+    materialize(plan, build_here=local_builds(plan))
+
+    root = plan.bundle.bundle.id_root
+    env = Env.get(f"{root}/desktop")
+    assert [(app.id, app.type, app.environment_name) for app in env.composed_apps()] == [
+        (f"{root}/notes", "computer_app", "notes"), (f"{root}/mail", "computer_app", "mail")]
+    assert composed == [(env.id, UBUNTU, REFERENCE, None)]
+
+
 @pytest.mark.parametrize("toml, problem", [
     ('type = "computer"\ndriver = "reference"\n', 'computer is required: the base computer, such as "ubuntu-24.04"'),
     ('type = "computer"\ncomputer = "ubuntu-24.04"\n', 'driver is required: the driver, such as "reference"'),
     (DESKTOP.replace("display =", "ports = [80]\ndisplay ="), "unknown key 'ports'"),
     (DESKTOP.replace("1600", "0"), "display is { width = <n>, height = <n> }, each 1 to 32767 pixels"),
-], ids=["no-computer", "no-driver", "unknown-key", "display"])
+    (WITH_APPS.replace('"build"', '"boot"'), 'apps[1]: install = \'boot\': an app installs at "build", into the '
+     'computer\'s image; "boot" isn\'t supported yet'),
+    (WITH_APPS.replace('["notes", ', '["notes", "notes", '), "apps: @local/~/desk/notes is listed twice"),
+    (WITH_APPS.replace('install = "build"', 'mode = "build"'), 'apps[1].env: expected an id or { env = "<id>", version = '
+     '<n> }, the version optional'),
+], ids=["no-computer", "no-driver", "unknown-key", "display", "boot", "twice", "key-beside"])
 def test_a_computer_env_folder_that_declares_what_cant_compose_is_refused_naming_the_folder(tmp_path, composed, toml,
                                                                                             problem):
-    plan = _plan(_bundle(tmp_path / "desk", toml))
-
     with pytest.raises(BundleError) as refused:
+        plan = _plan(_bundle(tmp_path / "desk", toml, APPS))
         materialize(plan, build_here=local_builds(plan))
 
     assert any(line.startswith("envs/desktop") and problem in line for line in refused.value.problems), refused.value
