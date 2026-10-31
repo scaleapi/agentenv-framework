@@ -197,19 +197,26 @@ def test_an_answer_verl_cuts_is_warned_of_once_a_tool(serve, tmp_path, tokenizer
                         r"answers", warning)
 
 
-def test_the_writer_counts_each_prompt_with_its_tools_and_refuses_one_over_the_limit(serve, tmp_path, tokenizer):
+def test_the_writer_counts_each_prompt_with_its_tools_as_verl_renders_it_and_refuses_one_over_the_limit(
+        serve, tmp_path, tokenizer):
     server = serve({"a": PLAYED})
 
     written = write_dataset(server.url, tmp_path / "data", tokenizer=TOKENIZER)
+    thinking_off = write_dataset(server.url, tmp_path / "off", tokenizer=TOKENIZER,
+                                 chat_template_kwargs={"enable_thinking": False})
     row = _row(written)
     with pytest.raises(ValueError, match=r"1 rows' prompts are over max_prompt_length=16 tokens with their tools, the "
                                          r"longest task a of split all at \d+, which verl would cut"):
         write_dataset(server.url, tmp_path / "refused", tokenizer=TOKENIZER, max_prompt_length=16)
     server.stop()
 
-    rendered = tokenizer.apply_chat_template(row["prompt"], tools=json.loads(row["extra_info"]["tools"]),
-                                             add_generation_prompt=True, tokenize=True, return_dict=True)
-    assert written.longest_prompt == len(rendered["input_ids"]) > 16
+    def rendered(**kwargs):
+        return len(tokenizer.apply_chat_template(row["prompt"], tools=json.loads(row["extra_info"]["tools"]),
+                                                 add_generation_prompt=True, tokenize=True, return_dict=True,
+                                                 **kwargs)["input_ids"])
+
+    assert (written.longest_prompt, thinking_off.longest_prompt) == (rendered(), rendered(enable_thinking=False))
+    assert thinking_off.longest_prompt != written.longest_prompt > 16
     assert not (tmp_path / "refused").exists()
 
 

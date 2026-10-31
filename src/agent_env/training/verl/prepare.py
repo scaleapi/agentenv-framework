@@ -41,7 +41,7 @@ class Written:
 
 def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, reset_timeout: float = 600.0,
                   attempts: int = 3, token_var: str | None = None, tokenizer: str | None = None,
-                  max_prompt_length: int | None = None) -> Written:
+                  max_prompt_length: int | None = None, chat_template_kwargs: dict[str, Any] | None = None) -> Written:
     """The tasks of the OpenEnv server at ``url`` as ``out/<split>.parquet``, a row per task of each split, and
     ``out/agent_loop.yaml``, which points the rows' agent loop at ``url`` with the deadlines and the ``attempts`` a
     rollout the env fails is played. A row's prompt is its task's system prompt and first prompt, and its tools every
@@ -51,12 +51,13 @@ def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, rese
     ``token_var`` names the environment variable that holds the token a server given one asks for
     (``build_app(token=...)``): the writer reads it now and the loop in each of verl's workers, so the token is in no
     file. With ``tokenizer``, the model's as transformers loads it, each row's prompt is counted with its tools as the
-    model's chat template renders them, and a row over ``max_prompt_length`` is refused before anything is written,
-    where verl would cut it from the left; verl's own length filter doesn't count a row's tools."""
+    model's chat template renders them with ``chat_template_kwargs``, verl's ``data.apply_chat_template_kwargs``, and a
+    row over ``max_prompt_length`` is refused before anything is written, where verl would cut it from the left; verl's
+    own length filter doesn't count a row's tools."""
     if attempts < 1:
         raise ValueError(f"attempts must be at least 1, not {attempts}")
-    if max_prompt_length is not None and tokenizer is None:
-        raise ValueError("max_prompt_length is in tokens, so it takes the model's tokenizer")
+    if tokenizer is None and (max_prompt_length is not None or chat_template_kwargs):
+        raise ValueError("max_prompt_length and chat_template_kwargs count tokens, so they take the model's tokenizer")
     url = url.rstrip("/")
     env_name, tasks, probed = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app first",
                                               timeout=reset_timeout, token=token_in(token_var))
@@ -68,7 +69,8 @@ def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, rese
         "extra_info": {"split": split, "index": task["index"], "task_id": task["id"],
                        "tools": json.dumps(tools[key(task)])},
     } for task in described] for split, described in tasks.items()}
-    longest = None if tokenizer is None else _longest(rows, AutoTokenizer.from_pretrained(tokenizer), max_prompt_length)
+    longest = None if tokenizer is None else _longest(rows, AutoTokenizer.from_pretrained(tokenizer), max_prompt_length,
+                                                      chat_template_kwargs or {})
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     for split, written in rows.items():
@@ -89,11 +91,12 @@ def token_in(var: str | None) -> str | None:
     return token
 
 
-def _longest(rows: dict[str, list[dict[str, Any]]], tokenizer: Any, limit: int | None) -> int:
+def _longest(rows: dict[str, list[dict[str, Any]]], tokenizer: Any, limit: int | None,
+             chat_template_kwargs: dict[str, Any]) -> int:
     """The longest row's prompt in tokens with its tools, refusing rows over ``limit``."""
     lengths = {(split, row["extra_info"]["task_id"]): len(tokenizer.apply_chat_template(
         row["prompt"], tools=json.loads(row["extra_info"]["tools"]), add_generation_prompt=True, tokenize=True,
-        return_dict=True)["input_ids"]) for split, written in rows.items() for row in written}
+        return_dict=True, **chat_template_kwargs)["input_ids"]) for split, written in rows.items() for row in written}
     if limit is not None and (over := {at: length for at, length in lengths.items() if length > limit}):
         (split, task), length = max(over.items(), key=lambda item: item[1])
         raise ValueError(f"{len(over)} rows' prompts are over max_prompt_length={limit} tokens with their tools, the "

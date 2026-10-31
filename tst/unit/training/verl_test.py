@@ -109,7 +109,8 @@ def test_a_server_that_asks_for_a_token_is_read_with_the_one_its_variable_holds_
 
 @pytest.mark.parametrize(("options", "message"), [
     ({"attempts": 0}, "attempts must be at least 1, not 0"),
-    ({"max_prompt_length": 1024}, "max_prompt_length is in tokens, so it takes the model's tokenizer"),
+    ({"max_prompt_length": 1024}, "max_prompt_length and chat_template_kwargs count tokens, so they take the model's"),
+    ({"chat_template_kwargs": {"enable_thinking": False}}, "count tokens, so they take the model's tokenizer"),
     ({"token_var": "UNSET_DOCK_TOKEN"}, "UNSET_DOCK_TOKEN isn't set: it holds the token the OpenEnv server asks for"),
 ])
 def test_what_cant_be_written_is_refused_before_the_server_is_read(tmp_path, monkeypatch, options, message):
