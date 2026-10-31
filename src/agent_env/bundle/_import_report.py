@@ -260,8 +260,10 @@ def _needs_lines(imported: BundleImport) -> list[str]:
     refs = [pulled.image for pulled in imported.pulled] + [image.ref for image in imported.images if image.ref]
     registries = sorted({host for ref in refs if (host := registry_host_from_ref(ref))})
     if registries:
-        lines.append(f"- Access to the registries its pulled images are in: `{'`, `'.join(registries)}`. agent-env reads "
-                     "a private one only through its configured image store, such as an ECR store for an ECR registry.")
+        lines.append(f"- Access to the registries its pulled images are in: `{'`, `'.join(registries)}`. An image pinned "
+                     "to a digest needs only this machine's Docker logged in to its registry (`docker login`); agent-env "
+                     "reads any other private one only through its configured image store, such as an ECR store for an "
+                     "ECR registry.")
     return lines
 
 
