@@ -171,15 +171,59 @@ PRIVATE = "registry.example/team/app@sha256:" + "0" * 64
 PUBLIC = "ghcr.io/team/tool:v1"
 
 
+class _StdinVm(_RecordingVmSandbox):
+    """Takes stdin on exec, as the local and Modal VM sandboxes do."""
+
+    def __init__(self):
+        super().__init__()
+        self.stdin: dict[str, bytes] = {}
+
+    async def exec_with_output(self, *args):
+        if args[:4] == ("sudo", "bash", "-c", "mktemp -d"):
+            self.scripts.append("mktemp -d")
+            return 0, "/tmp/tmp.Xq3\n", ""
+        return await super().exec_with_output(*args)
+
+    async def _exec_with_stdin(self, script, stdin):
+        self.stdin[script] = b"".join([piece async for piece in stdin])
+        return 0, "", ""
+
+
 @pytest.mark.asyncio
 async def test_an_image_with_no_tarball_is_pulled_after_logging_in_to_the_registry_the_store_holds(registry):
-    sandbox = _RecordingVmSandbox()
+    sandbox = _StdinVm()
 
     await sandbox.load_docker_images([_image(None, PRIVATE), _image(None, PUBLIC), _image(None, PRIVATE)])
 
-    login, *pulls = sandbox.scripts
-    assert login == "echo token | docker login --username user --password-stdin registry.example"
-    assert sorted(pulls) == sorted([f"docker pull {PRIVATE}", f"docker pull {PUBLIC}"])
+    *login, pull, other_pull = sandbox.scripts
+    assert login == [
+        "mktemp -d",
+        "docker login --username user --password-stdin registry.example < /tmp/tmp.Xq3/password",
+        "rm -rf /tmp/tmp.Xq3",
+    ]
+    assert sandbox.stdin == {"cat > /tmp/tmp.Xq3/password": b"token"}
+    assert sorted([pull, other_pull]) == sorted([f"docker pull {PRIVATE}", f"docker pull {PUBLIC}"])
+
+
+class _FileApiVm(_RecordingVmSandbox):
+    """Writes VM files through its own API, as sail_vm, daytona, tensorlake and vercel do."""
+
+    def __init__(self):
+        super().__init__()
+        self.written: dict[str, bytes] = {}
+
+    async def _write_bytes_to_vm_path(self, data, vm_path):
+        self.written[vm_path] = data
+
+
+@pytest.mark.asyncio
+async def test_a_secret_goes_through_the_file_api_of_a_sandbox_that_takes_no_stdin():
+    sandbox = _FileApiVm()
+
+    await sandbox.write_secret_file(b"token", "/tmp/tmp.Xq3/password")
+
+    assert sandbox.written == {"/tmp/tmp.Xq3/password": b"token"}
+    assert not any("token" in script for script in sandbox.scripts)
 
 
 @pytest.mark.asyncio

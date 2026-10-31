@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Callable, ClassVar, Iterable, Optional
 
 from agent_env.config import get_config
-from agent_env.store.image_store.oci_registry_credentials import registry_host_from_ref
+from agent_env.store.image_store.oci_registry_credentials import RegistryAuth, registry_host_from_ref
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM
 from agent_env.utils.paths import validate_relative_filename
 
@@ -432,10 +432,7 @@ class VmSandbox(Sandbox):
         for image_name in one_per_registry.values():
             auth = await asyncio.to_thread(store.auth, image_name)
             if auth is not None:
-                await self.exec_script(
-                    f"echo {shlex.quote(auth.password)} | docker login "
-                    f"--username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)}"
-                )
+                await self.docker_login(auth)
         pulls = [asyncio.ensure_future(_pull(self, image_name)) for image_name in image_names]
         try:
             await asyncio.gather(*pulls)
@@ -605,6 +602,41 @@ class VmSandbox(Sandbox):
         if parent:
             await self.exec_script(f"mkdir -p {shlex.quote(parent)}")
         await self._write_bytes_to_vm_path(data, vm_path)
+
+    async def docker_login(self, auth: RegistryAuth) -> None:
+        """Sign the VM host's Docker in to ``auth``'s registry, the password read from a secret file."""
+        async with self.secret_dir() as secrets:
+            await self.write_secret_file(auth.password.encode(), f"{secrets}/password")
+            await self.exec_script(
+                f"docker login --username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)} "
+                f"< {shlex.quote(f'{secrets}/password')}"
+            )
+
+    @contextlib.asynccontextmanager
+    async def secret_dir(self) -> AsyncIterator[str]:
+        """A directory on the VM host only its owner can open, under a name no one can guess, removed on the way out."""
+        path = (await self.exec_script("mktemp -d")).strip()
+        try:
+            yield path
+        finally:
+            try:
+                await self.exec_script(f"rm -rf {shlex.quote(path)}")
+            except Exception as e:
+                logger.warning(f"Removing {path} failed (ignored): {e}")
+
+    async def write_secret_file(self, data: bytes, vm_path: str) -> None:
+        """Write a secret to ``vm_path`` on the VM host: over the exec's stdin when this sandbox takes it, else through
+        ``write_host_file``, which keeps it off the command line only where the provider writes files through an API."""
+        async def once() -> AsyncIterator[bytes]:
+            yield data
+
+        try:
+            exit_code, stdout, stderr = await self._exec_with_stdin(f"cat > {shlex.quote(vm_path)}", once())
+        except NotImplementedError:
+            await self.write_host_file(data, vm_path)
+            return
+        if exit_code != 0:
+            raise RuntimeError(f"Writing {vm_path} failed (exit {exit_code}): {(stderr or stdout)[-1500:]}")
 
     async def write_file_from_text(self, content: str, destination_path: str, container: str | None = None) -> None:
         vm_path = self._staging_path("wft", destination_path)
