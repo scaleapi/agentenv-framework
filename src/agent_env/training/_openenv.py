@@ -38,6 +38,9 @@ STOP_SECONDS = 3 * TERMINATE_TIMEOUT_SECONDS + 60.0
 #: How long, and how far apart in seconds, a session tries to open while the server is at its limit, which it stays at
 #: until it has seen a closed session go.
 REOPEN_PATIENCE, REOPEN_SECONDS = 4.0, 1.0
+#: What a session's opening fails with when the server is too busy to answer in time, or drops the connection.
+_TRANSIENT = (TimeoutError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError, EOFError,
+              httpx.TimeoutException, httpx.ReadError, httpx.RemoteProtocolError)
 
 _CAPACITY = re.compile(r"Server at capacity: \d+/(\d+)")
 
@@ -263,9 +266,9 @@ async def opened(url: str, timeout: float) -> GenericEnvClient:
 
 
 async def reopened(url: str, timeout: float, *, dropped: bool, patience: float) -> GenericEnvClient:
-    """A session, tried again every ``REOPEN_SECONDS`` for ``patience`` seconds while the server is at its limit, in
-    place of a ``dropped`` one or for a rollout's own; raises Failed, which leaves the rollout unscored, when it can't
-    open one."""
+    """A session, tried again every ``REOPEN_SECONDS`` for ``patience`` seconds while the server is at its limit or too
+    busy to answer, in place of a ``dropped`` one or for a rollout's own; raises Failed, which leaves the rollout
+    unscored, when it can't open one, at once unless the server was at its limit or too busy to answer."""
     lead = "its session was dropped, and " if dropped else ""
     deadline = time.monotonic() + patience
     while True:
@@ -282,7 +285,19 @@ async def reopened(url: str, timeout: float, *, dropped: bool, patience: float) 
                                "more at once", url, e.limit)
             await asyncio.sleep(REOPEN_SECONDS)
         except ConnectionError as e:
-            raise Failed(f"{lead}{e}") from e
+            if not _transient(e) or time.monotonic() + REOPEN_SECONDS > deadline:
+                raise Failed(f"{lead}{e}") from e
+            await asyncio.sleep(REOPEN_SECONDS)
+
+
+def _transient(error: BaseException | None) -> bool:
+    """Whether ``error`` came of a server too busy to answer in time or a connection it dropped, rather than of nothing
+    listening at its address or an answer that isn't a session."""
+    while error is not None:
+        if isinstance(error, _TRANSIENT):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
 
 
 async def probe(url: str, toolset: NamedToolset, timeout: float) -> tuple[frozenset[str], tuple[dict[str, Any], ...]]:
