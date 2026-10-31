@@ -84,6 +84,20 @@ def test_the_desktop_comes_back_however_often_x_dies(base):
     assert "window id #" in wm
 
 
+def test_the_desktop_comes_back_from_a_restart_that_killed_x_with_its_lock_naming_a_running_pid(base):
+    """A restart gives pids out again, so the lock a killed X left can name a running process; here tini, pid 1."""
+    name = f"agentenv-test-base-{uuid.uuid4().hex[:8]}"
+    docker("run", "-d", "--name", name, base)
+    try:
+        _all_running(name)
+        _exec(name, "sh", "-c", 'printf "%10d\\n" 1 > /tmp/lock && chmod 444 /tmp/lock && mv -f /tmp/lock /tmp/.X99-lock')
+        docker("restart", "-t", "0", name)
+        running = _all_running(name)
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    assert all(" RUNNING " in line for line in running.splitlines()), running
+
+
 @pytest.mark.parametrize("setting, value, error", [
     ("RESOLUTION", "big", "resolution is <width>x<height>, each 1 to 32767 pixels, not 'big'"),
     ("RESOLUTION", "40000x800", "resolution is <width>x<height>, each 1 to 32767 pixels, not '40000x800'"),
