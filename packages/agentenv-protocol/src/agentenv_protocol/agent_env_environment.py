@@ -515,8 +515,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
         has no public hook for this (its low-level handler is ``FastMCP.call_tool``, bound at
         construction), so the manager is the one private seam, required by ``_check_tool_binding``.
 
-        The installed callable carries ``__agentenv_tool_context__ = True`` and ``__wrapped__`` (the
-        dispatch it wraps): the handles a downstream guard uses to assert the ordering contract.
+        The installed callable carries ``__agentenv_tool_context__ = True``, the marker
+        ``_check_tool_binding`` reads to refuse a second handler on the same app.
         """
         manager = app._tool_manager
         inner = manager.call_tool
