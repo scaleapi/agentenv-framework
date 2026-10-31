@@ -1,10 +1,10 @@
 """``AgentEnvAgentLoop`` on verl itself: verl's ``ToolAgentLoop`` plays a row ``write_dataset`` wrote, with Qwen3's
 tokenizer and chat template and a stand-in rollout server, on the unit tier's bundle served on loopback. A played row's
-reward is its episode's, through verl's hermes and qwen3_coder parsers and from a server that asks for a token; a
-rollout the env fails is played again on a new episode, but not once its time is up, and one it fails every time raises,
-which verl's V1 trainer leaves out; a prompt that doesn't fit, an episode that ends unscored without failing and a loop
-run twice raise; an answer verl cuts is warned of; and the writer counts prompts with their tools in the model's tokens.
-CI runs it on verl 0.9.1 and main."""
+reward is its episode's, and its scores, attempts and seconds its reward_extra_info, through verl's hermes and
+qwen3_coder parsers and from a server that asks for a token; a rollout the env fails is played again on a new episode,
+but not once its time is up, and one it fails every time raises, which verl's V1 trainer leaves out; a prompt that
+doesn't fit, an episode that ends unscored without failing and a loop run twice raise; an answer verl cuts is warned of;
+and the writer counts prompts with their tools in the model's tokens. CI runs it on verl 0.9.1 and main."""
 
 import asyncio
 import json
@@ -64,7 +64,10 @@ def test_a_played_rows_reward_is_its_episodes_and_its_last_reply_ends_the_turn(s
     output = asyncio.run(_play(server.url, row, model, tokenizer, parser=parser))
     server.stop()
 
-    assert (output.reward_score, output.extra_fields["agentenv"]) == (1.0, {"attempts": 1, "scores": {"replies": 1.0}})
+    info = output.extra_fields["reward_extra_info"]
+    assert (output.reward_score, info["attempts"], info["score/replies"]) == (1.0, 1, 1.0)
+    assert set(info) == {"attempts", "model_seconds", "env_seconds", "score/replies"}
+    assert info["env_seconds"] >= output.metrics.compute_score > 0 and info["model_seconds"] >= 0
     assert (model.calls, replies) == (2, ["Added a crate."])
     assert 0 in output.response_mask and 1 in output.response_mask
     assert "Added a crate." in tokenizer.decode(output.response_ids)
@@ -101,7 +104,7 @@ def test_a_rollout_the_env_fails_is_played_again_on_a_new_episode(serve, tmp_pat
     output = asyncio.run(_play(server.url, row, _Model(tokenizer), tokenizer))
     server.stop()
 
-    assert (output.reward_score, output.extra_fields["agentenv"]["attempts"], len(deploys)) == (1.0, 2, 2)
+    assert (output.reward_score, output.extra_fields["reward_extra_info"]["attempts"], len(deploys)) == (1.0, 2, 2)
 
 
 def test_a_rollout_the_env_fails_every_time_raises_so_verl_leaves_it_out(serve, tmp_path, tokenizer):

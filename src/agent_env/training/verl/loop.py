@@ -47,7 +47,10 @@ class AgentEnvAgentLoop(ToolAgentLoop):
     A task that ends unscored without failing, and a prompt that doesn't fit ``rollout.prompt_length`` with its tools,
     are configuration errors no replay changes, and raise too; the V1 trainer logs each such session and leaves it out.
     An env answer longer than ``multi_turn.max_tool_response_length``, which verl cuts, is warned of once a tool.
-    ``agent_loop.yaml`` sets the arguments; verl passes the rest.
+    A scored rollout's ``reward_extra_info``, which verl reports per eval as ``val-aux`` metrics and in its dumps,
+    holds each of the episode's scores (``score/<step id>``), its attempts, and its seconds in the model and in the env
+    (deploying, calling tools and scoring, which is also verl's ``compute_score`` time). ``agent_loop.yaml`` sets the
+    arguments; verl passes the rest.
 
     It leans on verl internals, which CI checks on verl 0.9.1 and main: verl builds an agent loop per trajectory, so an
     instance holds one rollout's state, and ``run`` refuses a second; ``ToolAgentLoop.run`` reads the tools from
@@ -93,7 +96,11 @@ class AgentEnvAgentLoop(ToolAgentLoop):
                     raise ValueError(f"{self._task()} ended without a reward: it records no score its server's reward "
                                      "reads, so it can't be trained on")
                 output.reward_score = float(rollout.reward)
-                output.extra_fields["agentenv"] = {"attempts": attempt, "scores": rollout.scores}
+                output.extra_fields["reward_extra_info"] = {
+                    "attempts": attempt, "model_seconds": output.metrics.generate_sequences,
+                    "env_seconds": output.metrics.tool_calls + output.metrics.compute_score,
+                    **{f"score/{step}": score for step, score in (rollout.scores or {}).items()},
+                }
                 return output
             logger.warning("%s, attempt %d of %d: %s", self._task(), attempt, self._attempts, rollout.failure)
             if time.monotonic() - began >= self._reset_timeout:
@@ -109,7 +116,10 @@ class AgentEnvAgentLoop(ToolAgentLoop):
         self.tool_schemas = schemas
         self._reply = ""
         output = await super().run(sampling_params, **kwargs)
-        return output, await session.finish(self._reply)
+        began = time.monotonic()
+        rollout = await session.finish(self._reply)
+        output.metrics.compute_score = time.monotonic() - began
+        return output, rollout
 
     def _cap_text_prompt_length(self, prompt_ids: list[int]) -> list[int]:
         """Refuses the first prompt when it doesn't fit, where verl would cut it from the left, losing the system
