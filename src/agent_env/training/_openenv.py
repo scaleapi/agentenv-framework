@@ -43,6 +43,7 @@ _TRANSIENT = (TimeoutError, ConnectionResetError, ConnectionAbortedError, Broken
               httpx.TimeoutException, httpx.ReadError, httpx.RemoteProtocolError)
 
 _CAPACITY = re.compile(r"Server at capacity: \d+/(\d+)")
+_FILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 
 logger = logging.getLogger(__name__)
 _waited: set[str] = set()
@@ -57,7 +58,8 @@ class NamedToolset:
 @dataclass(frozen=True)
 class Shared:
     """What a session needs of its server: where it is, the tools the model is shown, which an episode's first turn
-    must offer no more than, the deadlines, and how long to wait for room on the server. The key makes it equal to its
+    must offer no more than, the deadlines, how long to wait for room on the server, whether to wait as long for a
+    server that refuses connections, as one restarting does, and the token it asks for. The key makes it equal to its
     pickled copies only."""
 
     url: str
@@ -65,6 +67,8 @@ class Shared:
     tool_timeout: float
     reset_timeout: float
     patience: float = REOPEN_PATIENCE
+    waits_for_server: bool = False
+    token: str | None = field(default=None, repr=False)
     key: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
@@ -122,7 +126,8 @@ class Session:
                 await asyncio.wait([rollout.started])
             self._rollout = None
             if self.opens_at_start and not self._opened:
-                self._client, self._opened = await opened(self._shared.url, self._shared.reset_timeout), True
+                self._client, self._opened = await opened(self._shared.url, self._shared.reset_timeout,
+                                                          token=self._shared.token), True
             rollout = Rollout()
             rollout.started = asyncio.ensure_future(self._begin(rollout, split, index, expected))
             self._rollout = rollout
@@ -130,7 +135,8 @@ class Session:
     async def _begin(self, rollout: Rollout, split: str, index: int, expected: str | None) -> None:
         if self._client is None:
             self._client = await reopened(self._shared.url, self._shared.reset_timeout, dropped=self._opened,
-                                          patience=self._shared.patience)
+                                          patience=self._shared.patience, waits_for_server=self._shared.waits_for_server,
+                                          token=self._shared.token)
             self._opened = True
         reset = await self._client.reset(split=split, index=index, timeout_s=self._shared.reset_timeout)
         if reset.done:
@@ -250,10 +256,11 @@ class Server:
         return not self._thread.is_alive()
 
 
-async def opened(url: str, timeout: float) -> GenericEnvClient:
+async def opened(url: str, timeout: float, *, token: str | None = None) -> GenericEnvClient:
     """A session on the server, opened now rather than at the first reset, so a server at capacity refuses it at once;
-    each message waits ``GRACE_SECONDS`` longer than the ``timeout`` the server ends a call at."""
-    client = GenericEnvClient(base_url=url, message_timeout_s=timeout + GRACE_SECONDS)
+    each message waits ``GRACE_SECONDS`` longer than the ``timeout`` the server ends a call at. ``token`` goes with it
+    as ``Authorization: Bearer``, for a server that asks for one."""
+    client = GenericEnvClient(base_url=url, message_timeout_s=timeout + GRACE_SECONDS, headers=authorization(token))
     try:
         await client.state()
     except Exception as e:
@@ -265,15 +272,17 @@ async def opened(url: str, timeout: float) -> GenericEnvClient:
     return client
 
 
-async def reopened(url: str, timeout: float, *, dropped: bool, patience: float) -> GenericEnvClient:
+async def reopened(url: str, timeout: float, *, dropped: bool, patience: float, waits_for_server: bool = False,
+                   token: str | None = None) -> GenericEnvClient:
     """A session, tried again every ``REOPEN_SECONDS`` for ``patience`` seconds while the server is at its limit or too
-    busy to answer, in place of a ``dropped`` one or for a rollout's own; raises Failed, which leaves the rollout
-    unscored, when it can't open one, at once unless the server was at its limit or too busy to answer."""
+    busy to answer, or with ``waits_for_server`` refuses the connection, as one restarting does, in place of a
+    ``dropped`` one or for a rollout's own; raises Failed, which leaves the rollout unscored, when it can't open one, at
+    once unless it was waiting."""
     lead = "its session was dropped, and " if dropped else ""
     deadline = time.monotonic() + patience
     while True:
         try:
-            return await opened(url, timeout)
+            return await opened(url, timeout, token=token)
         except AtCapacity as e:
             if time.monotonic() + REOPEN_SECONDS > deadline:
                 raise Failed(f"{lead}the server stayed at its limit of {e.limit} sessions for "
@@ -285,7 +294,8 @@ async def reopened(url: str, timeout: float, *, dropped: bool, patience: float) 
                                "more at once", url, e.limit)
             await asyncio.sleep(REOPEN_SECONDS)
         except ConnectionError as e:
-            if not _transient(e) or time.monotonic() + REOPEN_SECONDS > deadline:
+            waits = _transient(e) or (waits_for_server and _caused_by(e, ConnectionRefusedError))
+            if not waits or time.monotonic() + REOPEN_SECONDS > deadline:
                 raise Failed(f"{lead}{e}") from e
             await asyncio.sleep(REOPEN_SECONDS)
 
@@ -293,19 +303,24 @@ async def reopened(url: str, timeout: float, *, dropped: bool, patience: float) 
 def _transient(error: BaseException | None) -> bool:
     """Whether ``error`` came of a server too busy to answer in time or a connection it dropped, rather than of nothing
     listening at its address or an answer that isn't a session."""
+    return _caused_by(error, _TRANSIENT)
+
+
+def _caused_by(error: BaseException | None, causes: type[BaseException] | tuple[type[BaseException], ...]) -> bool:
     while error is not None:
-        if isinstance(error, _TRANSIENT):
+        if isinstance(error, causes):
             return True
         error = error.__cause__ or error.__context__
     return False
 
 
-async def probe(url: str, toolset: NamedToolset, timeout: float) -> tuple[frozenset[str], tuple[dict[str, Any], ...]]:
+async def probe(url: str, toolset: NamedToolset, timeout: float, *,
+                token: str | None = None) -> tuple[frozenset[str], tuple[dict[str, Any], ...]]:
     """The tools ``toolset``'s first task offers at its first turn, and every tool any of its turns offers, found by
     walking it through its turns, ending each but the last empty and listing its tools, then ending the episode
     unscored. Each call on the probe's session has the deadline ``timeout``."""
     split, index, turns = toolset.first
-    client = await opened(url, timeout)
+    client = await opened(url, timeout, token=token)
     first, tools = None, {}
     try:
         turn = await client.reset(split=split, index=index, timeout_s=timeout)
@@ -347,10 +362,10 @@ async def end_turn(client: GenericEnvClient, response: str, deadline: float) -> 
     return await call_tool(client, END_TURN, {"response": response}, deadline)
 
 
-def read_tasks(url: str, *, local: str) -> tuple[str, dict[str, list[dict[str, Any]]]]:
+def read_tasks(url: str, *, local: str, token: str | None = None) -> tuple[str, dict[str, list[dict[str, Any]]]]:
     """The server's env name, and each split's tasks as its Task API describes them. ``local`` says how to serve the
     bundle in this process instead, for when no server answers."""
-    with httpx.Client(base_url=url, timeout=CONNECT_SECONDS) as http:
+    with httpx.Client(base_url=url, timeout=CONNECT_SECONDS, headers=authorization(token)) as http:
         try:
             [name] = http.get("/list_environments").raise_for_status().json()
         except httpx.TransportError as e:
@@ -363,6 +378,19 @@ def read_tasks(url: str, *, local: str) -> tuple[str, dict[str, list[dict[str, A
         raise ValueError(f"the server at {url} doesn't describe its tasks' toolsets and turns, so it isn't a bundle "
                          "served by agent_env.openenv.build_app from this version of agentenv-framework or later")
     return name, tasks
+
+
+def tasks_and_tools(url: str, *, local: str, timeout: float, token: str | None = None
+                    ) -> tuple[str, dict[str, list[dict[str, Any]]], dict[str, tuple[dict[str, Any], ...]]]:
+    """What a writer of a split's rows reads: the server's env name, each split's tasks, refusing a split whose name
+    can't name a data file, and every tool each toolset's turns offer, by the toolset's key, found by playing its
+    first task through (``probe``), so reading deploys those."""
+    name, tasks = read_tasks(url, local=local, token=token)
+    if unfit := [split for split in tasks if not _FILE.fullmatch(split)]:
+        raise ValueError(f"the server's splits {unfit} can't name a data file: a split's name must be letters, "
+                         "digits, '.', '_' and '-', not starting with '.'")
+    return name, tasks, {each: asyncio.run(probe(url, toolset, timeout, token=token))[1]
+                         for each, toolset in toolsets(name, tasks).items()}
 
 
 def toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, NamedToolset]:
@@ -386,6 +414,10 @@ def toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, Nam
             name = f"{base}-{n}"
         named[each] = NamedToolset(name, first)
     return named
+
+
+def authorization(token: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def key(task: Mapping[str, Any]) -> str:

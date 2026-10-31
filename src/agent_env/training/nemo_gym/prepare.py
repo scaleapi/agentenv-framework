@@ -3,7 +3,6 @@ a Gym checkout's own, as NeMo RL's is."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from importlib.metadata import version
@@ -13,7 +12,7 @@ from typing import Any
 import yaml
 
 from agent_env.openenv import build_app
-from agent_env.training._openenv import Server, key, messages, probe, read_tasks, toolsets
+from agent_env.training._openenv import Server, key, messages, tasks_and_tools
 
 #: The routes a resources server serves itself, which a tool's route can't take.
 GYM_ROUTES = frozenset({"seed_session", "verify", "close_session", "aggregate_metrics", "reverify_mode"})
@@ -45,7 +44,6 @@ nemo-gym = {{ path = "../..", editable = true }}
 REWARD_AND_COMPONENTS = ("reward_components makes the reward the sum of the task's scores, as NeMo RL requires, so "
                          "it takes no reward: weight the scores in GDPO's reward_weights instead")
 _ROUTE = re.compile(r"[A-Za-z0-9._~-]+")
-_FILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 
 
 def write_server(source: str | Path, root: str | Path, *, name: str | None = None, sandbox: str | None = None,
@@ -69,13 +67,9 @@ def write_server(source: str | Path, root: str | Path, *, name: str | None = Non
     served = None if url else Server(build_app(source, reward=summed if reward_components else reward, sandbox=sandbox,
                                                max_concurrent_envs=1))
     try:
-        env_name, tasks = read_tasks(url or served.url, local="name the bundle's folder instead of its server")
-        if unfit := [split for split in tasks if not _FILE.fullmatch(split)]:
-            raise ValueError(f"the server's splits {unfit} can't name a data file: a split's name must be letters, "
-                             "digits, '.', '_' and '-', not starting with '.'")
-        grouped = toolsets(env_name, tasks)
-        tools = {each: [_function(tool) for tool in asyncio.run(probe(url or served.url, toolset, reset_timeout))[1]]
-                 for each, toolset in grouped.items()}
+        env_name, tasks, probed = tasks_and_tools(url or served.url, local="name the bundle's folder instead of its "
+                                                  "server", timeout=reset_timeout)
+        tools = {each: [_function(tool) for tool in found] for each, found in probed.items()}
     finally:
         if served is not None:
             served.stop()

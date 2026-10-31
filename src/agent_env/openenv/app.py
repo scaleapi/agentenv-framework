@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import functools
+import hmac
 import logging
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
 
 from fastapi import FastAPI
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.websockets import WebSocketClose
 from openenv.core.env_server.http_server import create_app
 from openenv.core.env_server.mcp_types import CallToolAction, CallToolObservation
 from openenv.core.env_server.types import Observation
@@ -31,6 +35,7 @@ def build_app(
     reward: str | Callable[[dict[str, float]], float] | None = None,
     sandbox: str | None = None,
     max_concurrent_envs: int = 8,
+    token: str | None = None,
 ) -> FastAPI:
     """The OpenEnv server for ``bundle``'s tasks: a folder or an installed bundle's name, as ``agent-env run BUNDLE``
     reads it, served as the split ``all`` and a split per eval; or a mapping of split name to bundle. Each session
@@ -40,19 +45,23 @@ def build_app(
     task that records one score has that one. Each bundle is prepared as ``agent-env run`` prepares it before its
     first task, without the agent a client plays, so every task must pass its checks; one that can't run as an
     episode is then left out and logged. Namespace routing is on from the app's startup to its shutdown, which tears
-    down every open episode. Raises BundleError when a bundle can't be prepared or serves no task, and ValueError
+    down every open episode. With ``token``, every request and WebSocket but ``/health`` must carry
+    ``Authorization: Bearer <token>``, for a server others can reach: without it, anyone who reaches the server
+    deploys and drives its envs. Raises BundleError when a bundle can't be prepared or serves no task, and ValueError
     when ``reward`` can't score every task."""
     with namespace_routing():
         prepared = {split: _prepared(source, sandbox) for split, source in _sources(bundle).items()}
         served = Served(splits=_served(_splits(bundle, prepared), reward), sandbox=sandbox)
-    return _app(served, _env_name(prepared), max_concurrent_envs)
+    return _app(served, _env_name(prepared), max_concurrent_envs, token)
 
 
-def _app(served: Served, env_name: str, max_concurrent_envs: int) -> FastAPI:
+def _app(served: Served, env_name: str, max_concurrent_envs: int, token: str | None = None) -> FastAPI:
     """OpenEnv's server for what ``served`` serves, with namespace routing on from its startup to its shutdown, which
-    tears down every open episode."""
+    tears down every open episode, and ``token`` required of every request but ``/health`` when given."""
     app = create_app(functools.partial(AgentEnvEnvironment, served), CallToolAction, CallToolObservation,
                      env_name=env_name, max_concurrent_envs=max_concurrent_envs, reset_observation_cls=Observation)
+    if token:
+        app.add_middleware(_Bearer, token=token)
     routing = ExitStack()
 
     async def route() -> None:
@@ -67,6 +76,24 @@ def _app(served: Served, env_name: str, max_concurrent_envs: int) -> FastAPI:
     app.router.on_startup.append(route)
     app.router.on_shutdown.append(tear_down)
     return app
+
+
+class _Bearer:
+    """Refuses every request and WebSocket handshake but ``/health``'s that doesn't carry ``Authorization: Bearer
+    <token>``: a request with 401, a WebSocket by closing it before it opens, which its client sees as HTTP 403."""
+
+    def __init__(self, app: ASGIApp, token: str):
+        self.app, self.expected = app, f"Bearer {token}".encode()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] in ("http", "websocket") and scope["path"] != "/health":
+            given = dict(scope["headers"]).get(b"authorization", b"")
+            if not hmac.compare_digest(given, self.expected):
+                refusal = (JSONResponse({"detail": "this server needs Authorization: Bearer <its token>"}, 401)
+                           if scope["type"] == "http" else WebSocketClose(code=1008))
+                await refusal(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def _sources(bundle: _Source | Mapping[str, _Source]) -> dict[str | None, _Source]:

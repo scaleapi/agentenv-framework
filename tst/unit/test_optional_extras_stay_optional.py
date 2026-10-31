@@ -26,11 +26,12 @@ class Refuse(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Refuse())
 """
 
-# Not core: the Sail and Smol providers, the OpenEnv server and NeMo Gym's resources server need their optional extras,
-# and the gateway runs only in its container image, and the code runner is a script that reads its arguments on import.
+# Not core: the Sail and Smol providers, the OpenEnv server, NeMo Gym's resources server and the verl helper need their
+# optional extras (and the verl agent loop verl itself), and the gateway runs only in its container image, and the code
+# runner is a script that reads its arguments on import.
 _NOT_CORE = (
     "agent_env.providers.sandbox_providers.sail_vm", "agent_env.providers.sandbox_providers.smol_vm",
-    "agent_env.openenv", "agent_env.training.nemo_gym", "agent_env.env.gateway",
+    "agent_env.openenv", "agent_env.training.nemo_gym", "agent_env.training.verl", "agent_env.env.gateway",
     "agent_env.task_step.task_steps.run_code_runner",
 )
 
@@ -169,11 +170,21 @@ def _run(script: str, blocked: list[str], *args: str) -> str:
     return done.stdout.strip()
 
 
-@pytest.mark.parametrize("extra", sorted(_optional_requirements()))
+#: Extras every distribution of which another extra installs too, so blocking what only they install blocks nothing:
+#: verl's pyarrow comes with trl's datasets. The test without any extra covers them.
+_COVERED = {"verl": "trl"}
+
+
+@pytest.mark.parametrize("extra", sorted(set(_optional_requirements()) - set(_COVERED)))
 def test_core_and_every_store_module_import_without_the_extra(extra):
     blocked = _only_in(extra)
     assert blocked, f"the {extra!r} extra installs nothing core lacks, so this test proves nothing"
     assert json.loads(_run(_IMPORT_CORE, blocked, json.dumps(_NOT_CORE))) == []
+
+
+@pytest.mark.parametrize(("extra", "cover"), sorted(_COVERED.items()))
+def test_a_covered_extra_installs_nothing_its_cover_doesnt(extra, cover):
+    assert _closure(frozenset({extra})) <= _closure(frozenset({cover}))
 
 
 def test_core_and_every_store_module_import_without_any_extra():

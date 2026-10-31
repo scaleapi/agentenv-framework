@@ -69,6 +69,14 @@ nemo-gym = [
     "nemo-gym>=0.7.0rc0; python_full_version >= '3.13.14'",
     "omegaconf>=2.3; python_full_version >= '3.13.14'",
 ]
+# agent_env.training.verl: verl's trainers on a bundle served as an OpenEnv env; installed into verl's own environment,
+# whose verl, vLLM and torch are the trainer's to pin. pyarrow writes the parquet rows verl reads; transformers counts a
+# row's prompt with its tools as the model's chat template renders them.
+verl = [
+    "agentenv-framework[openenv]",
+    "pyarrow>=19",
+    "transformers>=5",
+]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
     "boto3>=1.35.0",
@@ -117,7 +125,7 @@ coreweave = [
     "cwsandbox>=1.19.6,<2",  # Reject exec streams that close without an exit status.
 ]
 dev = [
-    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
