@@ -3,8 +3,8 @@ cookie Gym keeps per rollout, over the bundle the unit tier serves on loopback: 
 the tool routes answer as text, verify ends the turns left open and scores the episode or masks the rollout, a rollout
 waits its turn at the server's limit, a closed or idle session ends its episode, the server takes one worker, a
 bundle named in the config is served for the server's lifetime, and ``serve`` runs a written server on its own,
-answering a masked rollout's verify with an HTTP error when asked. CI runs it on the nemo-gym ``uv.lock`` pins and on
-the latest nemo-gym."""
+answering a masked rollout's verify with an HTTP error when asked and ending abandoned episodes after the idle timeout
+it is given. CI runs it on the nemo-gym ``uv.lock`` pins and on the latest nemo-gym."""
 
 import asyncio
 import json
@@ -155,8 +155,11 @@ def test_a_rollout_gym_stopped_before_verifying_has_its_episode_ended_once_idle(
 @pytest.mark.parametrize(("config", "why"), [
     ({"num_workers": 2}, "the server runs with one worker"),
     ({"reward": "replies", "reward_components": True}, "reward_components makes the reward the sum"),
+    ({"idle_timeout": 0}, "greater than 0"),
+    ({"idle_timeout": float("nan")}, "finite number"),
 ])
-def test_a_config_with_more_than_one_worker_or_a_reward_beside_its_components_is_refused(config, why):
+def test_a_config_with_more_than_one_worker_a_reward_beside_its_components_or_no_finite_idle_timeout_is_refused(config,
+                                                                                                             why):
     with pytest.raises(pydantic.ValidationError, match=why):
         server.AgentEnvResourcesServerConfig(host="127.0.0.1", port=0, entrypoint="app.py", name="dock",
                                              url="http://127.0.0.1:8000", **config)
@@ -221,6 +224,32 @@ def test_serve_runs_a_written_server_on_its_own_at_the_port_it_is_given_answerin
         assert (masked.json()["reward"], masked.json()["mask_sample"]) == (0.0, True)
         assert why in masked.json()["failure_reason"]
     assert len(teardowns.finished) == 3
+
+
+def test_serve_ends_the_episode_of_a_session_its_client_abandons_after_the_idle_timeout_it_is_given(serve, tmp_path,
+                                                                                                 teardowns):
+    bundle_server = serve({"a": PLAYED})
+    folder = write_server(bundle_server.url, tmp_path)
+    row = json.loads((folder / "data" / "all.jsonl").read_text().splitlines()[0])
+    port = _free_port()
+
+    served = subprocess.Popen([sys.executable, "-m", "agent_env.training.nemo_gym", "serve", str(folder), "--port",
+                               str(port), "--idle-timeout", "1"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        with httpx.Client(base_url=_up(served, f"http://127.0.0.1:{port}")) as client:
+            client.post("/seed_session", json=row)
+            assert client.post("/add_item", json={"item": "crate"}).text == "add_item {'item': 'crate'}"
+            time.sleep(3)
+            abandoned = client.post("/add_item", json={"item": "crate"})
+    finally:
+        served.terminate()
+        served.wait(timeout=30)
+    bundle_server.stop()
+
+    assert abandoned.status_code == 400
+    assert "ended the episode of a rollout with no request for 1s" in served.stdout.read()
+    assert len(teardowns.finished) == 2
 
 
 _EPISODE = {"rollout_id": "rollout"}
