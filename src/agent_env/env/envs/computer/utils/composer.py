@@ -61,6 +61,11 @@ logger = logging.getLogger(__name__)
 
 #: The image store repository composed computers are pushed to, tagged by their keys.
 REPOSITORY = "agentenv-computers"
+#: What the composer and its builders make of a build's inputs beyond what its key shows of them (the base, the
+#: Dockerfile, the build files with their executable bits, the lock): raise it with a change that alters what an image
+#: holds some other way, its labels or how it's built, and leave it for any other, so images aren't built again for
+#: nothing.
+FORMAT = 1
 #: Where a driver's files go in a composed computer, in a folder named for the driver; an app's, under APPS.
 DRIVERS = "/opt/agentenv/drivers"
 APPS = str(installed_apps.APPS)
@@ -242,7 +247,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             key = "sha256:" + hashlib.sha256(json.dumps({
                 "base": base_identity, "dockerfile": dockerfile, "context": _digest(context),
                 "lock": lock.digest() if lock is not None else None, "form": form, "arch": arch,
-                "composer": _composer_digest(),
+                "format": FORMAT,
             }, sort_keys=True).encode()).hexdigest()
             store = get_config().get_image_store_for(env.stored_id)
             store.ensure_repository(REPOSITORY)
@@ -603,16 +608,13 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str]) -
 
 
 def _digest(folder: Path) -> str:
-    """A digest of the files under ``folder``, by their paths and bytes."""
+    """A digest of the files under ``folder``, by their paths, bytes and whether each is executable, which the composer
+    alone decides (umask never sets it)."""
     hashed = hashlib.sha256()
     for path in sorted(p for p in folder.rglob("*") if p.is_file()):
-        hashed.update(path.relative_to(folder).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+        hashed.update(path.relative_to(folder).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest()
+                      + (b"x" if path.stat().st_mode & 0o100 else b"-"))
     return "sha256:" + hashed.hexdigest()
-
-
-def _composer_digest() -> str:
-    """A digest of the composer, which says what a build makes of its inputs, and of its builders' ``FORMAT``."""
-    return "sha256:" + hashlib.sha256(Path(__file__).read_bytes() + f"builder {builder.FORMAT}".encode()).hexdigest()
 
 
 def _now() -> str:

@@ -107,6 +107,24 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
 
 
+def test_a_key_covers_its_build_files_executable_bits_and_the_composers_format(base, driver, docker, tmp_path,
+                                                                            monkeypatch):
+    folder = tmp_path / "ctx"
+    folder.mkdir()
+    (folder / "run").write_bytes(b"echo\n")
+    plain = composer._digest(folder)
+    (folder / "run").chmod(0o755)
+    runnable = composer._digest(folder)
+    (folder / "run").chmod(0o640)
+
+    first = Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]["key"]
+    monkeypatch.setattr(composer, "FORMAT", composer.FORMAT + 1)
+    raised = Env.get(_put(base, driver, id="@local/~/kit/other", environment_name="other").id).metadata["composed"][
+        "container"]["arm64"]["key"]
+
+    assert runnable != plain == composer._digest(folder) and raised != first
+
+
 def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one_another_env_built(base, driver,
                                                                                                     docker, monkeypatch):
     auth, docker_calls = RegistryAuth("localhost:5000", "user", "token"), []
