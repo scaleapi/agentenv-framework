@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 from pydantic import AliasChoices, ConfigDict, Field, model_serializer, model_validator
 
 from agent_env.artifact.artifact import FolderChild
-from agent_env.artifact.artifacts.environment import EnvironmentArtifact, SeedsEnvironments
+from agent_env.artifact.artifacts.environment import PARTS_UNWRITABLE, EnvironmentArtifact, SeedsEnvironments
 from agent_env.artifact.artifacts.environment_universe_folder import (
     METADATA,
     UniverseFolder,
@@ -184,6 +184,8 @@ class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
             name = environment.environment_name
             if name.split("/", 1)[0] == METADATA:
                 raise Unwritable(f"its environment {name!r} would read back as metadata, from its {METADATA}/ folder")
+            if environment.parts is not None:
+                raise Unwritable(f"its environment {name!r} {PARTS_UNWRITABLE}")
             file = environment.get_file_artifact()
             out.file(environment_path(Path(), name, file.filename).as_posix(), file.object_url)
         for key, file in (self.get_metadata() or {}).items():
@@ -260,18 +262,24 @@ class EnvironmentUniverseArtifact(Universe, SeedsEnvironments):
         Matching ``FileArtifactUniverse.get_file_artifacts()`` is what lets the same
         loaders stage a service universe as a file tree (grading a frozen snapshot)
         rather than restoring it into an env. Returns the pinned artifacts as-is —
-        nothing is copied or re-registered.
+        nothing is copied or re-registered. An environment of parts lists each by the path
+        its metadata names, else its name, else its file's.
         """
         out: dict[str, FileArtifact] = {}
         for sa in self.get_environment_artifacts():
-            fa = sa.get_file_artifact()
-            name = f"{sa.environment_name}/{fa.filename}"
-            if name in out:
-                raise ValueError(
-                    f"EnvironmentUniverseArtifact {self.id} v{self.version} has duplicate "
-                    f"environment '{sa.environment_name}'; cannot stage it as a file tree"
-                )
-            out[name] = fa
+            if sa.parts is None:
+                fa = sa.get_file_artifact()
+                named = [(fa.filename, fa)]
+            else:
+                named = [(part.path or part.name or fa.filename, fa) for part, fa in sa.get_parts()]
+            for relative, fa in named:
+                name = f"{sa.environment_name}/{relative}"
+                if name in out:
+                    raise ValueError(
+                        f"EnvironmentUniverseArtifact {self.id} v{self.version} has duplicate "
+                        f"environment '{sa.environment_name}'; cannot stage it as a file tree"
+                    )
+                out[name] = fa
         return out
 
     def get_metadata(self) -> dict[str, FileArtifact]:
