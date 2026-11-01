@@ -13,7 +13,6 @@ from typing import Any
 FORMATS = ("hermes", "qwen3_coder")
 
 _BLOCK = re.compile(r"<tool_call>(.*?)(?:</tool_call>|$)", re.DOTALL)
-_THINKING = re.compile(r"<think>.*?</think>", re.DOTALL)
 _FUNCTION = re.compile(r"<function=([^>\s]+)>(.*?)(?:</function>|$)", re.DOTALL)
 _PARAMETER = re.compile(r"<parameter=([^>\s]+)>(.*?)(?:</parameter>|(?=<parameter=)|$)", re.DOTALL)
 
@@ -32,13 +31,21 @@ class Unparsed:
 
 
 def parse(reply: str, tool_format: str, tools: Mapping[str, Mapping[str, Any]]) -> tuple[list[Call | Unparsed], str]:
-    """Each ``<tool_call>`` block of ``reply`` in order, as a call of one of ``tools`` (each function by its name) or
-    why it isn't one, and the reply's text outside them and its thinking, which ends a turn."""
+    """Each ``<tool_call>`` block of ``reply``'s answer in order, as a call of one of ``tools`` (each function by its
+    name) or why it isn't one, and the answer's text outside them, which ends a turn. The answer is what follows the
+    reply's reasoning, so a call the model only thinks about isn't run."""
     if tool_format not in FORMATS:
         raise ValueError(f"tool_format must be one of {', '.join(FORMATS)}, not {tool_format!r}")
     reading = _hermes if tool_format == "hermes" else _qwen3_coder
-    calls = [_checked(reading(block.strip(), tools), tools) for block in _BLOCK.findall(reply)]
-    return calls, _THINKING.sub("", _BLOCK.sub("", reply)).strip()
+    answer = _answer(reply)
+    calls = [_checked(reading(block.strip(), tools), tools) for block in _BLOCK.findall(answer)]
+    return calls, _BLOCK.sub("", answer).strip()
+
+
+def _answer(reply: str) -> str:
+    """What follows the reply's last ``</think>``, which closes reasoning a chat template may have opened in the
+    prompt, up to a ``<think>`` left open."""
+    return reply.rsplit("</think>", 1)[-1].split("<think>", 1)[0]
 
 
 def _hermes(block: str, tools: Mapping[str, Mapping[str, Any]]) -> Call | Unparsed:

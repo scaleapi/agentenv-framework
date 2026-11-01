@@ -227,6 +227,12 @@ def test_the_command_writes_the_rows(serve, tmp_path, tokenizer, teardowns):
      [Call("schedule", {"count": 2}), Call("end_turn", {"response": "Done."})], ""),
     ('<tool_call>{"name": "schedule", "arguments": {}}', [Call("schedule", {})], ""),
     ("<think>Idle is safest.</think>Idling all day.", [], "Idling all day."),
+    ('<think>Not yet: <tool_call>{"name": "end_turn", "arguments": {}}</tool_call></think>Idling all day.', [],
+     "Idling all day."),
+    ('Charge first, then <tool_call>{"name": "end_turn", "arguments": {}}</tool_call></think>\n'
+     '<tool_call>{"name": "schedule", "arguments": {"count": 1}}</tool_call>', [Call("schedule", {"count": 1})], ""),
+    ('Done.<tool_call>{"name": "end_turn", "arguments": {}}</tool_call><think>Or <tool_call>{"name": "schedule"}',
+     [Call("end_turn", {})], "Done."),
     ('<tool_call>{"name": "sell"}</tool_call>', [Unparsed("there's no tool 'sell'; the tools are end_turn, schedule")],
      ""),
     ("<tool_call>schedule(count=2)</tool_call>", [Unparsed(

@@ -57,7 +57,7 @@ class AgentEnvTextEnv(BaseTextEnv):
         self._run = self._unparsed = 0
 
     def init(self, prompt: ConversationType) -> tuple[ConversationType, dict[str, Any]]:
-        self._wait(self._session.start(self._episode))
+        self._wait(self._session.start(self._episode), self._waits)
         return prompt, {}
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
@@ -70,12 +70,12 @@ class AgentEnvTextEnv(BaseTextEnv):
                 answers.append({"role": "tool", "content": f"Error: {call.why}"})
                 continue
             self._run += 1
-            answers.append({"role": "tool", "content": self._wait(self._session.call(call))})
+            answers.append({"role": "tool", "content": self._wait(self._session.call(call), self._waits)})
             if self._session.rollout.done or self._session.rollout.failure:
                 break
         rollout = self._session.rollout
         if not (rollout.done or rollout.failure) and (not calls or self.turns >= self.max_turns):
-            self._wait(self._session.finish(reply))
+            self._wait(self._session.finish(reply), None)
         if rollout.failure is not None:
             self.close()
             if rollout.misgrouped:
@@ -98,13 +98,14 @@ class AgentEnvTextEnv(BaseTextEnv):
     def close(self) -> None:
         on_session_loop(self._session.close(), CLOSE_SECONDS)
 
-    def _wait(self, coroutine: Any) -> Any:
-        """The session's answer; one that takes past every deadline it has, and a grace, fails the episode."""
+    def _wait(self, coroutine: Any, timeout: float | None) -> Any:
+        """The session's answer within ``timeout``, past which the episode fails: a call's deadlines and a grace, or
+        none for ending the turns left open, each of which has its own deadline."""
         try:
-            return on_session_loop(coroutine, self._waits)
+            return on_session_loop(coroutine, timeout)
         except TimeoutError as e:
             self.close()
-            raise EpisodeFailed(f"{self._task()}: the env didn't answer within {self._waits:g}s") from e
+            raise EpisodeFailed(f"{self._task()}: the env didn't answer within {timeout:g}s") from e
 
     def _task(self) -> str:
         return f"task {self._episode['task_id']} of split {self._episode['split']}"
