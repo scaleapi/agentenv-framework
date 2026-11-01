@@ -16,8 +16,8 @@ from .types import INTAKE_EXTENSION_URI, MCP_PATH, MCP_TRANSPORT, METHOD_ADD, ME
 
 logger = logging.getLogger(__name__)
 
-#: The control token of each env address the running code is granted, by address.
-_GRANTS: ContextVar[dict[str, str]] = ContextVar("agentenv_control_grants", default={})
+#: The headers that carry the control token of each env address the running code is granted, by address.
+_GRANTS: ContextVar[dict[str, dict[str, str]]] = ContextVar("agentenv_control_grants", default={})
 
 
 class ExtensionCallError(httpx.HTTPStatusError):
@@ -49,12 +49,12 @@ def control_headers(token: str | None) -> dict[str, str]:
 
 
 @contextlib.contextmanager
-def authorized(grants: dict[str, str | None]) -> Iterator[None]:
-    """Within it, a call to an address under one of ``grants``, an env's address and its control token, carries
-    that token when the call names no headers of its own: how code agent-env runs against an env, a verifier's say,
-    reaches its framework-only routes as written."""
+def authorized(grants: dict[str | None, dict[str, str]]) -> Iterator[None]:
+    """Within it, a call to an address under one of ``grants``, an env's address and the headers that carry its
+    control token (``control_headers``), sends those headers when the call names none of its own: how the steps
+    agent-env runs, and the verifiers they call, reach an env's framework-only routes as written."""
     granted = _GRANTS.set({**_GRANTS.get(),
-                           **{url.rstrip("/"): token for url, token in grants.items() if url and token}})
+                           **{url.rstrip("/"): sent for url, sent in grants.items() if url and sent}})
     try:
         yield
     finally:
@@ -62,12 +62,11 @@ def authorized(grants: dict[str, str | None]) -> Iterator[None]:
 
 
 def request_headers(url: str, headers: dict[str, str] | None = None) -> dict[str, str]:
-    """What a call to ``url`` sends: ``headers`` when it names them, else the control token its grant gives
+    """What a call to ``url`` sends: ``headers`` when it names them, else the headers its grant gives
     (``authorized``), if any."""
     if headers is not None:
         return headers
-    return next((control_headers(token) for base, token in _GRANTS.get().items()
-                 if url == base or url.startswith(f"{base}/")), {})
+    return next((sent for base, sent in _GRANTS.get().items() if url == base or url.startswith(f"{base}/")), {})
 
 
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool,

@@ -1,7 +1,7 @@
 """The control token: with CONTROL_TOKEN_ENV set when an env mounts, everything it serves but its MCP endpoint and its
 card refuses a call without that token, or with another, before the route runs, and answers one with it; the MCP
 endpoint and the card stay open, and without the variable every route is open. The client sends a call's own headers,
-or else the token a grant gives the address it calls."""
+or else the headers a grant gives the address it calls."""
 from __future__ import annotations
 
 import contextlib
@@ -105,14 +105,15 @@ async def test_without_a_token_every_route_is_open(monkeypatch):
             assert await _calls(rest, {}) == [200, 200, 200]
 
 
-def test_a_call_sends_its_own_headers_or_else_the_token_its_grant_gives_an_address_under_the_envs():
+def test_a_call_sends_its_own_headers_or_else_the_ones_its_grant_gives_an_address_under_the_envs():
     env = "http://desk:18765"
 
-    with client.authorized({env: "s3cret", "http://other:1": None, None: "orphan"}):
+    with client.authorized({env: client.control_headers("s3cret"), "http://other:1": {},
+                            None: client.control_headers("orphan")}):
         granted = [client.request_headers(url) for url in (env, f"{env}/svc/mail/agentenv", f"{env}0/x",
                                                             "http://other:1/x")]
         own = client.request_headers(f"{env}/agentenv", {"X-Mine": "1"})
-        with client.authorized({env: "rotated"}):
+        with client.authorized({env: client.control_headers("rotated")}):
             inner = client.request_headers(f"{env}/agentenv")
         outer = client.request_headers(f"{env}/agentenv")
     after = client.request_headers(f"{env}/agentenv")
@@ -139,7 +140,7 @@ async def test_invoke_extension_and_the_data_plane_send_the_token(monkeypatch):
     await client.invoke_extension("http://desk", card, "urn:agentenv:test-exec/v1", {}, method="run",
                                   headers=client.control_headers("own"))
     await client.get_data("http://desk", headers=client.control_headers("own"))
-    with client.authorized({"http://desk": "granted"}):
+    with client.authorized({"http://desk": client.control_headers("granted")}):
         await client.add_data("http://desk", [])
         await client.reset_data("http://desk", headers={})
 

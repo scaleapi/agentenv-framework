@@ -240,8 +240,9 @@ nothing else. Without the variable, as when the environment runs on its own, eve
 its `/svc/<app>/` routes.
 
 On the client side each call takes `headers`, and `client.control_headers(token)` builds them.
-Code that names none, a task's verifier say, runs under `client.authorized({env_url: token})`:
-within it, a call to an address under `env_url` carries that token.
+Code that names none runs under `client.authorized({env_url: client.control_headers(token)})`:
+within it, a call to an address under `env_url` sends those headers. agent-env runs every task
+step, a verifier's `verify` included, under such a grant for each environment it deployed.
 
 ### Tool access without a gateway
 
