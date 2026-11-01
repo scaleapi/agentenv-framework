@@ -32,7 +32,9 @@ MODEL_ENDPOINT_MISSING = preflight.model_endpoint_missing  # the probe, which th
 DEPLOY = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "theirs"}
 ASK = {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "What is 6 * 7?", "depends_on": ["agent"]}
 CHECK = {"id": "check", "type": "harness_test_check", "verifier_id": "answer", "depends_on": ["ask"]}
-GIVEN = {"litellm_base_url": "http://models:4000", "env_vars": {"LITELLM_API_KEY": "sk-1"}}  # its own endpoint
+JUDGE = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "ask",
+         "agent_name": DeployAgentTaskStep.DEFAULT_AGENT_NAME, "criteria": [{"id": "c1", "description": "says 42"}],
+         "depends_on": ["ask"]}
 asked: list[dict] = []
 
 
@@ -138,7 +140,8 @@ def bundle(tmp_path, monkeypatch, local_stores):  # noqa: F811
             A2AAgent.put(id=agent_id, docker_image_artifact=image)
     return layout(tmp_path / "quiz", {"tasks/sum.json": json.dumps([DEPLOY, ASK, CHECK]),
                                       "tasks/broken.json": json.dumps([{**DEPLOY, "a2a_agent_id": "crashes"}, ASK]),
-                                      "tasks/unprompted.json": json.dumps([{**DEPLOY, **GIVEN}])})
+                                      "tasks/unprompted.json": json.dumps([DEPLOY]),
+                                      "tasks/self-judged.json": json.dumps([DEPLOY, ASK, JUDGE])})
 
 
 def test_the_solver_alone_calls_the_policy_through_the_proxy_and_the_run_is_captured_and_scored(engine, bundle, caplog):
@@ -159,6 +162,7 @@ def test_the_solver_alone_calls_the_policy_through_the_proxy_and_the_run_is_capt
     [turn] = trace.turns
     assert sorted(row["task_id"].rsplit("/", 1)[1] for row in rows) == ["broken", "sum"]
     assert "unprompted is left out: training needs the agent a step prompts deployed by a deploy_agent step" in caplog.text
+    assert "self-judged is left out: its rubric judge is its solver, whose grading would be trained on" in caplog.text
     assert (call["model"], call["answer"]) == ("trl-policy-v3", "It is 42.")
     assert call["overrides"]["step_params"] == {"agent": {"litellm_base_url": f"http://127.0.0.1:{factory._proxy.port}",
                                                           "litellm_api_key": call["key"]}}
@@ -203,7 +207,7 @@ def test_a_prompt_naming_no_task_of_the_factorys_is_refused(engine, bundle):
 
 
 def test_a_bundle_with_no_solver_to_train_is_refused(engine, bundle):
-    with pytest.raises(ValueError, match="no task of the bundle deploys"):
+    with pytest.raises(ValueError, match="no task of the bundle has a solver to train"):
         AgentEnvSessionFactory(bundle, llm_url=engine.url, model=MODEL, tasks=["unprompted"])
 
 

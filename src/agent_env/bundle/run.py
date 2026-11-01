@@ -41,7 +41,8 @@ from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle
 from .preflight import Preflight, preflight_run
 from .requires import Declaring, declare, declaring_for
-from .resolve import BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle, without_played_agents
+from .resolve import (BuiltImage, BundleImage, Reference, ReferencedImage, ResolvedEntry, resolve_bundle,
+                      without_played_agents)
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +403,16 @@ def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
     """How a run composes its computer envs: on the provider ``sandbox`` names, and emulating unless ``emulate`` is
     False. Raises ValueError when ``sandbox`` names no provider."""
     return Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
+
+
+def planned_tasks(root: Path | str, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
+                  agent: str | None = None) -> tuple[ResolvedEntry, ...]:
+    """The tasks ``run_bundle`` with these arguments would run, as resolved, without checking or writing anything.
+    Namespace routing must be on, as for ``plan_bundle``."""
+    plan = plan_bundle(resolve_bundle(parse_bundle(Path(root))), tasks=tasks, evals=evals, installed=installed_bundles,
+                       agent=agent)
+    selected = set(_to_run(plan))
+    return tuple(write.source for write in plan.writes if write.kind is BundleKind.TASK and write.source.entry in selected)
 
 
 def _to_run(plan: Plan) -> tuple[BundleEntry, ...]:
