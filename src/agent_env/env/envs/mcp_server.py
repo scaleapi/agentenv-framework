@@ -24,6 +24,7 @@ from agent_env.env.envs._deployment import (
     file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, staged_paths,
 )
 from agent_env.env.gateway import GatewayMode
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 from agent_env.attribution import Attribution
 from agent_env.utils.paths import validate_file_path
@@ -243,7 +244,7 @@ class MCPServerEnv(Env):
         folder = posixpath.dirname(container_path)
         if self._sandbox.mode == SANDBOX_MODE_CONTAINER:
             if folder != "/data":
-                await self._sandbox.exec_with_output("mkdir", "-p", folder)
+                await self._exec_in_server("mkdir", "-p", folder)
             await self._sandbox.write_file_from_object(file_artifact.object_url, container_path)
         else:
             # Stage on the disk-backed app dir, not /tmp (tmpfs/RAM): a large
@@ -263,13 +264,24 @@ class MCPServerEnv(Env):
         """Remove what a load staged at ``/data/<path>``, best-effort: a load that finished stands either way."""
         container_path = f"/data/{path}"
         try:
-            if self._sandbox.mode == SANDBOX_MODE_CONTAINER:
-                await self._sandbox.exec_with_output("rm", "-rf", container_path)
-            else:
-                container_id = await self._env_provider._get_container_id(self._sandbox, self.environment_name)
-                await self._sandbox.exec_script(f"docker exec {shlex.quote(container_id)} rm -rf {shlex.quote(container_path)}")
+            await self._exec_in_server("rm", "-rf", container_path)
         except Exception as e:  # noqa: BLE001 -- cleanup, not the load
             logger.warning(f"[{self.environment_name}] could not remove {container_path} after a load (ignored): {e}")
+
+    async def _exec_in_server(self, *command: str) -> None:
+        """Run ``command`` in the server's container, as staging writes there: through the host's docker unless the
+        sandbox is a container of its own; a VM sandbox's exec runs on its host. Raises when it fails."""
+        if self._sandbox.mode != SANDBOX_MODE_CONTAINER:
+            container = await self._env_provider._get_container_id(self._sandbox, self.environment_name)
+        elif isinstance(self._sandbox, VmSandbox):
+            container = self._sandbox.container_name
+        else:
+            exit_code, _, stderr = await self._sandbox.exec_with_output(*command)
+            if exit_code != 0:
+                raise RuntimeError(f"{shlex.join(command)} failed in {self.environment_name}'s server (exit {exit_code}): "
+                                   f"{stderr[-500:]}")
+            return
+        await self._sandbox.exec_script(f"docker exec -u 0 {shlex.quote(container)} {shlex.join(command)}")
 
     async def _load_environment_artifact_legacy(self, file_artifact) -> None:
         container_path = await self._copy_artifact_into_container(file_artifact, file_artifact.filename)

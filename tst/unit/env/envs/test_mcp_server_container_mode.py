@@ -368,7 +368,7 @@ def _env(env_provider_type: str = "gateway") -> MCPServerEnv:
 
 def _sandbox(sandbox_id: str, mode: str = SANDBOX_MODE_CONTAINER, sandbox_type: str = "modal") -> MagicMock:
     return MagicMock(sandbox_id=sandbox_id, mode=mode, type=sandbox_type, terminate=AsyncMock(), write_file_from_object=AsyncMock(),
-                     exec_with_output=AsyncMock())
+                     exec_with_output=AsyncMock(return_value=(0, "", "")))
 
 
 def _containers() -> dict[str, MagicMock]:

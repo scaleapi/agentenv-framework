@@ -1,7 +1,8 @@
 """An env stages a loaded artifact's file through its sandbox's shell: a file or env name with shell syntax in it is
 staged and copied as it is and runs nothing, a file inside folders is staged under them, and a path that isn't plain
-file names joined by '/' is refused before anything runs. A real LocalSandbox runs the scripts; docker is a stub that
-logs its arguments."""
+file names joined by '/' is refused before anything runs. A server whose VM sandbox is its container stages and removes
+a load's folder through docker, never on the host. A real LocalSandbox runs the scripts; docker is a stub that logs its
+arguments."""
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import pytest
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
+from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 
 _SHELL_NAMES = [
     ("email", "x;touch pwned;#.json"),
@@ -92,6 +94,20 @@ async def test_a_file_inside_folders_is_staged_under_them(host, make_env, data):
 
     exec_mkdir, cp = host.docker_calls()
     assert exec_mkdir[-3:] == ["mkdir", "-p", f"{data}/a"] and cp[-1].endswith(f":{data}/a/b.json")
+
+
+@pytest.mark.asyncio
+async def test_a_server_whose_vm_sandbox_is_its_container_stages_and_removes_a_loads_folder_through_docker(host):
+    env = _mcp(host, "email")
+    host.sandbox.mode = SANDBOX_MODE_CONTAINER
+    server = host.sandbox.container_name
+
+    await env._copy_artifact_into_container(_artifact("b.json"), ".agentenv-load-1/a/b.json")
+    await env._remove_from_container(".agentenv-load-1")
+
+    calls = host.docker_calls()
+    assert ["exec", "-u", "0", server, "mkdir", "-p", "/data/.agentenv-load-1/a"] in calls
+    assert calls[-1] == ["exec", "-u", "0", server, "rm", "-rf", "/data/.agentenv-load-1"]
 
 
 @pytest.mark.asyncio
