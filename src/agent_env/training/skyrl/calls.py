@@ -43,9 +43,21 @@ def parse(reply: str, tool_format: str, tools: Mapping[str, Mapping[str, Any]]) 
 
 
 def _answer(reply: str) -> str:
-    """What follows the reply's last ``</think>``, which closes reasoning a chat template may have opened in the
-    prompt, up to a ``<think>`` left open."""
-    return reply.rsplit("</think>", 1)[-1].split("<think>", 1)[0]
+    """What follows the reply's first ``</think>`` outside a tool call, which closes reasoning the reply or its chat
+    template's prompt opened, up to a ``<think>`` outside a tool call that opens more: a tool's argument may hold
+    either tag as text."""
+    calls = [match.span() for match in _BLOCK.finditer(reply)]
+
+    def outside(tag: str, start: int) -> int:
+        found = reply.find(tag, start)
+        while found != -1 and any(begin <= found < end for begin, end in calls):
+            found = reply.find(tag, found + 1)
+        return found
+
+    closed = outside("</think>", 0)
+    start = 0 if closed == -1 else closed + len("</think>")
+    opened = outside("<think>", start)
+    return reply[start:] if opened == -1 else reply[start:opened]
 
 
 def _hermes(block: str, tools: Mapping[str, Mapping[str, Any]]) -> Call | Unparsed:

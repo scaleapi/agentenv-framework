@@ -233,6 +233,10 @@ def test_the_command_writes_the_rows(serve, tmp_path, tokenizer, teardowns):
      '<tool_call>{"name": "schedule", "arguments": {"count": 1}}</tool_call>', [Call("schedule", {"count": 1})], ""),
     ('Done.<tool_call>{"name": "end_turn", "arguments": {}}</tool_call><think>Or <tool_call>{"name": "schedule"}',
      [Call("end_turn", {})], "Done."),
+    ('<tool_call>{"name": "schedule", "arguments": {"note": "keep </think> and <think> as written"}}</tool_call>',
+     [Call("schedule", {"note": "keep </think> and <think> as written"})], ""),
+    ('<think>Quote it.</think><tool_call>{"name": "schedule", "arguments": {"note": "</think>"}}</tool_call>',
+     [Call("schedule", {"note": "</think>"})], ""),
     ('<tool_call>{"name": "sell"}</tool_call>', [Unparsed("there's no tool 'sell'; the tools are end_turn, schedule")],
      ""),
     ("<tool_call>schedule(count=2)</tool_call>", [Unparsed(
@@ -261,6 +265,13 @@ def test_qwen3_coder_calls_are_typed_by_the_tools_schema():
                                        "plan": {"at": 18}, "either": "seven", "loose": [1]}),
                      Call("end_turn", {"response": "Sold."})]
     assert text == "I'll sell at the peak."
+
+
+def test_a_qwen3_coder_calls_argument_may_hold_the_reasoning_tags():
+    reply = ("<think>Write it down.</think>\n<tool_call>\n<function=schedule>\n<parameter=note>\nkeep </think> and "
+             "<think> as written\n</parameter>\n</function>\n</tool_call>")
+
+    assert parse(reply, "qwen3_coder", TOOLS) == ([Call("schedule", {"note": "keep </think> and <think> as written"})], "")
 
 
 @pytest.mark.parametrize(("reply", "calls"), [
