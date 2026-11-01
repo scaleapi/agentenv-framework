@@ -32,6 +32,7 @@ MODEL_ENDPOINT_MISSING = preflight.model_endpoint_missing  # the probe, which th
 DEPLOY = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "theirs"}
 ASK = {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "What is 6 * 7?", "depends_on": ["agent"]}
 CHECK = {"id": "check", "type": "harness_test_check", "verifier_id": "answer", "depends_on": ["ask"]}
+GIVEN = {"litellm_base_url": "http://models:4000", "env_vars": {"LITELLM_API_KEY": "sk-1"}}  # its own endpoint
 asked: list[dict] = []
 
 
@@ -137,7 +138,7 @@ def bundle(tmp_path, monkeypatch, local_stores):  # noqa: F811
             A2AAgent.put(id=agent_id, docker_image_artifact=image)
     return layout(tmp_path / "quiz", {"tasks/sum.json": json.dumps([DEPLOY, ASK, CHECK]),
                                       "tasks/broken.json": json.dumps([{**DEPLOY, "a2a_agent_id": "crashes"}, ASK]),
-                                      "tasks/unprompted.json": json.dumps([DEPLOY])})
+                                      "tasks/unprompted.json": json.dumps([{**DEPLOY, **GIVEN}])})
 
 
 def test_the_solver_alone_calls_the_policy_through_the_proxy_and_the_run_is_captured_and_scored(engine, bundle, caplog):
