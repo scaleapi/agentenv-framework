@@ -1,6 +1,7 @@
 """A computer app's own server: it adds the app's launcher, launches a boot app once per boot and says whether the app
 is ready (``computer-app/v1``); its computer's driver finds it on the socket in the app's folder and asks it, lists it
-as a child environment and forwards its requests to it, and leaves the paths it owns out of its own data/get."""
+as a child environment and forwards its requests to it, only with the computer's control token when it has one, and
+leaves the paths it owns out of its own data/get."""
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +32,7 @@ from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, ReadyChe
 from agentenv_protocol.computer import app, app_runtime, apps, session  # noqa: E402
 from agentenv_protocol.computer.app import COMPUTER_APP, FAILURE, SOCKET  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
-from agentenv_protocol.types import DATA_OBJECTS_EXTENSION_URI, WELL_KNOWN_PATH  # noqa: E402
+from agentenv_protocol.types import CONTROL_TOKEN_ENV, DATA_OBJECTS_EXTENSION_URI, WELL_KNOWN_PATH  # noqa: E402
 
 
 
@@ -307,6 +308,30 @@ async def test_the_driver_lists_its_apps_as_children_forwards_each_ones_requests
     assert unknown.status_code == 404
     assert [part["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for part in own["result"]["parts"]] == [
         "Documents/note.txt"]
+
+
+@pytest.mark.asyncio
+async def test_with_a_control_token_the_driver_lists_its_apps_and_forwards_to_one_only_with_it(tmp_path, monkeypatch):
+    from computer_fake import FakeDriver, http_client
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "Mail").mkdir()
+    (tmp_path / "Mail/inbox.txt").write_text("hi")
+    get = {"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": {}}
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
+        monkeypatch.setattr(apps, "APPS", Path(root))
+        async with _serving(Inbox(), Path(root) / "mail", monkeypatch):
+            monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
+            async with http_client(FakeDriver()) as http:
+                card = (await http.get(WELL_KNOWN_PATH)).json()
+                refused = [await http.post("/svc/mail/agentenv", json=get, headers=headers)
+                           for headers in ({}, client.control_headers("guess"))]
+                forwarded = await http.post("/svc/mail/agentenv", json=get, headers=client.control_headers("s3cret"))
+
+    assert [child["name"] for child in card["children_environments"]] == ["mail"]
+    assert [answer.status_code for answer in refused] == [401, 401]
+    assert [part["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for part in forwarded.json()["result"]["parts"]] == [
+        "Mail/inbox.txt"]
 
 
 @pytest.mark.asyncio

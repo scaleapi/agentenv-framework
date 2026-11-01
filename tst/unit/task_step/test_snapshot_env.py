@@ -736,7 +736,7 @@ async def test_export_service_to_file_materializes_filepart_zip(monkeypatch, tmp
     async def fake_supports_v1(base_url):
         return True
 
-    async def fake_get_data(base_url, timeout=None):
+    async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
     async def fake_get_card(base_url, timeout=10):
@@ -782,7 +782,7 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
     async def fake_supports_v1(base_url):
         return True
 
-    async def fake_get_data(base_url, timeout=None):
+    async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
     async def fake_get_card(base_url, timeout=10):
@@ -840,7 +840,7 @@ def _serve_filepart_uri(monkeypatch, uri):
     async def fake_supports_v1(base_url):
         return True
 
-    async def fake_get_data(base_url, timeout=None):
+    async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
     async def fake_get_card(base_url, timeout=10):
@@ -975,7 +975,7 @@ async def test_export_service_to_file_filepart_without_bytes_or_uri_raises_value
     async def fake_supports_v1(base_url):
         return True
 
-    async def fake_get_data(base_url, timeout=None):
+    async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
     async def fake_get_card(base_url, timeout=10):

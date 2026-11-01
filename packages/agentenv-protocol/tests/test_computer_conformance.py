@@ -1,6 +1,7 @@
 """The conformance probe against fake drivers on loopback: the fake driver with the fake fixture passes every check; a
-driver without what full needs gets those checks unverified; a driver broken one way fails the check for that way; each
-app a driver fronts that exports is asked for its export once; the report's verdicts and the CLI."""
+driver given a control token passes with it, refusing calls without it, and fails without it; a driver without what
+full needs gets those checks unverified; a driver broken one way fails the check for that way; each app a driver
+fronts that exports is asked for its export once; the report's verdicts and the CLI."""
 from __future__ import annotations
 
 import json
@@ -33,6 +34,7 @@ from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
 from agentenv_protocol.computer.conformance.__main__ import main  # noqa: E402
+from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI  # noqa: E402
 from agentenv_protocol.types import EnvironmentCard  # noqa: E402
 
@@ -69,6 +71,18 @@ async def test_the_fake_driver_passes_every_check_at_full_and_cleans_up(home):
     assert {c.check for c in report.checks} == {f"P{n}" for n in range(10)} | {"X"}
     assert not (home / ".agentenv-probe").exists() and not (home / ".agentenv-recordings").exists()
     assert ["kill", "4242"] in driver.commands
+
+
+@pytest.mark.asyncio
+async def test_a_driver_given_a_control_token_passes_with_it_and_refuses_calls_without_it(monkeypatch):
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
+
+    report = await _probe(FixtureDriver(), "basic", token="s3cret")
+    unauthorized = await _probe(FixtureDriver(), "basic")
+
+    assert report.passed, _failed(report)
+    assert _status(report, "a framework-only route refuses a call without the control token") == "passed"
+    assert not unauthorized.passed and "401 unauthorized" in _failed(unauthorized)[0]
 
 
 @pytest.mark.asyncio

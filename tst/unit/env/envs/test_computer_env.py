@@ -6,6 +6,7 @@ Docker and the registry are faked."""
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import importlib.metadata
 import json
@@ -19,6 +20,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
@@ -34,6 +36,7 @@ from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
+from agent_env.env.env import DeployedEnv
 from agent_env.env.envs.computer.utils import boot, builder, composer, gate, inside, packages, resolve_in_base
 from agent_env.env.envs.computer.utils.composer import Composing, _probe
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -251,7 +254,8 @@ def test_the_pairs_left_to_compose_are_those_failed_interrupted_or_unprobed_on_a
     assert composer.pending(Env.get(env.id)) == []
 
 
-def test_the_probe_boots_a_build_at_the_envs_settings_as_a_deploy_does(base, driver, docker, monkeypatch):
+def test_the_probe_boots_a_build_at_the_envs_settings_with_a_token_of_its_own_as_a_deploy_does(base, driver, docker,
+                                                                                               monkeypatch):
     env = _put(base, driver, compose=False, computer_settings={"timezone": "Europe/Paris"},
                display={"width": 1600, "height": 900})
     booted = []
@@ -262,12 +266,14 @@ def test_the_probe_boots_a_build_at_the_envs_settings_as_a_deploy_does(base, dri
 
     monkeypatch.setattr(boot, "boot", fake_boot)
     monkeypatch.setattr(boot, "discard", AsyncMock())
-    monkeypatch.setattr(composer, "run_probe", AsyncMock(return_value="report"))
+    probed = AsyncMock(return_value="report")
+    monkeypatch.setattr(composer, "run_probe", probed)
 
     assert asyncio.run(_probe([SimpleNamespace()], env, driver, "img")) == (
         "report", CARD, "SimpleNamespace")
     assert {k: v for k, v in booted[0].items() if k.startswith("AGENTENV_SETTING_")} == {
         "AGENTENV_SETTING_RESOLUTION": "1600x900", "AGENTENV_SETTING_TIMEZONE": "Europe/Paris"}
+    probed.assert_awaited_once_with("http://computer", "full", token=booted[0][CONTROL_TOKEN_ENV])
 
 
 def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_and_isnt_deployed(base, driver, docker,
@@ -503,8 +509,8 @@ DRIVER_CARD = {"name": "desktop", "capabilities": {"extensions": [
 @pytest.fixture
 def boots(monkeypatch):
     """The boots a deploy asks for, each a sandbox serving the desktop driver's card at 127.0.0.1:20001; the driver
-    shows a 1600x900 screen, and each extension call it gets is recorded."""
-    made = SimpleNamespace(boots=[], calls=[], sandboxes=[], display=(1600, 900))
+    shows a 1600x900 screen, and each extension call it gets is recorded, with the headers it carried."""
+    made = SimpleNamespace(boots=[], calls=[], headers=[], sandboxes=[], display=(1600, 900))
 
     async def fake_boot(sandbox_provider, **kwargs):
         made.boots.append({**kwargs, "provider": type(sandbox_provider).__name__})
@@ -519,8 +525,9 @@ def boots(monkeypatch):
         return boot.Booted(sandbox, "http://127.0.0.1:20001",
                            {**DRIVER_CARD, "name": kwargs["environment"]["ENVIRONMENT_NAME"]})
 
-    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
         made.calls.append((uri, method, params))
+        made.headers.append(headers)
         width, height = made.display
         return {"width": width, "height": height, "scale": 1, "modes": []} if uri == COMPUTER_DISPLAY else {}
 
@@ -530,7 +537,7 @@ def boots(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_settings_and_display(
+async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_settings_display_and_a_control_token(
         base, driver, docker, boots):
     env = _put(base, driver, display={"width": 1600, "height": 900})
 
@@ -545,7 +552,12 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
     assert (environment["AGENTENV_SETTING_RESOLUTION"], environment["AGENTENV_SETTING_TIMEZONE"]) == ("1600x900", "Asia/Tokyo")
     assert json.loads(environment["AGENTENV_COMPUTER_SETTINGS"]) == {"default_space": "norm"}
     assert environment["ENVIRONMENT_NAME"] == "desktop" and "AGENTENV_SETTING_THEME" not in environment
+    assert len(deployed.control_token) >= 32 and environment[CONTROL_TOKEN_ENV] == deployed.control_token
     assert boots.calls == [(COMPUTER_DISPLAY, "get", None)]
+    assert boots.headers == [{"Authorization": f"Bearer {deployed.control_token}"}]
+    assert DeployedEnv.from_dict(dataclasses.asdict(deployed)).control_token == deployed.control_token
+    second = await Env.get(env.id).deploy()
+    assert second.control_token != deployed.control_token
     assert (deployed.env_provider_type, deployed.sandbox_ids) == ("computer", {"computer": {"desktop": "local-1"}})
     assert deployed.environment_card == DRIVER_CARD and deployed.mcp_url == "http://127.0.0.1:20001/mcp"
     record = deployed.metadata["computer"]
@@ -580,7 +592,9 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     assert replaced is sandbox and not sandbox.terminated
     assert (kwargs["image_name"], kwargs["port"]) == (deployed.metadata["computer"]["image"], 18765)
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
-    env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S)
+    assert kwargs["env"][CONTROL_TOKEN_ENV] == deployed.control_token
+    env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S,
+                                                         deployed.control_token)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
 
 
@@ -674,22 +688,26 @@ async def test_a_boot_that_never_gets_ready_takes_its_sandbox_and_work_folder_do
 
 
 @pytest.mark.asyncio
-async def test_a_boot_is_ready_with_the_card_read_once_its_status_says_so_each_app_on_it(monkeypatch):
+async def test_a_boot_is_ready_with_the_card_read_once_its_status_asked_with_its_token_says_so_each_app_on_it(
+        monkeypatch):
     cards = iter([{"name": "desk"}, {"name": "desk"}, {"name": "desk", "children_environments": [{"name": "mail"}]}])
     statuses = iter([{"ready": False, "checks": [{"name": "app mail", "ok": False, "detail": "starting"}]},
                      {"ready": True}])
+    sent = []
 
     async def card(url, timeout):
         return next(cards)
 
-    async def status(url, card, uri, params, timeout, method):
+    async def status(url, card, uri, params, timeout, method, headers):
+        sent.append(headers)
         return next(statuses)
 
     monkeypatch.setattr(boot.protocol_v1, "get_card", card)
     monkeypatch.setattr(boot.protocol_v1, "invoke_extension", status)
     monkeypatch.setattr(boot, "_POLL_S", 0)
 
-    assert await boot.ready("http://desk", 5) == {"name": "desk", "children_environments": [{"name": "mail"}]}
+    assert await boot.ready("http://desk", 5, "t0ken") == {"name": "desk", "children_environments": [{"name": "mail"}]}
+    assert sent == [{"Authorization": "Bearer t0ken"}] * 2
 
 
 def test_a_boot_mints_a_generated_setting_resolves_a_secret_its_record_withholds_both_and_a_secret_is_a_reference(

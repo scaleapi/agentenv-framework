@@ -1,6 +1,6 @@
-"""snapshot_env on an env deployed without a gateway: reached through the card its deployment recorded, its
-environments the card's children its names reach that export, and the env itself when it exports beside them, or the
-env alone, each kept as one file as through a gateway and sent its own data/get params; an environment
+"""snapshot_env on an env deployed without a gateway: reached through the card its deployment recorded, with its control
+token, its environments the card's children its names reach that export, and the env itself when it exports beside
+them, or the env alone, each kept as one file as through a gateway and sent its own data/get params; an environment
 whose data/get returns a file tree, a computer's, kept file by file by its paths under a grant sized for a file tree;
 and an env that fails under the upload grant asked again without it."""
 
@@ -122,6 +122,24 @@ async def test_the_env_itself_is_reached_when_its_card_has_no_children(local_sto
 
     assert _kept(universe) == {"desktop": b'{"rows": 1}'}
     assert sent == [("/agentenv", {})]
+
+
+@pytest.mark.asyncio
+async def test_a_record_with_a_control_token_sends_it_on_its_data_get(local_stores, monkeypatch):
+    seen, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"parts": [
+            {"kind": "data", "data": {"rows": 1}}]}})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    record = _record(_server())
+    record.control_token = "t0ken"
+
+    await SnapshotEnvTaskStep.snapshot_env_state(env=_Desk(), gateway_url=None, snapshot_id="snap-t", deployed=record)
+
+    assert seen == ["Bearer t0ken"]
 
 
 @pytest.mark.asyncio

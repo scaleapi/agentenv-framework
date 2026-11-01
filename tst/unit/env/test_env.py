@@ -113,6 +113,19 @@ async def test_a_record_without_a_card_offers_nothing(sent):
     assert sent == []
 
 
+@pytest.mark.asyncio
+async def test_a_record_with_a_control_token_sends_it_on_each_extension_call_and_keeps_it_through_storage(
+        composed, sent):
+    deployed = _record(composed)
+    deployed.control_token = "t0ken"
+
+    await deployed.invoke(EXT_STEP_URI, "step", {"action": "list_tools"})
+
+    assert [request.headers.get("authorization") for request in sent] == ["Bearer t0ken"]
+    assert DeployedEnv.from_dict(dataclasses.asdict(deployed)).control_token == "t0ken"
+    assert _record(composed).control_headers == {}
+
+
 def test_child_env_cards_come_from_the_card_by_name(composed):
     deployed = _record(composed)
     assert deployed.get_child_env_card("slack")["url"] == "/svc/mcp-slack/agentenv"

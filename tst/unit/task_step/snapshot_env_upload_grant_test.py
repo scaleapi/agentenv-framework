@@ -43,7 +43,7 @@ def store(local_stores, tmp_path):
 def pushes(monkeypatch):
     pushed: list[str] = []
 
-    async def push(base_url, card, timeout_seconds):
+    async def push(base_url, card, timeout_seconds, headers):
         pushed.append(base_url)
 
     monkeypatch.setattr(snapshot_mod, "_push_s3_credentials", push)

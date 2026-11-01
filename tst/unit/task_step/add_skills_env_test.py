@@ -35,7 +35,7 @@ def agent(monkeypatch):
     """The agent's skill registrations and the env calls the step made."""
     made = SimpleNamespace(calls=[], register=AsyncMock(return_value={"ok": True}))
 
-    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
         made.calls.append((base_url, card["name"], uri, method, params))
         return {"name": params["name"], "description": "How to use this env", "skill_md": f"---\nname: {params['name']}\n"}
 
@@ -69,7 +69,7 @@ async def test_each_envs_skill_is_installed_under_its_environment_name_and_recor
 async def test_a_skill_with_files_is_stored_once_and_installed_as_a_bundle(agent, local_stores, monkeypatch):
     files = {"LINUX.md": "# Linux\n", "WORKFLOW.md": "# Workflow\n"}
 
-    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
         return {"name": params["name"], "description": "Drive the desktop", "skill_md": "# Skill\n", "files": files}
 
     monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
@@ -86,7 +86,7 @@ async def test_a_skill_with_files_is_stored_once_and_installed_as_a_bundle(agent
 @pytest.mark.asyncio
 async def test_a_skill_file_whose_path_leaves_its_folder_is_refused_before_anything_is_stored(agent, local_stores,
                                                                                              monkeypatch):
-    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
         return {"name": params["name"], "description": "d", "skill_md": "# Skill\n", "files": {"../../victim": "x"}}
 
     monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)

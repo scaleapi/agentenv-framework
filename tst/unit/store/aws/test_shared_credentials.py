@@ -19,7 +19,7 @@ _CARD = {"capabilities": {"extensions": [{"uri": "urn:agentenv:add-s3-credential
 def pushed(monkeypatch):
     calls: list[dict] = []
 
-    async def fake_invoke(base_url, card, uri, params=None, timeout=30):
+    async def fake_invoke(base_url, card, uri, params=None, timeout=30, headers=None):
         calls.append(params)
 
     monkeypatch.setattr(protocol_v1, "invoke_extension", fake_invoke)
