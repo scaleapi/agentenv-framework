@@ -3,8 +3,11 @@ solver's deploy alone is given OpenEnv's capture proxy as its model endpoint, in
 token ids and processed logprobs, with no endpoint configured; its calls are captured and the task's verifier scores
 the run."""
 
+import asyncio
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
@@ -32,6 +35,7 @@ JUDGE = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "pro
          "agent_name": DeployAgentTaskStep.DEFAULT_AGENT_NAME, "criteria": [{"id": "c1", "description": "says 42"}],
          "depends_on": ["ask"]}
 asked: list[dict] = []
+hanging = threading.Event()
 
 
 class _Deploys(DeployAgentTaskStep):
@@ -40,6 +44,9 @@ class _Deploys(DeployAgentTaskStep):
     async def execute(self, context):
         if self.a2a_agent_id == "crashes":
             raise RuntimeError("the agent crashed")
+        if self.a2a_agent_id == "hangs":
+            hanging.set()
+            await asyncio.sleep(3600)
         context.metadata["endpoint"] = self._model_endpoint(context)
         return context
 
@@ -101,7 +108,8 @@ def bundle(tmp_path, monkeypatch, local_stores):  # noqa: F811
     monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
     asked.clear()
-    for agent_id in ("theirs", "crashes", "mine"):
+    hanging.clear()
+    for agent_id in ("theirs", "crashes", "hangs", "mine"):
         with namespace_routing():
             image = get_artifact_store().put_document(DockerImageArtifact(
                 id=f"{agent_id}-image", description="d", image_name="ghcr.io/acme/agent:1",
@@ -109,6 +117,7 @@ def bundle(tmp_path, monkeypatch, local_stores):  # noqa: F811
             A2AAgent.put(id=agent_id, docker_image_artifact=image)
     return layout(tmp_path / "quiz", {"tasks/sum.json": json.dumps([DEPLOY, ASK, CHECK]),
                                       "tasks/broken.json": json.dumps([{**DEPLOY, "a2a_agent_id": "crashes"}, ASK]),
+                                      "tasks/hanging.json": json.dumps([{**DEPLOY, "a2a_agent_id": "hangs"}, ASK]),
                                       "tasks/unprompted.json": json.dumps([DEPLOY]),
                                       "tasks/self-judged.json": json.dumps([DEPLOY, ASK, JUDGE])})
 
@@ -129,7 +138,7 @@ def test_the_solver_alone_calls_the_policy_through_the_proxy_and_the_run_is_capt
 
     [call] = asked
     [turn] = trace.turns
-    assert sorted(row["task_id"].rsplit("/", 1)[1] for row in rows) == ["broken", "sum"]
+    assert sorted(row["task_id"].rsplit("/", 1)[1] for row in rows) == ["broken", "hanging", "sum"]
     assert "unprompted is left out: training needs the agent a step prompts deployed by a deploy_agent step" in caplog.text
     assert "self-judged is left out: its rubric judge is its solver, whose grading would be trained on" in caplog.text
     assert (call["model"], call["answer"]) == ("trl-policy-v3", "It is 42.")
@@ -164,6 +173,52 @@ def test_a_run_that_fails_is_unscored_rather_than_zero(engine, bundle, caplog):
         assert session.wait_for_completion() == 1
     assert session.verify([]).env_reward is None
     assert "failed, so its rollout is left unscored: " in caplog.text
+
+
+@pytest.fixture
+def torn(monkeypatch):
+    """The task ids of the runs torn down, each recorded once its teardown is done."""
+    done, teardown = [], harness.teardown_run
+
+    async def tears_down(context):
+        report = await teardown(context)
+        done.append(context.metadata["task_id"])
+        return report
+
+    monkeypatch.setattr(harness, "teardown_run", tears_down)
+    return done
+
+
+def test_close_stops_a_rollout_in_flight_and_returns_once_it_is_torn_down(engine, bundle, torn):
+    factory = AgentEnvSessionFactory(bundle, llm_url=engine.url, model=MODEL)
+    session = factory.create(next(row["prompt"] for row in prompt_rows(bundle) if row["task_id"].endswith("hanging")))
+
+    with ThreadPoolExecutor(1) as pool:
+        waiting = pool.submit(session.wait_for_completion)
+        assert hanging.wait(30)
+        session.close()
+        assert [task_id.rsplit("/", 1)[1] for task_id in torn] == ["hanging"]
+        assert waiting.result(30) == 1
+    assert session.verify([]).env_reward is None
+
+
+def test_a_rollout_past_its_timeout_is_torn_down_before_the_timeout_is_raised(engine, bundle, torn):
+    factory = AgentEnvSessionFactory(bundle, llm_url=engine.url, model=MODEL)
+    session = factory.create(next(row["prompt"] for row in prompt_rows(bundle) if row["task_id"].endswith("hanging")))
+
+    with pytest.raises(TimeoutError):
+        session.wait_for_completion(0.5)
+    assert [task_id.rsplit("/", 1)[1] for task_id in torn] == ["hanging"]
+
+
+def test_a_session_closed_before_it_runs_never_runs(engine, bundle, torn):
+    factory = AgentEnvSessionFactory(bundle, llm_url=engine.url, model=MODEL)
+    session = factory.create(next(row["prompt"] for row in prompt_rows(bundle) if row["task_id"].endswith("sum")))
+
+    session.close()
+
+    assert session.wait_for_completion() == 1
+    assert (asked, torn) == ([], [])
 
 
 def test_a_prompt_naming_no_task_of_the_factorys_is_refused(engine, bundle):

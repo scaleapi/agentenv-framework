@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import logging
 import re
+import asyncio
 import secrets
 import socket
+import threading
 import uuid
 from collections.abc import Callable, Sequence
+from concurrent.futures import CancelledError
 from pathlib import Path
 from typing import Any
 
@@ -39,33 +42,35 @@ from agent_env.training._openenv import on_session_loop
 logger = logging.getLogger(__name__)
 #: How a row's prompt names its task, since TRL hands the factory only the prompt.
 _NAMED = re.compile(r"^AgentEnv task (\d+): (.+)$")
+#: Where every deploy runs: local Docker alone reaches the capture proxy on this machine; a remote sandbox needs a tunnel.
+_SANDBOX = "local"
 
 
-def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (), sandbox: str = "local",
+def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
                 agent: str | None = None) -> list[dict[str, Any]]:
     """The trainer's dataset, a row per task ``AgentEnvSessionFactory`` plays with the same arguments: a system line
     naming the task, which is how the factory finds it, then the task's first prompt, for TRL's logs. The model never
     sees this prompt: the task's own agent builds its own."""
     return [{"prompt": [{"role": "system", "content": f"AgentEnv task {index}: {task.id}"},
                         {"role": "user", "content": _first_prompt(task)}], "task_id": task.id}
-            for index, (task, _) in enumerate(_trained(bundle, tasks, evals, sandbox, agent))]
+            for index, (task, _) in enumerate(_trained(bundle, tasks, evals, agent))]
 
 
 class AgentEnvSessionFactory(ResourceSessionFactory):
     """OpenEnv's session factory for TRL's ``HarnessRolloutWorker``, built in its rollout process. It prepares the
-    bundle, checks that ``llm_url``'s engine returns token ids, and serves OpenEnv's capture proxy in front of it,
-    where the task's solver reaches it: the agent a step prompts, which it deploys, its other agents and judges keeping
-    the configured endpoint. TRL sets ``model`` to the policy it publishes; ``reward`` is as ``build_app``'s, and
+    bundle to run on local Docker, checks that ``llm_url``'s engine returns token ids, and serves OpenEnv's capture
+    proxy in front of it, where the task's solver reaches it: the agent a step prompts, which it deploys, its other
+    agents and judges keeping the configured endpoint. TRL sets ``model`` to the policy it publishes; ``reward`` is as ``build_app``'s, and
     ``agent`` the agent the solver deploys, as ``agent-env run --agent``'s."""
 
     def __init__(self, bundle: str | Path, *, llm_url: str, model: str, sampling: dict[str, Any] | None = None,
-                 tasks: Sequence[str] = (), evals: Sequence[str] = (), sandbox: str = "local",
+                 tasks: Sequence[str] = (), evals: Sequence[str] = (),
                  reward: str | Callable[[dict[str, float]], float] | None = None, agent: str | None = None,
                  api_key: str | None = None, max_model_calls: int = 0):
         self.model = model
         self._llm_url, self._api_key, self._sampling = llm_url, api_key, sampling
-        self._sandbox, self._max_model_calls = sandbox, max_model_calls
-        self._trained = _trained(bundle, tasks, evals, sandbox, agent)
+        self._max_model_calls = max_model_calls
+        self._trained = _trained(bundle, tasks, evals, agent)
         self._rewards = [_reward(task, reward) for task, _ in self._trained]
         require_llm(llm_url, model, api_key=api_key, require_tokens=True)
         self._proxy = CaptureServer(llm_url=llm_url, model=model, port=_free_port(), api_key=api_key,
@@ -80,7 +85,7 @@ class AgentEnvSessionFactory(ResourceSessionFactory):
             capture_level="tokens", purpose="train", sampling=self._sampling, max_model_calls=self._max_model_calls,
             task=played.id, episode=episode_id or uuid.uuid4().hex)
         endpoint = {"litellm_base_url": f"http://127.0.0.1:{self._proxy.port}", "litellm_api_key": capture.session_id}
-        overrides = {**sandbox_overrides(self._sandbox),
+        overrides = {**sandbox_overrides(_SANDBOX),
                      "step_params": {step: {**params, **endpoint} for step, params in solver.items()}}
         return AgentEnvSession(played, overrides, self._rewards[index], self._proxy.registry, capture, self.model)
 
@@ -93,6 +98,8 @@ class AgentEnvSession(ResourceSession):
         self._task, self._overrides, self._reward, self._model = task, overrides, reward, model
         self._registry, self._capture = registry, capture
         self._scores: dict[str, float] | None = None
+        self._lock = threading.Lock()
+        self._closed, self._running, self._done = False, None, None
 
     def initial_messages(self) -> list[dict[str, Any]]:
         return [{"role": "user", "content": _first_prompt(self._task)}]
@@ -104,8 +111,16 @@ class AgentEnvSession(ResourceSession):
         return ToolResult(error="the task's own agent calls its tools in its sandbox; none are offered here")
 
     def wait_for_completion(self, timeout_s: float | None = None) -> int:
-        """Runs the task and tears it down: 0 when it ran to the end, 1 when it failed."""
-        return on_session_loop(self._run(), timeout_s)
+        """Runs the task and tears it down: 0 when it ran to the end, 1 when it failed or ``close`` stopped it. Raises
+        TimeoutError, once the run is torn down, when the task runs past ``timeout_s``."""
+        with self._lock:
+            if self._closed:
+                return 1
+            self._done = threading.Event()
+        try:
+            return on_session_loop(self._run(timeout_s), None)
+        except CancelledError:
+            return 1
 
     def fetch_training_trace(self) -> TrainingTrace:
         document = export_session(self._capture, include_messages=True, capture_level="tokens")
@@ -122,23 +137,44 @@ class AgentEnvSession(ResourceSession):
                                                                     for step, score in (self._scores or {}).items()})
 
     def close(self) -> None:
+        """Stops a run still going, as TRL does to the rollouts in flight when it stops, and returns once the run is torn
+        down, so no sandbox outlives the trainer; then drops the session's captures."""
+        with self._lock:
+            self._closed = True
+            running, done = self._running, self._done
+        if running is not None:
+            running.get_loop().call_soon_threadsafe(running.cancel)
+        if done is not None:
+            done.wait()
         self._registry.delete(self._capture.session_id)
 
-    async def _run(self) -> int:
-        context = TaskStepContext(metadata={"task_id": self._task.id, "user_overrides": self._overrides})
-        with namespace_routing():
-            try:
-                await self._task.run(agent_model=self._model, context=context)
-                self._scores = recorded_scores(self._task.steps, context)
-                return 0
-            except Exception as e:
-                logger.warning("task %s failed, so its rollout is left unscored: %s", self._task.id, e)
-                return 1
-            finally:
-                await teardown_run(context)
+    async def _run(self, timeout: float | None) -> int:
+        try:
+            with self._lock:
+                if self._closed:
+                    return 1
+                self._running = asyncio.current_task()
+            context = TaskStepContext(metadata={"task_id": self._task.id, "user_overrides": self._overrides})
+            with namespace_routing():
+                try:
+                    async with asyncio.timeout(timeout):
+                        await self._task.run(agent_model=self._model, context=context)
+                    self._scores = recorded_scores(self._task.steps, context)
+                    return 0
+                except TimeoutError:
+                    raise
+                except Exception as e:
+                    logger.warning("task %s failed, so its rollout is left unscored: %s", self._task.id, e)
+                    return 1
+                finally:
+                    with self._lock:
+                        self._running = None  # a close from here on waits for the teardown rather than cutting it short
+                    await teardown_run(context)
+        finally:
+            self._done.set()
 
 
-def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str], sandbox: str,
+def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str],
              agent: str | None) -> list[tuple[Task, dict[str, dict[str, Any]]]]:
     """The selected tasks that can train their solver, prepared as ``agent-env run`` prepares them, each with its
     solver's deploys and their step params, ``agent``'s if it swaps the solver. The others are left out before they're
@@ -153,7 +189,7 @@ def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str], san
         if not kept:
             raise ValueError("no task of the bundle has a solver to train: an agent a step prompts, deployed by a "
                              "deploy_agent step, that isn't also its judge")
-        prepared = prepare_bundle(bundle, tasks=kept, sandbox=sandbox, agent=agent, solver_endpoint=True)
+        prepared = prepare_bundle(bundle, tasks=kept, sandbox=_SANDBOX, agent=agent, solver_endpoint=True)
     swapped = solver_params(prepared.plan, prepared.materialization)
     return [(task, {step: swapped.get(entry.id, {}).get(step, {})
                     for step in solver_steps([step.to_dict() for step in task.steps])})
