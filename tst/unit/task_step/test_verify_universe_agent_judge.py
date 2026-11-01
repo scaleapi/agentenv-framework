@@ -55,6 +55,10 @@ class TestPrompts:
         assert UNIVERSES_DIR in build_user_prompt()
         assert "original" in build_user_prompt() and "export_1" in build_user_prompt()
 
+    def test_both_prompts_name_the_folder_a_service_of_several_files_has(self):
+        assert f"{UNIVERSES_DIR}/original/<service>/" in JUDGE_SYSTEM_PROMPT
+        assert "`original/<service>/`" in build_user_prompt()
+
 
 class TestFauId:
     def test_deterministic(self):
