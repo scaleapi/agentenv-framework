@@ -48,6 +48,8 @@ _FILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 
 logger = logging.getLogger(__name__)
 _waited: set[str] = set()
+#: The servers whose refused connections rollouts have been warned they wait out, once a process.
+_restarting: set[str] = set()
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_lock = threading.Lock()
 
@@ -301,6 +303,10 @@ async def reopened(url: str, timeout: float, *, dropped: bool, patience: float, 
             waited = max(patience, timeout) if restarting else patience
             if not (restarting or _transient(e)) or time.monotonic() + REOPEN_SECONDS > began + waited:
                 raise Failed(f"{lead}{e}") from e
+            if restarting and url not in _restarting:
+                _restarting.add(url)
+                logger.warning("the server at %s refuses connections, so rollouts wait up to %gs for it to come back",
+                               url, waited)
             await asyncio.sleep(REOPEN_SECONDS)
 
 

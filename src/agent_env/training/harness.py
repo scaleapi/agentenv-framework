@@ -1,0 +1,164 @@
+"""Train a bundle's own agents with TRL's harness rollouts (``trl.experimental.async_grpo.HarnessRolloutWorker`` with
+``harness_adapter=None``): each rollout runs a task as ``agent-env run`` does, its agents' model calls going through
+OpenEnv's capture proxy to the trainer's vLLM, which records the tokens TRL trains on, and the task's verifiers score it."""
+
+from __future__ import annotations
+
+import logging
+import re
+import secrets
+import socket
+import uuid
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
+
+try:
+    from openenv.core.harness.capture import CaptureServer, require_llm, to_training_trace
+    from openenv.core.harness.capture.export import export_session
+    from openenv.core.harness.capture.sessions import Upstream
+    from openenv.core.harness.rollout import ResourceSession, ResourceSessionFactory, ToolResult, VerifyResult
+    from openenv.core.harness.training import TrainingTrace
+except ModuleNotFoundError as exc:
+    if exc.name is None or exc.name.split(".")[0] != "openenv":
+        raise
+    raise ImportError("agent_env.training.harness requires pip install 'agentenv-framework[harness]'") from exc
+
+from agent_env.bundle.run import prepare_bundle
+from agent_env.openenv.app import reward_of
+from agent_env.store.routing import namespace_routing
+from agent_env.task.task import Task, recorded_scores
+from agent_env.task.teardown import teardown_run
+from agent_env.task_step.context import TaskStepContext, sandbox_overrides
+from agent_env.training._openenv import on_session_loop
+
+logger = logging.getLogger(__name__)
+#: How a row's prompt names its task, since TRL hands the factory only the prompt.
+_NAMED = re.compile(r"^AgentEnv task (\d+): (.+)$")
+
+
+def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
+                sandbox: str = "local") -> list[dict[str, Any]]:
+    """The trainer's dataset, a row per task ``AgentEnvSessionFactory`` plays with the same arguments: a system line
+    naming the task, which is how the factory finds it, then the task's first prompt, for TRL's logs. The model never
+    sees this prompt: the task's own agent builds its own."""
+    with namespace_routing():
+        prepared = prepare_bundle(bundle, tasks=tasks, evals=evals, sandbox=sandbox)
+    return [{"prompt": [{"role": "system", "content": f"AgentEnv task {index}: {task.id}"},
+                        {"role": "user", "content": _first_prompt(task)}], "task_id": task.id}
+            for index, (_, task) in enumerate(prepared.tasks)]
+
+
+class AgentEnvSessionFactory(ResourceSessionFactory):
+    """OpenEnv's session factory for TRL's ``HarnessRolloutWorker``, built in its rollout process. It prepares the
+    bundle, checks that ``llm_url``'s engine returns token ids, and serves OpenEnv's capture proxy in front of it,
+    where the task's sandboxes reach it. TRL sets ``model`` to the policy it publishes; ``reward`` is as
+    ``build_app``'s, and ``agent`` swaps the agent each task deploys."""
+
+    def __init__(self, bundle: str | Path, *, llm_url: str, model: str, sampling: dict[str, Any] | None = None,
+                 tasks: Sequence[str] = (), evals: Sequence[str] = (), sandbox: str = "local",
+                 reward: str | Callable[[dict[str, float]], float] | None = None, agent: str | None = None,
+                 api_key: str | None = None, max_model_calls: int = 0):
+        self.model = model
+        self._llm_url, self._api_key, self._sampling = llm_url, api_key, sampling
+        self._sandbox, self._agent, self._max_model_calls = sandbox, agent, max_model_calls
+        with namespace_routing():
+            self._tasks = [task for _, task in prepare_bundle(bundle, tasks=tasks, evals=evals, sandbox=sandbox).tasks]
+        self._rewards = [_reward(task, reward) for task in self._tasks]
+        require_llm(llm_url, model, api_key=api_key, require_tokens=True)
+        self._proxy = CaptureServer(llm_url=llm_url, model=model, port=_free_port(), api_key=api_key,
+                                    admin_key=secrets.token_urlsafe(32))
+        self._proxy.start()
+
+    def create(self, task: Any, seed: int | None = None, episode_id: str | None = None) -> AgentEnvSession:
+        index = _index_named(task, [each.id for each in self._tasks])
+        capture = self._proxy.registry.create(
+            upstream=Upstream(llm_url=self._llm_url, model=self.model, api_key=self._api_key),
+            capture_level="tokens", purpose="train", sampling=self._sampling, max_model_calls=self._max_model_calls,
+            task=self._tasks[index].id, episode=episode_id or uuid.uuid4().hex)
+        return AgentEnvSession(self, self._tasks[index], self._rewards[index], capture, self.model)
+
+    def _overrides(self, key: str) -> dict[str, Any]:
+        return {**sandbox_overrides(self._sandbox), "litellm_base_url": f"http://127.0.0.1:{self._proxy.port}",
+                "litellm_api_key": key, **({"a2a_agent_id": self._agent} if self._agent else {})}
+
+
+class AgentEnvSession(ResourceSession):
+    """One run of a task with its own agents, their model calls captured under this session's key."""
+
+    def __init__(self, factory: AgentEnvSessionFactory, task: Task, reward: Callable[[dict[str, float]], float | None],
+                 capture: Any, model: str):
+        self._factory, self._task, self._reward, self._capture, self._model = factory, task, reward, capture, model
+        self._scores: dict[str, float] | None = None
+
+    def initial_messages(self) -> list[dict[str, Any]]:
+        return [{"role": "user", "content": _first_prompt(self._task)}]
+
+    def list_tools(self) -> list[Any]:
+        return []
+
+    def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(error="the task's own agent calls its tools in its sandbox; none are offered here")
+
+    def wait_for_completion(self, timeout_s: float | None = None) -> int:
+        """Runs the task and tears it down: 0 when it ran to the end, 1 when it failed."""
+        return on_session_loop(self._run(), timeout_s)
+
+    def fetch_training_trace(self) -> TrainingTrace:
+        document = export_session(self._capture, include_messages=True, capture_level="tokens")
+        return to_training_trace(self._capture.graph, document)
+
+    def verify(self, transcript: list[dict[str, Any]], final_state: Any | None = None) -> VerifyResult:
+        """The task's reward from its recorded scores; ``None``, which TRL leaves out of the update, when the run
+        failed or recorded no score its reward reads."""
+        try:
+            reward = None if self._scores is None else self._reward(self._scores)
+        except LookupError:
+            reward = None
+        return VerifyResult(env_reward=reward, done=True, metrics={f"score/{step}": score
+                                                                    for step, score in (self._scores or {}).items()})
+
+    def close(self) -> None:
+        self._factory._proxy.registry.delete(self._capture.session_id)
+
+    async def _run(self) -> int:
+        context = TaskStepContext(metadata={"task_id": self._task.id,
+                                            "user_overrides": self._factory._overrides(self._capture.session_id)})
+        with namespace_routing():
+            try:
+                await self._task.run(agent_model=self._model, context=context)
+                self._scores = recorded_scores(self._task.steps, context)
+                return 0
+            except Exception as e:
+                logger.warning("task %s failed, so its rollout is left unscored: %s", self._task.id, e)
+                return 1
+            finally:
+                await teardown_run(context)
+
+
+def _reward(task: Task, reward: str | Callable[[dict[str, float]], float] | None
+            ) -> Callable[[dict[str, float]], float | None]:
+    of, why = reward_of(task, reward)
+    if of is None:
+        raise ValueError(why)
+    return of
+
+
+def _index_named(prompt: Any, ids: list[str]) -> int:
+    for message in prompt if isinstance(prompt, list) else []:
+        if isinstance(message, dict) and (named := _NAMED.match(str(message.get("content") or ""))):
+            index = int(named[1])
+            if index < len(ids) and ids[index] == named[2]:
+                return index
+    raise KeyError("the row's prompt names no task of this factory's: build the dataset with prompt_rows, from the "
+                   "same bundle, tasks and evals")
+
+
+def _first_prompt(task: Task) -> str:
+    return next((step.prompt for step in task.steps if step.type == "prompt_agent"), "")
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("", 0))
+        return probe.getsockname()[1]

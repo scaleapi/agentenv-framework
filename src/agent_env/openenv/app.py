@@ -142,11 +142,11 @@ def _served(splits: dict[str, list[tuple[str, Task]]],
             except EpisodeError as e:
                 refused[task.id] = str(e)
                 continue
-            reward_of, problem = _reward_of(task, reward)
+            rewarded, problem = reward_of(task, reward)
             if problem:
                 unscorable[task.id] = problem
                 continue
-            kept.append(ServedTask(task, name, spec, reward_of))
+            kept.append(ServedTask(task, name, spec, rewarded))
         served[split] = tuple(kept)
     for why in refused.values():
         logger.warning("left out: %s", why)
@@ -158,7 +158,7 @@ def _served(splits: dict[str, list[tuple[str, Task]]],
     return served
 
 
-def _reward_of(task: Task, reward: str | Callable[[dict[str, float]], float] | None
+def reward_of(task: Task, reward: str | Callable[[dict[str, float]], float] | None
                ) -> tuple[Callable[[dict[str, float]], float | None] | None, str | None]:
     """``task``'s reward as a function of its scores, or why ``reward`` can't make one."""
     if callable(reward):
