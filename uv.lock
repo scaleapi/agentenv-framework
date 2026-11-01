@@ -148,6 +148,12 @@ openenv = [
 sail = [
     { name = "sail" },
 ]
+skyrl = [
+    { name = "openenv" },
+    { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13.14'" },
+    { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13.14'" },
+    { name = "transformers" },
+]
 smol = [
     { name = "smolmachines" },
 ]
@@ -178,8 +184,9 @@ verl = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "openenv", "sail", "tensorlake", "tenki", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "openenv", "sail", "skyrl", "tensorlake", "tenki", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'nemo-gym'" },
+    { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'skyrl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'trl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'verl'" },
     { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
@@ -216,6 +223,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=22" },
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.4" },
     { name = "psycopg2-binary", marker = "extra == 'dev'", specifier = ">=2.9.0" },
+    { name = "pyarrow", marker = "extra == 'skyrl'", specifier = ">=19" },
     { name = "pyarrow", marker = "extra == 'verl'", specifier = ">=19" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pymongo", specifier = ">=4.7" },
@@ -235,13 +243,14 @@ requires-dist = [
     { name = "tenki", extras = ["async"], marker = "extra == 'tenki'", specifier = "~=1.4.1" },
     { name = "tensorlake", marker = "extra == 'tensorlake'", specifier = "~=0.5.140" },
     { name = "tomli-w", marker = "extra == 'dev'", specifier = "==1.2.0" },
+    { name = "transformers", marker = "extra == 'skyrl'", specifier = ">=5" },
     { name = "transformers", marker = "extra == 'trl'", specifier = ">=5.2" },
     { name = "transformers", marker = "extra == 'verl'", specifier = ">=5" },
     { name = "urllib3", marker = "extra == 'boat'", specifier = ">=2.1.0,<3" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["openenv", "trl", "nemo-gym", "verl", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
+provides-extras = ["openenv", "trl", "nemo-gym", "verl", "skyrl", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"

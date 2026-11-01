@@ -8,11 +8,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -47,6 +48,8 @@ _FILE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 
 logger = logging.getLogger(__name__)
 _waited: set[str] = set()
+_loop: asyncio.AbstractEventLoop | None = None
+_loop_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -414,6 +417,43 @@ def toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, Nam
             name = f"{base}-{n}"
         named[each] = NamedToolset(name, first)
     return named
+
+
+def on_session_loop(coroutine: Coroutine[Any, Any, Any], timeout: float | None) -> Any:
+    """``coroutine``'s result, run on the event loop this process's sessions share, on a daemon thread of its own, for
+    a trainer that calls its environments from threads; waits at most ``timeout`` seconds."""
+    future = asyncio.run_coroutine_threadsafe(coroutine, _session_loop())
+    try:
+        return future.result(timeout)
+    except TimeoutError:
+        future.cancel()
+        raise
+
+
+def _session_loop() -> asyncio.AbstractEventLoop:
+    global _loop
+    with _loop_lock:
+        if _loop is None:
+            _loop = asyncio.new_event_loop()
+            threading.Thread(target=_loop.run_forever, name="agentenv-sessions", daemon=True).start()
+        return _loop
+
+
+def token_in(var: str | None) -> str | None:
+    """The token in the environment variable ``var``, which must be set when it's named."""
+    if var is None:
+        return None
+    if not (token := os.environ.get(var)):
+        raise ValueError(f"{var} isn't set: it holds the token the OpenEnv server asks for")
+    return token
+
+
+def function_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
+    """An MCP tool as the function tool a chat template renders."""
+    return {"type": "function", "function": {
+        "name": tool["name"], "description": tool.get("description") or "",
+        "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
+    }}
 
 
 def authorization(token: str | None) -> dict[str, str]:

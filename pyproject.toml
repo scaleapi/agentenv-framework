@@ -77,6 +77,14 @@ verl = [
     "pyarrow>=19",
     "transformers>=5",
 ]
+# agent_env.training.skyrl: SkyRL's trainers on a bundle served as an OpenEnv env; installed into SkyRL's own
+# environment, whose SkyRL, skyrl-gym, vLLM and torch are the trainer's to pin. pyarrow writes the parquet rows SkyRL
+# reads; transformers renders a row's tools into its system prompt with the model's chat template.
+skyrl = [
+    "agentenv-framework[openenv]",
+    "pyarrow>=19",
+    "transformers>=5",
+]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
     "boto3>=1.35.0",
@@ -125,7 +133,7 @@ coreweave = [
     "cwsandbox>=1.19.6,<2",  # Reject exec streams that close without an exit status.
 ]
 dev = [
-    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,openenv,sail,skyrl,tensorlake,tenki,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with

@@ -13,7 +13,7 @@ import json
 import logging
 import threading
 import weakref
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Mapping
 from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar
@@ -40,6 +40,7 @@ from agent_env.training._openenv import (
     Shared,
     key,
     messages,
+    on_session_loop,
     probe,
     read_tasks,
     toolsets,
@@ -52,8 +53,6 @@ logger = logging.getLogger(__name__)
 #: How long the exit hook waits for the sessions to close.
 EXIT_SECONDS = 30.0
 
-_loop: asyncio.AbstractEventLoop | None = None
-_loop_lock = threading.Lock()
 _environments: weakref.WeakSet[_Environment] = weakref.WeakSet()
 _servers: set[Server] = set()
 
@@ -138,7 +137,7 @@ class AgentEnv:
         the last empty and listing its tools, then ends the episode unscored, since TRL reads the tools from the
         class: its methods are every tool a turn offers, and one a turn doesn't offer answers so. Each call on a
         probe's session has the reset deadline."""
-        classes = _on_loop(self._environments(), None)
+        classes = on_session_loop(self._environments(), None)
         return classes[0] if len(classes) == 1 else {each.__name__: each for each in classes}
 
     def close(self) -> None:
@@ -146,7 +145,7 @@ class AgentEnv:
         started."""
         mine = [environment for environment in list(_environments) if environment._shared in self._shared]
         try:
-            _on_loop(_gathered(environment._close() for environment in mine), CLOSE_SECONDS)
+            on_session_loop(_gathered(environment._close() for environment in mine), CLOSE_SECONDS)
         finally:
             if self._server is not None:
                 _stop(self._server)
@@ -189,7 +188,7 @@ class _Environment(Session):
         one at a time: the first tool call or ``get_reward`` waits for it. Raises when the server refuses this
         environment's first session, as one at capacity does; a later session it refuses, after one was dropped,
         leaves only that rollout unscored."""
-        _on_loop(self._start(split, index, task_id), CONNECT_SECONDS + CLOSE_SECONDS)
+        on_session_loop(self._start(split, index, task_id), CONNECT_SECONDS + CLOSE_SECONDS)
 
     def get_reward(self) -> float | None:
         """The episode's reward, or ``None`` when it ended in an error. Raises when the episode's first turn offered a
@@ -198,7 +197,7 @@ class _Environment(Session):
         if rollout is None:
             return None
         try:
-            _on_loop(self._finish(rollout), None)
+            on_session_loop(self._finish(rollout), None)
         except Exception as e:
             rollout.failure = rollout.failure or why(e)
         if rollout.misgrouped:
@@ -213,7 +212,7 @@ class _Environment(Session):
         """Waits at most for the deploy and the call, each to its deadline and a grace after, then the session's close:
         the first call of a rollout waits for its deploy."""
         shared = self._shared
-        return _on_loop(self._step(name, arguments), shared.reset_timeout + max(shared.reset_timeout, shared.tool_timeout)
+        return on_session_loop(self._step(name, arguments), shared.reset_timeout + max(shared.reset_timeout, shared.tool_timeout)
                         + 2 * GRACE_SECONDS + CLOSE_SECONDS)
 
 
@@ -250,24 +249,6 @@ def _reduce_environment_class(environment: _EnvironmentClass) -> tuple[Any, ...]
 copyreg.pickle(_EnvironmentClass, _reduce_environment_class)
 
 
-def _episode_loop() -> asyncio.AbstractEventLoop:
-    global _loop
-    with _loop_lock:
-        if _loop is None:
-            _loop = asyncio.new_event_loop()
-            threading.Thread(target=_loop.run_forever, name="agentenv-trl-sessions", daemon=True).start()
-        return _loop
-
-
-def _on_loop(coroutine: Coroutine[Any, Any, Any], timeout: float | None) -> Any:
-    future = asyncio.run_coroutine_threadsafe(coroutine, _episode_loop())
-    try:
-        return future.result(timeout)
-    except TimeoutError:
-        future.cancel()
-        raise
-
-
 async def _gathered(coroutines: Any) -> list[Any]:
     return list(await asyncio.gather(*coroutines))
 
@@ -278,7 +259,7 @@ def _close_all() -> None:
     ``EXIT_SECONDS`` for the sessions and ``STOP_SECONDS`` for each server. It runs before threading's shutdown, while
     the thread pools an episode's teardown uses still take work."""
     try:
-        _on_loop(_gathered(environment._close() for environment in list(_environments)), EXIT_SECONDS)
+        on_session_loop(_gathered(environment._close() for environment in list(_environments)), EXIT_SECONDS)
     except Exception as e:
         logger.warning("couldn't end the episodes left running: %s", why(e))
     for server in list(_servers):

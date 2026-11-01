@@ -23,8 +23,7 @@ except ModuleNotFoundError as exc:
     raise ImportError("agent_env.training.verl.loop runs in verl's agent loop workers: install "
                       "'agentenv-framework[verl]' into verl's environment") from exc
 
-from agent_env.training._openenv import Rollout, Session, Shared
-from agent_env.training.verl.prepare import token_in
+from agent_env.training._openenv import Rollout, Session, Shared, token_in
 
 logger = logging.getLogger(__name__)
 #: The tools whose answers verl was seen to cut, each warned of once a process.
