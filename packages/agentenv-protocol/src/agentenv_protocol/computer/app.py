@@ -10,8 +10,10 @@ and a reset, as declared for the OS it runs on."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import inspect
+import itertools
 import json
 import logging
 import os
@@ -300,6 +302,9 @@ def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, p
         owned = tuple(_PATHS.validate_python(list(paths or [])))
     except ValidationError:
         raise ValueError(f"paths are normalized paths relative to the session user's home, not {paths!r}") from None
+    if overlapping := [f"{a!r} and {b!r}" for a, b in itertools.combinations(owned, 2)
+                       if PurePosixPath(a).is_relative_to(b) or PurePosixPath(b).is_relative_to(a)]:
+        raise ValueError(f"an app's paths each hold files of their own, but {'; '.join(overlapping)} overlap")
 
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, ComputerAppEnvironment)):
@@ -422,7 +427,12 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     async def _computer_app_launch(self) -> dict:
         if self.launch is None:
             raise InvalidArgument(f"{type(self).__name__} declares no launch")
-        return {"pid": await self._computer_app_runtime().launch_app()}
+        runtime = self._computer_app_runtime()
+        await self._computer_app_wait_turn("launch")
+        try:
+            return {"pid": await runtime.launch_app()}
+        finally:
+            runtime.turn.release()
 
     @extension(COMPUTER_APP, op="ready", method="GET")
     async def _computer_app_ready(self) -> dict:
@@ -480,26 +490,56 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         return _skill_parts(Path(self._computer_app_skill_file()).read_text(), os.environ.get("ENVIRONMENT_NAME", ""))
 
     async def _computer_app_data(self, op: str, *args: Any) -> Any:
-        """``op``, by its hook or its paths' default: a load and a reset stop the app first and relaunch it after, and a
-        load that fails is followed by a reset."""
-        call = self._computer_app_data_call(op)
-        if op == OP_GET_DATA:
-            return await self._computer_app_within(op, call(*args))
+        """``op``, by its hook or its paths' default, one data call or launch at a time: a load and a reset stop the app
+        first and relaunch it after, and a load that fails is followed by a reset. A call fails once it runs past
+        ``data_timeout_s``, but a thread can't be stopped, so the reset and relaunch after it wait for it to end, and so
+        does the next call."""
+        call, runtime = self._computer_app_data_call(op), self._computer_app_runtime()
+        await self._computer_app_wait_turn(op)
+        answer = asyncio.get_running_loop().create_future()
+        change = asyncio.ensure_future(self._computer_app_change(op, call, args, answer))
+        runtime.changing.add(change)
+        change.add_done_callback(runtime.changing.discard)
+        change.add_done_callback(lambda _: runtime.turn.release())
+        return await answer
+
+    async def _computer_app_change(self, op: str, call: Callable, args: tuple, answer: asyncio.Future) -> None:
+        """``op`` between the app's stop and its relaunch, answered on ``answer``: as it ends, or once it runs past
+        ``data_timeout_s``."""
         runtime = self._computer_app_runtime()
-        running = await runtime.stop_app()
         try:
+            running = op != OP_GET_DATA and await runtime.stop_app()
             try:
-                return await self._computer_app_within(op, call(*args))
+                result = await self._computer_app_within(op, call, args, answer)
             except Exception:
-                if op == OP_ADD_DATA and (reset := self._computer_app_data_call(OP_RESET_DATA)) is not None:
-                    try:
-                        await self._computer_app_within(OP_RESET_DATA, reset())
-                    except Exception as e:
-                        logger.warning(f"the reset after a failed data/add failed too: {type(e).__name__}: {e}")
+                if op == OP_ADD_DATA:
+                    await self._computer_app_undo(answer)
                 raise
-        finally:
-            if running:
-                await runtime.launch_app()
+            finally:
+                if running:
+                    await runtime.launch_app()
+        except Exception as e:
+            if not answer.done():
+                answer.set_exception(e)
+        else:
+            answer.set_result(result)
+
+    async def _computer_app_undo(self, answer: asyncio.Future) -> None:
+        """Reset the app's data after a load that failed."""
+        if (reset := self._computer_app_data_call(OP_RESET_DATA)) is None:
+            return
+        try:
+            await self._computer_app_within(OP_RESET_DATA, reset, (), answer)
+        except Exception as e:
+            logger.warning(f"the reset after a failed data/add failed too: {type(e).__name__}: {e}")
+
+    async def _computer_app_wait_turn(self, op: str) -> None:
+        """Wait, within ``data_timeout_s``, for the data call before to end, its reset and relaunch included."""
+        try:
+            await asyncio.wait_for(self._computer_app_runtime().turn.acquire(), self.data_timeout_s)
+        except TimeoutError:
+            raise TimeoutError(f"{op} waited past the app's data_timeout_s, {self.data_timeout_s:g} s, for the data "
+                               "call before it to end") from None
 
     def _computer_app_data_call(self, op: str) -> Optional[Callable]:
         """What serves ``op``: the class's hook, or its paths' default; None when nothing does."""
@@ -510,15 +550,23 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             return hook
         if self._data_hooks or not self.paths:
             return None
-        return {OP_ADD_DATA: lambda parts: app_data.add(parts, self.paths),
-                OP_GET_DATA: lambda write_namespace: app_data.get(self.paths, write_namespace),
-                OP_RESET_DATA: lambda: app_data.reset(self.paths)}[op]
+        return {OP_ADD_DATA: functools.partial(app_data.add, paths=self.paths),
+                OP_GET_DATA: functools.partial(app_data.get, self.paths),
+                OP_RESET_DATA: functools.partial(app_data.reset, self.paths)}[op]
 
-    async def _computer_app_within(self, op: str, result: Any) -> Any:
+    async def _computer_app_within(self, op: str, call: Callable, args: tuple, answer: asyncio.Future) -> Any:
+        """``call``'s result within ``data_timeout_s``; past it, ``answer`` fails at once, and this waits for the call
+        to end before it raises the same."""
+        work = asyncio.ensure_future(_called(call, *args))
         try:
-            return await asyncio.wait_for(_awaited(result), self.data_timeout_s)
+            return await asyncio.wait_for(asyncio.shield(work), self.data_timeout_s)
         except TimeoutError:
-            raise TimeoutError(f"{op} ran past the app's data_timeout_s, {self.data_timeout_s:g} s") from None
+            late = TimeoutError(f"{op} ran past the app's data_timeout_s, {self.data_timeout_s:g} s")
+            if not answer.done():
+                answer.set_exception(late)
+            with contextlib.suppress(Exception):
+                await work
+            raise late from None
 
     def _computer_app_keep_initial(self) -> None:
         """Keep the app's paths as installed, before anything changes them, when they serve its data."""
@@ -579,7 +627,11 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         )
 
 
-async def _awaited(result: Any) -> Any:
+async def _called(fn: Callable, *args: Any) -> Any:
+    """``fn``'s result, a sync one's from a thread, so it can't hold up the server."""
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args)
+    result = await asyncio.to_thread(fn, *args)
     return await result if inspect.isawaitable(result) else result
 
 

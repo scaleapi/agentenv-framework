@@ -1,12 +1,16 @@
-"""A computer app's data plane, served by its own server. An app that declares only paths gets the defaults: a load writes
-files under them, an export returns them, and a reset puts back the copy its server kept before it served; its card
-declares a file tree. Hooks override paths. Around a load and a reset the app is stopped and relaunched, a failed load
-is followed by a reset, and a call past data_timeout_s fails. The app serves its skill file."""
+"""A computer app's data plane, served by its own server. An app that declares only paths, none inside another, gets
+the defaults: a load writes files under them, through no link out of them, an export returns them, and a reset puts back
+the copy its server kept before it served; its card declares a file tree. Hooks override paths. Around a load and a
+reset the app is stopped and relaunched, a failed load is followed by a reset, and data calls take turns. A call past
+data_timeout_s fails then, a sync hook running in a thread, and its reset and relaunch, and the next call, wait for it
+to end. The app serves its skill file."""
 from __future__ import annotations
 
 import asyncio
 import base64
 import contextlib
+import os
+import time
 
 import pytest
 
@@ -103,13 +107,32 @@ async def test_an_app_with_only_paths_loads_exports_and_resets_them_as_installed
 
 
 @pytest.mark.asyncio
-async def test_a_file_under_none_of_its_paths_is_refused_and_nothing_is_written(home):
-    async with _http(PathsMail()) as http:
-        answer = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("Mail/a.txt", b"a"),
-                                                                            _inline("Documents/b.txt", b"b")]}))
+async def test_a_file_under_none_of_its_paths_or_through_a_link_out_of_them_is_refused_and_nothing_is_written(home):
+    (home / "Documents").mkdir()
+    (home / "Mail").mkdir()
+    os.symlink(home / "Documents", home / "Mail" / "shared")
+    mail = PathsMail()
+    mail._computer_app_keep_initial()
 
-    assert "'Documents/b.txt' is under none of this app's paths" in answer.json()["error"]["message"]
-    assert not (home / "Mail").exists()
+    async with _http(mail) as http:
+        outside = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("Mail/a.txt", b"a"),
+                                                                             _inline("Documents/b.txt", b"b")]}))
+        linked = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("Mail/a.txt", b"a"),
+                                                                            _inline("Mail/shared/b.txt", b"b")]}))
+
+    assert "'Documents/b.txt' is under none of this app's paths" in outside.json()["error"]["message"]
+    assert "'Mail/shared/b.txt' lead out of this app's paths through a link" in linked.json()["error"]["message"]
+    assert sorted(p.name for p in (home / "Mail").iterdir()) == ["shared"] and not any((home / "Documents").iterdir())
+
+
+@pytest.mark.parametrize("paths, problem", [
+    (["/etc/mail"], "paths are normalized paths relative to the session user's home"),
+    (["Mail", "Mail/inbox"], "an app's paths each hold files of their own, but 'Mail' and 'Mail/inbox' overlap"),
+    (["Mail", "Mail"], "but 'Mail' and 'Mail' overlap"),
+], ids=["absolute", "nested", "twice"])
+def test_paths_that_arent_relative_or_overlap_are_refused_where_theyre_declared(paths, problem):
+    with pytest.raises(ValueError, match=problem):
+        linux(paths=paths)
 
 
 @pytest.mark.asyncio
@@ -173,6 +196,38 @@ async def test_a_call_past_its_timeout_fails_saying_so(home, desktop):
         answer = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("a.txt", b"a")]}))
 
     assert answer.json()["error"]["message"] == "add_data ran past the app's data_timeout_s, 0.2 s"
+
+
+@pytest.mark.asyncio
+async def test_calls_take_turns_and_one_past_its_timeout_fails_then_while_what_follows_waits_for_its_thread(
+        home, desktop):
+    @linux(launch=Launch(command=["slow"]))
+    class Slow(ComputerAppEnvironment):
+        data_timeout_s = 1.0
+
+        @add_data
+        def load(self, parts: list) -> None:
+            desktop.append(("load", len(parts)))
+            time.sleep(1.4 if len(parts) == 2 else 0)
+            desktop.append(("loaded", len(parts)))
+
+        @reset_data
+        def wipe(self) -> None:
+            desktop.append(("reset",))
+
+    slow = Slow()
+    await slow._computer_app.launch_app()
+
+    async with _http(slow) as http:
+        late = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("a", b"a"), _inline("b", b"b")]}))
+        desktop.append(("answered",))
+        card = await http.get(WELL_KNOWN_PATH)
+        await _rpc(http, "data/add", {"parts": [_inline("c", b"c")]})
+
+    assert late.json()["error"]["message"] == "add_data ran past the app's data_timeout_s, 1 s"
+    assert card.status_code == 200
+    assert desktop == [("launch", 4242), ("stop", 4242), ("load", 2), ("answered",), ("loaded", 2), ("reset",),
+                       ("launch", 4248), ("stop", 4248), ("load", 1), ("loaded", 1), ("launch", 4252)]
 
 
 @pytest.mark.asyncio

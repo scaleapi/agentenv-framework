@@ -46,7 +46,8 @@ class AppReadiness(BaseModel):
 
 class AppRuntime:
     """An app's server's state: its ``launch``, its ``@ready_check`` methods by name, bound to the app, how long it may
-    take to be ready, why its last launch failed, and each sync check still running in its thread."""
+    take to be ready, why its last launch failed, each sync check still running in its thread, the ``turn`` its data
+    calls and launches take one at a time, and each data call still running."""
 
     def __init__(self, launch: Optional[Launch], ready_checks: dict[str, Callable[[], Any]], timeout_s: float) -> None:
         self.launch = launch
@@ -55,6 +56,8 @@ class AppRuntime:
         self.started = time.time()
         self.launch_failed: Optional[str] = None
         self.checking: dict[str, asyncio.Future] = {}
+        self.turn = asyncio.Lock()
+        self.changing: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         """Once the desktop session is up, add the app's menu launcher and launch a boot app, unless the computer has
@@ -80,7 +83,7 @@ class AppRuntime:
         return pid
 
     async def stop_app(self) -> bool:
-        """Stop the app this server launched last, with everything it started; whether it was running."""
+        """Stop the app this server launched last, with everything it started; whether any of it was running."""
         try:
             pid = int(PID.read_text())
         except (FileNotFoundError, ValueError):

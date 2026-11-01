@@ -49,9 +49,9 @@ async def stop(pid: int, timeout_s: float) -> None:
 
 
 def alive(pid: int) -> bool:
-    """Whether the process ``pid`` is running."""
+    """Whether a process of the session ``launch`` started as ``pid`` is running, its first or one it started."""
     try:
-        os.kill(pid, 0)
+        os.killpg(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:

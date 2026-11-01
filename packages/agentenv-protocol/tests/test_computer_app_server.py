@@ -321,6 +321,18 @@ async def test_the_session_launches_an_app_in_a_session_of_its_own_from_its_fold
     assert (tmp_path / "seen").read_text() == f"{os.path.realpath(tmp_path)} notes :99 True"
 
 
+@pytest.mark.asyncio
+async def test_a_stop_ends_what_the_app_started_though_its_first_process_exited(tmp_path):
+    sleeper = f"{sys.executable} -c 'import time; time.sleep(60)' & exit 0"
+    pid = await session.launch(["sh", "-c", sleeper], tmp_path, {})
+    await asyncio.gather(*session._running)
+
+    running = session.alive(pid)
+    await session.stop(pid, 5)
+
+    assert running and not session.alive(pid)
+
+
 def test_the_launcher_runs_the_app_through_its_own_server(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     folder = Path("/opt/agentenv/apps/notes")

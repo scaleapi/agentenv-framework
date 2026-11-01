@@ -29,7 +29,8 @@ def keep_initial(paths: list[str]) -> None:
 
 
 async def add(parts: list, paths: list[str]) -> None:
-    """Write each file part at the path it names, which must be under one of ``paths``."""
+    """Write each file part at the path it names, which must be under one of ``paths``, through no link that leads
+    out of them; nothing is written when one isn't."""
     files = {}
     for part in parts:
         path = uploaded_object_path(part) if isinstance(part, FilePart) else None
@@ -38,7 +39,7 @@ async def add(parts: list, paths: list[str]) -> None:
         if not any(PurePosixPath(path).is_relative_to(owned) for owned in paths):
             raise ValueError(f"{path!r} is under none of this app's paths: {', '.join(paths)}")
         files[path] = await part_bytes(part)
-    await asyncio.to_thread(_write, Path.home(), files)
+    await asyncio.to_thread(_write, Path.home(), files, paths)
 
 
 async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
@@ -51,7 +52,10 @@ async def reset(paths: list[str]) -> None:
     await asyncio.to_thread(_restore, Path.home(), paths)
 
 
-def _write(home: Path, files: dict[str, bytes]) -> None:
+def _write(home: Path, files: dict[str, bytes], paths: list[str]) -> None:
+    owned = [(home / path).resolve() for path in paths]
+    if linked := [path for path in files if not any((home / path).resolve().is_relative_to(o) for o in owned)]:
+        raise ValueError(f"{', '.join(map(repr, linked))} lead out of this app's paths through a link")
     for path, data in files.items():
         target = home / path
         target.parent.mkdir(parents=True, exist_ok=True)
