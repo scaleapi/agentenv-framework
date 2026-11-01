@@ -246,7 +246,7 @@ class _FakeAsyncClient:
     async def __aexit__(self, *exc):
         return False
 
-    def stream(self, method, url, params=None):
+    def stream(self, method, url, params=None, headers=None):
         self.requests.append((method, url, params))
         client = self
 
@@ -464,7 +464,7 @@ class _FakeChangesClient(_FakeAsyncClient):
         self.rows = rows or []
         self.page_size = page_size
 
-    async def request(self, method, url, params=None):
+    async def request(self, method, url, params=None, headers=None):
         self.requests.append((method, url, params))
         if self.error:
             raise self.error
@@ -815,7 +815,7 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
         async def __aexit__(self, *exc):
             return False
 
-        def stream(self, method, url, timeout=None):
+        def stream(self, method, url, timeout=None, headers=None):
             captured["method"] = method
             captured["url"] = url
             return _FakeStreamCtx()

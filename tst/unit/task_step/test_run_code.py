@@ -1351,7 +1351,7 @@ async def test_a_run_the_computer_stopped_at_its_timeout_is_reported_as_one(comp
 async def test_a_run_whose_call_drops_fails_naming_why_and_the_next_one_runs_afresh(computer, monkeypatch):
     invoke, dropped = computer.invoke_extension, []
 
-    async def drop_once(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+    async def drop_once(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
         if params["argv"][0] == "python3" and not dropped:
             dropped.append(params["request_id"])
             raise httpx.RemoteProtocolError("the driver went away")

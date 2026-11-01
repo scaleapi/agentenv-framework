@@ -69,7 +69,7 @@ async def _served():
 
 async def _calls(rest: httpx.AsyncClient, headers: dict) -> list[int]:
     """The status of a call to each framework-only route with ``headers``: the data plane, an extension, tool access."""
-    load = {"jsonrpc": "2.0", "id": 1, "method": "data/add", "params": {"parts": []}}
+    load = {"jsonrpc": "2.0", "id": 1, "method": "data/add", "params": {"parts": [{"kind": "data", "data": {}}]}}
     return [(await rest.post(RPC_PATH, json=load, headers=headers)).status_code,
             (await rest.post("/agentenv/ext/test-exec/run", json={"argv": ["ls"]}, headers=headers)).status_code,
             (await rest.post("/tools/disable", json={"role": "agent", "tools": ["read"]}, headers=headers)).status_code]
