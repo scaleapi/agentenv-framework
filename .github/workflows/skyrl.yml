@@ -55,8 +55,11 @@ jobs:
           python -m pip install --quiet -r .github/ci-requirements.txt
           uv sync --locked --extra dev --extra skyrl --python "$(command -v python)"
       - name: Install SkyRL, skyrl-gym and CPU torch
+        # flash-attn is SkyRL's on Linux, but nothing on CPU uses it, and from PyPI it builds from source against torch.
         run: |
+          echo 'flash-attn; sys_platform == "never"' > "$RUNNER_TEMP/overrides.txt"
           uv pip install --python .venv/bin/python ${{ matrix.requirement }} torch \
+            --override "$RUNNER_TEMP/overrides.txt" \
             --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
           .venv/bin/python -c "from importlib.metadata import version; print('skyrl', version('skyrl'), 'skyrl-gym', version('skyrl-gym'), 'torch', version('torch'))"
       - name: SkyRL tier
