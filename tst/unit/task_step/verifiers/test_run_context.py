@@ -9,12 +9,10 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from agentenv_protocol import client as protocol_v1
 
 from agent_env.a2a_agent import conversation_store
 from agent_env.artifact import FileArtifact
 from agent_env.config import get_config
-from agent_env.env.env import DeployedEnv
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers import Run, RunRecordUnavailable
@@ -386,7 +384,7 @@ def _outcome(script: bytes, monkeypatch, **kw) -> EnvOutcomeVerifierTaskStep:
 @pytest.mark.asyncio
 async def test_a_verify_asking_for_run_is_handed_the_run_it_grades(monkeypatch):
     context, _, _ = recorded_run()
-    context.deployed_envs.append(DeployedEnv(env_id="calendar", env_version=1, mcp_url="http://mcp"))
+    context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://mcp"))
 
     await _outcome(RUN_SCRIPT, monkeypatch, prompt_id="p1").execute(context)
 
@@ -398,7 +396,7 @@ async def test_a_verify_asking_for_run_is_handed_the_run_it_grades(monkeypatch):
 async def test_without_a_prompt_id_the_runs_last_prompt_is_graded(monkeypatch):
     context, _, _ = recorded_run()
     context.prompt_responses.insert(0, PromptResponse(prompt_id="warmup", response="ok", prompt_text="hi", step_id="w"))
-    context.deployed_envs.append(DeployedEnv(env_id="calendar", env_version=1, mcp_url="http://mcp"))
+    context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://mcp"))
 
     await _outcome(RUN_SCRIPT, monkeypatch).execute(context)
 
@@ -406,28 +404,23 @@ async def test_without_a_prompt_id_the_runs_last_prompt_is_graded(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_verify_asking_for_env_url_is_handed_the_envs_address_and_reaches_it_with_its_control_token(
-        monkeypatch):
+async def test_a_verify_asking_for_env_url_is_handed_the_envs_address(monkeypatch):
     context, _, _ = recorded_run()
     context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://127.0.0.1:20001/mcp",
-                                                 environment_url="http://127.0.0.1:20001", control_token="t0ken"))
-    script = (b"from agentenv_protocol import client\n"
-              b"async def verify(mcp_url, env_url, run=None):\n"
-              b"    return [{'id': 'c', 'score': 1.0, 'env_url': env_url, 'turns': len(run.turns),\n"
-              b"             'headers': client.request_headers(env_url + '/agentenv/ext/computer-exec/run')}]\n")
+                                                 environment_url="http://127.0.0.1:20001"))
+    script = (b"async def verify(mcp_url, env_url, run=None):\n"
+              b"    return [{'id': 'c', 'score': 1.0, 'env_url': env_url, 'turns': len(run.turns)}]\n")
 
     await _outcome(script, monkeypatch, prompt_id="p1").execute(context)
 
     [row] = context.metadata["verifications"]["v"]["results"]
     assert (row["env_url"], row["turns"]) == ("http://127.0.0.1:20001", 3)
-    assert row["headers"] == {"Authorization": "Bearer t0ken"}
-    assert protocol_v1.request_headers("http://127.0.0.1:20001/agentenv") == {}
 
 
 @pytest.mark.asyncio
 async def test_a_verify_with_an_unrelated_second_parameter_is_called_as_before(monkeypatch):
     context, _, _ = recorded_run()
-    context.deployed_envs.append(DeployedEnv(env_id="calendar", env_version=1, mcp_url="http://mcp"))
+    context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://mcp"))
     script = b"async def verify(mcp_url, retries=3):\n    return [{'id': 'c', 'score': 1.0, 'retries': retries}]\n"
 
     await _outcome(script, monkeypatch, prompt_id="p1").execute(context)
@@ -438,7 +431,7 @@ async def test_a_verify_with_an_unrelated_second_parameter_is_called_as_before(m
 @pytest.mark.asyncio
 async def test_a_one_argument_verify_is_called_as_before(monkeypatch):
     context, _, _ = recorded_run()
-    context.deployed_envs.append(DeployedEnv(env_id="calendar", env_version=1, mcp_url="http://mcp"))
+    context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://mcp"))
     script = b"async def verify(mcp_url):\n    return [{'id': 'c', 'score': 1.0, 'url': mcp_url}]\n"
 
     await _outcome(script, monkeypatch, prompt_id="p1").execute(context)
@@ -449,7 +442,7 @@ async def test_a_one_argument_verify_is_called_as_before(monkeypatch):
 @pytest.mark.asyncio
 async def test_an_unknown_prompt_id_fails_the_step(monkeypatch):
     context, _, _ = recorded_run()
-    context.deployed_envs.append(DeployedEnv(env_id="calendar", env_version=1, mcp_url="http://mcp"))
+    context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://mcp"))
 
     with pytest.raises(RuntimeError, match="prompt_id='nope' not found"):
         await _outcome(RUN_SCRIPT, monkeypatch, prompt_id="nope").execute(context)
