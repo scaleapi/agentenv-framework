@@ -1,13 +1,14 @@
 """The data plane on a computer: ``data/add`` writes files under the session user's home, ``data/get`` returns the
-files under the paths its caller names, or under ``DEFAULT_DATA_PATHS`` when it names none. Each file part names its
-path, relative to the home, under the ``data-objects/v1`` marker."""
+files under the paths its caller names, or under ``DEFAULT_DATA_PATHS`` when it names none, leaving out those under a
+path one of the computer's apps keeps its data in. Each file part names its path, relative to the home, under the
+``data-objects/v1`` marker."""
 from __future__ import annotations
 
 import base64
 import binascii
 import mimetypes
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 import httpx
@@ -57,13 +58,15 @@ class DataPlane:
             named = _PATHS.validate_python(paths) if paths is not None else list(DEFAULT_DATA_PATHS)
         except ValidationError:
             raise ValueError(f"data/get on a computer takes paths relative to the home, not {paths!r}") from None
-        return await file_parts(Path.home(), named, write_namespace)
+        return await file_parts(Path.home(), named, write_namespace, leaving_out=await self._computer.app_paths())
 
 
-async def file_parts(home: Path, paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
-    """A part for each file under ``paths`` of ``home``, naming its path relative to ``home``: uploaded under
-    ``write_namespace`` when there is one, else inline."""
-    files = _data_files(home, paths)
+async def file_parts(home: Path, paths: list[str], write_namespace: Optional[WriteNamespaceGrant],
+                     leaving_out: list[str] = ()) -> list:
+    """A part for each file under ``paths`` of ``home`` but under none of ``leaving_out``, naming its path relative to
+    ``home``: uploaded under ``write_namespace`` when there is one, else inline."""
+    files = [(relative, source) for relative, source in _data_files(home, paths)
+             if not any(PurePosixPath(relative).is_relative_to(owned) for owned in leaving_out)]
     if write_namespace is not None:
         uploader = NamespaceUploader(write_namespace)
         parts = []

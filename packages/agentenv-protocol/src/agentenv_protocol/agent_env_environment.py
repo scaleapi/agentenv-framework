@@ -14,7 +14,8 @@ import sys
 import types
 import uuid
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Union, get_args, get_origin, get_type_hints
+from typing import (Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Optional, Union, get_args, get_origin,
+                    get_type_hints)
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
@@ -376,7 +377,10 @@ class AgentEnvApplication(ABC):
         return self.environment_card
 
     async def _serve_card(self, request: Request) -> Response:
-        return _json_response(self.environment_card.model_dump())
+        card = self.environment_card
+        if isinstance(self.handler, AgentEnvEnvironment) and (children := await self.handler.children_environments()):
+            card = card.model_copy(update={"children_environments": children})
+        return _json_response(card.model_dump())
 
     async def update_tool(self, name: str, *, description: str) -> None:
         """Change a served tool's description after the mount: on the card and in tools/list alike."""
@@ -661,6 +665,11 @@ class AgentEnvEnvironment:
     def declared_extensions(self) -> list[EnvironmentExtension]:
         """Declaration-only extensions to advertise, like ``intake/v1``: a promise with params and no handler."""
         return []
+
+    async def children_environments(self) -> Optional[list[EnvironmentCard]]:
+        """The environments this one fronts, as each serves its card with its paths under this one's, listed on the card
+        each time it's served; None for none."""
+        return None
 
     def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
         """The ``@extension`` handlers' extensions to serve, chosen at mount: one left out is not served, and of one served
