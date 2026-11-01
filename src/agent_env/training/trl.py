@@ -213,11 +213,12 @@ class _Environment(Session):
         return rollout.reward
 
     def _call(self, name: str, arguments: dict[str, Any]) -> str:
-        """Waits at most for the deploy and the call, each to its deadline and a grace after, then the session's close:
-        the first call of a rollout waits for its deploy."""
+        """Waits at most for a restarting server, the deploy and the call, each to its deadline and a grace after, then
+        the session's close: the first call of a rollout waits for its deploy, after its session reopens."""
         shared = self._shared
-        return on_session_loop(self._step(name, arguments), shared.reset_timeout + max(shared.reset_timeout, shared.tool_timeout)
-                        + 2 * GRACE_SECONDS + CLOSE_SECONDS)
+        reopen = max(shared.patience, shared.reset_timeout)
+        waits = reopen + shared.reset_timeout + max(shared.reset_timeout, shared.tool_timeout)
+        return on_session_loop(self._step(name, arguments), waits + 2 * GRACE_SECONDS + CLOSE_SECONDS)
 
 
 class _EnvironmentClass(type):

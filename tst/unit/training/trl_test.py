@@ -250,12 +250,21 @@ def test_a_session_dropped_by_a_restarting_server_opens_again_once_it_is_back(se
             raise ConnectionError(f"couldn't open a session on the server at {url}") from refused
         return await opened(url, timeout, token=token)
 
+    on_loop, budgets = trl.on_session_loop, []
+
+    def budgeted(coroutine, timeout):
+        budgets.append(timeout)
+        return on_loop(coroutine, timeout)
+
     monkeypatch.setattr(_openenv, "opened", restarting)
     monkeypatch.setattr(_openenv, "REOPEN_SECONDS", 0.01)
+    monkeypatch.setattr(trl, "on_session_loop", budgeted)
     environment.reset(**env.dataset[0])
     environment.end_turn(response="Added a crate.")
 
+    shared = environment._shared
     assert (environment.get_reward(), len(refusals)) == (1.0, 3)
+    assert budgets[1] > shared.reset_timeout + shared.reset_timeout + max(shared.reset_timeout, shared.tool_timeout)
 
 
 def test_a_rollout_whose_tools_arent_its_classs_stops_training(served, monkeypatch):
