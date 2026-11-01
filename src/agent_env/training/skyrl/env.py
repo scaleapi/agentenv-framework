@@ -12,6 +12,7 @@ from typing import Any
 
 try:
     from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
+    from skyrl_gym.metrics import default_aggregate_metrics
 except ModuleNotFoundError as exc:
     if exc.name is None or exc.name.split(".")[0] != "skyrl_gym":
         raise
@@ -38,8 +39,9 @@ class AgentEnvTextEnv(BaseTextEnv):
     returns its reward. A failure of the env raises EpisodeFailed; a task that ends unscored without failing, or offers
     a tool its row doesn't list, is a configuration error no replay changes, and raises ValueError.
 
-    ``get_metrics``, which SkyRL averages per step and per eval as ``environment/...``, holds each of the episode's
-    scores by the id of the step that recorded it (``score/<step id>``), the tool calls run and the unparsed ones."""
+    ``get_metrics`` holds each of the episode's scores by the id of the step that recorded it (``score/<step id>``),
+    the tool calls run and the unparsed ones; SkyRL logs their means per step and per eval as
+    ``environment/avg_<metric>``."""
 
     def __init__(self, env_config: Any = None, extras: dict[str, Any] | None = None):
         super().__init__()
@@ -94,6 +96,12 @@ class AgentEnvTextEnv(BaseTextEnv):
     def get_metrics(self) -> dict[str, Any]:
         return {"tool_calls": self._run, "unparsed_calls": self._unparsed,
                 **{f"score/{step}": score for step, score in self._scores.items()}}
+
+    @staticmethod
+    def aggregate_metrics(metrics: list[dict[str, Any]]) -> dict[str, Any]:
+        """Each metric's mean over the rollouts, named ``avg_<metric>`` as SkyRL names a mean: where SkyRL joins
+        groups' metrics, as its fully async trainer does, it averages a mean so named and adds the others up."""
+        return {f"avg_{key}": value for key, value in default_aggregate_metrics(metrics).items()}
 
     def close(self) -> None:
         on_session_loop(self._session.close(), CLOSE_SECONDS)

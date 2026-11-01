@@ -84,9 +84,23 @@ def test_a_played_rows_reward_is_its_episodes_and_its_last_reply_ends_the_turn(s
     assert all(1 in mask and 0 in mask for mask in output["loss_masks"])
     assert output["env_metrics"] == [{"tool_calls": 1, "unparsed_calls": 0, "score/replies": 1.0, "attempts": 1,
                                       "failed": 0}] * 2
-    assert output["rollout_metrics"]["environment/score/replies"] == 1.0
+    assert output["rollout_metrics"]["environment/avg_score/replies"] == 1.0
     assert (replies, engine.calls) == (["Added a crate."] * 2, 4)
     assert len(teardowns.finished) == 3
+
+
+def test_the_env_metrics_of_groups_joined_as_skyrls_fully_async_trainer_joins_them_stay_means(serve, tmp_path,
+                                                                                               tool_format, tokenizer):
+    server = serve({"a": PLAYED})
+    rows = _rows(server.url, tmp_path, tool_format)
+
+    groups = [_generate(rows, _Engine(tokenizer, adds_a_crate(tool_format)), tokenizer, samples=2,
+                        sampling_params=config.SamplingParams(logprobs=0)) for _ in range(2)]
+    server.stop()
+
+    joined = generator_utils.concatenate_generator_outputs(groups)["rollout_metrics"]
+    assert {key: joined[f"environment/avg_{key}"] for key in ("attempts", "failed", "tool_calls", "score/replies")} == {
+        "attempts": 1.0, "failed": 0.0, "tool_calls": 1.0, "score/replies": 1.0}
 
 
 def test_the_model_sees_its_tools_as_its_chat_template_renders_them(serve, tmp_path, tool_format, tokenizer):
@@ -292,7 +306,8 @@ class _Engine:
         self.first_prompt = self.first_prompt or list(prompt)
         reply = self.script(self.tokenizer.decode(prompt).count("<tool_response>"))
         ids = [*self.tokenizer.encode(reply, add_special_tokens=False), self.tokenizer.eos_token_id]
-        return {"responses": [reply], "response_ids": [ids], "stop_reasons": ["stop"], "response_logprobs": None}
+        return {"responses": [reply], "response_ids": [ids], "stop_reasons": ["stop"],
+                "response_logprobs": [[0.0] * len(ids)]}
 
     async def finish_session(self, session_id):
         pass
@@ -313,7 +328,7 @@ def _generator(engine, tokenizer, *, env_workers=4, **settings):
 
 
 def _generate(rows, engine, tokenizer, *, samples=1, phase="train", step_wise=False, max_turns=4,
-              reset_timeout=None, env_workers=4):
+              reset_timeout=None, env_workers=4, **settings):
     prompts = dataset.PromptDataset([str(rows)], tokenizer, max_prompt_length=8192, num_workers=1)
     batch = prompts.collate_fn([prompts[index] for index in range(len(prompts.dataframe))])
     if reset_timeout is not None:
@@ -322,6 +337,6 @@ def _generate(rows, engine, tokenizer, *, samples=1, phase="train", step_wise=Fa
                  for row in batch]
     generator_input, _ = generator_utils.prepare_generator_input(batch, samples, None, "agentenv", phase, 1)
     generator = _generator(engine, tokenizer, env_workers=env_workers, max_turns=max_turns,
-                           step_wise_trajectories=step_wise)
+                           step_wise_trajectories=step_wise, **settings)
     return asyncio.run(generator.generate(generator_input))
 
