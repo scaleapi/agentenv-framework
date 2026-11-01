@@ -1,5 +1,6 @@
 """A computer at its driver's boundary, for steps that reach inside one: its home a folder on this machine, ``data/add``
-writing there, ``data/get`` reading there, and computer-exec/v1 ``run`` running commands there; each call recorded.
+writing there, ``data/get`` reading there, and computer-exec/v1 ``run`` running commands there; each call recorded,
+and the address each ``data/add`` is sent to.
 ``pkill`` matches nothing, so one test never ends another's processes on this machine."""
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ class Computer:
     def __init__(self, home: Path):
         self.home = home
         self.calls: list[tuple] = []
+        self.added_at: list[str] = []
         self.add_fails: Exception | None = None
 
     def deployed(self, env_id: str = "desk", card: dict | None = None, **computer) -> DeployedSandboxEnv:
@@ -43,6 +45,7 @@ class Computer:
 
     async def add_data(self, base_url, parts, timeout=120, verify=True):
         self.calls.append(("data/add", [p.metadata[DATA_OBJECTS_EXTENSION_URI] for p in parts], timeout))
+        self.added_at.append(base_url)
         if self.add_fails is not None:
             raise self.add_fails
         for part in parts:

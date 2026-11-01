@@ -119,11 +119,15 @@ class DeployedEnv:
             raise EnvCapabilityUnsupported(uri, method, self.env_id, self.instance_id)
 
     def get_child_env_card(self, environment_name: str) -> Optional[dict]:
-        """The stored card's child env named `environment_name`; a leaf card is its own only child env."""
+        """The stored card's child env named `environment_name`; a leaf card is its own only child env, and a composed
+        card serving a data plane of its own, as a computer's driver fronting its apps does, is the one its own name
+        reaches."""
         card = self.environment_card or {}
-        if not isinstance(card.get("children_environments"), list):
-            return card if card.get("name") == environment_name else None
-        return protocol_v1.find_child(card, environment_name)
+        composed = isinstance(card.get("children_environments"), list)
+        own = not composed or (card.get("capabilities") or {}).get("operations")
+        if own and card.get("name") == environment_name:
+            return card
+        return protocol_v1.find_child(card, environment_name) if composed else None
 
     async def invoke(self, uri: str, method: str, params: Optional[dict] = None, *,
                      environment_name: Optional[str] = None, timeout: int = _EXTENSION_CALL_TIMEOUT_S) -> Any:

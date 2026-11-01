@@ -326,9 +326,9 @@ def _stored_skill(skill_md: str, files: dict[str, str]) -> str:
 
 
 async def _env_skills(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> list[dict]:
-    """The skills the env ``env_id`` serves, each under its card's environment name: its own card's, or else each of its
-    child envs' (a gateway's servers); refused for an env this run didn't deploy or bind to ``agent``, or that serves
-    none."""
+    """The skills the env ``env_id`` serves, each under its card's environment name: its own card's and each of its
+    child envs' (a gateway's servers, a computer's apps) its name reaches; refused for an env this run didn't deploy or
+    bind to ``agent``, or that serves none."""
     deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
     if deployed is None:
         raise RuntimeError(f"env '{env_id}' isn't deployed in this run")
@@ -336,12 +336,12 @@ async def _env_skills(context: TaskStepContext, agent: DeployedAgent, env_id: st
         raise RuntimeError(f"env '{env_id}' isn't bound to agent '{agent.agent_name}': name it in the env_ids of its "
                            "deploy_agent")
     card = deployed.environment_card or {}
-    if find_extension_method(card, SKILL_EXTENSION_URI, "get") is not None:
-        serving = [(None, _env_skill_name(card.get("name") or env_id, env_id))]
-    else:
-        serving = [(child["name"], _env_skill_name(child["name"], f"{env_id}/{child['name']}"))
-                   for child in card.get("children_environments") or []
-                   if find_extension_method(child, SKILL_EXTENSION_URI, "get") is not None]
+    serving = [(None, _env_skill_name(card.get("name") or env_id, env_id))] if find_extension_method(
+        card, SKILL_EXTENSION_URI, "get") is not None else []
+    serving += [(child["name"], _env_skill_name(child["name"], f"{env_id}/{child['name']}"))
+                for child in card.get("children_environments") or []
+                if find_extension_method(child, SKILL_EXTENSION_URI, "get") is not None
+                and deployed.get_child_env_card(child["name"]) is child]
     if not serving:
         raise RuntimeError(f"env '{env_id}' serves no skill: neither its card nor a child env's declares "
                            f"{SKILL_EXTENSION_URI}")

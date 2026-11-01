@@ -125,8 +125,9 @@ def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
 
 
 async def ready(url: str, timeout: float) -> dict:
-    """The card of the driver at ``url`` once its ``computer-ready`` status says it's ready; raises TimeoutError, naming
-    what it last saw, when it isn't within ``timeout`` seconds."""
+    """The card of the driver at ``url``, read once its ``computer-ready`` status says it's ready, so each app it fronts
+    is on it as the app's own server serves it; raises TimeoutError, naming what it last saw, when it isn't within
+    ``timeout`` seconds."""
     last = "nothing answered"
     try:
         async with asyncio.timeout(timeout):
@@ -136,7 +137,7 @@ async def ready(url: str, timeout: float) -> dict:
                     status = await protocol_v1.invoke_extension(url, card, COMPUTER_READY, None, _STATUS_TIMEOUT_S,
                                                                 method="status")
                     if status.get("ready"):
-                        return card
+                        return await protocol_v1.get_card(url, timeout=5)
                     last = "not ready: " + "; ".join(f"{check['name']}: {check.get('detail')}"
                                                      for check in status.get("checks", []) if not check.get("ok"))
                 except Exception as e:

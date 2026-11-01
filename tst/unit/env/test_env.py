@@ -120,9 +120,14 @@ def test_child_env_cards_come_from_the_card_by_name(composed):
     assert _record({**composed, "name": "slack", "children_environments": []}).get_child_env_card("slack") is None  # composed, not a leaf
 
 
-def test_a_leaf_card_is_its_own_only_child_env():
+def test_a_leaf_card_is_its_own_only_child_env_and_a_composed_one_with_a_data_plane_is_the_one_its_name_reaches():
     assert _record(_LEAF).get_child_env_card("notes") is _LEAF
     assert _record(_LEAF).get_child_env_card("slack") is None
+    mail = {"name": "mail", "url": "/svc/mail/agentenv"}
+    desk = {"name": "desk", "capabilities": {"operations": ["data/get"]}, "children_environments": [mail]}
+    assert _record(desk).get_child_env_card("desk") is desk and _record(desk).get_child_env_card("mail") is mail
+    alone = {**desk, "children_environments": [{**mail, "name": "desk"}]}
+    assert _record(alone).get_child_env_card("desk") is alone
 
 
 @pytest.mark.asyncio

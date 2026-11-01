@@ -54,7 +54,7 @@ from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
-from tst.unit.computer_home import Computer
+from tst.unit.computer_home import CARD as HOME_CARD, Computer
 from tst.unit.env.envs._computer import (CONFIG, SERVE, CARD_EXTENSION, CARD, MAIL_SETTINGS, MAIL_BUILD, MAIL_SERVER, _app,
                                          _base, _driver, _put, FakeVmProvider)
 
@@ -673,6 +673,25 @@ async def test_a_boot_that_never_gets_ready_takes_its_sandbox_and_work_folder_do
     assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None
 
 
+@pytest.mark.asyncio
+async def test_a_boot_is_ready_with_the_card_read_once_its_status_says_so_each_app_on_it(monkeypatch):
+    cards = iter([{"name": "desk"}, {"name": "desk"}, {"name": "desk", "children_environments": [{"name": "mail"}]}])
+    statuses = iter([{"ready": False, "checks": [{"name": "app mail", "ok": False, "detail": "starting"}]},
+                     {"ready": True}])
+
+    async def card(url, timeout):
+        return next(cards)
+
+    async def status(url, card, uri, params, timeout, method):
+        return next(statuses)
+
+    monkeypatch.setattr(boot.protocol_v1, "get_card", card)
+    monkeypatch.setattr(boot.protocol_v1, "invoke_extension", status)
+    monkeypatch.setattr(boot, "_POLL_S", 0)
+
+    assert await boot.ready("http://desk", 5) == {"name": "desk", "children_environments": [{"name": "mail"}]}
+
+
 def test_a_boot_mints_a_generated_setting_resolves_a_secret_its_record_withholds_both_and_a_secret_is_a_reference(
         base, monkeypatch):
     monkeypatch.setenv("DESK_KEY", "s3cret")
@@ -718,10 +737,18 @@ def computer(tmp_path, monkeypatch):
     return Computer(tmp_path / "home").install(monkeypatch)
 
 
-def _deployed_env(base, driver, computer, **record):
-    env = _put(base, driver, compose=False)
-    env._deployed = computer.deployed(env_id=env.id, **record)
+def _deployed_env(base, driver, computer, apps=(), children=(), **record):
+    """The env of ``apps``, deployed on ``computer``, its card named after it and listing ``children``."""
+    env = _put(base, driver, compose=False, apps=apps)
+    card = {**HOME_CARD, "name": env.environment_name,
+            **({"children_environments": list(children)} if children else {})}
+    env._deployed = computer.deployed(env_id=env.id, card=card, **record)
     return env
+
+
+def _child(name: str, *operations: str) -> dict:
+    """An app's card on its computer's, as the driver fronts it."""
+    return {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {"operations": list(operations)}}
 
 
 def _files(tmp_path, **contents):
@@ -793,33 +820,41 @@ def _snapshot(environment_name: str, contents: dict[str, bytes]) -> EnvironmentA
 
 
 @pytest.mark.asyncio
-async def test_a_snapshot_of_its_files_loads_back_at_their_paths_leaving_out_other_environments(
+async def test_a_snapshot_loads_back_its_files_then_each_apps_through_the_apps_route_leaving_out_other_environments(
         base, driver, docker, computer, tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: False)
-    env = _deployed_env(base, driver, computer)
+    mail = _app(base, driver, tmp_path / "mail", compose=False)
+    env = _deployed_env(base, driver, computer, apps=[mail], children=[_child("mail", "data/add", "data/get")])
     contents = {"Desktop/a.txt": b"a", "Documents/r/b.txt": b"b"}
     universe = EnvironmentUniverseArtifact.put("snap", environment_artifacts=[
-        _snapshot(env.environment_name, contents), _snapshot("mail", {"inbox/1.json": b"{}"})])
+        _snapshot("mail", {"Mail/inbox.txt": b"m"}), _snapshot(env.environment_name, contents),
+        _snapshot("notes", {"inbox/1.json": b"{}"})])
 
     with caplog.at_level(logging.WARNING):
         await env.load_environment_universe_artifact(universe)
 
     assert {path: (computer.home / path).read_bytes() for path in contents} == contents
+    assert computer.added_at == ["http://127.0.0.1:20001", "http://127.0.0.1:20001/svc/mail"]
+    assert [markers for _, markers, _ in computer.calls][1] == [{"path": "Mail/inbox.txt"}]
     assert not (computer.home / "inbox").exists()
-    assert "leaving out ['mail']" in caplog.text
+    assert "leaving out ['notes']" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_an_environment_not_named_after_the_computer_is_refused_before_anything_is_sent(base, driver, docker,
-                                                                                            computer):
-    env = _deployed_env(base, driver, computer)
-    mail = _snapshot("mail", {"inbox/1.json": b"{}"})
+async def test_an_environment_named_after_neither_the_computer_nor_an_app_that_loads_is_refused_before_anything_is_sent(
+        base, driver, docker, computer, tmp_path):
+    mail = _app(base, driver, tmp_path / "mail", compose=False)
+    env = _deployed_env(base, driver, computer, apps=[mail], children=[_child("mail", "data/get")])
+    notes, mailbox = _snapshot("notes", {"inbox/1.json": b"{}"}), _snapshot("mail", {"Mail/inbox.txt": b"m"})
 
-    with pytest.raises(ValueError, match="does not match env environment_name"):
-        await env.load_environment_artifact(mail)
-    with pytest.raises(RuntimeError, match=f"has no environment named '{env.environment_name}'"):
-        await env.load_environment_universe_artifact(EnvironmentUniverseArtifact.put("mail-only",
-                                                                                     environment_artifacts=[mail]))
+    with pytest.raises(ValueError, match="has no environment named 'notes': it has \\['desktop', 'mail'\\]"):
+        await env.load_environment_artifact(notes)
+    with pytest.raises(ValueError, match="'mail' in computer env '@local/~/kit/desktop' serves no data/add"):
+        await env.load_environment_universe_artifact(EnvironmentUniverseArtifact.put("both", environment_artifacts=[
+            _snapshot(env.environment_name, {"Desktop/a.txt": b"a"}), mailbox]))
+    with pytest.raises(RuntimeError, match="has no environment named any of \\['desktop', 'mail'\\]"):
+        await env.load_environment_universe_artifact(EnvironmentUniverseArtifact.put("notes-only",
+                                                                                     environment_artifacts=[notes]))
     assert computer.calls == []
 
 

@@ -1,0 +1,9 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desk",
+   "env_params": {"app_settings": {"notes": {"signature": "-- Ada", "token": "env:NOTES_TOKEN"}}}},
+  {"id": "load", "type": "load_artifact", "env_id": "desk", "artifact_id": "seed"},
+  {"id": "loaded", "type": "snapshot_computer_env", "env_id": "desk", "file_paths": ["Documents", "Desktop", "Notes"]},
+  {"id": "reset", "type": "run_code", "env_id": "desk", "script_artifact_id": "reset_apps"},
+  {"id": "after_reset", "type": "snapshot_computer_env", "env_id": "desk",
+   "file_paths": ["Documents", "Desktop", "Notes"]}
+]

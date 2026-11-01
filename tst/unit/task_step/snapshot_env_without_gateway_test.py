@@ -1,7 +1,8 @@
 """snapshot_env on an env deployed without a gateway: reached through the card its deployment recorded, its
-environments the card's children or the env itself, each kept as one file as through a gateway; an environment whose
-data/get returns a file tree, a computer's, kept file by file by its paths under a grant sized for a file tree; and an
-env that fails under the upload grant asked again without it."""
+environments the card's children its names reach that export, and the env itself when it exports beside them, or the
+env alone, each kept as one file as through a gateway and sent its own data/get params; an environment
+whose data/get returns a file tree, a computer's, kept file by file by its paths under a grant sized for a file tree;
+and an env that fails under the upload grant asked again without it."""
 
 from __future__ import annotations
 
@@ -69,9 +70,9 @@ def _serve(monkeypatch, answers: dict) -> list[tuple[str, dict]]:
     return sent
 
 
-async def _snapshot(card: dict) -> EnvironmentUniverseArtifact:
+async def _snapshot(card: dict, **params) -> EnvironmentUniverseArtifact:
     result = await SnapshotEnvTaskStep.snapshot_env_state(env=_Desk(), gateway_url=None, snapshot_id="snap-d",
-                                                          deployed=_record(card))
+                                                          deployed=_record(card), **params)
     return EnvironmentUniverseArtifact.get(result.environment_universe_artifact_id)
 
 
@@ -92,6 +93,25 @@ async def test_each_child_on_the_recorded_card_is_reached_and_kept_as_one_file(l
 
     assert _kept(universe) == {"mail": b'{"inbox": 2}', "notes": b"PK"}
     assert sorted(path for path, _ in sent) == ["/svc/mail/agentenv", "/svc/notes/agentenv"]
+
+
+@pytest.mark.asyncio
+async def test_a_card_exporting_beside_its_children_is_kept_first_with_its_own_params_leaving_out_what_doesnt_export(
+        local_stores, monkeypatch):
+    card = {"name": "desktop", "capabilities": {"operations": ["data/add", "data/get"], "extensions": []},
+            "children_environments": [
+                {"name": "mail", "url": "/svc/mail/agentenv", "capabilities": {"operations": ["data/get"]}},
+                {"name": "notes", "url": "/svc/notes/agentenv", "capabilities": {"operations": ["data/add"]}}]}
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: [{"kind": "data", "data": {"home": 1}}],
+                                "/svc/mail/agentenv": lambda params: [{"kind": "data", "data": {"inbox": 2}}]})
+
+    universe = await _snapshot(card, data_get_params={"desktop": {"paths": ["Desktop"]}})
+    alone = await _snapshot({**card, "children_environments": [
+        {"name": "desktop", "url": "/svc/desktop/agentenv", "capabilities": {"operations": ["data/get"]}}]})
+
+    assert _kept(universe) == {"desktop": b'{"home": 1}', "mail": b'{"inbox": 2}'}
+    assert _kept(alone) == {"desktop": b'{"home": 1}'}
+    assert sent == [("/agentenv", {"paths": ["Desktop"]}), ("/svc/mail/agentenv", {}), ("/agentenv", {})]
 
 
 @pytest.mark.asyncio

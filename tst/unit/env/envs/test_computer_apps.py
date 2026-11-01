@@ -59,7 +59,13 @@ def test_a_computer_env_builds_its_apps_after_its_driver_in_the_order_it_lists_t
     (lambda mail, other: [other(name="mail", install={"services": [{"name": "sync", "command": "venv/bin/sync"}]}),
                           other(name="mail-sync", install={"services": []})],
      "apps: @local/~/kit/mail and @local/~/kit/mail-sync would share the program 'app-mail-sync'"),
-], ids=["twice", "environment-name", "folder", "app-port", "driver-port", "arch", "no-shared-arch", "program"])
+    (lambda mail, other: [mail, other(name="desk-app", environment_name="desktop")],
+     "apps: @local/~/kit/desk-app is named 'desktop', as the computer env is, which names the computer's own files"),
+    (lambda mail, other: [other(name="a", paths=["Mail", ".config/a"]), other(name="b", paths=["Mail/inbox"]),
+                          other(name="c", paths=[".config/c"])],
+     "apps: @local/~/kit/a keeps its data in 'Mail' and @local/~/kit/b in 'Mail/inbox', so they'd share it"),
+], ids=["twice", "environment-name", "folder", "app-port", "driver-port", "arch", "no-shared-arch", "program",
+        "computer-name", "paths"])
 def test_apps_that_dont_fit_together_or_on_the_computer_are_refused_before_anything_is_stored(base, driver, docker,
                                                                                               tmp_path, apps, problem):
     def other(name="other", **changes):

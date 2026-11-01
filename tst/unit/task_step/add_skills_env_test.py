@@ -1,6 +1,7 @@
-"""``add_skills`` ``env_ids``: each env's skill, or each of its child envs' behind a gateway, written under that card's
-environment name, installed on the agent and recorded in the run, a skill with files beside its SKILL.md sent as a
-stored bundle; refused for an env the run didn't deploy or bind to the agent, or that serves no skill."""
+"""``add_skills`` ``env_ids``: each env's skill and each of its child envs' (a gateway's servers, a computer's apps) its
+name reaches, written under that card's environment name, installed on the agent and recorded in the run, a skill with
+files beside its SKILL.md sent as a stored bundle; refused for an env the run didn't deploy or bind to the agent, or
+that serves no skill."""
 
 import hashlib
 from types import SimpleNamespace
@@ -105,6 +106,20 @@ async def test_an_env_behind_a_gateway_installs_each_child_envs_skill_under_the_
     assert [(card, params["name"]) for _, card, *_, params in agent.calls] == [
         ("mail", "mail"), ("Chat Room", f"chat-room-{digest}")]
     assert set(context.metadata[ENV_SKILLS_KEY]["solver"]["office"]) == {"mail", f"chat-room-{digest}"}
+
+
+@pytest.mark.asyncio
+async def test_a_computer_installs_its_own_skill_then_each_apps_and_an_app_alone_the_computers_its_name_reaches(agent):
+    desk = _env("desk", name="desktop", children=(("mail", (_SKILL,)), ("notes", ())))
+    alone = _env("mail-alone", name="mail", children=(("mail", (_SKILL,)),))
+    for computer in (desk, alone):
+        computer.environment_card["capabilities"]["operations"] = ["data/add", "data/get"]
+
+    context = await _step("desk", "mail-alone").execute(_context(desk, alone, bound=("desk", "mail-alone")))
+
+    assert [(base_url, card) for base_url, card, *_ in agent.calls] == [
+        ("http://desk", "desktop"), ("http://desk", "mail"), ("http://mail-alone", "mail")]
+    assert set(context.metadata[ENV_SKILLS_KEY]["solver"]["mail-alone"]) == {"mail"}
 
 
 @pytest.mark.asyncio

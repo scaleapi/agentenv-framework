@@ -61,9 +61,10 @@ class Driver:
         return await protocol.invoke_extension(self.url, self.card, uri, params or {}, method=method,
                                                timeout=int(self.timeout_s))
 
-    async def rpc(self, method: str, params: dict | None = None) -> dict:
+    async def rpc(self, method: str, params: dict | None = None, card: dict | None = None) -> dict:
+        """``method``'s answer from the data plane of ``card``, the driver's own or a child's it fronts."""
         async with httpx.AsyncClient(timeout=self.timeout_s) as http:
-            response = await http.post(self.url + (self.card.get("url") or "/agentenv"),
+            response = await http.post(self.url + ((card or self.card).get("url") or "/agentenv"),
                                        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
         return response.json()
 

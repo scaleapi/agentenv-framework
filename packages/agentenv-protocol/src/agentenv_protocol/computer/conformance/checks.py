@@ -87,8 +87,8 @@ class Probe:
     async def basic(self) -> None:
         for check, section in (("P0", self._ready), ("P1", self._card), ("P2", self._frame), ("P5", self._refusals),
                                ("X", self._display), ("X", self._spaces), ("X", self._keyboard_settings),
-                               ("X", self._exec), ("X", self._data_get), ("X", self._tool_access),
-                               ("X", self._pointer), ("X", self._skill)):
+                               ("X", self._exec), ("X", self._data_get), ("X", self._app_exports),
+                               ("X", self._tool_access), ("X", self._pointer), ("X", self._skill)):
             await self._guarded(check, section)
         self._grants()
 
@@ -409,6 +409,18 @@ class Probe:
             return None if isinstance((got.get("result") or {}).get("parts"), list) else f"it answered {got}"
 
         await self.check("X", "data/get answers its parts", get, *DATA_PLANE)
+
+    async def _app_exports(self) -> None:
+        for app in self.driver.card.get("children_environments") or []:
+            if "data/get" not in ((app.get("capabilities") or {}).get("operations") or []):
+                continue
+
+            async def export(app: dict = app) -> str | None:
+                got = await self.driver.rpc("data/get", card=app)
+                return None if isinstance((got.get("result") or {}).get("parts"), list) else f"it answered {got}"
+
+            await self.check("X", f"app {app.get('name')}'s data/get answers its parts through the driver", export,
+                             *DATA_PLANE)
 
     async def _tool_access(self) -> None:
         if not (self.driver.declares(DISABLE_TOOL_EXTENSION_URI) and self.driver.declares(ENABLE_TOOL_EXTENSION_URI)):

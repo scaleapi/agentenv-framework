@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object_path
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, METHOD_GET, FilePart, uploaded_object_path
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.client import GetDataResponse, find_extension, find_extension_method, intake_declaration
 from agentenv_protocol.transfers import WriteNamespaceGrant
@@ -169,8 +169,10 @@ class SnapshotEnvTaskStep(TaskStep):
     ``include_env_changes`` also stores who changed what (urn:agentenv:changes/v1) under ``metadata["env_changes"]``.
 
     An env deployed without a gateway is reached through the card its deployment recorded, its environments the
-    card's children, or itself. An environment whose data/get returns a file tree, a computer's, is kept file by file,
-    each by its path, in its environment artifact.
+    card's children, and itself first when it exports beside them, as a computer fronting its apps does, or itself
+    alone. An
+    environment whose data/get returns a file tree, a computer's, is kept file by file, each by its path, in its
+    environment artifact.
     """
 
     type: ClassVar[str] = "snapshot_env"
@@ -588,13 +590,14 @@ class SnapshotEnvTaskStep(TaskStep):
         original_universe_artifact_id: Optional[str] = None,
         export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         concurrency: int = DEFAULT_EXPORT_CONCURRENCY,
-        data_get_params: Optional[dict] = None,
+        data_get_params: Optional[dict[str, dict]] = None,
     ) -> EnvSnapshotResult:
         """Export all services via the gateway, or without one (``gateway_url`` None) through
         ``deployed``'s recorded card, into a new EnvironmentUniverseArtifact ``snapshot_id``,
-        handing each service's data/get ``data_get_params``.
+        handing each service's data/get its ``data_get_params``, by its name.
         All-or-nothing; the raised error carries public per-service summaries (verbose details
-        go to the log).
+        go to the log). A file tree with no files, an app that keeps nothing yet, is left out,
+        unless every environment's is.
 
         A classmethod so callers that have no step instance can reuse it."""
         from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
@@ -645,7 +648,7 @@ class SnapshotEnvTaskStep(TaskStep):
                     try:
                         result = await cls._export_environment_to_file(
                             gateway, environment_name, tmp_path, export_timeout_seconds,
-                            deployed=card_record, data_get_params=data_get_params,
+                            deployed=card_record, data_get_params=(data_get_params or {}).get(environment_name),
                         )
                     except httpx.HTTPStatusError as e:
                         body_snippet = ""
@@ -665,6 +668,8 @@ class SnapshotEnvTaskStep(TaskStep):
                         try:
                             files = await _file_tree_files(*result, environment_name, f"{snapshot_id}-{environment_name}",
                                                            f"state snapshot of {environment_name} from env {env.id}")
+                            if not files:
+                                return None
                             return await asyncio.to_thread(
                                 EnvironmentArtifact.put, id=f"{snapshot_id}-{environment_name}",
                                 environment_name=environment_name, file_artifacts=files)
@@ -738,7 +743,7 @@ class SnapshotEnvTaskStep(TaskStep):
         for name, result in zip(services, results):
             if isinstance(result, tuple):
                 skipped[name] = result
-            else:
+            elif result is not None:
                 environment_artifacts.append(result)
 
         if skipped:
@@ -754,6 +759,10 @@ class SnapshotEnvTaskStep(TaskStep):
                 f"{len(skipped)}/{len(services)} services were not exported "
                 f"(missing={sorted(skipped)}): {public_summary}"
             )
+        if empty := [name for name, result in zip(services, results) if result is None]:
+            if len(empty) == len(services):
+                raise RuntimeError(f"{', '.join(map(repr, empty))} returned no files to snapshot")
+            logger.info(f"snapshot_env: {empty} returned no files to keep, so {snapshot_id} leaves them out")
 
         universe = await asyncio.to_thread(
             EnvironmentUniverseArtifact.put,
@@ -816,10 +825,7 @@ async def _file_tree_files(resp: GetDataResponse, upload: Optional[_SnapshotUplo
             return path, await asyncio.to_thread(registered_upload, upload.object_url(path), file_id, filename,
                                                  content_type, about)
 
-    files = dict(await asyncio.gather(*(written(part) for part in resp.parts)))
-    if not files:
-        raise ValueError(f"'{environment_name}' returned no files to snapshot")
-    return files
+    return dict(await asyncio.gather(*(written(part) for part in resp.parts)))
 
 
 def registered_upload(object_url: str, file_id: str, filename: str, content_type: str, description: str):
@@ -836,11 +842,19 @@ def registered_upload(object_url: str, file_id: str, filename: str, content_type
 
 
 def _card_environments(deployed) -> list[str]:
-    """The environments a deployment without a gateway serves, as the card it recorded names them: its children, or
-    the env itself."""
+    """The environments a deployment without a gateway serves, as the card it recorded names them: the env itself when
+    it has no children; else each child its name reaches that exports, and the env too, first, when it exports beside
+    them, as a computer fronting its apps does."""
     card = deployed.environment_card or {}
     children = card.get("children_environments")
-    names = [child.get("name") for child in children] if isinstance(children, list) else [card.get("name")]
+    if not isinstance(children, list):
+        names = [card.get("name")]
+    else:
+        names = [child.get("name") for child in children if deployed.get_child_env_card(child.get("name")) is child
+                 and ((operations := (child.get("capabilities") or {}).get("operations")) is None
+                      or METHOD_GET in operations)]
+        if METHOD_GET in ((card.get("capabilities") or {}).get("operations") or []):
+            names.insert(0, card.get("name"))
     if not all(names):
         raise RuntimeError(f"Deployed env '{deployed.env_id}' recorded a card naming no environment to snapshot")
     return names

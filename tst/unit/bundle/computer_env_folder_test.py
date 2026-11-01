@@ -157,6 +157,27 @@ def test_a_computer_env_folder_names_its_apps_in_order_each_written_before_it(tm
     assert composed == [(env.id, UBUNTU, REFERENCE, None)]
 
 
+def test_a_universe_loaded_into_a_stored_computer_env_seeds_its_files_and_each_of_its_apps_by_name(tmp_path, composed):
+    plan = _plan(_bundle(tmp_path / "desk", WITH_APPS, APPS))
+    materialize(plan, build_here=local_builds(plan))
+    world = {"artifacts/world/artifact.toml": 'type = "environment_universe"\n',
+             "artifacts/world/desktop/a.json": "{}", "artifacts/world/mail/a.json": "{}"}
+
+    def loading(root, *extra):
+        return layout(root, {**world, **{f"artifacts/world/{name}/a.json": "{}" for name in extra}, "tasks/t.json": (
+            json.dumps([{"id": "load", "type": "load_artifact", "env_id": f"{plan.bundle.bundle.id_root}/desktop",
+                         "artifact_id": "world"}]))})
+
+    plan_bundle(resolve_bundle(parse_bundle(loading(tmp_path / "seeds"))))
+    with pytest.raises(BundleError) as refused:
+        plan_bundle(resolve_bundle(parse_bundle(loading(tmp_path / "typo", "mial"))))
+
+    assert refused.value.problems == (
+        f"tasks/t.json: step 'load': artifacts/world/mial seeds an environment named 'mial', and env "
+        f"'{plan.bundle.bundle.id_root}/desktop' has no server by that name ('desktop', 'mail', 'notes'); name it "
+        "after the server it seeds, or leave it out",)
+
+
 @pytest.mark.parametrize("toml, problem", [
     ('type = "computer"\ndriver = "reference"\n', 'computer is required: the base computer, such as "ubuntu-24.04"'),
     ('type = "computer"\ncomputer = "ubuntu-24.04"\n', 'driver is required: the driver, such as "reference"'),

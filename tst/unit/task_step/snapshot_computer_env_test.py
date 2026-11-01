@@ -1,7 +1,8 @@
 """snapshot_computer_env: a computer env's files kept by their paths in its environment artifact, in a new environment
-universe, returned inline or uploaded under the grant and written where they were put, the computer asked again without
-the grant when it fails under it, and file_paths sent to its data/get; refused for an env that isn't a computer, for
-paths that aren't relative, and with no files to keep."""
+universe beside each of its apps' exports, returned inline or uploaded under the grant and written where they were put,
+the computer asked again without the grant when it fails under it, file_paths sent to its data/get alone, and an app
+that keeps nothing yet left out; refused for an env that isn't a computer, for paths that aren't relative, and with no
+files to keep."""
 
 from __future__ import annotations
 
@@ -15,8 +16,8 @@ from agent_env.config import set_object_store
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
-from tst.unit.task_step.snapshot_env_without_gateway_test import (DATA_OBJECTS, UNREACHABLE, _computer, _inline, _record,
-                                                                   _serve)
+from tst.unit.task_step.snapshot_env_without_gateway_test import (DATA_OBJECTS, FILE_TREE, UNREACHABLE, _computer,
+                                                                   _inline, _record, _serve)
 from tst.unit.task_step.test_snapshot_env import _ctx
 from tst.util.granting_object_store import GrantingObjectStore
 
@@ -30,7 +31,6 @@ class _Desk(ComputerEnv):
 
 class _Mail:
     id, version, type, environment_name = "mail", 1, "mcp_server", "mail"
-
 
 async def _snapshot(monkeypatch, card: dict, env=None, **fields) -> EnvironmentArtifact:
     """The computer's environment artifact in the universe the step snapshots it into."""
@@ -76,6 +76,30 @@ def test_an_env_that_isnt_a_computer_is_refused_before_a_run(monkeypatch, stored
 
     assert problems == (["snapshot_computer_env snapshots a computer env, and mail is a mcp_server env"]
                         if refused else [])
+
+
+@pytest.mark.asyncio
+async def test_a_computer_with_apps_keeps_its_files_beside_each_apps_export_sending_file_paths_to_itself_alone(
+        local_stores, monkeypatch):
+    card = {**_computer(), "children_environments": [
+        {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {
+            "operations": ["data/add", "data/get"], "extensions": [FILE_TREE]}} for name in ("mail", "notes")]}
+    card["capabilities"] = {**card["capabilities"], "operations": ["data/add", "data/get"]}
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/a.txt", b"a")],
+                                "/svc/mail/agentenv": lambda params: [_inline("Mail/inbox.txt", b"m")],
+                                "/svc/notes/agentenv": lambda params: []})
+    monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: _Desk()))
+    context = _ctx(_record(card))
+
+    await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="desk", file_paths=["Documents"]).execute(context)
+
+    snapshotted = context.metadata["env_snapshotted_universes"]["snap"]
+    universe = EnvironmentUniverseArtifact.get(snapshotted["id"], version=snapshotted["version"])
+    assert {environment.environment_name: _kept(environment) for environment in universe.get_environment_artifacts()
+            } == {"desktop": {"Documents/a.txt": b"a"}, "mail": {"Mail/inbox.txt": b"m"}}
+    assert sorted((path, sorted(params)) for path, params in sent) == [("/agentenv", ["paths"]),
+                                                                       ("/svc/mail/agentenv", []),
+                                                                       ("/svc/notes/agentenv", [])]
 
 
 @pytest.mark.asyncio

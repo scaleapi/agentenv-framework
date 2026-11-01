@@ -3,10 +3,11 @@ each other and against what the env declares, and every mismatch is named."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
-
+import itertools
 import re
+from collections.abc import Sequence
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer.apps import APPS
 from agentenv_protocol.computer.platform import Platform, supported
@@ -25,11 +26,11 @@ if TYPE_CHECKING:
 MAX_SIDE = 32767
 
 
-def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, display: Any, network: Any,
-          computer_settings: Any) -> tuple[dict[str, SettingValue], list[str]]:
-    """The env's values of the base's settings, and every way ``base``, ``driver`` and what the env declares don't
-    compose."""
-    problems = _platform(base, driver) + _apps(base, driver, apps)
+def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, environment_name: str, apps: list, display: Any,
+          network: Any, computer_settings: Any) -> tuple[dict[str, SettingValue], list[str]]:
+    """The env's values of the base's settings, and every way ``base``, ``driver`` and what the env declares, named
+    ``environment_name``, don't compose."""
+    problems = _platform(base, driver) + _apps(base, driver, apps, environment_name)
     problems += _image(base)
     problems += _display(base, display, computer_settings)
     problems += _network(network)
@@ -80,16 +81,20 @@ def app_folder(app: ComputerAppEnv) -> str:
     return folder_name(app.environment_name, "app")
 
 
-def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[ComputerAppEnv]) -> list[str]:
-    """Every way ``apps`` don't fit together on ``base`` and ``driver``: each one's own (``check_app``), no architecture
-    they all run, one listed twice, and two under one environment name, in one folder, with one program name or
-    listening on one port, each pair of apps named for the first they'd share."""
+def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[ComputerAppEnv],
+          environment_name: str) -> list[str]:
+    """Every way ``apps`` don't fit together on ``base`` and ``driver`` in a computer env named ``environment_name``:
+    each one's own (``check_app``), no architecture they all run, one listed twice, one named as the computer is, two
+    under one environment name, in one folder, with one program name or listening on one port, each pair of apps named
+    for the first they'd share, and two keeping their data in one path or one inside the other."""
     problems = [problem for i, app in enumerate(apps) for problem in check_app(base, driver, app, f"apps[{i}]")]
     if not problems and apps and not arches(base, driver, apps):
         problems.append(f"apps: no architecture {base.id}, {driver.id} and every app all run")
     ids = [app.id for app in apps]
     problems += [f"apps: {app_id} is listed twice" for app_id in sorted({i for i in ids if ids.count(i) > 1})]
     distinct, named = list({app.id: app for app in apps}.values()), set()
+    problems += [f"apps: {app.id} is named {environment_name!r}, as the computer env is, which names the computer's "
+                 "own files" for app in distinct if app.environment_name == environment_name]
     for kind, keys in (("environment name", lambda app: [app.environment_name]),
                        ("folder", lambda app: [f"{APPS}/{app_folder(app)}"]),
                        ("program", lambda app: programs(app, base.os.type)),
@@ -102,6 +107,10 @@ def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[Computer
             if len(owners) > 1 and frozenset(owners) not in named:
                 named.add(frozenset(owners))
                 problems.append(f"apps: {' and '.join(owners)} would share the {kind} {key!r}")
+    owned = [(app, PurePosixPath(path)) for app in distinct for path in _paths(app, base.os.type)]
+    problems += [f"apps: {one.id} keeps its data in {str(a)!r} and {other.id} in {str(b)!r}, so they'd share it"
+                 for (one, a), (other, b) in itertools.combinations(owned, 2)
+                 if one is not other and (a.is_relative_to(b) or b.is_relative_to(a))]
     return problems
 
 
@@ -110,6 +119,11 @@ def programs(app: ComputerAppEnv, os_type: str) -> list[str]:
     server = f"app-{app_folder(app)}"
     install = app.install.get(os_type)
     return [server, *(f"{server}-{service.name}" for service in (install.services if install is not None else []))]
+
+
+def _paths(app: ComputerAppEnv, os_type: str) -> list[str]:
+    declared = app.declaration.os.get(os_type)
+    return list(declared.paths or []) if declared is not None else []
 
 
 def _ports(app: ComputerAppEnv, os_type: str) -> list[int]:

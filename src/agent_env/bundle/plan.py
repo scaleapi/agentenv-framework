@@ -968,8 +968,8 @@ class _Planner:
                                 "seeds, or leave it out")
 
     def _server_names(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> set[str] | None:
-        """The environment_names of the servers the env ``ref`` names runs: an MCP server's or a website's own, or
-        each of a multi's envs'. None when they aren't all known."""
+        """The environment_names of the servers the env ``ref`` names runs: an MCP server's or a website's own, each
+        of a multi's envs', or a computer's own and each of its apps'. None when they aren't all known."""
         if isinstance(ref.local, BundleEntry):
             cls = get_env_registry().get(ref.local.type)
             if cls is not None and issubclass(cls, MultiEnv):
@@ -987,6 +987,8 @@ class _Planner:
             return None  # reported by the store ref check
         if isinstance(env, MultiEnv):
             return {child.environment_name for child in [*env.mcp_server_envs, *env.website_envs]}
+        if isinstance(env, ComputerEnv):
+            return {env.environment_name, *(app.environment_name for app in env.composed_apps())}
         name = getattr(env, "environment_name", None)
         return {name} if name else None
 

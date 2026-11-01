@@ -114,7 +114,8 @@ class ComputerAppEnv(ComputerEnv):
         if (computer is None) != (driver is None):
             problems.append("a computer app deploys alone on a computer and a driver; name both or neither")
         elif computer is not None and not problems:
-            _, refused = gate.check(computer, driver, apps=[], display=None, network=None, computer_settings={})
+            _, refused = gate.check(computer, driver, environment_name=environment_name, apps=[], display=None,
+                                    network=None, computer_settings={})
             problems += refused + gate.check_app(computer, driver, app)
         if problems:
             raise ValueError(f"computer app env {id!r}: " + "; ".join(problems))

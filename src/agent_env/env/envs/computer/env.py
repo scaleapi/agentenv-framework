@@ -8,6 +8,8 @@ import logging
 import posixpath
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
+from agentenv_protocol import METHOD_ADD, RPC_PATH
+
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
 from agent_env.attribution import Attribution
 from agent_env.entity.refs import EntityRef
@@ -95,8 +97,8 @@ class ComputerEnv(Env):
         order, once gate 1 passes, then compose it as ``composing`` says unless ``compose`` is False. Refused, naming
         every mismatch, before anything is stored."""
         apps = list(apps)
-        values, problems = gate.check(computer, driver, apps=apps, display=display, network=network,
-                                      computer_settings=computer_settings or {})
+        values, problems = gate.check(computer, driver, environment_name=environment_name, apps=apps, display=display,
+                                      network=network, computer_settings=computer_settings or {})
         if problems:
             raise ValueError(f"computer env {id!r}: " + "; ".join(problems))
         env = get_env_store().put_document(cls(
@@ -208,32 +210,25 @@ class ComputerEnv(Env):
         return LoadFileArtifactUniverseResult(destination_path=destination, files=paths)
 
     async def load_environment_artifact(self, environment_artifact: EnvironmentArtifact) -> None:
-        """Write the files of ``environment_artifact``, the computer's own, at their paths relative to the session
-        user's home, through the driver's ``data/add``, as ``snapshot_computer_env`` kept them. Other files there
-        stay."""
-        if environment_artifact.environment_name != self.environment_name:
-            raise ValueError(f"EnvironmentArtifact environment_name '{environment_artifact.environment_name}' does not "
-                             f"match env environment_name '{self.environment_name}'")
-        files = environment_artifact.get_file_artifacts()
-        for path in files:
-            validate_relative_filename(path)
-        await inside.add_artifacts(self._deployed, files)
-        logger.info(f"Loaded {len(files)} file(s) of '{environment_artifact.id}' into {self.id}'s home")
+        """Write the files of ``environment_artifact`` at their paths through the data plane its name reaches: the
+        computer's own relative to the session user's home, through the driver's ``data/add``, as
+        ``snapshot_computer_env`` kept them; an app's through the app's, which the driver fronts. Other files stay."""
+        await self._load([environment_artifact])
 
     async def load_environment_universe_artifact(self, environment_universe_artifact: EnvironmentUniverseArtifact) -> None:
-        """Load the universe's environment named after the computer, ``load_environment_artifact``; any other is left
-        out, with a warning."""
+        """Load the universe's environment named after the computer, then each named after one of its apps, so what an
+        app keeps ends as its own export has it; any other is left out, with a warning."""
         environments = environment_universe_artifact.get_environment_artifacts()
-        own = [environment for environment in environments if environment.environment_name == self.environment_name]
-        if not own:
+        names = self._environment_names()
+        if not (known := [environment for environment in environments if environment.environment_name in names]):
             raise RuntimeError(f"computer env '{self.id}' can't load '{environment_universe_artifact.id}': it has no "
-                               f"environment named '{self.environment_name}' (it has "
+                               f"environment named any of {names} (it has "
                                f"{[environment.environment_name for environment in environments]})")
         if others := [environment.environment_name for environment in environments
-                      if environment.environment_name != self.environment_name]:
-            logger.warning(f"[{self.id}] loading only '{self.environment_name}' from '{environment_universe_artifact.id}'; "
-                           f"leaving out {others}")
-        await self.load_environment_artifact(own[0])
+                      if environment.environment_name not in names]:
+            logger.warning(f"[{self.id}] loading only {[environment.environment_name for environment in known]} from "
+                           f"'{environment_universe_artifact.id}'; leaving out {others}")
+        await self._load(sorted(known, key=lambda environment: environment.environment_name != self.environment_name))
 
     async def reset(self, deployed: DeployedEnv) -> None:
         """Return the computer to boot state: its recordings ended, its container replaced with a fresh one of the same
@@ -257,6 +252,35 @@ class ComputerEnv(Env):
             except Exception as e:  # a cancellation propagates, and keeps the sandbox for the next close()
                 logger.warning(f"Failed to terminate sandbox {self._sandbox.sandbox_id}: {e}")
             self._sandbox = None
+
+    async def _load(self, environments: list[EnvironmentArtifact]) -> None:
+        """Write each environment's files through the data plane its name reaches, every one checked before any is
+        sent."""
+        loads = [(environment, self._data_plane(environment.environment_name), environment.get_file_artifacts())
+                 for environment in environments]
+        for _, _, files in loads:
+            for path in files:
+                validate_relative_filename(path)
+        for environment, url, files in loads:
+            await inside.add_artifacts(self._deployed, files, url)
+            logger.info(f"Loaded {len(files)} file(s) of '{environment.id}' into {self.id}'s "
+                        f"'{environment.environment_name}'")
+
+    def _data_plane(self, environment_name: str) -> str:
+        """The address of the data plane ``environment_name`` reaches in the deployed computer, as its card says: the
+        driver's for the computer's own, an app's route for an app's."""
+        card = self._deployed.get_child_env_card(environment_name)
+        if card is None:
+            raise ValueError(f"computer env '{self.id}' has no environment named '{environment_name}': it has "
+                             f"{self._environment_names()}")
+        if METHOD_ADD not in ((card.get("capabilities") or {}).get("operations") or []):
+            raise ValueError(f"'{environment_name}' in computer env '{self.id}' serves no data/add, so nothing loads "
+                             "into it")
+        return self._deployed.environment_url + card.get("url", RPC_PATH).removesuffix(RPC_PATH)
+
+    def _environment_names(self) -> list[str]:
+        """The environments a load reaches by name: the computer's own, then its apps'."""
+        return list(dict.fromkeys([self.environment_name, *(app.environment_name for app in self.composed_apps())]))
 
 
 def _app(env: Env) -> ComputerAppEnv:
