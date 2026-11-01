@@ -18,7 +18,7 @@ from agent_env.config.runtime import Config
 from agent_env.openenv.environment import AgentEnvEnvironment
 from agent_env.task_step.task_step import TaskStep
 from agent_env.training import trl
-from agent_env.training._openenv import ENDED, FAILED
+from agent_env.training._openenv import ENDED, FAILED, on_session_loop
 from agent_env.training.trl import AgentEnv
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
@@ -219,13 +219,13 @@ def test_a_session_refused_after_one_was_dropped_leaves_only_that_rollout_unscor
     first.reset(**env.dataset[0])
     first.end_turn(response="Added a crate.")
     assert first.get_reward() == 1.0
-    trl._on_loop(first._close(), 30)
+    on_session_loop(first._close(), 30)
 
     second.reset(**env.dataset[0])
     with caplog.at_level(logging.WARNING, logger=trl.__name__):
         first.reset(**env.dataset[0])
         assert first.get_reward() is None
-    trl._on_loop(second._close(), 30)
+    on_session_loop(second._close(), 30)
     first.reset(**env.dataset[0])
     first.end_turn(response="Added a crate.")
 

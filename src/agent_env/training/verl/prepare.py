@@ -5,7 +5,6 @@ takes."""
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,7 @@ import pyarrow.parquet as pq
 import yaml
 from transformers import AutoTokenizer
 
-from agent_env.training._openenv import key, messages, tasks_and_tools
+from agent_env.training._openenv import function_tool, key, longest_prompt, messages, tasks_and_tools, token_in
 
 #: The ``agent_name`` every row plays under, and the name ``agent_loop.yaml`` registers the loop at.
 AGENT = "agentenv"
@@ -61,7 +60,7 @@ def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, rese
     url = url.rstrip("/")
     env_name, tasks, probed = tasks_and_tools(url, local="serve the bundle with agent_env.openenv.build_app first",
                                               timeout=reset_timeout, token=token_in(token_var))
-    tools = {each: [_function(tool) for tool in found] for each, found in probed.items()}
+    tools = {each: [function_tool(tool) for tool in found] for each, found in probed.items()}
     rows = {split: [{
         "data_source": f"agentenv/{env_name}",
         "prompt": messages(task["system_prompt"], task["prompt"]),
@@ -82,32 +81,10 @@ def write_dataset(url: str, out: str | Path, *, tool_timeout: float = 60.0, rese
     return Written(out, longest)
 
 
-def token_in(var: str | None) -> str | None:
-    """The token in the environment variable ``var``, which must be set when it's named."""
-    if var is None:
-        return None
-    if not (token := os.environ.get(var)):
-        raise ValueError(f"{var} isn't set: it holds the token the OpenEnv server asks for")
-    return token
-
-
 def _longest(rows: dict[str, list[dict[str, Any]]], tokenizer: Any, limit: int | None,
              chat_template_kwargs: dict[str, Any]) -> int:
-    """The longest row's prompt in tokens with its tools, refusing rows over ``limit``."""
     lengths = {(split, row["extra_info"]["task_id"]): len(tokenizer.apply_chat_template(
         row["prompt"], tools=json.loads(row["extra_info"]["tools"]), add_generation_prompt=True, tokenize=True,
         return_dict=True, **chat_template_kwargs)["input_ids"]) for split, written in rows.items() for row in written}
-    if limit is not None and (over := {at: length for at, length in lengths.items() if length > limit}):
-        (split, task), length = max(over.items(), key=lambda item: item[1])
-        raise ValueError(f"{len(over)} rows' prompts are over max_prompt_length={limit} tokens with their tools, the "
-                         f"longest task {task} of split {split} at {length}, which verl would cut from the left: raise "
-                         "it, and data.max_prompt_length with it")
-    return max(lengths.values(), default=0)
-
-
-def _function(tool: dict[str, Any]) -> dict[str, Any]:
-    """An MCP tool as the function tool a chat template renders."""
-    return {"type": "function", "function": {
-        "name": tool["name"], "description": tool.get("description") or "",
-        "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
-    }}
+    return longest_prompt(lengths, limit, cut="which verl would cut from the left: raise it, and data.max_prompt_length "
+                                              "with it")

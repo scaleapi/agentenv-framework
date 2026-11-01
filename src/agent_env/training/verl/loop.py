@@ -23,8 +23,7 @@ except ModuleNotFoundError as exc:
     raise ImportError("agent_env.training.verl.loop runs in verl's agent loop workers: install "
                       "'agentenv-framework[verl]' into verl's environment") from exc
 
-from agent_env.training._openenv import Rollout, Session, Shared
-from agent_env.training.verl.prepare import token_in
+from agent_env.training._openenv import Rollout, Session, Shared, attempt_numbers, token_in
 
 logger = logging.getLogger(__name__)
 #: The tools whose answers verl was seen to cut, each warned of once a process.
@@ -84,8 +83,7 @@ class AgentEnvAgentLoop(ToolAgentLoop):
         schemas = json.loads(row["tools"])
         shared = Shared(self._url, frozenset(schema["function"]["name"] for schema in schemas), self._tool_timeout,
                         self._reset_timeout, patience=self._reset_timeout, waits_for_server=True, token=self._token)
-        began = time.monotonic()
-        for attempt in range(1, self._attempts + 1):
+        for attempt in attempt_numbers(self._attempts, self._reset_timeout):
             session = _Session(shared)
             try:
                 output, rollout = await self._play(session, schemas, sampling_params, kwargs)
@@ -103,8 +101,6 @@ class AgentEnvAgentLoop(ToolAgentLoop):
                 }
                 return output
             logger.warning("%s, attempt %d of %d: %s", self._task(), attempt, self._attempts, rollout.failure)
-            if time.monotonic() - began >= self._reset_timeout:
-                break
         raise RolloutFailed(f"{self._task()}: the env failed it on {attempt} attempt{'s' * (attempt > 1)}, so it's left "
                             f"out of training: {rollout.failure}")
 
