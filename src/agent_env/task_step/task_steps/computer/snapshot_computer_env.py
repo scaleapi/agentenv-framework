@@ -1,61 +1,38 @@
-"""snapshot_computer_env: a computer env's files, kept as a FileArtifactUniverse by their paths, which load_artifact
+"""snapshot_computer_env: a computer env's files, kept by their paths in its environment artifact, which load_artifact
 loads back into a computer."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import logging
-from pathlib import PurePosixPath
 from typing import ClassVar, Optional
 
-from agentenv_protocol import uploaded_object_path
-from agentenv_protocol.types import FileWithBytes
 from agentenv_protocol.transfers import RelativePath
 from pydantic import TypeAdapter, ValidationError
 
-from agent_env.a2a_agent.object_transfer import ObjectLimits
-from agent_env.artifact import FileArtifact
-from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.entity.refs import EntityRef, RefRole
-from agent_env.env import legacy_protocol
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.store.base import NotFoundError
-from agent_env.store.ids import derive_id, is_local_id, validate_local_id
+from agent_env.store.ids import is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
-from agent_env.task_step.task_steps.snapshot_env import (
-    DEFAULT_EXPORT_TIMEOUT_SECONDS,
-    SnapshotEnvTaskStep,
-    _snapshot_upload,
-    get_data,
-    registered_upload,
-)
-
-logger = logging.getLogger(__name__)
+from agent_env.task_step.task_steps.snapshot_env import DEFAULT_EXPORT_TIMEOUT_SECONDS, SnapshotEnvTaskStep
 
 _PATHS = TypeAdapter(list[RelativePath])
-#: What a computer may upload through its snapshot grant: each of its files, each as large as one upload to the store
-#: can be, up to this in all.
-FILE_TREE_LIMITS = ObjectLimits(max_objects=100_000, max_object_bytes=50 * 1024**3, max_total_bytes=50 * 1024**3)
-#: How many of its files are written to the store at once.
-_WRITES_IN_FLIGHT = 8
 
 
 class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
-    """Snapshot a deployed computer env's files into a new ``FileArtifactUniverse``, each under its path relative to
-    the session user's home: those under ``file_paths``, by default the folders its card declares. The computer
-    uploads each file through a grant when the store's grants reach it, and returns it inline otherwise.
-    ``load_artifact`` loads the universe back into a computer, through ``data/add``.
+    """Snapshot a deployed computer env's files into a new environment universe, as ``snapshot_env`` snapshots an env,
+    each file under its path relative to the session user's home in the computer's environment artifact: those under
+    ``file_paths``, by default the folders its card declares. ``load_artifact`` loads the snapshot back into a
+    computer, through ``data/add``.
 
-    Picks the deployment and names the snapshot as ``snapshot_env`` does. Output:
-    ``context.metadata["env_snapshotted_universes"][self.id]`` = ``{"id", "version"}``."""
+    Output: ``context.metadata["env_snapshotted_universes"][self.id]`` = ``{"id", "version"}``."""
 
     type: ClassVar[str] = "snapshot_computer_env"
     entity_refs = (
         EntityRef.env("env_id"),
-        EntityRef.artifact("snapshot_id", role=RefRole.OUTPUT, artifact_type="file_artifact_universe"),
+        EntityRef.artifact("snapshot_id", role=RefRole.OUTPUT, artifact_type="environment_universe"),
     )
 
     def __init__(
@@ -117,49 +94,13 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
         env = await asyncio.to_thread(Env.get, deployed.env_id, deployed.env_version)
         if not isinstance(env, ComputerEnv):
             raise RuntimeError(_not_a_computer(env))
-        files = await _files(deployed, env, snapshot_id, self.file_paths, self.export_timeout_seconds)
-        if not files:
-            under = ", ".join(self.file_paths) if self.file_paths is not None else "the folders its card declares"
-            raise RuntimeError(f"computer env {env.id} has no files under {under} to snapshot")
-        universe = await asyncio.to_thread(FileArtifactUniverse.put, snapshot_id, file_artifacts=files)
-        logger.info(f"snapshot_computer_env: {env.id} -> {universe.id} v{universe.version} ({len(files)} files)")
-        context.metadata.setdefault("env_snapshotted_universes", {})[self.id] = {"id": universe.id,
-                                                                                 "version": universe.version}
+        result = await self.snapshot_env_state(
+            env=env, gateway_url=None, snapshot_id=snapshot_id, deployed=deployed,
+            export_timeout_seconds=self.export_timeout_seconds,
+            data_get_params=None if self.file_paths is None else {"paths": self.file_paths})
+        context.metadata.setdefault("env_snapshotted_universes", {})[self.id] = {
+            "id": result.environment_universe_artifact_id, "version": result.environment_universe_artifact_version}
         return context
-
-
-async def _files(deployed, env: ComputerEnv, snapshot_id: str, paths: Optional[list[str]],
-                 timeout_seconds: float) -> dict[str, FileArtifact]:
-    """Each file ``env``'s own data/get returns under ``paths``, by its path, written to the store as ``<snapshot
-    id>__file-<index>``: an upload under the grant in place, without a download, else its inline bytes."""
-    name = env.environment_name
-    base_url = await legacy_protocol.v1_base_url(deployed, None, name)
-    _, card = await legacy_protocol.child_env_card(deployed, None, name)
-    if base_url is None:
-        raise RuntimeError(f"computer env {env.id}'s recorded card names no environment {name!r}")
-    upload = await asyncio.to_thread(_snapshot_upload, card or {}, timeout_seconds, deployed.sandbox_type,
-                                     FILE_TREE_LIMITS)
-    resp, upload = await get_data(base_url, name, timeout_seconds, upload,
-                                  **({} if paths is None else {"paths": paths}))
-    writing = asyncio.Semaphore(_WRITES_IN_FLIGHT)
-
-    async def written(index: int, part) -> tuple[str, FileArtifact]:
-        path = uploaded_object_path(part)
-        if path is None:
-            raise RuntimeError(f"computer env {env.id}'s data/get returned a {part.kind} part naming no path")
-        file_id, filename = derive_id(snapshot_id, f"file-{index}"), PurePosixPath(path).name
-        content_type, description = part.file.mimeType or "application/octet-stream", f"{path} of computer env {env.id}"
-        async with writing:
-            if isinstance(part.file, FileWithBytes):
-                return path, await asyncio.to_thread(FileArtifact.put_bytes, file_id, description=description,
-                                                     filename=filename, content=base64.b64decode(part.file.bytes),
-                                                     content_type=content_type)
-            if upload is None:
-                raise RuntimeError(f"computer env {env.id}'s data/get returned {path} neither inline nor uploaded")
-            return path, await asyncio.to_thread(registered_upload, upload.object_url(path), file_id, filename,
-                                                 content_type, description)
-
-    return dict(await asyncio.gather(*(written(index, part) for index, part in enumerate(resp.parts))))
 
 
 def _not_a_computer(env: Env) -> str:

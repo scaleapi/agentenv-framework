@@ -557,7 +557,7 @@ class _FakeMultiEnv:
 
 @pytest.mark.asyncio
 async def test_core_all_or_nothing_on_partial_failure(monkeypatch):
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         if name == "slack":
             raise ValueError("export-state returned non-JSON body (starts with b'<')")
         with open(tmp_path, "w") as f:
@@ -601,7 +601,7 @@ async def test_core_all_or_nothing_on_partial_failure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_core_success_creates_universe_with_metadata(monkeypatch):
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         with open(tmp_path, "w") as f:
             json.dump({"ok": name}, f)
         return ".json"
@@ -665,7 +665,7 @@ async def test_core_zip_export_creates_zip_filename_artifact(monkeypatch):
     """A FilePart(zip) export flows through as a .zip-suffixed FileArtifact path,
     so FileArtifact.filename (= basename) ends in .zip — the load side routes a
     .zip file:// artifact to reset_data() for a lossless round-trip."""
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         # Simulate the lossless-zip case: write zip bytes and report ".zip".
         with open(tmp_path, "wb") as f:
             f.write(b"PK\x03\x04zip-bytes")
@@ -903,7 +903,7 @@ async def test_core_registers_a_service_upload_in_place_and_it_loads_back(local_
     bundle_file.write_bytes(b"PK\x03\x04bundle")
     uploaded = store.put_file_at(upload_url, str(bundle_file))
 
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         return uploaded
 
     monkeypatch.setattr(SnapshotEnvTaskStep, "_export_environment_to_file", staticmethod(fake_export))
@@ -925,7 +925,7 @@ async def test_core_fails_a_service_whose_upload_the_store_cannot_find(local_sto
     set_object_store(FakeObjectStore())
     reset_artifact_store()
 
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         return "fake://shared/snapshots/missing.zip"
 
     monkeypatch.setattr(SnapshotEnvTaskStep, "_export_environment_to_file", staticmethod(fake_export))
@@ -942,7 +942,7 @@ async def test_core_snapshots_under_an_id_longer_than_a_filename_can_be(local_st
     local store may be the whole id."""
     snapshot_id = f"task-{'x' * 250}__snapshot-snap-1"
 
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         with open(tmp_path, "w") as f:
             json.dump({"service": name}, f)
         return ".json"
@@ -1038,7 +1038,7 @@ async def test_export_of_a_child_env_missing_from_the_card_streams_legacy_export
 async def test_snapshot_uses_the_stored_card_only_for_the_deployments_own_gateway(monkeypatch):
     seen = []
 
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         seen.append((gateway_url, deployed))
         raise ValueError("stop after the export call")
 
@@ -1131,7 +1131,7 @@ def test_resolve_loaded_universe_ref_none_when_instance_never_loaded(monkeypatch
 def _install_core_artifact_fakes(monkeypatch, universe_cls):
     """Wire the export + FileArtifact/EnvironmentArtifact fakes shared by the core
     carry-over tests; the caller supplies the EnvironmentUniverseArtifact fake."""
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         with open(tmp_path, "w") as f:
             json.dump({"ok": name}, f)
         return ".json"

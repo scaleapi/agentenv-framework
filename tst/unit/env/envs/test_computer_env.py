@@ -1,7 +1,7 @@
 """Computer envs: gate 1 refuses a base, a driver or a declaration that can't compose, naming every problem, before
 anything is stored; the composer builds each form and arch, reuses an image of the same key whichever env built it,
-records each result as it finishes, and writes the arches built as the env's computer; a deploy, a reset and a load;
-and computer apps. Where and how a pair builds is test_computer_builder; a computer of several apps, test_computer_apps.
+records each result as it finishes, and writes the arches built as the env's computer; a deploy, a reset and a load,
+of a file universe or of a snapshot of the computer's own files; and computer apps. Where and how a pair builds is test_computer_builder; a computer of several apps, test_computer_apps.
 Docker and the registry are faked."""
 
 import asyncio
@@ -25,6 +25,8 @@ from click.testing import CliRunner
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import get_artifact_store
@@ -779,6 +781,45 @@ async def test_a_load_outside_the_home_is_refused_before_anything_is_sent(base, 
     with pytest.raises(ValueError, match=problem):
         await env.load_file_artifact_universe(_files(tmp_path, **{"a.txt": b"aaaa"}), destination_path=destination)
 
+    assert computer.calls == []
+
+
+def _snapshot(environment_name: str, contents: dict[str, bytes]) -> EnvironmentArtifact:
+    """An environment artifact of ``contents`` by path, as snapshot_computer_env keeps a computer's files."""
+    files = {path: FileArtifact.put_bytes(f"snap-{environment_name}-{index}", description="snapshot",
+                                          filename=path.rsplit("/", 1)[-1], content=data, content_type="text/plain")
+             for index, (path, data) in enumerate(contents.items())}
+    return EnvironmentArtifact.put(f"snap-{environment_name}", environment_name=environment_name, file_artifacts=files)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_of_its_files_loads_back_at_their_paths_leaving_out_other_environments(
+        base, driver, docker, computer, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: False)
+    env = _deployed_env(base, driver, computer)
+    contents = {"Desktop/a.txt": b"a", "Documents/r/b.txt": b"b"}
+    universe = EnvironmentUniverseArtifact.put("snap", environment_artifacts=[
+        _snapshot(env.environment_name, contents), _snapshot("mail", {"inbox/1.json": b"{}"})])
+
+    with caplog.at_level(logging.WARNING):
+        await env.load_environment_universe_artifact(universe)
+
+    assert {path: (computer.home / path).read_bytes() for path in contents} == contents
+    assert not (computer.home / "inbox").exists()
+    assert "leaving out ['mail']" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_environment_not_named_after_the_computer_is_refused_before_anything_is_sent(base, driver, docker,
+                                                                                            computer):
+    env = _deployed_env(base, driver, computer)
+    mail = _snapshot("mail", {"inbox/1.json": b"{}"})
+
+    with pytest.raises(ValueError, match="does not match env environment_name"):
+        await env.load_environment_artifact(mail)
+    with pytest.raises(RuntimeError, match=f"has no environment named '{env.environment_name}'"):
+        await env.load_environment_universe_artifact(EnvironmentUniverseArtifact.put("mail-only",
+                                                                                     environment_artifacts=[mail]))
     assert computer.calls == []
 
 

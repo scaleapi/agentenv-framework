@@ -30,6 +30,7 @@ from agent_env.providers.env_providers.env_computer_provider import end_recordin
 from agent_env.utils.paths import validate_relative_filename
 
 if TYPE_CHECKING:
+    from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
     from agent_env.bundle.authoring import AuthoringContext
     from agent_env.env.env import DeployedEnv
     from agent_env.env.envs.computer.app_env import ComputerAppEnv
@@ -205,6 +206,34 @@ class ComputerEnv(Env):
         await inside.add_artifacts(self._deployed, {paths[filename]: artifact for filename, artifact in files.items()})
         logger.info(f"Loaded {len(files)} file(s) of '{file_artifact_universe.id}' into {self.id}'s ~/{destination}")
         return LoadFileArtifactUniverseResult(destination_path=destination, files=paths)
+
+    async def load_environment_artifact(self, environment_artifact: EnvironmentArtifact) -> None:
+        """Write the files of ``environment_artifact``, the computer's own, at their paths relative to the session
+        user's home, through the driver's ``data/add``, as ``snapshot_computer_env`` kept them. Other files there
+        stay."""
+        if environment_artifact.environment_name != self.environment_name:
+            raise ValueError(f"EnvironmentArtifact environment_name '{environment_artifact.environment_name}' does not "
+                             f"match env environment_name '{self.environment_name}'")
+        files = environment_artifact.get_file_artifacts()
+        for path in files:
+            validate_relative_filename(path)
+        await inside.add_artifacts(self._deployed, files)
+        logger.info(f"Loaded {len(files)} file(s) of '{environment_artifact.id}' into {self.id}'s home")
+
+    async def load_environment_universe_artifact(self, environment_universe_artifact: EnvironmentUniverseArtifact) -> None:
+        """Load the universe's environment named after the computer, ``load_environment_artifact``; any other is left
+        out, with a warning."""
+        environments = environment_universe_artifact.get_environment_artifacts()
+        own = [environment for environment in environments if environment.environment_name == self.environment_name]
+        if not own:
+            raise RuntimeError(f"computer env '{self.id}' can't load '{environment_universe_artifact.id}': it has no "
+                               f"environment named '{self.environment_name}' (it has "
+                               f"{[environment.environment_name for environment in environments]})")
+        if others := [environment.environment_name for environment in environments
+                      if environment.environment_name != self.environment_name]:
+            logger.warning(f"[{self.id}] loading only '{self.environment_name}' from '{environment_universe_artifact.id}'; "
+                           f"leaving out {others}")
+        await self.load_environment_artifact(own[0])
 
     async def reset(self, deployed: DeployedEnv) -> None:
         """Return the computer to boot state: its recordings ended, its container replaced with a fresh one of the same

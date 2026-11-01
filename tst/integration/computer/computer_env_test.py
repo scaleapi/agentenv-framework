@@ -4,7 +4,7 @@ computer, and gate 3 makes the image of this machine's arch ready; that image bo
 session user and passes the conformance probe at full three times in a row; another env that changes only what doesn't
 change the image reuses it; one with no network, deployed, is reached but reaches nothing, takes a file and runs
 code that reaches its driver on loopback, is snapshotted by snapshot_computer_env, its files under the paths it names
-kept by their paths after its upload under the grant fails, comes back from a reset fresh, takes the snapshot back
+kept by their paths in its environment artifact after its upload under the grant fails, comes back from a reset fresh, takes the snapshot back
 through load_artifact, and leaves nothing once torn down; an open one uploads each file under the snapshot's grant, kept where it was put; and a recording open when the
 computer resets or is torn down is ended by
 the computer and registered whole. Needs Docker and the local registry on localhost:5000."""
@@ -22,7 +22,7 @@ from agentenv_protocol.computer.conformance import run_probe
 from agentenv_protocol.computer.conformance.client import Driver
 
 from agent_env.artifact import FileArtifact
-from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -126,13 +126,11 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
             context = await SnapshotComputerEnvTaskStep(id="snapshot", version=None, env_id=closed.id,
                                                         snapshot_id=f"{closed.id}-snapshot",
                                                         file_paths=["Desktop", "Downloads/note.txt"]).execute(context)
-            taken = context.metadata["env_snapshotted_universes"]["snapshot"]
-            snapshot = {path: file.load() for path, file in FileArtifactUniverse.get(
-                taken["id"], version=taken["version"]).get_file_artifacts().items()}
+            snapshot = {path: file.load() for path, file in _snapshotted(context, closed).items()}
             await ResetEnvTaskStep(id="reset", version=None, env_id=closed.id, fail_task_on_error=True).execute(context)
             left = await (await Driver.connect(deployed.environment_url, 30)).run("test", "-e", "Desktop/left.txt")
             context = await LoadArtifactTaskStep(id="restore", version=None, env_id=closed.id,
-                                                 artifact_from_step_id="snapshot", destination_path=".").execute(context)
+                                                 artifact_from_step_id="snapshot").execute(context)
             restored = await (await Driver.connect(deployed.environment_url, 30)).run("cat", "Desktop/left.txt")
         finally:
             report = await teardown_run(context)
@@ -161,9 +159,7 @@ async def test_an_open_computer_uploads_each_file_under_the_snapshots_grant_and_
                                          "&& printf two > Downloads/b.txt")
             context = await SnapshotComputerEnvTaskStep(id="snapshot", version=None, env_id=desktop.id,
                                                         snapshot_id=f"{desktop.id}-snapshot").execute(context)
-            taken = context.metadata["env_snapshotted_universes"]["snapshot"]
-            snapshot = {path: (file.object_url, file.load()) for path, file in FileArtifactUniverse.get(
-                taken["id"], version=taken["version"]).get_file_artifacts().items()}
+            snapshot = {path: (file.object_url, file.load()) for path, file in _snapshotted(context, desktop).items()}
         finally:
             report = await teardown_run(context)
             grant_server(None, None).close()
@@ -215,3 +211,11 @@ async def _ready(name: str) -> str:
                 pass
         await asyncio.sleep(0.25)
     raise TimeoutError(f"{name}'s computer never became ready")
+
+
+def _snapshotted(context: TaskStepContext, env) -> dict:
+    """The computer's files in the universe the step ``snapshot`` wrote, by path."""
+    taken = context.metadata["env_snapshotted_universes"]["snapshot"]
+    (computer,) = EnvironmentUniverseArtifact.get(taken["id"], version=taken["version"]).get_environment_artifacts()
+    assert computer.environment_name == env.environment_name
+    return computer.get_file_artifacts()

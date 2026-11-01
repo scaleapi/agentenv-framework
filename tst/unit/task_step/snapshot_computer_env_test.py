@@ -1,7 +1,7 @@
-"""snapshot_computer_env: a computer env's files kept as a FileArtifactUniverse by their paths, returned inline or
-uploaded under the grant and written where they were put, the computer asked again without the grant when it fails
-under it, and file_paths sent to its data/get; refused for an env that isn't a computer, for paths that aren't
-relative, and with no files to keep."""
+"""snapshot_computer_env: a computer env's files kept by their paths in its environment artifact, in a new environment
+universe, returned inline or uploaded under the grant and written where they were put, the computer asked again without
+the grant when it fails under it, and file_paths sent to its data/get; refused for an env that isn't a computer, for
+paths that aren't relative, and with no files to keep."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from agentenv_protocol import uploaded_file_part
 
-from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact
 from agent_env.config import set_object_store
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.task_step.registry import get_task_step_registry
@@ -32,16 +32,19 @@ class _Mail:
     id, version, type, environment_name = "mail", 1, "mcp_server", "mail"
 
 
-async def _snapshot(monkeypatch, card: dict, env=None, **fields) -> FileArtifactUniverse:
+async def _snapshot(monkeypatch, card: dict, env=None, **fields) -> EnvironmentArtifact:
+    """The computer's environment artifact in the universe the step snapshots it into."""
     monkeypatch.setattr("agent_env.env.env.Env.get", classmethod(lambda cls, id, version=None: env or _Desk()))
     context = _ctx(_record(card))
     await SnapshotComputerEnvTaskStep(id="snap", version=None, env_id="desk", **fields).execute(context)
     snapshotted = context.metadata["env_snapshotted_universes"]["snap"]
-    return FileArtifactUniverse.get(snapshotted["id"], version=snapshotted["version"])
+    (desktop,) = EnvironmentUniverseArtifact.get(snapshotted["id"], version=snapshotted["version"]).get_environment_artifacts()
+    assert desktop.environment_name == "desktop"
+    return desktop
 
 
-def _kept(universe: FileArtifactUniverse) -> dict[str, bytes]:
-    return {path: file.load() for path, file in universe.get_file_artifacts().items()}
+def _kept(desktop: EnvironmentArtifact) -> dict[str, bytes]:
+    return {path: file.load() for path, file in desktop.get_file_artifacts().items()}
 
 
 def test_its_fields_round_trip_and_its_type_is_registered():
@@ -82,10 +85,10 @@ async def test_each_file_returned_inline_is_kept_by_its_path(local_stores, monke
     sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Documents/notes.txt", b"hello"),
                                                              _inline("Documents/b/c.bin", b"\x00\x01")]})
 
-    universe = await _snapshot(monkeypatch, _computer(), file_paths=file_paths)
+    desktop = await _snapshot(monkeypatch, _computer(), file_paths=file_paths)
 
-    assert _kept(universe) == {"Documents/notes.txt": b"hello", "Documents/b/c.bin": b"\x00\x01"}
-    assert universe.get_file_artifacts()["Documents/b/c.bin"].filename == "c.bin"
+    assert _kept(desktop) == {"Documents/notes.txt": b"hello", "Documents/b/c.bin": b"\x00\x01"}
+    assert desktop.get_file_artifacts()["Documents/b/c.bin"].filename == "c.bin"
     assert sent == [("/agentenv", params)]
 
 
@@ -105,12 +108,12 @@ async def test_files_uploaded_under_the_grant_are_written_where_the_computer_put
 
     sent = _serve(monkeypatch, {"/agentenv": uploading})
 
-    universe = await _snapshot(monkeypatch, _computer(DATA_OBJECTS))
+    desktop = await _snapshot(monkeypatch, _computer(DATA_OBJECTS))
 
     ((_, params),) = sent
     root = params["write_namespace"]["root_path"]
     assert params["write_namespace"]["max_objects"] == 100_000
-    assert {path: (file.object_url, file.load()) for path, file in universe.get_file_artifacts().items()} == {
+    assert {path: (file.object_url, file.load()) for path, file in desktop.get_file_artifacts().items()} == {
         path: (store.object_url(f"{root}/{path}"), data) for path, data in files.items()}
 
 
@@ -120,16 +123,16 @@ async def test_a_computer_that_fails_under_the_grant_is_asked_again_without_one(
     sent = _serve(monkeypatch, {"/agentenv": lambda params: UNREACHABLE if "write_namespace" in params
                                 else [_inline("Desktop/left.txt", b"x")]})
 
-    universe = await _snapshot(monkeypatch, _computer(DATA_OBJECTS))
+    desktop = await _snapshot(monkeypatch, _computer(DATA_OBJECTS))
 
-    assert _kept(universe) == {"Desktop/left.txt": b"x"}
+    assert _kept(desktop) == {"Desktop/left.txt": b"x"}
     assert [sorted(params) for _, params in sent] == [["write_namespace"], []]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("env, answers, refused", [
     (_Mail(), {}, "snapshots a computer env, and mail is a mcp_server env"),
-    (None, {"/agentenv": lambda params: []}, "computer env desk has no files under Documents to snapshot"),
+    (None, {"/agentenv": lambda params: []}, "'desktop' returned no files to snapshot"),
 ], ids=["not-a-computer", "no-files"])
 async def test_a_run_with_nothing_a_computer_snapshot_can_keep_is_refused(local_stores, monkeypatch, env, answers,
                                                                           refused):

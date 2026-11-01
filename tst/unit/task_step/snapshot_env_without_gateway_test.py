@@ -1,7 +1,7 @@
 """snapshot_env on an env deployed without a gateway: reached through the card its deployment recorded, its
 environments the card's children or the env itself, each kept as one file as through a gateway; an environment whose
-data/get returns a file tree, a computer's, refused for snapshot_computer_env; and an env that fails under the upload
-grant asked again without it."""
+data/get returns a file tree, a computer's, kept file by file by its paths under a grant sized for a file tree; and an
+env that fails under the upload grant asked again without it."""
 
 from __future__ import annotations
 
@@ -105,13 +105,18 @@ async def test_the_env_itself_is_reached_when_its_card_has_no_children(local_sto
 
 
 @pytest.mark.asyncio
-async def test_a_file_tree_is_refused_for_snapshot_computer_env_before_its_data_get(local_stores, monkeypatch):
-    sent = _serve(monkeypatch, {})
+async def test_a_file_tree_is_kept_file_by_file_by_its_paths_under_a_grant_sized_for_it(local_stores, tmp_path,
+                                                                                        monkeypatch):
+    set_object_store(GrantingObjectStore(str(tmp_path / "objects")))
+    sent = _serve(monkeypatch, {"/agentenv": lambda params: [_inline("Desktop/a.txt", b"a"), _inline("b.txt", b"b")]})
 
-    with pytest.raises(RuntimeError, match="'desktop' returns a file tree from data/get, which one file can't keep; "
-                                           "snapshot_computer_env snapshots a computer env's files"):
-        await _snapshot(_computer())
-    assert sent == []
+    universe = await _snapshot(_computer(DATA_OBJECTS))
+
+    (desktop,) = universe.get_environment_artifacts()
+    assert {path: file.load() for path, file in desktop.get_file_artifacts().items()} == {"Desktop/a.txt": b"a",
+                                                                                          "b.txt": b"b"}
+    ((_, params),) = sent
+    assert params["write_namespace"]["max_objects"] == 100_000
 
 
 @pytest.mark.asyncio
