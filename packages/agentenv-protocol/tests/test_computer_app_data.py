@@ -1,9 +1,9 @@
 """A computer app's data plane, served by its own server. An app that declares only paths, none inside another, gets
 the defaults: a load writes files under them, through no link out of them, an export returns them, and a reset puts back
-the copy its server kept before it served; its card declares a file tree. Hooks override paths. Around a load and a
-reset the app is stopped and relaunched, a failed load is followed by a reset, and data calls take turns. A call past
-data_timeout_s fails then and is cancelled, but a sync hook runs in a thread, which its reset and relaunch, and the
-next call, wait for. The app serves its skill file."""
+the copy its server kept before it served; its card declares a file tree. Hooks override paths, and read the parts they
+get with part_bytes. Around a load and a reset the app is stopped and relaunched, a failed load is followed by a reset,
+and data calls take turns. A call past data_timeout_s fails then and is cancelled, but a sync hook runs in a thread,
+which its reset and relaunch, and the next call, wait for. The app serves its skill file."""
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +19,7 @@ pytest.importorskip("mcp.server.fastmcp")
 import httpx  # noqa: E402
 
 from agentenv_protocol import add_data, client, reset_data  # noqa: E402
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, linux  # noqa: E402
+from agentenv_protocol.computer import ComputerAppEnvironment, Launch, linux, part_bytes  # noqa: E402
 from agentenv_protocol.computer import app, app_runtime, session  # noqa: E402
 from agentenv_protocol.computer.app import COMPUTER_APP  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
@@ -36,14 +36,14 @@ class PathsMail(ComputerAppEnvironment):
 
 @linux(paths=MAIL, launch=Launch(command=["mail"]))
 class HookedMail(ComputerAppEnvironment):
-    loaded: list
+    loaded: dict
     resets = 0
 
     @add_data
     async def load(self, parts: list) -> None:
-        if any(part["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] == "bad" for part in map(dict, parts)):
+        if any(part.metadata[DATA_OBJECTS_EXTENSION_URI]["path"] == "bad" for part in parts):
             raise RuntimeError("the seed is bad")
-        self.loaded = parts
+        self.loaded = {part.metadata[DATA_OBJECTS_EXTENSION_URI]["path"]: await part_bytes(part) for part in parts}
 
     @reset_data
     def wipe(self) -> None:
@@ -136,10 +136,14 @@ def test_paths_that_arent_relative_or_overlap_are_refused_where_theyre_declared(
 
 
 @pytest.mark.asyncio
-async def test_hooks_override_its_paths(home):
-    async with _http(HookedMail()) as http:
-        card = (await http.get(WELL_KNOWN_PATH)).json()
+async def test_hooks_override_its_paths_and_read_each_part_they_get_with_part_bytes(home):
+    mail = HookedMail()
 
+    async with _http(mail) as http:
+        card = (await http.get(WELL_KNOWN_PATH)).json()
+        await _rpc(http, "data/add", {"parts": [_inline("Mail/a.txt", b"a")]})
+
+    assert mail.loaded == {"Mail/a.txt": b"a"} and not (home / "Mail").exists()
     assert sorted(card["capabilities"]["operations"]) == ["data/add", "data/reset"]
     assert client.find_extension(card, INTAKE_EXTENSION_URI) is None
     assert HookedMail.declaration().data == ["data/add", "data/reset"]

@@ -7,8 +7,8 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from agentenv_protocol import DataPart, add_data, get_data, reset_data
-from agentenv_protocol.computer import ComputerAppEnvironment, Packages, RunScript, Service, computer_app, linux
-from agentenv_protocol.computer.dataplane import part_bytes
+from agentenv_protocol.computer import (ComputerAppEnvironment, Packages, RunScript, Service, computer_app, linux,
+                                        part_bytes)
 
 PORT = 8137
 ALARMS = ".clock-alarms.json"

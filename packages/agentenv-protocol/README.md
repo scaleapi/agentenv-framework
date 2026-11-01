@@ -505,8 +505,8 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
   `data/get` returns the files under the `paths` it's given, relative to the home, or under the
   card's `default_data_paths` (`Desktop`, `Documents`, `Downloads`) when it's given none, inline or
-  uploaded under a `write_namespace` grant. An environment whose `@get_data` hook takes no `paths`
-  refuses them.
+  uploaded under a `write_namespace` grant, leaving out the paths its apps keep their data in. An
+  environment whose `@get_data` hook takes no `paths` refuses them.
 - **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
   access (`tool_access` is on).
 
@@ -674,8 +674,10 @@ class MailApp(ComputerAppEnvironment):
   naming one the app declares no install for is refused when the class is read. A step reads
   `self.build_settings`; a deploy's `self.settings` aren't known at build, and reading one raises
   `AttributeError` (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
-- **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
-  its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
+- **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both.
+- **Its data** is under the `paths` its OS's decorator names, relative to the session user's home,
+  none inside another (`@linux(..., paths=["Mail", ".config/mail/accounts.json"])`), or what its own
+  `@add_data`, `@get_data` and `@reset_data` hooks serve instead (below).
 - **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
   in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
   its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
@@ -700,6 +702,18 @@ the app, and launches a `boot` app, once per boot. The driver finds each app by 
 folder: the computer is ready once every app's server answers and each `boot` app, and each app with
 no launch, says it's ready; a `demand` app counts once something launches it. What the server does
 in the session (`agentenv_protocol.computer.session`) is Linux's.
+
+The server serves the app's data plane and its skill. With `paths` alone, `data/add` writes the files
+it's given under them and refuses any other path, or one a link leads out of them; `data/get`
+returns the files there, a file tree; and `data/reset` puts them back as the server found them when
+it first started on this boot, which is the app as installed. Hooks serve what they mark instead.
+A hook's `data/add` parts come as they were sent, inline or as a read grant, and
+`part_bytes(part)` returns a part's bytes either way. Either way the base class takes data calls and
+launches one at a time, runs a load and a reset with the app stopped and relaunches it after,
+follows a failed load with a reset, and fails a call that runs past `data_timeout_s` (300 s); a sync
+hook runs in a thread, which the reset and relaunch after it wait for. The driver fronts its apps:
+its card lists each one's card as a child environment, rooted at `/svc/<app>/`, where it forwards
+requests to the app's server.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as

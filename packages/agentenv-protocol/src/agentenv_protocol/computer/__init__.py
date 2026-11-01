@@ -67,6 +67,7 @@ from .operations import (
     type_text,
     write_files,
 )
+from .dataplane import part_bytes
 from .keys import PRINTABLE_KEYS
 from .manifest import ManifestSegment, RecordingManifest
 from .platform import Platform
@@ -107,7 +108,7 @@ __all__ = [
     "ComputerAppEnvironment", "computer_app", "install", "linux", "install_step", "ready_check", "Linux", "Service",
     "Launch", "Ready", "Packages", "AptSource", "Download", "RunScript",
     "AppDeclaration", "AppOs",
-    "APP_SETTINGS_ENV",
+    "APP_SETTINGS_ENV", "part_bytes",
     "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV",
     "PRINTABLE_KEYS",
     "display", "set_display", "capture", "click", "drag", "scroll", "type_text", "press",
