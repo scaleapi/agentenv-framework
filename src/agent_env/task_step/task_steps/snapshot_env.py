@@ -379,13 +379,14 @@ class SnapshotEnvTaskStep(TaskStep):
     async def _capture_env_trajectory(self, entry: dict, context: TaskStepContext, env_id: str, deployed) -> None:
         """Stream the trajectory to a temp file, upload it verbatim (no envelope), and fill ``entry``."""
         method, url = _trajectory_route(deployed, self.gateway_url)
+        headers = None if self.gateway_url else deployed.control_headers
         store = get_config().get_object_store()
         event_count = 0
         timeout = httpx.Timeout(_TRAJECTORY_CAPTURE_BUDGET_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)
         tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(method, url, headers=deployed.control_headers) as response:
+                async with client.stream(method, url, headers=headers) as response:
                     response.raise_for_status()
                     async for chunk in response.aiter_bytes():
                         tmp.write(chunk)
@@ -406,6 +407,7 @@ class SnapshotEnvTaskStep(TaskStep):
     async def _capture_env_changes(self, entry: dict, context: TaskStepContext, env_id: str, deployed) -> None:
         """Page the gateway's changes into a JSONL upload; fill ``entry`` with its url and attribution counts."""
         method, url = _changes_route(deployed, self.gateway_url)
+        headers = None if self.gateway_url else deployed.control_headers
         counts = {"change_count": 0, "attributed_count": 0, "ambiguous_count": 0}
         timeout = httpx.Timeout(_CHANGES_CAPTURE_BUDGET_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)
         tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
@@ -414,7 +416,7 @@ class SnapshotEnvTaskStep(TaskStep):
             async with httpx.AsyncClient(timeout=timeout) as client:
                 while has_more:
                     response = await client.request(method, url, params={"after_id": after_id, "limit": CHANGES_PAGE_MAX},
-                                                    headers=deployed.control_headers)
+                                                    headers=headers)
                     response.raise_for_status()
                     page = response.json()
                     for change in page["changes"]:
