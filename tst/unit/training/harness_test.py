@@ -8,10 +8,6 @@ import logging
 
 import httpx
 import pytest
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse
-from starlette.routing import Route
-
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
@@ -22,10 +18,10 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.training import harness
-from agent_env.training._openenv import Server
 from agent_env.training.harness import AgentEnvSessionFactory, prompt_rows
 from tst.unit.bundle._support import layout
 from tst.unit.conftest import local_stores  # noqa: F401
+from tst.util.fake_vllm import fake_vllm, says, token_ids
 
 MODEL = "Qwen/Qwen3-4B"
 MODEL_ENDPOINT_MISSING = preflight.model_endpoint_missing  # the probe, which the unit tier's conftest stubs
@@ -88,35 +84,8 @@ class _Checks(TaskStep):
 
 @pytest.fixture
 def engine():
-    """A stand-in for vLLM run with --return-tokens-as-token-ids and processed logprobs."""
-    requests, served = [], [MODEL]
-
-    async def models(request):
-        return JSONResponse({"data": [{"id": model, "object": "model"} for model in served]})
-
-    async def completions(request):
-        body = await request.json()
-        requests.append(body)
-        temperature = body.get("temperature") or 1.0
-        prompt = [ord(char) % 500 + 1 for message in body["messages"] for char in str(message.get("content") or "")]
-        reply = "It is 42."
-        ids = [ord(char) % 500 + 600 for char in reply]
-        content = [{"token": f"token_id:{token}", "logprob": -0.5 / temperature, "bytes": None,
-                    "top_logprobs": [{"token": f"token_id:{token}", "logprob": -0.5 / temperature},
-                                     {"token": f"token_id:{token + 1}", "logprob": -3.0 / temperature}]}
-                   for token in ids]
-        return JSONResponse({
-            "id": "chatcmpl-1", "object": "chat.completion", "model": body["model"], "prompt_token_ids": prompt,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop",
-                         "token_ids": ids, "logprobs": {"content": content}}],
-            "usage": {"prompt_tokens": len(prompt), "completion_tokens": len(ids), "total_tokens": len(prompt) + len(ids)},
-        })
-
-    server = Server(Starlette(routes=[Route("/v1/models", models), Route("/v1/chat/completions", completions,
-                                                                          methods=["POST"])]))
-    server.requests, server.served = requests, served
-    yield server
-    server.stop()
+    with fake_vllm(MODEL, says("It is 42.")) as server:
+        yield server
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +137,7 @@ def test_the_solver_alone_calls_the_policy_through_the_proxy_and_the_run_is_capt
                                                           "litellm_api_key": call["key"]}}
     assert not {"litellm_base_url", "litellm_api_key"} & call["overrides"].keys()
     assert (verified.env_reward, verified.metrics) == (1.0, {"score/check": 1.0})
-    assert turn.completion_token_ids == [ord(char) % 500 + 600 for char in "It is 42."]
+    assert turn.completion_token_ids == token_ids({"role": "assistant", "content": "It is 42."})
     assert turn.loss_mask == [0] * len(turn.prompt_token_ids) + [1] * len(turn.completion_token_ids)
     assert engine.requests[-1]["model"] == "trl-policy-v3"
     assert factory._proxy.registry.get(call["key"]) is None
