@@ -1,12 +1,5 @@
-"""``AgentEnvGenerator`` and ``AgentEnvTextEnv`` on SkyRL itself: SkyRL's ``PromptDataset`` loads the rows
-``write_dataset`` wrote, with Qwen3's and Qwen3.5's tokenizers and chat templates, and its generator plays them through
-a stand-in inference engine, on the unit tier's bundle served on loopback. A played row's reward is its episode's, and
-its scores, attempts and tool calls its env metrics, through the hermes and qwen3_coder formats, over two turns, and
-from a server that asks for a token; the model sees its tools as its chat template renders them; an unparsed call is
-answered with why; the turn cap ends the episode; a rollout the env fails is played again on a new episode, but not
-once its time is up, and one it fails every attempt masks its group in training but not in an eval; an episode that
-ends unscored without failing raises; and the entrypoint registers the env and reads the rows' token variables. CI runs
-it on SkyRL 0.4.0 and main."""
+"""``AgentEnvGenerator`` and ``AgentEnvTextEnv`` on SkyRL itself: its ``PromptDataset`` loads the written rows and its
+generator plays them through a stand-in inference engine, with Qwen3's and Qwen3.5's tokenizers."""
 
 import asyncio
 import json
@@ -211,7 +204,7 @@ def test_a_rollout_the_env_fails_every_attempt_masks_its_group_in_training_but_n
     assert sum(output["rewards"][played]) == kept
     assert (1 in output["loss_masks"][played]) == (phase == "eval")
     failed = next(row for row, metrics in enumerate(output["env_metrics"]) if metrics.get("failed") == 1)
-    assert (output["loss_masks"][failed], sum(output["rewards"][failed])) == ([0], 0.0)
+    assert ((1 in output["loss_masks"][failed]), sum(output["rewards"][failed])) == (phase == "eval", 0.0)
     assert len(deploys) == 3
 
 

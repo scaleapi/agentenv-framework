@@ -1,8 +1,5 @@
-"""``python -m agent_env.training.skyrl.train``, or SkyRL's ``main_base`` with
-``trainer.override_entrypoint=agent_env.training.skyrl.train``: SkyRL's trainer on the rows
-``python -m agent_env.training.skyrl`` writes, with the env registered as ``agentenv`` and AgentEnvGenerator
-generating, and SkyRL's fully async trainer with ``trainer.fully_async.enabled=true``. It takes SkyRL's own
-settings."""
+"""SkyRL's trainer with the env registered and AgentEnvGenerator generating: ``python -m agent_env.training.skyrl.train``,
+or SkyRL's ``main_base`` with ``trainer.override_entrypoint=agent_env.training.skyrl.train``."""
 
 from __future__ import annotations
 

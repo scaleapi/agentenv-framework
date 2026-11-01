@@ -13,13 +13,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from transformers import AutoTokenizer
 
-from agent_env.training._openenv import function_tool, key, messages, tasks_and_tools, token_in
+from agent_env.training._openenv import function_tool, key, longest_prompt, messages, tasks_and_tools, token_in
 from agent_env.training.skyrl.calls import FORMATS
 
 #: The ``env_class`` every row plays under, and the id the env is registered at.
 AGENT = "agentenv"
-#: A row's columns, so a split the server keeps empty still has them. SkyRL hands the env every column but ``prompt``
-#: and ``env_class`` as its extras, and groups eval metrics by ``data_source``.
+#: A row's columns, so a split the server keeps empty still has them.
 ROW = pa.schema([
     ("prompt", pa.list_(pa.struct([("role", pa.string()), ("content", pa.string())]))),
     ("env_class", pa.string()),
@@ -45,18 +44,9 @@ def write_dataset(url: str, out: str | Path, *, tokenizer: str, tool_format: str
                   tool_timeout: float = 60.0, reset_timeout: float = 600.0, attempts: int = 3,
                   token_var: str | None = None, max_prompt_length: int | None = None,
                   chat_template_kwargs: dict[str, Any] | None = None) -> Written:
-    """The tasks of the OpenEnv server at ``url`` as ``out/<split>.parquet``, a row per task of each split. A row's
-    prompt is its task's system prompt and first prompt, with every tool its task's turns offer, found by playing one
-    task of each toolset to its last turn, unscored, so writing deploys those. The tools go in the system prompt as
-    ``tokenizer``'s chat template renders them with ``tools=`` and ``chat_template_kwargs``, SkyRL's
-    ``generator.chat_template_kwargs``, checked to render the same text; ``tool_format`` names the format the template
-    teaches the model to call them in. Each row also holds the server's settings for its env: the deadlines, the
-    ``attempts`` a rollout the env fails is played, and ``token_var``, the environment variable that holds the token a
-    server given one asks for (``build_app(token=...)``), read now and in the trainer, so the token is in no file.
-
-    A row's prompt is counted as SkyRL's prompt filter counts it, without ``chat_template_kwargs``, and as its generator
-    renders it, with them; a row over ``max_prompt_length``, SkyRL's ``trainer.max_prompt_length``, in either is
-    refused before anything is written, where the filter would drop it."""
+    """The tasks of the OpenEnv server at ``url`` as ``out/<split>.parquet``, each row's tools in its system prompt as
+    ``tokenizer``'s chat template renders them, since SkyRL's generator passes the template none. ``token_var`` names
+    the variable holding the server's token, read here and in the trainer, so the token is in no file."""
     if attempts < 1:
         raise ValueError(f"attempts must be at least 1, not {attempts}")
     if tool_format not in FORMATS:
@@ -118,15 +108,11 @@ def _rendered(tokenizer: Any, prompt: list[dict[str, str]], chat_template_kwargs
 
 def _longest(rows: dict[str, list[dict[str, Any]]], tokenizer: Any, limit: int | None,
              chat_template_kwargs: dict[str, Any]) -> int:
-    """The longest row's prompt in tokens, counted with and without ``chat_template_kwargs``, refusing rows over
-    ``limit``."""
+    """Counted as SkyRL's prompt filter counts a row, without ``chat_template_kwargs``, and as its generator renders it,
+    with them."""
     lengths = {(split, row["episode"]["task_id"]): max(
         len(tokenizer.apply_chat_template(row["prompt"], add_generation_prompt=True, tokenize=True, return_dict=True,
                                           **kwargs)["input_ids"])
         for kwargs in ({}, chat_template_kwargs)) for split, written in rows.items() for row in written}
-    if limit is not None and (over := {at: length for at, length in lengths.items() if length > limit}):
-        (split, task), length = max(over.items(), key=lambda item: item[1])
-        raise ValueError(f"{len(over)} rows' prompts are over max_prompt_length={limit} tokens with their tools, the "
-                         f"longest task {task} of split {split} at {length}, which SkyRL's prompt filter would drop: "
-                         "raise it, and trainer.max_prompt_length with it")
-    return max(lengths.values(), default=0)
+    return longest_prompt(lengths, limit, cut="which SkyRL's prompt filter would drop: raise it, and "
+                                              "trainer.max_prompt_length with it")

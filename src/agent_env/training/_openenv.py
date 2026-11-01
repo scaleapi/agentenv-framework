@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Coroutine, Mapping
+from collections.abc import Coroutine, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -454,6 +454,26 @@ def function_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
         "name": tool["name"], "description": tool.get("description") or "",
         "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
     }}
+
+
+def attempt_numbers(limit: int, reset_timeout: float) -> Iterator[int]:
+    """The attempts at a rollout the env fails, 1 to ``limit``, none starting once ``reset_timeout`` seconds have passed
+    since the first began."""
+    began = time.monotonic()
+    for attempt in range(1, limit + 1):
+        if attempt > 1 and time.monotonic() - began >= reset_timeout:
+            return
+        yield attempt
+
+
+def longest_prompt(lengths: Mapping[tuple[str, str], int], limit: int | None, *, cut: str) -> int:
+    """The longest of the rows' prompts, in tokens by split and task id, refusing rows over ``limit``, for which ``cut``
+    says what the trainer would do and the setting to raise."""
+    if limit is not None and (over := {at: length for at, length in lengths.items() if length > limit}):
+        (split, task), length = max(over.items(), key=lambda item: item[1])
+        raise ValueError(f"{len(over)} rows' prompts are over max_prompt_length={limit} tokens with their tools, the "
+                         f"longest task {task} of split {split} at {length}, {cut}")
+    return max(lengths.values(), default=0)
 
 
 def authorization(token: str | None) -> dict[str, str]:

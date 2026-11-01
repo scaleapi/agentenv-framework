@@ -1,7 +1,5 @@
-"""``write_dataset`` on the OpenEnv server ``build_app`` makes, served on loopback over the Episode API's fake steps:
-SkyRL's parquet rows for each split, each with its tools in its system prompt as a local tokenizer's chat template
-renders them, from a server that asks for a token too, and the command that writes them; and the tool-call parsers the
-env reads the model's replies with."""
+"""``write_dataset`` on the OpenEnv server ``build_app`` makes, served on loopback over the Episode API's fake steps,
+with a local tokenizer whose template renders tools as Qwen3's does; and the parsers the env reads replies with."""
 
 import json
 

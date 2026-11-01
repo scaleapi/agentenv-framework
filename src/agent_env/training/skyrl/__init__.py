@@ -1,5 +1,3 @@
-"""SkyRL's trainers on a bundle served as an OpenEnv env (``agent_env.openenv.build_app``, or the package ``openenv
-import`` writes): ``python -m agent_env.training.skyrl URL OUT`` writes the server's tasks as SkyRL's parquet rows, each
-with its tools in its system prompt, ``agent_env.training.skyrl.env.AgentEnvTextEnv`` plays each row's task as one
-episode on the server, ``agent_env.training.skyrl.generator.AgentEnvGenerator`` plays again a rollout the env fails,
-and ``python -m agent_env.training.skyrl.train`` runs SkyRL's trainer with both."""
+"""SkyRL on a bundle served as an OpenEnv env: ``python -m agent_env.training.skyrl`` writes SkyRL's rows,
+``env.AgentEnvTextEnv`` plays each row's task as one episode, ``generator.AgentEnvGenerator`` plays a failed rollout
+again, and ``python -m agent_env.training.skyrl.train`` runs SkyRL's trainer with both."""
