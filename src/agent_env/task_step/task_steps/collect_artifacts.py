@@ -68,7 +68,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import hashlib
 import logging
 import os
 import json
@@ -80,7 +79,7 @@ from typing import ClassVar, Optional
 
 from agent_env.config import get_config
 from agent_env.env.gateway.constants import EXT_STEP_URI
-from agent_env.store.ids import derive_id, is_local_id, validate_local_id
+from agent_env.store.ids import derive_path_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -971,7 +970,7 @@ class CollectArtifactsTaskStep(TaskStep):
         FileArtifact filename is the basename for clean downloads."""
         from agent_env.artifact import FileArtifact
 
-        fa_id = derive_id(artifact_id, hashlib.sha256(object_name.encode("utf-8")).hexdigest()[:16])
+        fa_id = derive_path_id(artifact_id, object_name)
         fa = FileArtifact(
             id=fa_id,
             description=f"Collected artifact '{object_name}' from task instance {context.instance_id or artifact_id}",

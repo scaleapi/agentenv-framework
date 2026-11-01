@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from abc import ABC, abstractmethod
 from pathlib import PurePosixPath
@@ -15,7 +14,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.entity.export import Unwritable
 from agent_env.entity.refs import EntityRef
-from agent_env.store.ids import derive_id
+from agent_env.store.ids import derive_id, derive_path_id
 from agent_env.utils.paths import validate_file_path
 
 logger = logging.getLogger(__name__)
@@ -133,7 +132,7 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         """Write the environment authored as ``data`` (its artifact.toml, with ``file`` resolved to a file artifact's
         id) under ``ctx.id`` and return it: over the artifact ``file`` names; over the folder's one file, written as
         ``<id>__file`` with ``description`` defaulting to its name; or over its several files by path, each written
-        as ``<id>__<16 hex of its path's hash>``, as a file universe's are."""
+        under the id a file universe's is (``derive_path_id``)."""
         fields = cls.accept_toml(data, ctx)
         if "file" in fields:
             file = ctx.artifact(fields["file"], FileArtifact)
@@ -143,8 +142,8 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
                                             description=fields.get("description", filename))
         else:
             return cls.put(ctx.id, environment_name=fields["environment_name"], file_artifacts={
-                path: FileArtifact.put_attempt(derive_id(ctx.id, hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]),
-                                               file_path=str(local), filename=PurePosixPath(path).name, description=path)
+                path: FileArtifact.put_attempt(derive_path_id(ctx.id, path), file_path=str(local),
+                                               filename=PurePosixPath(path).name, description=path)
                 for path, local in files.items()})
         return cls.put(ctx.id, environment_name=fields["environment_name"], file_artifact=file)
 
