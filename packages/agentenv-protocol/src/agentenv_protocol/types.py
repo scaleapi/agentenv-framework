@@ -16,6 +16,9 @@ PROTOCOL_VERSION = "1.0"
 
 WELL_KNOWN_PATH = "/.well-known/agent-env.json"
 RPC_PATH = "/agentenv"
+#: The variable that hands an env the token its framework-only routes take as their bearer, everything it serves but
+#: its MCP endpoint and its card; agent-env sets it when it deploys the env, and without it those routes are open.
+CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 
 # A card declares its MCP endpoint as an `additionalInterfaces` entry with this transport; a card
 # without one is reached at MCP_PATH by convention.

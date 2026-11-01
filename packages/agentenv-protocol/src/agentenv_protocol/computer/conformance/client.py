@@ -24,14 +24,15 @@ STREAM_READ_S = 300
 
 
 class Driver:
-    def __init__(self, url: str, card: dict, timeout_s: float) -> None:
+    def __init__(self, url: str, card: dict, timeout_s: float, token: str | None = None) -> None:
         self.url = url.rstrip("/")
         self.card = card
         self.timeout_s = timeout_s
+        self.headers = protocol.control_headers(token) if token else None
 
     @classmethod
-    async def connect(cls, url: str, timeout_s: float) -> Driver:
-        return cls(url, await protocol.get_card(url.rstrip("/"), timeout=int(timeout_s)), timeout_s)
+    async def connect(cls, url: str, timeout_s: float, token: str | None = None) -> Driver:
+        return cls(url, await protocol.get_card(url.rstrip("/"), timeout=int(timeout_s)), timeout_s, token)
 
     @property
     def name(self) -> str:
@@ -59,12 +60,13 @@ class Driver:
 
     async def invoke(self, uri: str, method: str, params: dict | None = None) -> Any:
         return await protocol.invoke_extension(self.url, self.card, uri, params or {}, method=method,
-                                               timeout=int(self.timeout_s))
+                                               timeout=int(self.timeout_s), headers=self.headers)
 
     async def rpc(self, method: str, params: dict | None = None, card: dict | None = None) -> dict:
         """``method``'s answer from the data plane of ``card``, the driver's own or a child's it fronts."""
         async with httpx.AsyncClient(timeout=self.timeout_s) as http:
-            response = await http.post(self.url + ((card or self.card).get("url") or "/agentenv"),
+            url = self.url + ((card or self.card).get("url") or "/agentenv")
+            response = await http.post(url, headers=protocol.request_headers(url, self.headers),
                                        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
         return response.json()
 

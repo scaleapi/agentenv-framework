@@ -1,19 +1,22 @@
 """Serve a computer app's class from its file, as its computer's program starts it:
 ``python -m agentenv_protocol.computer.serve_app <file>:<Class>``, run in the app's folder, serves the class's card and
-``computer-app/v1`` on the Unix socket ``.agentenv/server.sock`` there. Before it serves, it keeps a copy of the app's
-data paths as installed, which a reset puts back; once it serves, it adds the app's launcher and launches a boot app
-(``AppRuntime.start``). A server that can't start, or whose start fails once it serves,
-writes why to ``.agentenv/server.failure``, which its computer's driver reports, and exits. Needs the ``app`` extra."""
+``computer-app/v1`` on the Unix socket ``.agentenv/server.sock`` there, which only the computer reaches, so it takes no
+control token (``CONTROL_TOKEN_ENV``): the driver checks it in front of the app. Before it serves, it keeps a copy of
+the app's data paths as installed, which a reset puts back; once it serves, it adds the app's launcher and launches a
+boot app (``AppRuntime.start``). A server that can't start, or whose start fails once it serves, writes why to
+``.agentenv/server.failure``, which its computer's driver reports, and exits. Needs the ``app`` extra."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
 import traceback
 from pathlib import Path
 
 import uvicorn
 
+from ..types import CONTROL_TOKEN_ENV
 from ._load import load_class
 from .app import FAILURE, SOCKET, ComputerAppEnvironment
 
@@ -35,6 +38,7 @@ def _serve(argv: list[str]) -> None:
     if len(argv) != 1 or ":" not in argv[0]:
         raise SystemExit(USAGE)
     file, _, name = argv[0].partition(":")
+    os.environ.pop(CONTROL_TOKEN_ENV, None)
     app = load_class(Path(file), name, ComputerAppEnvironment)()
     runtime = app._computer_app_runtime()
     app._computer_app_keep_initial()

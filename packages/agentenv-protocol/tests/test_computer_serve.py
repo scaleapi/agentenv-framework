@@ -3,6 +3,7 @@ that isn't such a class exits saying why, and an app's server that can't start s
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 
 import pytest
@@ -11,6 +12,7 @@ pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
 pytest.importorskip("uvicorn")
 
+from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
 from agentenv_protocol.computer import ComputerDriverEnvironment, run_install_step, serve_app  # noqa: E402
 from agentenv_protocol.computer.app import BUILD_SETTINGS, FAILURE, SOCKET  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppRuntime  # noqa: E402
@@ -164,10 +166,11 @@ def app_folder(tmp_path, monkeypatch, isolated):
     return tmp_path, ran
 
 
-def test_an_apps_server_serves_on_the_socket_in_its_folder_and_starts_the_app_once_it_serves(app_folder,
-                                                                                             monkeypatch):
+def test_an_apps_server_serves_on_the_socket_in_its_folder_with_no_control_token_and_starts_the_app_once_it_serves(
+        app_folder, monkeypatch):
     folder, ran = app_folder
     started = []
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
 
     async def start(runtime):
         started.append(runtime)
@@ -177,6 +180,7 @@ def test_an_apps_server_serves_on_the_socket_in_its_folder_and_starts_the_app_on
     serve_app.main(["app.py:Notes"])
 
     (server,) = ran
+    assert CONTROL_TOKEN_ENV not in os.environ
     assert server.config.uds == str(SOCKET) and not server.should_exit
     assert not (folder / SOCKET).exists() and not (folder / FAILURE).exists()
     assert len(started) == 1 and isinstance(started[0], AppRuntime)

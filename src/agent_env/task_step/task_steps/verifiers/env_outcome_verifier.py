@@ -11,6 +11,8 @@ import tempfile
 import uuid
 from typing import ClassVar, Optional
 
+from agentenv_protocol import client as protocol_v1
+
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -25,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 class EnvOutcomeVerifierTaskStep(TaskStep):
     """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``, and an
-    ``env_url`` parameter the env's address, which the protocol client takes as it is."""
+    ``env_url`` parameter the env's address, which the protocol client takes as it is: ``verify`` runs under a grant
+    of the env's control token, so its calls reach the env's framework-only routes as written."""
 
     type: ClassVar[str] = "env_outcome_verifier"
     entity_refs = (
@@ -124,7 +127,8 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             keywords = {"env_url": deployed.environment_url} if "env_url" in parameters else {}
             if "run" in parameters:
                 keywords["run"] = await load_run_context(context, self._graded_prompt(context))
-            results = await module.verify(deployed.mcp_url, **keywords)
+            with protocol_v1.authorized({deployed.environment_url: deployed.control_token}):
+                results = await module.verify(deployed.mcp_url, **keywords)
 
             score = aggregate_score(results, self.score_aggregator)
             if "verifications" not in context.metadata:

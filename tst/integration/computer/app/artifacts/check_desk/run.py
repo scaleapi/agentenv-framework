@@ -18,7 +18,9 @@ def run(input):
         time.sleep(0.5)
     with urllib.request.urlopen(f"{input['env']['url']}/.well-known/agent-env.json", timeout=10) as response:
         card = json.load(response)
-    with urllib.request.urlopen(f"{input['env']['url']}/agentenv/ext/computer-ready/status", timeout=30) as response:
+    status = urllib.request.Request(f"{input['env']['url']}/agentenv/ext/computer-ready/status",
+                                    headers=input["env"]["headers"])
+    with urllib.request.urlopen(status, timeout=30) as response:
         ready = json.load(response)
     with urllib.request.urlopen("http://127.0.0.1:8137/", timeout=10) as response:
         clock = json.load(response)

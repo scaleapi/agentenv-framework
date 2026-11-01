@@ -88,7 +88,8 @@ class Probe:
         for check, section in (("P0", self._ready), ("P1", self._card), ("P2", self._frame), ("P5", self._refusals),
                                ("X", self._display), ("X", self._spaces), ("X", self._keyboard_settings),
                                ("X", self._exec), ("X", self._data_get), ("X", self._app_exports),
-                               ("X", self._tool_access), ("X", self._pointer), ("X", self._skill)):
+                               ("X", self._tool_access), ("X", self._pointer), ("X", self._skill),
+                               ("X", self._control)):
             await self._guarded(check, section)
         self._grants()
 
@@ -421,6 +422,24 @@ class Probe:
 
             await self.check("X", f"app {app.get('name')}'s data/get answers its parts through the driver", export,
                              *DATA_PLANE)
+
+    async def _control(self) -> None:
+        if not self.driver.headers:
+            return
+
+        async def refused() -> str | None:
+            for sent, without in (({}, "without"), (protocol.control_headers("not-its-token"), "with a wrong")):
+                try:
+                    await protocol.invoke_extension(self.driver.url, self.driver.card, COMPUTER_READY, method="status",
+                                                    timeout=int(self.driver.timeout_s), headers=sent)
+                except ExtensionCallError as e:
+                    if e.response.status_code != 401:
+                        return f"computer-ready status answered a call {without} control token {e.response.status_code}"
+                    continue
+                return f"computer-ready status answered a call {without} control token"
+            return None
+
+        await self.check("X", "a framework-only route refuses a call without the control token", refused)
 
     async def _tool_access(self) -> None:
         if not (self.driver.declares(DISABLE_TOOL_EXTENSION_URI) and self.driver.declares(ENABLE_TOOL_EXTENSION_URI)):
