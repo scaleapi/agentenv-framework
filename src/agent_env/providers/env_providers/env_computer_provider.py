@@ -8,7 +8,6 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, Optional
 
-from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -18,6 +17,7 @@ from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.utils.boot import (
     app_settings_environment,
     boot,
+    control_environment,
     control_token,
     discard,
     ready,
@@ -96,9 +96,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         values = _values(computer, values)
         policy = NetworkPolicy.from_dict(env.network) if env.network else None
         booted = await boot(
-            sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy,
-            environment=_environment(env, computer, values, params, token), timeout=ttl_seconds,
-            attribution=attribution,
+            sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
+            environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             ready_s=ready_timeout(env.composed_apps(), env.computer.os.type))
         self._container_sandboxes.append(booted.sandbox)
@@ -137,8 +136,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
         try:
             await sandbox_provider.reset_container(sandbox, image_name=record["image"], port=env.driver.port,
-                                                      env=_environment(env, computer, values, params,
-                                                                       deployed.control_token))
+                                                      env={**_environment(env, computer, values, params),
+                                                           **control_environment(deployed.control_token)})
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
         card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), env.computer.os.type),
@@ -164,14 +163,11 @@ def _values(computer: ComputerArtifact, values: dict) -> dict:
     return {**{key: setting.default for key, setting in computer.config.items()}, **values}
 
 
-def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict, params: computer_params.ComputerParams,
-                 token: Optional[str]) -> dict[str, str]:
-    """The computer's boot environment: its settings, its apps', and the control token its driver's framework-only
-    routes take, unless its record has none, as one an older agent-env booted has not."""
+def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
+                 params: computer_params.ComputerParams) -> dict[str, str]:
     return {**settings_environment(computer, values, environment_name=env.environment_name,
                                    driver_settings=params.driver_settings),
-            **app_settings_environment(env.composed_apps(), params.app_settings, env.computer.os.type),
-            **({CONTROL_TOKEN_ENV: token} if token else {})}
+            **app_settings_environment(env.composed_apps(), params.app_settings, env.computer.os.type)}
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:

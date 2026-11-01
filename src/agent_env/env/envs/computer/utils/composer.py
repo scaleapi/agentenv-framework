@@ -27,7 +27,6 @@ from pathlib import Path, PurePosixPath
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol.computer import apps as installed_apps
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 from agentenv_protocol.computer.conformance import run_probe
@@ -187,12 +186,11 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
     ``links`` that boots it, probed at ``full`` with that token within ``_PROBE_TIMEOUT_S`` and torn down; the report,
     the driver's card and the provider's name."""
     token = boot.control_token()
-    environment = {**boot.settings_environment(env.computer, _values(env), environment_name=env.environment_name),
-                   CONTROL_TOKEN_ENV: token}
+    environment = boot.settings_environment(env.computer, _values(env), environment_name=env.environment_name)
     problems = []
     for link in links:
         try:
-            booted = await boot.boot(link, image=image, port=driver.port, environment=environment,
+            booted = await boot.boot(link, image=image, port=driver.port, environment=environment, token=token,
                                      network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
                                      ready_s=boot.ready_timeout(env.composed_apps(), env.computer.os.type))
         except Exception as e:

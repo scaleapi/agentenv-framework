@@ -96,19 +96,25 @@ def control_token() -> str:
     return secrets.token_urlsafe(CONTROL_TOKEN_BYTES)
 
 
-async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str],
+def control_environment(token: Optional[str]) -> dict[str, str]:
+    """What hands a computer its control ``token`` in its boot environment; nothing without one, as for a computer an
+    older agent-env booted."""
+    return {CONTROL_TOKEN_ENV: token} if token else {}
+
+
+async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
                ready_s: float = READY_TIMEOUT_S) -> Booted:
-    """``image`` booted with ``environment`` on ``sandbox_provider``, which the caller chose to run its arch natively,
-    its driver's ``port`` reached on the sandbox, once the driver says the computer is ready, asked with the control
-    token ``environment`` gives it; a boot that fails is torn down."""
+    """``image`` booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the caller chose
+    to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that token, says
+    the computer is ready; a boot that fails is torn down."""
     sandbox = await sandbox_provider.create_container(
-        image_name=image, port=port, env=environment, network_policy=network_policy,
+        image_name=image, port=port, env={**environment, **control_environment(token)}, network_policy=network_policy,
         disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
     try:
         url = sandbox.tunnel_urls[port]
-        return Booted(sandbox, url, await ready(url, ready_s, environment.get(CONTROL_TOKEN_ENV)))
+        return Booted(sandbox, url, await ready(url, ready_s, token))
     except BaseException:
         await discard(sandbox)
         raise

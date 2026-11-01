@@ -261,7 +261,7 @@ def test_the_probe_boots_a_build_at_the_envs_settings_with_a_token_of_its_own_as
     booted = []
 
     async def fake_boot(link, **kwargs):
-        booted.append(kwargs["environment"])
+        booted.append(kwargs)
         return boot.Booted(sandbox=None, url="http://computer", card=CARD)
 
     monkeypatch.setattr(boot, "boot", fake_boot)
@@ -271,9 +271,10 @@ def test_the_probe_boots_a_build_at_the_envs_settings_with_a_token_of_its_own_as
 
     assert asyncio.run(_probe([SimpleNamespace()], env, driver, "img")) == (
         "report", CARD, "SimpleNamespace")
-    assert {k: v for k, v in booted[0].items() if k.startswith("AGENTENV_SETTING_")} == {
+    assert {k: v for k, v in booted[0]["environment"].items() if k.startswith("AGENTENV_SETTING_")} == {
         "AGENTENV_SETTING_RESOLUTION": "1600x900", "AGENTENV_SETTING_TIMEZONE": "Europe/Paris"}
-    probed.assert_awaited_once_with("http://computer", "full", token=booted[0][CONTROL_TOKEN_ENV])
+    assert len(booted[0]["token"]) >= 32
+    probed.assert_awaited_once_with("http://computer", "full", token=booted[0]["token"])
 
 
 def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_and_isnt_deployed(base, driver, docker,
@@ -552,7 +553,7 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
     assert (environment["AGENTENV_SETTING_RESOLUTION"], environment["AGENTENV_SETTING_TIMEZONE"]) == ("1600x900", "Asia/Tokyo")
     assert json.loads(environment["AGENTENV_COMPUTER_SETTINGS"]) == {"default_space": "norm"}
     assert environment["ENVIRONMENT_NAME"] == "desktop" and "AGENTENV_SETTING_THEME" not in environment
-    assert len(deployed.control_token) >= 32 and environment[CONTROL_TOKEN_ENV] == deployed.control_token
+    assert len(deployed.control_token) >= 32 and booted["token"] == deployed.control_token
     assert boots.calls == [(COMPUTER_DISPLAY, "get", None)]
     assert boots.headers == [{"Authorization": f"Bearer {deployed.control_token}"}]
     assert DeployedEnv.from_dict(dataclasses.asdict(deployed)).control_token == deployed.control_token
@@ -673,16 +674,21 @@ async def test_a_computer_that_boots_at_another_size_than_its_display_fails_the_
 
 
 @pytest.mark.asyncio
-async def test_a_boot_that_never_gets_ready_takes_its_sandbox_and_work_folder_down(monkeypatch, tmp_path):
+async def test_a_boot_hands_the_computer_its_token_and_one_never_ready_takes_its_sandbox_and_work_folder_down(
+        monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
     sandbox = local_sandbox.LocalSandbox(exposed_ports=[18765], sandbox_id="local-unready")
     sandbox.terminate = AsyncMock()
     monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=TimeoutError("not ready")))
+    create = AsyncMock(return_value=sandbox)
 
     with pytest.raises(TimeoutError):
-        await boot.boot(SimpleNamespace(create_container=AsyncMock(return_value=sandbox)), image="img", port=18765,
-                        environment={}, network_policy=None, timeout=60, attribution=None)
+        await boot.boot(SimpleNamespace(create_container=create), image="img", port=18765,
+                        environment={"ENVIRONMENT_NAME": "desk"}, token="t0ken", network_policy=None, timeout=60,
+                        attribution=None)
 
+    assert create.await_args.kwargs["env"] == {"ENVIRONMENT_NAME": "desk", CONTROL_TOKEN_ENV: "t0ken"}
+    assert boot.ready.await_args.args[2] == "t0ken"
     sandbox.terminate.assert_awaited_once()
     assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None
 
