@@ -120,7 +120,7 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
                                                  artifact_id=note.id).execute(context)
             context = await RunCodeTaskStep(id="read", version=None, env_id=closed.id,
                                             script_artifact_id=script.id).execute(context)
-            driver = await Driver.connect(deployed.environment_url, 30)
+            driver = await Driver.connect(deployed.environment_url, 30, deployed.control_token)
             egress = await driver.run("python3", "-c", "import urllib.request; urllib.request.urlopen('http://1.1.1.1', timeout=5)")
             await driver.run("sh", "-c", "echo x > Desktop/left.txt")
             context = await SnapshotComputerEnvTaskStep(id="snapshot", version=None, env_id=closed.id,
@@ -128,10 +128,10 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
                                                         file_paths=["Desktop", "Downloads/note.txt"]).execute(context)
             snapshot = {path: file.load() for path, file in _snapshotted(context, closed).items()}
             await ResetEnvTaskStep(id="reset", version=None, env_id=closed.id, fail_task_on_error=True).execute(context)
-            left = await (await Driver.connect(deployed.environment_url, 30)).run("test", "-e", "Desktop/left.txt")
+            left = await (await Driver.connect(deployed.environment_url, 30, deployed.control_token)).run("test", "-e", "Desktop/left.txt")
             context = await LoadArtifactTaskStep(id="restore", version=None, env_id=closed.id,
                                                  artifact_from_step_id="snapshot").execute(context)
-            restored = await (await Driver.connect(deployed.environment_url, 30)).run("cat", "Desktop/left.txt")
+            restored = await (await Driver.connect(deployed.environment_url, 30, deployed.control_token)).run("cat", "Desktop/left.txt")
         finally:
             report = await teardown_run(context)
     sandbox = deployed.sandbox_id
@@ -154,7 +154,7 @@ async def test_an_open_computer_uploads_each_file_under_the_snapshots_grant_and_
         deployed = await Env.get(desktop.id).deploy()
         context = TaskStepContext(deployed_envs=[deployed])
         try:
-            driver = await Driver.connect(deployed.environment_url, 30)
+            driver = await Driver.connect(deployed.environment_url, 30, deployed.control_token)
             await driver.run("sh", "-c", "mkdir -p Documents/reports && printf one > Documents/reports/a.txt "
                                          "&& printf two > Downloads/b.txt")
             context = await SnapshotComputerEnvTaskStep(id="snapshot", version=None, env_id=desktop.id,

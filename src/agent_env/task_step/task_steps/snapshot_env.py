@@ -99,7 +99,8 @@ def _snapshot_upload(card: dict, timeout_seconds: float, sandbox_type: Optional[
     return _SnapshotUpload(store, grant)
 
 
-async def _push_s3_credentials(base_url: str, card: dict, timeout_seconds: float) -> None:
+async def _push_s3_credentials(base_url: str, card: dict, timeout_seconds: float,
+                               headers: Optional[dict[str, str]]) -> None:
     """Best-effort: push the object store's shared AWS creds + bucket to a service
     advertising add_s3_credentials, if the store shares any. Never raises (get_data falls back).
     An @local run's snapshots land in the local stores, so it hands a service no credentials to
@@ -132,6 +133,7 @@ async def _push_s3_credentials(base_url: str, card: dict, timeout_seconds: float
             _S3_CREDENTIALS_EXTENSION_URI,
             params,
             timeout=int(timeout_seconds),
+            headers=headers,
         )
         logger.info("snapshot_env: pushed S3 creds to %s", base_url)
     except Exception:
@@ -383,7 +385,7 @@ class SnapshotEnvTaskStep(TaskStep):
         tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(method, url) as response:
+                async with client.stream(method, url, headers=deployed.control_headers) as response:
                     response.raise_for_status()
                     async for chunk in response.aiter_bytes():
                         tmp.write(chunk)
@@ -411,7 +413,8 @@ class SnapshotEnvTaskStep(TaskStep):
             after_id, has_more = 0, True
             async with httpx.AsyncClient(timeout=timeout) as client:
                 while has_more:
-                    response = await client.request(method, url, params={"after_id": after_id, "limit": CHANGES_PAGE_MAX})
+                    response = await client.request(method, url, params={"after_id": after_id, "limit": CHANGES_PAGE_MAX},
+                                                    headers=deployed.control_headers)
                     response.raise_for_status()
                     page = response.json()
                     for change in page["changes"]:
@@ -496,18 +499,21 @@ class SnapshotEnvTaskStep(TaskStep):
 
         base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=True)
         if base_url is not None:
+            headers = deployed.control_headers if deployed is not None else None
             card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
             if returns_file_tree(card or {}):
                 upload = await asyncio.to_thread(_snapshot_upload, card or {}, timeout_seconds,
                                                  getattr(deployed, "sandbox_type", None), FILE_TREE_LIMITS)
-                return await get_data(base_url, environment_name, timeout_seconds, upload, **(data_get_params or {}))
+                return await get_data(base_url, environment_name, timeout_seconds, upload, headers=headers,
+                                      **(data_get_params or {}))
             upload = await asyncio.to_thread(
                 _snapshot_upload, card or {}, timeout_seconds, getattr(deployed, "sandbox_type", None)
             )
             # Push S3 creds (no-op unless the service advertises the extension), with a grant too: a
             # bundle the grant cannot hold can still be uploaded with them.
-            await _push_s3_credentials(card_base, card or {}, timeout_seconds)
-            resp, upload = await get_data(base_url, environment_name, timeout_seconds, upload, **(data_get_params or {}))
+            await _push_s3_credentials(card_base, card or {}, timeout_seconds, headers)
+            resp, upload = await get_data(base_url, environment_name, timeout_seconds, upload, headers=headers,
+                                          **(data_get_params or {}))
             part = resp.parts[0] if resp.parts else None
             if upload is not None and (path := uploaded_object_path(part)) is not None:
                 return upload.object_url(path)

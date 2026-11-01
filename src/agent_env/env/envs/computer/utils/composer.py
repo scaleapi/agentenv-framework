@@ -27,6 +27,7 @@ from pathlib import Path, PurePosixPath
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol.computer import apps as installed_apps
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 from agentenv_protocol.computer.conformance import run_probe
@@ -182,9 +183,12 @@ def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, r
 
 async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv,
                  image: str) -> tuple[ProbeReport, dict, str]:
-    """``image`` booted at the env's settings, as a deploy boots it, on the first of ``links`` that boots it, probed at
-    ``full`` within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name."""
-    environment = boot.settings_environment(env.computer, _values(env), environment_name=env.environment_name)
+    """``image`` booted at the env's settings with a control token of its own, as a deploy boots it, on the first of
+    ``links`` that boots it, probed at ``full`` with that token within ``_PROBE_TIMEOUT_S`` and torn down; the report,
+    the driver's card and the provider's name."""
+    token = boot.control_token()
+    environment = {**boot.settings_environment(env.computer, _values(env), environment_name=env.environment_name),
+                   CONTROL_TOKEN_ENV: token}
     problems = []
     for link in links:
         try:
@@ -196,7 +200,7 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
             continue
         try:
             async with asyncio.timeout(_PROBE_TIMEOUT_S):
-                return await run_probe(booted.url, "full"), booted.card, type(link).__name__
+                return await run_probe(booted.url, "full", token=token), booted.card, type(link).__name__
         finally:
             await boot.discard(booted.sandbox)
     raise RuntimeError("; ".join(problems))

@@ -43,7 +43,7 @@ def _merged_env(caller_env: dict[str, str] | None = None, metadata: dict | None 
 async def test_nothing_is_shared_by_default(s3, host_credentials, pushed):
     if s3:
         set_object_store(S3ObjectStore(object(), "bucket", region="us-west-2"))
-    await _push_s3_credentials("https://svc", _CARD, 30)
+    await _push_s3_credentials("https://svc", _CARD, 30, None)
     assert not any(k.startswith("AWS_") for k in _merged_env())
     assert pushed == []
 
@@ -51,7 +51,7 @@ async def test_nothing_is_shared_by_default(s3, host_credentials, pushed):
 @pytest.mark.asyncio
 async def test_an_opted_in_s3_store_shares_the_frozen_chain(host_credentials, pushed):
     set_object_store(S3ObjectStore(object(), "bucket", region="us-west-2", share_credentials=True))
-    await _push_s3_credentials("https://svc", _CARD, 30)
+    await _push_s3_credentials("https://svc", _CARD, 30, None)
     assert {k: v for k, v in _merged_env().items() if k.startswith("AWS_")} == {
         "AWS_ACCESS_KEY_ID": "AKIA-HOST",
         "AWS_SECRET_ACCESS_KEY": "host-secret",
@@ -72,7 +72,7 @@ async def test_an_opted_in_s3_store_shares_the_frozen_chain(host_credentials, pu
 async def test_an_local_run_hands_a_service_no_credentials_to_upload_a_snapshot_with(owner, shared, host_credentials, pushed, cli_routing):
     set_object_store(S3ObjectStore(object(), "bucket", region="us-west-2", share_credentials=True))
     with routing.run_scope(owner):
-        await _push_s3_credentials("https://svc", _CARD, 30)
+        await _push_s3_credentials("https://svc", _CARD, 30, None)
     assert [call["bucket"] for call in pushed] == (["bucket"] if shared else [])
 
 

@@ -93,6 +93,8 @@ class DeployedEnv:
     instance_id: Optional[str] = None
     created_at_utc: Optional[str] = None
     expires_at_utc: Optional[str] = None
+    # The token the env's framework-only routes take, from the provider that booted it with it; None when they're open.
+    control_token: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Only older records lack their card: they keep the stored values.
@@ -109,6 +111,11 @@ class DeployedEnv:
     def environment_url(self) -> Optional[str]:
         """The env's address: its card URL without the well-known path; card paths join onto it."""
         return _environment_url(self.environment_card_url) if self.environment_card_url else None
+
+    @property
+    def control_headers(self) -> dict[str, str]:
+        """What a call to the env's framework-only routes sends: its control token, when it has one."""
+        return protocol_v1.control_headers(self.control_token)
 
     def supports(self, uri: str, method: str) -> bool:
         """Whether the stored env card offers `method` on the extension at `uri`; no network."""
@@ -135,7 +142,8 @@ class DeployedEnv:
         card = self.environment_card if environment_name is None else self.get_child_env_card(environment_name)
         if card is None or not self.environment_url or protocol_v1.find_extension_method(card, uri, method) is None:
             raise EnvCapabilityUnsupported(uri, method, self.env_id, self.instance_id, environment_name)
-        return await protocol_v1.invoke_extension(self.environment_url, card, uri, params, timeout, method=method)
+        return await protocol_v1.invoke_extension(self.environment_url, card, uri, params, timeout, method=method,
+                                                  headers=self.control_headers)
 
     @classmethod
     def _fields_from(cls, data: dict) -> dict:
@@ -152,6 +160,7 @@ class DeployedEnv:
             instance_id=data.get("instance_id"),
             created_at_utc=data.get("created_at_utc"),
             expires_at_utc=data.get("expires_at_utc"),
+            control_token=data.get("control_token"),
         )
 
 

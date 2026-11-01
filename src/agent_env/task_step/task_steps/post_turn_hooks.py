@@ -152,7 +152,8 @@ class HookEnv:
                 "source": STEP_SOURCE_POST_TURN_HOOK, "hook_artifact_id": self._hook_artifact_id}
         async with httpx.AsyncClient() as client:
             resp = await client.request(op["method"], f"{self._deployed.environment_url}{op['endpoint']}", json=body,
-                                        headers={AGENT_ENV_ROLE_HEADER: role}, timeout=_TOOL_CALL_TIMEOUT_S)
+                                        headers={AGENT_ENV_ROLE_HEADER: role, **self._deployed.control_headers},
+                                        timeout=_TOOL_CALL_TIMEOUT_S)
         if resp.status_code >= 400:
             raise RuntimeError(f"env '{self.env_id}': /step call_tool {tool!r} failed (HTTP {resp.status_code}): "
                                f"{resp.text[:300]}")

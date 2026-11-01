@@ -227,6 +227,22 @@ async def display_get(self) -> dict: ...
 async def display_set(self, width: int, height: int) -> dict: ...
 ```
 
+### Framework-only routes and the control token
+
+Everything an environment serves but its MCP endpoint and its card is agent-env's own: the data
+plane, every `@extension` route and the tool-access routes. When agent-env deploys an environment
+that takes one, it boots it with a per-deploy token in `AGENTENV_CONTROL_TOKEN`
+(`CONTROL_TOKEN_ENV`), and the SDK then refuses a call to those routes that doesn't carry it as
+`Authorization: Bearer <token>`, answering 401 with the code `unauthorized` before the route runs.
+The MCP endpoint and the card stay open, so an agent reaches the environment's tools as before and
+nothing else. Without the variable, as when the environment runs on its own, every route is open.
+`control_guard()` wraps a route an environment adds itself the same way, as a computer driver does
+its `/svc/<app>/` routes.
+
+On the client side each call takes `headers`, and `client.control_headers(token)` builds them.
+Code that names none, a task's verifier say, runs under `client.authorized({env_url: token})`:
+within it, a call to an address under `env_url` carries that token.
+
 ### Tool access without a gateway
 
 An environment agents reach directly, with no gateway in front, can enforce per-role tool access
@@ -588,7 +604,10 @@ report = await run_probe("http://localhost:18765", "full")   # a ProbeReport
 failed = [c for c in report.checks if c.status == "failed"]
 ```
 
-The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach the driver.
+The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach the driver. A
+driver booted with a control token is probed with it: `--token`, by default
+`$AGENTENV_CONTROL_TOKEN`, or `run_probe(..., token=...)`. Given one, the probe also checks that
+`computer-ready`'s status refuses a call without it and with a wrong one.
 
 | Level | Checks | Needs on the computer |
 |---|---|---|
