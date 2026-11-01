@@ -10,6 +10,7 @@ it on SkyRL 0.4.0 and main."""
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pyarrow.parquet as pq
 import pytest
@@ -261,6 +262,21 @@ def test_the_entrypoint_registers_the_env_once_and_batched_generation_and_no_env
         _generator(_Engine(tokenizer, None), tokenizer, batched=True, chat_template_kwargs={})
     with pytest.raises(ValueError, match="set environment.skyrl_gym.max_env_workers to at least 1"):
         _generator(_Engine(tokenizer, None), tokenizer, env_workers=0)
+
+
+@pytest.mark.parametrize(("fully_async", "built"), [(False, "RayPPOTrainer"), (True, "FullyAsyncRayPPOTrainer")])
+def test_the_experiment_hands_skyrls_trainer_parts_to_the_trainer_its_settings_pick(monkeypatch, fully_async, built):
+    trainers = []
+    monkeypatch.setattr(train.BasePPOExp, "get_trainer",
+                        lambda self, **parts: trainers.append(("RayPPOTrainer", parts)))
+    monkeypatch.setattr(train, "FullyAsyncRayPPOTrainer", lambda **parts: trainers.append(("FullyAsyncRayPPOTrainer", parts)))
+    cfg = SimpleNamespace(trainer=SimpleNamespace(fully_async=SimpleNamespace(enabled=fully_async)))
+    parts = {"tracker": "tracker", "tokenizer": "tokenizer", "train_dataset": "rows", "eval_dataset": "eval rows",
+             "inference_engine_client": "engine", "generator": "generator", "colocate_pg": None}
+
+    object.__new__(train.AgentEnvExp).get_trainer(cfg=cfg, **parts)
+
+    assert trainers == [(built, {"cfg": cfg, **parts})]
 
 
 class _Engine:

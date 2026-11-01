@@ -48,13 +48,11 @@ class AgentEnvExp(BasePPOExp):
                                  inference_engine_client=inference_engine_client, tokenizer=tokenizer,
                                  policy_model_name=resolve_policy_model_name(cfg))
 
-    def get_trainer(self, cfg: SkyRLTrainConfig, *args: Any, **kwargs: Any) -> Any:
+    def get_trainer(self, cfg: SkyRLTrainConfig, **parts: Any) -> Any:
+        """SkyRL's trainer, or its fully async one, built from the parts SkyRL's experiment hands its own."""
         if not cfg.trainer.fully_async.enabled:
-            return super().get_trainer(cfg, *args, **kwargs)
-        tracker, tokenizer, train_dataset, eval_dataset, inference_engine_client, generator, colocate_pg = args
-        return FullyAsyncRayPPOTrainer(cfg=cfg, tracker=tracker, tokenizer=tokenizer, train_dataset=train_dataset,
-                                       eval_dataset=eval_dataset, inference_engine_client=inference_engine_client,
-                                       generator=generator, colocate_pg=colocate_pg)
+            return super().get_trainer(cfg=cfg, **parts)
+        return FullyAsyncRayPPOTrainer(cfg=cfg, **parts)
 
 
 @ray.remote(num_cpus=1)
