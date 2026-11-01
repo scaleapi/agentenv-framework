@@ -200,6 +200,18 @@ def test_a_rollout_the_env_fails_every_attempt_masks_its_group_in_training_but_n
     assert len(deploys) == 3
 
 
+def test_more_rollouts_than_env_threads_play_in_turn_on_a_server_at_its_limit(serve, tmp_path, tool_format, tokenizer):
+    server = serve({"a": PLAYED}, max_concurrent_envs=2)
+    rows = _rows(server.url, tmp_path, tool_format)
+
+    output = _generate(rows, _Engine(tokenizer, adds_a_crate(tool_format)), tokenizer, samples=6, env_workers=2,
+                       reset_timeout=30.0)
+    server.stop()
+
+    assert [sum(reward) for reward in output["rewards"]] == [1.0] * 6
+    assert [metrics["attempts"] for metrics in output["env_metrics"]] == [1] * 6
+
+
 def test_a_rollout_isnt_played_again_once_its_time_is_up(serve, tmp_path, tool_format, tokenizer, monkeypatch):
     server = serve({"a": PLAYED})
     rows = _rows(server.url, tmp_path, tool_format)
@@ -241,12 +253,14 @@ def test_a_server_that_asks_for_a_token_is_played_with_the_one_its_variable_hold
     assert token_vars([str(tmp_path / "all.parquet"), str(tmp_path / "absent.parquet")]) == {"DOCK_TOKEN"}
 
 
-def test_the_entrypoint_registers_the_env_once_and_batched_generation_is_refused(tokenizer):
+def test_the_entrypoint_registers_the_env_once_and_batched_generation_and_no_env_threads_are_refused(tokenizer):
     train.register()
 
     with pytest.raises(ValueError, match="agentenv rows play an episode over several turns, which SkyRL's batched "
                                          "generation doesn't: set generator.batched=false"):
         _generator(_Engine(tokenizer, None), tokenizer, batched=True, chat_template_kwargs={})
+    with pytest.raises(ValueError, match="set environment.skyrl_gym.max_env_workers to at least 1"):
+        _generator(_Engine(tokenizer, None), tokenizer, env_workers=0)
 
 
 class _Engine:
@@ -273,17 +287,17 @@ def _rows(url, folder, tool_format, **options):
                          chat_template_kwargs=UNTHINKING, **options).folder / "all.parquet"
 
 
-def _generator(engine, tokenizer, **settings):
+def _generator(engine, tokenizer, *, env_workers=4, **settings):
     generator_config = config.GeneratorConfig(**{"max_turns": 4, "max_input_length": 8192,
                                                  "chat_template_kwargs": UNTHINKING, **settings})
     return skyrl_generator.AgentEnvGenerator(generator_cfg=generator_config,
-                                             skyrl_gym_cfg=config.SkyRLGymConfig(max_env_workers=4),
+                                             skyrl_gym_cfg=config.SkyRLGymConfig(max_env_workers=env_workers),
                                              inference_engine_client=engine, tokenizer=tokenizer,
                                              policy_model_name="policy")
 
 
 def _generate(rows, engine, tokenizer, *, samples=1, phase="train", step_wise=False, max_turns=4,
-              reset_timeout=None):
+              reset_timeout=None, env_workers=4):
     prompts = dataset.PromptDataset([str(rows)], tokenizer, max_prompt_length=8192, num_workers=1)
     batch = prompts.collate_fn([prompts[index] for index in range(len(prompts.dataframe))])
     if reset_timeout is not None:
@@ -291,6 +305,7 @@ def _generate(rows, engine, tokenizer, *, samples=1, phase="train", step_wise=Fa
                                                                         "reset_timeout": reset_timeout}}}
                  for row in batch]
     generator_input, _ = generator_utils.prepare_generator_input(batch, samples, None, "agentenv", phase, 1)
-    generator = _generator(engine, tokenizer, max_turns=max_turns, step_wise_trajectories=step_wise)
+    generator = _generator(engine, tokenizer, env_workers=env_workers, max_turns=max_turns,
+                           step_wise_trajectories=step_wise)
     return asyncio.run(generator.generate(generator_input))
 

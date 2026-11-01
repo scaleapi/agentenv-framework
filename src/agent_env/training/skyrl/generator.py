@@ -4,6 +4,7 @@ and has no way to leave out one trajectory."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import asdict
@@ -30,7 +31,9 @@ class AgentEnvGenerator(SkyRLGymGenerator):
     once its ``reset_timeout`` has passed since the rollout began. A rollout that fails every attempt, in training, has
     its whole group's loss mask and rewards zeroed, as SkyRL's Harbor generator does with a failed trial, so the group
     is out of the gradient and of its own baseline; in an eval it scores 0. Each rollout's env metrics hold its
-    attempts and whether it ``failed``.
+    attempts and whether it ``failed``. At most ``environment.skyrl_gym.max_env_workers`` rollouts play at once, one
+    per thread SkyRL calls envs from: a rollout waiting for room on the server holds its thread, so more rollouts than
+    threads would starve the ones holding sessions of the threads that end them.
 
     It leans on SkyRL internals, which CI checks on SkyRL 0.4.0 and main: ``agent_loop`` builds a new env per call and
     raises what the env raises, its output's ``env_metrics`` reach ``generate``'s, and ``generate``'s ``loss_masks``,
@@ -42,11 +45,20 @@ class AgentEnvGenerator(SkyRLGymGenerator):
         if self.batched:
             raise ValueError("agentenv rows play an episode over several turns, which SkyRL's batched generation "
                              "doesn't: set generator.batched=false")
+        if self.skyrl_gym_cfg.max_env_workers < 1:
+            raise ValueError("agentenv rows' envs wait on their server, which SkyRL's env threads let them do without "
+                             "stalling generation: set environment.skyrl_gym.max_env_workers to at least 1")
+        self._playing = asyncio.Semaphore(self.skyrl_gym_cfg.max_env_workers)
 
     async def agent_loop(self, prompt: Any, env_class: str, env_extras: dict[str, Any], *args: Any,
                          **kwargs: Any) -> TrajectoryOutput | StepWiseOutput:
         if env_class != AGENT:
             return await super().agent_loop(prompt, env_class, env_extras, *args, **kwargs)
+        async with self._playing:
+            return await self._played(prompt, env_class, env_extras, *args, **kwargs)
+
+    async def _played(self, prompt: Any, env_class: str, env_extras: dict[str, Any], *args: Any,
+                      **kwargs: Any) -> TrajectoryOutput | StepWiseOutput:
         server, episode = env_extras["server"], env_extras["episode"]
         began = time.monotonic()
         for attempt in range(1, server["attempts"] + 1):
