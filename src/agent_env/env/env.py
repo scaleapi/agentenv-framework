@@ -131,7 +131,7 @@ class DeployedEnv:
         reaches."""
         card = self.environment_card or {}
         composed = isinstance(card.get("children_environments"), list)
-        own = not composed or (card.get("capabilities") or {}).get("operations")
+        own = not composed or protocol_v1.operations(card)
         if own and card.get("name") == environment_name:
             return card
         return protocol_v1.find_child(card, environment_name) if composed else None

@@ -859,9 +859,9 @@ def _card_environments(deployed) -> list[str]:
         names = [card.get("name")]
     else:
         names = [child.get("name") for child in children if deployed.get_child_env_card(child.get("name")) is child
-                 and ((operations := (child.get("capabilities") or {}).get("operations")) is None
+                 and ((operations := protocol_v1.operations(child)) is None
                       or METHOD_GET in operations)]
-        if METHOD_GET in ((card.get("capabilities") or {}).get("operations") or []):
+        if METHOD_GET in (protocol_v1.operations(card) or []):
             names.insert(0, card.get("name"))
     if not all(names):
         raise RuntimeError(f"Deployed env '{deployed.env_id}' recorded a card naming no environment to snapshot")

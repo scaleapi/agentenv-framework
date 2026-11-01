@@ -7,6 +7,7 @@ from typing import ClassVar, Optional
 
 import httpx
 from agentenv_protocol import METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -49,7 +50,6 @@ class VerifyCoreEnvironmentProtocolStep(TaskStep):
         return cls(**cls._base_from_dict(data), env_id=data["env_id"])
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        from agentenv_protocol import client as protocol_v1
         from agent_env.env.env import Env
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
@@ -87,7 +87,7 @@ class VerifyCoreEnvironmentProtocolStep(TaskStep):
         backing = children[0] if len(children) == 1 else (card if not children else None)
         if backing is None:
             return None
-        advertised = (backing.get("capabilities") or {}).get("operations")
+        advertised = protocol_v1.operations(backing)
         return True if advertised is None else method in advertised
 
     async def _probe_operation(self, environment_url: str, method: str, params: dict) -> Optional[bool]:

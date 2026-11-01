@@ -413,7 +413,7 @@ class Probe:
 
     async def _app_exports(self) -> None:
         for app in self.driver.card.get("children_environments") or []:
-            if "data/get" not in ((app.get("capabilities") or {}).get("operations") or []):
+            if "data/get" not in (protocol.operations(app) or []):
                 continue
 
             async def export(app: dict = app) -> str | None:

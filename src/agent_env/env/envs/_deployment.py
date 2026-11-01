@@ -112,7 +112,7 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, environment_artifac
     if not env._deployed.environment_card:
         raise RuntimeError(f"{deployed_by}, whose record carries no env card, so '{env.environment_name}' has no data plane to load into")
     base_url = await legacy_protocol.v1_base_url(env._deployed, env._gateway_url, env.environment_name, mcp=True)
-    operations = ((env._deployed.get_child_env_card(env.environment_name) or {}).get("capabilities") or {}).get("operations")
+    operations = protocol_v1.operations(env._deployed.get_child_env_card(env.environment_name) or {})
     if base_url is None:
         raise RuntimeError(f"{deployed_by}, whose card offers '{env.environment_name}' no data plane to load into")
     if operations is not None and (missing := [op for op in LOAD_OPERATIONS if op not in operations]):

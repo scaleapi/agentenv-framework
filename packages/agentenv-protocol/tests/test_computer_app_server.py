@@ -297,6 +297,7 @@ async def test_the_driver_lists_its_apps_as_children_forwards_each_ones_requests
                 mail = client.find_child(card, "mail")
                 forwarded = (await http.post(mail["url"], json=get)).json()["result"]["parts"]
                 unknown = await http.post("/svc/notes/agentenv", json=get)
+                silent = await http.post("/svc/music/agentenv", json=get)
                 own = (await http.post("/agentenv", json={**get, "params": {"paths": ["Documents", "Mail"]}})).json()
 
     assert [(child["name"], child["url"]) for child in card["children_environments"]] == [
@@ -305,7 +306,8 @@ async def test_the_driver_lists_its_apps_as_children_forwards_each_ones_requests
     assert client.find_extension_method(mail, COMPUTER_APP, "ready")["endpoint"].startswith("/svc/mail/")
     assert [(part["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"], base64.b64decode(part["file"]["bytes"]))
             for part in forwarded] == [("Mail/inbox.txt", b"Mail/inbox.txt")]
-    assert unknown.status_code == 404
+    assert (unknown.status_code, unknown.json()["error"]["code"]) == (404, "target_unavailable")
+    assert (silent.status_code, silent.json()["error"]["code"]) == (502, "delivery_failed")
     assert [part["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for part in own["result"]["parts"]] == [
         "Documents/note.txt"]
 

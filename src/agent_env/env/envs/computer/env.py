@@ -9,6 +9,7 @@ import posixpath
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import METHOD_ADD, RPC_PATH
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
 from agent_env.attribution import Attribution
@@ -279,7 +280,7 @@ class ComputerEnv(Env):
         if card is None:
             raise ValueError(f"computer env '{self.id}' has no environment named '{environment_name}': it has "
                              f"{self._environment_names()}")
-        if METHOD_ADD not in ((card.get("capabilities") or {}).get("operations") or []):
+        if METHOD_ADD not in (protocol_v1.operations(card) or []):
             raise ValueError(f"'{environment_name}' in computer env '{self.id}' serves no data/add, so nothing loads "
                              "into it")
         return self._deployed.environment_url + card.get("url", RPC_PATH).removesuffix(RPC_PATH)
