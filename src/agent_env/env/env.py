@@ -117,6 +117,11 @@ class DeployedEnv:
         """What a call to the env's framework-only routes sends: its control token, when it has one."""
         return protocol_v1.control_headers(self.control_token)
 
+    def control_headers_for(self, url: str) -> dict[str, str]:
+        """What a call to ``url`` sends of the env's control token: ``control_headers`` when ``url`` is the env's
+        address or under it, as a step's grant gives them, and none anywhere else, an override's address say."""
+        return protocol_v1.granted_headers(url, {self.environment_url: self.control_headers})
+
     def supports(self, uri: str, method: str) -> bool:
         """Whether the stored env card offers `method` on the extension at `uri`; no network."""
         return protocol_v1.find_extension_method(self.environment_card or {}, uri, method) is not None

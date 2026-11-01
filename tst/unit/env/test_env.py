@@ -114,16 +114,20 @@ async def test_a_record_without_a_card_offers_nothing(sent):
 
 
 @pytest.mark.asyncio
-async def test_a_record_with_a_control_token_sends_it_on_each_extension_call_and_keeps_it_through_storage(
+async def test_a_record_with_a_control_token_sends_it_on_each_extension_call_only_to_its_address_and_keeps_it(
         composed, sent):
     deployed = _record(composed)
     deployed.control_token = "t0ken"
+    env = deployed.environment_url
 
     await deployed.invoke(EXT_STEP_URI, "step", {"action": "list_tools"})
 
     assert [request.headers.get("authorization") for request in sent] == ["Bearer t0ken"]
+    assert [deployed.control_headers_for(url) for url in (env, f"{env}/svc/clock/agentenv", f"{env}0/x",
+                                                          "https://override/trajectory")] == [
+        {"Authorization": "Bearer t0ken"}] * 2 + [{}] * 2
     assert DeployedEnv.from_dict(dataclasses.asdict(deployed)).control_token == "t0ken"
-    assert _record(composed).control_headers == {}
+    assert _record(composed).control_headers == {} and _record(composed).control_headers_for(env) == {}
 
 
 def test_child_env_cards_come_from_the_card_by_name(composed):

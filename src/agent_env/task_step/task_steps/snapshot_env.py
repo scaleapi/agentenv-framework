@@ -379,7 +379,7 @@ class SnapshotEnvTaskStep(TaskStep):
     async def _capture_env_trajectory(self, entry: dict, context: TaskStepContext, env_id: str, deployed) -> None:
         """Stream the trajectory to a temp file, upload it verbatim (no envelope), and fill ``entry``."""
         method, url = _trajectory_route(deployed, self.gateway_url)
-        headers = None if self.gateway_url else deployed.control_headers
+        headers = deployed.control_headers_for(url) if deployed is not None else None
         store = get_config().get_object_store()
         event_count = 0
         timeout = httpx.Timeout(_TRAJECTORY_CAPTURE_BUDGET_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)
@@ -407,7 +407,7 @@ class SnapshotEnvTaskStep(TaskStep):
     async def _capture_env_changes(self, entry: dict, context: TaskStepContext, env_id: str, deployed) -> None:
         """Page the gateway's changes into a JSONL upload; fill ``entry`` with its url and attribution counts."""
         method, url = _changes_route(deployed, self.gateway_url)
-        headers = None if self.gateway_url else deployed.control_headers
+        headers = deployed.control_headers_for(url) if deployed is not None else None
         counts = {"change_count": 0, "attributed_count": 0, "ambiguous_count": 0}
         timeout = httpx.Timeout(_CHANGES_CAPTURE_BUDGET_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)
         tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
@@ -501,7 +501,7 @@ class SnapshotEnvTaskStep(TaskStep):
 
         base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=True)
         if base_url is not None:
-            headers = deployed.control_headers if deployed is not None else None
+            headers = deployed.control_headers_for(base_url) if deployed is not None else None
             card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
             if returns_file_tree(card or {}):
                 upload = await asyncio.to_thread(_snapshot_upload, card or {}, timeout_seconds,

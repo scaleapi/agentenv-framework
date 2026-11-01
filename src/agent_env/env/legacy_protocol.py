@@ -105,7 +105,8 @@ async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[s
     base_url = await v1_base_url(deployed, gateway_url, environment_name, mcp=True)
     if base_url is None:
         return await export_state(gateway_url, environment_name)
-    response = await protocol_v1.get_data(base_url, headers=deployed.control_headers if deployed is not None else None)
+    response = await protocol_v1.get_data(base_url,
+                                          headers=deployed.control_headers_for(base_url) if deployed is not None else None)
     if not response.parts:
         return {}
     if isinstance(response.parts[0], DataPart):

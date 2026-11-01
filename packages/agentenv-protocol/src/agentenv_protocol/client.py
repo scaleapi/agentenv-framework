@@ -66,7 +66,14 @@ def request_headers(url: str, headers: dict[str, str] | None = None) -> dict[str
     (``authorized``), if any."""
     if headers is not None:
         return headers
-    return next((sent for base, sent in _GRANTS.get().items() if url == base or url.startswith(f"{base}/")), {})
+    return granted_headers(url, _GRANTS.get())
+
+
+def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[str, str]:
+    """What ``grants``, env addresses and the headers that carry their control tokens, give a call to ``url``: those of
+    the address it is or is under, and none anywhere else."""
+    return next((sent for base, sent in grants.items()
+                 if base and (url == base.rstrip("/") or url.startswith(f"{base.rstrip('/')}/"))), {})
 
 
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool,
