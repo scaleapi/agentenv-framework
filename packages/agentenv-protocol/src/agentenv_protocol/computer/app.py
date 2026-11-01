@@ -1,24 +1,33 @@
 """ComputerAppEnvironment: software on a computer, an AgentEnvEnvironment whose class also declares what it is for a
 computer: the platforms it supports and the permissions it needs (``@computer_app``); for each OS, how it installs and
 launches there and what differs there (``@linux``, or ``@install`` for any OS type); its install steps and ready checks,
-each on every OS or on those it names; its skill, its typed ``Settings`` and its ``BuildSettings``. A ``computer_app``
-env's put reads that declaration from the class; its data hooks are the base class's. Its name is its env's
-``environment_name``. On the computer the class runs as the app's own server (``serve_app``), which launches the app,
-adds its launcher and says whether it's ready (``computer-app/v1``), as declared for the OS it runs on."""
+each on every OS or on those it names; its skill, its typed ``Settings`` and its ``BuildSettings``; and its data, the
+``paths`` it keeps it in under the session user's home or its own ``@add_data``, ``@get_data`` and ``@reset_data``
+hooks. A ``computer_app`` env's put reads that declaration from the class. Its name is its env's ``environment_name``.
+On the computer the class runs as the app's own server (``serve_app``), which launches the app, adds its launcher, says
+whether it's ready (``computer-app/v1``), serves its skill, and serves its data plane, stopping the app around a load
+and a reset, as declared for the OS it runs on."""
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Callable, ClassVar, Literal, Optional, Union
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
+from pydantic import (AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, create_model,
+                      field_validator, model_validator)
 
-from ..agent_env_environment import _EXT_ATTR, _OP_ATTR, AgentEnvEnvironment, extension
-from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI
+from ..agent_env_environment import (_EXT_ATTR, _OP_ATTR, OP_ADD_DATA, OP_GET_DATA, OP_RESET_DATA, AgentEnvEnvironment,
+                                     add_data, agent_skill, extension, get_data, reset_data)
+from ..transfers import RelativePath, WriteNamespaceGrant
+from ..types import (METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI, EnvironmentExtension, IntakeDeclaration,
+                     IntakeFormat, intake_extension)
+from . import app_data
 from .app_runtime import AppRuntime
 from .errors import InvalidArgument
 from .platform import detect
@@ -27,7 +36,9 @@ from .platform import detect
 APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
 _INSTALL_STEP_ATTR = "_aee_install_step"
 _READY_CHECK_ATTR = "_aee_ready_check"
-_DATA_METHODS = {"reset_data": METHOD_RESET, "add_data": METHOD_ADD, "get_data": METHOD_GET}
+_DATA_METHODS = {OP_RESET_DATA: METHOD_RESET, OP_ADD_DATA: METHOD_ADD, OP_GET_DATA: METHOD_GET}
+_PATHS = TypeAdapter(list[RelativePath])
+logger = logging.getLogger(__name__)
 #: What a launch's window can be matched by, as the session lists each window.
 WINDOW_KEYS = frozenset({"class", "instance", "title"})
 #: The framework extension an app's own server serves: its launch as params, and its ``launch`` and ``ready`` methods.
@@ -207,13 +218,15 @@ class AppReadyCheck(BaseModel):
 
 class AppOs(BaseModel):
     """What an app declares for one OS type: ``install``, how that OS installs it, as the OS type's install model gives
-    it; its ``launch`` there; and its ``skill``, ``settings`` and ``build_settings`` there when they differ from the
-    class's, the schemas with the class's fields added."""
+    it; its ``launch`` there; the ``paths`` it keeps its data in there, relative to the session user's home; and its
+    ``skill``, ``settings`` and ``build_settings`` there when they differ from the class's, the schemas with the class's
+    fields added."""
 
     model_config = ConfigDict(extra="forbid")
 
     install: dict[str, Any]
     launch: Optional[Launch] = None
+    paths: Optional[list[str]] = None
     skill: Optional[AppSkill] = None
     settings: Optional[dict[str, Any]] = None
     build_settings: Optional[dict[str, Any]] = None
@@ -258,6 +271,7 @@ class _OsDeclared:
 
     install: BaseModel
     launch: Optional[Launch]
+    paths: tuple[str, ...]
     skill: Optional[str]
     settings: Optional[type[BaseModel]]
     build_settings: Optional[type[BaseModel]]
@@ -274,17 +288,23 @@ def computer_app(*, supports: Optional[list] = None, permissions: Optional[list[
     return deco
 
 
-def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, skill: Optional[str] = None,
-            settings: Optional[type[BaseModel]] = None,
+def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, paths: Optional[list[str]] = None,
+            skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
             build_settings: Optional[type[BaseModel]] = None) -> Callable:
     """Declare how a computer of ``os_type`` installs the app, ``spec`` being that OS type's install model, and what is
-    the app's own there: its ``launch``; its ``skill``, a file of its folder, instead of the class's; and ``settings``
-    and ``build_settings``, models whose fields add to the class's ``Settings`` and ``BuildSettings`` there. ``@linux``
-    is this for Linux; an OS type a plugin adds is declared with it."""
+    the app's own there: its ``launch``; the ``paths`` it keeps its data in, relative to the session user's home, which
+    serve its data plane when it has no data hooks; its ``skill``, a file of its folder, instead of the class's; and
+    ``settings`` and ``build_settings``, models whose fields add to the class's ``Settings`` and ``BuildSettings`` there.
+    ``@linux`` is this for Linux; an OS type a plugin adds is declared with it."""
+    try:
+        owned = tuple(_PATHS.validate_python(list(paths or [])))
+    except ValidationError:
+        raise ValueError(f"paths are normalized paths relative to the session user's home, not {paths!r}") from None
+
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, ComputerAppEnvironment)):
             raise TypeError("@install decorates a ComputerAppEnvironment subclass")
-        cls._installs = {**cls._installs, os_type: _OsDeclared(spec, launch, skill, settings, build_settings)}
+        cls._installs = {**cls._installs, os_type: _OsDeclared(spec, launch, owned, skill, settings, build_settings)}
         return cls
     return deco
 
@@ -292,12 +312,13 @@ def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, s
 def linux(*, files: str = ".", packages: Optional[Packages] = None, python: Optional[str] = None,
           sources: Optional[list[AptSource]] = None, downloads: Optional[list[Download]] = None,
           run: Optional[list[RunScript]] = None, services: Optional[list[Service]] = None,
-          ports: Optional[list[int]] = None, launch: Optional[Launch] = None, skill: Optional[str] = None,
-          settings: Optional[type[BaseModel]] = None, build_settings: Optional[type[BaseModel]] = None) -> Callable:
+          ports: Optional[list[int]] = None, launch: Optional[Launch] = None, paths: Optional[list[str]] = None,
+          skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
+          build_settings: Optional[type[BaseModel]] = None) -> Callable:
     """``@install`` for Linux: how a Linux computer installs the app, ``Linux``'s fields, and what is its own there."""
     return install("linux", Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads,
                                   run=run, services=services or [], ports=ports),
-                   launch=launch, skill=skill, settings=settings, build_settings=build_settings)
+                   launch=launch, paths=paths, skill=skill, settings=settings, build_settings=build_settings)
 
 
 def install_step(scope: Literal["system", "session"] = "system", *,
@@ -328,15 +349,39 @@ def _named(os_types: Union[str, list[str], None]) -> Optional[list[str]]:
 class ComputerAppEnvironment(AgentEnvEnvironment):
     """Subclass it, declare it with ``@computer_app`` and an OS decorator for each OS (``@linux``), and set ``skill`` as
     a class attribute; a deploy's settings arrive as ``self.settings``, those its env fixes at build as
-    ``self.build_settings``, and its launch as ``self.launch``, each as declared for the OS it runs on."""
+    ``self.build_settings``, and its launch and paths as ``self.launch`` and ``self.paths``, each as declared for the OS
+    it runs on.
+
+    Its data plane is its ``@add_data``, ``@get_data`` and ``@reset_data`` hooks, or, with none, defaults on its
+    ``paths`` (``app_data``). The base class serves them around its contract: a load and a reset stop the app first and
+    relaunch it after, a load that fails is followed by a reset, and each call runs within ``data_timeout_s``."""
 
     supports: ClassVar[list] = []
     permissions: ClassVar[list[str]] = []
     _installs: ClassVar[dict[str, _OsDeclared]] = {}
+    #: Its data hooks' method names, by the operation each serves.
+    _data_hooks: ClassVar[dict[str, str]] = {}
     _computer_app: Optional[AppRuntime] = None
     launch: Optional[Launch] = None
+    paths: list[str] = []
     #: A file of the app's folder holding its skill for agents, when no ``@agent_skill`` method writes it.
     skill: ClassVar[Optional[str]] = None
+    #: How long one of its data calls may take, a hook or its paths' default, before it fails.
+    data_timeout_s: ClassVar[float] = 300.0
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Take the class's data hooks over, for the base class's handlers to serve around its contract; and serve its
+        skill file unless it writes its skill itself."""
+        super().__init_subclass__(**kwargs)
+        hooks = dict(cls._data_hooks)
+        for name, member in vars(cls).items():
+            if (op := getattr(member, _OP_ATTR, None)) in _DATA_METHODS:
+                hooks[op] = name
+                delattr(member, _OP_ATTR)
+        cls._data_hooks = hooks
+        if any(getattr(getattr(member, _EXT_ATTR, None), "uri", None) == SKILL_EXTENSION_URI
+               for member in vars(cls).values()):
+            cls._computer_app_skill = None
 
     class Settings(BaseModel):
         """The app's settings: an app declares its own; a ``SecretStr`` field is a secret."""
@@ -350,7 +395,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         values = json.loads(os.environ.get(APP_SETTINGS_ENV) or "{}").get(os.environ.get("ENVIRONMENT_NAME"), {})
         self.settings = cls.settings_on(on).model_validate(values)
         self.build_settings = _built_settings(cls, on)
-        self.launch = declared.launch if (declared := cls._installs.get(on)) is not None else None
+        declared = cls._installs.get(on)
+        self.launch = declared.launch if declared is not None else None
+        self.paths = list(declared.paths) if declared is not None else []
         ready = self.launch.ready if self.launch is not None else None
         self._computer_app = AppRuntime(
             self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(cls)
@@ -388,8 +435,100 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     def extension_params(self, uri: str) -> dict:
         if uri == COMPUTER_APP:
-            return {"launch": self.launch.model_dump(mode="json", exclude_none=True) if self.launch else None}
+            return {"launch": self.launch.model_dump(mode="json", exclude_none=True) if self.launch else None,
+                    "paths": self.paths}
         return super().extension_params(uri)
+
+    def served_operations(self, operations: list[str]) -> list[str]:
+        """Its hooks' operations, or with none, all three when it has paths."""
+        served = ({_DATA_METHODS[op] for op in self._data_hooks} if self._data_hooks
+                  else set(_DATA_METHODS.values()) if self.paths else set())
+        return [op for op in operations if op in served]
+
+    def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
+        """Without its skill file on this OS, no skill, unless it writes one itself."""
+        own_skill = getattr(type(self), "_computer_app_skill", None) is not None
+        if own_skill and self._computer_app_skill_file() is None:
+            extensions = [extension for extension in extensions if extension.uri != SKILL_EXTENSION_URI]
+        return super().served_extensions(extensions)
+
+    def declared_extensions(self) -> list[EnvironmentExtension]:
+        """With its paths serving its data, a file tree: ``data/get`` returns a part per file."""
+        declared = super().declared_extensions()
+        if self.paths and not self._data_hooks:
+            tree = IntakeDeclaration(get=[IntakeFormat(part="file", format="file-tree")],
+                                     add=[IntakeFormat(part="file", format="file-tree", load="additive")])
+            declared.append(intake_extension(tree, f"data/add writes files under the app's paths, "
+                                                   f"{', '.join(self.paths)}; data/get returns them; data/reset puts "
+                                                   "them back as installed."))
+        return declared
+
+    @add_data
+    async def _computer_app_add_data(self, parts: list) -> None:
+        await self._computer_app_data(OP_ADD_DATA, parts)
+
+    @get_data
+    async def _computer_app_get_data(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
+        return await self._computer_app_data(OP_GET_DATA, write_namespace)
+
+    @reset_data
+    async def _computer_app_reset_data(self) -> None:
+        await self._computer_app_data(OP_RESET_DATA)
+
+    @agent_skill
+    def _computer_app_skill(self) -> tuple[str, str]:
+        return _skill_parts(Path(self._computer_app_skill_file()).read_text(), os.environ.get("ENVIRONMENT_NAME", ""))
+
+    async def _computer_app_data(self, op: str, *args: Any) -> Any:
+        """``op``, by its hook or its paths' default: a load and a reset stop the app first and relaunch it after, and a
+        load that fails is followed by a reset."""
+        call = self._computer_app_data_call(op)
+        if op == OP_GET_DATA:
+            return await self._computer_app_within(op, call(*args))
+        runtime = self._computer_app_runtime()
+        running = await runtime.stop_app()
+        try:
+            try:
+                return await self._computer_app_within(op, call(*args))
+            except Exception:
+                if op == OP_ADD_DATA and (reset := self._computer_app_data_call(OP_RESET_DATA)) is not None:
+                    try:
+                        await self._computer_app_within(OP_RESET_DATA, reset())
+                    except Exception as e:
+                        logger.warning(f"the reset after a failed data/add failed too: {type(e).__name__}: {e}")
+                raise
+        finally:
+            if running:
+                await runtime.launch_app()
+
+    def _computer_app_data_call(self, op: str) -> Optional[Callable]:
+        """What serves ``op``: the class's hook, or its paths' default; None when nothing does."""
+        if (name := self._data_hooks.get(op)) is not None:
+            hook = getattr(self, name)
+            if op == OP_GET_DATA and "write_namespace" not in inspect.signature(hook).parameters:
+                return lambda write_namespace=None: hook()
+            return hook
+        if self._data_hooks or not self.paths:
+            return None
+        return {OP_ADD_DATA: lambda parts: app_data.add(parts, self.paths),
+                OP_GET_DATA: lambda write_namespace: app_data.get(self.paths, write_namespace),
+                OP_RESET_DATA: lambda: app_data.reset(self.paths)}[op]
+
+    async def _computer_app_within(self, op: str, result: Any) -> Any:
+        try:
+            return await asyncio.wait_for(_awaited(result), self.data_timeout_s)
+        except TimeoutError:
+            raise TimeoutError(f"{op} ran past the app's data_timeout_s, {self.data_timeout_s:g} s") from None
+
+    def _computer_app_keep_initial(self) -> None:
+        """Keep the app's paths as installed, before anything changes them, when they serve its data."""
+        if self.paths and not self._data_hooks:
+            app_data.keep_initial(self.paths)
+
+    def _computer_app_skill_file(self) -> Optional[str]:
+        """The file of the app's folder holding its skill on this OS, or the class's."""
+        declared = type(self)._installs.get(detect().os)
+        return declared.skill if declared is not None and declared.skill is not None else type(self).skill
 
     @classmethod
     def declaration(cls) -> AppDeclaration:
@@ -404,7 +543,8 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
                                  "it in Settings")
         methods = _methods(cls)
         skill_methods = [fn.__name__ for fn in methods
-                         if getattr(getattr(fn, _EXT_ATTR, None), "uri", None) == SKILL_EXTENSION_URI]
+                         if getattr(getattr(fn, _EXT_ATTR, None), "uri", None) == SKILL_EXTENSION_URI
+                         and not fn.__name__.startswith("_computer_app_")]
         if cls.skill is not None and skill_methods:
             raise ValueError(f"{cls.__name__} declares its skill twice: skill = {cls.skill!r} and @agent_skill "
                              f"{skill_methods[0]}")
@@ -425,6 +565,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             supports=cls.supports, permissions=cls.permissions,
             os={os_type: AppOs(
                 install=declared.install.model_dump(mode="json", exclude_none=True), launch=declared.launch,
+                paths=list(declared.paths) or None,
                 skill=AppSkill(file=declared.skill) if declared.skill is not None else None,
                 settings=cls.settings_on(os_type).model_json_schema() if declared.settings is not None else None,
                 build_settings=(cls.build_settings_on(os_type).model_json_schema()
@@ -433,9 +574,25 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             settings=cls.Settings.model_json_schema(), build_settings=build if build.get("properties") else None,
             skill=AppSkill(file=cls.skill) if cls.skill is not None else
                   AppSkill(method=skill_methods[0]) if skill_methods else None,
-            data=sorted({_DATA_METHODS[op] for fn in methods if (op := getattr(fn, _OP_ATTR, None)) in _DATA_METHODS}),
+            data=sorted(_DATA_METHODS[op] for op in cls._data_hooks),
             install_steps=steps, ready_checks=checks,
         )
+
+
+async def _awaited(result: Any) -> Any:
+    return await result if inspect.isawaitable(result) else result
+
+
+def _skill_parts(text: str, name: str) -> tuple[str, str]:
+    """A skill file's description and body: from its frontmatter's ``description`` when it has one."""
+    if text.startswith("---\n") and (end := text.find("\n---", 4)) != -1:
+        front, body = text[4:end], text[end + 4:].lstrip("\n")
+        description = next((line.partition(":")[2].strip().strip("'\"") for line in front.splitlines()
+                            if line.startswith("description:")), "")
+        if description:
+            return description, body
+        text = body
+    return f"How to use {name} on this computer.", text
 
 
 def _secret_at(schema: dict, path: str = "") -> Optional[str]:

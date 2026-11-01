@@ -1,7 +1,8 @@
 """Serve a computer app's class from its file, as its computer's program starts it:
 ``python -m agentenv_protocol.computer.serve_app <file>:<Class>``, run in the app's folder, serves the class's card and
-``computer-app/v1`` on the Unix socket ``.agentenv/server.sock`` there. Once it serves, the app's server adds the app's
-launcher and launches a boot app (``AppRuntime.start``). A server that can't start, or whose start fails once it serves,
+``computer-app/v1`` on the Unix socket ``.agentenv/server.sock`` there. Before it serves, it keeps a copy of the app's
+data paths as installed, which a reset puts back; once it serves, it adds the app's launcher and launches a boot app
+(``AppRuntime.start``). A server that can't start, or whose start fails once it serves,
 writes why to ``.agentenv/server.failure``, which its computer's driver reports, and exits. Needs the ``app`` extra."""
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ def _serve(argv: list[str]) -> None:
     file, _, name = argv[0].partition(":")
     app = load_class(Path(file), name, ComputerAppEnvironment)()
     runtime = app._computer_app_runtime()
+    app._computer_app_keep_initial()
     asgi = app.create_app().streamable_http_app()
     server = uvicorn.Server(uvicorn.Config(asgi, uds=str(SOCKET), log_level="warning"))
     serving, failed = asgi.router.lifespan_context, []

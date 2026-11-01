@@ -47,7 +47,7 @@ class DataPlane:
             if path is None:
                 raise ValueError(f"data/add on a computer takes file parts naming their path under "
                                  f"{DATA_OBJECTS_EXTENSION_URI}, got a {part.kind} part")
-            files[path] = await _fetch(part)
+            files[path] = await part_bytes(part)
         await self._computer.call("write_files", files)
 
     @get_data
@@ -57,23 +57,29 @@ class DataPlane:
             named = _PATHS.validate_python(paths) if paths is not None else list(DEFAULT_DATA_PATHS)
         except ValidationError:
             raise ValueError(f"data/get on a computer takes paths relative to the home, not {paths!r}") from None
-        files = _data_files(Path.home(), named)
-        if write_namespace is not None:
-            uploader = NamespaceUploader(write_namespace)
-            parts = []
-            for relative, source in files:
-                await uploader.upload(relative, source)
-                parts.append(uploaded_file_part(relative, name=source.name, mime_type=_mime(source)))
-            return parts
-        return [
-            FilePart(file=FileWithBytes(bytes=base64.b64encode(source.read_bytes()).decode("ascii"),
-                                        name=source.name, mimeType=_mime(source)),
-                     metadata={DATA_OBJECTS_EXTENSION_URI: {"path": relative}})
-            for relative, source in files
-        ]
+        return await file_parts(Path.home(), named, write_namespace)
 
 
-async def _fetch(part: FilePart) -> bytes:
+async def file_parts(home: Path, paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
+    """A part for each file under ``paths`` of ``home``, naming its path relative to ``home``: uploaded under
+    ``write_namespace`` when there is one, else inline."""
+    files = _data_files(home, paths)
+    if write_namespace is not None:
+        uploader = NamespaceUploader(write_namespace)
+        parts = []
+        for relative, source in files:
+            await uploader.upload(relative, source)
+            parts.append(uploaded_file_part(relative, name=source.name, mime_type=_mime(source)))
+        return parts
+    return [
+        FilePart(file=FileWithBytes(bytes=base64.b64encode(source.read_bytes()).decode("ascii"),
+                                    name=source.name, mimeType=_mime(source)),
+                 metadata={DATA_OBJECTS_EXTENSION_URI: {"path": relative}})
+        for relative, source in files
+    ]
+
+
+async def part_bytes(part: FilePart) -> bytes:
     """A part's bytes: inline, from a read grant under the marker, or from an https URL."""
     marker = part.metadata[DATA_OBJECTS_EXTENSION_URI]
     if "read" in marker:
