@@ -32,7 +32,7 @@ MODEL_ENDPOINT_MISSING = preflight.model_endpoint_missing  # the probe, which th
 DEPLOY = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "theirs"}
 ASK = {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "What is 6 * 7?", "depends_on": ["agent"]}
 CHECK = {"id": "check", "type": "harness_test_check", "verifier_id": "answer", "depends_on": ["ask"]}
-JUDGE = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "ask",
+JUDGE = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "ask", "judge_a2a_agent_id": "theirs",
          "agent_name": DeployAgentTaskStep.DEFAULT_AGENT_NAME, "criteria": [{"id": "c1", "description": "says 42"}],
          "depends_on": ["ask"]}
 asked: list[dict] = []
