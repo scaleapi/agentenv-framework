@@ -1,7 +1,7 @@
 """``AgentEnv`` on the OpenEnv server ``build_app`` makes, served on loopback over the Episode API's fake steps and
 used as TRL's trainers use it: the dataset and the environment classes, rollouts reset, stepped and scored on a reused
-environment, the turns a model leaves open, episodes left unscored, a server at capacity or missing, tasks with other
-tools, and a bundle served by ``AgentEnv.local`` whose episodes end at close and at exit."""
+environment, the turns a model leaves open, episodes left unscored, a server at capacity, missing or restarting, tasks
+with other tools, and a bundle served by ``AgentEnv.local`` whose episodes end at close and at exit."""
 
 import asyncio
 import inspect
@@ -17,7 +17,7 @@ from agentenv_protocol.a2a_agent import proxy as proxy_module
 from agent_env.config.runtime import Config
 from agent_env.openenv.environment import AgentEnvEnvironment
 from agent_env.task_step.task_step import TaskStep
-from agent_env.training import trl
+from agent_env.training import _openenv, trl
 from agent_env.training._openenv import ENDED, FAILED, on_session_loop
 from agent_env.training.trl import AgentEnv
 from tst.unit.bundle._support import layout
@@ -231,6 +231,31 @@ def test_a_session_refused_after_one_was_dropped_leaves_only_that_rollout_unscor
 
     assert first.get_reward() == 1.0
     assert "its session was dropped, and the server stayed at its limit of 1 sessions for 4s after" in caplog.text
+
+
+def test_a_session_dropped_by_a_restarting_server_opens_again_once_it_is_back(served, monkeypatch):
+    env = served({"a": PLAYED})
+    environment = env.factory()
+    environment.reset(**env.dataset[0])
+    environment.end_turn(response="Added a crate.")
+    assert environment.get_reward() == 1.0
+    on_session_loop(environment._close(), 30)
+    opened, refusals = _openenv.opened, []
+
+    async def restarting(url, timeout, *, token=None):
+        if len(refusals) < 3:
+            refusals.append(url)
+            refused = ConnectionError(f"Failed to connect to {url}/ws")
+            refused.__cause__ = ConnectionRefusedError(111, "Connection refused")
+            raise ConnectionError(f"couldn't open a session on the server at {url}") from refused
+        return await opened(url, timeout, token=token)
+
+    monkeypatch.setattr(_openenv, "opened", restarting)
+    monkeypatch.setattr(_openenv, "REOPEN_SECONDS", 0.01)
+    environment.reset(**env.dataset[0])
+    environment.end_turn(response="Added a crate.")
+
+    assert (environment.get_reward(), len(refusals)) == (1.0, 3)
 
 
 def test_a_rollout_whose_tools_arent_its_classs_stops_training(served, monkeypatch):

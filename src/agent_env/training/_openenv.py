@@ -61,9 +61,9 @@ class NamedToolset:
 @dataclass(frozen=True)
 class Shared:
     """What a session needs of its server: where it is, the tools the model is shown, which an episode's first turn
-    must offer no more than, the deadlines, how long to wait for room on the server, whether to wait as long for a
-    server that refuses connections, as one restarting does, and the token it asks for. The key makes it equal to its
-    pickled copies only."""
+    must offer no more than, the deadlines, how long to wait for room on the server, whether to wait for a server that
+    refuses connections, as one restarting does, as long as a reset may take, and the token it asks for. The key makes
+    it equal to its pickled copies only."""
 
     url: str
     offered: frozenset[str]
@@ -277,17 +277,17 @@ async def opened(url: str, timeout: float, *, token: str | None = None) -> Gener
 
 async def reopened(url: str, timeout: float, *, dropped: bool, patience: float, waits_for_server: bool = False,
                    token: str | None = None) -> GenericEnvClient:
-    """A session, tried again every ``REOPEN_SECONDS`` for ``patience`` seconds while the server is at its limit or too
-    busy to answer, or with ``waits_for_server`` refuses the connection, as one restarting does, in place of a
-    ``dropped`` one or for a rollout's own; raises Failed, which leaves the rollout unscored, when it can't open one, at
-    once unless it was waiting."""
+    """A session, tried again every ``REOPEN_SECONDS`` while the server is at its limit or too busy to answer, for
+    ``patience`` seconds, or with ``waits_for_server`` while it refuses the connection, as one restarting does, for as
+    long as a reset may take, in place of a ``dropped`` one or for a rollout's own; raises Failed, which leaves the
+    rollout unscored, when it can't open one, at once unless it was waiting."""
     lead = "its session was dropped, and " if dropped else ""
-    deadline = time.monotonic() + patience
+    began = time.monotonic()
     while True:
         try:
             return await opened(url, timeout, token=token)
         except AtCapacity as e:
-            if time.monotonic() + REOPEN_SECONDS > deadline:
+            if time.monotonic() + REOPEN_SECONDS > began + patience:
                 raise Failed(f"{lead}the server stayed at its limit of {e.limit} sessions for "
                              f"{patience:g}s{' after' if dropped else ''}") from e
             if url not in _waited:
@@ -297,8 +297,9 @@ async def reopened(url: str, timeout: float, *, dropped: bool, patience: float, 
                                "more at once", url, e.limit)
             await asyncio.sleep(REOPEN_SECONDS)
         except ConnectionError as e:
-            waits = _transient(e) or (waits_for_server and _caused_by(e, ConnectionRefusedError))
-            if not waits or time.monotonic() + REOPEN_SECONDS > deadline:
+            restarting = waits_for_server and _caused_by(e, ConnectionRefusedError)
+            waited = max(patience, timeout) if restarting else patience
+            if not (restarting or _transient(e)) or time.monotonic() + REOPEN_SECONDS > began + waited:
                 raise Failed(f"{lead}{e}") from e
             await asyncio.sleep(REOPEN_SECONDS)
 

@@ -2,8 +2,9 @@
 writes): ``AgentEnv`` reads the server's tasks into a dataset, and makes the ``environment_factory`` whose environments
 each play one episode of a task over OpenEnv's WebSocket, offer its turn's tools as methods and own its reward.
 ``GRPOTrainer`` takes both as they are, verified with TRL 1.16 and 1.17, and AsyncGRPO the same ``environment_factory``;
-either needs TRL 1.15 or later, for an environment that owns its reward. Every session runs on one event-loop thread of
-this module's own, since TRL calls an environment synchronously, from its own threads."""
+either needs TRL 1.15 or later, for an environment that owns its reward. Unsloth's ``GRPOTrainer``, TRL's rewritten when
+``unsloth`` is imported first, takes them too, verified with Unsloth 2026.10.11 on TRL 1.15. Every session runs on one
+event-loop thread of this module's own, since TRL calls an environment synchronously, from its own threads."""
 
 from __future__ import annotations
 
@@ -73,7 +74,8 @@ class AgentEnv:
         tool_timeout: One tool call's deadline in seconds. The server ends a call that misses it, and the episode with
             it, since what the call does may still be under way: the rollout is left unscored, and the session kept.
         reset_timeout: How long an episode may take to deploy and open its first turn, and each turn to be ended,
-            in seconds. The server ends an episode that misses it, so the rollout is left unscored.
+            in seconds. The server ends an episode that misses it, so the rollout is left unscored. A session dropped
+            by a server restarting waits as long for it to come back.
 
     Example:
 
@@ -155,7 +157,8 @@ class AgentEnv:
 
     async def _environment(self, toolset: NamedToolset) -> type[_Environment]:
         first, tools = await probe(self.url, toolset, self._reset_timeout)
-        shared = Shared(url=self.url, offered=first, tool_timeout=self._tool_timeout, reset_timeout=self._reset_timeout)
+        shared = Shared(url=self.url, offered=first, tool_timeout=self._tool_timeout, reset_timeout=self._reset_timeout,
+                        waits_for_server=True)
         self._shared.append(shared)
         return _environment_class(toolset.name, tools, shared)
 
@@ -187,7 +190,8 @@ class _Environment(Session):
         """Starts the row's episode and returns before it is deployed, since ``GRPOTrainer`` resets its environments
         one at a time: the first tool call or ``get_reward`` waits for it. Raises when the server refuses this
         environment's first session, as one at capacity does; a later session it refuses, after one was dropped,
-        leaves only that rollout unscored."""
+        leaves only that rollout unscored, unless the server is restarting, which it waits out within the reset
+        deadline."""
         on_session_loop(self._start(split, index, task_id), CONNECT_SECONDS + CLOSE_SECONDS)
 
     def get_reward(self) -> float | None:
