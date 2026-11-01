@@ -24,12 +24,14 @@ except ModuleNotFoundError as exc:
         raise
     raise ImportError("agent_env.training.harness requires pip install 'agentenv-framework[harness]'") from exc
 
-from agent_env.bundle.run import prepare_bundle
+from agent_env.bundle.plan import solver_steps
+from agent_env.bundle.run import prepare_bundle, solver_params
 from agent_env.openenv.app import reward_of
 from agent_env.store.routing import namespace_routing
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
+from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.training._openenv import on_session_loop
 
 logger = logging.getLogger(__name__)
@@ -37,23 +39,22 @@ logger = logging.getLogger(__name__)
 _NAMED = re.compile(r"^AgentEnv task (\d+): (.+)$")
 
 
-def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                sandbox: str = "local") -> list[dict[str, Any]]:
+def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (), sandbox: str = "local",
+                agent: str | None = None) -> list[dict[str, Any]]:
     """The trainer's dataset, a row per task ``AgentEnvSessionFactory`` plays with the same arguments: a system line
     naming the task, which is how the factory finds it, then the task's first prompt, for TRL's logs. The model never
     sees this prompt: the task's own agent builds its own."""
-    with namespace_routing():
-        prepared = prepare_bundle(bundle, tasks=tasks, evals=evals, sandbox=sandbox)
     return [{"prompt": [{"role": "system", "content": f"AgentEnv task {index}: {task.id}"},
                         {"role": "user", "content": _first_prompt(task)}], "task_id": task.id}
-            for index, (_, task) in enumerate(prepared.tasks)]
+            for index, (task, _) in enumerate(_trained(bundle, tasks, evals, sandbox, agent))]
 
 
 class AgentEnvSessionFactory(ResourceSessionFactory):
     """OpenEnv's session factory for TRL's ``HarnessRolloutWorker``, built in its rollout process. It prepares the
     bundle, checks that ``llm_url``'s engine returns token ids, and serves OpenEnv's capture proxy in front of it,
-    where the task's sandboxes reach it. TRL sets ``model`` to the policy it publishes; ``reward`` is as
-    ``build_app``'s, and ``agent`` swaps the agent each task deploys."""
+    where the task's solver reaches it: the agent a step prompts, which it deploys, its other agents and judges keeping
+    the configured endpoint. TRL sets ``model`` to the policy it publishes; ``reward`` is as ``build_app``'s, and
+    ``agent`` the agent the solver deploys, as ``agent-env run --agent``'s."""
 
     def __init__(self, bundle: str | Path, *, llm_url: str, model: str, sampling: dict[str, Any] | None = None,
                  tasks: Sequence[str] = (), evals: Sequence[str] = (), sandbox: str = "local",
@@ -61,34 +62,34 @@ class AgentEnvSessionFactory(ResourceSessionFactory):
                  api_key: str | None = None, max_model_calls: int = 0):
         self.model = model
         self._llm_url, self._api_key, self._sampling = llm_url, api_key, sampling
-        self._sandbox, self._agent, self._max_model_calls = sandbox, agent, max_model_calls
-        with namespace_routing():
-            self._tasks = [task for _, task in prepare_bundle(bundle, tasks=tasks, evals=evals, sandbox=sandbox).tasks]
-        self._rewards = [_reward(task, reward) for task in self._tasks]
+        self._sandbox, self._max_model_calls = sandbox, max_model_calls
+        self._trained = _trained(bundle, tasks, evals, sandbox, agent)
+        self._rewards = [_reward(task, reward) for task, _ in self._trained]
         require_llm(llm_url, model, api_key=api_key, require_tokens=True)
         self._proxy = CaptureServer(llm_url=llm_url, model=model, port=_free_port(), api_key=api_key,
                                     admin_key=secrets.token_urlsafe(32))
         self._proxy.start()
 
     def create(self, task: Any, seed: int | None = None, episode_id: str | None = None) -> AgentEnvSession:
-        index = _index_named(task, [each.id for each in self._tasks])
+        index = _index_named(task, [each.id for each, _ in self._trained])
+        played, solver = self._trained[index]
         capture = self._proxy.registry.create(
             upstream=Upstream(llm_url=self._llm_url, model=self.model, api_key=self._api_key),
             capture_level="tokens", purpose="train", sampling=self._sampling, max_model_calls=self._max_model_calls,
-            task=self._tasks[index].id, episode=episode_id or uuid.uuid4().hex)
-        return AgentEnvSession(self, self._tasks[index], self._rewards[index], capture, self.model)
-
-    def _overrides(self, key: str) -> dict[str, Any]:
-        return {**sandbox_overrides(self._sandbox), "litellm_base_url": f"http://127.0.0.1:{self._proxy.port}",
-                "litellm_api_key": key, **({"a2a_agent_id": self._agent} if self._agent else {})}
+            task=played.id, episode=episode_id or uuid.uuid4().hex)
+        endpoint = {"litellm_base_url": f"http://127.0.0.1:{self._proxy.port}", "litellm_api_key": capture.session_id}
+        overrides = {**sandbox_overrides(self._sandbox),
+                     "step_params": {step: {**params, **endpoint} for step, params in solver.items()}}
+        return AgentEnvSession(played, overrides, self._rewards[index], self._proxy.registry, capture, self.model)
 
 
 class AgentEnvSession(ResourceSession):
     """One run of a task with its own agents, their model calls captured under this session's key."""
 
-    def __init__(self, factory: AgentEnvSessionFactory, task: Task, reward: Callable[[dict[str, float]], float | None],
-                 capture: Any, model: str):
-        self._factory, self._task, self._reward, self._capture, self._model = factory, task, reward, capture, model
+    def __init__(self, task: Task, overrides: dict[str, Any], reward: Callable[[dict[str, float]], float | None],
+                 registry: Any, capture: Any, model: str):
+        self._task, self._overrides, self._reward, self._model = task, overrides, reward, model
+        self._registry, self._capture = registry, capture
         self._scores: dict[str, float] | None = None
 
     def initial_messages(self) -> list[dict[str, Any]]:
@@ -119,11 +120,10 @@ class AgentEnvSession(ResourceSession):
                                                                     for step, score in (self._scores or {}).items()})
 
     def close(self) -> None:
-        self._factory._proxy.registry.delete(self._capture.session_id)
+        self._registry.delete(self._capture.session_id)
 
     async def _run(self) -> int:
-        context = TaskStepContext(metadata={"task_id": self._task.id,
-                                            "user_overrides": self._factory._overrides(self._capture.session_id)})
+        context = TaskStepContext(metadata={"task_id": self._task.id, "user_overrides": self._overrides})
         with namespace_routing():
             try:
                 await self._task.run(agent_model=self._model, context=context)
@@ -134,6 +134,26 @@ class AgentEnvSession(ResourceSession):
                 return 1
             finally:
                 await teardown_run(context)
+
+
+def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str], sandbox: str,
+             agent: str | None) -> list[tuple[Task, dict[str, dict[str, Any]]]]:
+    """The bundle's tasks prepared as ``agent-env run`` prepares them, each with its solver's deploys and their step
+    params, ``agent``'s if it swaps the solver; a task whose solver no ``deploy_agent`` step deploys is left out."""
+    with namespace_routing():
+        prepared = prepare_bundle(bundle, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent, solver_endpoint=True)
+    swapped = solver_params(prepared.plan, prepared.materialization)
+    trained = []
+    for entry, task in prepared.tasks:
+        solver = solver_steps([step.to_dict() for step in task.steps])
+        if solver and all(step.type == DeployAgentTaskStep.type for step in task.steps if step.id in solver):
+            trained.append((task, {step: swapped.get(entry.id, {}).get(step, {}) for step in solver}))
+        else:
+            logger.warning("%s is left out: training needs the agent a step prompts deployed by a deploy_agent step",
+                           task.id)
+    if not trained:
+        raise ValueError("no task of the bundle deploys, with a deploy_agent step, an agent a step prompts to train")
+    return trained
 
 
 def _reward(task: Task, reward: str | Callable[[dict[str, float]], float] | None

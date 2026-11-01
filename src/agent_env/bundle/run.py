@@ -251,7 +251,7 @@ def run_bundle(
         with Interrupts() as interrupts:
             overrides = _overrides(sandbox, user_model, judge_model)
             runs = interrupts.run(_run_all(plan, list(prepared.tasks), model, overrides,
-                                           _solver_params(plan, prepared.materialization), keep, say, interrupts))
+                                           solver_params(plan, prepared.materialization), keep, say, interrupts))
             _mark_cancelled(runs, interrupts.reason)
             result = _bundle_run(plan, prepared.materialization, runs,
                                  _skipped(plan, entries, every=not tasks and not evals))
@@ -274,17 +274,20 @@ def prepare_bundle(
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
     played: bool = False,
+    agent: str | None = None,
+    solver_endpoint: bool = False,
 ) -> PreparedBundle:
     """Do what ``run_bundle`` with these arguments does before its first task runs, and stop there. ``played``
     leaves out what each task's only prompted agent would deploy, for a caller that plays that agent itself
-    (``EpisodeSpec``), so the agent needn't exist.
+    (``EpisodeSpec``), so the agent needn't exist. With ``solver_endpoint`` the caller gives the solver's deploys their
+    model endpoint in each run's ``step_params``, so the config needn't set one.
 
     It doesn't turn namespace routing on: the caller keeps it on for as long as it runs the tasks
     (``agent_env.store.routing.namespace_routing``), which suits a service that runs nothing else. Raises what
     ``run_bundle`` raises before its first task runs, except for a running event loop, which it doesn't need."""
     composing = _composing(sandbox)
-    return _prepare(root, tasks, evals, sandbox, id_root, None, played, _progress(on_progress), _hint(id_root),
-                    composing)
+    return _prepare(root, tasks, evals, sandbox, id_root, agent, played, _progress(on_progress), _hint(id_root),
+                    composing, solver_endpoint=solver_endpoint)
 
 
 def _write_bundle(
@@ -373,8 +376,9 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 
 def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandbox: str | None, id_root: str | None,
              agent: str | None, played: bool, say: Callable[[str], None], declaring: Declaring,
-             composing: Composing = Composing()) -> PreparedBundle:
-    plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played)
+             composing: Composing = Composing(), *, solver_endpoint: bool = False) -> PreparedBundle:
+    plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played,
+                               solver_endpoint=solver_endpoint)
     _say_plan(plan, say, declaring)
     materialization = _written_with_infra(plan, preflight, say, composing)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
@@ -382,7 +386,8 @@ def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandb
 
 
 def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None,
-             sandbox: str | None, agent: str | None = None, *, played: bool = False) -> tuple[Plan, Preflight]:
+             sandbox: str | None, agent: str | None = None, *, played: bool = False,
+             solver_endpoint: bool = False) -> tuple[Plan, Preflight]:
     resolved = resolve_bundle(parse_bundle(Path(root), id_root=id_root))
     plan = plan_bundle(without_played_agents(resolved) if played else resolved, tasks=tasks, evals=evals,
                        installed=installed_bundles, agent=agent)
@@ -390,7 +395,7 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
     to_run = set(_to_run(plan))
     return plan, preflight_run(plan, [write.source for write in plan.writes
                                       if write.kind is BundleKind.TASK and write.source.entry in to_run], sandbox,
-                               played=played)
+                               played=played, solver_endpoint=solver_endpoint)
 
 
 def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
@@ -445,7 +450,7 @@ def _hint(id_root: str | None) -> Declaring:
     return Declaring.QUIET if id_root is not None else Declaring.HINT
 
 
-def _solver_params(plan: Plan, materialization: Materialization) -> dict[str, dict[str, dict]]:
+def solver_params(plan: Plan, materialization: Materialization) -> dict[str, dict[str, dict]]:
     """Each task's ``step_params`` that deploy ``Plan.agent`` at its solver steps: at the version this run wrote, for
     an agent it writes, or the store's version the plan read."""
     if plan.agent is None:
