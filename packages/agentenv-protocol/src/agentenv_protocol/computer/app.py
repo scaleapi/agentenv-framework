@@ -10,7 +10,6 @@ and a reset, as declared for the OS it runs on."""
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import functools
 import inspect
 import itertools
@@ -555,8 +554,8 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
                 OP_RESET_DATA: functools.partial(app_data.reset, self.paths)}[op]
 
     async def _computer_app_within(self, op: str, call: Callable, args: tuple, answer: asyncio.Future) -> Any:
-        """``call``'s result within ``data_timeout_s``; past it, ``answer`` fails at once, and this waits for the call
-        to end before it raises the same."""
+        """``call``'s result within ``data_timeout_s``; past it, ``answer`` fails at once and the call is cancelled,
+        and this raises the same once it has ended: at once for what awaits, after any thread it runs."""
         work = asyncio.ensure_future(_called(call, *args))
         try:
             return await asyncio.wait_for(asyncio.shield(work), self.data_timeout_s)
@@ -564,8 +563,10 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             late = TimeoutError(f"{op} ran past the app's data_timeout_s, {self.data_timeout_s:g} s")
             if not answer.done():
                 answer.set_exception(late)
-            with contextlib.suppress(Exception):
-                await work
+            work.cancel()
+            await asyncio.wait([work])
+            if not work.cancelled():
+                work.exception()
             raise late from None
 
     def _computer_app_keep_initial(self) -> None:
@@ -631,7 +632,7 @@ async def _called(fn: Callable, *args: Any) -> Any:
     """``fn``'s result, a sync one's from a thread, so it can't hold up the server."""
     if inspect.iscoroutinefunction(fn):
         return await fn(*args)
-    result = await asyncio.to_thread(fn, *args)
+    result = await app_data.in_thread(fn, *args)
     return await result if inspect.isawaitable(result) else result
 
 

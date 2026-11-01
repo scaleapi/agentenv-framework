@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Any, Optional
 
 from ..transfers import WriteNamespaceGrant
 from ..types import FilePart, uploaded_object_path
@@ -39,7 +40,7 @@ async def add(parts: list, paths: list[str]) -> None:
         if not any(PurePosixPath(path).is_relative_to(owned) for owned in paths):
             raise ValueError(f"{path!r} is under none of this app's paths: {', '.join(paths)}")
         files[path] = await part_bytes(part)
-    await asyncio.to_thread(_write, Path.home(), files, paths)
+    await in_thread(_write, Path.home(), files, paths)
 
 
 async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
@@ -49,7 +50,18 @@ async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) 
 
 async def reset(paths: list[str]) -> None:
     """Put each of ``paths`` back as ``keep_initial`` kept it, or remove it where it wasn't there then."""
-    await asyncio.to_thread(_restore, Path.home(), paths)
+    await in_thread(_restore, Path.home(), paths)
+
+
+async def in_thread(fn: Callable, *args: Any) -> Any:
+    """``fn``'s result from a thread, which a cancelled call still waits for to the end, since a thread can't be
+    stopped."""
+    work = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        await asyncio.wait([work])
+        raise
 
 
 def _write(home: Path, files: dict[str, bytes], paths: list[str]) -> None:

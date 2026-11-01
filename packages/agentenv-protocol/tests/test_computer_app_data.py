@@ -2,8 +2,8 @@
 the defaults: a load writes files under them, through no link out of them, an export returns them, and a reset puts back
 the copy its server kept before it served; its card declares a file tree. Hooks override paths. Around a load and a
 reset the app is stopped and relaunched, a failed load is followed by a reset, and data calls take turns. A call past
-data_timeout_s fails then, a sync hook running in a thread, and its reset and relaunch, and the next call, wait for it
-to end. The app serves its skill file."""
+data_timeout_s fails then and is cancelled, but a sync hook runs in a thread, which its reset and relaunch, and the
+next call, wait for. The app serves its skill file."""
 from __future__ import annotations
 
 import asyncio
@@ -183,17 +183,21 @@ async def test_a_failed_load_is_followed_by_a_reset_and_the_app_is_relaunched(ho
 
 
 @pytest.mark.asyncio
-async def test_a_call_past_its_timeout_fails_saying_so(home, desktop):
+async def test_an_async_call_past_its_timeout_fails_saying_so_and_is_cancelled_so_the_next_takes_its_turn(
+        home, desktop):
     @linux(launch=Launch(command=["slow"]))
     class Slow(ComputerAppEnvironment):
         data_timeout_s = 0.2
 
         @add_data
         async def load(self, parts: list) -> None:
-            await asyncio.sleep(5)
+            if len(parts) == 2:
+                await asyncio.Event().wait()
 
     async with _http(Slow()) as http:
-        answer = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("a.txt", b"a")]}))
+        answer = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("a.txt", b"a"),
+                                                                            _inline("b.txt", b"b")]}))
+        await _rpc(http, "data/add", {"parts": [_inline("c.txt", b"c")]})
 
     assert answer.json()["error"]["message"] == "add_data ran past the app's data_timeout_s, 0.2 s"
 
