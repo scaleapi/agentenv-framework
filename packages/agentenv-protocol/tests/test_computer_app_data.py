@@ -89,7 +89,7 @@ async def test_an_app_with_only_paths_loads_exports_and_resets_them_as_installed
     (home / "Mail").mkdir()
     (home / "Mail/inbox.txt").write_text("installed")
     mail = PathsMail()
-    mail._computer_app_keep_initial()
+    mail._computer_app_data_plane().keep_initial()
 
     async with _http(mail) as http:
         card = (await http.get(WELL_KNOWN_PATH)).json()
@@ -112,7 +112,7 @@ async def test_a_file_under_none_of_its_paths_or_through_a_link_out_of_them_is_r
     (home / "Mail").mkdir()
     os.symlink(home / "Documents", home / "Mail" / "shared")
     mail = PathsMail()
-    mail._computer_app_keep_initial()
+    mail._computer_app_data_plane().keep_initial()
 
     async with _http(mail) as http:
         outside = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("Mail/a.txt", b"a"),
@@ -152,7 +152,7 @@ async def test_hooks_override_its_paths_and_read_each_part_they_get_with_part_by
 @pytest.mark.asyncio
 async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_export_leaves_it_be(home, desktop):
     mail = PathsMail()
-    mail._computer_app_keep_initial()
+    mail._computer_app_data_plane().keep_initial()
     await mail._computer_app.launch_app()
 
     async with _http(mail) as http:
@@ -166,7 +166,7 @@ async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_ex
 @pytest.mark.asyncio
 async def test_an_app_that_isnt_running_is_left_stopped(home, desktop):
     mail = PathsMail()
-    mail._computer_app_keep_initial()
+    mail._computer_app_data_plane().keep_initial()
 
     async with _http(mail) as http:
         await _rpc(http, "data/add", {"parts": [_inline("Mail/a.txt", b"a")]})

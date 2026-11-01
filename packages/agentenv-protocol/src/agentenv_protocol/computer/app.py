@@ -9,12 +9,10 @@ whether it's ready (``computer-app/v1``), serves its skill, and serves its data 
 and a reset, as declared for the OS it runs on."""
 from __future__ import annotations
 
-import asyncio
 import functools
 import inspect
 import itertools
 import json
-import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -28,7 +26,7 @@ from ..agent_env_environment import (_EXT_ATTR, _OP_ATTR, OP_ADD_DATA, OP_GET_DA
 from ..transfers import RelativePath, WriteNamespaceGrant
 from ..types import (METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI, EnvironmentExtension, IntakeDeclaration,
                      IntakeFormat, intake_extension)
-from . import app_data
+from .app_data import AppDataPlane
 from .app_runtime import AppRuntime
 from .errors import InvalidArgument
 from .platform import detect
@@ -39,7 +37,6 @@ _INSTALL_STEP_ATTR = "_aee_install_step"
 _READY_CHECK_ATTR = "_aee_ready_check"
 _DATA_METHODS = {OP_RESET_DATA: METHOD_RESET, OP_ADD_DATA: METHOD_ADD, OP_GET_DATA: METHOD_GET}
 _PATHS = TypeAdapter(list[RelativePath])
-logger = logging.getLogger(__name__)
 #: What a launch's window can be matched by, as the session lists each window.
 WINDOW_KEYS = frozenset({"class", "instance", "title"})
 #: The framework extension an app's own server serves: its launch as params, and its ``launch`` and ``ready`` methods.
@@ -357,8 +354,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     it runs on.
 
     Its data plane is its ``@add_data``, ``@get_data`` and ``@reset_data`` hooks, or, with none, defaults on its
-    ``paths`` (``app_data``). The base class serves them around its contract: a load and a reset stop the app first and
-    relaunch it after, a load that fails is followed by a reset, and each call runs within ``data_timeout_s``."""
+    ``paths``, which the base class serves around its contract (``app_data.AppDataPlane``): one call at a time, a load
+    and a reset with the app stopped and relaunched after, a load that fails followed by a reset, and each call within
+    ``data_timeout_s``."""
 
     supports: ClassVar[list] = []
     permissions: ClassVar[list[str]] = []
@@ -366,6 +364,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     #: Its data hooks' method names, by the operation each serves.
     _data_hooks: ClassVar[dict[str, str]] = {}
     _computer_app: Optional[AppRuntime] = None
+    _computer_app_data: Optional[AppDataPlane] = None
     launch: Optional[Launch] = None
     paths: list[str] = []
     #: A file of the app's folder holding its skill for agents, when no ``@agent_skill`` method writes it.
@@ -407,6 +406,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(cls)
                           if hasattr(fn, _READY_CHECK_ATTR) and _runs_on(getattr(fn, _READY_CHECK_ATTR), on)},
             ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S)
+        self._computer_app_data = AppDataPlane(
+            self._computer_app, {op: getattr(self, name) for op, name in cls._data_hooks.items()}, self.paths,
+            cls.data_timeout_s)
 
     @classmethod
     def settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
@@ -426,12 +428,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     async def _computer_app_launch(self) -> dict:
         if self.launch is None:
             raise InvalidArgument(f"{type(self).__name__} declares no launch")
-        runtime = self._computer_app_runtime()
-        await self._computer_app_wait_turn("launch")
-        try:
-            return {"pid": await runtime.launch_app()}
-        finally:
-            runtime.turn.release()
+        return {"pid": await self._computer_app_data_plane().launch()}
 
     @extension(COMPUTER_APP, op="ready", method="GET")
     async def _computer_app_ready(self) -> dict:
@@ -441,6 +438,10 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         if self._computer_app is None:
             raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")
         return self._computer_app
+
+    def _computer_app_data_plane(self) -> AppDataPlane:
+        self._computer_app_runtime()
+        return self._computer_app_data
 
     def extension_params(self, uri: str) -> dict:
         if uri == COMPUTER_APP:
@@ -474,105 +475,19 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     @add_data
     async def _computer_app_add_data(self, parts: list) -> None:
-        await self._computer_app_data(OP_ADD_DATA, parts)
+        await self._computer_app_data_plane().call(OP_ADD_DATA, parts)
 
     @get_data
     async def _computer_app_get_data(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
-        return await self._computer_app_data(OP_GET_DATA, write_namespace)
+        return await self._computer_app_data_plane().call(OP_GET_DATA, write_namespace)
 
     @reset_data
     async def _computer_app_reset_data(self) -> None:
-        await self._computer_app_data(OP_RESET_DATA)
+        await self._computer_app_data_plane().call(OP_RESET_DATA)
 
     @agent_skill
     def _computer_app_skill(self) -> tuple[str, str]:
         return _skill_parts(Path(self._computer_app_skill_file()).read_text(), os.environ.get("ENVIRONMENT_NAME", ""))
-
-    async def _computer_app_data(self, op: str, *args: Any) -> Any:
-        """``op``, by its hook or its paths' default, one data call or launch at a time: a load and a reset stop the app
-        first and relaunch it after, and a load that fails is followed by a reset. A call fails once it runs past
-        ``data_timeout_s``, but a thread can't be stopped, so the reset and relaunch after it wait for it to end, and so
-        does the next call."""
-        call, runtime = self._computer_app_data_call(op), self._computer_app_runtime()
-        await self._computer_app_wait_turn(op)
-        answer = asyncio.get_running_loop().create_future()
-        change = asyncio.ensure_future(self._computer_app_change(op, call, args, answer))
-        runtime.changing.add(change)
-        change.add_done_callback(runtime.changing.discard)
-        change.add_done_callback(lambda _: runtime.turn.release())
-        return await answer
-
-    async def _computer_app_change(self, op: str, call: Callable, args: tuple, answer: asyncio.Future) -> None:
-        """``op`` between the app's stop and its relaunch, answered on ``answer``: as it ends, or once it runs past
-        ``data_timeout_s``."""
-        runtime = self._computer_app_runtime()
-        try:
-            running = op != OP_GET_DATA and await runtime.stop_app()
-            try:
-                result = await self._computer_app_within(op, call, args, answer)
-            except Exception:
-                if op == OP_ADD_DATA:
-                    await self._computer_app_undo(answer)
-                raise
-            finally:
-                if running:
-                    await runtime.launch_app()
-        except Exception as e:
-            if not answer.done():
-                answer.set_exception(e)
-        else:
-            answer.set_result(result)
-
-    async def _computer_app_undo(self, answer: asyncio.Future) -> None:
-        """Reset the app's data after a load that failed."""
-        if (reset := self._computer_app_data_call(OP_RESET_DATA)) is None:
-            return
-        try:
-            await self._computer_app_within(OP_RESET_DATA, reset, (), answer)
-        except Exception as e:
-            logger.warning(f"the reset after a failed data/add failed too: {type(e).__name__}: {e}")
-
-    async def _computer_app_wait_turn(self, op: str) -> None:
-        """Wait, within ``data_timeout_s``, for the data call before to end, its reset and relaunch included."""
-        try:
-            await asyncio.wait_for(self._computer_app_runtime().turn.acquire(), self.data_timeout_s)
-        except TimeoutError:
-            raise TimeoutError(f"{op} waited past the app's data_timeout_s, {self.data_timeout_s:g} s, for the data "
-                               "call before it to end") from None
-
-    def _computer_app_data_call(self, op: str) -> Optional[Callable]:
-        """What serves ``op``: the class's hook, or its paths' default; None when nothing does."""
-        if (name := self._data_hooks.get(op)) is not None:
-            hook = getattr(self, name)
-            if op == OP_GET_DATA and "write_namespace" not in inspect.signature(hook).parameters:
-                return lambda write_namespace=None: hook()
-            return hook
-        if self._data_hooks or not self.paths:
-            return None
-        return {OP_ADD_DATA: functools.partial(app_data.add, paths=self.paths),
-                OP_GET_DATA: functools.partial(app_data.get, self.paths),
-                OP_RESET_DATA: functools.partial(app_data.reset, self.paths)}[op]
-
-    async def _computer_app_within(self, op: str, call: Callable, args: tuple, answer: asyncio.Future) -> Any:
-        """``call``'s result within ``data_timeout_s``; past it, ``answer`` fails at once and the call is cancelled,
-        and this raises the same once it has ended: at once for what awaits, after any thread it runs."""
-        work = asyncio.ensure_future(_called(call, *args))
-        try:
-            return await asyncio.wait_for(asyncio.shield(work), self.data_timeout_s)
-        except TimeoutError:
-            late = TimeoutError(f"{op} ran past the app's data_timeout_s, {self.data_timeout_s:g} s")
-            if not answer.done():
-                answer.set_exception(late)
-            work.cancel()
-            await asyncio.wait([work])
-            if not work.cancelled():
-                work.exception()
-            raise late from None
-
-    def _computer_app_keep_initial(self) -> None:
-        """Keep the app's paths as installed, before anything changes them, when they serve its data."""
-        if self.paths and not self._data_hooks:
-            app_data.keep_initial(self.paths)
 
     def _computer_app_skill_file(self) -> Optional[str]:
         """The file of the app's folder holding its skill on this OS, or the class's."""
@@ -626,14 +541,6 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             data=sorted(_DATA_METHODS[op] for op in cls._data_hooks),
             install_steps=steps, ready_checks=checks,
         )
-
-
-async def _called(fn: Callable, *args: Any) -> Any:
-    """``fn``'s result, a sync one's from a thread, so it can't hold up the server."""
-    if inspect.iscoroutinefunction(fn):
-        return await fn(*args)
-    result = await app_data.in_thread(fn, *args)
-    return await result if inspect.isawaitable(result) else result
 
 
 def _skill_parts(text: str, name: str) -> tuple[str, str]:

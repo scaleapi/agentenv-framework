@@ -9,14 +9,16 @@ from typing import Any, Callable, ClassVar
 import httpx
 from pydantic import BaseModel, ConfigDict
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 
-from ..agent_env_environment import _CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication, environment_card
+from ..agent_env_environment import (_CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
+                                     _error_response, environment_card)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
 from . import _linux, apps, card
 from .checks import check_features, check_names
 from .dataplane import DataPlane
+from .errors import DeliveryFailed, TargetUnavailable
 from .extensions import Extensions
 from .operations import ReadyCheck, check_class, default_for
 from .platform import Platform, detect
@@ -141,13 +143,12 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         name = request.path_params["name"]
         folder = next((folder for folder in self._computer.apps if folder.name == name), None)
         if folder is None:
-            return JSONResponse({"error": f"this computer has no app named {name!r}"}, status_code=404)
+            return _error_response(TargetUnavailable(f"this computer has no app named {name!r}"))
         try:
             answer = await apps.forward(folder, request.method, request.path_params["path"], request.url.query,
                                         await request.body(), request.headers.get("content-type"))
         except (httpx.HTTPError, OSError) as e:
-            return JSONResponse({"error": f"app {name}'s server isn't answering: {type(e).__name__}: {e}"},
-                                status_code=502)
+            return _error_response(DeliveryFailed(f"app {name}'s server isn't answering: {type(e).__name__}: {e}"))
         return Response(answer.content, status_code=answer.status_code, media_type=answer.headers.get("content-type"))
 
     # The card: what the driver's operations support.

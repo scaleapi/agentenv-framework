@@ -147,6 +147,12 @@ def intake_declaration(card: dict) -> dict | None:
     return params if params else None
 
 
+def operations(card: dict) -> list[str] | None:
+    """The data-plane methods a card declares it serves (``capabilities.operations``), or None when it declares none,
+    as an older card doesn't."""
+    return (card.get("capabilities") or {}).get("operations")
+
+
 def find_tool(card: dict, name: str) -> dict | None:
     """Return the MCP tool advertised under `name`, or None.
 

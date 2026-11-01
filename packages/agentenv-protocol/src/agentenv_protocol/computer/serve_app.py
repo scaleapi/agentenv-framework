@@ -37,7 +37,7 @@ def _serve(argv: list[str]) -> None:
     file, _, name = argv[0].partition(":")
     app = load_class(Path(file), name, ComputerAppEnvironment)()
     runtime = app._computer_app_runtime()
-    app._computer_app_keep_initial()
+    app._computer_app_data_plane().keep_initial()
     asgi = app.create_app().streamable_http_app()
     server = uvicorn.Server(uvicorn.Config(asgi, uds=str(SOCKET), log_level="warning"))
     serving, failed = asgi.router.lifespan_context, []

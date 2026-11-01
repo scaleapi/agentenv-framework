@@ -148,6 +148,14 @@ _CARD_WITH_TOOLS = {
 }
 
 
+def test_operations_are_what_a_card_declares_and_none_when_it_declares_none():
+    assert protocol_v1.operations({"capabilities": {"operations": ["data/get"]}}) == ["data/get"]
+    assert protocol_v1.operations({"capabilities": {"operations": []}}) == []
+    assert protocol_v1.operations({"capabilities": {}}) is None
+    assert protocol_v1.operations({"capabilities": None}) is None
+    assert protocol_v1.operations({}) is None
+
+
 def test_find_tool_returns_matching():
     assert protocol_v1.find_tool(_CARD_WITH_TOOLS, "slack_ping")["description"] == "Ping the server."
 

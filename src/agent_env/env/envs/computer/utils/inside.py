@@ -36,7 +36,7 @@ _READ_TIMEOUT_S = 120
 
 def missing(deployed: DeployedSandboxEnv) -> list[str]:
     """What the env's card doesn't serve of computer-exec/v1 ``run``, ``data/add`` and ``data/get``."""
-    operations = ((deployed.environment_card or {}).get("capabilities") or {}).get("operations")
+    operations = protocol_v1.operations(deployed.environment_card or {})
     absent = [] if deployed.supports(COMPUTER_EXEC, "run") else [f"{COMPUTER_EXEC} run"]
     return absent + [op for op in (METHOD_ADD, METHOD_GET) if operations is not None and op not in operations]
 
