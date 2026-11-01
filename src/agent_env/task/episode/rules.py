@@ -150,7 +150,7 @@ UNAFFECTED = frozenset({
     "aggregate_verifiers", "apply_server_config", "build_mcp_cli", "combine_universe_verdicts", "configure_scheduled_checks",
     "deploy_env", "deploy_sandbox", "end_computer_recording", "start_computer_recording", "env_outcome_verifier",
     "modify_env_tool_access", "reset_env", "review",
-    "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "sync_env_clock",
+    "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "snapshot_computer_env", "sync_env_clock",
     "validation_gate_aggregator", "verify_env_card", "verify_env_core_protocol", "verify_mcp_tool_schema",
     "verify_spec_conformance", "verify_universe_load_export_roundtrip",
     # They read only what an outside turn leaves: its reply.

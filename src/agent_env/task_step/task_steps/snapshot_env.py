@@ -1,4 +1,5 @@
-"""Snapshot a deployed env's live service state into a new EnvironmentUniverseArtifact."""
+"""Snapshot a deployed env's live service state into a new EnvironmentUniverseArtifact: through its gateway, or without
+one through the card its deployment recorded."""
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +18,8 @@ from urllib.parse import urlparse
 import httpx
 
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, FilePart, uploaded_object_path
-from agentenv_protocol.client import find_extension, find_extension_method
+from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.client import GetDataResponse, find_extension, find_extension_method, intake_declaration
 from agentenv_protocol.transfers import WriteNamespaceGrant
 
 from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
@@ -62,21 +64,22 @@ class _SnapshotUpload:
         return self.store.object_url(f"{self.grant.root_path}/{path}")
 
 
-def _snapshot_upload(card: dict, timeout_seconds: float, sandbox_type: Optional[str]) -> Optional[_SnapshotUpload]:
-    """A grant for a service advertising the data-objects form to upload its bundle with, under a namespace
-    of its own; None when it does not advertise the form, or the object store issues no grant that reaches
-    the service's sandbox, of ``sandbox_type`` (None: unknown) and lasts the export."""
+def _snapshot_upload(card: dict, timeout_seconds: float, sandbox_type: Optional[str],
+                     limits: ObjectLimits = ENV_SNAPSHOT_LIMITS) -> Optional[_SnapshotUpload]:
+    """A grant for a service advertising the data-objects form to upload its bundle with, or the files ``limits``
+    allows, under a namespace of its own; None when it does not advertise the form, or the object store issues no
+    grant that reaches the service's sandbox, of ``sandbox_type`` (None: unknown) and lasts the export."""
     if find_extension(card, DATA_OBJECTS_EXTENSION_URI) is None:
         return None
     config = get_config()
     store = config.get_object_store()
     if not issues_grants_to(store, sandbox_type):
         return None
-    cap = store.max_single_upload_bytes or ENV_SNAPSHOT_LIMITS.max_object_bytes
+    cap = store.max_single_upload_bytes or limits.max_object_bytes
     limits = ObjectLimits(
-        max_objects=ENV_SNAPSHOT_LIMITS.max_objects,
-        max_object_bytes=min(ENV_SNAPSHOT_LIMITS.max_object_bytes, cap),
-        max_total_bytes=min(ENV_SNAPSHOT_LIMITS.max_total_bytes, cap),
+        max_objects=limits.max_objects,
+        max_object_bytes=min(limits.max_object_bytes, cap),
+        max_total_bytes=min(limits.max_total_bytes, cap),
     )
     namespace_url = store.object_url(f"{config.get_artifact_key_prefix()}{_SNAPSHOT_KEY_PREFIX}/{uuid.uuid4().hex}")
     try:
@@ -157,6 +160,10 @@ class SnapshotEnvTaskStep(TaskStep):
     ``{"id", "version"}``. Fails the step if any service fails to export.
 
     ``include_env_changes`` also stores who changed what (urn:agentenv:changes/v1) under ``metadata["env_changes"]``.
+
+    An env deployed without a gateway is reached through the card its deployment recorded, its environments the
+    card's children, or itself. An environment whose data/get returns a file tree, a computer's, is refused, since
+    one file can't keep it: ``snapshot_computer_env`` snapshots a computer env's files.
     """
 
     type: ClassVar[str] = "snapshot_env"
@@ -238,9 +245,10 @@ class SnapshotEnvTaskStep(TaskStep):
         if not env_id:
             raise RuntimeError("snapshot_env could not resolve an env_id")
         gateway_url = self.gateway_url or gateway_url_of(deployed)
-        if not gateway_url:
+        if not gateway_url and not (deployed is not None and deployed.environment_card):
             raise RuntimeError(
-                f"Deployed env '{env_id}' has no gateway_url and no override was provided"
+                f"Deployed env '{env_id}' has no gateway_url, no recorded card to reach it through, and no override "
+                "was provided"
             )
 
         if self.include_env_trajectory:
@@ -461,7 +469,7 @@ class SnapshotEnvTaskStep(TaskStep):
 
     @staticmethod
     async def _export_environment_to_file(
-        gateway_url: str, environment_name: str, tmp_path: str, timeout_seconds: float, deployed=None
+        gateway_url: Optional[str], environment_name: str, tmp_path: str, timeout_seconds: float, deployed=None
     ) -> str:
         """Export one service; return the suffix written (".json"/".zip") to
         ``tmp_path``, or the object url a FilePart names when the service uploaded the
@@ -471,21 +479,23 @@ class SnapshotEnvTaskStep(TaskStep):
         form: an upload through it → its object url; ``DataPart`` → json; ``FilePart`` →
         object url (no download) / base64 ``bytes`` / streamed relative-or-same-origin ``uri`` →
         ".zip"; else legacy ``GET /export-state`` streamed to disk with a first-byte JSON
-        guard. Errors are caught by the caller (fails just this service)."""
+        guard. Errors are caught by the caller (fails just this service): a file tree, which one file can't
+        keep, among them."""
         from agent_env.env import legacy_protocol
-        from agentenv_protocol import client as protocol_v1
 
         base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=True)
         if base_url is not None:
             card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
+            if returns_file_tree(card or {}):
+                raise ValueError(f"'{environment_name}' returns a file tree from data/get, which one file can't keep; "
+                                 "snapshot_computer_env snapshots a computer env's files")
             upload = await asyncio.to_thread(
                 _snapshot_upload, card or {}, timeout_seconds, getattr(deployed, "sandbox_type", None)
             )
             # Push S3 creds (no-op unless the service advertises the extension), with a grant too: a
             # bundle the grant cannot hold can still be uploaded with them.
             await _push_s3_credentials(card_base, card or {}, timeout_seconds)
-            grant = {} if upload is None else {"write_namespace": upload.grant}
-            resp = await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **grant)
+            resp, upload = await get_data(base_url, environment_name, timeout_seconds, upload)
             part = resp.parts[0] if resp.parts else None
             if upload is not None and (path := uploaded_object_path(part)) is not None:
                 return upload.object_url(path)
@@ -562,27 +572,28 @@ class SnapshotEnvTaskStep(TaskStep):
         cls,
         *,
         env,
-        gateway_url: str,
+        gateway_url: Optional[str],
         snapshot_id: str,
         deployed=None,
         original_universe_artifact_id: Optional[str] = None,
         export_timeout_seconds: int = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         concurrency: int = DEFAULT_EXPORT_CONCURRENCY,
     ) -> EnvSnapshotResult:
-        """Export all services via the gateway into a new EnvironmentUniverseArtifact
-        ``snapshot_id``. All-or-nothing; the raised error carries public
-        per-service summaries (verbose details go to the log).
+        """Export all services via the gateway, or without one (``gateway_url`` None) through
+        ``deployed``'s recorded card, into a new EnvironmentUniverseArtifact ``snapshot_id``.
+        All-or-nothing; the raised error carries public per-service summaries (verbose details
+        go to the log).
 
         A classmethod so callers that have no step instance can reuse it."""
         from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
         from agent_env.env.env import gateway_url_of
 
-        services = cls._enumerate_environments(env)
-        gateway = gateway_url.rstrip("/")
+        services = cls._enumerate_environments(env) if gateway_url else _card_environments(deployed)
+        gateway = gateway_url.rstrip("/") if gateway_url else None
         # `gateway` identifies which deployment was exported: env= alone doesn't when one env_id has several.
         logger.info(
             f"snapshot_env: env={env.id} v{env.version} snapshot_id={snapshot_id} "
-            f"gateway={gateway} services={services}"
+            f"gateway={gateway or 'none, through its recorded card'} services={services}"
         )
 
         # Carry the source universe's metadata into the snapshot: explicit
@@ -607,7 +618,7 @@ class SnapshotEnvTaskStep(TaskStep):
                 logger.warning("snapshot_env: failed to carry metadata from %s", source_id, exc_info=True)
 
         # The stored card describes the deployment's own gateway; an override pointing elsewhere keeps the live probe.
-        card_record = deployed if deployed is not None and (gateway_url_of(deployed) or "").rstrip("/") == gateway else None
+        card_record = deployed if deployed is not None and (gateway is None or (gateway_url_of(deployed) or "").rstrip("/") == gateway) else None
         sem = asyncio.Semaphore(concurrency)
 
         async def export_one(environment_name: str):
@@ -643,26 +654,15 @@ class SnapshotEnvTaskStep(TaskStep):
                     # from the url's last segment (the extension drives load-time parsing),
                     # like FileArtifact.put.
                     if urlparse(result).scheme:
-                        from agent_env.artifact.store import get_artifact_store
-
                         object_url = result
                         filename = object_url.rsplit("/", 1)[-1] or f"{environment_name}.zip"
                         content_type = mimetypes.guess_type(filename)[0] or "application/zip"
 
                         def _register_uploaded_bundle():
-                            if get_config().get_object_store().get_object_metadata_at(object_url) is None:
-                                raise FileNotFoundError(f"snapshot bundle not found at {object_url}")
-                            store = get_artifact_store()
-                            fa_id = f"{snapshot_id}-{environment_name}-file"
-                            get_config().check_object_url(fa_id, object_url)
-                            fa = FileArtifact(
-                                id=fa_id,
-                                description=f"State snapshot of {environment_name} from env {env.id}",
-                                filename=filename,
-                                content_type=content_type,
-                                object_url=object_url,
+                            fa = registered_upload(
+                                object_url, f"{snapshot_id}-{environment_name}-file", filename, content_type,
+                                f"State snapshot of {environment_name} from env {env.id}",
                             )
-                            fa = store.put_document(fa)
                             return EnvironmentArtifact.put(
                                 id=f"{snapshot_id}-{environment_name}",
                                 environment_name=environment_name,
@@ -746,6 +746,50 @@ class SnapshotEnvTaskStep(TaskStep):
             environments_snapshotted=[sa.environment_name for sa in environment_artifacts],
             total=len(services),
         )
+
+
+def returns_file_tree(card: dict) -> bool:
+    """Whether ``card`` declares its data/get returns a file tree: its files, each a part by its path."""
+    return any(returned.get("format") == "file-tree" for returned in (intake_declaration(card) or {}).get("get") or [])
+
+
+async def get_data(base_url: str, environment_name: str, timeout_seconds: float, upload: Optional[_SnapshotUpload],
+                   **params) -> tuple[GetDataResponse, Optional[_SnapshotUpload]]:
+    """``data/get`` of the environment at ``base_url`` with ``params``, handed ``upload``'s grant when there is one,
+    and what it answered with the upload it answered under: asked again without the grant when it fails under it, as
+    an env that can't reach the store does, a computer whose network is closed say."""
+    if upload is not None:
+        try:
+            return await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), write_namespace=upload.grant,
+                                              **params), upload
+        except RuntimeError as e:
+            logger.info("snapshot_env: %s's data/get failed under the upload grant (%s); asking again without one",
+                        environment_name, e)
+    return await protocol_v1.get_data(base_url, timeout=int(timeout_seconds), **params), None
+
+
+def registered_upload(object_url: str, file_id: str, filename: str, content_type: str, description: str):
+    """A file artifact ``file_id`` over ``object_url``, an object a service uploaded itself, written without
+    downloading it; refused when the store holds no object there."""
+    from agent_env.artifact import FileArtifact
+    from agent_env.artifact.store import get_artifact_store
+
+    if get_config().get_object_store().get_object_metadata_at(object_url) is None:
+        raise FileNotFoundError(f"snapshot bundle not found at {object_url}")
+    get_config().check_object_url(file_id, object_url)
+    return get_artifact_store().put_document(FileArtifact(
+        id=file_id, description=description, filename=filename, content_type=content_type, object_url=object_url))
+
+
+def _card_environments(deployed) -> list[str]:
+    """The environments a deployment without a gateway serves, as the card it recorded names them: its children, or
+    the env itself."""
+    card = deployed.environment_card or {}
+    children = card.get("children_environments")
+    names = [child.get("name") for child in children] if isinstance(children, list) else [card.get("name")]
+    if not all(names):
+        raise RuntimeError(f"Deployed env '{deployed.env_id}' recorded a card naming no environment to snapshot")
+    return names
 
 
 def _changes_route(deployed, override_url: Optional[str]) -> tuple[str, str]:

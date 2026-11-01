@@ -3,7 +3,10 @@ builds an image for each arch this machine's Docker can build, pushed to the loc
 computer, and gate 3 makes the image of this machine's arch ready; that image boots with everything running as the
 session user and passes the conformance probe at full three times in a row; another env that changes only what doesn't
 change the image reuses it; one with no network, deployed, is reached but reaches nothing, takes a file and runs
-code that reaches its driver on loopback, comes back from a reset fresh, and leaves nothing once torn down; and a recording open when the computer resets or is torn down is ended by
+code that reaches its driver on loopback, is snapshotted by snapshot_computer_env, its files under the paths it names
+kept by their paths after its upload under the grant fails, comes back from a reset fresh, takes the snapshot back
+through load_artifact, and leaves nothing once torn down; an open one uploads each file under the snapshot's grant, kept where it was put; and a recording open when the
+computer resets or is torn down is ended by
 the computer and registered whole. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
@@ -19,6 +22,7 @@ from agentenv_protocol.computer.conformance import run_probe
 from agentenv_protocol.computer.conformance.client import Driver
 
 from agent_env.artifact import FileArtifact
+from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -35,6 +39,7 @@ from agent_env.task_step.task_steps.computer_recording import (
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
+from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
 from tst.integration.computer.conftest import docker
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -118,21 +123,55 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
             driver = await Driver.connect(deployed.environment_url, 30)
             egress = await driver.run("python3", "-c", "import urllib.request; urllib.request.urlopen('http://1.1.1.1', timeout=5)")
             await driver.run("sh", "-c", "echo x > Desktop/left.txt")
+            context = await SnapshotComputerEnvTaskStep(id="snapshot", version=None, env_id=closed.id,
+                                                        snapshot_id=f"{closed.id}-snapshot",
+                                                        file_paths=["Desktop", "Downloads/note.txt"]).execute(context)
+            taken = context.metadata["env_snapshotted_universes"]["snapshot"]
+            snapshot = {path: file.load() for path, file in FileArtifactUniverse.get(
+                taken["id"], version=taken["version"]).get_file_artifacts().items()}
             await ResetEnvTaskStep(id="reset", version=None, env_id=closed.id, fail_task_on_error=True).execute(context)
             left = await (await Driver.connect(deployed.environment_url, 30)).run("test", "-e", "Desktop/left.txt")
+            context = await LoadArtifactTaskStep(id="restore", version=None, env_id=closed.id,
+                                                 artifact_from_step_id="snapshot", destination_path=".").execute(context)
+            restored = await (await Driver.connect(deployed.environment_url, 30)).run("cat", "Desktop/left.txt")
         finally:
             report = await teardown_run(context)
     sandbox = deployed.sandbox_id
 
     assert context.metadata["script_results"]["read"] == {"note": "inside\n", "card": "closed"}
+    assert snapshot == {"Desktop/left.txt": b"x\n", "Downloads/note.txt": b"inside\n"}
     assert egress["exit_code"] != 0 and "Network is unreachable" in egress["stderr"], egress
-    assert left["exit_code"] != 0
+    assert left["exit_code"] != 0 and (restored["exit_code"], restored["stdout"]) == (0, "x\n"), restored
     assert [s.sandbox_id for s in report.terminated] == [sandbox] and not report.failed
     for listing in (["ps", "-aq", "--filter", f"label=agentenv.sandbox={sandbox}"],
                     ["ps", "-aq", "--filter", f"name=agent-{sandbox}"],
                     ["network", "ls", "-q", "--filter", f"label=agentenv.sandbox={sandbox}"]):
         assert not docker(*listing).stdout.strip(), listing
     assert LocalSandbox.find_work_dir(sandbox) is None
+
+
+@pytest.mark.asyncio
+async def test_an_open_computer_uploads_each_file_under_the_snapshots_grant_and_it_is_kept_where_it_was_put(desktop):
+    with namespace_routing():
+        deployed = await Env.get(desktop.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            driver = await Driver.connect(deployed.environment_url, 30)
+            await driver.run("sh", "-c", "mkdir -p Documents/reports && printf one > Documents/reports/a.txt "
+                                         "&& printf two > Downloads/b.txt")
+            context = await SnapshotComputerEnvTaskStep(id="snapshot", version=None, env_id=desktop.id,
+                                                        snapshot_id=f"{desktop.id}-snapshot").execute(context)
+            taken = context.metadata["env_snapshotted_universes"]["snapshot"]
+            snapshot = {path: (file.object_url, file.load()) for path, file in FileArtifactUniverse.get(
+                taken["id"], version=taken["version"]).get_file_artifacts().items()}
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+
+    assert not report.failed
+    assert {path: data for path, (_, data) in snapshot.items()} == {"Documents/reports/a.txt": b"one",
+                                                                     "Downloads/b.txt": b"two"}
+    assert all("/agentenv-snapshots/" in url and url.endswith(path) for path, (url, _) in snapshot.items()), snapshot
 
 
 @pytest.mark.asyncio

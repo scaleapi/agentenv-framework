@@ -145,9 +145,10 @@ def test_snapshot_id_falls_back_to_an_adhoc_run_without_instance_id():
 
 
 @pytest.mark.asyncio
-async def test_execute_refuses_an_env_deployed_without_a_gateway():
+async def test_execute_refuses_an_env_deployed_without_a_gateway_or_a_recorded_card():
     bare = DeployedSandboxEnv(env_id="env-1", env_version=3, sandbox_id="srv", instance_id="env-1-abc123")
-    with pytest.raises(RuntimeError, match="Deployed env 'env-1' has no gateway_url and no override was provided"):
+    with pytest.raises(RuntimeError, match="Deployed env 'env-1' has no gateway_url, no recorded card to reach it "
+                                           "through, and no override was provided"):
         await _step(env_id="env-1").execute(_ctx(bare))
 
 @pytest.mark.asyncio
