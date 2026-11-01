@@ -972,12 +972,15 @@ class _Planner:
         of a multi's envs', or a computer's own and each of its apps'. None when they aren't all known."""
         if isinstance(ref.local, BundleEntry):
             cls = get_env_registry().get(ref.local.type)
+            children = self.nodes[_key(ref.local)].references
             if cls is not None and issubclass(cls, MultiEnv):
-                children = self.nodes[_key(ref.local)].references
                 names = {self._environment_name(child, store_latest) for child in children
                          if child.kind is EntityKind.ENV}
             else:
                 names = {self.accepted.get(_key(ref.local), {}).get("environment_name")}
+            if cls is not None and issubclass(cls, ComputerEnv):
+                names |= {self._environment_name(child, store_latest) for child in children
+                          if child.kind is EntityKind.ENV and child.artifact_type == ComputerAppEnv.type}
             return None if None in names else names
         if ref.local is not None or store_latest is None:
             return None

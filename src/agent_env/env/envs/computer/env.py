@@ -113,21 +113,27 @@ class ComputerEnv(Env):
         """Write the computer env an env.toml declares, its base, driver and apps as the bundle wrote them or the ones
         they name, its environment_name the folder's when it sets none. An app's ``install`` is ``"build"``, the
         default: it's built into the computer."""
+        fields = cls.accept_toml(data, ctx)
+        base, driver = ctx.artifact(fields.pop("computer"), ComputerArtifact), ctx.env(fields.pop("driver"),
+                                                                                       ComputerDriverEnv)
+        fields["apps"] = _listed_apps(fields.get("apps", []), ctx)
+        try:
+            return cls.put(id=ctx.id, computer=base, driver=driver, composing=ctx.composing, **fields)
+        except ValueError as e:
+            ctx.refuse([str(e)])
+
+    @classmethod
+    def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
+        """The keys of ``data``, an env.toml, a computer env takes: the ``computer`` and ``driver`` it's composed of,
+        both required, its ``apps``, ``display``, ``network`` and ``computer_settings``, and ``environment_name``, the
+        folder's when it sets none. Raises BundleError listing every problem."""
         fields, refused = ctx.accepted(data, environment_name=str, computer=object, driver=object, apps=list,
                                        display=dict, network=dict, computer_settings=dict)
         missing = [ctx.config_problem(f"{key} is required: the {what}, such as {example}") for key, what, example in (
             ("computer", "base computer", '"ubuntu-24.04"'), ("driver", "driver", '"reference"')) if key not in data]
         if refused or missing:
             ctx.refuse([*refused, *missing])
-        base, driver = ctx.artifact(fields.pop("computer"), ComputerArtifact), ctx.env(fields.pop("driver"),
-                                                                                       ComputerDriverEnv)
-        fields["apps"] = _listed_apps(fields.get("apps", []), ctx)
-        try:
-            return cls.put(id=ctx.id, computer=base, driver=driver,
-                           environment_name=fields.pop("environment_name", ctx.name), composing=ctx.composing,
-                           **fields)
-        except ValueError as e:
-            ctx.refuse([str(e)])
+        return {"environment_name": ctx.name, **fields}
 
     def composed_apps(self) -> list[ComputerAppEnv]:
         """The computer app envs composed into the env's computer, each installed under its prefix."""
