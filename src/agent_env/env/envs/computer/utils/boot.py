@@ -36,6 +36,8 @@ _STATUS_TIMEOUT_S = int(ANSWER_TIMEOUT_S) + 15
 _POLL_S = 0.5
 #: How a setting a record keeps shows a secret's or a generated one's value, which it never holds.
 WITHHELD = "<withheld>"
+#: How many random bytes a computer's control token carries: 256 bits, past guessing.
+CONTROL_TOKEN_BYTES = 32
 
 
 @dataclass
@@ -91,7 +93,7 @@ def recorded_settings(computer: ComputerArtifact, values: dict[str, Any]) -> dic
 def control_token() -> str:
     """A token for one computer's framework-only routes (``CONTROL_TOKEN_ENV``), which agent-env holds and gives no
     agent."""
-    return secrets.token_urlsafe(32)
+    return secrets.token_urlsafe(CONTROL_TOKEN_BYTES)
 
 
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str],

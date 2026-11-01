@@ -10,6 +10,7 @@ from agentenv_protocol import RPC_PATH, WELL_KNOWN_PATH, DataPart, uploaded_file
 from agentenv_protocol.client import GetDataResponse
 
 from agent_env.env import legacy_protocol
+from agent_env.env.env import DeployedSandboxEnv
 
 
 @pytest.mark.asyncio
@@ -143,6 +144,26 @@ def _v1_service(monkeypatch, answer: list, export_state: dict) -> list[str]:
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
     return asked
+
+
+@pytest.mark.asyncio
+async def test_a_childs_state_is_read_with_its_deployments_control_token(monkeypatch):
+    seen, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("authorization")))
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"parts": [
+            {"kind": "data", "data": {"alarms": []}}]}})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    deployed = DeployedSandboxEnv(
+        env_id="desk", env_version=1, sandbox_id="sb-1", environment_card_url=f"http://desk:18765{WELL_KNOWN_PATH}",
+        environment_card={"name": "desk", "capabilities": {"operations": ["data/get"]},
+                          "children_environments": [{"name": "clock", "url": "/svc/clock/agentenv"}]},
+        control_token="t0ken")
+
+    assert await legacy_protocol.service_state(deployed, None, "clock") == {"alarms": []}
+    assert seen == [("/svc/clock/agentenv", "Bearer t0ken")]
 
 
 @pytest.mark.asyncio
