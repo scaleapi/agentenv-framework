@@ -32,6 +32,7 @@ from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
 from .extensions import (
     AGENT_CONFIG_V1,
+    CDP_CONFIG_V1,
     MAX_TRAJECTORY_READ_EVENTS,
     MCP_CONFIG_V1,
     PEER_AGENTS_V1,
@@ -41,6 +42,8 @@ from .extensions import (
     ContextEventsTrajectoryRequest,
     ContextObjectTrajectoryRequest,
     ContextTrajectoryRequest,
+    CdpAddRequest,
+    CdpRemoveRequest,
     ExtensionActivation,
     ExtensionDefinition,
     ImplementationOwner,
@@ -66,6 +69,7 @@ from .tasks.v1 import (
     TaskProgress,
     TaskRequest,
     TaskResult,
+    _TaskFailed,
 )
 from .tasks.v1 import (
     DataPart as TaskDataPart,
@@ -541,6 +545,7 @@ class _SdkServices:
             self.config_model
         )
         self.mcp_servers: dict[str, dict[str, Any]] = {}
+        self.cdp_endpoints: dict[str, dict[str, Any]] = {}
         self.task_trajectories = TaskTrajectories()
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
@@ -616,6 +621,9 @@ class _SdkServices:
             (AGENT_CONFIG_V1.uri, "get"): self.agent_config_get,
             (MCP_CONFIG_V1.uri, "add"): self.mcp_add,
             (MCP_CONFIG_V1.uri, "list"): self.mcp_list,
+            (CDP_CONFIG_V1.uri, "add"): self.cdp_add,
+            (CDP_CONFIG_V1.uri, "list"): self.cdp_list,
+            (CDP_CONFIG_V1.uri, "remove"): self.cdp_remove,
             (PEER_AGENTS_V1.uri, "set"): self.peer_agents_set,
             (PEER_AGENTS_V1.uri, "list"): self.peer_agents_list,
             (SKILL_CONFIG_V1.uri, "list"): self.skill_list,
@@ -720,6 +728,32 @@ class _SdkServices:
                 for name, registration in self.task_mcp_servers().items()
             }
         }
+
+    async def cdp_add(self, request: CdpAddRequest) -> dict[str, Any]:
+        """Adding a name again replaces its endpoint."""
+        self.cdp_endpoints[request.name] = {
+            "http_url": request.http_url,
+            "ws_url": request.ws_url,
+            "headers": dict(request.headers) if request.headers else None,
+            "metadata": dict(request.metadata or {}),
+        }
+        return {"status": "added", "name": request.name}
+
+    async def cdp_list(self) -> dict[str, Any]:
+        """Names and metadata only: an endpoint's URLs can carry its credential, as its headers can."""
+        return {
+            "cdp_endpoints": {
+                name: {
+                    "has_headers": bool(endpoint["headers"]),
+                    "metadata": endpoint["metadata"],
+                }
+                for name, endpoint in self.cdp_endpoints.items()
+            }
+        }
+
+    async def cdp_remove(self, request: CdpRemoveRequest) -> dict[str, Any]:
+        removed = self.cdp_endpoints.pop(request.name, None) is not None
+        return {"status": "removed" if removed else "absent", "name": request.name}
 
     def task_mcp_servers(self) -> dict[str, dict[str, Any]]:
         """The MCP servers a task gets: those registered, and the SDK's peer-agents server when it serves one."""
@@ -1238,16 +1272,22 @@ class _StandardExecutor:
                     ),
                     config=task_config,
                     mcp_servers=self._services.task_mcp_servers(),
+                    cdp_endpoints=self._services.cdp_endpoints,
                     skills=tuple(self._services.skills),
                     metadata=metadata,
                     session_ref=self._services.session_ref_for_context(task.context_id),
                     workspace=self._workspace,
                     trajectory=trajectory,
                 )
-                if self._streaming:
-                    result = await self._run_streaming(request, updater, event_queue)
-                else:
-                    result = await self._handler(request)
+                try:
+                    if self._streaming:
+                        result = await self._run_streaming(request, updater, event_queue)
+                    else:
+                        result = await self._handler(request)
+                except _TaskFailed as failed:
+                    result = TaskResult.failure(
+                        failed.error.code, failed.error.message, error_type=failed.error.error_type
+                    )
                 if not isinstance(result, TaskResult):
                     raise TypeError("agent.run must return TaskResult")
                 if result.session_ref is not None:

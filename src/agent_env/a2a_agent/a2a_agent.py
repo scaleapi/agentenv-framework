@@ -135,6 +135,7 @@ class A2AAgent:
     }
 
     EXT_MCP_CONFIG: ClassVar[str] = "urn:agentenv:mcp-config/v1"
+    EXT_CDP_CONFIG: ClassVar[str] = "urn:agentenv:cdp-config/v1"
     EXT_SKILL_CONFIG: ClassVar[str] = "urn:agentenv:skill-config/v1"
     EXT_TRAJECTORY: ClassVar[str] = "urn:agentenv:trajectory/v1"
     EXT_AGENT_CONFIG: ClassVar[str] = "urn:agentenv:agent-config/v1"

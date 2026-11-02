@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import json
 import logging
 import os
 import tempfile
 import uuid
 from typing import ClassVar, Optional
 
+from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -24,10 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 class EnvOutcomeVerifierTaskStep(TaskStep):
-    """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``, and an
-    ``env_url`` parameter the env's address, which the protocol client takes as it is: like every step, ``verify``
-    runs under ``Task.run``'s grant of each deployed env's control token, so its calls reach the env's framework-only
-    routes as written."""
+    """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``, a
+    ``trajectory`` parameter that prompt's agent trajectory, and an ``env_url`` parameter the env's address, which the
+    protocol client takes as it is: like every step, ``verify`` runs under ``Task.run``'s grant of each deployed env's
+    control token, so its calls reach the env's framework-only routes as written."""
 
     type: ClassVar[str] = "env_outcome_verifier"
     entity_refs = (
@@ -126,6 +128,8 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             keywords = {"env_url": deployed.environment_url} if "env_url" in parameters else {}
             if "run" in parameters:
                 keywords["run"] = await load_run_context(context, self._graded_prompt(context))
+            if "trajectory" in parameters:
+                keywords["trajectory"] = await asyncio.to_thread(_trajectory, self._graded_prompt(context))
             results = await module.verify(deployed.mcp_url, **keywords)
 
             score = aggregate_score(results, self.score_aggregator)
@@ -149,3 +153,13 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
         if prompt_response is None:
             raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         return prompt_response
+
+
+def _trajectory(prompt_response: Optional[PromptResponse]) -> Optional[list]:
+    """The agent's trajectory of ``prompt_response``, one document per turn as the agent stored it, None for a turn it
+    stored none of; None when it stored none at all."""
+    urls = ((prompt_response.target_agent_per_turn_trajectory_object_urls
+             or [prompt_response.agent_trajectory_object_url]) if prompt_response is not None else [])
+    if not any(urls):
+        return None
+    return [json.loads(get_config().get_object_store_at(url).get(url)) if url else None for url in urls]

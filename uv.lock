@@ -46,7 +46,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1411"
+version = "0.9.1417"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -68,6 +68,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "starlette" },
+    { name = "tzdata" },
     { name = "uvicorn" },
 ]
 
@@ -251,6 +252,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'skyrl'", specifier = ">=5" },
     { name = "transformers", marker = "extra == 'trl'", specifier = ">=5.2" },
     { name = "transformers", marker = "extra == 'verl'", specifier = ">=5" },
+    { name = "tzdata", specifier = ">=2024.1" },
     { name = "urllib3", marker = "extra == 'boat'", specifier = ">=2.1.0,<3" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
@@ -259,7 +261,7 @@ provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "aw
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.426"
+version = "0.1.432"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },

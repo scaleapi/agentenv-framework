@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 import os
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
@@ -43,6 +44,7 @@ class FileArtifact(Artifact):
     filename: str = Field(description="Original filename (preserved for reference)")
     content_type: str = Field(description="MIME type of the file")
     object_url: str = Field(alias="s3_url", description="Object-store locator where the file is stored")
+    sha256: str | None = Field(default=None, description="SHA-256 of the bytes it was put with, which load() checks")
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
@@ -91,6 +93,7 @@ class FileArtifact(Artifact):
             filename=filename,
             content_type=content_type,
             object_url=stored_url,
+            sha256=_file_sha256(file_path),
         )
         return store.put_document(instance)
 
@@ -127,6 +130,7 @@ class FileArtifact(Artifact):
             filename=filename,
             content_type=content_type,
             object_url=stored_url,
+            sha256=hashlib.sha256(content).hexdigest(),
         )
         return store.put_document(instance)
 
@@ -173,7 +177,12 @@ class FileArtifact(Artifact):
     def load(self) -> bytes:
         from agent_env.artifact.store import get_artifact_store
 
-        return get_artifact_store().get_object(self.object_url)
+        data = get_artifact_store().get_object(self.object_url)
+        if self.sha256 is not None and hashlib.sha256(data).hexdigest() != self.sha256:
+            raise ValueError(
+                f"{self.object_url} no longer holds the bytes file artifact {self.id} v{self.version} was put with"
+            )
+        return data
 
     def get_file_artifacts(self) -> dict[str, "FileArtifact"]:
         return {self.filename: self}
@@ -208,6 +217,7 @@ class FileArtifact(Artifact):
             filename=filename,
             content_type=content_type,
             object_url=stored_url,
+            sha256=_file_sha256(file_path),
         )
         return artifact_store.put_document(instance)
 
@@ -248,3 +258,8 @@ class FileArtifact(Artifact):
             object_url=object_url,
         )
         return artifact_store.put_document(instance)
+
+
+def _file_sha256(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
