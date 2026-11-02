@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1389"
+version = "0.9.1411"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -55,11 +55,41 @@ dependencies = [
 openenv = [
     "openenv>=0.9",
 ]
+# agent_env.training.harness: TRL's harness rollouts on a bundle's own agents, through OpenEnv's capture proxy (0.10
+# and later). TRL and vLLM are the trainer's to pin.
+harness = [
+    "agentenv-framework[openenv]",
+    "openenv>=0.10",
+]
 # agent_env.training.trl: TRL's trainers on a bundle served as an OpenEnv env. TRL itself is the trainer's to pin.
 trl = [
     "agentenv-framework[openenv]",
     "datasets>=3",
     "transformers>=5.2",  # renders the tools as TRL shows them to a model; 5.2 is what TRL's environment_factory needs
+]
+# agent_env.training.nemo_gym: a bundle served to NeMo Gym as a resources server. rc0 is the version NeMo RL's Gym
+# checkout reports; Gym needs Python 3.13.14 or later. omegaconf builds the config Gym's server client takes when the
+# server runs on its own.
+nemo-gym = [
+    "agentenv-framework[openenv]",
+    "nemo-gym>=0.7.0rc0; python_full_version >= '3.13.14'",
+    "omegaconf>=2.3; python_full_version >= '3.13.14'",
+]
+# agent_env.training.verl: verl's trainers on a bundle served as an OpenEnv env; installed into verl's own environment,
+# whose verl, vLLM and torch are the trainer's to pin. pyarrow writes the parquet rows verl reads; transformers counts a
+# row's prompt with its tools as the model's chat template renders them.
+verl = [
+    "agentenv-framework[openenv]",
+    "pyarrow>=19",
+    "transformers>=5",
+]
+# agent_env.training.skyrl: SkyRL's trainers on a bundle served as an OpenEnv env; installed into SkyRL's own
+# environment, whose SkyRL, skyrl-gym, vLLM and torch are the trainer's to pin. pyarrow writes the parquet rows SkyRL
+# reads; transformers renders a row's tools into its system prompt with the model's chat template.
+skyrl = [
+    "agentenv-framework[openenv]",
+    "pyarrow>=19",
+    "transformers>=5",
 ]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
@@ -104,8 +134,12 @@ boat = [
     "boat-sdk~=1.13.0",  # sandboxes, labels, hosted ports, detached commands and their output stream validated against 1.13
     "urllib3>=2.1.0,<3",  # the SDK's transport, whose errors are what a dropped connection raises
 ]
+# The CoreWeave Sandbox provider, selected as the built-in `coreweave` backend.
+coreweave = [
+    "cwsandbox>=1.19.6,<2",  # Reject exec streams that close without an exit status.
+]
 dev = [
-    "agentenv-framework[aws,boat,boxd,daytona,gcp,openenv,sail,tensorlake,tenki,trl,vercel]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,harness,openenv,sail,skyrl,tensorlake,tenki,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
@@ -130,6 +164,7 @@ agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
 agents = "agent_env"
+browsers = "agent_env"
 computers = "agent_env"
 drivers = "agent_env"
 desktop = "agent_env.examples"
@@ -137,6 +172,7 @@ hello = "agent_env.examples"
 echo-mcp = "agent_env.examples"
 mail-mcp = "agent_env.examples"
 next-env-event = "agent_env.examples"
+advance-to-next-event = "agent_env.examples"
 
 [project.urls]
 Homepage = "https://www.agentenvframework.com"

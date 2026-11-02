@@ -1,10 +1,12 @@
 """What a computer app's own server does in the desktop session, the Linux way: wait for the session, launch the app
-into it, add its menu launcher and list the session's windows. Another OS type brings its own."""
+into it and stop it, add its menu launcher and list the session's windows. Another OS type brings its own."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
+import signal
 from pathlib import Path
 
 #: How often a starting session is looked for.
@@ -30,6 +32,36 @@ async def launch(argv: list[str], cwd: Path, env: dict[str, str]) -> int:
     _running.add(reaped)
     reaped.add_done_callback(_running.discard)
     return process.pid
+
+
+async def stop(pid: int, timeout_s: float) -> None:
+    """End the session ``launch`` started as ``pid``, every process in it: asked to exit, then killed after
+    ``timeout_s``."""
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(_exited(pid), timeout_s)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pid, signal.SIGKILL)
+
+
+def alive(pid: int) -> bool:
+    """Whether a process of the session ``launch`` started as ``pid`` is running, its first or one it started."""
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _exited(pid: int) -> None:
+    while alive(pid):
+        await asyncio.sleep(POLL_S)
 
 
 def add_launcher(name: str, folder: Path) -> Path:

@@ -6,18 +6,20 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import uuid
 from typing import TYPE_CHECKING, Optional
 
-from agentenv_protocol import METHOD_ADD, METHOD_RESET, RPC_PATH, FilePart, client as protocol_v1
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, METHOD_ADD, METHOD_RESET, RPC_PATH, FilePart, client as protocol_v1
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv, gateway_url_of
 from agent_env.env.store import register_env_instance
 from agent_env.store.base import ObjectNotFoundError
+from agent_env.utils.paths import validate_file_name
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from agent_env.artifact import FileArtifact
+    from agent_env.artifact import EnvironmentArtifact, FileArtifact
     from agent_env.env.env import DeployedEnv, Env
     from agent_env.env.envs.mcp_server import MCPServerEnv
     from agent_env.env.envs.website import WebsiteEnv
@@ -100,9 +102,9 @@ async def close_replaced(env: Env) -> None:
             raise
 
 
-async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, file_artifact: FileArtifact) -> None:
-    """Load into a server a plugin's provider deployed, which has no sandbox of ours to stage into: it fetches the file from a
-    signed URL. The server may be a MultiEnv's child, whose record is the MultiEnv's."""
+async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, environment_artifact: EnvironmentArtifact) -> None:
+    """Load into a server a plugin's provider deployed, which has no sandbox of ours to stage into: it fetches each file from
+    a signed URL. The server may be a MultiEnv's child, whose record is the MultiEnv's."""
     from agent_env.config import get_config
     from agent_env.env.gateway.constants import data_plane_load_timeout_s
 
@@ -110,27 +112,60 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, file_artifact: File
     if not env._deployed.environment_card:
         raise RuntimeError(f"{deployed_by}, whose record carries no env card, so '{env.environment_name}' has no data plane to load into")
     base_url = await legacy_protocol.v1_base_url(env._deployed, env._gateway_url, env.environment_name, mcp=True)
-    operations = ((env._deployed.get_child_env_card(env.environment_name) or {}).get("capabilities") or {}).get("operations")
+    operations = protocol_v1.operations(env._deployed.get_child_env_card(env.environment_name) or {})
     if base_url is None:
         raise RuntimeError(f"{deployed_by}, whose card offers '{env.environment_name}' no data plane to load into")
     if operations is not None and (missing := [op for op in LOAD_OPERATIONS if op not in operations]):
         raise RuntimeError(f"{deployed_by}, whose card offers '{env.environment_name}' no {', '.join(missing)} operation to load with")
-    store = get_config().get_object_store_at(file_artifact.object_url)
-    metadata = await asyncio.to_thread(store.get_object_metadata_at, file_artifact.object_url)
-    if metadata is None:
-        raise ObjectNotFoundError(f"No object at {file_artifact.object_url}")
-    timeout = data_plane_load_timeout_s(metadata.size)
+    files = environment_artifact.get_file_artifacts()
+    stores = {path: get_config().get_object_store_at(file.object_url) for path, file in files.items()}
+    size = 0
+    for path, file in files.items():
+        metadata = await asyncio.to_thread(stores[path].get_object_metadata_at, file.object_url)
+        if metadata is None:
+            raise ObjectNotFoundError(f"No object at {file.object_url}")
+        size += metadata.size
+    timeout = data_plane_load_timeout_s(size)
     # Signed before the reset, so a store that can't sign leaves the env's data as it is; it lasts one timeout per call.
-    url = await asyncio.to_thread(store.signed_get_url, file_artifact.object_url, len(LOAD_OPERATIONS) * timeout)
-    if url is None:
-        raise RuntimeError(f"{deployed_by}, so its server fetches {file_artifact.object_url} itself, and {type(store).__name__} "
-                           "can't sign a URL for it; loading into such an env needs an object store that signs URLs (S3, Cloud Storage)")
+    urls = {}
+    for path, file in files.items():
+        urls[path] = await asyncio.to_thread(stores[path].signed_get_url, file.object_url, len(LOAD_OPERATIONS) * timeout)
+        if urls[path] is None:
+            raise RuntimeError(f"{deployed_by}, so its server fetches {file.object_url} itself, and {type(stores[path]).__name__} "
+                               "can't sign a URL for it; loading into such an env needs an object store that signs URLs (S3, Cloud Storage)")
     await protocol_v1.reset_data(base_url, timeout=timeout)
-    await protocol_v1.add_data(base_url, [FilePart(file={
-        "uri": url,
-        "mimeType": file_artifact.content_type,
-        "name": file_artifact.filename,
-    })], timeout=timeout)
+    await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, urls), timeout=timeout)
+
+
+def file_parts(environment_artifact: EnvironmentArtifact, files: dict[str, FileArtifact], uris: dict[str, str]) -> list[FilePart]:
+    """The parts ``data/add`` takes ``environment_artifact``'s ``files`` as, each fetched from its uri in ``uris``: one file
+    as the one part it has always been sent as, each of several with its path in the data-objects marker."""
+    by_path = environment_artifact.file_artifact_refs is not None
+    return [FilePart(file={"uri": uris[path], "mimeType": file.content_type, "name": file.filename},
+                     **({"metadata": {DATA_OBJECTS_EXTENSION_URI: {"path": path}}} if by_path else {}))
+            for path, file in files.items()]
+
+
+def staged_paths(environment_artifact: EnvironmentArtifact, files: dict[str, FileArtifact]) -> tuple[Optional[str], dict[str, str]]:
+    """Where a load stages each of ``files`` in the server's data folder, by path, and the folder of the load's own that
+    holds them, which the load removes after it: one file at its filename, a plain name, as it always has been, with no
+    folder; several each at its path inside a new folder, so no earlier load's files are in their way."""
+    if environment_artifact.file_artifact_refs is None:
+        filename = next(iter(files))
+        validate_file_name(filename)
+        return None, {filename: filename}
+    folder = f".agentenv-load-{uuid.uuid4().hex[:8]}"
+    return folder, {path: f"{folder}/{path}" for path in files}
+
+
+def legacy_load_file(env: MCPServerEnv | WebsiteEnv, environment_artifact: EnvironmentArtifact) -> FileArtifact:
+    """The file a server's pre-v1 load takes, which is one; refused for an environment artifact holding several."""
+    if environment_artifact.file_artifact_refs is not None:
+        raise RuntimeError(f"'{env.environment_name}' takes one file through its pre-v1 load, and environment artifact "
+                           f"'{environment_artifact.id}' holds {len(environment_artifact.file_artifact_refs)}")
+    file = environment_artifact.get_file_artifact()
+    validate_file_name(file.filename)
+    return file
 
 
 async def close_deployed(deployed: DeployedEnv, env_class: type[Env]) -> None:

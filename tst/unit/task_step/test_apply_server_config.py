@@ -88,14 +88,14 @@ class _MockGateway:
         self.get_calls: list[str] = []
         self.post_calls: list[tuple[str, dict]] = []
 
-    async def get(self, url, *, timeout=None, params=None):
+    async def get(self, url, *, timeout=None, params=None, headers=None):
         self.get_calls.append(url)
         for service, card in self.cards.items():
             if f"/svc/mcp-{service}/.well-known/agent-env.json" in url:
                 return _resp(200, url, card)
         return _resp(404, url, {"error": "no card"})
 
-    async def request(self, method, url, *, json=None, timeout=None):
+    async def request(self, method, url, *, json=None, timeout=None, headers=None):
         self.post_calls.append((url, json))
         return _resp(200, url, {"ok": True, "echo": json})
 
@@ -269,7 +269,7 @@ async def test_tolerate_unadvertised_still_fails_on_rejected_args():
     # fails loud — that's the fail-loud-on-unknown-persona contract.
     gw = _MockGateway({"slack": _card(_ext(_SET_ACTING_USER_URI, "/agentenv/ext/set_acting_user"))})
 
-    async def rejecting_request(method, url, *, json=None, timeout=None):
+    async def rejecting_request(method, url, *, json=None, timeout=None, headers=None):
         gw.post_calls.append((url, json))
         return _resp(500, url, {"error": "user_not_found: nobody@x.com"})
 
@@ -452,7 +452,7 @@ async def test_non_404_card_fetch_still_raises_under_tolerate():
     # endpoint that errors (500) is a real fault and must still fail loud.
     gw = _MockGateway({})
 
-    async def failing_get(url, *, timeout=None, params=None):
+    async def failing_get(url, *, timeout=None, params=None, headers=None):
         gw.get_calls.append(url)
         return _resp(500, url, {"error": "boom"})
 
@@ -472,7 +472,7 @@ async def test_non_404_card_fetch_still_raises_under_tolerate():
 async def test_server_rejects_args_raises_with_status():
     gw = _MockGateway({"slack": _card(_ext(_SET_ERRORS_URI, "/agentenv/ext/set_errors"))})
 
-    async def rejecting_request(method, url, *, json=None, timeout=None):
+    async def rejecting_request(method, url, *, json=None, timeout=None, headers=None):
         gw.post_calls.append((url, json))
         return _resp(400, url, {"error": "error_rate must be between 0.0 and 1.0"})
 

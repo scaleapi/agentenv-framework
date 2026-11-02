@@ -1,18 +1,24 @@
 """ComputerDriverEnvironment: a driver writes screen operations, and the base class serves the computer contract
-from them: the tools agents call, the framework extensions agentenv calls, the data plane and the card."""
+from them: the tools agents call, the framework extensions agentenv calls, the data plane and the card, which lists the
+computer's apps as child environments, each reached at ``/svc/<name>/`` through the driver."""
 from __future__ import annotations
 
 import asyncio
 from typing import Any, Callable, ClassVar
 
+import httpx
 from pydantic import BaseModel, ConfigDict
+from starlette.requests import Request
+from starlette.responses import Response
 
-from ..agent_env_environment import _CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication, environment_card
+from ..agent_env_environment import (_CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
+                                     _error_response, control_guard, environment_card)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
-from . import card, linux
+from . import _linux, apps, card
 from .checks import check_features, check_names
 from .dataplane import DataPlane
+from .errors import DeliveryFailed, TargetUnavailable
 from .extensions import Extensions
 from .operations import ReadyCheck, check_class, default_for
 from .platform import Platform, detect
@@ -118,11 +124,32 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
 
     def create_app(self) -> Any:
         self._computer_require_init()
-        return super().create_app()
+        return self._computer_front_apps(super().create_app())
 
     def mount(self, app: Any) -> Any:
         self._computer_require_init()
-        return super().mount(app)
+        return self._computer_front_apps(super().mount(app))
+
+    async def children_environments(self) -> list[EnvironmentCard] | None:
+        """The computer's apps, from the folders it composed them into."""
+        return await apps.children(self._computer.apps) if self._computer.apps else None
+
+    def _computer_front_apps(self, app: Any) -> Any:
+        app.custom_route("/svc/{name}/{path:path}", methods=["GET", "POST"])(control_guard()(self._computer_forward))
+        return app
+
+    async def _computer_forward(self, request: Request) -> Response:
+        """A request under ``/svc/<name>/``, sent on to the app named so: its own server answers it."""
+        name = request.path_params["name"]
+        folder = next((folder for folder in self._computer.apps if folder.name == name), None)
+        if folder is None:
+            return _error_response(TargetUnavailable(f"this computer has no app named {name!r}"))
+        try:
+            answer = await apps.forward(folder, request.method, request.path_params["path"], request.url.query,
+                                        await request.body(), request.headers.get("content-type"))
+        except (httpx.HTTPError, OSError) as e:
+            return _error_response(DeliveryFailed(f"app {name}'s server isn't answering: {type(e).__name__}: {e}"))
+        return Response(answer.content, status_code=answer.status_code, media_type=answer.headers.get("content-type"))
 
     # The card: what the driver's operations support.
 
@@ -149,11 +176,11 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
 
     @default_for("run_in_session", os="linux")
     async def _computer_linux_run_in_session(self, argv: list, cwd: str | None, env: dict | None, timeout_s: float):
-        return await linux.run_in_session(argv, cwd, env, timeout_s, output_bytes=self.settings.exec_output_bytes)
+        return await _linux.run_in_session(argv, cwd, env, timeout_s, output_bytes=self.settings.exec_output_bytes)
 
     @default_for("write_files", os="linux")
     async def _computer_linux_write_files(self, files: dict) -> None:
-        await asyncio.to_thread(linux.write_files, files)
+        await asyncio.to_thread(_linux.write_files, files)
 
 
 def computer_driver(name: str | None = None, *, supports: list | None = None) -> Callable:

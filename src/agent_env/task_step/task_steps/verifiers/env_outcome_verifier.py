@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 class EnvOutcomeVerifierTaskStep(TaskStep):
     """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``Run`` of ``prompt_id``, and an
-    ``env_url`` parameter the env's address, which the protocol client takes as it is."""
+    ``env_url`` parameter the env's address, which the protocol client takes as it is: like every step, ``verify``
+    runs under ``Task.run``'s grant of each deployed env's control token, so its calls reach the env's framework-only
+    routes as written."""
 
     type: ClassVar[str] = "env_outcome_verifier"
     entity_refs = (

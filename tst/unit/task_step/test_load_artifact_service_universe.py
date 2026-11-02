@@ -25,6 +25,7 @@ from agent_env.artifact.artifacts.environment_universe import EnvironmentUnivers
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import load_artifact as load_artifact_mod
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
@@ -206,10 +207,11 @@ class _FakeProvider:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("env_class, problems", [
-    (ComputerEnv, ["load_artifact 'load': computer env 'desk' loads no environment_universe artifacts, so not "
-                   f"'{UNIVERSE_ID}'"]),
+    (ServiceDBEnv, ["load_artifact 'load': service_db env 'desk' loads no environment_universe artifacts, so not "
+                    f"'{UNIVERSE_ID}'"]),
+    (ComputerEnv, []),
     (MCPServerEnv, []),
-], ids=["computer", "mcp-server"])
+], ids=["service-db", "computer", "mcp-server"])
 async def test_an_env_whose_type_loads_no_environment_artifacts_is_refused_at_save_and_at_run(universe, monkeypatch,
                                                                                              env_class, problems):
     env = env_class.__new__(env_class)

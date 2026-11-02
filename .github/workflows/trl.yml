@@ -1,9 +1,10 @@
 name: TRL contract
 
-# One GRPOTrainer step on CPU through agent_env.training.trl (tst/trl), against TRL 1.16 and the latest. TRL marks
-# environment_factory experimental, so a release can break the helper with nothing else in CI noticing. TRL 1.15 can't
-# train on CPU (its log-prob path is a Triton GPU kernel), so 1.16 is the oldest this job can run. It runs on pull requests that touch the helper, the OpenEnv server it trains against or the tier, weekly,
-# and on demand; it isn't a required check.
+# One GRPOTrainer step on CPU through agent_env.training.trl (tst/trl), against TRL 1.16 and the latest, and on
+# transformers 5.17, the newest Unsloth's GRPOTrainer allows. TRL marks environment_factory experimental, so a release
+# can break the helper with nothing else in CI noticing. TRL 1.15 can't train on CPU (its log-prob path is a Triton GPU
+# kernel), so 1.16 is the oldest this job can run, though Unsloth caps TRL at 1.15. It runs on pull requests that touch
+# the helper, the OpenEnv server it trains against or the tier, weekly, and on demand; it isn't a required check.
 
 on:
   pull_request:
@@ -31,13 +32,17 @@ env:
 
 jobs:
   grpo:
-    name: grpo (${{ matrix.trl }})
+    name: grpo (${{ matrix.trl }}${{ matrix.transformers && format(', {0}', matrix.transformers) || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        trl: ["trl==1.16.*", "trl"]
+        include:
+          - trl: "trl==1.16.*"
+          - trl: "trl"
+          - trl: "trl==1.16.*"
+            transformers: "transformers==5.17.*"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -47,7 +52,7 @@ jobs:
         run: |
           python -m pip install --quiet -r .github/ci-requirements.txt
           uv sync --locked --extra dev --python "$(command -v python)"
-          uv pip install --python .venv/bin/python --torch-backend cpu torch "${{ matrix.trl }}"
+          uv pip install --python .venv/bin/python --torch-backend cpu torch "${{ matrix.trl }}" ${{ matrix.transformers }}
           .venv/bin/python -c "import torch, transformers, trl; print('trl', trl.__version__, 'transformers', transformers.__version__, 'torch', torch.__version__)"
       - name: TRL contract tier
         run: .venv/bin/python -m pytest tst/trl -rA --timeout=900 --junitxml=junit-trl.xml

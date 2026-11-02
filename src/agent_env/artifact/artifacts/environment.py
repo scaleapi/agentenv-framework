@@ -1,9 +1,10 @@
-"""Environment artifact for wrapping a FileArtifact with environment identity."""
+"""Environment artifact: the files of the environment it seeds, by path, with its name."""
 
 from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from pydantic import ConfigDict, Field, model_serializer
@@ -11,8 +12,10 @@ from pydantic import ConfigDict, Field, model_serializer
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.ref import ArtifactRef
+from agent_env.entity.export import Unwritable
 from agent_env.entity.refs import EntityRef
-from agent_env.store.ids import derive_id
+from agent_env.store.ids import derive_id, derive_path_id
+from agent_env.utils.paths import validate_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +36,14 @@ class SeedsEnvironments(ABC):
 
 
 class EnvironmentArtifact(Artifact, SeedsEnvironments):
-    """A FileArtifact wrapped with the name of the environment it seeds."""
+    """The files of the environment it seeds, by path, with its name: one wrapped FileArtifact, as every environment
+    artifact was before it could hold several, or ``file_artifact_refs`` when it holds several or one inside a folder."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     # An artifact.toml names the environment and either the artifact to wrap (file) or nothing, to wrap the folder's
-    # one file, whose description it may set. The stored document's own names for these aren't taken.
+    # one file, whose description it may set, or keep its several. The stored document's own names for these aren't
+    # taken.
     toml_keys: ClassVar[dict[str, type]] = {"environment_name": str, "file": object, "description": str}
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("file", artifact_type="file"),)
     toml_stored_names: ClassVar[dict[str, str]] = {"service_name": "environment_name", "file_artifact_id": "file",
@@ -56,6 +61,11 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         alias="file_artifact_id",
         description="Legacy unpinned wrapped-FileArtifact id",
     )
+    file_artifact_refs: Optional[dict[str, ArtifactRef]] = Field(
+        default=None,
+        description="Pinned (id, version) refs to the environment's FileArtifacts by path, in place of "
+                    "file_artifact_ref when it has several, or one inside a folder",
+    )
 
     # No return annotation: pydantic builds the serialization schema from one, and a dict drops the fields.
     @model_serializer(mode="wrap")
@@ -65,8 +75,12 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         data = handler(self)
         if "legacy_file_artifact_id" in data:
             data["file_artifact_id"] = data.pop("legacy_file_artifact_id")
-        if self.file_artifact_ref is not None:  # new doc
+        if self.file_artifact_ref is not None or self.file_artifact_refs is not None:  # new doc
             data.pop("file_artifact_id", None)
+        if self.file_artifact_refs is None:
+            data.pop("file_artifact_refs", None)
+        else:
+            data.pop("file_artifact_ref", None)
         # Dual-write. Sourced from the attribute, not from `data`,
         # because `alias=` emits exactly one spelling and which one depends on the
         # caller's `by_alias` — the store persists with by_alias=True
@@ -81,16 +95,30 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         id: str,
         *,
         environment_name: Optional[str] = None,
-        file_artifact: FileArtifact,
+        file_artifact: Optional[FileArtifact] = None,
+        file_artifacts: Optional[dict[str, FileArtifact]] = None,
     ) -> EnvironmentArtifact:
+        """Write the environment of ``environment_name`` over ``file_artifact``, or ``file_artifacts`` by path. One file
+        whose path is its filename is written as ``file_artifact``, the document every environment artifact had."""
         from agent_env.artifact.store import get_artifact_store
 
         if not environment_name:
             raise ValueError("environment_name cannot be empty")
+        if (file_artifact is None) == (file_artifacts is None):
+            raise ValueError("an environment artifact holds a file_artifact or file_artifacts, one of the two")
+        if file_artifacts is not None:
+            if not file_artifacts:
+                raise ValueError("file_artifacts can't be empty")
+            for path in file_artifacts:
+                validate_file_path(path)
+            if len(file_artifacts) == 1 and (path := next(iter(file_artifacts))) == file_artifacts[path].filename:
+                file_artifact, file_artifacts = file_artifacts[path], None
         instance = cls(
             id=id,
             environment_name=environment_name,
-            file_artifact_ref=file_artifact.as_ref(),
+            file_artifact_ref=file_artifact.as_ref() if file_artifact is not None else None,
+            file_artifact_refs=({path: file.as_ref() for path, file in file_artifacts.items()}
+                                if file_artifacts is not None else None),
         )
         return get_artifact_store().put_document(instance)
 
@@ -102,19 +130,34 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
     @classmethod
     def from_toml(cls, data: dict, ctx: AuthoringContext) -> EnvironmentArtifact:
         """Write the environment authored as ``data`` (its artifact.toml, with ``file`` resolved to a file artifact's
-        id) under ``ctx.id`` and return it: over the artifact ``file`` names, or over the folder's one file, written
-        as ``<id>__file`` with ``description`` defaulting to its name."""
+        id) under ``ctx.id`` and return it: over the artifact ``file`` names; over the folder's one file, written as
+        ``<id>__file`` with ``description`` defaulting to its name; or over its several files by path, each written
+        under the id a file universe's is (``derive_path_id``)."""
         fields = cls.accept_toml(data, ctx)
         if "file" in fields:
             file = ctx.artifact(fields["file"], FileArtifact)
-        else:
+        elif len(files := ctx.files()) == 1:
             filename, path = ctx.file()
             file = FileArtifact.put_attempt(cls.derived_file_id(ctx.id), file_path=str(path), filename=filename,
                                             description=fields.get("description", filename))
+        else:
+            return cls.put(ctx.id, environment_name=fields["environment_name"], file_artifacts={
+                path: FileArtifact.put_attempt(derive_path_id(ctx.id, path), file_path=str(local),
+                                               filename=PurePosixPath(path).name, description=path)
+                for path, local in files.items()})
         return cls.put(ctx.id, environment_name=fields["environment_name"], file_artifact=file)
 
     def to_toml(self, out: ExportContext) -> dict:
-        """The artifact.toml of a folder holding the environment's file, which ``from_toml`` reads back as this."""
+        """The artifact.toml of a folder holding the environment's files at their paths, which ``from_toml`` reads back
+        as this. One file kept at a path other than its filename is refused: a folder's one file reads back at its
+        filename."""
+        if self.file_artifact_refs is not None:
+            if len(self.file_artifact_refs) == 1:
+                raise Unwritable(f"its one file is kept at {next(iter(self.file_artifact_refs))!r}, not at its filename, "
+                                 "and a folder's one file reads back kept at its filename")
+            for path, file in self.get_file_artifacts().items():
+                out.file(path, file.object_url)
+            return {"type": self.type, "environment_name": self.environment_name}
         file = self.get_file_artifact()
         out.file(file.filename, file.object_url)
         described = {} if file.description == file.filename else {"description": file.description}
@@ -122,7 +165,7 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
-        """The keys of ``data``, an artifact.toml, an environment takes, and its folder: its one file, or only
+        """The keys of ``data``, an artifact.toml, an environment takes, and its folder: its files, or only
         artifact.toml when ``file`` names the artifact to wrap. Raises BundleError listing every problem."""
         problems = []
         if (files := ctx.try_files(empty_ok=True)) is not None:  # None when the plan's walk reports why
@@ -130,13 +173,13 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
                 if files:
                     problems.append(f"its file is the artifact file names, so the folder holds only artifact.toml, and "
                                     f"it also has {', '.join(repr(name) for name in files)}; give the file an artifact "
-                                    "folder of its own, or leave out file to wrap the folder's one file")
+                                    "folder of its own, or leave out file to keep the folder's files")
             elif not files:
                 problems.append(ctx.no_files("file for the environment to wrap",
-                                             "put its one file here, or name the artifact to wrap with file"))
-            elif problem := ctx.not_one_file(files, "name the artifact to wrap with file, or give each other file an "
-                                                    "artifact folder of its own"):
-                problems.append(problem)
+                                             "put its files here, or name the artifact to wrap with file"))
+            elif "description" in data and len(files) > 1:
+                problems.append(ctx.config_problem(f"description describes the folder's one file, and it holds "
+                                                   f"{', '.join(repr(name) for name in files)}; drop description"))
         data, renamed = ctx.renamed(data, cls.toml_stored_names)
         problems += renamed
         fields, more = ctx.accepted(data, **cls.toml_keys)
@@ -158,7 +201,19 @@ class EnvironmentArtifact(Artifact, SeedsEnvironments):
         name = ctx.entry.config.get("environment_name") if isinstance(ctx.entry.config, dict) else None
         return (("", name),) if isinstance(name, str) and name else ()
 
+    def get_file_artifacts(self) -> dict[str, FileArtifact]:
+        """The environment's files by path: ``{filename: file}`` for the one file it wraps."""
+        if self.file_artifact_refs is not None:
+            return {path: FileArtifact.get(ref.id, version=ref.version) for path, ref in self.file_artifact_refs.items()}
+        file = self.get_file_artifact()
+        return {file.filename: file}
+
     def get_file_artifact(self) -> FileArtifact:
+        """The one file the environment wraps; refused for one that holds several, whose files
+        ``get_file_artifacts`` reads."""
+        if self.file_artifact_refs is not None:
+            raise ValueError(f"EnvironmentArtifact {self.id} v{self.version} holds {len(self.file_artifact_refs)} files "
+                             f"by path, not one; read them with get_file_artifacts()")
         if self.file_artifact_ref is not None:
             return FileArtifact.get(
                 self.file_artifact_ref.id, version=self.file_artifact_ref.version

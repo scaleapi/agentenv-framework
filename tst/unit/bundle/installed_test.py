@@ -127,8 +127,8 @@ def test_the_plugin_report_counts_the_bundles_agent_env_ships(monkeypatch, quiet
     assert result.exit_code == 0, result.output
     (core,) = json.loads(result.stdout)["plugins"]
     assert [(c["group"], c["name"], c["status"]) for c in core["contributions"]] == [
-        (BUNDLES, "agents", "active"), (BUNDLES, "computers", "active"), (BUNDLES, "desktop", "active"),
-        (BUNDLES, "drivers", "active"),
+        (BUNDLES, "advance-to-next-event", "active"), (BUNDLES, "agents", "active"), (BUNDLES, "browsers", "active"),
+        (BUNDLES, "computers", "active"), (BUNDLES, "desktop", "active"), (BUNDLES, "drivers", "active"),
         (BUNDLES, "echo-mcp", "active"), (BUNDLES, "hello", "active"), (BUNDLES, "mail-mcp", "active"),
         (BUNDLES, "next-env-event", "active")]
     assert "\n  agent-env itself\n" in shown and "requires:" not in shown
@@ -281,11 +281,11 @@ def test_the_cli_says_so_when_no_bundles_are_installed_and_needs_a_bundle_for_it
 
     assert CliRunner().invoke(cli, ["run"]).output == "No bundles are installed. agent-env run PATH runs a folder.\n"
     for option in (["--task", "t"], ["--keep"], ["--dry-run"], ["--user-model", "m"], ["--judge-model", "m"],
-                   ["--agent", "pi"]):
+                   ["--agent", "pi"], ["--no-emulate"]):
         usage = CliRunner().invoke(cli, ["run", *option])
         assert usage.exit_code == 2
-        assert ("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep and --dry-run need a "
-                "BUNDLE to run") in " ".join(usage.output.split())
+        assert ("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep, --dry-run and "
+                "--no-emulate need a BUNDLE to run") in " ".join(usage.output.split())
 
 
 def test_the_cli_runs_an_installed_bundle_by_name_with_ids_rooted_at_its_package(site, monkeypatch, quiet_logs,

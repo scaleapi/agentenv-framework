@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_env.artifact import FileArtifact
+from agent_env.env.env import DeployedEnv
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep, ScoreAggregator
 from tst.unit.event_loop_probe import on_event_loop
@@ -77,7 +78,7 @@ def test_the_verifier_script_is_read_off_the_event_loop(monkeypatch):
     monkeypatch.setattr(FileArtifact, "get", staticmethod(lambda id, version=None: SimpleNamespace(load=load)))
     step = EnvOutcomeVerifierTaskStep(id="outcome", version=None, env_id="e", file_artifact_id="script", verifier_id="v")
     ctx = TaskStepContext()
-    ctx.deployed_envs.append(SimpleNamespace(env_id="e", mcp_url="http://mcp"))
+    ctx.deployed_envs.append(DeployedEnv(env_id="e", env_version=1, mcp_url="http://mcp"))
 
     asyncio.run(step.execute(ctx))
 

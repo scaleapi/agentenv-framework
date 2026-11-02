@@ -227,6 +227,23 @@ async def display_get(self) -> dict: ...
 async def display_set(self, width: int, height: int) -> dict: ...
 ```
 
+### Framework-only routes and the control token
+
+Everything an environment serves but its MCP endpoint and its card is agent-env's own: the data
+plane, every `@extension` route and the tool-access routes. When agent-env deploys an environment
+that takes one, it boots it with a per-deploy token in `AGENTENV_CONTROL_TOKEN`
+(`CONTROL_TOKEN_ENV`), and the SDK then refuses a call to those routes that doesn't carry it as
+`Authorization: Bearer <token>`, answering 401 with the code `unauthorized` before the route runs.
+The MCP endpoint and the card stay open, so an agent reaches the environment's tools as before and
+nothing else. Without the variable, as when the environment runs on its own, every route is open.
+`control_guard()` wraps a route an environment adds itself the same way, as a computer driver does
+its `/svc/<app>/` routes.
+
+On the client side each call takes `headers`, and `client.control_headers(token)` builds them.
+Code that names none runs under `client.authorized({env_url: client.control_headers(token)})`:
+within it, a call to an address under `env_url` sends those headers. agent-env runs every task
+step, a verifier's `verify` included, under such a grant for each environment it deployed.
+
 ### Tool access without a gateway
 
 An environment agents reach directly, with no gateway in front, can enforce per-role tool access
@@ -505,8 +522,8 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
   `data/get` returns the files under the `paths` it's given, relative to the home, or under the
   card's `default_data_paths` (`Desktop`, `Documents`, `Downloads`) when it's given none, inline or
-  uploaded under a `write_namespace` grant. An environment whose `@get_data` hook takes no `paths`
-  refuses them.
+  uploaded under a `write_namespace` grant, leaving out the paths its apps keep their data in. An
+  environment whose `@get_data` hook takes no `paths` refuses them.
 - **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
   access (`tool_access` is on).
 
@@ -588,7 +605,10 @@ report = await run_probe("http://localhost:18765", "full")   # a ProbeReport
 failed = [c for c in report.checks if c.status == "failed"]
 ```
 
-The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach the driver.
+The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach the driver. A
+driver booted with a control token is probed with it: `--token`, by default
+`$AGENTENV_CONTROL_TOKEN`, or `run_probe(..., token=...)`. Given one, the probe also checks that
+`computer-ready`'s status refuses a call without it and with a wrong one.
 
 | Level | Checks | Needs on the computer |
 |---|---|---|
@@ -615,37 +635,77 @@ server, which needs the `app` extra (below).
 
 ```python
 from pydantic import BaseModel, SecretStr
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Linux, Service, computer_app
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Packages, Service, computer_app,
+                                        install_step, linux)
+
+class LinuxSettings(BaseModel):
+    font: str = "DejaVu Sans"
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+@linux(packages=Packages(apt=["thunderbird"]), python="requirements.txt",
+       services=[Service(name="imap", command="venv/bin/python imap.py")],
+       launch=Launch(command=["thunderbird"], window={"class": "thunderbird"}), settings=LinuxSettings)
 class MailApp(ComputerAppEnvironment):
-    linux = Linux(python="requirements.txt", services=[Service(name="imap", command="venv/bin/python imap.py")])
-    launch = Launch(command=["thunderbird"], window={"class": "thunderbird"})
     skill = "skill.md"
 
     class Settings(BaseModel):
         signature: str = ""
         password: SecretStr = SecretStr("")
+
+    class BuildSettings(BaseModel):
+        locale: str = "en_US"
+
+    @install_step(scope="session")
+    def profile(self) -> None: ...
 ```
 
 - **`@computer_app`** names the platforms the app supports, as a driver names them, and the
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
-  (`environment_name`) and the `computer` and `driver` it deploys alone on.
-- **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
-  copied under its prefix, which holds the class's file; `python`, a requirements file there,
-  installed into the venv every app gets beside them; `services`, programs the computer's init runs
-  from the prefix as the session user.
-- **`launch = Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
+  (`environment_name`), the `computer` and `driver` it deploys alone on, and `build_settings`, its
+  build settings' values (`build_settings = { locale = "fr_FR" }`).
+- **`@linux(...)`** is how a Linux computer installs it, `Linux`'s fields: `files`, a folder of the app's
+  copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
+  (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
+  installed into the venv every app gets beside them; `sources`, extra apt repositories
+  (`AptSource`, with a key file in the folder); `downloads`, files fetched by URL and checked by
+  sha256 (`Download`); `run`, scripts of the folder run as root or the session user (`RunScript`);
+  `services`, programs the computer's init runs from the prefix as the session user; and `ports`,
+  those it listens on. Packages, requirements and downloads are resolved and fetched once, when the
+  computer env is put, and every build installs only those stored files, with the network closed.
+  Each value is checked as the class is defined: a URL, a sha256, a path that stays in the folder.
+  Installs are exact: apt installs each package without its recommends, and the venv gets exactly
+  the wheels resolved for it (`pip install --no-deps`). A requirements file lists everything itself,
+  since its lock covers that file alone: a line including another file (`-r`, `-c`), an editable
+  install (`-e`), a local path or a local folder of wheels is refused at put.
+- **Each OS has its own decorator,** and what differs by OS goes in it: `launch=` always; and
+  optionally `skill=`, a file used instead of the class's, and `settings=` and `build_settings=`,
+  models whose fields add to the class's `Settings` and `BuildSettings` on that OS. What's on the
+  class applies to every OS. `@install(os_type, spec, launch=..., ...)` is the generic form, for an
+  OS type a plugin adds, with that OS type's own install model as `spec`; `@linux(...)` is
+  `@install("linux", Linux(...), ...)`. On the computer the class reads what's declared for the OS
+  it runs on (`platform.detect()`).
+- **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title, a port answering on
   loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
-  app.
-- **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
-  its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
+  app, after its run scripts, offline and without the class's `__init__`. Each runs on every OS the
+  app installs on, or on those its `os=` names (`@install_step(os="linux")`, `@ready_check(os=[...])`);
+  naming one the app declares no install for is refused when the class is read. A step reads
+  `self.build_settings`; a deploy's `self.settings` aren't known at build, and reading one raises
+  `AttributeError` (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
+- **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both.
+- **Its data** is under the `paths` its OS's decorator names, relative to the session user's home,
+  none inside another (`@linux(..., paths=["Mail", ".config/mail/accounts.json"])`), or what its own
+  `@add_data`, `@get_data` and `@reset_data` hooks serve instead (below).
 - **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
   in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
   its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+- **`BuildSettings`** is typed too: values the app's env fixes in its computer's image, which only
+  another image changes, so a deploy can't give one. The composer writes them to
+  `.agentenv/build_settings.json` in the app's folder, and the base class reads them, over the
+  defaults, as `self.build_settings`, in its install steps and on the computer alike. None is a
+  secret, since the image keeps them; `declaration()` refuses a `SecretStr` one.
 
 On a computer each app is its own server: `python -m agentenv_protocol.computer.serve_app
 <file>:<Class>`, a program the computer's init runs from the app's folder in the app's venv, which
@@ -662,6 +722,18 @@ the app, and launches a `boot` app, once per boot. The driver finds each app by 
 folder: the computer is ready once every app's server answers and each `boot` app, and each app with
 no launch, says it's ready; a `demand` app counts once something launches it. What the server does
 in the session (`agentenv_protocol.computer.session`) is Linux's.
+
+The server serves the app's data plane and its skill. With `paths` alone, `data/add` writes the files
+it's given under them and refuses any other path, or one a link leads out of them; `data/get`
+returns the files there, a file tree; and `data/reset` puts them back as the server found them when
+it first started on this boot, which is the app as installed. Hooks serve what they mark instead.
+A hook's `data/add` parts come as they were sent, inline or as a read grant, and
+`part_bytes(part)` returns a part's bytes either way. Either way the base class takes data calls and
+launches one at a time, runs a load and a reset with the app stopped and relaunches it after,
+follows a failed load with a reset, and fails a call that runs past `data_timeout_s` (300 s); a sync
+hook runs in a thread, which the reset and relaunch after it wait for. The driver fronts its apps:
+its card lists each one's card as a child environment, rooted at `/svc/<app>/`, where it forwards
+requests to the app's server.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
@@ -933,6 +1005,23 @@ from agentenv_protocol.a2a_agent import AgentConfig, WriteOnly
 
 class MyAgentConfig(AgentConfig):
     provider_token: WriteOnly[str | None] = None
+```
+
+An agent that can turn its own tools off, such as its shell, file or web tools, takes `builtin_tools`, typed
+`BuiltinTools` over a `Literal` of its tools' names, so its card's schema names them. A task selects them on
+`deploy_agent`: `{"disable": "*"}` turns them all off, `{"disable": [...]}` the ones named, and `{"only": [...]}` keeps
+the ones named; the agent applies `request.config.builtin_tools` to its runtime. The MCP tools AgentEnv gives it are not
+its own and stay. A selection for an agent whose config has
+no `builtin_tools`, or that names a tool its schema doesn't, is refused before the deploy sends it anything.
+
+```python
+from typing import Literal
+
+from agentenv_protocol.a2a_agent import AgentConfig, BuiltinTools
+
+
+class MyAgentConfig(AgentConfig):
+    builtin_tools: BuiltinTools[Literal["shell", "read_file", "web_fetch"]] | None = None
 ```
 
 `output_format` is author-owned in v1 rather than a field on the base

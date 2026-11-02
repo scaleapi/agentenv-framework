@@ -1,4 +1,5 @@
-"""`container_name` is VmSandbox-only, so `LoadArtifactTaskStep(agent_name=...)` must resolve the staging container by subtype, not by `sandbox.mode`."""
+"""`container_name` is VmSandbox-only, so `LoadArtifactTaskStep(agent_name=...)` must resolve the staging container by subtype, not by `sandbox.mode`.
+An environment of several files is staged file by file at their paths, by the same subtype."""
 
 from __future__ import annotations
 
@@ -7,6 +8,8 @@ import pytest
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
+from agent_env.artifact.ref import ArtifactRef
+from agent_env.providers.sandbox_providers import sandbox as sandbox_mod
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SANDBOX_MODE_VM
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
@@ -164,3 +167,29 @@ async def test_plain_vm_agent_gets_the_default_container_name_the_one_it_was_ins
 
     assert staged[0]["container"] == expected
     assert staged[0]["destination"] == "/app/files"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sandbox, container, on_host", [
+    (_ModalLikeSandbox(), None, False),
+    (_LocalLikeSandbox(), "agent-local-1", False),
+    (_LocalLikeSandbox(), None, True),
+], ids=["container-sandbox", "vm-container", "vm-host"])
+async def test_an_environment_of_several_files_is_staged_file_by_file_at_their_paths(monkeypatch, sandbox, container,
+                                                                                    on_host):
+    calls = []
+
+    async def stage(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"inbox/a.json": "/app/files/inbox/a.json", "sent.json": "/app/files/sent.json"}
+
+    monkeypatch.setattr(sandbox_mod, "stage_files_into_container", stage)
+    files = {"inbox/a.json": object(), "sent.json": object()}
+    monkeypatch.setattr(EnvironmentArtifact, "get_file_artifacts", lambda self: files)
+    mail = EnvironmentArtifact(id="mail", version=1, environment_name="mail", file_artifact_refs={
+        "inbox/a.json": ArtifactRef(id="fa-a", version=1), "sent.json": ArtifactRef(id="fa-b", version=1)})
+
+    staged = await mod._stage_environment_payload_into_container(sandbox, container, mail, "/app/files")
+
+    assert staged == ["inbox/a.json", "sent.json"]
+    assert calls == [((sandbox, files, "/app/files"), {"container": container, "on_host": on_host})]

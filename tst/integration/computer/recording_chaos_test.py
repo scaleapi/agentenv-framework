@@ -7,6 +7,7 @@ import asyncio
 import json
 import platform
 import subprocess
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -20,6 +21,7 @@ from agentenv_protocol.client import ExtensionCallError
 from agentenv_protocol.computer import COMPUTER_READY, COMPUTER_RECORDING, Recording, RecordingManifest
 from agentenv_protocol.computer.conformance.client import Driver
 from agentenv_protocol.computer.recording import DISK_CHECK_S, RECORDINGS_DIR
+from agent_env.env.envs.computer.utils.boot import READY_TIMEOUT_S
 from tst.integration.computer.conftest import docker
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -123,8 +125,10 @@ async def _desk(image: str, *docker_args: str):
 
 
 async def _ready(name: str) -> Driver:
-    """A client for the container's driver once its computer is ready; a restart may move its port."""
-    for _ in range(240):
+    """A client for the container's driver once its computer is ready, within the time a deploy gives one; a restart may
+    move its port."""
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    while time.monotonic() < deadline:
         port = subprocess.run(["docker", "port", name, str(PORT)], capture_output=True, text=True).stdout
         if port:
             try:
@@ -134,7 +138,7 @@ async def _ready(name: str) -> Driver:
             except Exception:  # not serving yet
                 pass
         await asyncio.sleep(0.25)
-    raise TimeoutError(f"{name}'s computer never became ready")
+    raise TimeoutError(f"{name}'s computer wasn't ready within {READY_TIMEOUT_S:.0f} s")
 
 
 async def _layout(driver: Driver) -> dict:

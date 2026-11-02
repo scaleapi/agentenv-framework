@@ -1,5 +1,6 @@
 """VerifyUniverseLoadExportRoundtripStep exports each child env at the base the stored env card gives it, MCP server or
-website, and a child env the card doesn't list through legacy /export-state. Only the gateway HTTP boundary is mocked."""
+website, and a child env the card doesn't list through legacy /export-state. An environment of several files, not one
+JSON state, is compared export to export only, as a non-JSON one is. Only the gateway HTTP boundary is mocked."""
 
 from __future__ import annotations
 
@@ -68,7 +69,7 @@ async def test_both_export_rounds_read_the_deployed_record(monkeypatch):
     monkeypatch.setattr(VerifyUniverseLoadExportRoundtripStep, "_create_universe_artifact", lambda *a: MagicMock(id="u-export1"))
     monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a: _FakeEnv())
     universe = MagicMock(id="u", version=1)
-    universe.get_environment_artifacts.return_value = [MagicMock(environment_name="items", **{"get_file_artifact.return_value.load.return_value": b'{"items": []}'})]
+    universe.get_environment_artifacts.return_value = [_environment("items", {"items.json": b'{"items": []}'})]
     monkeypatch.setattr("agent_env.artifact.EnvironmentUniverseArtifact.get", lambda *a: universe)
 
     step = VerifyUniverseLoadExportRoundtripStep(id="rt", version=None, env_id="env-x", universe_artifact_id="u", persist_result=False)
@@ -76,6 +77,25 @@ async def test_both_export_rounds_read_the_deployed_record(monkeypatch):
 
     assert export_all.await_args_list == [call(record, ["items"]), call(record, ["items"])]
     assert ctx.metadata["verifications"]["universe_compatibility"]["compatible"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_environment_of_several_files_is_compared_export_to_export_only(monkeypatch):
+    record = _record(await _card(["mcp-desk"]))
+    monkeypatch.setattr(VerifyUniverseLoadExportRoundtripStep, "_export_all", AsyncMock(return_value={"desk": {"files": ["a"]}}))
+    monkeypatch.setattr(VerifyUniverseLoadExportRoundtripStep, "_create_universe_artifact", lambda *a: MagicMock(id="u-export1"))
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a: _FakeEnv())
+    universe = MagicMock(id="u", version=1)
+    desk = _environment("desk", {"Desktop/a.txt": b"not json", "b.txt": b"{}"})
+    universe.get_environment_artifacts.return_value = [desk]
+    monkeypatch.setattr("agent_env.artifact.EnvironmentUniverseArtifact.get", lambda *a: universe)
+
+    step = VerifyUniverseLoadExportRoundtripStep(id="rt", version=None, env_id="env-x", universe_artifact_id="u", persist_result=False)
+    ctx = await step.execute(TaskStepContext(deployed_envs=[record]))
+
+    verdict = ctx.metadata["verifications"]["universe_compatibility"]
+    assert verdict["compatible"] is True and verdict["environments"]["desk"]["issues"] == []
+    assert all(not file.load.called for file in desk.get_file_artifacts().values())
 
 
 @pytest.mark.asyncio
@@ -98,7 +118,9 @@ async def test_the_universe_files_are_read_and_the_exports_uploaded_off_the_even
     for cls in (EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifactUniverse):
         monkeypatch.setattr(cls, "put", staticmethod(lambda **kwargs: MagicMock(id=kwargs["id"])))
     universe = MagicMock(id="u", version=1)
-    universe.get_environment_artifacts.return_value = [MagicMock(environment_name="items", **{"get_file_artifact.return_value.load": load})]
+    environment = MagicMock(environment_name="items")
+    environment.get_file_artifacts.return_value = {"items.json": MagicMock(load=load)}
+    universe.get_environment_artifacts.return_value = [environment]
     monkeypatch.setattr(EnvironmentUniverseArtifact, "get", lambda *a: universe)
 
     step = VerifyUniverseLoadExportRoundtripStep(
@@ -107,6 +129,14 @@ async def test_the_universe_files_are_read_and_the_exports_uploaded_off_the_even
     await step.execute(TaskStepContext(deployed_envs=[record]))
 
     assert reads == [False] and uploads == [False, False]
+
+
+def _environment(name: str, contents: dict[str, bytes]) -> MagicMock:
+    """An environment artifact of ``contents``' files by path."""
+    environment = MagicMock(environment_name=name)
+    environment.get_file_artifacts.return_value = {path: MagicMock(**{"load.return_value": data})
+                                                   for path, data in contents.items()}
+    return environment
 
 
 async def _card(keys: list[str]) -> dict:

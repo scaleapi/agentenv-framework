@@ -359,9 +359,8 @@ def test_progress_is_reported_and_a_progress_callback_that_raises_stops_without_
 def test_a_run_says_before_it_builds_an_image_and_names_the_image_apart_from_its_agent(bundle_dir, docker,
                                                                                       monkeypatch):
     """As it does for an image a deploy on this machine runs, which preflight names."""
-    monkeypatch.setattr(run_module, "preflight_run",
-                        lambda plan, tasks, sandbox, played: Preflight(frozenset(), (),
-                                                                       frozenset({f"{ROOT}/solver__agent_image"})))
+    monkeypatch.setattr(run_module, "preflight_run", lambda plan, tasks, sandbox, played, solver_endpoint: Preflight(
+        frozenset(), (), frozenset({f"{ROOT}/solver__agent_image"})))
     layout(bundle_dir, BUILT_AGENT)
     lines = []
 

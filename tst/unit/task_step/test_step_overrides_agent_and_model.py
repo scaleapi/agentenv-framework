@@ -71,6 +71,25 @@ class TestDeployAgentRef:
         assert _deploy_step()._resolve_agent_ref(ctx) == ("stored-agent", 7)
 
 
+class TestDeployAgentModelEndpoint:
+    def test_the_steps_own_url_without_overrides(self):
+        assert _deploy_step(litellm_base_url="http://stored")._model_endpoint(_ctx()) == {
+            "LITELLM_BASE_URL": "http://stored"}
+
+    def test_the_run_wide_endpoint_applies(self):
+        ctx = _ctx(run_overrides={"litellm_base_url": "http://run", "litellm_api_key": "sk-run"})
+        assert _deploy_step(litellm_base_url="http://stored")._model_endpoint(ctx) == {
+            "LITELLM_API_KEY": "sk-run", "LITELLM_BASE_URL": "http://run"}
+
+    def test_the_steps_override_wins_and_another_steps_is_ignored(self):
+        ctx = _ctx({"deploy-solver": {"litellm_base_url": "http://trainer", "litellm_api_key": "session"},
+                    "deploy-judge": {"litellm_base_url": "http://elsewhere"}},
+                   {"litellm_base_url": "http://run", "litellm_api_key": "sk-run"})
+        assert _deploy_step()._model_endpoint(ctx) == {"LITELLM_API_KEY": "session", "LITELLM_BASE_URL": "http://trainer"}
+        assert _deploy_step(id="deploy-judge")._model_endpoint(ctx) == {
+            "LITELLM_API_KEY": "sk-run", "LITELLM_BASE_URL": "http://elsewhere"}
+
+
 class TestPromptModelAndEffort:
     def test_stored_values_without_overrides(self):
         assert _prompt_step()._resolve_model_and_effort(_ctx()) == ("stored-model", "stored-effort")

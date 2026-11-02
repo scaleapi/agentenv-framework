@@ -73,6 +73,7 @@ from tar_changelog import (
 )
 from claude_bridge import (
     CLAUDE_STATE_DIR,
+    ClaudeCodeTools,
     SESSION_JSONL_DIR,
     WORKSPACE_DIR,
     kill_running_clis,
@@ -134,6 +135,8 @@ class ClaudeCodeConfig(AgentConfig):
     effort: str | None = None
     max_turns: int | None = None
     max_thinking_tokens: int | None = None
+    # Which of the CLI's own tools it may use. With any selection, its MCP servers are only the ones agent-env gives it.
+    builtin_tools: ClaudeCodeTools | None = None
 
 
 def _rewrite_session_ids(jsonl_text: str, session_id: str) -> tuple[list[str], int]:
@@ -488,6 +491,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 effort=cfg.effort,
                 max_turns=cfg.max_turns,
                 max_thinking_tokens=cfg.max_thinking_tokens,
+                builtin_tools=cfg.builtin_tools,
                 event_callback=request.trajectory.append,
             )
         except Exception as e:

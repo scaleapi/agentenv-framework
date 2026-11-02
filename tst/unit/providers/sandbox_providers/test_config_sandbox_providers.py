@@ -10,6 +10,7 @@ from agent_env.config import ConfigError
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.config import reset_config
 from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
+from agent_env.providers.sandbox_providers.coreweave.provider import CoreWeaveSandboxProvider
 from agent_env.providers.sandbox_providers.daytona.config import Settings as DaytonaSettings
 from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
@@ -343,6 +344,34 @@ def test_boxd_missing_api_key_is_a_config_error(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match="requires a non-empty 'api_key'"):
         build_sandbox_provider("boxd")
+
+
+def test_coreweave_builtin_receives_an_interpolated_key(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.coreweave.config]
+        wandb_api_key = "env:CW_TEST_WANDB_API_KEY"
+        wandb_entity = "team"
+        docker_storage = "memory"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    monkeypatch.setenv("CW_TEST_WANDB_API_KEY", "resolved-test-key")
+
+    provider = build_sandbox_provider("coreweave")
+
+    assert isinstance(provider, CoreWeaveSandboxProvider)
+    assert provider._client.auth.headers == {"x-wandb-api-key": "resolved-test-key", "x-entity-id": "team"}
+    assert provider._docker_storage == "memory"
+
+
+def test_coreweave_without_a_key_is_a_config_error(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.coreweave.config]
+        image = "registry.test/host:1"
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+
+    with pytest.raises(ConfigError, match="requires exactly one of 'api_key' and 'wandb_api_key'"):
+        build_sandbox_provider("coreweave")
 
 
 def test_daytona_builtin_receives_interpolated_key_and_settings(monkeypatch, tmp_path):

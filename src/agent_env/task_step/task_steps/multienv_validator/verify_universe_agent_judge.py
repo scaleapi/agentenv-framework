@@ -36,6 +36,12 @@ same multi-service universe as JSON files on disk:
 - `{UNIVERSES_DIR}/export_2/<service>.json` — the data after re-loading export_1 and exporting \
 again (present only when available).
 
+A service seeded with several files has a folder, `{UNIVERSES_DIR}/original/<service>/`, holding \
+each file at its path, in place of `original/<service>.json`. It has no single original JSON to \
+diff, and the programmatic verifier only compares its two exports. Read its files to learn what it \
+was seeded with, judge whether `export_1/<service>.json` still holds that data in meaning, and use \
+`export_2` to corroborate stability.
+
 Your job is to decide whether the round-trip is **semantically lossless**: does the exported data \
 preserve the *meaning* of the original? Compare `original` against `export_1` (and use `export_2` \
 to corroborate stability). Read the files with your tools; do not guess.
@@ -80,7 +86,10 @@ def build_user_prompt() -> str:
         f"Inspect the universe snapshots under `{UNIVERSES_DIR}/`. For each service, compare "
         f"`original/<service>.json` against `export_1/<service>.json` (corroborate with "
         f"`export_2/<service>.json` when present) and identify any MAJOR differences — real data "
-        f"loss or corruption — applying the IGNORE/FLAG rules from your instructions. "
+        f"loss or corruption — applying the IGNORE/FLAG rules from your instructions. A service "
+        f"seeded with several files has the folder `original/<service>/` in place of "
+        f"`original/<service>.json`: judge its export against what those files hold, as your "
+        f"instructions say. "
         f"Produce a concise per-service report: for each service state whether it is semantically "
         f"preserved, and list every major difference you found with the service, entity, field, "
         f"and an example (original value vs exported value). If a service is fully preserved "

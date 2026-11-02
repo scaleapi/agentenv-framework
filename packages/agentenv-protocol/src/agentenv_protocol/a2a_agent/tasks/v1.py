@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
 
 from a2a.types import TaskStatusUpdateEvent
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,26 @@ class AgentConfig(BaseModel):
     description: str | None = None
     role: str | None = None
     timeout_seconds: int = 600
+
+
+ToolName = TypeVar("ToolName", bound=str)
+
+
+class BuiltinTools(BaseModel, Generic[ToolName]):
+    """Which of an agent's own tools it may use, as a task selects them: ``disable`` turns off the ones it names, or
+    all of them with ``"*"``; ``only`` keeps the ones it names. An agent's config takes it as
+    ``builtin_tools: BuiltinTools[<a Literal of its tools>] | None``, so its card's agent-config schema names them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disable: Literal["*"] | list[ToolName] | None = None
+    only: list[ToolName] | None = None
+
+    @model_validator(mode="after")
+    def _one_of(self) -> BuiltinTools:
+        if (self.disable is None) == (self.only is None):
+            raise ValueError("builtin_tools takes exactly one of disable and only")
+        return self
 
 
 ConfigT = TypeVar("ConfigT", bound=AgentConfig)
