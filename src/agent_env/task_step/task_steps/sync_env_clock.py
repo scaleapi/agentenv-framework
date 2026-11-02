@@ -11,9 +11,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone as _utc_tz
 from typing import ClassVar, Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
+import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
@@ -31,7 +32,7 @@ def resolve_virtual_time(virtual_time: str, timezone: Optional[str]) -> str:
         return virtual_time
     try:
         zone = ZoneInfo(timezone.strip()) if isinstance(timezone, str) and timezone.strip() else None
-    except Exception:
+    except (ZoneInfoNotFoundError, ValueError):
         zone = None
     if zone is None:
         raise ValueError(f"timezone must be a valid IANA name such as 'America/Chicago', got {timezone!r}")
