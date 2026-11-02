@@ -52,10 +52,16 @@ def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParam
     apps = {app.environment_name: app for app in env.composed_apps()}
     problems += [f"env_params.app_settings.{name}: {env.id} has no app {name!r}"
                  + (f"; its apps are {', '.join(apps)}" if apps else "") for name in params.app_settings if name not in apps]
+    merged = app_settings(env, params.app_settings)
     for name, app in apps.items():
-        problems += gate.check_app_settings(app, params.app_settings.get(name, {}), f"env_params.app_settings.{name}",
-                                            env.computer.os.type)
+        problems += gate.check_app_settings(app, merged[name], f"env_params.app_settings.{name}", env.computer.os.type)
     return params, values, problems
+
+
+def app_settings(env: ComputerEnv, given: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The settings each of ``env``'s apps deploys with, by name: the env's defaults for it under ``given``, a deploy's
+    ``app_settings``, field by field."""
+    return {name: {**defaults, **given.get(name, {})} for name, defaults in env.app_defaults().items()}
 
 
 def _problems(at: str, error: ValidationError) -> list[str]:

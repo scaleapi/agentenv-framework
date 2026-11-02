@@ -1,17 +1,20 @@
 """WebsiteBrowserEnvironment: agentenv's flags after a subclass's command, in a computer and alone, and the proxy rule
 for each; a subclass refused for carrying one of them; the start tabs, the time zone and the window from its settings;
 its launch run with no desktop when alone; a CDP connection over a new debugging pipe at each launch, which its ready
-check asks, and a browser launched again when its server restarts; its policies, card params and skill; and an app that
-isn't a browser launched and declared as before."""
+check asks, and a browser launched again when its server restarts; its shared memory in files only on a small
+/dev/shm; an empty cache and the deploy's prompt answers in its profile at each launch; its policies, card params and
+skill; and an app that isn't a browser launched and declared as before."""
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 
 import pytest
 
 from agentenv_protocol.computer import APP_SETTINGS_ENV, ComputerAppEnvironment, Launch, Ready, app, linux, session
+from agentenv_protocol import website_browser
 from agentenv_protocol.computer import app_runtime
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.website_browser import (ALONE_BYPASS, ALONE_ENV, BROWSER, COMPUTER_BYPASS, OPEN_WEB_ENV,
@@ -19,7 +22,8 @@ from agentenv_protocol.website_browser import (ALONE_BYPASS, ALONE_ENV, BROWSER,
                                                WebsiteBrowserEnvironment)
 
 PROXY = "http://127.0.0.1:3128"
-OWNED = ["--user-data-dir", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=en-US"]
+OWNED = ["--user-data-dir", "--disk-cache-dir", "--remote-debugging-pipe", "--no-first-run",
+         "--no-default-browser-check", "--lang=en-US"]
 # A browser that answers CDP on its debugging pipe, fds 3 and 4, as a Chromium does: Browser.getVersion with its product,
 # Target.createTarget by writing the tab's URL to tabs.txt beside it, anything else with an error.
 FAKE_BROWSER = """import json, os
@@ -60,8 +64,10 @@ class OnDemandBrowser(WebsiteBrowserEnvironment):
 
 @pytest.fixture(autouse=True)
 def browser_home(monkeypatch, tmp_path):
-    """A browser on Linux, its session user's home under ``tmp_path``, inside a computer with no site proxy."""
+    """A browser on Linux, its session user's home under ``tmp_path``, inside a computer with no site proxy and 1 GiB
+    of /dev/shm."""
     monkeypatch.setattr(app, "detect", lambda: Platform(os="linux"))
+    monkeypatch.setattr(website_browser, "_shm_bytes", lambda path="/dev/shm": 1 << 30)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
@@ -78,7 +84,8 @@ def test_in_a_computer_its_flags_follow_its_command_then_its_start_tabs_and_its_
     launch = Browser().launch
 
     profile = f"--user-data-dir={browser_home / '.config/chromium'}"
-    assert launch.command == ["chromium/chrome", "--no-sandbox", profile, *OWNED[1:], "about:blank"]
+    cache = f"--disk-cache-dir={browser_home / '.cache/chromium'}"
+    assert launch.command == ["chromium/chrome", "--no-sandbox", profile, cache, *OWNED[2:], "about:blank"]
     assert launch.env == {"TZ": "UTC"}
     assert launch.window == {"class": "Chromium"} and launch.ready == Ready(window=True, timeout_s=30)
 
@@ -89,7 +96,7 @@ def test_in_a_computer_with_a_site_proxy_only_loopback_bypasses_it(monkeypatch):
     command = Browser().launch.command
 
     assert [f"--proxy-server={PROXY}", f"--proxy-bypass-list={COMPUTER_BYPASS}",
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"] == command[7:10]
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"] == command[8:11]
     assert not any(flag.startswith(("--headless", "--window-size")) for flag in command)
 
 
@@ -142,7 +149,8 @@ def test_alone_it_refuses_to_launch_without_a_site_proxy(monkeypatch):
 
 
 @pytest.mark.parametrize("flag", ["--remote-debugging-port=9222", "--remote-allow-origins=*", "--headless",
-                                  "--proxy-server=http://elsewhere:3128", "--user-data-dir=/tmp/profile"])
+                                  "--proxy-server=http://elsewhere:3128", "--user-data-dir=/tmp/profile",
+                                  "--disk-cache-dir=/tmp/cache", "--disable-dev-shm-usage"])
 def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_declared(flag):
     @linux(launch=Launch(command=["chromium/chrome", flag]))
     class Widened(WebsiteBrowserEnvironment):
@@ -150,6 +158,37 @@ def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_d
 
     with pytest.raises(ValueError, match="agentenv sets for every website browser"):
         Widened.declaration()
+
+
+@pytest.mark.parametrize("mib, in_files", [(64, True), (1024, False)], ids=["docker-default", "sized"])
+def test_it_keeps_its_shared_memory_in_files_only_when_dev_shm_is_under_1_gib(monkeypatch, mib, in_files):
+    monkeypatch.setattr(website_browser, "_shm_bytes", lambda path="/dev/shm": mib * 2**20)
+
+    assert ("--disable-dev-shm-usage" in Browser().launch.command) is in_files
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings, prompts", [
+    ({}, {"geolocation": 2, "notifications": 2}),
+    ({"notifications": "ask"}, {"geolocation": 2}),
+], ids=["deny", "ask"])
+async def test_each_launch_starts_with_an_empty_cache_and_the_deploys_prompt_answers_in_its_profile(
+        browser_home, monkeypatch, settings, prompts):
+    _settings(monkeypatch, **settings)
+    preferences = browser_home / ".config/chromium/Default/Preferences"
+    preferences.parent.mkdir(parents=True)
+    preferences.write_text(json.dumps({"homepage": "about:blank", "profile": {"default_content_setting_values": {
+        "notifications": 1, "cookies": 1}}}))
+    (browser_home / ".cache/chromium/Cache").mkdir(parents=True)
+    browser = Browser()
+
+    for fd in (await browser._launch_fds()).values():
+        os.close(fd)
+    browser.devtools.close()
+
+    assert json.loads(preferences.read_text()) == {"homepage": "about:blank", "profile": {
+        "default_content_setting_values": {"cookies": 1, **prompts}}}
+    assert not (browser_home / ".cache/chromium").exists()
 
 
 def test_its_settings_give_its_start_tabs_language_and_time_zone_and_no_start_url_is_a_flag(monkeypatch):

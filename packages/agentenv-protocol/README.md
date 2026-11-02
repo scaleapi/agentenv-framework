@@ -661,8 +661,9 @@ class MailApp(ComputerAppEnvironment):
 
 - **`@computer_app`** names the platforms the app supports, as a driver names them, and the
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
-  (`environment_name`), the `computer` and `driver` it deploys alone on, and `build_settings`, its
-  build settings' values (`build_settings = { locale = "fr_FR" }`).
+  (`environment_name`), the `computer` and `driver` it deploys alone on, `build_settings`, its
+  build settings' values (`build_settings = { locale = "fr_FR" }`), and `[settings]`, defaults for its
+  `Settings` each deploy starts from.
 - **`@linux(...)`** is how a Linux computer installs it, `Linux`'s fields: `files`, a folder of the app's
   copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
   (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
@@ -698,9 +699,13 @@ class MailApp(ComputerAppEnvironment):
 - **Its data** is under the `paths` its OS's decorator names, relative to the session user's home,
   none inside another (`@linux(..., paths=["Mail", ".config/mail/accounts.json"])`), or what its own
   `@add_data`, `@get_data` and `@reset_data` hooks serve instead (below).
-- **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
-  in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
-  its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+- **`Settings`** is typed. Its values come from the app env's `[settings]`, then the computer env's
+  `settings` beside the app in its `apps` (`apps = [{ env = "mail", settings = { signature = "-- Ada" } }]`),
+  then the deploy's `env_params` `app_settings`, each over the one before by top-level field (a table
+  or list is replaced whole). Each is checked at put; a required one may be left to the deploy, which
+  checks them merged. A computer hands each app its values as one JSON value in `APP_SETTINGS_ENV`
+  (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads its own, by
+  `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
 - **`BuildSettings`** is typed too: values the app's env fixes in its computer's image, which only
   another image changes, so a deploy can't give one. The composer writes them to
   `.agentenv/build_settings.json` in the app's folder, and the base class reads them, over the
@@ -752,9 +757,12 @@ are the profile's template. The base class adds:
 - **Its settings**, `BrowserSettings`, which a subclass's `Settings` extends: `start_urls`, opened in
   tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`), headless
   the first from its command line and the rest over its pipe, since headless Chromium takes one; `window`,
-  1280 × 800, alone only; `locale`; and `time_zone`, set as `TZ` in its launch's `env`.
-- **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile,
-  `--remote-debugging-pipe`, `--no-first-run`, `--no-default-browser-check` and `--lang`. With
+  1280 × 800, alone only; `locale`; `time_zone`, set as `TZ` in its launch's `env`; and `geolocation` and
+  `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`.
+- **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile, its
+  HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
+  `--no-default-browser-check`, `--lang` and, when `/dev/shm` holds under 1 GiB (Docker gives 64 MiB),
+  `--disable-dev-shm-usage`, so it keeps its shared memory in files. With
   `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
   Alone it bypasses nothing, loopback included; in a computer it bypasses loopback (`127.0.0.1`,
   `[::1]`, `localhost`), so the apps beside it stay reachable while `*.localhost` names still go
@@ -762,6 +770,9 @@ are the profile's template. The base class adds:
   except on the open web (`AGENTENV_BROWSER_OPEN_WEB=1`), and refuses to start with no proxy.
   `declaration()` refuses a subclass whose command carries any of these, or `--remote-allow-origins`, or
   any other way to open a debugging port.
+- **Before each launch** it empties its cache, so no launch inherits another's, and writes the deploy's
+  prompt answers into its profile's `Default/Preferences` (`profile.default_content_setting_values`,
+  `2` to deny, left out to ask), which it reads as it starts.
 - **Alone, no desktop**: its launch matches and waits on no window, its server adds no launcher and,
   without `DISPLAY`, waits for no display, and its ready checks say when it's ready.
 - **`write_policies`**, an install step that writes agentenv's unattended-use policies (`POLICIES`)

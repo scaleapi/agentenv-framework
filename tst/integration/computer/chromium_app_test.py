@@ -1,8 +1,11 @@
-"""agentenv's chromium app on the ubuntu-24.04 base, as the chromium test bundle's desktop lists it: gate 3 makes this
+"""agentenv's chromium app on the ubuntu-24.04 base, as the chromium test bundle's desktops list it: gate 3 makes this
 machine's arch ready with it; deployed on two start_urls, it shows one Chromium window, on the first, with no first-run,
 sign-in or permission window beside it, and the second a tab away, which an agent reaches with Control+Tab; its managed
-policies are where Chrome for Testing reads them; and a reset of its data clears its profile and opens it again. Needs
-Docker and the local registry on localhost:5000."""
+policies are where Chrome for Testing reads them; and a reset of its data clears its profile and opens it again. As a
+website browser it runs Chrome itself with agentenv's flags on its debugging pipe, keeps its shared memory in files on
+Docker's 64 MiB /dev/shm, and answers location prompts and leaves notification ones to ask as the deploy says; and the
+desktop that gives it French defaults deploys with them, a deploy's time zone over them, each recorded. Needs Docker and
+the local registry on localhost:5000."""
 
 import asyncio
 import json
@@ -16,6 +19,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.env import Env
+from tst.integration.computer.website_browser_test import _browser_process, _keys
 from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
@@ -26,6 +30,25 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 ALPHA = "data:text/html,<title>Alpha page</title><h1>Alpha</h1>"
 BRAVO = "data:text/html,<title>Bravo page</title><h1>Bravo</h1>"
+LOOPBACK = "http://127.0.0.1:8766/"
+# Serves, on loopback for the seconds it's given, a page whose title is its location and notification permissions.
+SERVE_PERMISSIONS = """import http.server, sys, threading, time
+class Page(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = (b"<title>asking</title><script>Promise.all(['geolocation', 'notifications'].map(name => "
+                b"navigator.permissions.query({name}))).then(states => "
+                b"document.title = states.map(s => s.state).join(' '))</script>")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 8766), Page)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+time.sleep(float(sys.argv[1]))
+"""
 # Each window the window manager manages, its class and its title.
 WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); do '
            'xprop -id "$w" WM_CLASS _NET_WM_NAME; done')
@@ -65,6 +88,53 @@ async def test_a_deploy_opens_its_start_urls_unprompted_and_a_reset_clears_its_p
     assert {"BrowserSignin": 0, "CommandLineFlagSecurityWarningsEnabled": False}.items() <= json.loads(
         policies["stdout"]).items()
     assert marker["exit_code"] != 0 and reopened == ["Alpha page - Google Chrome for Testing"]
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_it_runs_chrome_itself_on_its_pipe_and_answers_prompts_as_the_deploy_says(chromium_desktop):
+    settings = {"start_urls": [LOOPBACK], "notifications": "ask"}
+    with namespace_routing():
+        deployed = await Env.get(chromium_desktop.id).deploy(env_params={"app_settings": {"chromium": settings}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            browser = await _browser_process(deployed)
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_PERMISSIONS, "60"],
+                                                       timeout_s=90))
+            await asyncio.sleep(3)
+            await _keys(deployed, ["F5"])
+            permissions = await _chromium_windows(deployed, "denied")
+            await serving
+        finally:
+            report = await teardown_run(context)
+
+    argv = browser["argv"]
+    assert argv[0].endswith("chromium/chrome/chrome") and argv[1:3] == ["--no-sandbox", "--class=Chromium"]
+    assert argv[3].endswith("/.config/chromium") and argv[4].endswith("/.cache/chromium")
+    assert argv[5:10] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=en-US",
+                          "--disable-dev-shm-usage"] and argv[10:] == [LOOPBACK]
+    assert browser["listening"] == 0
+    assert permissions == ["denied prompt - Google Chrome for Testing"]
+    recorded = deployed.metadata["computer"]["app_settings"]["chromium"]
+    assert (recorded["geolocation"], recorded["notifications"], recorded["start_urls"]) == ("deny", "ask", [LOOPBACK])
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_that_gives_it_defaults_deploys_with_them_and_a_deploys_own_over_them(chromium_desktop):
+    with namespace_routing():
+        french = Env.get(chromium_desktop.id.rsplit("/", 1)[0] + "/desktop-fr")
+        deployed = await french.deploy(env_params={"app_settings": {"chromium": {"time_zone": "Asia/Tokyo"}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            browser = await _browser_process(deployed)
+        finally:
+            report = await teardown_run(context)
+
+    assert "--lang=fr-FR" in browser["argv"]
+    recorded = deployed.metadata["computer"]["app_settings"]["chromium"]
+    assert (recorded["locale"], recorded["time_zone"]) == ("fr-FR", "Asia/Tokyo")
+    assert deployed.metadata["computer"]["env_params"] == {"app_settings": {"chromium": {"time_zone": "Asia/Tokyo"}}}
     assert not report.failed
 
 

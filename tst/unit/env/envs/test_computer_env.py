@@ -1243,3 +1243,62 @@ async def test_app_settings_an_app_doesnt_declare_are_refused_at_save_and_at_dep
         await Env.get(app.id).deploy(env_params=env_params)
 
     assert len(saved) == 1 and problem in saved[0] and boots.boots == []
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_starts_from_its_app_envs_and_computer_envs_defaults_and_overrides_them_field_by_field(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    boots.display = (1280, 800)
+    mail = _app(base, driver, tmp_path / "mail", defaults={"signature": "-- Ada", "theme": "dark"})
+    env = _put(base, driver, apps=[mail], app_settings={"mail": {"theme": "light", "token": "env:MAIL_TOKEN"}})
+    env_params = {"app_settings": {"mail": {"signature": "-- Bo"}}}
+
+    deployed = await Env.get(env.id).deploy(env_params=env_params)
+
+    assert json.loads(boots.boots[0]["environment"]["AGENTENV_APP_SETTINGS"]) == {"mail": {
+        "signature": "-- Bo", "theme": "light", "token": "t0ken"}}
+    assert deployed.metadata["computer"]["app_settings"] == {"mail": {
+        "signature": "-- Bo", "password": "<withheld>", "token": "<withheld>", "theme": "light"}}
+    assert deployed.metadata["computer"]["env_params"] == env_params
+
+
+def test_default_settings_are_stored_with_each_env_and_left_out_when_there_are_none(base, driver, docker, tmp_path):
+    mail = _app(base, driver, tmp_path / "mail", compose=False, defaults={"theme": "dark"})
+    plain = _app(base, driver, tmp_path / "notes", compose=False, name="notes")
+    env = _put(base, driver, compose=False, apps=[mail, plain], app_settings={"mail": {"signature": "-- Ada"}})
+
+    stored = Env.get(env.id)
+    assert (Env.get(mail.id).settings, stored.app_settings) == ({"theme": "dark"}, {"mail": {"signature": "-- Ada"}})
+    assert stored.to_dict()["apps"] == [{"id": mail.id, "version": mail.version, "settings": {"signature": "-- Ada"}},
+                                        {"id": plain.id, "version": plain.version}]
+    assert "settings" not in plain.to_dict()
+    assert stored.app_defaults() == {"mail": {"theme": "dark", "signature": "-- Ada"}, "notes": {}}
+
+
+@pytest.mark.parametrize("values, problem", [
+    ({"colour": "blue"}, "settings.colour: @local/~/kit/mail declares no setting 'colour'"),
+    ({"theme": "blue"}, "settings.theme: 'blue' is not one of ['light', 'dark']"),
+    ({"password": "hunter2"}, "settings.password is a secret, so it takes a secret:KEY"),
+    ({"edition": "pro"}, "settings.edition is one of @local/~/kit/mail's build settings"),
+], ids=["unknown", "enum", "secret-value", "build-setting"])
+def test_default_settings_an_app_refuses_are_refused_at_put_in_its_own_env_and_in_a_computer_env(
+        base, driver, docker, tmp_path, values, problem):
+    with pytest.raises(ValueError, match=re.escape(problem)):
+        _app(base, driver, tmp_path / "mail", compose=False, defaults=values)
+    mail = _app(base, driver, tmp_path / "mail", compose=False)
+    with pytest.raises(ValueError, match=re.escape(f"apps.mail.{problem}")):
+        _put(base, driver, compose=False, apps=[mail], app_settings={"mail": values})
+    with pytest.raises(ValueError, match=re.escape("apps.notes.settings: @local/~/kit/desktop has no app 'notes'")):
+        _put(base, driver, compose=False, apps=[mail], app_settings={"notes": {}})
+
+
+def test_a_required_setting_may_be_left_to_each_deploy_and_one_an_env_gives_satisfies_it(base, driver, docker,
+                                                                                        tmp_path):
+    settings = {**MAIL_SETTINGS, "required": ["signature"]}
+    left = _app(base, driver, tmp_path / "mail", settings=settings)
+    given = _app(base, driver, tmp_path / "signed", settings=settings, name="signed", defaults={"signature": "-- Ada"})
+
+    (missing,) = DeployEnvTaskStep(id="d", version=None, env_id=left.id).preflight()
+    assert "env_params.app_settings.mail: 'signature' is a required property" in missing
+    assert DeployEnvTaskStep(id="d", version=None, env_id=given.id).preflight() == []
