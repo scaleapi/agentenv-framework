@@ -69,11 +69,7 @@ async def test_a_deploy_opens_its_start_urls_unprompted_and_a_reset_clears_its_p
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             opened = await _chromium_windows(deployed, "Alpha page")
-            async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    keyed = await session.call_tool("computer_key", {"keys": ["Control", "Tab"]})
-            tabbed = await _chromium_windows(deployed, "Bravo page")
+            keyed, tabbed = await _tab_to(deployed, "Bravo page")
             policies = await inside.run(
                 deployed, ["cat", "/etc/opt/chrome_for_testing/policies/managed/agentenv.json"], timeout_s=30)
             await inside.run(deployed, ["sh", "-c", "touch ~/.config/chromium/marker"], timeout_s=30)
@@ -138,9 +134,24 @@ async def test_a_desktop_that_gives_it_defaults_deploys_with_them_and_a_deploys_
     assert not report.failed
 
 
-async def _chromium_windows(deployed, title: str) -> list[str]:
+async def _tab_to(deployed, title: str):
+    """Control+Tab pressed as an agent presses it, again while the window still shows the tab before, which a press
+    can reach before the next tab opens; the last press's result and the window titles once one starts with ``title``."""
+    async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            for attempt in range(3):
+                keyed = await session.call_tool("computer_key", {"keys": ["Control", "Tab"]})
+                try:
+                    return keyed, await _chromium_windows(deployed, title, seconds=20)
+                except TimeoutError:
+                    if attempt == 2:
+                        raise
+
+
+async def _chromium_windows(deployed, title: str, seconds: int = 60) -> list[str]:
     """The titles of the computer's Chromium windows once one of them starts with ``title``."""
-    for _ in range(60):
+    for _ in range(seconds):
         listed = (await inside.run(deployed, ["sh", "-c", WINDOWS], timeout_s=30))["stdout"]
         classes = re.findall(r'WM_CLASS\(STRING\) = .*"([^"]*)"\n_NET_WM_NAME\(UTF8_STRING\) = "(.*)"', listed)
         titles = [name for cls, name in classes if cls == "Chromium"]
