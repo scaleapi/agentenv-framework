@@ -31,8 +31,9 @@ async def run(base_url: str, prompt: list[dict[str, Any]], request_kwargs: dict[
     with the row's tools; each call is a call on the episode, and the model's last reply, or the turn cap, ends the
     turn. A call whose arguments aren't a JSON object is answered with why, as the model's error, and the episode goes
     on. Returns what Miles merges into the sample's metadata: the episode's reward and scores, or, when the env or the
-    session failed it, a reward of 0 and why, which ``keep_scored_groups`` leaves out of training; and the calls made
-    and refused. A failed episode isn't played again: the session already holds its turns."""
+    session failed it, the model missed the row's ``model_timeout`` or the episode ended without a reward, a reward of 0
+    and why, which ``keep_scored_groups`` leaves out of training; and the calls made and refused. A failed episode
+    isn't played again: the session already holds its turns."""
     row = metadata or {}
     server, tools = row["agentenv"], row["tools"]
     episode = _Episode(Shared(server["url"], frozenset(tool["function"]["name"] for tool in tools),
@@ -41,14 +42,15 @@ async def run(base_url: str, prompt: list[dict[str, Any]], request_kwargs: dict[
     counts = {"agentenv_tool_calls": 0, "agentenv_invalid_calls": 0}
     try:
         await episode._start(row["split"], int(row["index"]), row["task_id"])
-        reply = await _converse(episode, base_url, list(prompt), tools, request_kwargs or {}, server["max_turns"],
-                                counts)
+        reply = await _converse(episode, base_url, list(prompt), tools, request_kwargs or {}, server, counts)
         rollout = episode._rollout
         if not (rollout.done or rollout.failure):
             await episode._finish(rollout, reply)
+        if rollout.failure is None and rollout.reward is None:
+            rollout.failure = "the episode ended without a reward"
         if rollout.failure is not None:
             return {"reward": 0.0, "agentenv_failure": rollout.failure, **counts}
-        return {"reward": float(rollout.reward or 0.0), "agentenv_scores": rollout.scores or {}, **counts}
+        return {"reward": float(rollout.reward), "agentenv_scores": rollout.scores or {}, **counts}
     except Exception as e:
         return {"reward": 0.0, "agentenv_failure": f"{type(e).__name__}: {e}", **counts}
     finally:
@@ -70,10 +72,11 @@ def keep_scored_groups(args: Any, samples: list[Any], **kwargs: Any) -> bool:
 
 
 async def _converse(episode: _Episode, base_url: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-                    request_kwargs: dict[str, Any], max_turns: int, counts: dict[str, int]) -> str:
-    """The model's turns, until it replies without a call, the episode ends, or ``max_turns`` pass; its last reply."""
-    async with httpx.AsyncClient(timeout=None) as client:
-        for _ in range(max_turns):
+                    request_kwargs: dict[str, Any], server: dict[str, Any], counts: dict[str, int]) -> str:
+    """The model's turns, until it replies without a call, the episode ends, or the server's ``max_turns`` pass; its
+    last reply."""
+    async with httpx.AsyncClient(timeout=server["model_timeout"]) as client:
+        for _ in range(server["max_turns"]):
             response = await client.post(f"{base_url}/v1/chat/completions", json={
                 "model": "default", "messages": messages, "tools": tools, **request_kwargs})
             response.raise_for_status()
@@ -91,7 +94,7 @@ async def _converse(episode: _Episode, base_url: str, messages: list[dict[str, A
 
 
 async def _answer(episode: _Episode, call: dict[str, Any], counts: dict[str, int]) -> str:
-    name, arguments = call["function"]["name"], call["function"].get("arguments") or "{}"
+    name, arguments = call["function"]["name"], call["function"].get("arguments")
     try:
         arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
     except json.JSONDecodeError as e:
