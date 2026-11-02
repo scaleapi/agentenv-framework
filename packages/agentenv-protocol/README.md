@@ -767,7 +767,7 @@ are the profile's template. The base class adds:
 - **`write_policies`**, an install step that writes agentenv's unattended-use policies (`POLICIES`)
   and the subclass's to `agentenv.json` in `policy_dir`.
 - **A debugging pipe, not a port.** Its server launches it with a new pipe's ends as its fds 3 and 4
-  (`session.launch`'s `fds`, moved into place by `agentenv_protocol.computer._with_fds`) and keeps the
+  (`session.launch`'s `fds`, moved into place by `computer/_with_fds.py`, run alone with `-I -S`) and keeps the
   other ends as `self.devtools`, a `DevToolsPipe`: `await self.devtools.call(method, params)` returns
   the result or raises `DevToolsError`, and `ConnectionError` with no browser connected. No port
   listens and no `DevToolsActivePort` is written, so nothing else in the computer can reach it over
