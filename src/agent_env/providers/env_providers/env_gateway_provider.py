@@ -73,6 +73,9 @@ logger = logging.getLogger(__name__)
 
 _TRAJECTORY_READ_ATTEMPTS = 3
 
+# Random bytes in the path a deploy serves its SQL consoles under (24 URL-safe characters).
+_CONSOLE_PATH_BYTES = 18
+
 # How much of a service's output a failed deploy's error carries: enough for the end of a traceback.
 _LOG_TAIL_LINES = 30
 _LOG_LINE_CHARS = 300
@@ -880,9 +883,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         db_web_url = f"{db_web_base_url}{console}/" if db_web_base_url else None
         db_mcp_base_url = sandbox.tunnel_urls.get(DB_MCP_PORT) if DB_MCP_SERVICE_NAME in sidecar_names else None
         db_mcp_url = f"{db_mcp_base_url}{console}/mcp" if db_mcp_base_url else None
-        logger.info(f"pgweb URL: {self._masked(db_web_url)}")
+        logger.info(self._masked(f"pgweb URL: {db_web_url}"))
         if db_mcp_url:
-            logger.info(f"DB MCP endpoint: {self._masked(db_mcp_url)}")
+            logger.info(self._masked(f"DB MCP endpoint: {db_mcp_url}"))
 
         # Wait for the tunnel to serve the env card, which the deploy records
         card = await self._wait_for_tunnel(gateway_url, timeout=120)
@@ -1374,7 +1377,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             else LocalPostgresStateProvider()
         )
         if isinstance(self._state_provider, LocalPostgresStateProvider):
-            self._state_provider.console_path = secrets.token_urlsafe(18)
+            self._state_provider.console_path = secrets.token_urlsafe(_CONSOLE_PATH_BYTES)
         deploy_kwargs = {"attribution": dict(attribution or {})}
         if not self.in_vm(sandbox_provider):
             if problem := self.sandbox_problem(sandbox_provider, websites=bool(website_configs)):

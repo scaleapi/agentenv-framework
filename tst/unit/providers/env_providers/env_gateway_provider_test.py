@@ -1785,6 +1785,37 @@ async def test_a_vm_deploy_writes_its_compose_file_as_one_quoted_argument():
     assert not any("<<" in script for script in scripts)
 
 
+@pytest.mark.asyncio
+async def test_a_callers_vm_without_tunnels_for_the_consoles_deploys_without_their_urls():
+    from agent_env.env.gateway import GatewayMode
+
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock(spec=LocalPostgresStateProvider, console_path="Kp3vX8nQ2wR7tY5mZ1aB9cDe",
+                                   prepare=AsyncMock(), store_images_to_load=MagicMock(return_value=[]),
+                                   rendered_sidecar_service_names=MagicMock(return_value=["pgweb", "db-mcp"]))
+    gp._state_instance = MagicMock(instance_id="esi-1")
+    vm = AsyncMock(ON_THIS_MACHINE=False, tunnel_urls={18765: "https://gw.example"}, host_ips=(), extra_hosts={},
+                   host_port=lambda port: port, exec_with_output=AsyncMock(return_value=(0, GATEWAY_SERVICE_NAME, "")))
+
+    with patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=_loadable("gw"))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "_build_local_store", AsyncMock(return_value=MagicMock(init_sql=""))), \
+         patch.object(gp, "create_docker_compose", return_value="services: {}\n"), \
+         patch.object(gp, "_compose_up", AsyncMock()), \
+         patch.object(gp, "_wait_for_gateway", AsyncMock(return_value=True)), \
+         patch.object(gp, "_log_service", AsyncMock(return_value=True)), \
+         patch.object(gp, "_wait_for_tunnel", AsyncMock(return_value=_CARD)), \
+         patch.object(gp, "_refuse_tool_name_clashes", AsyncMock()), \
+         patch.object(env_gateway_provider.asyncio, "sleep", AsyncMock()):
+        deployed = await gp._deploy_via_vm(
+            sandbox_provider=_vm_provider(), mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+            mcp_server_images=[_loadable("mcp-slack")], gateway_port=18765, website_configs=None, website_images=None,
+            gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10, existing_sandbox=vm,
+        )
+
+    assert (deployed.gateway_url, deployed.db_web_url, deployed.db_mcp_url) == ("https://gw.example", None, None)
+
+
 _PROBE_CARD = {"name": "env1234", "children_environments": [
     {"name": "a", "capabilities": {"tools": [{"name": "a_list"}, {"name": "a_get"}]}},
     {"name": "b", "capabilities": {"tools": [{"name": "b_send"}]}},
