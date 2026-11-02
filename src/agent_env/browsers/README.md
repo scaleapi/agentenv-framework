@@ -1,4 +1,5 @@
-Computer apps that come with agent-env, each a `computer_app` env a computer env lists in its `apps`.
+The website browsers that come with agent-env, today `chromium`, a `computer_app` env a computer env lists in its
+`apps`.
 
 `envs/chromium/` is Chromium for an X11 desktop on Linux (`amd64` and `arm64`): Chrome for Testing 156.0.8078.4, the
 build Playwright 1.64.1 pins, fetched by sha256 when a computer env that lists it is put and unpacked into
@@ -9,7 +10,7 @@ prompts, and no warning bar. It runs without Chromium's sandbox and `/dev/shm`, 
 with no proxy. It opens at boot on its `start_urls` setting, a list, the first tab active, none by default
 (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which the
 image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
-the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/apps/chromium`.
+the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`.
 
 An app that starts Chromium itself, with its own profile and flags, shares this install through
 `agentenv_protocol.website_browser`: `CHROMIUM_DOWNLOADS` and `CHROMIUM_PACKAGES` in its `@linux(...)`,

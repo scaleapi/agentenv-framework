@@ -158,7 +158,7 @@ agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
 agents = "agent_env"
-apps = "agent_env"
+browsers = "agent_env"
 computers = "agent_env"
 drivers = "agent_env"
 desktop = "agent_env.examples"

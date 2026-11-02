@@ -1,3 +1,0 @@
-# Ids a computer env's apps, or a task, can name these apps by; a store's env of the id wins over an alias.
-[envs]
-chromium = ["chromium"]

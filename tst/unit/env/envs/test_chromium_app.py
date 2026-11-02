@@ -1,4 +1,4 @@
-"""agentenv's chromium app as a put reads it: the installed ``apps`` bundle names it ``chromium``, and its class declares
+"""agentenv's chromium app as a put reads it: the installed ``browsers`` bundle names it ``chromium``, and its class declares
 the pinned Chromium archives and packages, its profile as its data, a launch matched by its window class and started on
 its ``start_urls``, none by default, and Chromium's install step."""
 import sys
@@ -11,18 +11,18 @@ from agent_env.bundle import parse_bundle
 from agent_env.bundle.installed import find_bundle
 
 
-def test_the_apps_bundle_names_its_chromium_app_chromium():
-    bundle = find_bundle("apps")
+def test_the_browsers_bundle_names_its_chromium_app_chromium():
+    bundle = find_bundle("browsers")
     parsed = parse_bundle(bundle.root, id_root=bundle.id_root)
 
-    assert [(entry.id, entry.type) for entry in parsed.entries] == [("@local/agentenv-framework/apps/chromium",
+    assert [(entry.id, entry.type) for entry in parsed.entries] == [("@local/agentenv-framework/browsers/chromium",
                                                                      "computer_app")]
     assert parsed.aliases == {"envs": {"chromium": ("chromium",)}}
 
 
 def test_chromium_declares_its_archives_profile_launch_start_urls_and_install_step():
     sys.modules.pop("chromium", None)
-    chromium = load_class(find_bundle("apps").root / "envs" / "chromium" / "chromium.py", "Chromium",
+    chromium = load_class(find_bundle("browsers").root / "envs" / "chromium" / "chromium.py", "Chromium",
                           ComputerAppEnvironment)
 
     declared = chromium.declaration()
