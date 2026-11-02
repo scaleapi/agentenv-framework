@@ -4,16 +4,18 @@ token and the top two at each, scaled by the temperature as processed logprobs a
 message from the request body."""
 
 import json
+import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
+import uvicorn
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
-
-from agent_env.training._openenv import Server
 
 Reply = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -49,9 +51,10 @@ def token_ids(message: dict[str, Any]) -> list[int]:
 
 
 @contextmanager
-def fake_vllm(model: str, reply: Reply) -> Iterator[Server]:
-    """The engine, served on loopback; ``.requests`` are the completion bodies it got, and ``.served`` the models it
-    lists, which a test appends to as vLLM lists a LoRA adapter once it's loaded."""
+def fake_vllm(model: str, reply: Reply, host: str = "127.0.0.1") -> Iterator[SimpleNamespace]:
+    """The engine, listening on ``host``, every interface for a client in a container, at ``.url`` on loopback;
+    ``.requests`` are the completion bodies it got, and ``.served`` the models it lists, which a test appends to as vLLM
+    lists a LoRA adapter once it's loaded."""
     requests: list[dict[str, Any]] = []
     served = [model]
 
@@ -78,10 +81,15 @@ def fake_vllm(model: str, reply: Reply) -> Iterator[Server]:
                       "total_tokens": len(prompt) + len(completion)},
         })
 
-    server = Server(Starlette(routes=[Route("/v1/models", models),
-                                      Route("/v1/chat/completions", completions, methods=["POST"])]))
-    server.requests, server.served = requests, served
+    app = Starlette(routes=[Route("/v1/models", models), Route("/v1/chat/completions", completions, methods=["POST"])])
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=0, log_level="warning"))
+    thread = threading.Thread(target=server.run, name="fake-vllm", daemon=True)
+    thread.start()
+    while not server.started:
+        time.sleep(0.05)
+    port = server.servers[0].sockets[0].getsockname()[1]
     try:
-        yield server
+        yield SimpleNamespace(url=f"http://127.0.0.1:{port}", requests=requests, served=served)
     finally:
-        server.stop()
+        server.should_exit = True
+        thread.join()

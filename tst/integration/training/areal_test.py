@@ -21,7 +21,7 @@ def test_opencode_plays_its_smoke_task_against_the_proxy_address_and_the_run_ret
     (state / "smoke" / "tasks").mkdir(parents=True)
     (state / "smoke" / "tasks" / shipped.name).write_text(shipped.read_text())
 
-    with fake_vllm(MODEL, shell_then_says("echo $((6 * 7))", "42")) as engine:
+    with fake_vllm(MODEL, shell_then_says("echo $((6 * 7))", "42"), host="0.0.0.0") as engine:
         [row] = task_rows(state / "smoke")
         reward = asyncio.run(AgentEnvWorkflow(state / "smoke").run(row, base_url=engine.url, api_key="session-1",
                                                                    http_client=None))
