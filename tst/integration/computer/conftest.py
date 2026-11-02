@@ -1,5 +1,6 @@
 """The ubuntu-24.04 base computer, built from its folder once for the tests here and tagged for the local registry; the
-shipped desktop example's computer env, and the cua-driver test bundle's, each composed once for a module's tests;
+shipped desktop example's computer env, the cua-driver test bundle's and the chromium test bundle's, each composed once
+for a module's tests;
 ``state``, local stores for a test that runs a bundle; and ``docker``, which runs the docker CLI for them."""
 
 import logging
@@ -25,6 +26,7 @@ from agent_env.task.store import get_task_instance_store
 
 BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04"
 CUA_DRIVER = Path(__file__).parent / "cua-driver"
+CHROMIUM = Path(__file__).parent / "chromium"
 
 
 @pytest.fixture(scope="session")
@@ -48,6 +50,13 @@ def cua_desktop(tmp_path_factory):
     """The cua-driver test bundle's desktop, the ubuntu-24.04 base with the cua-driver driver, composed as ``desktop``
     is."""
     yield from _composed(tmp_path_factory.mktemp("cua-desktop"), parse_bundle(CUA_DRIVER))
+
+
+@pytest.fixture(scope="module")
+def chromium_desktop(tmp_path_factory):
+    """The chromium test bundle's desktop, the ubuntu-24.04 base and the reference driver with agentenv's chromium app,
+    composed as ``desktop`` is."""
+    yield from _composed(tmp_path_factory.mktemp("chromium-desktop"), parse_bundle(CHROMIUM))
 
 
 def _composed(root: Path, bundle):
