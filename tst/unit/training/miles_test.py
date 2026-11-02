@@ -163,9 +163,10 @@ def test_the_command_writes_the_rows(serve, tmp_path, teardowns):
     server.stop()
 
     assert result.exit_code == 0, result.output
-    assert result.output == f"wrote all.jsonl to {tmp_path / 'rows'}\n"
+    assert sorted(path.name for path in (tmp_path / "rows").iterdir()) == ["all.jsonl"]
     [line] = (tmp_path / "rows" / "all.jsonl").read_text().splitlines()
     assert json.loads(line)["metadata"]["agentenv"]["max_turns"] == 2
+    assert len(teardowns.finished) == 1
 
 
 def _sample(metadata, status="COMPLETED"):
