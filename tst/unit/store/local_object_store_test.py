@@ -66,13 +66,25 @@ def test_resolve_rejects_key_escaping_root(store, tmp_path):
     assert not (tmp_path.parent / "escapes.bin").exists()
 
 
+@pytest.mark.parametrize("key", ["ns/../other/x", "ns/agent/../../other/x", "a/../.gitignore", ".."])
+def test_a_key_that_climbs_is_refused_even_when_it_lands_inside_the_root(store, tmp_path, key):
+    """A name joined under a prefix must not reach another prefix, as it can't on S3, where the key is kept as
+    written."""
+    for write in (lambda: store.put(key, b"x"), lambda: store.object_url(key),
+                  lambda: store.get_object_key(f"file://{tmp_path}/{key}")):
+        with pytest.raises(ValueError, match="'..' path segment"):
+            write()
+    assert store.list("") == []
+    store.put("ns/a..b/x", b"a name holding two dots is a name")
+    assert store.list("") == ["ns/a..b/x"]
+
+
 def test_root_gitignore_key_is_reserved(tmp_path):
     """The store writes its ignore rule at the root's .gitignore; an object there would
     clobber the rule and then vanish from listings."""
     store = LocalFilesystemObjectStore(str(tmp_path / "root"))
-    for key in (".gitignore", "a/../.gitignore"):
-        with pytest.raises(ValueError, match="reserved"):
-            store.put(key, b"mine")
+    with pytest.raises(ValueError, match="reserved"):
+        store.put(".gitignore", b"mine")
     assert not (tmp_path / "root").exists()
     store.put("a/.gitignore", b"nested is an ordinary key")
     assert (tmp_path / "root" / ".gitignore").read_text() == "*\n"
@@ -287,7 +299,7 @@ def test_an_overwrite_that_names_no_type_never_inherits_the_old_one(store, tmp_p
     assert store.get_object_metadata("keep/x").content_type is None
 
 
-@pytest.mark.parametrize("key", [".agentenv-meta/x", ".agentenv-tmp/x", "a/../.agentenv-meta"])
+@pytest.mark.parametrize("key", [".agentenv-meta/x", ".agentenv-tmp/x"])
 def test_the_stores_own_directories_are_reserved(store, key):
     with pytest.raises(ValueError, match="reserved"):
         store.put(key, b"mine")
