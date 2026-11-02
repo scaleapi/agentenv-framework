@@ -48,6 +48,7 @@ dependencies = [
     "modal>=1.5.2.dev22",  # dev22 adds _experimental_create(tags=); dev2 added VM-mode V2 (vm_runtime)
     "e2b~=2.46.4",  # AsyncSandbox/AsyncTemplate APIs validated against the 2.46 line
     "fastapi>=0.110",  # the explorer, agent-env up
+    "tzdata>=2024.1",  # sync_env_clock reads a task's timezone on a worker image with no system zone files
 ]
 
 [project.optional-dependencies]
