@@ -18,7 +18,7 @@ from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, BundleKind, dry_run_bundle, run_bundle
-from agent_env.bundle.run import _write_bundle
+from agent_env.bundle.run import _write_bundle, prepare_bundle
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import get_config
@@ -1176,12 +1176,18 @@ def test_an_agent_or_agent_judge_needs_a_model_endpoint_unless_its_step_gives_on
              "judge_a2a_agent_id": "solver", "criteria": [{"id": "c1", "description": "done"}]}
     direct = {**judge, "id": "direct", "use_agent_judge": False}
     given = {**AGENT, "env_vars": {"LITELLM_API_KEY": "sk-1"}, "litellm_base_url": "http://models:4000"}
-    _task(bundle_dir, [AGENT, judge], name="judged")
+    asks = {"id": "ask", "type": "prompt_agent", "prompt_id": "agent", "prompt": "go", "depends_on": ["agent"]}
+    _task(bundle_dir, [AGENT, asks, judge], name="judged")
     _task(bundle_dir, [given, direct], name="given")
 
     assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local")) == [
         "tasks/judged.json: step 'agent', tasks/judged.json: step 'judge' deploy an agent that calls the model endpoint, "
         "and no model endpoint is set: set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"]
+    with namespace_routing():  # a trainer gives the solver its endpoint, and the judge still needs the configured one
+        trained = lambda: prepare_bundle(bundle_dir, tasks=["judged"], sandbox="local", solver_endpoint=True)  # noqa: E731
+        assert _problems(trained) == [
+            "tasks/judged.json: step 'judge' deploys an agent that calls the model endpoint, and no model endpoint is "
+            "set: set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"]
     assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["given"], sandbox="local").runs] == ["given"]
     monkeypatch.setenv("LITELLM_BASE_URL", "http://models:4000")
     [problem] = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local"))

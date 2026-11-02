@@ -365,13 +365,7 @@ class DeployAgentTaskStep(TaskStep):
         requested_disk = user_overrides.get("agent_disk_size_gb") or self.disk_size_gb
         min_disk = agent.metadata.get("min_disk_size_gb")
         agent_disk_size_gb = max(requested_disk or 0, min_disk or 0) or None
-        env_vars = dict(self.env_vars) if self.env_vars else {}
-        override_litellm_key = user_overrides.get("litellm_api_key")
-        if override_litellm_key:
-            env_vars["LITELLM_API_KEY"] = config.resolve_reference(override_litellm_key)
-        resolved_litellm_base_url = user_overrides.get("litellm_base_url") or self.litellm_base_url
-        if resolved_litellm_base_url:
-            env_vars["LITELLM_BASE_URL"] = resolved_litellm_base_url
+        env_vars = {**(self.env_vars or {}), **self._model_endpoint(context)}
         if self.role is not None:
             env_vars.setdefault(ROLE_ENV_VAR, self.role)  # the generated MCP CLI sends its role from here
 
@@ -508,6 +502,18 @@ class DeployAgentTaskStep(TaskStep):
             env_ids=list(self.env_ids),
         ))
         return context
+
+    def _model_endpoint(self, context: TaskStepContext) -> dict[str, str]:
+        """The agent's ``LITELLM_API_KEY`` and ``LITELLM_BASE_URL`` in this run: this step's ``step_params`` over the
+        run-wide overrides, so a trainer can point the solver alone at its own endpoint, and the base URL over the
+        step's."""
+        overrides = {**context.metadata.get("user_overrides", {}), **self.step_param_overrides(context)}
+        endpoint = {}
+        if overrides.get("litellm_api_key"):
+            endpoint["LITELLM_API_KEY"] = get_config().resolve_reference(overrides["litellm_api_key"])
+        if base_url := overrides.get("litellm_base_url") or self.litellm_base_url:
+            endpoint["LITELLM_BASE_URL"] = base_url
+        return endpoint
 
     def _resolved_ttl_seconds(self, context: TaskStepContext) -> int:
         override = context.metadata.get("user_overrides", {}).get("ttl_seconds")

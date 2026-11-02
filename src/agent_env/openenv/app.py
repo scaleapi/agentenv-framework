@@ -23,6 +23,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task import EpisodeError, EpisodeSpec, Task
 
 from .environment import AgentEnvEnvironment, Served, ServedTask
+from .reward import reward_of
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +143,11 @@ def _served(splits: dict[str, list[tuple[str, Task]]],
             except EpisodeError as e:
                 refused[task.id] = str(e)
                 continue
-            reward_of, problem = _reward_of(task, reward)
+            rewarded, problem = reward_of(task, reward)
             if problem:
                 unscorable[task.id] = problem
                 continue
-            kept.append(ServedTask(task, name, spec, reward_of))
+            kept.append(ServedTask(task, name, spec, rewarded))
         served[split] = tuple(kept)
     for why in refused.values():
         logger.warning("left out: %s", why)
@@ -156,32 +157,3 @@ def _served(splits: dict[str, list[tuple[str, Task]]],
         raise BundleError([f"no task can be served as an OpenEnv env: {why}" for why in refused.values()]
                           or ["no task can be served as an OpenEnv env: the bundle has none"])
     return served
-
-
-def _reward_of(task: Task, reward: str | Callable[[dict[str, float]], float] | None
-               ) -> tuple[Callable[[dict[str, float]], float | None] | None, str | None]:
-    """``task``'s reward as a function of its scores, or why ``reward`` can't make one."""
-    if callable(reward):
-        return reward, None
-    scoring = [step.id for step in task.steps if getattr(step, "verifier_id", None)]
-    if reward is None:
-        if len(scoring) > 1:
-            return None, (f"task {task.id!r} records a score at each of {', '.join(scoring)}; name the one that is "
-                          "its reward with reward=<step id>")
-        return (_score_at(scoring[0]) if scoring else _unscored), None
-    if reward not in scoring:
-        return None, f"task {task.id!r} records no score at step {reward!r}; it records them at {scoring}"
-    return _score_at(reward), None
-
-
-def _score_at(step: str) -> Callable[[dict[str, float]], float]:
-    def score(scores: dict[str, float]) -> float:
-        if step not in scores:
-            raise LookupError(f"the run recorded no score at step {step!r}")
-        return scores[step]
-
-    return score
-
-
-def _unscored(scores: dict[str, float]) -> None:
-    return None

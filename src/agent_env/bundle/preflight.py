@@ -80,7 +80,7 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVer
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_missing, docker_unreachable
 
 from .parse import BundleError, BundleKind
-from .plan import AgentOverride, Plan
+from .plan import AgentOverride, Plan, solver_steps
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step, played_deploys
 
 _SHOWN = 3
@@ -96,13 +96,16 @@ class Preflight:
     built_here: frozenset[str] = frozenset()  # the ids of the images the bundle builds that a deploy here runs
 
 
-def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None, *, played: bool = False) -> Preflight:
+def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None, *, played: bool = False,
+                  solver_endpoint: bool = False) -> Preflight:
     """Check where each of ``tasks`` deploys, with ``sandbox`` overriding every deploy's provider, and name the infra
-    envs the run builds; ``played`` skips each task's played agent's deploys (``played_deploys``). Raises BundleError
-    listing every problem found. Reads the store but writes nothing."""
+    envs the run builds; ``played`` skips each task's played agent's deploys (``played_deploys``), and with
+    ``solver_endpoint`` the caller gives the solver's deploys (``solver_steps``) their model endpoint. Raises
+    BundleError listing every problem found. Reads the store but writes nothing."""
     walk = _Walk(plan, sandbox)
     for task in tasks:
-        walk.task(task, skip=played_deploys(task) if played else frozenset())
+        walk.task(task, skip=played_deploys(task) if played else frozenset(),
+                  given=frozenset(solver_steps(task.config)) if solver_endpoint else frozenset())
     return walk.finish()
 
 
@@ -148,7 +151,7 @@ class _Walk:
         # Each deploy of an image the bundle builds: (where, what, its provider's links, the images it accepts on each)
         self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], Callable[[SandboxProvider], Accepts]]]] = {}
 
-    def task(self, task: ResolvedEntry, skip: frozenset[str]) -> None:
+    def task(self, task: ResolvedEntry, skip: frozenset[str], given: frozenset[str] = frozenset()) -> None:
         steps = [build_step(config) for config in task.config]
         sandboxes = {step.sandbox_name: step for step in steps if isinstance(step, DeploySandboxTaskStep)}
         solver = self.plan.agent.steps.get(task.entry.id, ()) if self.plan.agent else ()
@@ -161,7 +164,7 @@ class _Walk:
                 if isinstance(step, DeployEnvTaskStep):
                     self._env(where, step)
                 elif isinstance(step, DeployAgentTaskStep):
-                    self._agent(where, step, sandboxes, override)
+                    self._agent(where, step, sandboxes, override, endpoint_given=step.id in given)
                 elif isinstance(step, DeploySandboxTaskStep):
                     self._sandbox(where, step)
                 elif isinstance(step, RubricsVerifierTaskStep):
@@ -289,7 +292,7 @@ class _Walk:
         return version if version is not None else self.plan.store_latest.get((kind, entity_id))
 
     def _agent(self, where: str, step: DeployAgentTaskStep, sandboxes: dict[str, DeploySandboxTaskStep],
-               override: AgentOverride | None = None) -> None:
+               override: AgentOverride | None = None, endpoint_given: bool = False) -> None:
         """Check a deploy of the step's agent, or of ``override``, the agent ``--agent`` names for the solver."""
         accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts
         if step.sandbox_name:
@@ -303,7 +306,8 @@ class _Walk:
             accepts = functools.partial(A2AAgent.accepts, sandbox_mode=linked.sandbox_mode)  # the VM loads its image
         else:
             provider = _provider(self.sandbox or step.sandbox_type, get_agent_sandbox_provider)
-        given = frozenset({*step.env_vars, *([ENV_BASE_URL] if step.litellm_base_url else [])})
+        given = frozenset({*step.env_vars, *([ENV_BASE_URL] if step.litellm_base_url else []),
+                           *(_MODEL_VARS if endpoint_given else ())})
         agent_id, version = ((override.agent_id, override.version) if override is not None
                              else (step.a2a_agent_id, step.a2a_agent_version))
         self._agent_deploy(where, provider, agent_id, version, "names no agent", accepts, given=given)

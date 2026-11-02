@@ -137,6 +137,9 @@ gcp = [
     { name = "google-cloud-storage" },
     { name = "requests" },
 ]
+harness = [
+    { name = "openenv" },
+]
 nemo-gym = [
     { name = "nemo-gym", marker = "python_full_version >= '3.13.14'" },
     { name = "omegaconf", marker = "python_full_version >= '3.13.14'" },
@@ -184,7 +187,8 @@ verl = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "openenv", "sail", "skyrl", "tensorlake", "tenki", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "harness", "openenv", "sail", "skyrl", "tensorlake", "tenki", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'harness'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'nemo-gym'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'skyrl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'trl'" },
@@ -219,6 +223,7 @@ requires-dist = [
     { name = "moto", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "nemo-gym", marker = "python_full_version >= '3.13.14' and extra == 'nemo-gym'", specifier = ">=0.7.0rc0" },
     { name = "omegaconf", marker = "python_full_version >= '3.13.14' and extra == 'nemo-gym'", specifier = ">=2.3" },
+    { name = "openenv", marker = "extra == 'harness'", specifier = ">=0.10" },
     { name = "openenv", marker = "extra == 'openenv'", specifier = ">=0.9" },
     { name = "packaging", specifier = ">=22" },
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.4" },
@@ -250,7 +255,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["openenv", "trl", "nemo-gym", "verl", "skyrl", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
+provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
