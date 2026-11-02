@@ -140,6 +140,9 @@ gcp = [
 harness = [
     { name = "openenv" },
 ]
+miles = [
+    { name = "openenv" },
+]
 nemo-gym = [
     { name = "nemo-gym", marker = "python_full_version >= '3.13.14'" },
     { name = "omegaconf", marker = "python_full_version >= '3.13.14'" },
@@ -189,6 +192,7 @@ requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
     { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "harness", "openenv", "sail", "skyrl", "tensorlake", "tenki", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'harness'" },
+    { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'miles'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'nemo-gym'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'skyrl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'trl'" },
@@ -255,7 +259,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
+provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "miles", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
