@@ -106,8 +106,9 @@ def test_an_image_its_registry_names_is_written_as_its_ref_and_reported_as_pulle
     assert _toml(imported.root, "envs/crm/env.toml")["image"] == {"ref": "registry.example.com/crm:v1"}
     assert [(pull.folder, pull.image) for pull in imported.pulled] == [("envs/crm", "registry.example.com/crm:v1")]
     assert imported.pinned == () and imported.images == ()
-    assert ("- Access to the registries its pulled images are in: `registry.example.com`. agent-env reads a private one "
-            "only through its configured image store, such as an ECR store for an ECR registry.") in (
+    assert ("- Access to the registries its pulled images are in: `registry.example.com`. An image pinned to a digest "
+            "needs only this machine's Docker logged in to its registry (`docker login`); agent-env reads any other "
+            "private one only through its configured image store, such as an ECR store for an ECR registry.") in (
         imported.root / "README.md").read_text().splitlines()
 
 

@@ -8,6 +8,7 @@ URL, where it reaches its staging over loopback."""
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -296,6 +297,36 @@ async def test_a_staged_changelog_is_drained_into_the_store_and_applied_to_a_fre
     call = changelog_apply_call(method, granting, agent_name="a", source_url=namespace_url, sandbox_type="modal")
     await invoke_transfer(URL + path, call, verb="PUT", operation="changelog apply", timeout=60, store=granting)
     assert _Agent.received == {"applied/0": b"first", "applied/3": b"second"}
+
+
+@pytest.mark.asyncio
+async def test_a_listed_path_that_is_not_plain_under_the_namespace_is_left_where_it_is(agent, store, monkeypatch):
+    """The agent lists what it staged, so its listing can name anything; only plain paths under its namespace move."""
+    namespace_url, namespace = await _enable_changelog(agent, store)
+    await _Agent.uploader.upload("000000.tar", b"first")
+    root = store.get_object_key(namespace_url) + "/"
+    client = staging._client
+
+    @asynccontextmanager
+    async def listing_more(doing):
+        async with client(doing) as real:
+            get = real.get
+
+            async def get_listing_more(url, *args, **kwargs):
+                response = await get(url, *args, **kwargs)
+                if url != namespace.staging_url + "/":
+                    return response
+                climbs = [f"{root}../../escaped.tar", f"{root}./000001.tar", f"{root}a//000002.tar"]
+                objects = response.json()["objects"] + [{"path": path} for path in climbs]
+                return httpx.Response(200, json={"objects": objects}, request=response.request)
+
+            real.get = get_listing_more
+            yield real
+
+    monkeypatch.setattr(staging, "_client", listing_more)
+
+    assert await staging.drain(namespace, store) == 1
+    assert store.list("") == [f"{root}000000.tar"]
 
 
 @pytest.mark.asyncio

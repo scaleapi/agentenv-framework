@@ -114,6 +114,35 @@ def test_a_ref_the_registry_cant_serve_writes_nothing(local_stores, monkeypatch)
     assert get_artifact_store().next_version("tool-image") == 1
 
 
+@pytest.mark.parametrize("ref, credentials, kept", [
+    (f"registry.example/team/app:v1@{DIGEST}", None, True),
+    ("registry.example/team/app:v1", None, False),
+    (f"registry.example/team/app:v1@{DIGEST}", RegistryAuth("registry.example", "user", "pw"), False),
+], ids=["digest", "tag", "the store's own registry"])
+def test_a_digest_ref_its_registry_refuses_a_store_without_its_credentials_is_kept_as_given(
+        local_stores, monkeypatch, ref, credentials, kept):
+    """For a sandbox whose Docker is logged in to that registry to pull; a tag, or the store's own refusal, still fails."""
+    class _Registry(ImageStore):
+        def image_ref(self, repository, tag):
+            return f"registry.example/{repository}:{tag}"
+
+        def auth(self, ref):
+            return credentials
+
+    def refuse(ref, auth):
+        raise docker_image.RegistryRefusedError(f"{ref}: registry.example refused to serve it (HTTP 401)")
+
+    local_stores.set_image_store(_Registry())
+    monkeypatch.setattr(docker_image, "pin_digest", refuse)
+
+    if kept:
+        assert DockerImageArtifact.put_ref("app-image", description="d", image_name=ref).image_name == ref
+    else:
+        with pytest.raises(ValueError, match="refused to serve it"):
+            DockerImageArtifact.put_ref("app-image", description="d", image_name=ref)
+        assert get_artifact_store().next_version("app-image") == 1
+
+
 def test_a_ref_given_its_build_context_runs_under_its_tag_pulled_by_the_digest_given(local_stores, resolved, tmp_path):
     """So a sandbox that can't pull it builds it from the context, under the name its containers start from."""
     (tmp_path / "Dockerfile").write_text("FROM scratch\n")
