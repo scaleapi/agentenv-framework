@@ -1,11 +1,13 @@
 """WebsiteBrowserEnvironment: agentenv's flags after a subclass's command, in a computer and alone, and the proxy rule
 for each; a subclass refused for carrying one of them; the start tabs, the time zone and the window from its settings;
-its launch run with no desktop when alone; the debugging address read again each time and checked for readiness; its
-policies, card params and skill; and an app that isn't a browser launched and declared as before."""
+its launch run with no desktop when alone; a CDP connection over a new debugging pipe at each launch, which its ready
+check asks, and a browser launched again when its server restarts; its policies, card params and skill; and an app that
+isn't a browser launched and declared as before."""
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 import pytest
 
@@ -13,10 +15,30 @@ from agentenv_protocol.computer import APP_SETTINGS_ENV, ComputerAppEnvironment,
 from agentenv_protocol.computer import app_runtime
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.website_browser import (ALONE_BYPASS, ALONE_ENV, BROWSER, COMPUTER_BYPASS, OPEN_WEB_ENV,
-                                               POLICIES, SITE_PROXY_ENV, SKILL, WebsiteBrowserEnvironment, cdp)
+                                               POLICIES, SITE_PROXY_ENV, SKILL, DevToolsError,
+                                               WebsiteBrowserEnvironment)
 
 PROXY = "http://127.0.0.1:3128"
-OWNED = ["--user-data-dir", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--lang=en-US"]
+OWNED = ["--user-data-dir", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=en-US"]
+# A browser that answers CDP on its debugging pipe, fds 3 and 4, as a Chromium does: Browser.getVersion with its product,
+# Target.createTarget by writing the tab's URL to tabs.txt beside it, anything else with an error.
+FAKE_BROWSER = """import json, os
+buffer = b""
+while chunk := os.read(3, 65536):
+    buffer += chunk
+    while b"\\0" in buffer:
+        raw, buffer = buffer.split(b"\\0", 1)
+        message = json.loads(raw)
+        if message["method"] == "Browser.getVersion":
+            answer = {"result": {"product": "Fake/1"}}
+        elif message["method"] == "Target.createTarget" and message["params"]["background"]:
+            with open("tabs.txt", "a") as tabs:
+                tabs.write(message["params"]["url"] + "\\n")
+            answer = {"result": {"targetId": message["params"]["url"]}}
+        else:
+            answer = {"error": {"code": -32601, "message": "unknown method"}}
+        os.write(4, json.dumps({"id": message["id"], **answer}).encode() + b"\\0")
+"""
 
 
 @linux(launch=Launch(command=["chromium/chrome", "--no-sandbox"], window={"class": "Chromium"},
@@ -146,8 +168,8 @@ async def test_alone_its_server_launches_it_at_once_in_its_environment_with_no_d
     monkeypatch.chdir(tmp_path)
     launched, waited, launchers = [], [], []
 
-    async def launch(argv, cwd, env):
-        launched.append(env)
+    async def launch(argv, cwd, env, fds=None):
+        launched.append((env, sorted(fds or {})))
         return 4242
 
     async def up():
@@ -160,7 +182,7 @@ async def test_alone_its_server_launches_it_at_once_in_its_environment_with_no_d
 
     await Browser()._computer_app.start()
 
-    assert launched == [{"TZ": "UTC", "ENVIRONMENT_NAME": "chromium"}] and waited == [] and launchers == []
+    assert launched == [({"TZ": "UTC", "ENVIRONMENT_NAME": "chromium"}, [3, 4])] and waited == [] and launchers == []
 
 
 @pytest.mark.asyncio
@@ -169,7 +191,7 @@ async def test_in_a_computer_its_server_waits_for_the_display_and_adds_its_launc
     monkeypatch.chdir(tmp_path)
     waited, launchers = [], []
 
-    async def launch(argv, cwd, env):
+    async def launch(argv, cwd, env, fds=None):
         return 4242
 
     async def up():
@@ -185,38 +207,92 @@ async def test_in_a_computer_its_server_waits_for_the_display_and_adds_its_launc
     assert waited == [True] and launchers == ["chromium"]
 
 
+@linux(launch=Launch(command=[sys.executable, "-c", FAKE_BROWSER], ready=Ready(command=["true"])))
+class FakeBrowser(WebsiteBrowserEnvironment):
+    pass
+
+
 @pytest.mark.asyncio
-async def test_its_debugging_address_is_read_again_each_time_and_answers_its_ready_check(browser_home):
+async def test_each_launch_gets_a_new_pipe_its_server_talks_cdp_over_and_its_ready_check_asks(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
+    browser = FakeBrowser()
+    runtime = browser._computer_app
+    unlaunched = await browser.devtools_answers()
+
+    await runtime.launch_app()
+    version = await browser.devtools.call("Browser.getVersion")
+    with pytest.raises(DevToolsError, match="unknown method"):
+        await browser.devtools.call("Page.navigate", {"url": "about:blank"})
+    launched = await browser.devtools_answers()
+    await runtime.stop_app()
+    stopped = await browser.devtools_answers()
+    await runtime.launch_app()
+    relaunched = await browser.devtools_answers()
+    await runtime.stop_app()
+    browser.devtools.close()
+
+    assert unlaunched is False and version == {"product": "Fake/1"} and launched is True
+    assert stopped is False and relaunched is True
+    assert "devtools_answers" in runtime.ready_checks
+
+
+@pytest.mark.asyncio
+async def test_headless_it_opens_one_start_tab_from_its_command_line_and_the_rest_over_its_pipe(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
+    monkeypatch.setenv(ALONE_ENV, "1")
+    monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
+    _settings(monkeypatch, start_urls=["https://slack.com", "https://linear.app", "https://github.com"])
+    browser = FakeBrowser()
+
+    await browser._computer_app.launch_app()
+    for _ in range(50):
+        if ready := await browser.devtools_answers():
+            break
+        await asyncio.sleep(0.1)
+    await browser._computer_app.stop_app()
+    browser.devtools.close()
+
+    assert browser.launch.command[-2:] == ["--headless=new", "https://slack.com"]
+    assert ready is True and (tmp_path / "tabs.txt").read_text() == "https://linear.app\nhttps://github.com\n"
+
+
+@pytest.mark.asyncio
+async def test_a_restarted_server_launches_a_browser_again_and_leaves_any_other_app_be(monkeypatch, tmp_path):
+    monkeypatch.setenv("DISPLAY", ":1")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
+    launched, stopped = [], []
+
+    async def launch(argv, cwd, env, fds=None):
+        launched.append((argv[0], sorted(fds or {})))
+        return 4242
+
+    async def stop(pid, timeout_s):
+        stopped.append(pid)
+
+    async def up():
+        pass
+
+    monkeypatch.setattr(session, "launch", launch)
+    monkeypatch.setattr(session, "stop", stop)
+    monkeypatch.setattr(session, "alive", lambda pid: True)
+    monkeypatch.setattr(session, "wait_until_up", up)
+    monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
+    (tmp_path / "launched").mkdir()
+    (tmp_path / "launched" / tmp_path.name).touch()
+    (tmp_path / ".agentenv").mkdir()
+    (tmp_path / ".agentenv" / "app.pid").write_text("4241")
+
+    await Mail()._computer_app.start()
+    left_alone = list(launched)
     browser = Browser()
-    profile = browser_home / ".config/chromium"
-    profile.mkdir(parents=True)
-    with pytest.raises(FileNotFoundError):
-        await browser.devtools_address()
-    unwritten = await browser.debugging_address_answers()
+    await browser._computer_app.start()
+    browser.devtools.close()
 
-    server = await asyncio.start_server(_json_version, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    (profile / "DevToolsActivePort").write_text("1\n/devtools/browser/first\n")
-    first = await browser.devtools_address()
-    (profile / "DevToolsActivePort").write_text(f"{port}\n/devtools/browser/second\n")
-    async with server:
-        relaunched = await browser.devtools_address()
-        answers = await browser.debugging_address_answers()
-
-    assert unwritten is False
-    assert first == "ws://127.0.0.1:1/devtools/browser/first"
-    assert relaunched == f"ws://127.0.0.1:{port}/devtools/browser/second" and answers is True
-    assert "debugging_address_answers" in browser._computer_app.ready_checks
-
-
-@pytest.mark.asyncio
-async def test_a_subclass_that_marks_its_own_method_cdp_gives_that_address():
-    class Elsewhere(Browser):
-        @cdp
-        async def own(self) -> str:
-            return "ws://127.0.0.1:9333/devtools/browser/own"
-
-    assert await Elsewhere().devtools_address() == "ws://127.0.0.1:9333/devtools/browser/own"
+    assert left_alone == [] and stopped == [4241]
+    assert launched == [("chromium/chrome", [3, 4])]
 
 
 def test_its_policies_are_agentenvs_with_its_own_over_them_where_its_build_reads_them(monkeypatch, tmp_path):
@@ -259,9 +335,3 @@ def test_an_app_that_isnt_a_browser_launches_and_declares_as_before():
     assert stored["os"]["linux"]["launch"] == {"at": "boot", "command": ["mail"], "window": {"class": "Mail"},
                                                "ready": {"window": True, "timeout_s": 60.0}}
 
-
-async def _json_version(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    await reader.readuntil(b"\r\n\r\n")
-    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
-    await writer.drain()
-    writer.close()

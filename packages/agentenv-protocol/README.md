@@ -750,24 +750,29 @@ under the session user's home (`.config/chromium` by default), whose contents fr
 are the profile's template. The base class adds:
 
 - **Its settings**, `BrowserSettings`, which a subclass's `Settings` extends: `start_urls`, opened in
-  tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`); `window`,
+  tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`), headless
+  the first from its command line and the rest over its pipe, since headless Chromium takes one; `window`,
   1280 × 800, alone only; `locale`; and `time_zone`, set as `TZ` in its launch's `env`.
 - **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile,
-  `--remote-debugging-port=0`, `--no-first-run`, `--no-default-browser-check` and `--lang`. With
+  `--remote-debugging-pipe`, `--no-first-run`, `--no-default-browser-check` and `--lang`. With
   `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
   Alone it bypasses nothing, loopback included; in a computer it bypasses loopback (`127.0.0.1`,
   `[::1]`, `localhost`), so the apps beside it stay reachable while `*.localhost` names still go
   through. Alone (`AGENTENV_BROWSER_ALONE=1`) it also takes `--window-size` and `--headless=new`,
   except on the open web (`AGENTENV_BROWSER_OPEN_WEB=1`), and refuses to start with no proxy.
-  `declaration()` refuses a subclass whose command carries any of these, or `--remote-allow-origins`,
-  which agentenv never sets, so the debugging port refuses a WebSocket that carries a page's Origin.
+  `declaration()` refuses a subclass whose command carries any of these, or `--remote-allow-origins`, or
+  any other way to open a debugging port.
 - **Alone, no desktop**: its launch matches and waits on no window, its server adds no launcher and,
   without `DISPLAY`, waits for no display, and its ready checks say when it's ready.
 - **`write_policies`**, an install step that writes agentenv's unattended-use policies (`POLICIES`)
   and the subclass's to `agentenv.json` in `policy_dir`.
-- **`@cdp`**, which marks the method returning its debugging address. The default reads
-  `DevToolsActivePort` from the profile, and `devtools_address()` calls it each time, so it's right
-  after a relaunch. The ready check `debugging_address_answers` asks that address's `/json/version`.
+- **A debugging pipe, not a port.** Its server launches it with a new pipe's ends as its fds 3 and 4
+  (`session.launch`'s `fds`, moved into place by `agentenv_protocol.computer._with_fds`) and keeps the
+  other ends as `self.devtools`, a `DevToolsPipe`: `await self.devtools.call(method, params)` returns
+  the result or raises `DevToolsError`, and `ConnectionError` with no browser connected. No port
+  listens and no `DevToolsActivePort` is written, so nothing else in the computer can reach it over
+  CDP. Since only the server that launched it holds the pipe, a server that restarts stops it and
+  launches it again. The ready check `devtools_answers` asks `Browser.getVersion` over the pipe.
 - **`browser/v1`** on its card, params only: `chromium` (its `version`), `clock: "real"` and, alone,
   `window`.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in

@@ -49,11 +49,14 @@ class AppRuntime:
     take to be ready, why its last launch failed, and each sync check still running in its thread."""
 
     def __init__(self, launch: Optional[Launch], ready_checks: dict[str, Callable[[], Any]], timeout_s: float, *,
-                 desktop: bool = True) -> None:
+                 desktop: bool = True, launch_fds: Optional[Callable[[], Awaitable[dict[int, int]]]] = None,
+                 relaunch_on_start: bool = False) -> None:
         self.launch = launch
         self.ready_checks = ready_checks
         self.timeout_s = timeout_s
         self.desktop = desktop
+        self.launch_fds = launch_fds
+        self.relaunch_on_start = relaunch_on_start
         self.started = time.time()
         self.launch_failed: Optional[str] = None
         self.checking: dict[str, asyncio.Future] = {}
@@ -61,23 +64,33 @@ class AppRuntime:
     async def start(self) -> None:
         """Once its X display is up, when it has one, add the app's menu launcher on a desktop and launch a boot app,
         unless the computer has launched it since it booted, at boot or on demand: a server that restarts leaves the
-        app be."""
+        app be, or with ``relaunch_on_start``, for an app only the server that launched it can talk to, stops it and
+        launches it again."""
         if self.launch is None:
             return
         if os.environ.get("DISPLAY"):
             await session.wait_until_up()
         if self.desktop:
             session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())
-        if self.launch.at == "boot" and _launched_at() is None:
+        if self.launch.at == "boot" and (_launched_at() is None or self.relaunch_on_start):
             try:
+                if self.relaunch_on_start:
+                    await self.stop_app()
                 await self.launch_app()
             except Exception as e:
                 self.launch_failed = f"{type(e).__name__}: {e}"
 
     async def launch_app(self) -> int:
-        """Start the app from its folder, marked as launched; its pid."""
-        pid = await session.launch(self.launch.command, Path.cwd(),
-                                   {**(self.launch.env or {}), "ENVIRONMENT_NAME": os.environ["ENVIRONMENT_NAME"]})
+        """Start the app from its folder, marked as launched, with the fds the app gives it, whose copies here are
+        closed once it has them; its pid."""
+        fds = await self.launch_fds() if self.launch_fds is not None else {}
+        try:
+            pid = await session.launch(self.launch.command, Path.cwd(),
+                                       {**(self.launch.env or {}), "ENVIRONMENT_NAME": os.environ["ENVIRONMENT_NAME"]},
+                                       **({"fds": fds} if fds else {}))
+        finally:
+            for fd in fds.values():
+                os.close(fd)
         self.launch_failed = None
         PID.parent.mkdir(parents=True, exist_ok=True)
         PID.write_text(str(pid))
