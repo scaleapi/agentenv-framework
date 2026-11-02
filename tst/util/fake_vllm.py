@@ -1,20 +1,20 @@
 """A stand-in for vLLM served with ``--return-tokens-as-token-ids`` and processed logprobs, as OpenEnv's capture proxy
 needs its engine: it lists the models it serves and answers chat completions with token ids, a logprob per completion
-token and the top two at each, scaled by the temperature as processed logprobs are. ``reply`` makes each answer's
-message from the request body."""
+token and the top two at each, scaled by the temperature as processed logprobs are, or streamed, as an agent's own
+client asks for them. ``reply`` makes each answer's message from the request body."""
 
 import json
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
 import uvicorn
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 Reply = Callable[[dict[str, Any]], dict[str, Any]]
@@ -72,13 +72,17 @@ def fake_vllm(model: str, reply: Reply, host: str = "127.0.0.1") -> Iterator[Sim
                     "top_logprobs": [{"token": f"token_id:{token}", "logprob": -0.5 / temperature},
                                      {"token": f"token_id:{token + 1}", "logprob": -3.0 / temperature}]}
                    for token in completion]
+        answer = {"id": f"chatcmpl-{uuid.uuid4().hex[:8]}", "model": body["model"]}
+        finish = "tool_calls" if message.get("tool_calls") else "stop"
+        usage = {"prompt_tokens": len(prompt), "completion_tokens": len(completion),
+                 "total_tokens": len(prompt) + len(completion)}
+        if body.get("stream"):
+            return StreamingResponse(_chunks(answer, message, finish, usage), media_type="text/event-stream")
         return JSONResponse({
-            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}", "object": "chat.completion", "model": body["model"],
-            "prompt_token_ids": prompt,
-            "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if message.get("tool_calls")
-                         else "stop", "token_ids": completion, "logprobs": {"content": content}}],
-            "usage": {"prompt_tokens": len(prompt), "completion_tokens": len(completion),
-                      "total_tokens": len(prompt) + len(completion)},
+            **answer, "object": "chat.completion", "prompt_token_ids": prompt,
+            "choices": [{"index": 0, "message": message, "finish_reason": finish, "token_ids": completion,
+                         "logprobs": {"content": content}}],
+            "usage": usage,
         })
 
     app = Starlette(routes=[Route("/v1/models", models), Route("/v1/chat/completions", completions, methods=["POST"])])
@@ -93,3 +97,15 @@ def fake_vllm(model: str, reply: Reply, host: str = "127.0.0.1") -> Iterator[Sim
     finally:
         server.should_exit = True
         thread.join()
+
+
+async def _chunks(answer: dict[str, Any], message: dict[str, Any], finish: str,
+                  usage: dict[str, int]) -> AsyncIterator[str]:
+    """The answer as a streamed completion: the whole message in one delta, then its finish reason and usage."""
+    delta = {"role": "assistant", "content": message.get("content")}
+    if message.get("tool_calls"):
+        delta["tool_calls"] = [{"index": index, **call} for index, call in enumerate(message["tool_calls"])]
+    for choice, extra in (({"index": 0, "delta": delta, "finish_reason": None}, {}),
+                          ({"index": 0, "delta": {}, "finish_reason": finish}, {"usage": usage})):
+        yield f"data: {json.dumps({**answer, 'object': 'chat.completion.chunk', 'choices': [choice], **extra})}\n\n"
+    yield "data: [DONE]\n\n"

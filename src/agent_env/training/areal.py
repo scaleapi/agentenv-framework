@@ -44,7 +44,8 @@ class AgentEnvWorkflow:
     async def run(self, data: dict[str, Any], *, base_url: str, api_key: str, **_: Any) -> float:
         """Plays ``data``'s task, its solver calling the model at ``base_url`` with ``api_key``, the key of the session
         AReaL records the calls in, and returns its reward. Raises, which has AReaL leave the sample out, when the run
-        fails or records no score its reward reads. Cancelled, it stops the run and returns once it is torn down."""
+        fails or records no score its reward reads. Cancelled, it stops the run and passes the cancel on once the run
+        is torn down."""
         if (played := self._played.get(data.get("task_id"))) is None:
             raise KeyError(f"the row names no task this workflow plays: {data.get('task_id')!r}; build the dataset "
                            "with task_rows, from the same bundle, tasks and evals")
