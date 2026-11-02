@@ -21,9 +21,9 @@ from agent_env.bundle import BundleError, BundleKind, PreparedBundle, parse_bund
 from agent_env.bundle.installed import locate_bundle
 from agent_env.store.routing import namespace_routing
 from agent_env.task import EpisodeError, EpisodeSpec, Task
-from agent_env.task.task import reward_of
 
 from .environment import AgentEnvEnvironment, Served, ServedTask
+from .reward import reward_of
 
 logger = logging.getLogger(__name__)
 
