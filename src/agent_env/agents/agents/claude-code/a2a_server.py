@@ -20,7 +20,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, Literal
 
 from a2a.types import AgentSkill
 from agentenv_protocol.a2a_agent import (
@@ -122,9 +122,11 @@ _HOST_WORKDIR = "/app"
 _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install.sh host {{agent_name}} {{a2a_port}} {_HOST_WORKDIR}"]
 
 
-# The CLI's own tools, by the names its model sees, in the pinned version.
+# The CLI's own tools, by the names its model sees, in the pinned version. Which of them it offers by default depends
+# on the model, and its MCP resource tools come only with MCP servers.
 ClaudeCodeTool = Literal["Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
-                         "ExitWorktree", "ListAgents", "NotebookEdit", "Read", "ReportFindings", "ScheduleWakeup",
+                         "ExitWorktree", "ListAgents", "ListMcpResourcesTool", "NotebookEdit", "Read",
+                         "ReadMcpResourceDirTool", "ReadMcpResourceTool", "ReportFindings", "ScheduleWakeup",
                          "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskStop", "TaskUpdate",
                          "WebFetch", "WebSearch", "Workflow", "Write"]
 
@@ -143,12 +145,6 @@ class ClaudeCodeTools(BaseModel):
         if (self.disable is None) == (self.only is None):
             raise ValueError("builtin_tools takes exactly one of disable and only")
         return self
-
-    def enabled(self, tools: Iterable[str]) -> list[str]:
-        """Those of ``tools`` the selection leaves on, in their order."""
-        if self.only is not None:
-            return [tool for tool in tools if tool in self.only]
-        return [] if self.disable == "*" else [tool for tool in tools if tool not in self.disable]
 
 
 class ClaudeCodeConfig(AgentConfig):
@@ -520,8 +516,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 effort=cfg.effort,
                 max_turns=cfg.max_turns,
                 max_thinking_tokens=cfg.max_thinking_tokens,
-                builtin_tools=(None if cfg.builtin_tools is None
-                               else cfg.builtin_tools.enabled(get_args(ClaudeCodeTool))),
+                builtin_tools=None if cfg.builtin_tools is None else cfg.builtin_tools.model_dump(exclude_none=True),
                 event_callback=request.trajectory.append,
             )
         except Exception as e:

@@ -1,13 +1,10 @@
-"""A selection of the CLI's own tools: the CLI is offered only the tools it leaves on, by the names its card lists,
-and only the MCP servers agent-env gives it; with none, the CLI keeps its own."""
-
-from typing import get_args
+"""A selection of the CLI's own tools: ``"*"`` and ``only`` name the tools the CLI may offer, a list to turn off leaves
+the CLI's defaults but those, and with any selection its MCP servers are only agent-env's; with none, the CLI keeps
+its own. A tool the CLI doesn't have is refused."""
 
 import pytest
 
 from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge
-
-TOOLS = get_args(a2a_server.ClaudeCodeTool)
 
 
 def _command(selection: dict | None) -> list[str]:
@@ -15,24 +12,27 @@ def _command(selection: dict | None) -> list[str]:
     return claude_bridge._command(
         "sess-1", False, model=None, allowed_tools=None, mcp_servers=None, system_prompt=None, output_format=None,
         role=None, effort=None, max_turns=None,
-        builtin_tools=None if config.builtin_tools is None else config.builtin_tools.enabled(TOOLS))
+        builtin_tools=None if config.builtin_tools is None else config.builtin_tools.model_dump(exclude_none=True))
 
 
 def test_no_selection_leaves_the_clis_tools_and_mcp_servers_alone():
     command = _command(None)
 
-    assert "--tools" not in command and "--strict-mcp-config" not in command
+    assert not {"--tools", "--disallowedTools", "--strict-mcp-config"} & set(command)
 
 
-@pytest.mark.parametrize("selection, offered", [
-    ({"disable": "*"}, []),
-    ({"disable": ["WebFetch", "WebSearch"]}, [tool for tool in TOOLS if tool not in ("WebFetch", "WebSearch")]),
-    ({"only": ["Read", "Agent"]}, ["Agent", "Read"]),
+@pytest.mark.parametrize("selection, flags", [
+    ({"disable": "*"}, ["--tools", ""]),
+    ({"only": ["Read", "Agent"]}, ["--tools", "Read,Agent"]),
+    ({"only": []}, ["--tools", ""]),
+    ({"disable": ["WebFetch", "WebSearch"]}, ["--disallowedTools", "WebFetch,WebSearch"]),
 ])
-def test_a_selection_is_the_clis_tool_list_with_only_agent_envs_mcp_servers(selection, offered):
+def test_a_selection_is_the_clis_tool_flags_with_only_agent_envs_mcp_servers(selection, flags):
     command = _command(selection)
+    at = command.index(flags[0])
 
-    assert command[command.index("--tools") + 1] == ",".join(offered) and "--strict-mcp-config" in command
+    assert command[at:at + 2] == flags and "--strict-mcp-config" in command
+    assert not ({"--tools", "--disallowedTools"} - {flags[0]}) & set(command)
 
 
 def test_a_tool_the_cli_does_not_have_is_refused():

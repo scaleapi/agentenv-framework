@@ -22,9 +22,10 @@ pulls it by its digest and builds it from this folder only when it can't, and a 
 run it. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
 `node`, without npm or npx, and the Python packages `model-requirements.txt` pins. A `deploy_agent` `builtin_tools`
-selection, such as `{"disable": "*"}`, becomes the CLI's `--tools` list with `--strict-mcp-config`, so the model is
-offered only the CLI tools it leaves on and the task env's MCP servers; the names are `ClaudeCodeTool`'s in
-`a2a_server.py`, the pinned CLI's.
+selection picks the CLI's own tools: `{"disable": "*"}` and `{"only": [...]}` become its `--tools` list, a list to
+turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the rest, and any selection adds
+`--strict-mcp-config`, so its MCP servers are only the task env's. The names are `ClaudeCodeTool`'s in
+`a2a_server.py`: every tool the pinned CLI has, though which it offers by default depends on the model.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements
