@@ -20,7 +20,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 from a2a.types import AgentSkill
 from agentenv_protocol.a2a_agent import (
@@ -34,6 +34,7 @@ from agentenv_protocol.a2a_agent import (
     AgentConfig,
     AgentEnvAgent,
     AgentIdentity,
+    BuiltinTools,
     BundleSkillRequest,
     ContextObjectTrajectoryRequest,
     ContextTrajectoryRequest,
@@ -121,6 +122,13 @@ _HOST_WORKDIR = "/app"
 _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install.sh host {{agent_name}} {{a2a_port}} {_HOST_WORKDIR}"]
 
 
+# The CLI's own tools, by the names its model sees, in the pinned version.
+ClaudeCodeTool = Literal["Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
+                         "ExitWorktree", "ListAgents", "NotebookEdit", "Read", "ReportFindings", "ScheduleWakeup",
+                         "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskStop", "TaskUpdate",
+                         "WebFetch", "WebSearch", "Workflow", "Write"]
+
+
 class ClaudeCodeConfig(AgentConfig):
     timeout_seconds: int = 1800
     model: str | None = None
@@ -134,6 +142,8 @@ class ClaudeCodeConfig(AgentConfig):
     effort: str | None = None
     max_turns: int | None = None
     max_thinking_tokens: int | None = None
+    # Which of the CLI's own tools it may use. With any selection, its MCP servers are only the ones agent-env gives it.
+    builtin_tools: BuiltinTools[ClaudeCodeTool] | None = None
 
 
 def _rewrite_session_ids(jsonl_text: str, session_id: str) -> tuple[list[str], int]:
@@ -488,6 +498,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 effort=cfg.effort,
                 max_turns=cfg.max_turns,
                 max_thinking_tokens=cfg.max_thinking_tokens,
+                builtin_tools=(None if cfg.builtin_tools is None
+                               else cfg.builtin_tools.enabled(get_args(ClaudeCodeTool))),
                 event_callback=request.trajectory.append,
             )
         except Exception as e:

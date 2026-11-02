@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
+from typing import get_args
 
 import pytest
 from click.testing import CliRunner
@@ -26,6 +27,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.unit.agents.claude_code.agent import a2a_server
 from tst.util.fake_anthropic import FakeAnthropic, answer, delegate_then_answer, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -156,14 +158,21 @@ def test_the_alias_claude_code_names_the_shipped_agent_until_the_store_has_an_ag
     assert named == [shipped, "claude-code"]
 
 
-def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(state, endpoint):
+@pytest.mark.parametrize("builtin_tools, kept", [
+    (None, set(get_args(a2a_server.ClaudeCodeTool))),
+    ({"disable": "*"}, set()),
+    ({"disable": ["WebFetch"]}, set(get_args(a2a_server.ClaudeCodeTool)) - {"WebFetch"}),
+], ids=["own-tools", "none-of-its-own", "all-but-webfetch"])
+def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(state, endpoint, builtin_tools, kept):
+    """With no selection, the CLI offers exactly the tools claude-code's card names; a selection leaves the rest off."""
     endpoint.respond = tool_then_answer("__echo", {"text": "ping-from-tool"}, prefix="the tool said: ")
     root = _bundle(state / "tools", "echo", [
         {"id": "env", "type": "deploy_env", "env_id": ECHO_ENV, "sandbox_type": "local"},
         *_ask("Call the echo tool with the text ping-from-tool.", "ping-from-tool", env_ids=[ECHO_ENV]),
     ])
+    selected = {} if builtin_tools is None else {"builtin_tools": builtin_tools}
     root.joinpath("tasks/echo.json").write_text(json.dumps(
-        [{**step, "depends_on": ["env"]} if step["id"] == "agent" else step
+        [{**step, "depends_on": ["env"], **selected} if step["id"] == "agent" else step
          for step in json.loads(root.joinpath("tasks/echo.json").read_text())]))
 
     result = _run(root)
@@ -171,6 +180,7 @@ def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(
     offered = sorted({tool["name"] for call in endpoint.messages() for tool in call.body.get("tools") or []})
     seen = (result.output, offered, endpoint.tool_results())
     assert result.exit_code == 0 and "tasks/echo.json v1: passed" in result.output, seen
+    assert {name for name in offered if not name.startswith("mcp__")} == kept, seen
     # The fake never repeats the prompt, so the text reached the answer through the tool.
     assert any(name.endswith("__echo") for name in offered), seen
     assert ["ping-from-tool" in result for result in endpoint.tool_results()] == [True], seen

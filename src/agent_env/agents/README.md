@@ -21,7 +21,10 @@ the folder changes. A run that deploys the agent registers that image when it's 
 pulls it by its digest and builds it from this folder only when it can't, and a provider that runs images by name can
 run it. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
-`node`, without npm or npx, and the Python packages `model-requirements.txt` pins.
+`node`, without npm or npx, and the Python packages `model-requirements.txt` pins. A `deploy_agent` `builtin_tools`
+selection, such as `{"disable": "*"}`, becomes the CLI's `--tools` list with `--strict-mcp-config`, so the model is
+offered only the CLI tools it leaves on and the task env's MCP servers; the names are `ClaudeCodeTool`'s in
+`a2a_server.py`, the pinned CLI's.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements
