@@ -95,14 +95,14 @@ def engine():
         yield server
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def registries(monkeypatch):
     steps = {**Config().task_step_registry(), "deploy_agent": _Deploys, "prompt_agent": _Asks, _Checks.type: _Checks}
     monkeypatch.setattr(Config, "task_step_registry", lambda self: steps)
 
 
 @pytest.fixture
-def bundle(tmp_path, monkeypatch, local_stores):  # noqa: F811
+def bundle(tmp_path, monkeypatch, local_stores, registries):  # noqa: F811
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(preflight, "model_endpoint_missing", MODEL_ENDPOINT_MISSING)
     monkeypatch.delenv("LITELLM_BASE_URL", raising=False)

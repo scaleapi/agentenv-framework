@@ -10,8 +10,7 @@ import pytest
 from agent_env.training import areal
 from agent_env.training.areal import AgentEnvWorkflow, task_rows
 from tst.unit.bundle._support import layout
-from tst.unit.conftest import local_stores  # noqa: F401
-from tst.unit.training.harness_test import ASK, DEPLOY, asked, bundle, engine, hanging, registries  # noqa: F401
+from tst.unit.training.harness_test import ASK, DEPLOY, asked, hanging
 
 #: What AReaL passes an inline agent besides its proxy and session key.
 EXTRA = {"http_client": None, "proxy_gateway_api_key": "gateway"}
