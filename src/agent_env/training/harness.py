@@ -140,13 +140,19 @@ class AgentEnvSession(ResourceSession):
         """Stops a run still going, as TRL does to the rollouts in flight when it stops, and returns once the run is torn
         down, so no sandbox outlives the trainer; then drops the session's captures."""
         with self._lock:
-            self._closed = True
+            stopping, self._closed = not self._closed, True
             running, done = self._running, self._done
-        if running is not None:
-            running.get_loop().call_soon_threadsafe(running.cancel)
+        if stopping and running is not None:
+            running.get_loop().call_soon_threadsafe(self._stop)
         if done is not None:
             done.wait()
         self._registry.delete(self._capture.session_id)
+
+    def _stop(self) -> None:
+        """Cancels the run if it's still in its task, decided on the session loop, where the run leaves its task for
+        its teardown, so the cancel can't land in the teardown."""
+        if self._running is not None:
+            self._running.cancel()
 
     async def _run(self, timeout: float | None) -> int:
         try:

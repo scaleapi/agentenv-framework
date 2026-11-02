@@ -199,6 +199,8 @@ def test_close_stops_a_rollout_in_flight_and_returns_once_it_is_torn_down(engine
         session.close()
         assert [task_id.rsplit("/", 1)[1] for task_id in torn] == ["hanging"]
         assert waiting.result(30) == 1
+        session.close()  # as TRL closes it again once the rollout returns
+    assert len(torn) == 1
     assert session.verify([]).env_reward is None
 
 
