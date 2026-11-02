@@ -687,7 +687,7 @@ class MailApp(ComputerAppEnvironment):
 - **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title, a port answering on
-  loopback, or a command exiting 0. `@ready_check` marks a method for readiness that needs logic (a
+  loopback, or a command exiting 0. `env` sets variables in the app's environment, over its server's. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
   app, after its run scripts, offline and without the class's `__init__`. Each runs on every OS the
   app installs on, or on those its `os=` names (`@install_step(os="linux")`, `@ready_check(os=[...])`);
@@ -716,9 +716,10 @@ desktop session, and `ready` (GET: an `AppReadiness` of `ready`, `problems`, `la
 and `timeout_s`), which runs the app's readiness checks then, at once, each within 10 s. A server
 that can't start, or whose start in the session fails (adding the launcher, say), writes why to
 `.agentenv/server.failure` in the folder and exits, and the driver reports that in its place. Once
-the session is up the server adds the app's launcher to the session user's menu, which runs `python
--m agentenv_protocol.computer.launch <folder>` to ask the server, so the server starts every copy of
-the app, and launches a `boot` app, once per boot. The driver finds each app by the socket in its
+the X display is up, when `DISPLAY` names one, the server adds the app's launcher to the session user's
+menu, which runs `python -m agentenv_protocol.computer.launch <folder>` to ask the server, so the
+server starts every copy of the app, and launches a `boot` app, once per boot. An app that runs with
+no desktop, a website browser alone, gets no launcher. The driver finds each app by the socket in its
 folder: the computer is ready once every app's server answers and each `boot` app, and each app with
 no launch, says it's ready; a `demand` app counts once something launches it. What the server does
 in the session (`agentenv_protocol.computer.session`) is Linux's.
@@ -738,6 +739,39 @@ requests to the app's server.
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
 JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
+
+### Website browsers
+
+`agentenv_protocol.website_browser.WebsiteBrowserEnvironment` is the computer app class for a Chromium
+website browser, run inside a computer or alone. A subclass declares its build as any app does, its
+`Launch` running the browser itself. It sets `version`, its build, and `policy_dir`, where that build
+reads managed policies; `policies` adds its own over agentenv's, and `profile` is its profile folder
+under the session user's home (`.config/chromium` by default), whose contents from its install steps
+are the profile's template. The base class adds:
+
+- **Its settings**, `BrowserSettings`, which a subclass's `Settings` extends: `start_urls`, opened in
+  tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`); `window`,
+  1280 × 800, alone only; `locale`; and `time_zone`, set as `TZ` in its launch's `env`.
+- **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile,
+  `--remote-debugging-port=0`, `--no-first-run`, `--no-default-browser-check` and `--lang`. With
+  `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
+  Alone it bypasses nothing, loopback included; in a computer it bypasses loopback (`127.0.0.1`,
+  `[::1]`, `localhost`), so the apps beside it stay reachable while `*.localhost` names still go
+  through. Alone (`AGENTENV_BROWSER_ALONE=1`) it also takes `--window-size` and `--headless=new`,
+  except on the open web (`AGENTENV_BROWSER_OPEN_WEB=1`), and refuses to start with no proxy.
+  `declaration()` refuses a subclass whose command carries any of these, or `--remote-allow-origins`,
+  which agentenv never sets, so the debugging port refuses a WebSocket that carries a page's Origin.
+- **Alone, no desktop**: its launch matches and waits on no window, its server adds no launcher and,
+  without `DISPLAY`, waits for no display, and its ready checks say when it's ready.
+- **`write_policies`**, an install step that writes agentenv's unattended-use policies (`POLICIES`)
+  and the subclass's to `agentenv.json` in `policy_dir`.
+- **`@cdp`**, which marks the method returning its debugging address. The default reads
+  `DevToolsActivePort` from the profile, and `devtools_address()` calls it each time, so it's right
+  after a relaunch. The ready check `debugging_address_answers` asks that address's `/json/version`.
+- **`browser/v1`** on its card, params only: `chromium` (its `version`), `clock: "real"` and, alone,
+  `window`.
+- **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
+  `~/Downloads`, folders it makes.
 
 ## A2A agent framework
 

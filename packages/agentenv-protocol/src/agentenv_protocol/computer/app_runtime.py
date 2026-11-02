@@ -48,21 +48,26 @@ class AppRuntime:
     """An app's server's state: its ``launch``, its ``@ready_check`` methods by name, bound to the app, how long it may
     take to be ready, why its last launch failed, and each sync check still running in its thread."""
 
-    def __init__(self, launch: Optional[Launch], ready_checks: dict[str, Callable[[], Any]], timeout_s: float) -> None:
+    def __init__(self, launch: Optional[Launch], ready_checks: dict[str, Callable[[], Any]], timeout_s: float, *,
+                 desktop: bool = True) -> None:
         self.launch = launch
         self.ready_checks = ready_checks
         self.timeout_s = timeout_s
+        self.desktop = desktop
         self.started = time.time()
         self.launch_failed: Optional[str] = None
         self.checking: dict[str, asyncio.Future] = {}
 
     async def start(self) -> None:
-        """Once the desktop session is up, add the app's menu launcher and launch a boot app, unless the computer has
-        launched it since it booted, at boot or on demand: a server that restarts leaves the app be."""
+        """Once its X display is up, when it has one, add the app's menu launcher on a desktop and launch a boot app,
+        unless the computer has launched it since it booted, at boot or on demand: a server that restarts leaves the
+        app be."""
         if self.launch is None:
             return
-        await session.wait_until_up()
-        session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())
+        if os.environ.get("DISPLAY"):
+            await session.wait_until_up()
+        if self.desktop:
+            session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())
         if self.launch.at == "boot" and _launched_at() is None:
             try:
                 await self.launch_app()
@@ -71,7 +76,8 @@ class AppRuntime:
 
     async def launch_app(self) -> int:
         """Start the app from its folder, marked as launched; its pid."""
-        pid = await session.launch(self.launch.command, Path.cwd(), {"ENVIRONMENT_NAME": os.environ["ENVIRONMENT_NAME"]})
+        pid = await session.launch(self.launch.command, Path.cwd(),
+                                   {**(self.launch.env or {}), "ENVIRONMENT_NAME": os.environ["ENVIRONMENT_NAME"]})
         self.launch_failed = None
         PID.parent.mkdir(parents=True, exist_ok=True)
         PID.write_text(str(pid))
