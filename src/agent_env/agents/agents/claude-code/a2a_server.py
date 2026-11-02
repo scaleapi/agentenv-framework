@@ -34,7 +34,6 @@ from agentenv_protocol.a2a_agent import (
     AgentConfig,
     AgentEnvAgent,
     AgentIdentity,
-    BuiltinTools,
     BundleSkillRequest,
     ContextObjectTrajectoryRequest,
     ContextTrajectoryRequest,
@@ -59,6 +58,7 @@ from agentenv_protocol.a2a_agent import (
     extension,
 )
 from agentenv_protocol.transfers import Uploaded, download, upload
+from pydantic import BaseModel, ConfigDict, model_validator
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 
@@ -129,6 +129,28 @@ ClaudeCodeTool = Literal["Agent", "Bash", "CronCreate", "CronDelete", "CronList"
                          "WebFetch", "WebSearch", "Workflow", "Write"]
 
 
+class ClaudeCodeTools(BaseModel):
+    """The protocol's ``BuiltinTools[ClaudeCodeTool]``, which the image's protocol floor doesn't have yet: the same
+    fields and checks, so the card's schema is the same."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disable: Literal["*"] | list[ClaudeCodeTool] | None = None
+    only: list[ClaudeCodeTool] | None = None
+
+    @model_validator(mode="after")
+    def _one_of(self) -> ClaudeCodeTools:
+        if (self.disable is None) == (self.only is None):
+            raise ValueError("builtin_tools takes exactly one of disable and only")
+        return self
+
+    def enabled(self, tools: Iterable[str]) -> list[str]:
+        """Those of ``tools`` the selection leaves on, in their order."""
+        if self.only is not None:
+            return [tool for tool in tools if tool in self.only]
+        return [] if self.disable == "*" else [tool for tool in tools if tool not in self.disable]
+
+
 class ClaudeCodeConfig(AgentConfig):
     timeout_seconds: int = 1800
     model: str | None = None
@@ -143,7 +165,7 @@ class ClaudeCodeConfig(AgentConfig):
     max_turns: int | None = None
     max_thinking_tokens: int | None = None
     # Which of the CLI's own tools it may use. With any selection, its MCP servers are only the ones agent-env gives it.
-    builtin_tools: BuiltinTools[ClaudeCodeTool] | None = None
+    builtin_tools: ClaudeCodeTools | None = None
 
 
 def _rewrite_session_ids(jsonl_text: str, session_id: str) -> tuple[list[str], int]:

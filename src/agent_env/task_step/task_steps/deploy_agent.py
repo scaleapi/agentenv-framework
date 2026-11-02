@@ -8,6 +8,7 @@ from typing import ClassVar, Optional
 
 import httpx
 from agentenv_protocol.a2a_agent import (
+    AGENT_CONFIG_V1,
     BuiltinTools,
     NamespaceChangelogEnableResponse,
     ObjectChangelogApplyResponse,
@@ -150,14 +151,13 @@ def _skill_fields(skill: dict) -> dict:
 
 
 
-def _check_builtin_tools(card: dict, agent_name: str, selection: dict) -> None:
-    """Refuse a selection of the agent's own tools that its card can't take: its agent-config has no ``builtin_tools``,
-    or its schema doesn't name a tool the selection does."""
-    extension = A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG) or {}
-    request = (extension.get("params") or {}).get("methods", {}).get("set", {}).get("request", {})
+def _check_builtin_tools(agent_config: dict | None, agent_name: str, selection: dict) -> None:
+    """Refuse a selection of the agent's own tools that its card's agent-config extension can't take: it has no
+    ``builtin_tools``, or its schema doesn't name a tool the selection does."""
+    request = ((agent_config or {}).get("params") or {}).get("methods", {}).get("set", {}).get("request", {})
     if "builtin_tools" not in request.get("supported", []):
         raise RuntimeError(f"Agent '{agent_name}' cannot have its own tools selected: its card's "
-                           f"{A2AAgent.EXT_AGENT_CONFIG} takes no 'builtin_tools'")
+                           f"{AGENT_CONFIG_V1.uri} takes no 'builtin_tools'")
     schema = request.get("schema") or {}
     field = (schema.get("properties") or {}).get("builtin_tools")
     if field is not None:
@@ -443,7 +443,8 @@ class DeployAgentTaskStep(TaskStep):
             identity_payload["role"] = self.role
         if self.builtin_tools is not None:
             # Before the first request to the agent, so an agent that would keep its own tools never runs the task.
-            _check_builtin_tools(card, self.agent_name, self.builtin_tools)
+            _check_builtin_tools(A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG), self.agent_name,
+                                 self.builtin_tools)
             identity_payload["builtin_tools"] = self.builtin_tools
         identity = A2AAgent.negotiate_agent_config(card, identity_payload)
         if self.role is not None:
