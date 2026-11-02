@@ -7,10 +7,14 @@ import contextlib
 import os
 import re
 import signal
+import sys
 from pathlib import Path
+from typing import Optional
 
 #: How often a starting session is looked for.
 POLL_S = 0.2
+#: Moves the fds an app is launched with into place, run on its own so it loads nothing but the standard library.
+WITH_FDS = Path(__file__).with_name("_with_fds.py")
 #: The processes launched into the session, kept until they exit so each is reaped.
 _running: set[asyncio.Task] = set()
 
@@ -22,12 +26,15 @@ async def wait_until_up() -> None:
         await asyncio.sleep(POLL_S)
 
 
-async def launch(argv: list[str], cwd: Path, env: dict[str, str]) -> int:
+async def launch(argv: list[str], cwd: Path, env: dict[str, str], fds: Optional[dict[int, int]] = None) -> int:
     """Start ``argv`` in ``cwd``, in a session of its own so it outlives the server, with the server's environment and
-    ``env``; its pid."""
+    ``env``, and ``fds``, the server's fds it inherits by the number each gets in it; its pid."""
+    if fds:
+        argv = [sys.executable, "-I", "-S", str(WITH_FDS), *(f"{source}={target}" for target, source in fds.items()),
+                "--", *argv]
     process = await asyncio.create_subprocess_exec(
         *argv, cwd=cwd, env={**os.environ, **env}, start_new_session=True, stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, pass_fds=tuple((fds or {}).values()))
     reaped = asyncio.ensure_future(process.wait())
     _running.add(reaped)
     reaped.add_done_callback(_running.discard)

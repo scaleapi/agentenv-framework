@@ -169,6 +169,8 @@ class Launch(BaseModel):
     #: Matches the app's window by its WM_CLASS ``class`` or ``instance`` and its ``title``, as given.
     window: Optional[dict[str, str]] = None
     ready: Optional[Ready] = None
+    #: Variables set in the app's environment, over its server's.
+    env: Optional[dict[str, str]] = None
 
     @field_validator("window")
     @classmethod
@@ -399,16 +401,35 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         self.settings = cls.settings_on(on).model_validate(values)
         self.build_settings = _built_settings(cls, on)
         declared = cls._installs.get(on)
-        self.launch = declared.launch if declared is not None else None
+        launch = declared.launch if declared is not None else None
+        self.launch = self._launch_for(launch) if launch is not None else None
         self.paths = list(declared.paths) if declared is not None else []
-        ready = self.launch.ready if self.launch is not None else None
+        ready = launch.ready if launch is not None else None
         self._computer_app = AppRuntime(
             self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(cls)
                           if hasattr(fn, _READY_CHECK_ATTR) and _runs_on(getattr(fn, _READY_CHECK_ATTR), on)},
-            ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S)
+            ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S, desktop=self._on_desktop(),
+            launch_fds=self._launch_fds, relaunch_on_start=self._relaunch_on_start())
         self._computer_app_data = AppDataPlane(
             self._computer_app, {op: getattr(self, name) for op, name in cls._data_hooks.items()}, self.paths,
             cls.data_timeout_s)
+
+    def _launch_for(self, launch: Launch) -> Launch:
+        """The launch its server uses, from the one declared for its OS, whose ``ready`` timeout it keeps: as
+        declared."""
+        return launch
+
+    def _on_desktop(self) -> bool:
+        """Whether it runs in a computer's desktop session, which lists it in its menu."""
+        return True
+
+    async def _launch_fds(self) -> dict[int, int]:
+        """The fds each launch hands it, by the number each gets in it, made new for that launch: none."""
+        return {}
+
+    def _relaunch_on_start(self) -> bool:
+        """Whether only the server that launched it can talk to it, so a server that restarts launches it again."""
+        return False
 
     @classmethod
     def settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
