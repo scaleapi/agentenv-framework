@@ -26,7 +26,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import LocalSan
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps import run_code as _run_code_module
-from tst.unit.computer_home import CARD, Computer
+from tst.unit.computer_home import CARD, TOKEN, Computer
 from tst.unit.event_loop_probe import on_event_loop
 from agent_env.task_step.task_steps.run_code import (
     RunCodeExecutionError,
@@ -1309,13 +1309,15 @@ async def _run_in(computer, body, deployed=None, **step):
 
 
 @pytest.mark.asyncio
-async def test_a_script_for_a_computer_runs_inside_it_and_reaches_its_driver_on_loopback(computer):
+async def test_a_script_for_a_computer_runs_inside_it_and_reaches_its_driver_on_loopback_with_its_token(computer):
     body = b"import os\ndef run(inp):\n    return {'env': inp['env'], 'cwd': os.getcwd()}\n"
 
     ctx = await _run_in(computer, body)
 
     result = ctx.metadata["script_results"]["run-code-1"]
-    assert result["env"] == {"id": "desk", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp"}
+    assert result["env"] == {"id": "desk", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
+                             "headers": {"Authorization": f"Bearer {TOKEN}"}}
+    assert computer.headers and all(sent == {"Authorization": f"Bearer {TOKEN}"} for sent in computer.headers)
     assert Path(result["cwd"]).resolve() == computer.home.resolve()
     run_dir = ".agentenv/run_code/run-code-1"
     assert [call[1] for call in computer.calls if call[0] == "data/add"] == [
@@ -1349,7 +1351,7 @@ async def test_a_run_the_computer_stopped_at_its_timeout_is_reported_as_one(comp
 async def test_a_run_whose_call_drops_fails_naming_why_and_the_next_one_runs_afresh(computer, monkeypatch):
     invoke, dropped = computer.invoke_extension, []
 
-    async def drop_once(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+    async def drop_once(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
         if params["argv"][0] == "python3" and not dropped:
             dropped.append(params["request_id"])
             raise httpx.RemoteProtocolError("the driver went away")

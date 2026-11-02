@@ -2,8 +2,8 @@
 
 Covers the pure prompt/rubric builders and the FileArtifactUniverse-emit helper on the round-trip
 step. The helper test mocks the artifact store so it runs with no external services, and asserts
-the transport is **faithful** (original/export1 reference the existing FileArtifacts verbatim;
-export2 is dumped losslessly, unicode preserved).
+the transport is **faithful** (original/export1 reference the existing FileArtifacts verbatim, a
+service of several files each at its path; export2 is dumped losslessly, unicode preserved).
 """
 
 import json
@@ -54,6 +54,10 @@ class TestPrompts:
     def test_user_prompt_points_at_universes_dir(self):
         assert UNIVERSES_DIR in build_user_prompt()
         assert "original" in build_user_prompt() and "export_1" in build_user_prompt()
+
+    def test_both_prompts_name_the_folder_a_service_of_several_files_has(self):
+        assert f"{UNIVERSES_DIR}/original/<service>/" in JUDGE_SYSTEM_PROMPT
+        assert "`original/<service>/`" in build_user_prompt()
 
 
 class TestFauId:
@@ -167,32 +171,49 @@ class _FakeFileArtifact:
 
 
 class _FakeServiceArtifact:
-    def __init__(self, environment_name):
+    def __init__(self, environment_name, paths=()):
         self.environment_name = environment_name
         self._fa = _FakeFileArtifact(f"fa-{environment_name}")
+        self._files = ({path: _FakeFileArtifact(f"fa-{environment_name}-{path}") for path in paths} if paths
+                       else {f"{environment_name}.json": self._fa})
 
     def get_file_artifact(self):
         return self._fa
 
+    def get_file_artifacts(self):
+        return self._files
+
+
+class _FakeExportedUniverse:
+    def __init__(self, *names):
+        self.names = names
+
+    def get_environment_artifacts(self):
+        return [_FakeServiceArtifact(name) for name in self.names]
+
+
+def _capture_puts(monkeypatch) -> tuple[dict, dict]:
+    """What the helper hands the store for the bundle, and the text it writes for each export2 file, by id."""
+    put_calls, dumped = {}, {}
+
+    def fake_fa_put(id, description, file_path):
+        with open(file_path, encoding="utf-8") as f:
+            dumped[id] = f.read()
+        return _FakeFileArtifact(id)
+
+    def fake_fau_put(id, *, file_artifacts):
+        put_calls["id"] = id
+        put_calls["file_artifacts"] = file_artifacts
+        return _FakeFileArtifact(id)
+
+    monkeypatch.setattr(FileArtifact, "put", staticmethod(fake_fa_put))
+    monkeypatch.setattr(FileArtifactUniverse, "put", staticmethod(fake_fau_put))
+    return put_calls, dumped
+
 
 class TestCreateFileArtifactUniverse:
     def test_bundles_three_dirs_faithfully(self, monkeypatch):
-        # Capture what the helper hands to the store, plus the bytes it writes for export2.
-        put_calls = {}
-        dumped = {}
-
-        def fake_fa_put(id, description, file_path):
-            with open(file_path, encoding="utf-8") as f:
-                dumped[id] = f.read()
-            return _FakeFileArtifact(id)
-
-        def fake_fau_put(id, *, file_artifacts):
-            put_calls["id"] = id
-            put_calls["file_artifacts"] = file_artifacts
-            return _FakeFileArtifact(id)
-
-        monkeypatch.setattr(FileArtifact, "put", staticmethod(fake_fa_put))
-        monkeypatch.setattr(FileArtifactUniverse, "put", staticmethod(fake_fau_put))
+        put_calls, dumped = _capture_puts(monkeypatch)
 
         step = VerifyUniverseLoadExportRoundtripStep(
             id="s", version=None, env_id="multi-x", universe_artifact_id="uni", emit_file_artifact_universe=True
@@ -200,17 +221,14 @@ class TestCreateFileArtifactUniverse:
 
         orig_sas = [_FakeServiceArtifact("slack"), _FakeServiceArtifact("oracle_gl")]
 
-        class _FakeExportedUniverse:
-            def get_environment_artifacts(self):
-                return [_FakeServiceArtifact("slack"), _FakeServiceArtifact("oracle_gl")]
-
         # unicode + float to prove lossless, ensure_ascii=False dump
         export2_raw = {
             "slack": {"messages": [{"body": "héllo", "ts": 1772461920.0}]},
             "oracle_gl": {"lines": [{"amount": 1500000001.5, "product_code": "OACCT"}]},
         }
 
-        fau = step._create_file_artifact_universe(orig_sas, _FakeExportedUniverse(), export2_raw, env_version=3, universe_version=7)
+        fau = step._create_file_artifact_universe(orig_sas, _FakeExportedUniverse("slack", "oracle_gl"), export2_raw,
+                                                  env_version=3, universe_version=7)
 
         assert fau.id == "multi-x__validate-v3-uni-v7-fau"
         assert put_calls["id"] == "multi-x__validate-v3-uni-v7-fau"
@@ -230,6 +248,21 @@ class TestCreateFileArtifactUniverse:
         assert json.loads(slack_dumped) == export2_raw["slack"]
         assert "héllo" in slack_dumped  # ensure_ascii=False
         assert json.loads(dumped["multi-x__validate-v3-uni-v7-export2-oracle_gl"]) == export2_raw["oracle_gl"]
+
+    def test_bundles_each_file_of_a_service_of_several_at_its_path(self, monkeypatch):
+        put_calls, _ = _capture_puts(monkeypatch)
+        step = VerifyUniverseLoadExportRoundtripStep(
+            id="s", version=None, env_id="multi-x", universe_artifact_id="uni", emit_file_artifact_universe=True
+        )
+        desk = _FakeServiceArtifact("desk", ["Desktop/a.txt", "b.txt"])
+
+        step._create_file_artifact_universe([desk], _FakeExportedUniverse("desk"), {"desk": {"files": 2}},
+                                            env_version=3, universe_version=7)
+
+        fa_map = put_calls["file_artifacts"]
+        assert set(fa_map) == {"original/desk/Desktop/a.txt", "original/desk/b.txt", "export_1/desk.json",
+                               "export_2/desk.json"}
+        assert all(fa_map[f"original/desk/{path}"] is file for path, file in desk.get_file_artifacts().items())
 
 
 class TestFrontendContract:

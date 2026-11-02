@@ -26,13 +26,20 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import draining, staged_changelogs, transfer_store
 from agent_env.a2a_agent.trajectory_follower import live_trajectory_endpoint
 from agent_env.config.model import MODEL_PARAMS_RESERVED
-from agent_env.env.gateway.constants import EXT_CLOCK_URI, EXT_TRIGGERS_URI, TRIGGER_IN_FLIGHT_STATUSES
+from agent_env.env.gateway.constants import (
+    DEFAULT_ROLE,
+    EXT_CLOCK_URI,
+    EXT_NOTIFICATIONS_URI,
+    EXT_TRIGGERS_URI,
+    TRIGGER_IN_FLIGHT_STATUSES,
+)
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
 from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
@@ -479,6 +486,8 @@ class PromptAgentTaskStep(TaskStep):
             "output_format": self.output_format, "timeout_seconds": self.timeout_seconds,
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
+            # Again each turn, so an agent that restarted since deploy_agent sent it doesn't get its own tools back.
+            "builtin_tools": card.get("builtin_tools"),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         model_params = get_config().get_model_params(self.model_params)
@@ -541,6 +550,9 @@ class PromptAgentTaskStep(TaskStep):
 
         current_user_parts = initial_parts
         clock_envs = [d for d in context.deployed_envs if d.supports(EXT_CLOCK_URI, "state")]
+        # What comes due for the agent's role on these envs (notifications/v1) opens its next message.
+        notification_envs = [d for d in context.deployed_envs if d.supports(EXT_NOTIFICATIONS_URI, "take")]
+        recipient = agent.role or DEFAULT_ROLE
         final_terminal = protocol.TerminalResponse(response_text="")
         # Each turn's terminal reports only that turn's tool calls, so the conversation's count is
         # their sum. None until a turn reports one, so agents that don't report it stay None.
@@ -669,7 +681,14 @@ class PromptAgentTaskStep(TaskStep):
                     break
                 if last:
                     break
-                current_user_parts = answer["message"]
+                # The conversation goes on: what came due for the agent goes first, the user side's reply after it.
+                # An answer that ended it, or the last turn, takes nothing, so what is due stays queued on the env.
+                due = await take_due(notification_envs, recipient) if notification_envs else []
+                current_user_parts = next_message(delivered_parts(due), answer["message"])
+                if not current_user_parts:  # a hook said nothing ([]) and nothing came due
+                    logger.info(f"Turn {turn+1}: nothing to send the agent; ending multi-turn (nothing_to_send)")
+                    conversation_store.mark_closed(conversation_id)
+                    break
         finally:
             # On failure too, so a reader of the last turn knows no other follows.
             if live_turns is not None:

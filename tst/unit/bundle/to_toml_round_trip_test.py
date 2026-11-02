@@ -163,6 +163,19 @@ def test_an_environment_reads_back_wrapping_its_file(home):
         assert (seeded.filename, seeded.description, _bytes(seeded)) == ("seed.json", "the seed", b'{"rows": 1}')
 
 
+def test_an_environment_of_several_files_reads_back_with_each_file_at_its_path(home):
+    _env(home, "crm")
+    texts = {"rows.json": "rows", "deep/er/notes.txt": "notes"}
+    files = {path: FileArtifact.put_bytes(f"crm-{index}", description=path, filename=path.rsplit("/", 1)[-1],
+                                          content=text.encode(), content_type="text/plain")
+             for index, (path, text) in enumerate(texts.items())}
+    EnvironmentArtifact.put("crm-seed", environment_name="crm", file_artifacts=files)
+
+    with _read_back(home, [{**LOAD, "artifacts": [{"id": "crm-seed"}]}], "artifact", "crm-seed") as (read, _):
+        assert (type(read), read.environment_name) == (EnvironmentArtifact, "crm")
+        assert {path: _bytes(file).decode() for path, file in read.get_file_artifacts().items()} == texts
+
+
 def test_an_environment_universe_reads_back_with_its_environments_and_metadata(home):
     _env(home, "crm")
     environments = []

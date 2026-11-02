@@ -53,6 +53,7 @@ from .manifest import (
     manifest_compatible,
 )
 from .types import (
+    CONTROL_TOKEN_ENV,
     DATA_OBJECTS_EXTENSION_URI,
     INTAKE_EXTENSION_URI,
     MCP_PATH,
@@ -161,6 +162,7 @@ __all__ = [
     "ExtensionCallError",
     "PROTOCOL_VERSION",
     "RPC_PATH",
+    "CONTROL_TOKEN_ENV",
     "WELL_KNOWN_PATH",
     "METHOD_RESET",
     "METHOD_ADD",

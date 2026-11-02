@@ -43,6 +43,10 @@ class ComputerRuntime:
         self.recordings = Recordings(self)
         self.apps = apps.expected()
 
+    async def app_paths(self) -> list[str]:
+        """The paths under the session user's home that the computer's apps keep their data in."""
+        return await apps.owned_paths(self.apps) if self.apps else []
+
     def has(self, capability: str) -> bool:
         if capability in GROUPS:
             return all(op in self.operations for op in GROUPS[capability])

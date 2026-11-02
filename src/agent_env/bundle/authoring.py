@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +18,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.entity.refs import EntityKind, parse_toml_ref
 from agent_env.env.env import Env
 from agent_env.env.envs._deployment import provider_refusal
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, environment_name_problem
 from agent_env.providers.env_providers.env_provider import _env_provider_class
@@ -48,8 +49,8 @@ class AuthoringContext:
 
     bundle: Bundle
     entry: BundleEntry
-    #: Called just before writing the entry builds an image with this machine's Docker, which a run says it does.
-    on_build: Callable[[], None] | None = None
+    #: How writing a computer env composes it.
+    composing: Composing = Composing()
 
     @property
     def id(self) -> str:

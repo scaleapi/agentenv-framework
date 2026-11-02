@@ -1,4 +1,4 @@
-.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test nemo-gym-test verl-test skyrl-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -68,6 +68,22 @@ installer-test: ## Run plugin add/remove through the real pip, uv and pipx, and 
 # Hub. trl and torch aren't in the dev extra: install them first, as .github/workflows/trl.yml does.
 trl-test: ## Run one GRPOTrainer step on CPU through the TRL helper (needs trl and CPU torch, and the Hub)
 	$(PYTHON) -m pytest tst/trl --timeout=900 $(PYTEST_ARGS)
+
+# The NeMo Gym tier plays the bundle's resources server in-process. nemo-gym needs Python 3.13.14 or later and isn't in
+# the dev extra: sync it on that Python first (uv sync --extra dev --extra nemo-gym), as .github/workflows/nemo-gym.yml does.
+nemo-gym-test: ## Play rollouts through NeMo Gym's resources server for a bundle (needs nemo-gym, on Python 3.13.14+)
+	$(PYTHON) -m pytest tst/nemo_gym --timeout=900 $(PYTEST_ARGS)
+
+# The verl tier plays a row through AgentEnvAgentLoop on verl itself, with Qwen3's tokenizer from the Hub. verl and
+# torch aren't in the dev extra: install them first, as .github/workflows/verl.yml does.
+verl-test: ## Play rows through the verl agent loop on verl itself (needs verl and CPU torch, and the Hub)
+	$(PYTHON) -m pytest tst/verl --timeout=900 $(PYTEST_ARGS)
+
+# The SkyRL tier plays rows through AgentEnvGenerator and AgentEnvTextEnv on SkyRL itself, with Qwen3's and Qwen3.5's
+# tokenizers from the Hub. SkyRL, skyrl-gym and torch aren't in the dev extra, and SkyRL needs Python 3.12 or later:
+# install them first, as .github/workflows/skyrl.yml does.
+skyrl-test: ## Play rows through the SkyRL env and generator on SkyRL itself (needs SkyRL and CPU torch, and the Hub)
+	$(PYTHON) -m pytest tst/skyrl --timeout=900 $(PYTEST_ARGS)
 
 # The clean-install gate CI runs, on the same Python. The script gives every step an allowlisted
 # environment, so nothing in this shell reaches the install it checks. A failed run keeps its folder.

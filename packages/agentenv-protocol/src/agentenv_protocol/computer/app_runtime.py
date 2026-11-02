@@ -1,6 +1,6 @@
 """A computer app's own server at work: it launches the app into the desktop session, marking each launch for the rest
-of the boot, and says whether the app is ready, its checks run at once, each within ``CHECK_TIMEOUT_S``
-(``AppReadiness``). ``ComputerAppEnvironment`` keeps one as ``self._computer_app``."""
+of the boot, stops the app it launched, and says whether the app is ready, its checks run at once, each within
+``CHECK_TIMEOUT_S`` (``AppReadiness``). ``ComputerAppEnvironment`` keeps one as ``self._computer_app``."""
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 LAUNCHED = Path("/run/agentenv/apps")
 #: How long one readiness check may take; an app's checks run at once.
 CHECK_TIMEOUT_S = 10.0
+#: Where an app's server keeps the pid of the app it launched last, in the app's folder, so a server that restarts can
+#: still stop it.
+PID = Path(".agentenv/app.pid")
+#: How long a stopped app may take to exit before it's killed.
+STOP_TIMEOUT_S = 10.0
 
 
 class AppReadiness(BaseModel):
@@ -68,9 +73,23 @@ class AppRuntime:
         """Start the app from its folder, marked as launched; its pid."""
         pid = await session.launch(self.launch.command, Path.cwd(), {"ENVIRONMENT_NAME": os.environ["ENVIRONMENT_NAME"]})
         self.launch_failed = None
+        PID.parent.mkdir(parents=True, exist_ok=True)
+        PID.write_text(str(pid))
         _mark().parent.mkdir(parents=True, exist_ok=True)
         _mark().touch()
         return pid
+
+    async def stop_app(self) -> bool:
+        """Stop the app this server launched last, with everything it started; whether any of it was running."""
+        try:
+            pid = int(PID.read_text())
+        except (FileNotFoundError, ValueError):
+            return False
+        PID.unlink()
+        if not session.alive(pid):
+            return False
+        await session.stop(pid, STOP_TIMEOUT_S)
+        return True
 
     async def readiness(self) -> AppReadiness:
         ready = self.launch.ready if self.launch is not None else None

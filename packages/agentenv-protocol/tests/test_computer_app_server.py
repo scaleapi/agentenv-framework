@@ -1,5 +1,7 @@
 """A computer app's own server: it adds the app's launcher, launches a boot app once per boot and says whether the app
-is ready (``computer-app/v1``); its computer's driver finds it on the socket in the app's folder and asks it."""
+is ready (``computer-app/v1``); its computer's driver finds it on the socket in the app's folder and asks it, lists it
+as a child environment and forwards its requests to it, only with the computer's control token when it has one, and
+leaves the paths it owns out of its own data/get."""
 from __future__ import annotations
 
 import asyncio
@@ -19,18 +21,23 @@ import pytest
 pytest.importorskip("mcp.server.fastmcp")
 uvicorn = pytest.importorskip("uvicorn")
 
+import base64  # noqa: E402
+
 import httpx  # noqa: E402
 
 import agentenv_protocol.computer.launch as launcher  # noqa: E402
 from agentenv_protocol import client  # noqa: E402
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, ReadyCheck, Ready, ready_check  # noqa: E402
-from agentenv_protocol.computer import app_runtime, apps, session  # noqa: E402
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, ReadyCheck, Ready, linux,  # noqa: E402
+                                        ready_check)
+from agentenv_protocol.computer import app, app_runtime, apps, session  # noqa: E402
 from agentenv_protocol.computer.app import COMPUTER_APP, FAILURE, SOCKET  # noqa: E402
+from agentenv_protocol.computer.platform import Platform  # noqa: E402
+from agentenv_protocol.types import CONTROL_TOKEN_ENV, DATA_OBJECTS_EXTENSION_URI, WELL_KNOWN_PATH  # noqa: E402
 
 
 
+@linux(launch=Launch(command=["mail"], window={"class": "Mail"}, ready=Ready(window=True, timeout_s=30)))
 class Mail(ComputerAppEnvironment):
-    launch = Launch(command=["mail"], window={"class": "Mail"}, ready=Ready(window=True, timeout_s=30))
     synced = False
 
     @ready_check
@@ -38,14 +45,21 @@ class Mail(ComputerAppEnvironment):
         return self.synced
 
 
+@linux(launch=Launch(at="demand", command=["music"], window={"class": "Music"}, ready=Ready(window=True)))
 class Music(ComputerAppEnvironment):
-    launch = Launch(at="demand", command=["music"], window={"class": "Music"}, ready=Ready(window=True))
+    pass
 
 
 class Sync(ComputerAppEnvironment):
     @ready_check
     async def caught_up(self):
         return True
+
+
+@pytest.fixture(autouse=True)
+def on_linux(monkeypatch):
+    """Every app here runs as on Linux, which its launch is declared for."""
+    monkeypatch.setattr(app, "detect", lambda: Platform(os="linux"))
 
 
 @pytest.fixture
@@ -103,8 +117,8 @@ async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_
         port = closed.getsockname()[1]
     exits = [sys.executable, "-c", "import sys; sys.exit('no database yet')"]
 
+    @linux(launch=Launch(command=["slow"], ready=Ready(port=port, command=exits)))
     class Slow(ComputerAppEnvironment):
-        launch = Launch(command=["slow"], ready=Ready(port=port, command=exits))
 
         @ready_check
         def stuck(self):
@@ -259,6 +273,69 @@ async def test_the_drivers_readiness_asks_every_apps_server_at_once(desktop, mon
     assert status["ready"] is True and took < 2.5
 
 
+@linux(paths=["Mail"])
+class Inbox(ComputerAppEnvironment):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_the_driver_lists_its_apps_as_children_forwards_each_ones_requests_and_leaves_their_paths_out(
+        tmp_path, monkeypatch):
+    from computer_fake import FakeDriver, http_client
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for path in ("Mail/inbox.txt", "Documents/note.txt"):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(path)
+    get = {"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": {}}
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
+        monkeypatch.setattr(apps, "APPS", Path(root))
+        (Path(root) / "music").mkdir()
+        async with _serving(Inbox(), Path(root) / "mail", monkeypatch):
+            async with http_client(FakeDriver()) as http:
+                card = (await http.get(WELL_KNOWN_PATH)).json()
+                mail = client.find_child(card, "mail")
+                forwarded = (await http.post(mail["url"], json=get)).json()["result"]["parts"]
+                unknown = await http.post("/svc/notes/agentenv", json=get)
+                silent = await http.post("/svc/music/agentenv", json=get)
+                own = (await http.post("/agentenv", json={**get, "params": {"paths": ["Documents", "Mail"]}})).json()
+
+    assert [(child["name"], child["url"]) for child in card["children_environments"]] == [
+        ("mail", "/svc/mail/agentenv"), ("music", "/svc/music/agentenv")]
+    assert client.extension_params(mail, COMPUTER_APP)["paths"] == ["Mail"]
+    assert client.find_extension_method(mail, COMPUTER_APP, "ready")["endpoint"].startswith("/svc/mail/")
+    assert [(part["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"], base64.b64decode(part["file"]["bytes"]))
+            for part in forwarded] == [("Mail/inbox.txt", b"Mail/inbox.txt")]
+    assert (unknown.status_code, unknown.json()["error"]["code"]) == (404, "target_unavailable")
+    assert (silent.status_code, silent.json()["error"]["code"]) == (502, "delivery_failed")
+    assert [part["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for part in own["result"]["parts"]] == [
+        "Documents/note.txt"]
+
+
+@pytest.mark.asyncio
+async def test_with_a_control_token_the_driver_lists_its_apps_and_forwards_to_one_only_with_it(tmp_path, monkeypatch):
+    from computer_fake import FakeDriver, http_client
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "Mail").mkdir()
+    (tmp_path / "Mail/inbox.txt").write_text("hi")
+    get = {"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": {}}
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
+        monkeypatch.setattr(apps, "APPS", Path(root))
+        async with _serving(Inbox(), Path(root) / "mail", monkeypatch):
+            monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
+            async with http_client(FakeDriver()) as http:
+                card = (await http.get(WELL_KNOWN_PATH)).json()
+                refused = [await http.post("/svc/mail/agentenv", json=get, headers=headers)
+                           for headers in ({}, client.control_headers("guess"))]
+                forwarded = await http.post("/svc/mail/agentenv", json=get, headers=client.control_headers("s3cret"))
+
+    assert [child["name"] for child in card["children_environments"]] == ["mail"]
+    assert [answer.status_code for answer in refused] == [401, 401]
+    assert [part["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for part in forwarded.json()["result"]["parts"]] == [
+        "Mail/inbox.txt"]
+
+
 @pytest.mark.asyncio
 async def test_the_session_launches_an_app_in_a_session_of_its_own_from_its_folder(tmp_path, monkeypatch):
     monkeypatch.setenv("DISPLAY", ":99")
@@ -269,6 +346,18 @@ async def test_the_session_launches_an_app_in_a_session_of_its_own_from_its_fold
     await asyncio.gather(*session._running)
 
     assert (tmp_path / "seen").read_text() == f"{os.path.realpath(tmp_path)} notes :99 True"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_ends_what_the_app_started_though_its_first_process_exited(tmp_path):
+    sleeper = f"{sys.executable} -c 'import time; time.sleep(60)' & exit 0"
+    pid = await session.launch(["sh", "-c", sleeper], tmp_path, {})
+    await asyncio.gather(*session._running)
+
+    running = session.alive(pid)
+    await session.stop(pid, 5)
+
+    assert running and not session.alive(pid)
 
 
 def test_the_launcher_runs_the_app_through_its_own_server(tmp_path, monkeypatch):

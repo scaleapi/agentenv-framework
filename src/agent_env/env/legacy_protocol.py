@@ -96,7 +96,8 @@ async def _export_state_at(base_url: str, timeout: int, verify: bool) -> dict:
 
 
 async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str) -> dict:
-    """An MCP service's state as JSON: its v1 ``data/get`` answer when that is data, else ``GET /export-state``.
+    """An MCP service's state as JSON: its v1 ``data/get`` answer when that is data, asked with the deployment's
+    control token, else ``GET /export-state``.
 
     A service that exports a file from ``data/get`` (a bundle of its database, to reload from) still serves its state
     as JSON at ``/export-state``.
@@ -104,7 +105,8 @@ async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[s
     base_url = await v1_base_url(deployed, gateway_url, environment_name, mcp=True)
     if base_url is None:
         return await export_state(gateway_url, environment_name)
-    response = await protocol_v1.get_data(base_url)
+    response = await protocol_v1.get_data(base_url,
+                                          headers=deployed.control_headers_for(base_url) if deployed is not None else None)
     if not response.parts:
         return {}
     if isinstance(response.parts[0], DataPart):

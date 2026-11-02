@@ -133,8 +133,9 @@ class Ledger:
                   "files": {}, "needs": {}, "store_refs": {}}
         from_folder = write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL) or (
             write.kind is BundleKind.ENV and env_folder_writer(get_env_registry().get(_type(write))))
-        if from_folder and not isinstance(write.source, ReferencedImage):
-            built = isinstance(write.source, BuiltImage)
+        built = isinstance(write.source, BuiltImage) or (
+            isinstance(write.source, ReferencedImage) and write.source.dockerfile is not None)
+        if from_folder and (built or not isinstance(write.source, ReferencedImage)):
             listing = build_context_files if built else folder_files
             for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
@@ -256,6 +257,8 @@ def _config(write: Write) -> Any:
     if not isinstance(source, BundleImage):
         return source.config
     config = {"dockerfile": source.dockerfile} if isinstance(source, BuiltImage) else {"ref": source.ref}
+    if isinstance(source, ReferencedImage) and source.dockerfile is not None:
+        config["dockerfile"] = source.dockerfile
     if source.description is not None:  # only an image folder's, so an image key's digest is as before
         config["description"] = source.description
     return config

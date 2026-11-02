@@ -11,9 +11,11 @@ from .report import CheckResult, Level, ProbeReport, Status, Verdict
 __all__ = ["run_probe", "ProbeReport", "CheckResult", "Level", "Status", "Verdict"]
 
 
-async def run_probe(url: str, level: Level = "full", *, timeout_s: float = 60, ready_timeout_s: float = 60) -> ProbeReport:
-    """Probe the driver serving its card at ``url``. ``ready_timeout_s`` is how long it may take to report ready."""
-    driver = await Driver.connect(url, timeout_s)
+async def run_probe(url: str, level: Level = "full", *, timeout_s: float = 60, ready_timeout_s: float = 60,
+                    token: str | None = None) -> ProbeReport:
+    """Probe the driver serving its card at ``url``, sending ``token``, its control token, to its framework-only routes.
+    ``ready_timeout_s`` is how long it may take to report ready."""
+    driver = await Driver.connect(url, timeout_s, token)
     async with driver.session() as session:
         probe = Probe(driver, session, ready_timeout_s)
         await probe.basic()

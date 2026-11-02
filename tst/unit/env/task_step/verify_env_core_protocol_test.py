@@ -108,8 +108,10 @@ class TestExecute:
             assert "not found in context.deployed_envs" in str(e)
 
 
-def _probe(payload):
+def _probe(payload, status=200):
     class _Resp:
+        status_code = status
+
         def json(self):
             return payload
 
@@ -127,7 +129,7 @@ def _probe(payload):
             return _Resp()
 
     with patch("agent_env.task_step.task_steps.env_card_validator.verify_env_core_protocol.httpx.AsyncClient", _Client):
-        return asyncio.run(_make_step()._probe_operation("https://gw", "data/add", {"parts": []}))
+        return asyncio.run(_make_step()._probe_operation("https://gw", "data/add", {"parts": []}, {}))
 
 
 class TestProbeOperation:
@@ -143,6 +145,9 @@ class TestProbeOperation:
     def test_result_means_registered(self):
         assert _probe({"jsonrpc": "2.0", "id": 1, "result": {"parts": []}}) is True
 
+    def test_a_refusal_for_the_control_token_is_indeterminate(self):
+        assert _probe({"error": {"code": "unauthorized", "message": "no", "applied": "no"}}, status=401) is None
+
 
 class TestWire:
     @pytest.mark.parametrize("gateway_url", ["https://gw", "https://gw/", "https://sandbox.example.com/sandbox/sandbox-vm-1-18765"])
@@ -150,7 +155,7 @@ class TestWire:
         base = gateway_url.rstrip("/")
         ctx = TaskStepContext(deployed_envs=[DeployedGatewayEnv(
             env_id="e1", env_version=3, gateway_url=gateway_url, mcp_url=f"{base}/mcp", db_web_url=None, sandbox_id="sb",
-            environment_card_url=f"{gateway_url}{WELL_KNOWN_PATH}",
+            environment_card_url=f"{gateway_url}{WELL_KNOWN_PATH}", control_token="s3cret",
         )])
         sent = []
 
@@ -169,6 +174,7 @@ class TestWire:
             ("GET", f"{base}{WELL_KNOWN_PATH}"), ("POST", f"{base}/agentenv"), ("POST", f"{base}/agentenv"),
         ]
         assert [(b["method"], b["params"]) for b in (json.loads(r.content) for r in sent[1:])] == [("data/add", {"parts": []}), ("data/get", {})]
+        assert [r.headers.get("authorization") for r in sent] == [None, "Bearer s3cret", "Bearer s3cret"]
         assert fake_env.update_metadata.call_args[0][0]["validated_environment_protocol"] == {
             "data/reset": {"supported": True}, "data/add": {"supported": True}, "data/get": {"supported": True},
         }

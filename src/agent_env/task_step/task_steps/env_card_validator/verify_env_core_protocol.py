@@ -7,6 +7,7 @@ from typing import ClassVar, Optional
 
 import httpx
 from agentenv_protocol import METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -49,7 +50,6 @@ class VerifyCoreEnvironmentProtocolStep(TaskStep):
         return cls(**cls._base_from_dict(data), env_id=data["env_id"])
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        from agentenv_protocol import client as protocol_v1
         from agent_env.env.env import Env
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
@@ -65,7 +65,8 @@ class VerifyCoreEnvironmentProtocolStep(TaskStep):
         protocol = {}
         for method, probe_params in _CORE_OPERATIONS:
             if probe_params is not None:
-                supported = await self._probe_operation(deployed.environment_url, method, probe_params)
+                supported = await self._probe_operation(deployed.environment_url, method, probe_params,
+                                                        deployed.control_headers)
             else:
                 supported = self._advertised_support(card, method)
             protocol[method] = {"supported": supported}
@@ -87,22 +88,23 @@ class VerifyCoreEnvironmentProtocolStep(TaskStep):
         backing = children[0] if len(children) == 1 else (card if not children else None)
         if backing is None:
             return None
-        advertised = (backing.get("capabilities") or {}).get("operations")
+        advertised = protocol_v1.operations(backing)
         return True if advertised is None else method in advertised
 
-    async def _probe_operation(self, environment_url: str, method: str, params: dict) -> Optional[bool]:
-        """Mutation-free: -32601 = unregistered; -32000 = gateway couldn't forward (None);
+    async def _probe_operation(self, environment_url: str, method: str, params: dict,
+                               headers: dict[str, str]) -> Optional[bool]:
+        """Mutation-free: -32601 = unregistered; -32000 = gateway couldn't forward, or a 401 = not let in (None);
         anything else — a result, or -32602 from the empty-parts add probe — proves registration."""
         body = {"jsonrpc": "2.0", "id": f"verify-{method}", "method": method, "params": params}
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.post(f"{environment_url}{RPC_PATH}", json=body)
+                response = await client.post(f"{environment_url}{RPC_PATH}", json=body, headers=headers)
             error = (response.json() or {}).get("error") or {}
         except Exception as e:
             logger.warning(f"operation probe {method} for '{self.env_id}' failed: {e}")
             return None
         if error.get("code") == -32601:
             return False
-        if error.get("code") == -32000:
+        if response.status_code == 401 or error.get("code") == -32000:
             return None
         return True

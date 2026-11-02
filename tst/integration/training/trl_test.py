@@ -11,7 +11,8 @@ import uuid
 import pytest
 
 from agent_env.artifact import FileArtifact
-from agent_env.training.trl import ENDED, AgentEnv
+from agent_env.training._openenv import ENDED
+from agent_env.training.trl import AgentEnv
 from tst.integration.openenv.build_app_test import _left
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]

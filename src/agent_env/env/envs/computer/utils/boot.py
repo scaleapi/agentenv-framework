@@ -11,6 +11,7 @@ import secrets
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
+from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
@@ -35,6 +36,8 @@ _STATUS_TIMEOUT_S = int(ANSWER_TIMEOUT_S) + 15
 _POLL_S = 0.5
 #: How a setting a record keeps shows a secret's or a generated one's value, which it never holds.
 WITHHELD = "<withheld>"
+#: How many random bytes a computer's control token carries: 256 bits, past guessing.
+CONTROL_TOKEN_BYTES = 32
 
 
 @dataclass
@@ -68,14 +71,16 @@ def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, 
     return environment
 
 
-def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str, dict]) -> dict[str, str]:
-    """The environment that hands each of ``apps`` the values ``app_settings`` gives it, by its name, in
-    ``APP_SETTINGS_ENV``, a secret's resolved through the secret store; nothing when none has any."""
+def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str, dict],
+                             os_type: str) -> dict[str, str]:
+    """The environment that hands each of ``apps``, on a computer of ``os_type``, the values ``app_settings`` gives it,
+    by its name, in ``APP_SETTINGS_ENV``, a secret's resolved through the secret store; nothing when none has any."""
     given = [(app, app_settings[app.environment_name]) for app in apps if app_settings.get(app.environment_name)]
     if not given:
         return {}
     return {APP_SETTINGS_ENV: json.dumps({app.environment_name: {
-        name: get_config().resolve_reference(value) if name in app.secret_settings() and value is not None else value
+        name: get_config().resolve_reference(value) if name in app.secret_settings(os_type) and value is not None
+        else value
         for name, value in values.items()} for app, values in given})}
 
 
@@ -85,19 +90,31 @@ def recorded_settings(computer: ComputerArtifact, values: dict[str, Any]) -> dic
             for name, setting in computer.config.items() if setting.phase == "deploy"}
 
 
-async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str],
+def control_token() -> str:
+    """A token for one computer's framework-only routes (``CONTROL_TOKEN_ENV``), which agent-env holds and gives no
+    agent."""
+    return secrets.token_urlsafe(CONTROL_TOKEN_BYTES)
+
+
+def control_environment(token: Optional[str]) -> dict[str, str]:
+    """What hands a computer its control ``token`` in its boot environment; nothing without one, as for a computer an
+    older agent-env booted."""
+    return {CONTROL_TOKEN_ENV: token} if token else {}
+
+
+async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
                ready_s: float = READY_TIMEOUT_S) -> Booted:
-    """``image`` booted with ``environment`` on ``sandbox_provider``, which the caller chose to run its arch natively,
-    its driver's ``port`` reached on the sandbox, once the driver says the computer is ready; a boot that fails is torn
-    down."""
+    """``image`` booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the caller chose
+    to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that token, says
+    the computer is ready; a boot that fails is torn down."""
     sandbox = await sandbox_provider.create_container(
-        image_name=image, port=port, env=environment, network_policy=network_policy,
+        image_name=image, port=port, env={**environment, **control_environment(token)}, network_policy=network_policy,
         disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
     try:
         url = sandbox.tunnel_urls[port]
-        return Booted(sandbox, url, await ready(url, ready_s))
+        return Booted(sandbox, url, await ready(url, ready_s, token))
     except BaseException:
         await discard(sandbox)
         raise
@@ -115,15 +132,16 @@ async def discard(sandbox: Sandbox) -> None:
             await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
 
 
-def ready_timeout(apps: list[ComputerAppEnv]) -> float:
-    """How long a computer of ``apps`` may take to be ready: ``READY_TIMEOUT_S``, or longer when an app that starts with
-    it gives itself longer."""
+def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
+    """How long a computer of ``os_type`` and ``apps`` may take to be ready: ``READY_TIMEOUT_S``, or longer when an app
+    that starts with it there gives itself longer."""
     return max([READY_TIMEOUT_S, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in apps
-                                   if (launch := app.declaration.launch) and launch.at == "boot" and launch.ready)])
+                                   if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
 
 
-async def ready(url: str, timeout: float) -> dict:
-    """The card of the driver at ``url`` once its ``computer-ready`` status says it's ready; raises TimeoutError, naming
+async def ready(url: str, timeout: float, token: Optional[str] = None) -> dict:
+    """The card of the driver at ``url``, read once its ``computer-ready`` status, asked with its control ``token``,
+    says it's ready, so each app it fronts is on it as the app's own server serves it; raises TimeoutError, naming
     what it last saw, when it isn't within ``timeout`` seconds."""
     last = "nothing answered"
     try:
@@ -132,9 +150,10 @@ async def ready(url: str, timeout: float) -> dict:
                 try:
                     card = await protocol_v1.get_card(url, timeout=5)
                     status = await protocol_v1.invoke_extension(url, card, COMPUTER_READY, None, _STATUS_TIMEOUT_S,
-                                                                method="status")
+                                                                method="status",
+                                                                headers=protocol_v1.control_headers(token))
                     if status.get("ready"):
-                        return card
+                        return await protocol_v1.get_card(url, timeout=5)
                     last = "not ready: " + "; ".join(f"{check['name']}: {check.get('detail')}"
                                                      for check in status.get("checks", []) if not check.get("ok"))
                 except Exception as e:

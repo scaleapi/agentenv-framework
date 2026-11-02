@@ -338,17 +338,21 @@ async def test_keys_held_past_max_hold_ms_are_released():
 
 @pytest.mark.asyncio
 async def test_a_second_hold_restarts_the_release_timer():
-    driver = FakeDriver(settings=ComputerSettings(max_hold_ms=150))
+    """Timed by the clock: the keys go up no sooner than max_hold_ms after the second hold was sent, where the first
+    hold's timer would have released them 0.3 s sooner, and a slow loop has 1.2 s to land the second hold before it."""
+    driver = FakeDriver(settings=ComputerSettings(max_hold_ms=1500))
     async with mcp_session(driver) as session:
         await session.call_tool("computer_keyboard_down", {"keys": ["Alt"]})
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.3)
+        second = time.monotonic()
         await session.call_tool("computer_keyboard_down", {"keys": ["Shift"]})
-        await asyncio.sleep(0.1)
-        still = list(driver.screen.held)
-        with anyio.fail_after(5):
+        both = list(driver.screen.held)
+        with anyio.fail_after(10):
             while driver.screen.held:
                 await asyncio.sleep(0.01)
-    assert still == ["Alt", "Shift"] and driver.screen.log[-1] == ("key_up", ("Shift", "Alt"))
+        released = time.monotonic()
+    assert both == ["Alt", "Shift"] and driver.screen.log[-1] == ("key_up", ("Shift", "Alt"))
+    assert released - second >= 1.5
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,5 @@
 """Environment and environment_universe artifacts written from a bundle's artifact folders: an environment over the
-file its folder holds or the file artifact it names, and a universe laid out as ``environment-universe get
+file its folder holds, even inside a subfolder, its files by path when it holds several, or the file artifact it names, and a universe laid out as ``environment-universe get
 --output-dir`` writes one, adding the environments it names. Each is checked before any write, rewritten when
 what it records changes, and equal, field for field, to one the CLI writes from the same files. Each environment
 the bundle writes must seed a server of the env a task loads it into."""
@@ -125,6 +125,36 @@ def test_a_description_names_the_folders_file(bundle_dir):
     _run(bundle_dir)
 
     assert EnvironmentArtifact.get(f"{ROOT}/crm-data").get_file_artifact().description == "crm rows"
+
+
+def test_an_environment_keeps_the_several_files_its_folder_holds_by_path_and_is_rewritten_when_one_changes(bundle_dir):
+    files = {"inbox/a.json": "{}\n", "sent.json": "[]\n"}
+    _bundle(bundle_dir, {**_environment("mail", "mail"), **{f"artifacts/mail/{path}": text for path, text in files.items()}},
+            "mail")
+
+    first = _summary(_run(bundle_dir))
+    kept = EnvironmentArtifact.get(f"{ROOT}/mail").get_file_artifacts()
+
+    assert first[f"{ROOT}/mail"] == (1, False, ("new",))
+    assert {path: (file.filename, file.load().decode()) for path, file in kept.items()} == {
+        path: (path.rsplit("/", 1)[-1], text) for path, text in files.items()}
+    assert {path: file.id for path, file in kept.items()} == {
+        path: f"{ROOT}/mail__{hashlib.sha256(path.encode()).hexdigest()[:16]}" for path in files}
+
+    assert all(reused for _, reused, _ in _summary(_run(bundle_dir)).values())
+    (bundle_dir / "artifacts/mail/sent.json").write_text('["x"]\n')
+    assert _summary(_run(bundle_dir))[f"{ROOT}/mail"] == (2, False, ("files changed: sent.json",))
+    assert EnvironmentArtifact.get(f"{ROOT}/mail").get_file_artifacts()["sent.json"].load() == b'["x"]\n'
+
+
+def test_a_folders_one_file_inside_a_subfolder_is_still_the_one_file_it_wraps(bundle_dir):
+    _bundle(bundle_dir, {**_environment("mail", "mail"), "artifacts/mail/inbox/a.json": "{}\n"}, "mail")
+
+    _run(bundle_dir)
+    environment = EnvironmentArtifact.get(f"{ROOT}/mail")
+
+    assert environment.file_artifact_refs is None
+    assert (environment.get_file_artifact().id, environment.get_file_artifact().filename) == (f"{ROOT}/mail__file", "a.json")
 
 
 def test_an_environment_over_a_bundle_file_is_rewritten_when_the_file_is(bundle_dir):
@@ -414,12 +444,12 @@ def _refused(files):
 
 
 @pytest.mark.parametrize("files, problem", [
-    (_environment("x", "crm") | {"artifacts/x/a.json": "{}", "artifacts/x/b.json": "{}"},
-     "artifacts/x: an environment artifact holds one file, and this folder has 2 ('a.json', 'b.json'); name the "
-     "artifact to wrap with file, or give each other file an artifact folder of its own"),
+    (_environment("x", "crm", description='"d"') | {"artifacts/x/a.json": "{}", "artifacts/x/b.json": "{}"},
+     "artifacts/x: artifact.toml: description describes the folder's one file, and it holds 'a.json', 'b.json'; drop "
+     "description"),
     (_environment("x", "crm"),
      "artifacts/x: has no file for the environment to wrap (.DS_Store, Thumbs.db, __pycache__, desktop.ini don't "
-     "count); put its one file here, or name the artifact to wrap with file"),
+     "count); put its files here, or name the artifact to wrap with file"),
     ({f"artifacts/x/{TOML}": 'type = "environment"\n', "artifacts/x/a.json": "{}"},
      "artifacts/x: artifact.toml: environment_name is required: the environment the file seeds"),
     (_environment("x", "") | {"artifacts/x/a.json": "{}"},
@@ -433,7 +463,7 @@ def _refused(files):
      "drop one"),
     (_environment("x", "crm", file='"f"') | {"artifacts/f/a.json": "{}", "artifacts/x/stray.json": "{}"},
      "artifacts/x: its file is the artifact file names, so the folder holds only artifact.toml, and it also has "
-     "'stray.json'; give the file an artifact folder of its own, or leave out file to wrap the folder's one file"),
+     "'stray.json'; give the file an artifact folder of its own, or leave out file to keep the folder's files"),
     (_environment("x", "crm", file='"many"') | {"artifacts/many/a.json": "{}", "artifacts/many/b.json": "{}"},
      "artifacts/x: file: 'many' is this bundle's file_artifact_universe, but this field takes file"),
     (_universe("x"),
@@ -458,7 +488,7 @@ def _refused(files):
     (_universe("x", service_artifact_refs='["a"]', metadata='{ m = "f" }') | {"artifacts/x/gmail/a.json": "{}"},
      "artifacts/x: artifact.toml: service_artifact_refs is what the stored document calls it; write "
      "environment_artifacts instead"),
-], ids=["environment-two-files", "environment-no-file", "environment-no-name", "environment-empty-name",
+], ids=["environment-description-of-two-files", "environment-no-file", "environment-no-name", "environment-empty-name",
         "environment-service-name", "environment-file-artifact-id", "environment-file-and-description",
         "environment-file-and-a-file", "environment-over-a-universe", "universe-empty", "universe-root-file",
         "universe-two-files", "universe-flat-metadata", "universe-metadata-in-another-case", "universe-repeated-name",

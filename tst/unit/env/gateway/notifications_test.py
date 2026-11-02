@@ -1,0 +1,663 @@
+"""Unit tests for an agent's notifications (urn:agentenv:notifications/v1): scheduled checks and the notify action."""
+from __future__ import annotations
+
+import asyncio
+import json
+
+import httpx
+import pytest
+from mcp.types import CallToolResult, TextContent
+from mcp.types import Tool as MCPTool
+
+from agent_env.env.gateway import gateway as gw_mod
+from agent_env.env.gateway.caller import Caller
+from agent_env.env.gateway.clock import Clock
+from agent_env.env.gateway.constants import AGENT_ENV_ROLE_HEADER, GATEWAY_EXTENSIONS
+from agent_env.env.gateway.gateway import Gateway
+from agent_env.env.gateway.triggers import TriggerEngine, TriggerError
+from agent_env.env.gateway.notifications import CHECK_TOOL_NAMES, NotificationError, Notifications
+
+T0 = "2027-02-01T15:00:00Z"  # Mon 7:00 AM Pacific
+
+
+class FakeNow:
+    def __init__(self, start: float = 1000.0):
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+    def tick(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def _frozen_clock(at: str = T0) -> Clock:
+    clock = Clock(now_fn=FakeNow())
+    clock.set_time(at, 0)
+    return clock
+
+
+def _notifications(clock: Clock | None = None, **config) -> Notifications:
+    clock = clock or _frozen_clock()
+    w = Notifications(lambda: clock)
+    w.configure({"roles": ["default"], **config})
+    return w
+
+
+def _said(item: dict) -> str:
+    """A taken item's text."""
+    [part] = item["parts"]
+    return part["text"]
+
+
+# ---- Notifications ----
+
+def test_scheduled_checks_are_off_until_a_task_turns_them_on():
+    w = Notifications(lambda: _frozen_clock())
+    assert w.state()["roles"] == []
+    with pytest.raises(NotificationError, match="not available"):
+        w.schedule("look again", at="PT6H")
+
+
+def test_a_check_takes_a_duration_from_now_or_a_time_with_its_offset():
+    w = _notifications()
+    assert w.schedule("in six hours", at="PT6H")["next"] == "2027-02-01T21:00:00Z"
+    assert w.schedule("tonight", at="2027-02-01T18:00:00-08:00")["next"] == "2027-02-02T02:00:00Z"
+    assert [c["note"] for c in w.list()["checks"]] == ["in six hours", "tonight"]
+
+
+def test_schedule_returns_what_the_gateway_decided_and_list_still_shows_the_note():
+    n = _notifications()
+    made = n.schedule("Check the saved search for 2BRs on Alder St", at="PT2H", every="P1D", until="P4D")
+    assert made == {"check_id": "check-1", "next": "2027-02-01T17:00:00Z", "every": "P1D",
+                    "until": "2027-02-05T15:00:00Z"}
+    assert n.schedule("once", at="PT3H") == {"check_id": "check-2", "next": "2027-02-01T18:00:00Z"}
+    assert [c["note"] for c in n.list()["checks"]] == ["Check the saved search for 2BRs on Alder St", "once"]
+    assert [c["note"] for c in n.state()["checks"]] == ["Check the saved search for 2BRs on Alder St", "once"]
+
+
+@pytest.mark.parametrize("kwargs, error", [
+    ({"note": "x"}, "give at"),
+    ({"note": " ", "at": "PT1H"}, "note must say"),
+    ({"note": "x", "at": "2027-02-01T06:00:00-08:00"}, "already passed"),
+    ({"note": "x", "at": "2027-02-01T18:00:00"}, "at must be a time with seconds and its UTC offset"),
+    ({"note": "x", "every": "PT10M"}, "at least"),
+    ({"note": "x", "at": "PT1H", "until": "P1D"}, "until only applies"),
+    ({"note": "x", "every": "PT6H", "until": "PT1H"}, "before the first"),
+    ({"note": "x", "at": "PT1H", "every": "P3000000D"}, "too long"),
+    ({"note": "x", "at": "P3000000D"}, "too far away"),
+])
+def test_bad_checks_are_refused_with_the_reason(kwargs, error):
+    with pytest.raises(NotificationError, match=error):
+        _notifications().schedule(**kwargs)
+
+
+@pytest.mark.parametrize("kwargs, error", [
+    ({"at": "2027-02-02T18:00-08:00"}, "at must be a time with seconds and its UTC offset"),
+    ({"at": "tomorrow"}, "at must be a time with seconds"),
+    ({"at": "pt6h"}, "at must be a duration in weeks, days, hours, minutes or seconds"),
+    ({"every": "P1M"}, "every must be a duration .*no months or years"),
+    ({"every": "P1Y"}, "every must be a duration"),
+    ({"every": "PT1.5H"}, "every must be a duration .*only seconds may have a fraction"),
+    ({"every": "P9999999999D"}, "every is too long"),
+    ({"at": "PT1H", "every": "PT6H", "until": "next week"}, "until must be a time with seconds"),
+])
+def test_a_bad_time_s_error_names_the_argument_the_agent_gave_and_the_rule(kwargs, error):
+    with pytest.raises(NotificationError, match=error) as refused:
+        _notifications().schedule("x", **kwargs)
+    assert "virtual_time" not in str(refused.value) and "RFC" not in str(refused.value)
+
+
+@pytest.mark.parametrize("text", ["PT3H", "P1D", "P1DT6H30M", "PT0.001S", "PT1M0.5S"])
+def test_durations_are_echoed_in_the_form_the_tools_take(text):
+    w = _notifications(min_interval="PT0.001S")
+    assert w.schedule("x", every=text)["every"] == text
+    assert _notifications(min_interval=text).state()["min_interval"] == text
+
+
+def test_the_too_short_error_names_the_minimum_as_a_duration_to_send_back():
+    with pytest.raises(NotificationError, match=r"at least PT3H apart"):
+        _notifications(min_interval="PT3H").schedule("x", every="PT1H")
+
+
+def test_the_active_cap_refuses_one_more_until_one_is_cancelled():
+    w = _notifications(max_active=2)
+    first = w.schedule("a", at="PT1H")["check_id"]
+    w.schedule("b", at="PT2H")
+    with pytest.raises(NotificationError, match="already have 2"):
+        w.schedule("c", at="PT3H")
+    w.cancel(first)
+    w.schedule("c", at="PT3H")
+    with pytest.raises(NotificationError, match="no active scheduled check"):
+        w.cancel(first)
+
+
+def test_take_hands_out_each_due_check_once_and_a_one_shot_is_done():
+    clock = _frozen_clock()
+    w = _notifications(clock)
+    w.schedule("look at 9", at="PT2H")
+    w.schedule("look at noon", at="PT5H")
+    assert w.state()["next_due_at"] == "2027-02-01T17:00:00Z"
+    clock.set_time("2027-02-01T17:00:00Z", 0)
+    taken = w.take({})["items"]
+    assert [(i["source"], _said(i), i["at"]) for i in taken] == [("scheduled_check", "look at 9", "2027-02-01T17:00:00Z")]
+    assert w.take({})["items"] == []
+    assert [c["note"] for c in w.list()["checks"]] == ["look at noon"]
+    assert w.state()["next_due_at"] == "2027-02-01T20:00:00Z"
+
+
+def test_next_due_at_is_the_earliest_of_the_checks_and_the_pending_notifications():
+    clock = _frozen_clock()
+    n = _notifications(clock)
+    n.schedule("look again", at="PT6H")
+    clock.set_time("2027-02-01T16:00:00Z", 0)
+    n.notify("Messages", "Jamie: still on for tonight?")  # queued at 16:00, before the check at 21:00
+    assert n.state()["next_due_at"] == "2027-02-01T16:00:00Z"
+    n.take({})
+    assert n.state()["next_due_at"] == "2027-02-01T21:00:00Z"
+
+
+def test_a_notification_queued_before_the_clock_was_set_is_due_once_it_is():
+    clock = Clock(now_fn=FakeNow())
+    n = Notifications(lambda: clock)
+    n.notify("Gmail", "New email")
+    assert n.state()["next_due_at"] is None
+    clock.set_time(T0, 0)
+    assert n.state()["next_due_at"] == T0
+
+
+def test_a_repeating_check_moves_past_a_long_jump_and_says_how_often_it_came_due():
+    clock = _frozen_clock()
+    w = _notifications(clock)
+    w.schedule("check rugs", at="PT5H", every="PT6H", until="P4D")
+    clock.set_time("2027-02-02T15:00:00Z", 0)  # a day later: due at 20:00, 02:00, 08:00, 14:00
+    [item] = w.take({})["items"]
+    assert (item["at"], item["times"]) == ("2027-02-01T20:00:00Z", 4)
+    assert w.list()["checks"][0]["next"] == "2027-02-02T20:00:00Z"
+
+
+def test_a_jump_over_a_short_every_is_counted_not_stepped():
+    clock = _frozen_clock()
+    w = _notifications(clock, min_interval="PT0.001S")
+    w.schedule("tick", every="PT0.001S")
+    clock.set_time("2027-02-02T15:00:00Z", 0)
+    [item] = w.take({})["items"]
+    assert item["times"] == 86_400_000
+    assert w.list()["checks"][0]["next"] == "2027-02-02T15:00:00.001000Z"
+
+
+def test_a_repeating_check_ends_at_until():
+    clock = _frozen_clock()
+    w = _notifications(clock)
+    w.schedule("check", every="P1D", until="P2D")
+    clock.set_time("2027-02-05T15:00:00Z", 0)
+    assert w.take({})["items"][0]["times"] == 2
+    assert w.list()["checks"] == [] and w.state()["next_due_at"] is None
+
+
+def test_take_until_looks_ahead_without_moving_the_clock():
+    w = _notifications()
+    w.schedule("later", at="PT3H")
+    assert w.take({"until": "PT1H"})["items"] == []
+    assert [_said(i) for i in w.take({"until": "PT3H"})["items"]] == ["later"]
+
+
+def test_a_check_and_a_notification_are_taken_as_one_shape():
+    clock = _frozen_clock()
+    n = _notifications(clock)
+    n.schedule("See if Dana replied", at="PT2H", every="PT6H")
+    clock.set_time("2027-02-01T23:10:00Z", 0)
+    n.notify("Curbfinch alert", "New listing: 2BR on Ivy St", trigger_id="curbfinch-new-listing")
+    assert n.take({})["items"] == [
+        {"id": "check-1", "to": "default", "at": "2027-02-01T17:00:00Z", "times": 2, "source": "scheduled_check",
+         "source_id": "check-1", "channel": "your scheduled check",
+         "parts": [{"kind": "text", "text": "See if Dana replied"}]},
+        {"id": "notification-2", "to": "default", "at": "2027-02-01T23:10:00Z", "times": 1, "source": "trigger",
+         "source_id": "curbfinch-new-listing", "channel": "Curbfinch alert",
+         "parts": [{"kind": "text", "text": "New listing: 2BR on Ivy St"}]},
+    ]
+
+
+def test_a_take_retried_with_its_take_id_gets_the_same_batch_back():
+    clock = _frozen_clock()
+    n = Notifications(lambda: clock)
+    n.notify("Messages", "Jamie: did the rug thing get sorted?")
+    first = n.take({"take_id": "t-1"})
+    assert [_said(i) for i in first["items"]] == ["Jamie: did the rug thing get sorted?"]
+    assert n.take({"take_id": "t-1"}) == first          # the response was lost; the retry still gets the item
+    assert n.take({"take_id": "t-2"})["items"] == []    # a new take hands nothing out twice
+    with pytest.raises(NotificationError, match="take_id"):
+        n.take({"take_id": ""})
+
+
+def test_notifications_queue_at_the_virtual_time_and_are_taken_once():
+    clock = _frozen_clock()
+    w = Notifications(lambda: clock)  # notifications need no switch
+    w.notify("Messages", "Jamie: did the rug thing get sorted?", trigger_id="t1")
+    pending = w.state()["pending_notifications"]
+    assert [(n["channel"], n["at"], n["trigger_id"]) for n in pending] == [("Messages", T0, "t1")]
+    [item] = w.take({})["items"]
+    assert (item["source"], _said(item)) == ("trigger", "Jamie: did the rug thing get sorted?")
+    assert w.take({})["items"] == [] and w.state()["pending_notifications"] == []
+
+
+def test_due_is_judged_on_the_time_not_its_text():
+    clock = _frozen_clock()
+    w = _notifications(clock)
+    w.notify("Messages", "on the second")                    # 15:00:00Z sorts after 15:00:00.500000Z as text
+    w.schedule("half a second on", at="PT0.5S")
+    items = w.take({"until": "PT0.75S"})["items"]
+    assert [_said(i) for i in items] == ["on the second", "half a second on"]
+
+
+def test_turning_checks_off_cancels_the_ones_still_to_come():
+    clock = _frozen_clock()
+    w = _notifications(clock)
+    w.schedule("sweep", every="P1D")
+    w.configure({"roles": []})
+    clock.set_time("2027-02-05T15:00:00Z", 0)
+    assert w.state()["next_due_at"] is None and w.take({})["items"] == []
+    assert [c["status"] for c in w.state()["checks"]] == ["cancelled"]
+
+
+def test_history_is_bounded_and_delivered_notifications_are_dropped():
+    from agent_env.env.gateway import notifications as notifications_mod
+    w = _notifications()
+    for n in range(notifications_mod._HISTORY + 10):
+        w.cancel(w.schedule(f"check {n}", at="PT1H")["check_id"])
+    checks = w.state()["checks"]
+    assert len(checks) == notifications_mod._HISTORY and checks[-1]["note"] == f"check {notifications_mod._HISTORY + 9}"
+    w.notify("Messages", "hi")
+    w.take({})
+    assert w._queue == []
+
+
+def test_clear_resets_every_setting_and_forgets_everything():
+    w = _notifications(max_active=3, min_interval="PT2H")
+    w.schedule("x", at="PT1H")
+    w.notify("Gmail", "hello")
+    w.clear()
+    st = w.state()
+    assert (st["roles"], st["max_active"], st["min_interval"]) == ([], 10, "PT1H")
+    assert (st["checks"], st["pending_notifications"]) == ([], [])
+
+
+def test_a_config_replaces_every_setting_so_a_field_left_out_goes_back_to_its_default():
+    n = _notifications(max_active=3, min_interval="PT2H")
+    st = n.configure({"max_active": 5})
+    assert (st["roles"], st["max_active"], st["min_interval"]) == ([], 5, "PT1H")
+    assert not n.enabled
+
+
+def test_a_new_config_leaves_existing_checks_as_they_are():
+    n = _notifications(max_active=3)
+    n.schedule("a", at="PT1H")
+    n.schedule("b", every="PT6H")
+    n.configure({"roles": ["default"], "max_active": 1, "min_interval": "PT12H"})
+    assert [(c["status"], c.get("every")) for c in n.state()["checks"]] == [("active", None), ("active", "PT6H")]
+    with pytest.raises(NotificationError, match="already have 1"):
+        n.schedule("c", at="PT2H")
+
+
+@pytest.mark.parametrize("body, error", [
+    ({"scheduled_checks": True}, r"not \['scheduled_checks'\]"),
+    ({"roles": "default"}, "list of role names"),
+    ({"roles": ["default", " "]}, "roles must name a role"),
+    ({"roles": ["*"]}, "names each role"),
+    ({"max_active": 0}, "positive integer"),
+    ({"min_interval": "1h"}, "min_interval"),
+])
+def test_bad_config_is_refused(body, error):
+    with pytest.raises(NotificationError, match=error):
+        Notifications(lambda: _frozen_clock()).configure(body)
+
+
+# ---- recipients ----
+
+def test_only_the_named_roles_schedule_and_each_lists_and_cancels_only_its_own():
+    n = _notifications(roles=["default", "landlord"])
+    mine = n.schedule("see if Dana replied", at="PT2H", to="default")["check_id"]
+    theirs = n.schedule("chase the deposit", at="PT1H", to="landlord")["check_id"]
+    assert [c["note"] for c in n.list(to="default")["checks"]] == ["see if Dana replied"]
+    assert [c["note"] for c in n.list(to="landlord")["checks"]] == ["chase the deposit"]
+    with pytest.raises(NotificationError, match="no active scheduled check"):
+        n.cancel(theirs, to="default")
+    n.cancel(mine, to="default")
+    with pytest.raises(NotificationError, match="not available"):
+        n.schedule("snoop", at="PT1H", to="neighbour")
+
+
+def test_a_persona_s_check_never_reaches_the_solver():
+    clock = _frozen_clock()
+    n = _notifications(clock, roles=["default", "landlord"])
+    n.schedule("chase the deposit", at="PT1H", to="landlord")
+    n.schedule("see if Dana replied", at="PT2H", to="default")
+    clock.set_time("2027-02-01T18:00:00Z", 0)
+    assert [(i["to"], _said(i)) for i in n.take({})["items"]] == [("default", "see if Dana replied")]
+    assert [(i["to"], _said(i)) for i in n.take({"to": "landlord"})["items"]] == [("landlord", "chase the deposit")]
+
+
+def test_the_active_cap_counts_each_role_s_checks_on_their_own():
+    n = _notifications(roles=["default", "landlord"], max_active=1)
+    n.schedule("a", at="PT1H", to="default")
+    n.schedule("b", at="PT1H", to="landlord")
+    with pytest.raises(NotificationError, match="already have 1"):
+        n.schedule("c", at="PT2H", to="default")
+
+
+def test_a_role_left_out_of_the_config_loses_its_checks_and_the_others_keep_theirs():
+    n = _notifications(roles=["default", "landlord"])
+    n.schedule("mine", at="PT1H", to="default")
+    n.schedule("theirs", at="PT1H", to="landlord")
+    assert n.configure({"roles": ["default"]})["roles"] == ["default"]
+    assert [(c["to"], c["status"]) for c in n.state()["checks"]] == [("default", "active"), ("landlord", "cancelled")]
+
+
+def test_state_for_one_recipient_shows_only_its_items_and_their_next_due_at():
+    clock = _frozen_clock()
+    n = _notifications(clock, roles=["default", "landlord"])
+    n.schedule("chase the deposit", at="PT1H", to="landlord")
+    n.schedule("see if Dana replied", at="PT3H", to="default")
+    n.notify("Messages", "Dana: is Tuesday ok?", to="landlord")
+    solver, landlord, everyone = n.state("default"), n.state("landlord"), n.state()
+    assert ([c["note"] for c in solver["checks"]], solver["pending_notifications"]) == (["see if Dana replied"], [])
+    assert solver["next_due_at"] == "2027-02-01T18:00:00Z"
+    assert landlord["next_due_at"] == T0 and [x["to"] for x in landlord["pending_notifications"]] == ["landlord"]
+    assert everyone["next_due_at"] == T0 and len(everyone["checks"]) == 2
+
+
+def test_a_notification_goes_to_the_solver_unless_it_names_a_role():
+    n = Notifications(lambda: _frozen_clock())
+    n.notify("Gmail", "for the solver")
+    n.notify("Messages", "for the landlord", to="landlord")
+    assert [_said(i) for i in n.take({})["items"]] == ["for the solver"]
+    assert [_said(i) for i in n.take({"to": "landlord"})["items"]] == ["for the landlord"]
+
+
+@pytest.mark.parametrize("call", [lambda n: n.take({"to": ""}), lambda n: n.take({"to": 3}), lambda n: n.state(" ")])
+def test_a_recipient_must_name_a_role(call):
+    with pytest.raises(NotificationError, match="to must name a role"):
+        call(Notifications(lambda: _frozen_clock()))
+
+
+# ---- the gateway ----
+
+@pytest.fixture
+def gateway(tmp_path, monkeypatch) -> Gateway:
+    monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
+    gw = Gateway(host="127.0.0.1", port=0, server_name="AgentEnvGateway", internal_mcp_servers=[])
+    gw._clock = _frozen_clock()
+    gw._server_tools["mcp-svc"] = [MCPTool(name="svc_thing", description="", inputSchema={"type": "object"})]
+    gw._tools_discovered = True
+    yield gw
+    gw._close_trajectory_file()
+
+
+def _request(gw: Gateway, method: str, path: str, body: dict | None = None, role: str | None = None) -> httpx.Response:
+    async def _do() -> httpx.Response:
+        transport = httpx.ASGITransport(app=gw._mcp.streamable_http_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            return await client.request(method, path, json=body,
+                                        headers={AGENT_ENV_ROLE_HEADER: role} if role else None)
+
+    return asyncio.run(_do())
+
+
+def _gateway_tool_names(gw: Gateway) -> set[str]:
+    return {t.name for t in gw._server_tools.get("gateway", [])}
+
+
+def test_the_card_names_the_extension_notifications_and_not_a2a_push_notifications():
+    [ext] = [e for e in GATEWAY_EXTENSIONS if e["uri"] == "urn:agentenv:notifications/v1"]
+    assert "Unrelated to A2A push notifications" in ext["description"]
+    assert {name: m["endpoint"] for name, m in ext["params"]["methods"].items()} == {
+        "config": "/notifications/config", "state": "/notifications/state", "take": "/notifications/take",
+        "clear": "/notifications/clear"}
+
+
+def test_the_tools_appear_only_once_a_task_turns_them_on_and_go_on_clear(gateway):
+    tools = gateway._mcp._tool_manager._tools
+    assert not set(CHECK_TOOL_NAMES) & set(tools)
+    assert _request(gateway, "POST", "/notifications/config", {"max_active": 5}).json()["roles"] == []
+    assert not set(CHECK_TOOL_NAMES) & set(tools)  # no role named, no tools
+    r = _request(gateway, "POST", "/notifications/config", {"roles": ["default"], "max_active": 5})
+    assert r.status_code == 200 and r.json()["max_active"] == 5
+    assert set(CHECK_TOOL_NAMES) <= set(tools) and set(CHECK_TOOL_NAMES) <= _gateway_tool_names(gateway)
+    assert _request(gateway, "POST", "/notifications/clear", {}).status_code == 200
+    assert not set(CHECK_TOOL_NAMES) & set(tools) and not set(CHECK_TOOL_NAMES) & _gateway_tool_names(gateway)
+    state = _request(gateway, "GET", "/notifications/state").json()
+    assert (state["roles"], state["max_active"], state["min_interval"]) == ([], 10, "PT1H")
+
+
+def test_the_schedule_tool_states_the_rules_with_the_configured_limits(gateway):
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"], "max_active": 3, "min_interval": "PT2H"})
+    schedule = gateway._mcp._tool_manager._tools["schedule_check"]
+    assert schedule.description.endswith("You can have at most 3 checks at once. Times you get back are in UTC.")
+    described = {name: field["description"] for name, field in schedule.parameters["properties"].items()}
+    assert described["at"] == ("When it first comes due: a time with seconds and its UTC offset "
+                               "(2027-02-02T18:00:00-08:00), or a duration from now (PT6H).")
+    assert described["every"] == ("Repeat this often: a duration in weeks, days, hours, minutes or seconds (PT6H, P1D, "
+                                  "P1W), at least PT2H. No months or years; P1D is exactly 24 hours, not the same "
+                                  "local time each day.")
+    assert described["until"] == "Only with every: stop after this time, or after this duration from now (not from at)."
+
+
+def test_each_config_rebuilds_the_tools_so_their_descriptions_carry_its_limits(gateway):
+    def described() -> tuple[str, str, str]:
+        tool = gateway._mcp._tool_manager._tools["schedule_check"]
+        [mirrored] = [t for t in gateway._server_tools["gateway"] if t.name == "schedule_check"]
+        return tool.description, mirrored.description, mirrored.inputSchema["properties"]["every"]["description"]
+
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"], "max_active": 4})
+    assert "at most 4 checks" in described()[0] and "at most 4 checks" in described()[1]
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"], "max_active": 7, "min_interval": "PT3H"})
+    tool, mirrored, every = described()
+    assert "at most 7 checks" in tool and "at most 7 checks" in mirrored and "at least PT3H" in every
+    assert [t.name for t in gateway._server_tools["gateway"]].count("schedule_check") == 1
+
+
+def test_turning_checks_off_removes_the_tools(gateway):
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
+    _request(gateway, "POST", "/notifications/config", {"roles": []})
+    assert not set(CHECK_TOOL_NAMES) & set(gateway._mcp._tool_manager._tools)
+
+
+def test_config_is_refused_over_a_backing_server_tool_of_the_same_name(gateway):
+    gateway._tool_server_urls["schedule_check"] = "http://svc:1/mcp"
+    r = _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
+    assert r.status_code == 409 and "schedule_check" in r.json()["error"]
+
+
+@pytest.mark.parametrize("body", [{"roles": []}, {"max_active": 5}])
+def test_turning_checks_off_is_never_refused_over_a_backing_server_tool_of_the_same_name(gateway, body):
+    gateway._tool_server_urls["schedule_check"] = "http://svc:1/mcp"
+    proxied = gateway._mcp._tool_manager._tools["schedule_check"] = object()  # the backing server's, as discovery left it
+    r = _request(gateway, "POST", "/notifications/config", body)
+    assert r.status_code == 200 and r.json()["roles"] == []
+    assert gateway._mcp._tool_manager._tools["schedule_check"] is proxied
+
+
+def test_config_waits_for_tool_discovery_and_sees_what_it_found(gateway, monkeypatch):
+    gateway._tools_discovered = False
+
+    async def discover():
+        gateway._tool_server_urls["schedule_check"] = "http://svc:1/mcp"
+        gateway._tools_discovered = True
+
+    monkeypatch.setattr(gateway, "_ensure_tools_discovered", discover)
+    r = _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
+    assert r.status_code == 409 and "schedule_check" in r.json()["error"]
+
+
+def test_config_is_a_503_while_tool_discovery_fails(gateway, monkeypatch):
+    async def discover():
+        raise RuntimeError("backing server down")
+
+    monkeypatch.setattr(gateway, "_ensure_tools_discovered", discover)
+    r = _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
+    assert r.status_code == 503 and "retry" in r.json()["error"]
+    assert not set(CHECK_TOOL_NAMES) & set(gateway._mcp._tool_manager._tools)
+    assert _request(gateway, "POST", "/notifications/config", {"roles": []}).status_code == 200  # off needs no discovery
+
+
+def test_a_bad_config_is_a_400(gateway):
+    assert _request(gateway, "POST", "/notifications/config", {"max_active": -1}).status_code == 400
+
+
+def test_the_agent_schedules_through_the_tool_and_the_harness_takes_it(gateway):
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
+    tool = gateway._mcp._tool_manager._tools["schedule_check"]
+    made = asyncio.run(tool.fn(note="check rugs", at="PT2H"))
+    assert made == {"check_id": "check-1", "next": "2027-02-01T17:00:00Z"}
+    refused = asyncio.run(tool.fn(note="check", every="PT5M"))
+    assert isinstance(refused, CallToolResult) and refused.isError
+    state = _request(gateway, "GET", "/notifications/state").json()
+    assert state["next_due_at"] == "2027-02-01T17:00:00Z"
+    gateway._clock.set_time("2027-02-01T17:00:00Z", 0)
+    items = _request(gateway, "POST", "/notifications/take", {}).json()["items"]
+    assert [_said(i) for i in items] == ["check rugs"]
+
+
+def test_list_is_read_only_so_it_does_not_re_check_state_triggers(gateway):
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
+    annotations = {t.name: t.annotations for t in gateway._server_tools["gateway"]}
+    assert annotations["list_scheduled_checks"].readOnlyHint is True
+    assert annotations["schedule_check"].readOnlyHint is False
+
+
+def test_a_role_the_config_does_not_name_neither_sees_nor_calls_the_tools(gateway):
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default"]})
+    listed = _request(gateway, "POST", "/step", {"action": "list_tools"}, role="landlord").json()["tools"]
+    assert not {t["name"] for t in listed} & set(CHECK_TOOL_NAMES)
+    refused = _request(gateway, "POST", "/step", {"action": "call_tool", "tool_name": "schedule_check",
+                                                  "arguments": {"note": "x", "at": "PT1H"}}, role="landlord")
+    assert refused.status_code == 403
+    token = Caller(role="landlord").bind()
+    try:
+        assert not {t.name for t in gateway._mcp._tool_manager.list_tools()} & set(CHECK_TOOL_NAMES)
+    finally:
+        Caller.reset(token)
+    listed = _request(gateway, "POST", "/step", {"action": "list_tools"}, role="default").json()["tools"]
+    assert set(CHECK_TOOL_NAMES) <= {t["name"] for t in listed}
+
+
+def test_a_check_is_for_the_role_that_scheduled_it_and_only_its_take_hands_it_out(gateway):
+    _request(gateway, "POST", "/notifications/config", {"roles": ["default", "planner"]})
+    made = _request(gateway, "POST", "/step", {"action": "call_tool", "tool_name": "schedule_check",
+                                               "arguments": {"note": "re-plan the week", "at": "PT1H"}}, role="planner")
+    assert made.status_code == 200, made.text
+    state = _request(gateway, "GET", "/notifications/state?to=planner").json()
+    assert [(c["to"], c["note"]) for c in state["checks"]] == [("planner", "re-plan the week")]
+    assert _request(gateway, "GET", "/notifications/state?to=default").json()["checks"] == []
+    assert _request(gateway, "GET", "/notifications/state?to=").status_code == 400
+    gateway._clock.set_time("2027-02-01T17:00:00Z", 0)
+    assert _request(gateway, "POST", "/notifications/take", {}).json()["items"] == []
+    taken = _request(gateway, "POST", "/notifications/take", {"to": "planner"}).json()["items"]
+    assert [(i["to"], _said(i)) for i in taken] == [("planner", "re-plan the week")]
+
+
+# ---- notify ----
+
+class _FakeGateway:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+        self._role_rules_lock = asyncio.Lock()
+        self._server_tools: dict = {}
+        self._tool_server_urls: dict = {}
+        self._clock = _frozen_clock()
+        self._notifications = Notifications(lambda: self._clock)
+        self.TOOL_CALL_TIMEOUT_S = 30
+
+    def _query_changelog_id(self):
+        return 1
+
+    async def _log_event(self, event):
+        self.events.append(dict(event))
+        return f"event_{len(self.events)}"
+
+    async def _ensure_tools_discovered(self):
+        pass
+
+
+def _ok(text: str = "{}") -> CallToolResult:
+    return CallToolResult(content=[TextContent(type="text", text=text)], isError=False)
+
+
+def _notify_trigger(**action) -> dict:
+    return {"id": "jamie-texts", "when": {"type": "action", "tool": "messaging_send_message"},
+            "actions": [{"type": "notify", "channel": "Messages", "text": "Jamie: ok", **action}]}
+
+
+@pytest.mark.asyncio
+async def test_notify_queues_a_templated_notification():
+    gw = _FakeGateway()
+    engine = TriggerEngine(gw)
+    engine.register({"watch_roles": ["default"],
+                     "triggers": [_notify_trigger(text="${args.to}: got your text about ${args.subject}")]})
+    engine.on_tool_call("default", "messaging_send_message", {"to": "Jamie", "subject": "the rug"}, _ok())
+    await asyncio.sleep(0.2)
+    [note] = gw._notifications.state()["pending_notifications"]
+    assert (note["channel"], note["text"], note["at"]) == ("Messages", "Jamie: got your text about the rug", T0)
+    ok = [e for e in engine.state()["events"] if e["kind"] == "action_ok"]
+    assert ok and ok[0]["detail"]["notify"] == "Messages" and "got your text" not in json.dumps(ok[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["${args.note?}", " ${args.note?} "])
+async def test_notify_whose_text_resolves_to_nothing_queues_no_notification(text):
+    gw = _FakeGateway()
+    engine = TriggerEngine(gw)
+    engine.register({"watch_roles": ["default"], "triggers": [_notify_trigger(text=text)]})
+    engine.on_tool_call("default", "messaging_send_message", {"to": "Jamie"}, _ok())
+    await asyncio.sleep(0.2)
+    assert gw._notifications.state()["pending_notifications"] == []
+    ok = [e for e in engine.state()["events"] if e["kind"] == "action_ok"]
+    assert ok and ok[0]["detail"]["skipped"] == "text resolved to nothing"
+
+
+@pytest.mark.parametrize("action, error", [
+    ({"channel": ""}, "channel"),
+    ({"channel": "Your Scheduled Check "}, "the agent's own scheduled checks"),
+    ({"text": " "}, "text"),
+    ({"verify": {"tool": "x", "predicate": {"exists": True}}}, "nothing to verify"),
+    ({"text": "${result.id}", "channel": "Gmail"}, None),
+])
+def test_notify_is_validated_at_registration(action, error):
+    engine = TriggerEngine(_FakeGateway())
+    body = {"watch_roles": ["default"], "triggers": [_notify_trigger(**action)]}
+    if error is None:
+        engine.register(body)
+    else:
+        with pytest.raises(TriggerError, match=error):
+            engine.register(body)
+
+
+@pytest.mark.asyncio
+async def test_notify_to_a_named_role_queues_it_for_that_role():
+    gw = _FakeGateway()
+    engine = TriggerEngine(gw)
+    engine.register({"watch_roles": ["default"], "triggers": [_notify_trigger(to="landlord")]})
+    engine.on_tool_call("default", "messaging_send_message", {"to": "Jamie"}, _ok())
+    await asyncio.sleep(0.2)
+    assert [n["to"] for n in gw._notifications.state()["pending_notifications"]] == ["landlord"]
+    assert gw._notifications.take({})["items"] == []
+    ok = [e for e in engine.state()["events"] if e["kind"] == "action_ok"]
+    assert ok[0]["detail"]["to"] == "landlord"
+
+
+@pytest.mark.parametrize("action, error", [
+    ({"to": ""}, "to must name a role"),
+    ({"to": ["landlord"]}, "to must name a role"),
+])
+def test_notify_s_recipient_is_validated_at_registration(action, error):
+    engine = TriggerEngine(_FakeGateway())
+    with pytest.raises(TriggerError, match=error):
+        engine.register({"watch_roles": ["default"], "triggers": [_notify_trigger(**action)]})
+
+
+def test_only_a_notify_action_takes_a_recipient():
+    engine = TriggerEngine(_FakeGateway())
+    trigger = {"id": "t", "when": {"type": "action", "tool": "x"},
+               "actions": [{"type": "tool", "tool": "y", "args": {}, "to": "landlord"}]}
+    with pytest.raises(TriggerError, match="only valid on notify"):
+        engine.register({"watch_roles": ["default"], "triggers": [trigger]})

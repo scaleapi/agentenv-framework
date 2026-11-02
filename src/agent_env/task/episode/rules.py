@@ -139,17 +139,19 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "peer_agents": _peer_agents,
     "rubrics_verifier": _rubrics_verifier,
     **dict.fromkeys((
-        "verify_a2a_agent_card", "verify_a2a_agent_config_identity", "verify_a2a_agent_mcp", "verify_a2a_core_protocol",
-        "verify_a2a_install", "verify_a2a_modalities", "verify_a2a_peer_agents", "verify_a2a_role",
-        "verify_a2a_skill_config", "verify_a2a_snapshot", "verify_a2a_system_prompt", "verify_a2a_trajectory",
+        "verify_a2a_agent_card", "verify_a2a_agent_config_identity", "verify_a2a_agent_mcp", "verify_a2a_builtin_tools",
+        "verify_a2a_core_protocol", "verify_a2a_install", "verify_a2a_modalities", "verify_a2a_peer_agents",
+        "verify_a2a_role", "verify_a2a_skill_config", "verify_a2a_snapshot", "verify_a2a_system_prompt",
+        "verify_a2a_trajectory",
     ), _validates_an_agent),
 }
 
 UNAFFECTED = frozenset({
     # They name no agent.
-    "aggregate_verifiers", "apply_server_config", "build_mcp_cli", "combine_universe_verdicts", "deploy_env",
-    "deploy_sandbox", "end_computer_recording", "start_computer_recording", "env_outcome_verifier", "modify_env_tool_access", "reset_env", "review",
-    "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "sync_env_clock",
+    "aggregate_verifiers", "apply_server_config", "build_mcp_cli", "combine_universe_verdicts", "configure_scheduled_checks",
+    "deploy_env", "deploy_sandbox", "end_computer_recording", "start_computer_recording", "env_outcome_verifier",
+    "modify_env_tool_access", "reset_env", "review",
+    "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "snapshot_computer_env", "sync_env_clock",
     "validation_gate_aggregator", "verify_env_card", "verify_env_core_protocol", "verify_mcp_tool_schema",
     "verify_spec_conformance", "verify_universe_load_export_roundtrip",
     # They read only what an outside turn leaves: its reply.

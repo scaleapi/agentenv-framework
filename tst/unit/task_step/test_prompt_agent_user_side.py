@@ -63,8 +63,8 @@ class Peers:
         return self._norm(self.raw)
 
     def _norm(self, value):
-        if isinstance(value, dict):
-            return {k: self._norm(v) for k, v in value.items()}
+        if isinstance(value, dict):  # a notifications take_id is fresh per take, so it's named, not numbered
+            return {k: "<take_id>" if k == "take_id" else self._norm(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
             return type(value)(self._norm(v) for v in value)
         if isinstance(value, str) and _ID_RE.fullmatch(value):

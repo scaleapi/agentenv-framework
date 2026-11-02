@@ -145,9 +145,10 @@ def test_snapshot_id_falls_back_to_an_adhoc_run_without_instance_id():
 
 
 @pytest.mark.asyncio
-async def test_execute_refuses_an_env_deployed_without_a_gateway():
+async def test_execute_refuses_an_env_deployed_without_a_gateway_or_a_recorded_card():
     bare = DeployedSandboxEnv(env_id="env-1", env_version=3, sandbox_id="srv", instance_id="env-1-abc123")
-    with pytest.raises(RuntimeError, match="Deployed env 'env-1' has no gateway_url and no override was provided"):
+    with pytest.raises(RuntimeError, match="Deployed env 'env-1' has no gateway_url, no recorded card to reach it "
+                                           "through, and no override was provided"):
         await _step(env_id="env-1").execute(_ctx(bare))
 
 @pytest.mark.asyncio
@@ -235,6 +236,7 @@ class _FakeAsyncClient:
         self.response = response
         self.error = error
         self.requests = []
+        self.headers = []
 
     def __call__(self, **kwargs):
         return self
@@ -245,8 +247,9 @@ class _FakeAsyncClient:
     async def __aexit__(self, *exc):
         return False
 
-    def stream(self, method, url, params=None):
+    def stream(self, method, url, params=None, headers=None):
         self.requests.append((method, url, params))
+        self.headers.append(headers)
         client = self
 
         class _CM:
@@ -427,7 +430,7 @@ async def test_trajectory_capture_records_one_sentence_when_the_card_offers_no_t
 
 
 @pytest.mark.asyncio
-async def test_trajectory_capture_streams_from_the_stored_cards_address_and_endpoint(monkeypatch):
+async def test_trajectory_capture_streams_from_the_stored_cards_address_and_endpoint_with_its_token(monkeypatch):
     _wire_fake_snapshot(monkeypatch)
     client = _FakeAsyncClient(response=_FakeTrajectoryResponse([b"{}\n"]))
     _wire_fake_capture(monkeypatch, client)
@@ -435,22 +438,28 @@ async def test_trajectory_capture_streams_from_the_stored_cards_address_and_endp
     deployed.environment_card_url = f"https://sandbox.example/sb-1{WELL_KNOWN_PATH}"
     deployed.environment_card = {"capabilities": {"extensions": [{
         "uri": "urn:agentenv:trajectory/v1", "params": {"endpoint": "/env/trajectory", "methods": {"get": {"method": "GET"}}}}]}}
+    deployed.control_token = "t0ken"
 
     await _step(include_env_trajectory=True).execute(_ctx(deployed))
 
     assert [(m, u) for m, u, _ in client.requests] == [("GET", "https://sandbox.example/sb-1/env/trajectory")]
+    assert client.headers == [{"Authorization": "Bearer t0ken"}]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("deployments", [[], [_deployed()]], ids=["pure-override", "next-to-a-deployment"])
-async def test_trajectory_capture_with_a_gateway_url_override_reads_the_override(monkeypatch, deployments):
+async def test_trajectory_capture_with_a_gateway_url_override_reads_the_override_without_a_token(monkeypatch,
+                                                                                                 deployments):
     _wire_fake_snapshot(monkeypatch)
     client = _FakeAsyncClient(response=_FakeTrajectoryResponse([b"{}\n"]))
     _wire_fake_capture(monkeypatch, client)
+    for deployed in deployments:
+        deployed.control_token = "t0ken"
 
     await _step(env_id="env-1", gateway_url="https://override/", include_env_trajectory=True).execute(_ctx(*deployments))
 
     assert [(m, u) for m, u, _ in client.requests] == [("GET", "https://override/trajectory")]
+    assert "Authorization" not in (client.headers[0] or {})
 
 
 # ── env changes capture ──────────────────────────────────────────────────────
@@ -463,7 +472,7 @@ class _FakeChangesClient(_FakeAsyncClient):
         self.rows = rows or []
         self.page_size = page_size
 
-    async def request(self, method, url, params=None):
+    async def request(self, method, url, params=None, headers=None):
         self.requests.append((method, url, params))
         if self.error:
             raise self.error
@@ -556,7 +565,7 @@ class _FakeMultiEnv:
 
 @pytest.mark.asyncio
 async def test_core_all_or_nothing_on_partial_failure(monkeypatch):
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         if name == "slack":
             raise ValueError("export-state returned non-JSON body (starts with b'<')")
         with open(tmp_path, "w") as f:
@@ -600,7 +609,7 @@ async def test_core_all_or_nothing_on_partial_failure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_core_success_creates_universe_with_metadata(monkeypatch):
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         with open(tmp_path, "w") as f:
             json.dump({"ok": name}, f)
         return ".json"
@@ -664,7 +673,7 @@ async def test_core_zip_export_creates_zip_filename_artifact(monkeypatch):
     """A FilePart(zip) export flows through as a .zip-suffixed FileArtifact path,
     so FileArtifact.filename (= basename) ends in .zip — the load side routes a
     .zip file:// artifact to reset_data() for a lossless round-trip."""
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         # Simulate the lossless-zip case: write zip bytes and report ".zip".
         with open(tmp_path, "wb") as f:
             f.write(b"PK\x03\x04zip-bytes")
@@ -735,7 +744,7 @@ async def test_export_service_to_file_materializes_filepart_zip(monkeypatch, tmp
     async def fake_supports_v1(base_url):
         return True
 
-    async def fake_get_data(base_url, timeout=None):
+    async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
     async def fake_get_card(base_url, timeout=10):
@@ -758,12 +767,13 @@ async def test_export_service_to_file_materializes_filepart_zip(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "same-origin"])
 async def test_export_service_to_file_resolves_relative_uri_and_streams(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, absolute
 ):
     """A FilePart with a RELATIVE uri (e.g. "export-snapshot") is resolved against
     the service base_url and streamed to disk — so multi-GB bundles never ride
-    inline in the JSON-RPC response."""
+    inline in the JSON-RPC response. An absolute uri on that address streams the same."""
     from agentenv_protocol import FilePart
     from agentenv_protocol.client import GetDataResponse
     from agentenv_protocol import client as protocol_v1
@@ -771,14 +781,16 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
     from agent_env.task_step.task_steps import snapshot_env as mod
 
     zip_bytes = b"PK\x03\x04streamed-from-export-snapshot"
+    expected_base = legacy_protocol.environment_base_url("https://gw", "gdrive", mcp=True)
+    uri = f"{expected_base.rstrip('/')}/export-snapshot" if absolute else "export-snapshot"
     part = FilePart(
-        file={"uri": "export-snapshot", "name": "gdrive.zip", "mimeType": "application/zip"}
+        file={"uri": uri, "name": "gdrive.zip", "mimeType": "application/zip"}
     )
 
     async def fake_supports_v1(base_url):
         return True
 
-    async def fake_get_data(base_url, timeout=None):
+    async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
     async def fake_get_card(base_url, timeout=10):
@@ -811,7 +823,7 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
         async def __aexit__(self, *exc):
             return False
 
-        def stream(self, method, url, timeout=None):
+        def stream(self, method, url, timeout=None, headers=None):
             captured["method"] = method
             captured["url"] = url
             return _FakeStreamCtx()
@@ -826,7 +838,6 @@ async def test_export_service_to_file_resolves_relative_uri_and_streams(
     assert suffix == ".zip"
     with open(out, "rb") as f:
         assert f.read() == zip_bytes
-    expected_base = legacy_protocol.environment_base_url("https://gw", "gdrive", mcp=True)
     assert captured["method"] == "GET"
     assert captured["url"] == f"{expected_base.rstrip('/')}/export-snapshot"
 
@@ -837,7 +848,7 @@ def _serve_filepart_uri(monkeypatch, uri):
     async def fake_supports_v1(base_url):
         return True
 
-    async def fake_get_data(base_url, timeout=None):
+    async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
     async def fake_get_card(base_url, timeout=10):
@@ -869,6 +880,25 @@ async def test_export_service_to_file_returns_an_object_url_as_the_services_uplo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("uri", [
+    "http://127.0.0.1:8234/api/runs",
+    "http://169.254.169.254/latest/meta-data/",
+    "https://internal.example/export-snapshot",
+    "https://gw@internal.example/export-snapshot",
+    "https://gw:8443/export-snapshot",
+    "http://gw/export-snapshot",
+])
+async def test_export_service_to_file_refuses_an_absolute_uri_off_its_service_address(monkeypatch, tmp_path, uri):
+    """This process makes the request, from where it sits, so a service names only its own address."""
+    _serve_filepart_uri(monkeypatch, uri)
+
+    out = tmp_path / "export-tmp"
+    with pytest.raises(ValueError, match="not on its service's address"):
+        await SnapshotEnvTaskStep._export_environment_to_file("https://gw", "gdrive", str(out), 30)
+    assert not out.exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("upload_url", ["fake://home/snapshots/gdrive#v2.zip", "fake://shared/snapshots/gdrive#v2.zip"])
 async def test_core_registers_a_service_upload_in_place_and_it_loads_back(local_stores, monkeypatch, tmp_path, upload_url):
     """Registered where the service put it, in the store's own root or anywhere else the store
@@ -881,7 +911,7 @@ async def test_core_registers_a_service_upload_in_place_and_it_loads_back(local_
     bundle_file.write_bytes(b"PK\x03\x04bundle")
     uploaded = store.put_file_at(upload_url, str(bundle_file))
 
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         return uploaded
 
     monkeypatch.setattr(SnapshotEnvTaskStep, "_export_environment_to_file", staticmethod(fake_export))
@@ -903,7 +933,7 @@ async def test_core_fails_a_service_whose_upload_the_store_cannot_find(local_sto
     set_object_store(FakeObjectStore())
     reset_artifact_store()
 
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         return "fake://shared/snapshots/missing.zip"
 
     monkeypatch.setattr(SnapshotEnvTaskStep, "_export_environment_to_file", staticmethod(fake_export))
@@ -920,7 +950,7 @@ async def test_core_snapshots_under_an_id_longer_than_a_filename_can_be(local_st
     local store may be the whole id."""
     snapshot_id = f"task-{'x' * 250}__snapshot-snap-1"
 
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         with open(tmp_path, "w") as f:
             json.dump({"service": name}, f)
         return ".json"
@@ -953,7 +983,7 @@ async def test_export_service_to_file_filepart_without_bytes_or_uri_raises_value
     async def fake_supports_v1(base_url):
         return True
 
-    async def fake_get_data(base_url, timeout=None):
+    async def fake_get_data(base_url, timeout=None, headers=None):
         return GetDataResponse(parts=[part])
 
     async def fake_get_card(base_url, timeout=10):
@@ -1016,7 +1046,7 @@ async def test_export_of_a_child_env_missing_from_the_card_streams_legacy_export
 async def test_snapshot_uses_the_stored_card_only_for_the_deployments_own_gateway(monkeypatch):
     seen = []
 
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         seen.append((gateway_url, deployed))
         raise ValueError("stop after the export call")
 
@@ -1109,7 +1139,7 @@ def test_resolve_loaded_universe_ref_none_when_instance_never_loaded(monkeypatch
 def _install_core_artifact_fakes(monkeypatch, universe_cls):
     """Wire the export + FileArtifact/EnvironmentArtifact fakes shared by the core
     carry-over tests; the caller supplies the EnvironmentUniverseArtifact fake."""
-    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
         with open(tmp_path, "w") as f:
             json.dump({"ok": name}, f)
         return ".json"

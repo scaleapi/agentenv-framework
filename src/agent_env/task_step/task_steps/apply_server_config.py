@@ -255,7 +255,7 @@ class ApplyServerConfigStep(TaskStep):
                     )
                 result = await protocol_v1.invoke_extension(
                     base_url, card, directive.uri, params=directive.args,
-                    timeout=self.timeout_seconds,
+                    timeout=self.timeout_seconds, headers=deployed.control_headers,
                 )
             except ApplyServerConfigError:
                 raise

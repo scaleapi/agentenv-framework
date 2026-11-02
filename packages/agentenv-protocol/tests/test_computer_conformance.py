@@ -1,6 +1,7 @@
 """The conformance probe against fake drivers on loopback: the fake driver with the fake fixture passes every check; a
-driver without what full needs gets those checks unverified; a driver broken one way fails the check for that way;
-the report's verdicts and the CLI."""
+driver given a control token passes with it, refusing calls without it, and fails without it; a driver without what
+full needs gets those checks unverified; a driver broken one way fails the check for that way; each app a driver
+fronts that exports is asked for its export once; the report's verdicts and the CLI."""
 from __future__ import annotations
 
 import json
@@ -33,7 +34,9 @@ from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
 from agentenv_protocol.computer.conformance.__main__ import main  # noqa: E402
+from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI  # noqa: E402
+from agentenv_protocol.types import EnvironmentCard  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +74,18 @@ async def test_the_fake_driver_passes_every_check_at_full_and_cleans_up(home):
 
 
 @pytest.mark.asyncio
+async def test_a_driver_given_a_control_token_passes_with_it_and_refuses_calls_without_it(monkeypatch):
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
+
+    report = await _probe(FixtureDriver(), "basic", token="s3cret")
+    unauthorized = await _probe(FixtureDriver(), "basic")
+
+    assert report.passed, _failed(report)
+    assert _status(report, "a framework-only route refuses a call without the control token") == "passed"
+    assert not unauthorized.passed and "401 unauthorized" in _failed(unauthorized)[0]
+
+
+@pytest.mark.asyncio
 async def test_a_driver_whose_default_space_is_norm_passes_at_full():
     report = await _probe(FixtureDriver(settings=ComputerSettings(default_space="norm")))
     assert report.passed, _failed(report)
@@ -95,6 +110,26 @@ async def test_basic_needs_no_fixture(home):
     assert report.passed, _failed(report)
     assert {c.check for c in report.checks} == {"P0", "P1", "P2", "P5", "P8", "X"}
     assert not driver.desk.started and not (home / ".agentenv-probe").exists()
+
+
+class FrontsApps(FixtureDriver):
+    """Fronts mail, whose card routes to the driver's own data plane, notes, which no app answers, and quiet, which
+    doesn't export."""
+
+    async def children_environments(self):
+        return [EnvironmentCard(name=name, url=url, capabilities={"operations": operations})
+                for name, url, operations in (("mail", "/agentenv", ["data/get"]),
+                                              ("notes", "/svc/notes/agentenv", ["data/get"]),
+                                              ("quiet", "/svc/quiet/agentenv", ["data/add"]))]
+
+
+@pytest.mark.asyncio
+async def test_each_app_a_driver_fronts_that_exports_is_asked_for_its_export_once(home):
+    report = await _probe(FrontsApps(), "basic")
+
+    assert [(c.name, c.status) for c in report.checks if c.name.startswith("app ")] == [
+        ("app mail's data/get answers its parts through the driver", "passed"),
+        ("app notes's data/get answers its parts through the driver", "failed")]
 
 
 @pytest.mark.asyncio

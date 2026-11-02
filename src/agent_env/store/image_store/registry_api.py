@@ -1,10 +1,11 @@
 """Read an image from its registry over the OCI distribution API: its digest, to pin a tag to the image it names now,
-and its manifests and blobs, to inspect what it holds without pulling it."""
+and its manifests and blobs, to inspect what it holds without pulling it; and write an index of images it holds."""
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ _MANIFEST_TYPES = ", ".join([
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
 ])
+_INDEXES = {"application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"}
+_DOCKER_TYPES = {"application/vnd.docker.distribution.manifest.list.v2+json",
+                 "application/vnd.docker.distribution.manifest.v2+json"}
 # The digests Docker pulls by: the algorithm, then its full-length lowercase hex.
 _DIGEST = re.compile(r"^(?:sha256:[a-f0-9]{64}|sha384:[a-f0-9]{96}|sha512:[a-f0-9]{128})$")
 _DOCKER_HUB_API = "registry-1.docker.io"
@@ -159,6 +163,32 @@ def read_blob(ref: str, digest: str, auth: RegistryAuth | None, path: Path, *,
         raise ValueError(f"{ref}: the blob {image.host} served for {digest} hashes to sha256:{hashed.hexdigest()}")
 
 
+def write_index(ref: str, images: dict[str, str], auth: RegistryAuth | None, *,
+                timeout: float = _TIMEOUT_SECONDS) -> None:
+    """Write under ``ref``'s tag an index of ``images``, by their platforms, each pinned by its digest in ``ref``'s
+    repository: an image's manifest, or every manifest of one that's an index itself, as ``docker buildx imagetools
+    create`` joins them. A Docker manifest list when every manifest is Docker's, else an OCI index."""
+    image, manifests = _parse(ref), []
+    with _Repository(image, auth, timeout, ref) as repository:
+        for platform, pinned in images.items():
+            digest = _parse(pinned).digest
+            response = repository.get(f"manifests/{digest}", accept=_MANIFEST_TYPES)
+            served = response.headers.get("content-type", "").split(";")[0].strip()
+            if served in _INDEXES:
+                manifests += response.json()["manifests"]
+            else:
+                os_name, _, architecture = platform.partition("/")
+                manifests.append({"mediaType": served, "digest": digest, "size": len(response.content),
+                                  "platform": {"architecture": architecture, "os": os_name}})
+    media = ("application/vnd.docker.distribution.manifest.list.v2+json"
+             if all(manifest["mediaType"] in _DOCKER_TYPES for manifest in manifests)
+             else "application/vnd.oci.image.index.v1+json")
+    # A repository of its own, so the token its first challenge asks for is one that pushes.
+    with _Repository(image, auth, timeout, ref) as repository:
+        repository.put(f"manifests/{image.tag or 'latest'}", json.dumps(
+            {"schemaVersion": 2, "mediaType": media, "manifests": manifests}).encode(), media)
+
+
 class _Repository:
     """One image's repository on its registry, read with the Bearer token the registry's first challenge asks for."""
 
@@ -187,6 +217,11 @@ class _Repository:
         self._raise_for(response)
         return response
 
+    def put(self, path: str, content: bytes, content_type: str) -> None:
+        response = self._send("PUT", path, None, stream=False, content=content, content_type=content_type)
+        if response.status_code not in (200, 201):
+            self._raise_for(response)
+
     @contextlib.contextmanager
     def stream(self, path: str) -> Iterator[httpx.Response]:
         """``path`` as a streamed response, closed when the block ends."""
@@ -199,13 +234,16 @@ class _Repository:
         finally:
             response.close()
 
-    def _send(self, method: str, path: str, accept: str | None, *, stream: bool) -> httpx.Response:
+    def _send(self, method: str, path: str, accept: str | None, *, stream: bool, content: bytes | None = None,
+              content_type: str | None = None) -> httpx.Response:
         try:
             for _ in range(2):
                 headers = {"Accept": accept} if accept else {}
+                if content_type:
+                    headers["Content-Type"] = content_type
                 if self._token:
                     headers["Authorization"] = f"Bearer {self._token}"
-                request = self._client.build_request(method, f"{self._base}/{path}", headers=headers)
+                request = self._client.build_request(method, f"{self._base}/{path}", headers=headers, content=content)
                 # Basic credentials go with every request until a Bearer token replaces them.
                 response = self._client.send(request, auth=None if self._token else self._basic, stream=stream)
                 if response.status_code != 401 or self._token:
@@ -219,7 +257,9 @@ class _Repository:
             return response
         except httpx.HTTPError as e:
             thing = "its manifest" if path.startswith("manifests/") else f"the blob {path.removeprefix('blobs/')}"
-            raise ValueError(f"{self._what}: couldn't read {thing} from {self._host}: {type(e).__name__}: {e}") from e
+            verb = "write it to" if method == "PUT" else "read it from"
+            raise ValueError(f"{self._what}: couldn't {verb.replace('it', thing)} {self._host}: "
+                             f"{type(e).__name__}: {e}") from e
 
     def _raise_for(self, response: httpx.Response) -> None:
         if response.status_code == 200:

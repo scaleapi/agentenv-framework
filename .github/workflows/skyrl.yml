@@ -1,0 +1,69 @@
+name: SkyRL contract
+
+# AgentEnvGenerator and AgentEnvTextEnv on SkyRL itself (tst/skyrl): SkyRL's PromptDataset loads rows the writer wrote,
+# with Qwen3's and Qwen3.5's tokenizers, and its generator plays them through a stand-in inference engine, on SkyRL 0.4.0
+# and on its main branch. SkyRL, skyrl-gym, torch and their dependencies are installed over the dev environment; torch
+# is the CPU build, as nothing generates. It runs on pull requests that touch the helper, the OpenEnv server it plays or
+# the tier, weekly, and on demand; it isn't a required check.
+
+on:
+  pull_request:
+    paths:
+      - "src/agent_env/training/**"
+      - "src/agent_env/openenv/**"
+      - "tst/skyrl/**"
+      - "tst/unit/training/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/skyrl.yml"
+  schedule:
+    - cron: "53 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skyrl-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  generator:
+    name: env and generator (SkyRL ${{ matrix.skyrl }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - skyrl: "0.4.0"
+            requirement: "skyrl[skyrl-train]==0.4.0 skyrl-gym==0.4.0"
+          - skyrl: "main"
+            requirement: >-
+              skyrl[skyrl-train]@git+https://github.com/NovaSky-AI/SkyRL@main
+              skyrl-gym@git+https://github.com/NovaSky-AI/SkyRL@main#subdirectory=skyrl-gym
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install from uv.lock with the skyrl extra
+        run: |
+          python -m pip install --quiet -r .github/ci-requirements.txt
+          uv sync --locked --extra dev --extra skyrl --python "$(command -v python)"
+      - name: Install SkyRL, skyrl-gym and CPU torch
+        # flash-attn is SkyRL's on Linux, but nothing on CPU uses it, and from PyPI it builds from source against torch.
+        run: |
+          echo 'flash-attn; sys_platform == "never"' > "$RUNNER_TEMP/overrides.txt"
+          uv pip install --python .venv/bin/python ${{ matrix.requirement }} torch \
+            --override "$RUNNER_TEMP/overrides.txt" \
+            --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+          .venv/bin/python -c "from importlib.metadata import version; print('skyrl', version('skyrl'), 'skyrl-gym', version('skyrl-gym'), 'torch', version('torch'))"
+      - name: SkyRL tier
+        run: .venv/bin/python -m pytest tst/skyrl -rA --timeout=900 --junitxml=junit-skyrl.xml
+      - name: No skips
+        if: always()
+        run: .venv/bin/python .github/scripts/check_skip_policy.py junit-skyrl.xml

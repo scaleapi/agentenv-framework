@@ -1,12 +1,15 @@
 """``python -m agentenv_protocol.computer.conformance <driver url>``: probe a running driver, print each check, and
-exit 1 when one failed or 2 when the driver couldn't be reached."""
+exit 1 when one failed or 2 when the driver couldn't be reached. ``--token`` is its control token, by default
+``CONTROL_TOKEN_ENV``'s."""
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
+from ...types import CONTROL_TOKEN_ENV
 from . import run_probe
 
 _MARK = {"passed": "PASS", "failed": "FAIL", "unverified": "----", "not_applicable": "n/a "}
@@ -19,9 +22,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--level", choices=("basic", "full"), default="full")
     parser.add_argument("--json", type=Path, help="also write the report to this file")
     parser.add_argument("--timeout", type=float, default=60, help="seconds for each call, and to report ready")
+    parser.add_argument("--token", default=os.environ.get(CONTROL_TOKEN_ENV),
+                        help=f"the driver's control token, if it was given one (default: ${CONTROL_TOKEN_ENV})")
     args = parser.parse_args(argv)
     try:
-        report = asyncio.run(run_probe(args.url, args.level, timeout_s=args.timeout, ready_timeout_s=args.timeout))
+        report = asyncio.run(run_probe(args.url, args.level, timeout_s=args.timeout, ready_timeout_s=args.timeout,
+                                       token=args.token))
     except Exception as e:
         print(f"couldn't probe {args.url}: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

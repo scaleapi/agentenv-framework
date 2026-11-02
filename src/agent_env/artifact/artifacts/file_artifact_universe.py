@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
@@ -13,7 +12,7 @@ from agent_env.artifact.artifact import _write_twin
 from agent_env.artifact.ref import ArtifactRef
 from agent_env.artifact.universe import Universe
 from agent_env.config import get_config
-from agent_env.store.ids import derive_id
+from agent_env.store.ids import derive_path_id
 
 logger = logging.getLogger(__name__)
 
@@ -157,9 +156,8 @@ class FileArtifactUniverse(Universe):
                 raise ValueError(f"Bundle key {rel_path!r} must be a relative path")
             if ".." in rel_path.split("/"):
                 raise ValueError(f"Bundle key {rel_path!r} must not contain '..' segments")
-            path_hash = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:16]
             fa = FileArtifact.put_at(
-                id=derive_id(id, path_hash),
+                id=derive_path_id(id, rel_path),
                 description=f"Bundled file '{rel_path}' of FileArtifactUniverse '{id}'",
                 file_path=str(local_path),
                 object_url=prefix_url + rel_path,
@@ -218,9 +216,8 @@ class FileArtifactUniverse(Universe):
             rel_path = object_url[len(prefix_url):]
             if not rel_path:
                 continue
-            path_hash = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:16]
             fa = FileArtifact.put_existing(
-                id=derive_id(id, path_hash),
+                id=derive_path_id(id, rel_path),
                 description=f"Bundled file '{rel_path}' of FileArtifactUniverse '{id}'",
                 object_url=object_url,
             )
