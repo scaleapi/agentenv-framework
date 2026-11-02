@@ -853,7 +853,7 @@ protocol. `TaskRequest` and `TaskResult` are framework boundary types; the
 executor maps them to and from the wire-level `a2a.types.Task` lifecycle.
 
 `TaskRequest` is a frozen record whose nested JSON values are detached copies.
-Its `config`, `mcp_servers`, `skills`, `metadata`, and inbound `DataPart.data`
+Its `config`, `mcp_servers`, `cdp_endpoints`, `skills`, `metadata`, and inbound `DataPart.data`
 retain their declared `dict`/`list` types, so normal Pydantic serialization,
 copying, and `json.dumps(...)` work. `TaskRequest.trajectory` is the exception:
 it is the task's live trajectory log, described below. Within `tasks.v1`, new
@@ -866,8 +866,10 @@ and become failed A2A tasks with `error_type`, `error_code`, and `error_message`
 in the terminal message. `error_type` is the platform classification
 (`agent_error` by default, or explicitly `infra_error` for a retryable
 infrastructure failure); `error_code` preserves the author's machine-readable
-code. An exception escaping `run()`, an invalid return value, or a
-result-mapping failure is logged with a correlation ID and reported as an
+code. `run()` may instead raise `TaskFailed(code, message, error_type=...)`,
+which fails the task the same way. Any other exception escaping `run()`, an
+invalid return value, or a result-mapping failure is logged with a
+correlation ID and reported as an
 `infra_error` with code `framework.unhandled_exception`; raw exception text is
 never sent to callers.
 Invalid input that prevents task creation returns JSON-RPC `InvalidParams`.
@@ -1171,6 +1173,19 @@ discovery, `name` so the caller can choose the server alias the harness prefixes
 tools with (agent-env relays the env card's name: the MultiEnv's declared name, else
 `env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
 `mcp_<8 hex>`.
+
+`CDP_CONFIG_V1` gives an agent the CDP endpoints it drives itself. `add` takes
+`name`, `http_url` (`http` or `https`, for clients that discover through
+`/json/version`) and `ws_url` (`ws` or `wss`, for clients that connect
+directly), with optional `headers` and `metadata`; adding a name again replaces
+it. `GET /ext/cdp-config` returns `{"cdp_endpoints": {name: {"http_url",
+"ws_url", "has_headers", "metadata"}}}`, header values hidden, and
+`DELETE /ext/cdp-config` with `{"name"}` removes one; removing a name that isn't
+there is not an error. Every task's `TaskRequest.cdp_endpoints` holds them,
+headers included. `TaskRequest.cdp_endpoint(name=None)` returns the named
+endpoint, or the only one, and otherwise raises `TaskFailed`, failing the task
+as an `infra_error` with `cdp.no_endpoint` (none, or none by that name) or
+`cdp.ambiguous` (several and no name).
 
 `PEER_AGENTS_V1` lets an agent delegate to the other agents in its task. AgentEnv
 sets the routing table with `POST /ext/peer-agents` (`{"peers": [{"name", "url",
