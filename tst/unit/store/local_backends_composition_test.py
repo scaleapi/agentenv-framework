@@ -386,3 +386,31 @@ def test_get_many_writes_universes_that_differ_by_a_slash_into_different_directo
     assert res.exit_code == 0, res.output
     assert (out / "crm" / "eu" / "report.md").read_bytes() == b"eu"
     assert (out / "crm-eu" / "report.md").read_bytes() == b"flat"
+
+
+def test_get_many_writes_a_file_named_by_an_absolute_path_under_its_universes_folder(local_stores, tmp_path):
+    """A collect names each file by the path it was read from, as given."""
+    absolute = str(tmp_path / "elsewhere" / "result.pdf")
+    report = FileArtifact.put_bytes(id="report-file", description="d", filename="result.pdf", content=b"pdf")
+    FileArtifactUniverse.put(id="collected", file_artifacts={absolute: report})
+
+    out = tmp_path / "out"
+    res = CliRunner().invoke(file_artifact_universe, ["get-many", "--id", "collected", "--output-dir", str(out)])
+
+    assert res.exit_code == 0, res.output
+    assert (out / "collected" / absolute.lstrip("/")).read_bytes() == b"pdf"
+    assert not Path(absolute).exists()
+
+
+def test_get_many_refuses_a_file_that_climbs_out_of_its_universes_folder_before_writing_any(local_stores, tmp_path):
+    ok = FileArtifact.put_bytes(id="ok-file", description="d", filename="ok.md", content=b"ok")
+    climbing = FileArtifact.put_bytes(id="climbing-file", description="d", filename="x.md", content=b"climbed")
+    FileArtifactUniverse.put(id="collected", file_artifacts={"ok.md": ok, "../../escaped.md": climbing})
+
+    out = tmp_path / "work" / "out"
+    res = CliRunner().invoke(file_artifact_universe, ["get-many", "--id", "collected", "--output-dir", str(out)])
+
+    assert res.exit_code != 0
+    assert "'../../escaped.md' can't be downloaded" in res.output and "would be written outside its folder" in res.output
+    assert not (tmp_path / "work" / "escaped.md").exists()
+    assert list(out.rglob("*")) == []

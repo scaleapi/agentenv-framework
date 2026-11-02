@@ -167,6 +167,23 @@ def test_a_reserved_id_is_refused_before_anything_is_uploaded():
         reset_config()
 
 
+@pytest.mark.parametrize("name", ["../../other/1/x.pdf", "tmp/../../../x", ".."])
+def test_an_object_name_that_climbs_out_of_its_artifacts_keys_is_refused(tmp_path, name):
+    """A collected file's object name comes from the agent's manifest. A store that keeps keys as written still
+    gets none outside the artifact's own, and one that resolves them gets none in another artifact's."""
+    objects = FakeObjectStore()
+    set_object_store(objects)
+    source = tmp_path / "f"
+    source.write_bytes(b"x")
+    for write in (lambda: ArtifactStore().put_object("file", "a", 1, name, b"x"),
+                  lambda: ArtifactStore().put_object_file("file", "a", 1, name, str(source))):
+        with pytest.raises(ValueError, match="'..' path segment"):
+            write()
+    assert objects.objects == {}
+    ArtifactStore().put_object("file", "a", 1, "tmp/output/a..b.pdf", b"x")
+    assert len(objects.objects) == 1
+
+
 def test_a_file_whose_version_another_writer_publishes_during_its_upload_is_still_published():
     """put_bytes keys its object by a version it reserves, then writes the document after the upload; a writer that
     publishes that version meanwhile moves the document to the next one rather than failing it."""

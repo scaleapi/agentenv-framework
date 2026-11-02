@@ -573,6 +573,9 @@ class DeployAgentTaskStep(TaskStep):
             )
         instance_id = (context.instance_id or "noinstance").replace("/", "_")
         agent_name = self.agent_name.replace("/", "_")
+        if {instance_id, agent_name} & {"", ".", ".."}:
+            raise ValueError(f"Agent {self.agent_name!r} can't have a changelog folder of its own: its name and its "
+                             f"run's id {context.instance_id!r} must each be a folder name, not '', '.' or '..'")
         config = get_config()
         store = transfer_store(config.get_object_store(), a2a_url, card, sandbox_type=sandbox_type)
         namespace_url = store.object_url(f"{config.get_artifact_key_prefix()}agent_changelog/{instance_id}/{agent_name}")

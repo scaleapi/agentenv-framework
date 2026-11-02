@@ -7,6 +7,7 @@ import click
 
 from agent_env.artifact import FileArtifact, FileArtifactUniverse
 from agent_env.cli.utils import write_out
+from agent_env.entity.export import Unwritable, checked_path
 from agent_env.store.ids import fs_safe, is_local_id, key_segment
 
 
@@ -219,18 +220,23 @@ def get_many(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Flatten into (universe_id, filename, FileArtifact) triples so we can
-    # parallelize downloads across all files in all universes.
-    jobs: list[tuple[str, str, FileArtifact]] = []
+    # Flatten into (universe_id, filename, destination, FileArtifact) jobs so we can
+    # parallelize downloads across all files in all universes. A file named by an
+    # absolute path goes under its universe's folder like any other.
+    jobs: list[tuple[str, str, Path, FileArtifact]] = []
     for u in universes:
+        folder = fs_safe(u.id) if is_local_id(u.id) else key_segment(u.id)
         for fname, fa_id in u.file_artifact_ids.items():
-            jobs.append((u.id, fname, FileArtifact.get(fa_id)))
+            try:
+                dest = out / checked_path(f"{folder}/{fname.lstrip('/')}")
+            except Unwritable as e:
+                raise click.ClickException(f"{u.id}'s file {fname!r} can't be downloaded into {out}: {e}")
+            jobs.append((u.id, fname, dest, FileArtifact.get(fa_id)))
     click.echo(f"Total files to download: {len(jobs)}")
 
-    def _download(job: tuple[str, str, FileArtifact]) -> tuple[str, str, int]:
-        universe_id, filename, fa = job
+    def _download(job: tuple[str, str, Path, FileArtifact]) -> tuple[str, str, int]:
+        universe_id, filename, dest, fa = job
         data = fa.load()
-        dest = out / (fs_safe(universe_id) if is_local_id(universe_id) else key_segment(universe_id)) / filename
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         return (universe_id, filename, len(data))

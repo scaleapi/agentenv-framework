@@ -98,7 +98,7 @@ class VerifyA2ATrajectoryStep(TaskStep):
             try:
                 prefix = granting.object_url(probe_prefix)
                 upload = await asyncio.to_thread(
-                    TrajectoryUpload.to, granting, trajectory_object_url(prefix, name=task_id, store=granting)
+                    TrajectoryUpload.to, granting, trajectory_object_url(prefix, store=granting)
                 )
                 await fetch_trajectory(endpoint, {"task_id": task_id}, upload=upload, store=granting)
                 objects_ok = True

@@ -12,6 +12,7 @@ task builder.
 """
 
 import asyncio
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -362,7 +363,9 @@ async def test_validator_anchors_trajectory_step_on_its_mcp_step(monkeypatch):
     ]
 
 
-def test_the_trajectory_probe_prefix_is_under_the_fixture_prefix(local_stores, monkeypatch):
+@pytest.mark.parametrize("task_id", ["task-abc", "../../../../escape"])
+def test_the_trajectory_probe_prefix_is_under_the_fixture_prefix(local_stores, monkeypatch, task_id):
+    """The object is named by the framework, not after the task id the agent answers with."""
     monkeypatch.setenv("AGENT_ENV_FIXTURE_PREFIX", "fx")
     configure()
     store = _ObjectStore()
@@ -374,12 +377,14 @@ def test_the_trajectory_probe_prefix_is_under_the_fixture_prefix(local_stores, m
 
     asyncio.run(
         VerifyA2ATrajectoryStep(id="t", version=None, a2a_agent_id="agent-x").execute(
-            _context_with_trajectory_agent({"task_id": "task-abc"}, get_method=get_method)
+            _context_with_trajectory_agent({"task_id": task_id}, get_method=get_method)
         )
     )
 
     (granted,) = store.write_grants
-    assert store.get_object_key(granted).startswith("fx/a2a_validator_trajectories/agent-x/")
+    key = store.get_object_key(granted)
+    assert key.startswith("fx/a2a_validator_trajectories/agent-x/")
+    assert re.fullmatch(r"[^.]*/trajectory-[0-9a-f]{12}\.json", key)
 
 
 @pytest.mark.asyncio

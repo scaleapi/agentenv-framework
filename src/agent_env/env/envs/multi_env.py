@@ -49,6 +49,7 @@ from agent_env.providers.env_state.local_postgres import INIT_SCRIPT_MOUNT_PATH
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
+from agent_env.utils.paths import validate_file_name
 from agent_env.attribution import Attribution
 
 
@@ -240,6 +241,8 @@ class MultiEnv(Env):
         if (refusal := host_staging_refusal(self, "Staging a universe's metadata files onto the env's host")) \
                 and environment_universe_artifact.get_metadata():
             raise RuntimeError(refusal)
+        for file_artifact in (environment_universe_artifact.get_metadata() or {}).values():
+            validate_file_name(file_artifact.filename)
 
         # Check for a clean snapshot before doing slow REST-based loading.
 

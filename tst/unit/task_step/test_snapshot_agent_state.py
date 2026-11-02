@@ -50,8 +50,11 @@ class _StubServiceArtifact:
 
 
 class _StubUniverse:
+    def __init__(self, names=("calendar", "contacts")):
+        self.names = names
+
     def get_environment_artifacts(self):
-        return [_StubServiceArtifact("calendar"), _StubServiceArtifact("contacts")]
+        return [_StubServiceArtifact(name) for name in self.names]
 
 
 def _step():
@@ -245,6 +248,30 @@ def _carded_ctx(card: dict) -> TaskStepContext:
     ctx.deployed_envs[0].environment_card_url = f"https://sandbox.example/sb-1{WELL_KNOWN_PATH}"
     ctx.deployed_envs[0].environment_card = card
     return ctx
+
+
+@pytest.mark.asyncio
+async def test_a_universe_name_that_isnt_an_environment_name_is_skipped_unasked(monkeypatch):
+    """The names come from a stored universe; one that isn't an environment's name would put its state outside
+    the capture's prefix."""
+    store = _Store()
+    names = ("calendar", "../../other-run/x", "a/b", "..")
+    monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact",
+                        type("U", (), {"get": staticmethod(lambda _id: _StubUniverse(names))}))
+    monkeypatch.setattr(config_mod, "get_config", lambda: type("C", (), {"get_object_store_at": lambda self, url: store})())
+    asked = []
+
+    async def _state(_deployed, _gateway, name):
+        asked.append(name)
+        return {"service": name}
+
+    monkeypatch.setattr(legacy_protocol, "service_state", _state)
+    ctx = _ctx()
+    await _step()._capture_universe_state(ctx, _PREFIX)
+
+    assert json.loads(ctx.metadata["snapshot_json_url"]) == {"calendar": f"{_PREFIX}services/calendar.json"}
+    assert asked == ["calendar"]
+    assert [key.rsplit("/", 1)[-1] for key in store.puts] == ["calendar.json"]
 
 
 @pytest.mark.asyncio

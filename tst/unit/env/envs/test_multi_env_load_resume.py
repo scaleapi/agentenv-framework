@@ -75,6 +75,24 @@ async def _load(env, universe, *, recorded: list[str], changelog_empty: bool):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["../../etc/cron.d/x", "sub/x.json", ".."])
+async def test_a_metadata_filename_that_isnt_one_file_name_is_refused_before_anything_loads(filename):
+    """A metadata file goes onto the sandbox host by its stored filename, so one holding '/' or '..' would land
+    outside the folder it's given."""
+    env = _env()
+    universe = _universe(ALL)
+    universe.get_metadata.return_value = {"config": MagicMock(filename=filename, object_url="s3://bucket/x")}
+    env.load_environment_artifact = AsyncMock()
+
+    with pytest.raises(ValueError, match="must be a single file name"):
+        await env.load_environment_universe_artifact(universe)
+
+    env.load_environment_artifact.assert_not_called()
+    env._sandbox.exec_script.assert_not_called()
+    env._sandbox.load_object_file.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_a_retry_skips_what_already_loaded():
     """The saving: one failed service costs one service on retry, not all of them."""
     loaded, _ = await _load(_env(), _universe(ALL), recorded=["a", "b"], changelog_empty=True)

@@ -172,6 +172,8 @@ class ArtifactStore:
 
     @staticmethod
     def _object_key(artifact_type: str, id: str, version: int, object_name: str) -> str:
+        if ".." in object_name.split("/"):
+            raise ValueError(f"Object name {object_name!r} has a '..' path segment.")
         return f"{get_config().get_artifact_key_prefix()}artifacts/{artifact_type}/{key_segment(id)}/{version}/{object_name}"
 
     def get_object(self, object_url: str) -> bytes:

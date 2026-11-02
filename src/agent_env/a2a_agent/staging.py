@@ -232,12 +232,13 @@ class StagedObjectStore:
 
 async def drain(namespace: StagedNamespace, store: ObjectStore) -> int:
     """Move the increments staged in ``namespace`` into ``store``, and return how many. An increment is
-    removed from staging only once it is in the store, and only if the agent has not replaced it since."""
+    removed from staging only once it is in the store, and only if the agent has not replaced it since. The agent
+    lists the paths, so one that isn't a plain relative path under the namespace is left where it is."""
     root = store.get_object_key(namespace.namespace_url).rstrip("/") + "/"
     async with _client("draining staged changelog increments") as client:
         listed = await client.get(namespace.staging_url + "/")
         listed.raise_for_status()
-        entries = [e for e in listed.json().get("objects") or () if str(e.get("path", "")).startswith(root)]
+        entries = [e for e in listed.json().get("objects") or () if _under(str(e.get("path", "")), root)]
 
         async def move(entry: Mapping[str, Any]) -> None:
             staged = _Staged(entry["path"], store.object_url(entry["path"]), max_bytes=namespace.max_object_bytes)
@@ -303,6 +304,10 @@ async def draining(namespaces: Iterable[StagedNamespace]) -> AsyncIterator[None]
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await drain_all(namespaces, within=LAST_DRAIN_SECONDS)
+
+
+def _under(path: str, root: str) -> bool:
+    return path.startswith(root) and "\\" not in path and all(part not in ("", ".", "..") for part in path.split("/"))
 
 
 def _size(store: ObjectStore, object_url: str) -> int | None:

@@ -7,6 +7,7 @@ import logging
 from typing import ClassVar, Optional
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.providers.env_providers.env_gateway_provider import environment_name_problem
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef, RefRole
@@ -218,6 +219,8 @@ class SnapshotAgentStateTaskStep(TaskStep):
         urls: dict[str, str] = {}
         for name in environment_names:
             try:
+                if problem := environment_name_problem(name):
+                    raise ValueError(problem)
                 state = await legacy_protocol.service_state(deployed_env, gateway_url_of(deployed_env), name)
                 urls[name] = await asyncio.to_thread(
                     store.put, f"{key_prefix}services/{name}.json", json.dumps(state).encode(),
