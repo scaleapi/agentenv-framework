@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import FrozenInstanceError
 from functools import wraps
-from typing import Any, Union
+from typing import Any, Literal, Union
 from unittest.mock import MagicMock
 
 import httpx
@@ -44,6 +44,7 @@ from agentenv_protocol.a2a_agent import (
     AgentEnvAgent,
     AgentIdentity,
     AttributionProbeResponse,
+    BuiltinTools,
     BundleSkillRequest,
     ContextObjectTrajectoryRequest,
     ContextTrajectoryRequest,
@@ -1772,6 +1773,26 @@ def test_agent_card_config_schema_omits_literal_defaults() -> None:
     assert "default" not in schema["properties"]["default"]
     assert "default" not in schema["properties"]["api_key"]
     assert "default" not in schema["$defs"]["NestedConfig"]["properties"]["token"]
+
+
+def test_builtin_tools_names_the_agents_own_tools_on_its_card_and_takes_one_selection() -> None:
+    class RuntimeConfig(AgentConfig):
+        builtin_tools: BuiltinTools[Literal["Bash", "Read", "WebFetch"]] | None = None
+
+    @a2a_agent(identity=AgentIdentity(name="tooled", description="test", version="1"), config=RuntimeConfig)
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest[RuntimeConfig]) -> TaskResult:
+            return TaskResult.text("ok")
+
+    with TestClient(Agent().create_app()) as client:
+        card = client.get("/.well-known/agent-card.json").json()
+        statuses = [_operation(client, card, AGENT_CONFIG_V1.uri, "set", {"builtin_tools": selection}).status_code
+                    for selection in ({"disable": "*"}, {"only": ["Read"]}, {"disable": ["Glob"]},
+                                      {"disable": "*", "only": ["Read"]}, {})]
+
+    request = _extension(card, AGENT_CONFIG_V1.uri)["params"]["methods"]["set"]["request"]
+    assert "builtin_tools" in request["supported"] and '"enum": ["Bash", "Read", "WebFetch"]' in json.dumps(request)
+    assert statuses == [200, 200, 400, 400, 400]
 
 
 def test_validation_errors_do_not_echo_rejected_values() -> None:

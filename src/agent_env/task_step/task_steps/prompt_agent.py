@@ -486,6 +486,8 @@ class PromptAgentTaskStep(TaskStep):
             "output_format": self.output_format, "timeout_seconds": self.timeout_seconds,
             "task_id": context.metadata.get("task_id"),
             "agentenv_tools": self.agentenv_tools,
+            # Again each turn, so an agent that restarted since deploy_agent sent it doesn't get its own tools back.
+            "builtin_tools": card.get("builtin_tools"),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         model_params = get_config().get_model_params(self.model_params)

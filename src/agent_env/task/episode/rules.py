@@ -139,9 +139,10 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "peer_agents": _peer_agents,
     "rubrics_verifier": _rubrics_verifier,
     **dict.fromkeys((
-        "verify_a2a_agent_card", "verify_a2a_agent_config_identity", "verify_a2a_agent_mcp", "verify_a2a_core_protocol",
-        "verify_a2a_install", "verify_a2a_modalities", "verify_a2a_peer_agents", "verify_a2a_role",
-        "verify_a2a_skill_config", "verify_a2a_snapshot", "verify_a2a_system_prompt", "verify_a2a_trajectory",
+        "verify_a2a_agent_card", "verify_a2a_agent_config_identity", "verify_a2a_agent_mcp", "verify_a2a_builtin_tools",
+        "verify_a2a_core_protocol", "verify_a2a_install", "verify_a2a_modalities", "verify_a2a_peer_agents",
+        "verify_a2a_role", "verify_a2a_skill_config", "verify_a2a_snapshot", "verify_a2a_system_prompt",
+        "verify_a2a_trajectory",
     ), _validates_an_agent),
 }
 

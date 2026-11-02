@@ -1007,6 +1007,23 @@ class MyAgentConfig(AgentConfig):
     provider_token: WriteOnly[str | None] = None
 ```
 
+An agent that can turn its own tools off, such as its shell, file or web tools, takes `builtin_tools`, typed
+`BuiltinTools` over a `Literal` of its tools' names, so its card's schema names them. A task selects them on
+`deploy_agent`: `{"disable": "*"}` turns them all off, `{"disable": [...]}` the ones named, and `{"only": [...]}` keeps
+the ones named; the agent applies `request.config.builtin_tools` to its runtime. The MCP tools AgentEnv gives it are not
+its own and stay. A selection for an agent whose config has
+no `builtin_tools`, or that names a tool its schema doesn't, is refused before the deploy sends it anything.
+
+```python
+from typing import Literal
+
+from agentenv_protocol.a2a_agent import AgentConfig, BuiltinTools
+
+
+class MyAgentConfig(AgentConfig):
+    builtin_tools: BuiltinTools[Literal["shell", "read_file", "web_fetch"]] | None = None
+```
+
 `output_format` is author-owned in v1 rather than a field on the base
 `AgentConfig`. An agent that supports structured output must declare the field
 on its config subclass, apply it to its model or runtime, and return the value

@@ -69,6 +69,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_skill_config import VerifyA2ASkillConfigStep
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_snapshot import VerifyA2ASnapshotStep
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_trajectory import VerifyA2ATrajectoryStep
+    from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_builtin_tools import VerifyA2ABuiltinToolsStep
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_role import VerifyA2ARoleStep
     from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_system_prompt import VerifyA2ASystemPromptStep
     from agent_env.task_step.task_steps.add_skills import AddSkillsTaskStep
@@ -135,6 +136,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(VerifyA2AModalitiesStep): VerifyA2AModalitiesStep,
         _get_type(VerifySandboxTaskStep): VerifySandboxTaskStep,
         _get_type(AggregateVerifiersTaskStep): AggregateVerifiersTaskStep,
+        _get_type(VerifyA2ABuiltinToolsStep): VerifyA2ABuiltinToolsStep,
         _get_type(VerifyA2ARoleStep): VerifyA2ARoleStep,
         _get_type(VerifyA2ASystemPromptStep): VerifyA2ASystemPromptStep,
     }
