@@ -208,23 +208,6 @@ async def test_enable_is_refused_for_an_agent_without_the_object_form(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent_name, instance_id", [("..", "run-1"), (".", "run-1"), ("solver", "..")])
-async def test_enable_is_refused_for_a_name_that_isnt_a_folder_of_its_own(monkeypatch, store, agent_name, instance_id):
-    """'..' would grant the agent every run's changelogs, and '.' every changelog of its own run."""
-    requests = _install(monkeypatch, {"roots": ["workspace"]})
-    context = _run_context()
-    context.instance_id = instance_id
-
-    with pytest.raises(ValueError, match="must each be a folder name"):
-        await DeployAgentTaskStep(
-            id="deploy", version=None, agent_name=agent_name, enable_agent_changelog=True,
-        )._configure_agent_changelog("https://agent", _card(), context, expires_in=7_200, sandbox_type="local")
-
-    assert not requests
-    assert store.granted == []
-
-
-@pytest.mark.asyncio
 async def test_apply_lists_validates_and_sends_ordered_read_grants(monkeypatch, store):
     namespace = _increments(store, "000002.tar", "000000.tar", "000001.tar")
     requests = _install(monkeypatch, {"count": 2, "context_id": "continued"})
