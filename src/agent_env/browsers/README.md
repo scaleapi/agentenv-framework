@@ -11,7 +11,3 @@ with no proxy. It opens at boot on its `start_urls` setting, a list, the first t
 (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which the
 image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
 the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`.
-
-An app that starts Chromium itself, with its own profile and flags, shares this install through
-`agentenv_protocol.website_browser`: `CHROMIUM_DOWNLOADS` and `CHROMIUM_PACKAGES` in its `@linux(...)`,
-`ChromiumInstall` among its class's bases, and `chromium_command(...)` for the command.

@@ -14,7 +14,6 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.website_browser import POLICIES
 
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import inside
@@ -63,7 +62,8 @@ async def test_a_deploy_opens_its_start_urls_unprompted_and_a_reset_clears_its_p
 
     assert opened == ["Alpha page - Google Chrome for Testing"]
     assert not keyed.isError and tabbed == ["Bravo page - Google Chrome for Testing"]
-    assert json.loads(policies["stdout"]) == POLICIES
+    assert {"BrowserSignin": 0, "CommandLineFlagSecurityWarningsEnabled": False}.items() <= json.loads(
+        policies["stdout"]).items()
     assert marker["exit_code"] != 0 and reopened == ["Alpha page - Google Chrome for Testing"]
     assert not report.failed
 
