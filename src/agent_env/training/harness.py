@@ -28,11 +28,11 @@ except ModuleNotFoundError as exc:
     raise ImportError("agent_env.training.harness requires pip install 'agentenv-framework[harness]'") from exc
 
 from agent_env.store.routing import namespace_routing
-from agent_env.task.task import Task, recorded_scores
+from agent_env.task.task import Task
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.training._loop import on_session_loop
-from agent_env.training._solver import first_prompt, rewarded, solver_overrides, trained
+from agent_env.training._solver import first_prompt, rewarded, run_scores, solver_overrides, trained
 
 logger = logging.getLogger(__name__)
 #: How a row's prompt names its task, since TRL hands the factory only the prompt.
@@ -150,7 +150,7 @@ class AgentEnvSession(ResourceSession):
                         self._task.run(agent_model=self._model, context=context))
                 try:
                     await asyncio.wait_for(task_run, timeout)
-                    self._scores = recorded_scores(self._task.steps, context)
+                    self._scores = run_scores(self._task, context)
                     return 0
                 except TimeoutError:
                     raise

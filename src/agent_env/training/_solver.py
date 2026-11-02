@@ -1,7 +1,8 @@
 """What training a bundle's own agents shares, the harness and AReaL's helpers: the tasks whose solver, the agent a step
 prompts, can train, prepared as ``agent-env run`` prepares them to run on local Docker, which alone reaches the
 trainer's endpoint on this machine, a remote sandbox needing a tunnel; and the overrides that point the solver alone at
-that endpoint, its other agents and judges keeping the configured one."""
+that endpoint, its other agents and judges keeping the configured one; and a finished run's scores, which a run
+``agent-env run`` counts as failed has none of."""
 
 from __future__ import annotations
 
@@ -14,8 +15,8 @@ from agent_env.bundle.plan import solver_steps
 from agent_env.bundle.resolve import build_step
 from agent_env.bundle.run import planned_tasks, prepare_bundle, solver_params
 from agent_env.store.routing import namespace_routing
-from agent_env.task.task import Task
-from agent_env.task_step.context import sandbox_overrides
+from agent_env.task.task import Task, recorded_scores
+from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.training.reward import reward_of
@@ -59,6 +60,15 @@ def rewarded(task: Task, reward: str | Callable[[dict[str, float]], float] | Non
     if of is None:
         raise ValueError(why)
     return of
+
+
+def run_scores(task: Task, context: TaskStepContext) -> dict[str, float]:
+    """The scores a finished run of ``task`` recorded. Raises when a step failed and no retry recovered it, a run
+    ``agent-env run`` counts as failed, though a step that doesn't fail the task let it finish."""
+    if failed := [failure for failure in context.metadata.get("failed_steps") or [] if not failure.get("retried")]:
+        raise RuntimeError("the run failed at " + "; ".join(f"{failure['step_id']}: {failure['error']}"
+                                                           for failure in failed))
+    return recorded_scores(task.steps, context)
 
 
 def first_prompt(task: Task) -> str:

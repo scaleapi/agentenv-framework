@@ -10,7 +10,7 @@ import pytest
 from agent_env.training import areal
 from agent_env.training.areal import AgentEnvWorkflow, task_rows
 from tst.unit.bundle._support import layout
-from tst.unit.training.harness_test import ASK, DEPLOY, asked, hanging
+from tst.unit.training.harness_test import ASIDE, ASK, CHECK, DEPLOY, asked, hanging
 
 #: What AReaL passes an inline agent besides its proxy and session key.
 EXTRA = {"http_client": None, "proxy_gateway_api_key": "gateway"}
@@ -58,6 +58,26 @@ def test_a_run_that_records_no_score_raises_so_areal_leaves_the_sample_out(engin
         asyncio.run(AgentEnvWorkflow(unchecked).run(_row(task_rows(unchecked), "sum"), base_url=engine.url,
                                                     api_key="k"))
     assert len(asked) == 1
+
+
+def test_a_run_with_a_step_that_failed_without_failing_the_task_raises_so_areal_leaves_the_sample_out(engine, bundle,
+                                                                                                    tmp_path):
+    aside = layout(tmp_path / "aside", {"tasks/sum.json": json.dumps([DEPLOY, ASK, CHECK, ASIDE])})
+
+    with pytest.raises(RuntimeError, match="the run failed at aside: the side check fell over"):
+        asyncio.run(AgentEnvWorkflow(aside, reward="check").run(task_rows(aside)[0], base_url=engine.url,
+                                                                api_key="k"))
+    assert asked[0]["answer"] == "It is 42."
+
+
+def test_a_reward_function_need_not_be_hashable(bundle):
+    class Unhashable:
+        __hash__ = None
+
+        def __call__(self, scores):
+            return scores["check"]
+
+    assert AgentEnvWorkflow(bundle, reward=Unhashable())._played
 
 
 @pytest.fixture

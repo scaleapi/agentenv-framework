@@ -31,6 +31,9 @@ MODEL_ENDPOINT_MISSING = preflight.model_endpoint_missing  # the probe, which th
 DEPLOY = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "theirs"}
 ASK = {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "What is 6 * 7?", "depends_on": ["agent"]}
 CHECK = {"id": "check", "type": "harness_test_check", "verifier_id": "answer", "depends_on": ["ask"]}
+#: A side check that fails without failing the task, after which the task still records its answer's score.
+ASIDE = {"id": "aside", "type": "harness_test_check", "verifier_id": "fails", "depends_on": ["ask"],
+         "fail_task_on_error": False}
 JUDGE = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "ask",
          "judge_a2a_agent_id": "theirs", "agent_name": DeployAgentTaskStep.DEFAULT_AGENT_NAME,
          "criteria": [{"id": "c1", "description": "says 42"}], "depends_on": ["ask"]}
@@ -84,6 +87,8 @@ class _Checks(TaskStep):
         return cls(**cls._base_from_dict(data), verifier_id=data["verifier_id"])
 
     async def execute(self, context):
+        if self.verifier_id == "fails":
+            raise RuntimeError("the side check fell over")
         context.metadata.setdefault("verifications", {})[self.verifier_id] = {
             "score": float("42" in context.metadata["answer"])}
         return context
@@ -174,6 +179,18 @@ def test_a_run_that_fails_is_unscored_rather_than_zero(engine, bundle, caplog):
         assert session.wait_for_completion() == 1
     assert session.verify([]).env_reward is None
     assert "failed, so its rollout is left unscored: " in caplog.text
+
+
+def test_a_run_with_a_step_that_failed_without_failing_the_task_is_unscored(engine, bundle, tmp_path, caplog):
+    aside = layout(tmp_path / "aside", {"tasks/sum.json": json.dumps([DEPLOY, ASK, CHECK, ASIDE])})
+    factory = AgentEnvSessionFactory(aside, llm_url=engine.url, model=MODEL, reward="check")
+    session = factory.create(prompt_rows(aside)[0]["prompt"])
+
+    with caplog.at_level(logging.WARNING, logger=harness.__name__):
+        assert session.wait_for_completion() == 1
+    session.close()
+    assert session.verify([]).env_reward is None
+    assert "the run failed at aside: the side check fell over" in caplog.text
 
 
 @pytest.fixture

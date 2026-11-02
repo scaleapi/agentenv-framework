@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from agent_env.store.routing import namespace_routing
-from agent_env.task.task import Task, recorded_scores
+from agent_env.task.task import Task
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.training._loop import session_loop
-from agent_env.training._solver import first_prompt, rewarded, solver_overrides, trained
+from agent_env.training._solver import first_prompt, rewarded, run_scores, solver_overrides, trained
 
 #: The model the solver names: AReaL's proxy serves its policy whatever a request names, and its own agents name this.
 _MODEL = "default"
@@ -39,7 +39,8 @@ class AgentEnvWorkflow:
 
     def __init__(self, bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
                  reward: str | Callable[[dict[str, float]], float] | None = None, agent: str | None = None):
-        self._played = _prepared(str(bundle), tuple(tasks), tuple(evals), reward, agent)
+        self._played = {task.id: (task, solver, rewarded(task, reward))
+                        for task, solver in _prepared(str(bundle), tuple(tasks), tuple(evals), agent)}
 
     async def run(self, data: dict[str, Any], *, base_url: str, api_key: str, **_: Any) -> float:
         """Plays ``data``'s task, its solver calling the model at ``base_url`` with ``api_key``, the key of the session
@@ -85,7 +86,7 @@ class _Run:
                     raise asyncio.CancelledError
                 self._running = asyncio.ensure_future(self._task.run(agent_model=_MODEL, context=context))
                 await self._running
-                return recorded_scores(self._task.steps, context)
+                return run_scores(self._task, context)
             finally:
                 await teardown_run(context)
 
@@ -97,6 +98,5 @@ class _Run:
 
 @functools.cache
 def _prepared(bundle: str, tasks: tuple[str, ...], evals: tuple[str, ...],
-              reward: str | Callable[[dict[str, float]], float] | None, agent: str | None
-              ) -> dict[str, tuple[Task, dict[str, dict[str, Any]], Callable[[dict[str, float]], float | None]]]:
-    return {task.id: (task, solver, rewarded(task, reward)) for task, solver in trained(bundle, tasks, evals, agent)}
+              agent: str | None) -> list[tuple[Task, dict[str, dict[str, Any]]]]:
+    return trained(bundle, tasks, evals, agent)
