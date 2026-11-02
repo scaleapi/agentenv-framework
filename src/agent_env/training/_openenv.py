@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Coroutine, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -50,8 +50,6 @@ logger = logging.getLogger(__name__)
 _waited: set[str] = set()
 #: The servers whose refused connections rollouts have been warned they wait out, once a process.
 _restarting: set[str] = set()
-_loop: asyncio.AbstractEventLoop | None = None
-_loop_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -424,26 +422,6 @@ def toolsets(name: str, tasks: dict[str, list[dict[str, Any]]]) -> dict[str, Nam
             name = f"{base}-{n}"
         named[each] = NamedToolset(name, first)
     return named
-
-
-def on_session_loop(coroutine: Coroutine[Any, Any, Any], timeout: float | None) -> Any:
-    """``coroutine``'s result, run on the event loop this process's sessions share, on a daemon thread of its own, for
-    a trainer that calls its environments from threads; waits at most ``timeout`` seconds."""
-    future = asyncio.run_coroutine_threadsafe(coroutine, _session_loop())
-    try:
-        return future.result(timeout)
-    except TimeoutError:
-        future.cancel()
-        raise
-
-
-def _session_loop() -> asyncio.AbstractEventLoop:
-    global _loop
-    with _loop_lock:
-        if _loop is None:
-            _loop = asyncio.new_event_loop()
-            threading.Thread(target=_loop.run_forever, name="agentenv-sessions", daemon=True).start()
-        return _loop
 
 
 def token_in(var: str | None) -> str | None:

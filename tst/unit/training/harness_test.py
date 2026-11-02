@@ -20,7 +20,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from agent_env.training import harness
+from agent_env.training import _solver, harness
 from agent_env.training.harness import AgentEnvSessionFactory, prompt_rows
 from tst.unit.bundle._support import layout
 from tst.unit.conftest import local_stores  # noqa: F401
@@ -123,7 +123,7 @@ def bundle(tmp_path, monkeypatch, local_stores):  # noqa: F811
 
 
 def test_the_solver_alone_calls_the_policy_through_the_proxy_and_the_run_is_captured_and_scored(engine, bundle, caplog):
-    with caplog.at_level(logging.WARNING, logger=harness.__name__):
+    with caplog.at_level(logging.WARNING, logger=_solver.__name__):
         rows = prompt_rows(bundle)
     factory = AgentEnvSessionFactory(bundle, llm_url=engine.url, model=MODEL, sampling={"temperature": 1.0})
     engine.served.append("trl-policy-v3")

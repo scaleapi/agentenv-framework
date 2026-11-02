@@ -1,4 +1,4 @@
-.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test nemo-gym-test verl-test skyrl-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test nemo-gym-test verl-test skyrl-test areal-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -84,6 +84,12 @@ verl-test: ## Play rows through the verl agent loop on verl itself (needs verl a
 # install them first, as .github/workflows/skyrl.yml does.
 skyrl-test: ## Play rows through the SkyRL env and generator on SkyRL itself (needs SkyRL and CPU torch, and the Hub)
 	$(PYTHON) -m pytest tst/skyrl --timeout=900 $(PYTEST_ARGS)
+
+# The AReaL tier plays rows through AgentEnvWorkflow in AReaL's agent workflow, resolved by AReaL's rollout engine.
+# AReaL and torch aren't in the dev extra, and AReaL needs Python 3.11 or 3.12: install them first, as
+# .github/workflows/areal.yml does.
+areal-test: ## Play rows through AgentEnvWorkflow in AReaL's agent workflow (needs AReaL and CPU torch)
+	$(PYTHON) -m pytest tst/areal --timeout=900 $(PYTEST_ARGS)
 
 # The clean-install gate CI runs, on the same Python. The script gives every step an allowlisted
 # environment, so nothing in this shell reaches the install it checks. A failed run keeps its folder.

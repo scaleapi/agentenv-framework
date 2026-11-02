@@ -18,7 +18,8 @@ from agent_env.config.runtime import Config
 from agent_env.openenv.environment import AgentEnvEnvironment
 from agent_env.task_step.task_step import TaskStep
 from agent_env.training import _openenv, trl
-from agent_env.training._openenv import ENDED, FAILED, on_session_loop
+from agent_env.training._loop import on_session_loop
+from agent_env.training._openenv import ENDED, FAILED
 from agent_env.training.trl import AgentEnv
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN

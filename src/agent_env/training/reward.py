@@ -1,4 +1,5 @@
-"""How a task's recorded scores make its reward: the rules ``build_app`` applies, which harness training shares."""
+"""How a task's recorded scores make its reward: the rules ``build_app`` applies, which training a bundle's own
+agents shares."""
 
 from __future__ import annotations
 

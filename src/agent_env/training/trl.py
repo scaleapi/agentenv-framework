@@ -41,12 +41,12 @@ from agent_env.training._openenv import (
     Shared,
     key,
     messages,
-    on_session_loop,
     probe,
     read_tasks,
     toolsets,
     why,
 )
+from agent_env.training._loop import on_session_loop
 from agent_env.training._tools import SchemaTool, tool_method
 
 logger = logging.getLogger(__name__)

@@ -27,24 +27,16 @@ except ModuleNotFoundError as exc:
         raise
     raise ImportError("agent_env.training.harness requires pip install 'agentenv-framework[harness]'") from exc
 
-from agent_env.bundle.plan import solver_steps
-from agent_env.bundle.resolve import build_step
-from agent_env.bundle.run import planned_tasks, prepare_bundle, solver_params
 from agent_env.store.routing import namespace_routing
-from agent_env.openenv.reward import reward_of
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
-from agent_env.task_step.context import TaskStepContext, sandbox_overrides
-from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
-from agent_env.training._openenv import on_session_loop
+from agent_env.task_step.context import TaskStepContext
+from agent_env.training._loop import on_session_loop
+from agent_env.training._solver import first_prompt, rewarded, solver_overrides, trained
 
 logger = logging.getLogger(__name__)
 #: How a row's prompt names its task, since TRL hands the factory only the prompt.
 _NAMED = re.compile(r"^AgentEnv task (\d+): (.+)$")
-#: Where every deploy runs: local Docker alone reaches the capture proxy on this machine, a remote sandbox needing a
-#: tunnel.
-_SANDBOX = "local"
 
 
 def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
@@ -53,8 +45,8 @@ def prompt_rows(bundle: str | Path, *, tasks: Sequence[str] = (), evals: Sequenc
     naming the task, which is how the factory finds it, then the task's first prompt, for TRL's logs. The model never
     sees this prompt: the task's own agent builds its own."""
     return [{"prompt": [{"role": "system", "content": f"AgentEnv task {index}: {task.id}"},
-                        {"role": "user", "content": _first_prompt(task)}], "task_id": task.id}
-            for index, (task, _) in enumerate(_trained(bundle, tasks, evals, agent))]
+                        {"role": "user", "content": first_prompt(task)}], "task_id": task.id}
+            for index, (task, _) in enumerate(trained(bundle, tasks, evals, agent))]
 
 
 class AgentEnvSessionFactory(ResourceSessionFactory):
@@ -69,8 +61,8 @@ class AgentEnvSessionFactory(ResourceSessionFactory):
                  reward: str | Callable[[dict[str, float]], float] | None = None, agent: str | None = None):
         self.model = model
         self._llm_url, self._sampling = llm_url, sampling
-        self._trained = _trained(bundle, tasks, evals, agent)
-        self._rewards = [_reward(task, reward) for task, _ in self._trained]
+        self._trained = trained(bundle, tasks, evals, agent)
+        self._rewards = [rewarded(task, reward) for task, _ in self._trained]
         require_llm(llm_url, model, require_tokens=True)
         self._proxy = CaptureServer(llm_url=llm_url, model=model, port=_free_port(),
                                     admin_key=secrets.token_urlsafe(32))
@@ -82,9 +74,8 @@ class AgentEnvSessionFactory(ResourceSessionFactory):
         capture = self._proxy.registry.create(
             upstream=Upstream(llm_url=self._llm_url, model=self.model), capture_level="tokens", purpose="train",
             sampling=self._sampling, task=played.id, episode=episode_id or uuid.uuid4().hex)
-        endpoint = {"litellm_base_url": f"http://127.0.0.1:{self._proxy.port}", "litellm_api_key": capture.session_id}
-        overrides = {**sandbox_overrides(_SANDBOX),
-                     "step_params": {step: {**params, **endpoint} for step, params in solver.items()}}
+        overrides = solver_overrides(solver, {"litellm_base_url": f"http://127.0.0.1:{self._proxy.port}",
+                                              "litellm_api_key": capture.session_id})
         return AgentEnvSession(task=played, overrides=overrides, reward=self._rewards[index],
                                registry=self._proxy.registry, capture=capture, model=self.model)
 
@@ -103,7 +94,7 @@ class AgentEnvSession(ResourceSession):
         self._done: threading.Event | None = None  # set once the run is torn down
 
     def initial_messages(self) -> list[dict[str, Any]]:
-        return [{"role": "user", "content": _first_prompt(self._task)}]
+        return [{"role": "user", "content": first_prompt(self._task)}]
 
     def list_tools(self) -> list[Any]:
         return []
@@ -176,50 +167,6 @@ class AgentEnvSession(ResourceSession):
             self._done.set()
 
 
-def _trained(bundle: str | Path, tasks: Sequence[str], evals: Sequence[str],
-             agent: str | None) -> list[tuple[Task, dict[str, dict[str, Any]]]]:
-    """The selected tasks that can train their solver, prepared as ``agent-env run`` prepares them, each with its
-    solver's deploys and their step params, ``agent``'s if it swaps the solver. The others are left out before they're
-    checked, so what they alone need can't stop the rest."""
-    with namespace_routing():
-        kept = []
-        for entry in planned_tasks(bundle, tasks=tasks, evals=evals, agent=agent):
-            if why := _untrainable(entry.config):
-                logger.warning("%s is left out: %s", entry.entry.name, why)
-            else:
-                kept.append(entry.entry.name)
-        if not kept:
-            raise ValueError("no task of the bundle has a solver to train: an agent a step prompts, deployed by a "
-                             "deploy_agent step, that isn't also its judge")
-        prepared = prepare_bundle(bundle, tasks=kept, sandbox=_SANDBOX, agent=agent, solver_endpoint=True)
-    swapped = solver_params(prepared.plan, prepared.materialization)
-    return [(task, {step: swapped.get(entry.id, {}).get(step, {})
-                    for step in solver_steps([step.to_dict() for step in task.steps])})
-            for entry, task in prepared.tasks]
-
-
-def _untrainable(config: list[dict[str, Any]]) -> str | None:
-    """Why a task's rollouts can't train its solver alone, or None."""
-    solver = set(solver_steps(config))
-    steps = [build_step(step) for step in config]
-    deploys = [step for step in steps if step.id in solver]
-    if not deploys or not all(isinstance(step, DeployAgentTaskStep) for step in deploys):
-        return "training needs the agent a step prompts deployed by a deploy_agent step"
-    agents = {step.agent_name for step in deploys}
-    if any(isinstance(step, RubricsVerifierTaskStep) and step.use_agent_judge and step.agent_name in agents
-           for step in steps):
-        return "its rubric judge is its solver, whose grading would be trained on"
-    return None
-
-
-def _reward(task: Task, reward: str | Callable[[dict[str, float]], float] | None
-            ) -> Callable[[dict[str, float]], float | None]:
-    of, why = reward_of(task, reward)
-    if of is None:
-        raise ValueError(why)
-    return of
-
-
 def _index_named(prompt: Any, ids: list[str]) -> int:
     for message in prompt if isinstance(prompt, list) else []:
         if isinstance(message, dict) and (named := _NAMED.match(str(message.get("content") or ""))):
@@ -228,10 +175,6 @@ def _index_named(prompt: Any, ids: list[str]) -> int:
                 return index
     raise KeyError("the row's prompt names no task of this factory's: build the dataset with prompt_rows, from the "
                    "same bundle, tasks and evals")
-
-
-def _first_prompt(task: Task) -> str:
-    return next((step.prompt for step in task.steps if step.type == "prompt_agent"), "")
 
 
 def _free_port() -> int:

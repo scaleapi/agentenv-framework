@@ -16,7 +16,8 @@ except ModuleNotFoundError as exc:
     raise ImportError("agent_env.training.skyrl.env runs in SkyRL's trainer: install 'agentenv-framework[skyrl]' into "
                       "SkyRL's environment") from exc
 
-from agent_env.training._openenv import CLOSE_SECONDS, GRACE_SECONDS, Rollout, Session, Shared, on_session_loop, token_in
+from agent_env.training._loop import on_session_loop
+from agent_env.training._openenv import CLOSE_SECONDS, GRACE_SECONDS, Rollout, Session, Shared, token_in
 from agent_env.training.skyrl.calls import Call, Unparsed, parse
 
 logger = logging.getLogger(__name__)

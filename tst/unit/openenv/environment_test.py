@@ -12,9 +12,9 @@ from agentenv_protocol.a2a_agent import proxy as proxy_module
 from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction, ToolErrorType
 
 import agent_env.task.episode.run as episode_run
-from agent_env.openenv.reward import _score_at
 from agent_env.openenv.environment import ENDED, NOT_RESET, TIMEOUT_METADATA, AgentEnvEnvironment, Served, ServedTask
 from agent_env.task import EpisodeError, EpisodeSpec, Task
+from agent_env.training.reward import _score_at
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN, _gate, _until
 
 AGAIN = {**TURN, "id": "again", "prompt_id": "again", "prompt": "Add another.", "depends_on": ["turn"]}
