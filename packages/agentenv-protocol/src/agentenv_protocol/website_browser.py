@@ -69,6 +69,9 @@ class DevToolsPipe:
     """A CDP connection over a Chromium's debugging pipe, each message JSON ended by a NUL. It connects anew at every
     launch; a call with no browser connected, or whose browser exits before answering, raises ConnectionError."""
 
+    #: How long a call waits for the browser's answer when it names no wait of its own.
+    call_timeout_s: ClassVar[float] = 30.0
+
     def __init__(self) -> None:
         self._ids = itertools.count(1)
         self._waiting: dict[int, asyncio.Future] = {}
@@ -85,7 +88,7 @@ class DevToolsPipe:
         self._reading = asyncio.ensure_future(self._read(reader))
 
     async def call(self, method: str, params: Optional[dict] = None, *, session_id: Optional[str] = None,
-                   timeout_s: float = 30.0) -> dict:
+                   timeout_s: Optional[float] = None) -> dict:
         """``method``'s result, or DevToolsError with the browser's message."""
         if self._writer is None or self._writer.is_closing():
             raise ConnectionError("no browser is connected over its debugging pipe")
@@ -96,7 +99,7 @@ class DevToolsPipe:
                    **({"sessionId": session_id} if session_id else {})}
         self._writer.write(json.dumps(message).encode() + b"\0")
         try:
-            answered = await asyncio.wait_for(answer, timeout_s)
+            answered = await asyncio.wait_for(answer, self.call_timeout_s if timeout_s is None else timeout_s)
         finally:
             self._waiting.pop(message_id, None)
         if "error" in answered:

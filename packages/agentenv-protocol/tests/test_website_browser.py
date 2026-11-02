@@ -53,6 +53,11 @@ class Mail(ComputerAppEnvironment):
     pass
 
 
+@linux(launch=Launch(at="demand", command=["chromium/chrome"], window={"class": "Chromium"}, ready=Ready(window=True)))
+class OnDemandBrowser(WebsiteBrowserEnvironment):
+    pass
+
+
 @pytest.fixture(autouse=True)
 def browser_home(monkeypatch, tmp_path):
     """A browser on Linux, its session user's home under ``tmp_path``, inside a computer with no site proxy."""
@@ -287,12 +292,31 @@ async def test_a_restarted_server_launches_a_browser_again_and_leaves_any_other_
 
     await Mail()._computer_app.start()
     left_alone = list(launched)
-    browser = Browser()
+    browser, on_demand = Browser(), OnDemandBrowser()
     await browser._computer_app.start()
+    await on_demand._computer_app.start()
     browser.devtools.close()
+    on_demand.devtools.close()
 
-    assert left_alone == [] and stopped == [4241]
-    assert launched == [("chromium/chrome", [3, 4])]
+    assert left_alone == [] and stopped == [4241, 4242]
+    assert launched == [("chromium/chrome", [3, 4]), ("chromium/chrome", [3, 4])]
+
+
+@pytest.mark.asyncio
+async def test_a_browser_on_demand_that_was_never_launched_is_left_unlaunched_by_its_server(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
+    launched = []
+
+    async def launch(argv, cwd, env, fds=None):
+        launched.append(argv)
+        return 4242
+
+    monkeypatch.setattr(session, "launch", launch)
+
+    await OnDemandBrowser()._computer_app.start()
+
+    assert launched == []
 
 
 def test_its_policies_are_agentenvs_with_its_own_over_them_where_its_build_reads_them(monkeypatch, tmp_path):
