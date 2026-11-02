@@ -11,11 +11,7 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.a2a_agent_validator import verify_a2a_builtin_tools as module
-from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_builtin_tools import (
-    AGENT_NAME,
-    NO_SUCH_TOOL,
-    VerifyA2ABuiltinToolsStep,
-)
+from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_builtin_tools import NO_SUCH_TOOL, VerifyA2ABuiltinToolsStep
 
 
 def _card(*supported: str) -> dict:
