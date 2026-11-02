@@ -155,6 +155,7 @@ def test_an_episode_that_fails_or_ends_without_a_reward_is_flagged_and_its_group
     assert keep_scored_groups(None, [scored, failed]) is False
     assert keep_scored_groups(None, [[scored], [_sample({"reward": 0.0})]]) is True
     assert keep_scored_groups(None, [scored, _sample({"reward": 0.0}, status="ABORTED")]) is False
+    assert keep_scored_groups(None, [scored, _sample({"session_id": "s1"})]) is False
 
 
 def test_the_reward_hook_reads_each_samples_reward_from_its_metadata():

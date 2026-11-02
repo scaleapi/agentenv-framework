@@ -65,10 +65,11 @@ async def reward(args: Any, samples: Any, **kwargs: Any) -> float | list[float]:
 
 
 def keep_scored_groups(args: Any, samples: list[Any], **kwargs: Any) -> bool:
-    """Whether to train on a group: not when an episode of it failed in the env, or Miles aborted a sample of it,
-    neither of them the policy's doing."""
-    return not any(sample.metadata.get("agentenv_failure") or getattr(sample.status, "name", None) == "ABORTED"
-                   for sample in _samples(samples))
+    """Whether to train on a group: not when an episode of it failed in the env, its agent function never returned
+    (a child process that died mid-episode leaves the session's turns with no reward), or Miles aborted a sample of
+    it, none of them the policy's doing."""
+    return not any(sample.metadata.get("agentenv_failure") or "reward" not in sample.metadata
+                   or getattr(sample.status, "name", None) == "ABORTED" for sample in _samples(samples))
 
 
 async def _converse(episode: _Episode, base_url: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]],

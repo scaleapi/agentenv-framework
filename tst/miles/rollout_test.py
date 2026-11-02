@@ -29,38 +29,46 @@ FAILS_AFTER_THE_TURN = [ITEMS, ALICE, TURN, {"id": "crane", "type": "episode_tes
                         REPLIES]
 
 
-def test_miles_plays_a_row_through_its_session_and_trains_on_the_episodes_reward(serve, tmp_path):
+@pytest.fixture(params=[[], ["v2"]], ids=["session-server-v1", "session-server-v2"])
+def session_server(request):
+    """Miles' session server, bare (v1, append-only) or ``v2`` (tree serving), which merges the agent function's
+    metadata into the samples itself."""
+    return ["--use-session-server", *request.param]
+
+
+def test_miles_plays_a_row_through_its_session_and_trains_on_the_episodes_reward(serve, tmp_path, session_server):
     server = serve({"a": PLAYED})
     rows = write_rows(server.url, tmp_path / "rows") / "all.jsonl"
 
-    played = _rollout(rows)
+    played = _rollout(rows, session_server)
     server.stop()
 
-    [[sample]] = played.samples
+    [[sample]] = _groups(played)
     assert (sample.status, sample.reward) == (sample_types.Sample.Status.COMPLETED, 1.0)
     assert {key: sample.metadata[key] for key in ("agentenv_scores", "agentenv_tool_calls", "agentenv_invalid_calls")} \
         == {"agentenv_scores": {"replies": 1.0}, "agentenv_tool_calls": 1, "agentenv_invalid_calls": 0}
     assert sample.response.startswith(ADDS_A_CRATE) and sample.response.endswith("Added a crate.")
 
 
-def test_miles_leaves_out_a_group_the_env_failed_and_draws_rows_until_its_batch_is_full(serve, tmp_path):
+def test_miles_leaves_out_a_group_the_env_failed_and_draws_rows_until_its_batch_is_full(serve, tmp_path,
+                                                                                        session_server):
     server = serve({"a": FAILS_AFTER_THE_TURN, "b": PLAYED})
     rows = write_rows(server.url, tmp_path / "rows") / "all.jsonl"
 
-    played = _rollout(rows, groups=2)
+    played = _rollout(rows, session_server, groups=2)
     server.stop()
 
-    assert [[(sample.metadata["task_id"], sample.reward) for sample in group] for group in played.samples] == [
+    assert [[(sample.metadata["task_id"], sample.reward) for sample in group] for group in _groups(played)] == [
         [("b", 1.0)], [("b", 1.0)]]
 
 
-def _rollout(rows, groups=1):
+def _rollout(rows, session_server, groups=1):
     """A train rollout of ``groups`` groups of one sample from ``rows``, the model answering each chat request with
     ``_model``."""
     misc.SingletonMeta.clear_all_instances()
     try:
         with mock_sglang.with_mock_server(process_fn=_model) as model:
-            args = _args(rows, groups, http_utils.find_available_port(20000))
+            args = _args(rows, session_server, groups, http_utils.find_available_port(20000))
             with fixtures._with_miles_router(args) as router:
                 httpx.post(f"{router.url}/add_worker", params={"url": model.url}, timeout=5.0).raise_for_status()
                 with fixtures._with_session_server(args, router.url):
@@ -70,12 +78,18 @@ def _rollout(rows, groups=1):
         misc.SingletonMeta.clear_all_instances()
 
 
+def _groups(played):
+    """The rollout's groups, each a flat list of samples: v2 hands back each generate call's samples as a list."""
+    return [[sample for each in group for sample in (each if isinstance(each, list) else [each])]
+            for group in played.samples]
+
+
 def _model(prompt):
     """Adds a crate, then says so once the tool has answered."""
     return mock_sglang.ProcessResult(text="Added a crate." if "<tool_response>" in prompt else ADDS_A_CRATE)
 
 
-def _args(rows, groups, router_port):
+def _args(rows, session_server, groups, router_port):
     """The arguments Miles' own rollout tests start from, with the helper's agent function and hooks in place of a
     label and a reward type."""
     argv = [
@@ -89,7 +103,7 @@ def _args(rows, groups, router_port):
         *integration.MODULAR_ROLLOUT_BASE_ARGV,
         "--custom-generate-function-path", "miles.rollout.generate_hub.agentic_tool_call.generate",
         "--custom-agent-function-path", "agent_env.training.miles.agent.run",
-        "--use-session-server", "--tito-model", "qwen3",
+        *session_server, "--tito-model", "qwen3",
         "--custom-rm-path", "agent_env.training.miles.agent.reward",
         "--dynamic-sampling-filter-path", "agent_env.training.miles.agent.keep_scored_groups",
     ]
