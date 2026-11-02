@@ -65,11 +65,11 @@ from .staging import STAGING_ENDPOINT, StagingStore, staging_routes
 from .tasks.v1 import (
     AgentConfig,
     AgentRunResult,
-    TaskFailed,
     TaskOutcome,
     TaskProgress,
     TaskRequest,
     TaskResult,
+    _TaskFailed,
 )
 from .tasks.v1 import (
     DataPart as TaskDataPart,
@@ -740,11 +740,10 @@ class _SdkServices:
         return {"status": "added", "name": request.name}
 
     async def cdp_list(self) -> dict[str, Any]:
+        """Names and metadata only: an endpoint's URLs can carry its credential, as its headers can."""
         return {
             "cdp_endpoints": {
                 name: {
-                    "http_url": endpoint["http_url"],
-                    "ws_url": endpoint["ws_url"],
                     "has_headers": bool(endpoint["headers"]),
                     "metadata": endpoint["metadata"],
                 }
@@ -1285,7 +1284,7 @@ class _StandardExecutor:
                         result = await self._run_streaming(request, updater, event_queue)
                     else:
                         result = await self._handler(request)
-                except TaskFailed as failed:
+                except _TaskFailed as failed:
                     result = TaskResult.failure(
                         failed.error.code, failed.error.message, error_type=failed.error.error_type
                     )

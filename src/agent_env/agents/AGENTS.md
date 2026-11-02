@@ -53,9 +53,8 @@ terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
   `{error_type, error_code, error_message}`. A success needs at least one part, and `builder().failed(...)` adds no
   text part, so add one.
 - **Errors:** `agent_error`, the default, means the agent tried and failed; `infra_error` means the run couldn't
-  happen, and agent-env may retry it. Raising `TaskFailed(code, message, error_type=...)` in `run()` fails the turn
-  the same way as returning `TaskResult.failure`. Any other exception that escapes `run()` becomes an opaque
-  `infra_error`, its text never sent.
+  happen, and agent-env may retry it. An exception that escapes `run()` becomes an opaque `infra_error`, its text
+  never sent.
 - **Context and sessions:** turns of one `context_id` run one at a time; different contexts run concurrently, and the
   validator relies on it, so don't serialize them. Return your runtime's conversation id as `session_ref` and the next
   turn in that context gets it back; bind it before the runtime starts, so a live trajectory read or a mid-turn
@@ -120,12 +119,14 @@ Reference: `enable(MCP_CONFIG_V1, ...)`, and `claude_bridge.py` where it builds 
 
 ### `cdp-config/v1`, `/ext/cdp-config`
 
-For an agent that drives a browser itself. agent-env adds each browser it gives the agent as `{name, http_url,
-ws_url, headers?, metadata?}`, and adding a name again replaces it. The SDK implements `add`, `list` and `remove` and
-passes the endpoints in `request.cdp_endpoints` every turn. Take yours with `request.cdp_endpoint()`, or
-`request.cdp_endpoint(name)` when the task gives several, and connect afresh each turn, since an address can change
-between turns. With no endpoint, or several and no name, it fails the turn as an `infra_error` (`cdp.no_endpoint`,
-`cdp.ambiguous`), so the agent never falls back to a browser of its own.
+For an agent that drives a browser itself. A browser reaches the agent as an endpoint `{name, http_url, ws_url,
+headers?, metadata?}` sent to `add`, and adding a name again replaces it; nothing in agent-env sends one yet (the
+`browser_connect_cdp` task step will). The SDK implements `add`, `list` and `remove`, and passes the endpoints in
+`request.cdp_endpoints` every turn. Take yours with `request.cdp_endpoint()`, or `request.cdp_endpoint(name)` when
+the task gives several, and connect afresh each turn, since an address can change between turns. With no endpoint, or
+several and no name, it fails the turn as an `infra_error` (`cdp.no_endpoint`, `cdp.ambiguous`), so the agent never
+falls back to a browser of its own. It fails the turn by raising, so call it before any handler of yours that catches
+every exception.
 
 ### `trajectory/v1`, `/ext/trajectory`
 

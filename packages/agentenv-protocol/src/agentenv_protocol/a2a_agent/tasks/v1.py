@@ -246,14 +246,14 @@ class TaskRequest(Generic[ConfigT]):
         if name is not None:
             if name in self.cdp_endpoints:
                 return self.cdp_endpoints[name]
-            raise TaskFailed(
+            raise _TaskFailed(
                 "cdp.no_endpoint", f"the task gave no browser named {name!r}", error_type="infra_error"
             )
         if len(self.cdp_endpoints) == 1:
             return next(iter(self.cdp_endpoints.values()))
         if not self.cdp_endpoints:
-            raise TaskFailed("cdp.no_endpoint", "the task gave no browser", error_type="infra_error")
-        raise TaskFailed(
+            raise _TaskFailed("cdp.no_endpoint", "the task gave no browser", error_type="infra_error")
+        raise _TaskFailed(
             "cdp.ambiguous",
             f"the task gave several browsers; name one of {', '.join(sorted(self.cdp_endpoints))}",
             error_type="infra_error",
@@ -276,8 +276,8 @@ class TaskError:
             raise ValueError("error_type must be 'agent_error' or 'infra_error'")
 
 
-class TaskFailed(Exception):
-    """Raised in ``run()`` to end the turn as ``TaskResult.failure(code, message, error_type=error_type)``."""
+class _TaskFailed(Exception):
+    """Ends the turn as ``TaskResult.failure(code, message, error_type=error_type)``; ``cdp_endpoint`` raises it."""
 
     def __init__(
         self,

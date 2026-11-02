@@ -866,10 +866,8 @@ and become failed A2A tasks with `error_type`, `error_code`, and `error_message`
 in the terminal message. `error_type` is the platform classification
 (`agent_error` by default, or explicitly `infra_error` for a retryable
 infrastructure failure); `error_code` preserves the author's machine-readable
-code. `run()` may instead raise `TaskFailed(code, message, error_type=...)`,
-which fails the task the same way. Any other exception escaping `run()`, an
-invalid return value, or a result-mapping failure is logged with a
-correlation ID and reported as an
+code. An exception escaping `run()`, an invalid return value, or a
+result-mapping failure is logged with a correlation ID and reported as an
 `infra_error` with code `framework.unhandled_exception`; raw exception text is
 never sent to callers.
 Invalid input that prevents task creation returns JSON-RPC `InvalidParams`.
@@ -1178,14 +1176,15 @@ tools with (agent-env relays the env card's name: the MultiEnv's declared name, 
 `name`, `http_url` (`http` or `https`, for clients that discover through
 `/json/version`) and `ws_url` (`ws` or `wss`, for clients that connect
 directly), with optional `headers` and `metadata`; adding a name again replaces
-it. `GET /ext/cdp-config` returns `{"cdp_endpoints": {name: {"http_url",
-"ws_url", "has_headers", "metadata"}}}`, header values hidden, and
-`DELETE /ext/cdp-config` with `{"name"}` removes one; removing a name that isn't
-there is not an error. Every task's `TaskRequest.cdp_endpoints` holds them,
-headers included. `TaskRequest.cdp_endpoint(name=None)` returns the named
-endpoint, or the only one, and otherwise raises `TaskFailed`, failing the task
-as an `infra_error` with `cdp.no_endpoint` (none, or none by that name) or
-`cdp.ambiguous` (several and no name).
+it. `GET /ext/cdp-config` returns `{"cdp_endpoints": {name: {"has_headers",
+"metadata"}}}`: neither the URLs nor the header values, since either can carry
+the endpoint's credential. `DELETE /ext/cdp-config` with `{"name"}` removes one;
+removing a name that isn't there is not an error. Every task's
+`TaskRequest.cdp_endpoints` holds them in full. `TaskRequest.cdp_endpoint(name=None)`
+returns the named endpoint, or the only one, and otherwise fails the task as an
+`infra_error` with `cdp.no_endpoint` (none, or none by that name) or
+`cdp.ambiguous` (several and no name). It fails the task by raising, so call it
+before any handler of your own that catches every exception.
 
 `PEER_AGENTS_V1` lets an agent delegate to the other agents in its task. AgentEnv
 sets the routing table with `POST /ext/peer-agents` (`{"peers": [{"name", "url",

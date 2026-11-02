@@ -13,7 +13,6 @@ from agentenv_protocol.a2a_agent import (
     CDP_CONFIG_V1,
     AgentEnvAgent,
     AgentIdentity,
-    TaskFailed,
     TaskProgress,
     TaskRequest,
     TaskResult,
@@ -85,7 +84,7 @@ def test_the_card_lists_add_list_and_remove() -> None:
     assert all("endpoint" not in method for method in methods.values())
 
 
-def test_adding_a_name_again_replaces_it_and_list_hides_header_values() -> None:
+def test_adding_a_name_again_replaces_it_and_list_hides_urls_and_header_values() -> None:
     with TestClient(CdpAgent().create_app()) as client:
         assert client.post("/ext/cdp-config", json=CHROMIUM).json() == {"status": "added", "name": "chromium"}
         replaced = {**CHROMIUM, "http_url": "http://browser.test:8000/cdp/token-2/", "headers": {"X-Secret": "s3"}}
@@ -93,16 +92,10 @@ def test_adding_a_name_again_replaces_it_and_list_hides_header_values() -> None:
         listing = client.get("/ext/cdp-config")
 
     assert listing.json() == {
-        "cdp_endpoints": {
-            "chromium": {
-                "http_url": "http://browser.test:8000/cdp/token-2/",
-                "ws_url": CHROMIUM["ws_url"],
-                "has_headers": True,
-                "metadata": CHROMIUM["metadata"],
-            }
-        }
+        "cdp_endpoints": {"chromium": {"has_headers": True, "metadata": CHROMIUM["metadata"]}}
     }
     assert "s3" not in listing.text
+    assert "token-" not in listing.text
 
 
 def test_remove_takes_a_name_and_a_name_that_is_not_there_is_not_an_error() -> None:
@@ -212,9 +205,3 @@ def test_a_turn_holds_a_copy_of_the_endpoints() -> None:
     assert request.cdp_endpoint()["ws_url"] == CHROMIUM["ws_url"]
     assert request.cdp_endpoint("chromium") == request.cdp_endpoints["chromium"]
 
-
-def test_task_failed_takes_only_the_known_error_types() -> None:
-    assert TaskFailed("cdp.no_endpoint", "none", error_type="infra_error").error.error_type == "infra_error"
-    assert TaskFailed("tool.failed", "failed").error.error_type == "agent_error"
-    with pytest.raises(ValueError, match="error_type"):
-        TaskFailed("cdp.no_endpoint", "none", error_type="custom")  # type: ignore[arg-type]
