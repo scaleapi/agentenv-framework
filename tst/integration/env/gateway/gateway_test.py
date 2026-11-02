@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from typing import NamedTuple
+from urllib.parse import urlsplit
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -1375,6 +1376,12 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
         logger.info(f"browser_snapshot result: {content_text[:500]}")
         assert "Slack Workspace" in content_text, f"Expected 'Slack Workspace' in snapshot, got {content_text}"
 
+        # The SQL consoles share the browser's network but answer only under the deploy's own path.
+        for url in ("http://pgweb:8081/api/query?query=SELECT%201", "http://db-mcp:8000/mcp"):
+            result = await session.call_tool("browser_navigate", {"url": url})
+            content_text = "".join(c.text for c in result.content if hasattr(c, "text"))
+            assert "not found" in content_text.lower(), f"Expected {url} refused to the browser, got {content_text}"
+
         # 4. browser_close then snapshot returns empty/blank page
         await session.call_tool("browser_close", {})
         result = await session.call_tool("browser_snapshot", {})
@@ -1428,6 +1435,20 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
             logger.info(f"BEFORE load_environment_artifact - channels: {data}")
             assert data["ok"] is True
             assert data["channels"] == []
+
+        # The operator reaches pgweb and db-mcp at the URLs the deploy recorded, and nowhere else on their hosts.
+        async with httpx.AsyncClient() as client:
+            queried = await client.post(f"{result.db_web_url}api/query", data={"query": "SELECT 1 AS one"}, timeout=30)
+            assert queried.status_code == 200 and "one" in queried.text, f"pgweb at {result.db_web_url}: {queried.text}"
+            web_origin = urlsplit(result.db_web_url)._replace(path="").geturl()
+            for path in ("/", "/api/query?query=SELECT%201"):
+                assert (await client.get(f"{web_origin}{path}", timeout=30)).status_code == 404
+            mcp_origin = urlsplit(result.db_mcp_url)._replace(path="").geturl()
+            assert (await client.post(f"{mcp_origin}/mcp", json={}, timeout=30)).status_code == 404
+        async with streamable_http_client(result.db_mcp_url) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                assert "execute_sql" in [t.name for t in (await session.list_tools()).tools]
 
         await slack_website_env.load_environment_artifact(slack_service_artifact)
 

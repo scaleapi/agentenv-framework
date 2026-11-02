@@ -149,7 +149,7 @@ def stub_postgres(monkeypatch):
     monkeypatch.setattr(
         LocalPostgresStateProvider, "_pg_url", lambda self, *a, **k: "postgres://stub",
     )
-    return LocalPostgresStateProvider.__new__(LocalPostgresStateProvider)
+    return LocalPostgresStateProvider()
 
 
 def _sidecar(name: str, host_port: int, container_port: int = 8000) -> SidecarConfig:

@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import yaml
+
 from agent_env.env.envs.service_db import (
     DB_NAME,
     DB_PASSWORD,
@@ -298,3 +300,17 @@ def test_rendered_sidecar_service_names_matches_creation_gating():
     rendered = "\n".join(both.render_sidecar_containers(["svc"]))
     for name in both.rendered_sidecar_service_names():
         assert f"  {name}:" in rendered
+
+
+def test_the_sql_consoles_answer_only_under_the_path_a_deploy_gives_them():
+    """pgweb and db-mcp are published, and on a VM tunnelled, so a deploy serves them under a path of its own that only
+    the URLs it records carry; with none, as an exported bundle renders them, they answer at their roots."""
+    provider = LocalPostgresStateProvider(service_db_config=ServiceDBConfig(db_web_image="pgweb:1", db_mcp_image="dbmcp:1"))
+    at_root = "\n".join(provider.render_sidecar_containers(["svc"]))
+    provider.console_path = "Kp3vX8nQ2wR7tY5mZ1aB9cDe"
+    services = yaml.safe_load("services:\n" + "\n".join(provider.render_sidecar_containers(["svc"])))["services"]
+
+    assert "PGWEB_URL_PREFIX=Kp3vX8nQ2wR7tY5mZ1aB9cDe" in services[PGWEB_SERVICE_NAME]["environment"]
+    assert "DB_MCP_PATH=/Kp3vX8nQ2wR7tY5mZ1aB9cDe/mcp" in services[DB_MCP_SERVICE_NAME]["environment"]
+    assert services[DB_MCP_SERVICE_NAME]["entrypoint"][:2] == ["python", "-c"]
+    assert not any(word in at_root for word in ("PGWEB_URL_PREFIX", "DB_MCP_PATH", "entrypoint"))

@@ -13,6 +13,7 @@ SQL, and the container healthcheck. ``ServiceDBEnv`` keeps only the docker image
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
@@ -54,6 +55,14 @@ logger = logging.getLogger(__name__)
 INIT_SCRIPT_MOUNT_PATH = "/docker-entrypoint-initdb.d/init-schemas.sql"
 
 _STOCK_POSTGRES_IMAGE = "public.ecr.aws/docker/library/postgres:16-alpine"
+
+# postgres-mcp takes no option for its MCP path, so db-mcp starts through this, which sets the path from DB_MCP_PATH
+# first. It needs no change to the image, so every db-mcp image already promoted runs it.
+_DB_MCP_ENTRYPOINT = [
+    "python", "-c",
+    "import asyncio, os; from postgres_mcp import server; "
+    "server.mcp.settings.streamable_http_path = os.environ['DB_MCP_PATH']; asyncio.run(server.main())",
+]
 
 
 @dataclass
@@ -108,6 +117,9 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
         super().__init__()
         self._service_db_config = service_db_config
         self._service_db_env: "ServiceDBEnv | None" = None
+        # The path pgweb and db-mcp answer under. A gateway deploy draws one, so that only the URLs it records reach
+        # consoles whose ports are published, and on a VM tunnelled; None serves them at their roots.
+        self.console_path: str | None = None
 
     def deploy_state_context(
         self, *, ttl_seconds: int = DEFAULT_STATE_TTL_SECONDS, name_hint: str | None = None
@@ -278,6 +290,7 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
                 # sidecar_specs for why: Disconnect tore down pgweb's shared
                 # session and 500'd the changelog export on Save & Next).
                 "      - PGWEB_LOCK_SESSION=true",
+                *([f"      - PGWEB_URL_PREFIX={self.console_path}"] if self.console_path else []),
                 "    ports:",
                 *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(DB_WEB_PORT), DB_WEB_PORT)),
                 "    networks:",
@@ -294,6 +307,8 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
                 "        condition: service_healthy",
                 "    environment:",
                 f"      - DATABASE_URI={self._pg_url(DATABASE_SERVICE_NAME, scheme='postgresql')}",
+                *([f"      - DB_MCP_PATH=/{self.console_path}/mcp",
+                   f"    entrypoint: {json.dumps(_DB_MCP_ENTRYPOINT)}"] if self.console_path else []),
                 "    command: --transport=streamable-http --streamable-http-host=0.0.0.0 --access-mode=unrestricted",
                 "    ports:",
                 *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(DB_MCP_PORT), DB_MCP_CONTAINER_PORT)),
@@ -360,7 +375,8 @@ class LocalPostgresStateProvider(DatabaseStateProvider):
                 # session — breaking both the Raw DB view AND the hub's changelog
                 # export (it queries the same pgweb `/api/query`), so Save & Next
                 # 500'd. Locking the session removes the button and the failure.
-                env={"PGWEB_DATABASE_URL": pgweb_url, "PGWEB_LOCK_SESSION": "true"},
+                env={"PGWEB_DATABASE_URL": pgweb_url, "PGWEB_LOCK_SESSION": "true",
+                     **({"PGWEB_URL_PREFIX": self.console_path} if self.console_path else {})},
             ))
         elif cfg.db_web_image:
             logger.warning(f"pgweb image {cfg.db_web_image} is not in the image store; skipping pgweb provisioning")

@@ -766,6 +766,30 @@ async def test_the_deploys_cpu_reaches_every_container():
 
 
 @pytest.mark.asyncio
+async def test_a_container_deploy_records_pgweb_under_its_path_and_db_mcp_at_its_root():
+    """In containers pgweb takes the deploy's path from the env it starts with; db-mcp, whose path only its compose
+    entrypoint can set, keeps /mcp there."""
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    calls: list[dict] = []
+
+    async def fake_create_container(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("is_tcp"):
+            return _FakeSandbox(f"db-{kwargs['port']}", kwargs["port"], f"tcp://db.modal.host:{kwargs['port']}")
+        return _FakeSandbox(f"sb-{kwargs['image_name']}", kwargs["port"], f"https://{kwargs['image_name']}.modal.host")
+
+    with _slack_in_containers(gp, provider, fake_create_container) as args:
+        gp._state_provider.console_path = "Kp3vX8nQ"
+        deployed = await gp._deploy_via_containers(sandbox_provider=provider, **args)
+
+    pgweb, db_mcp = (next(c["image_name"] for c in calls if c["image_name"].endswith(name)) for name in ("pgweb", "db-mcp"))
+    assert next(c for c in calls if c["image_name"] == pgweb)["env"]["PGWEB_URL_PREFIX"] == "Kp3vX8nQ"
+    assert (deployed.db_web_url, deployed.db_mcp_url) == (f"https://{pgweb}.modal.host/Kp3vX8nQ/",
+                                                          f"https://{db_mcp}.modal.host/mcp")
+
+
+@pytest.mark.asyncio
 async def test_container_mode_injects_the_registered_environment_name():
     """As in compose mode, the MCP server gets its registered name, which the SDK serves as its card name."""
     calls = await _run_container_deploy()
@@ -1187,6 +1211,9 @@ def test_redact_compose_secrets_masks_only_secret_env_lines():
     assert '      - "18768:8000"' in redacted
     # the un-redacted compose still carries the real secret (only the log copy is masked)
     assert "s3cr3t-token-value" in compose
+    # and so do the SQL consoles' path, which their URLs carry
+    consoles = "    environment:\n      - PGWEB_URL_PREFIX=Kp3vX8nQ\n      - DB_MCP_PATH=/Kp3vX8nQ/mcp"
+    assert "Kp3vX8nQ" not in _redact_compose_secrets(consoles)
 
 
 @pytest.mark.asyncio

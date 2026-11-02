@@ -269,15 +269,21 @@ def test_sidecar_specs_skip_images_the_image_store_does_not_own(image_store, cap
 
     # Both in the image store → both sidecars, pointed at the instance's host. The config is held
     # on the provider instance, not threaded through sidecar_specs.
-    both = LocalPostgresStateProvider(
+    provider = LocalPostgresStateProvider(
         service_db_config=ServiceDBConfig(db_web_image=f"{_REPOSITORIES}/pgweb:v1", db_mcp_image=f"{_REPOSITORIES}/db-mcp:v1")
-    ).sidecar_specs(instance=instance)
+    )
+    both = provider.sidecar_specs(instance=instance)
     assert {s.name for s in both} == {"pgweb", "db-mcp"}
     assert all("[fdaa::1]" in next(iter(s.env.values())) for s in both)
     # pgweb runs locked to its single connection (Connect/Disconnect hidden) so a
     # contributor can't tear down the shared session the changelog export relies on.
     pgweb_spec = next(s for s in both if s.name == "pgweb")
     assert pgweb_spec.env["PGWEB_LOCK_SESSION"] == "true"
+    assert "PGWEB_URL_PREFIX" not in pgweb_spec.env
+    # A deploy's path, which the URL it records carries, is the only place pgweb answers.
+    provider.console_path = "Kp3vX8nQ2wR7tY5mZ1aB9cDe"
+    pgweb_spec = next(s for s in provider.sidecar_specs(instance=instance) if s.name == "pgweb")
+    assert pgweb_spec.env["PGWEB_URL_PREFIX"] == "Kp3vX8nQ2wR7tY5mZ1aB9cDe"
 
     # pgweb from Docker Hub + unset db-mcp → neither, and a warning for the configured one only.
     none = LocalPostgresStateProvider(

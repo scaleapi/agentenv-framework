@@ -538,12 +538,14 @@ def _is_safe_member(name: str) -> bool:
 
 
 def _env_on_host(deployed: DeployedSandboxEnv, sandbox: Any) -> dict:
-    """The env's id, address and MCP endpoint as a script on its host reaches them."""
-    url, mcp_url = deployed.environment_url, deployed.mcp_url
+    """The env's id, address and MCP endpoint as a script on its host reaches them, and its DB MCP endpoint when it
+    has one, which serves under a path of the deploy's own that only the recorded URL carries."""
+    url, mcp_url, db_mcp_url = deployed.environment_url, deployed.mcp_url, getattr(deployed, "db_mcp_url", None)
     return {
         "id": deployed.env_id,
         "url": url and sandbox.url_on_host(url),
         "mcp_url": mcp_url and sandbox.url_on_host(mcp_url),
+        **({"db_mcp_url": sandbox.url_on_host(db_mcp_url)} if db_mcp_url else {}),
     }
 
 

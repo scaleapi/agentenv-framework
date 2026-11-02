@@ -315,6 +315,15 @@ def test_an_envs_address_and_mcp_endpoint_come_from_its_card_whatever_deployed_i
     assert _run_code_module._env_on_host(deployed, sandbox) == expected
 
 
+def test_a_gateway_envs_db_mcp_endpoint_keeps_the_path_its_deploy_serves_it_under():
+    deployed = DeployedGatewayEnv(env_id="gw", env_version=1, sandbox_id="sb", gateway_url="https://abc.modal.host",
+                                  db_mcp_url="https://db.modal.host/Kp3vX8nQ/mcp", environment_card_url=_CARD_URL,
+                                  environment_card={"name": "gw"})
+    sandbox = _ContainerEnvSandbox({18765: "https://abc.modal.host", 18767: "https://db.modal.host"})
+
+    assert _run_code_module._env_on_host(deployed, sandbox)["db_mcp_url"] == "http://127.0.0.1:18767/Kp3vX8nQ/mcp"
+
+
 def _written_input(sandbox):
     """The input.json the step staged, through whichever writer its target uses."""
     for call in sandbox.write_host_file.await_args_list:

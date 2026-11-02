@@ -7,6 +7,7 @@ import functools
 import json
 import logging
 import re
+import secrets
 import shlex
 import time
 from collections import Counter
@@ -874,13 +875,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 logger.warning(f"{name} container not found")
 
         gateway_url = sandbox.tunnel_urls.get(gateway_port)
+        console = f"/{self._state_provider.console_path}" if sidecar_names and self._state_provider.console_path else ""
         db_web_base_url = sandbox.tunnel_urls.get(DB_WEB_PORT) if PGWEB_SERVICE_NAME in sidecar_names else None
-        db_web_url = f"{db_web_base_url}/" if db_web_base_url else None
+        db_web_url = f"{db_web_base_url}{console}/" if db_web_base_url else None
         db_mcp_base_url = sandbox.tunnel_urls.get(DB_MCP_PORT) if DB_MCP_SERVICE_NAME in sidecar_names else None
-        db_mcp_url = f"{db_mcp_base_url}/mcp" if db_mcp_base_url else None
-        logger.info(f"pgweb URL: {db_web_url}")
+        db_mcp_url = f"{db_mcp_base_url}{console}/mcp" if db_mcp_base_url else None
+        logger.info(f"pgweb URL: {self._masked(db_web_url)}")
         if db_mcp_url:
-            logger.info(f"DB MCP endpoint: {db_mcp_url}")
+            logger.info(f"DB MCP endpoint: {self._masked(db_mcp_url)}")
 
         # Wait for the tunnel to serve the env card, which the deploy records
         card = await self._wait_for_tunnel(gateway_url, timeout=120)
@@ -1040,7 +1042,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             card_read_at_utc = datetime.now(timezone.utc).isoformat()
             await self._refuse_tool_name_clashes(gateway_url)
 
-            db_web_url = pgweb_sb.tunnel_urls[DB_WEB_PORT] + "/" if pgweb_sb else None
+            console = f"/{self._state_provider.console_path}" if pgweb_sb and self._state_provider.console_path else ""
+            db_web_url = f"{pgweb_sb.tunnel_urls[DB_WEB_PORT]}{console}/" if pgweb_sb else None
             db_mcp_url = db_mcp_sb.tunnel_urls[DB_MCP_CONTAINER_PORT] + "/mcp" if db_mcp_sb else None
             return DeployedGateway(
                 gateway_url=gateway_url,
@@ -1179,8 +1182,13 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         except Exception as e:
             logger.warning(f"Can't read container {container_id}'s logs: {e}")
             return None
-        lines = [line[:_LOG_LINE_CHARS] for line in logs.splitlines() if line.strip()] if exit_code == 0 else []
+        lines = [line[:_LOG_LINE_CHARS] for line in self._masked(logs).splitlines() if line.strip()] if exit_code == 0 else []
         return "\n".join(f"    {line}" for line in lines) or None
+
+    def _masked(self, text: str) -> str:
+        """``text`` with the consoles' path masked: pgweb prints it as it starts, and both log the paths they serve."""
+        path = getattr(self._state_provider, "console_path", None)
+        return text.replace(path, "***") if path else text
 
     async def _log_service(self, sandbox: VmSandbox, compose_service: str) -> bool:
         """Log a compose service's container output; False when it has no container. Diagnostics only, so
@@ -1196,9 +1204,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if exit_code != 0:
             logger.warning(f"Skipping {compose_service} logs: docker logs exited {exit_code}: {stderr.strip()[-500:]}")
             return True
-        logger.info(f"  stdout:\n{logs}")
+        logger.info(f"  stdout:\n{self._masked(logs)}")
         if stderr:
-            logger.info(f"  stderr:\n{stderr}")
+            logger.info(f"  stderr:\n{self._masked(stderr)}")
         return True
 
     async def _get_container_id(self, sandbox: VmSandbox, compose_service: str) -> str | None:
@@ -1365,6 +1373,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if state_instance is not None
             else LocalPostgresStateProvider()
         )
+        if isinstance(self._state_provider, LocalPostgresStateProvider):
+            self._state_provider.console_path = secrets.token_urlsafe(18)
         deploy_kwargs = {"attribution": dict(attribution or {})}
         if not self.in_vm(sandbox_provider):
             if problem := self.sandbox_problem(sandbox_provider, websites=bool(website_configs)):
@@ -1544,7 +1554,8 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
 # Compose `environment:` keys whose values are secrets and must be masked before the
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
-_SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+_SECRET_ENV_KEY_RE = re.compile(
+    r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY|URL_PREFIX|DB_MCP_PATH)[A-Za-z0-9_]*)=.*$")
 
 
 def _compose_ps_rows(text: str) -> list[dict]:
