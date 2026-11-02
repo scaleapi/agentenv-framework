@@ -3,8 +3,8 @@ the ubuntu-24.04 base: gate 3 makes this machine's arch ready with it, which its
 of; deployed, Chromium runs with agentenv's flags after the fixture's command, on the deploy's locale, through no proxy,
 with agentenv's policies where its build reads them and with no debugging port anything in the computer could find; its
 first start tab sees the deploy's time zone, and a page on loopback loads; its card declares browser/v1; and a reset
-relaunches it on its profile template, on a new pipe its ready check answers over. Needs Docker and the local registry
-on localhost:5000."""
+relaunches it on its profile template, on a new pipe its ready check answers over. Its computer's /dev/shm is Docker's
+64 MiB, so it keeps its shared memory in files. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import json
@@ -117,11 +117,12 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
             report = await teardown_run(context)
 
     argv = browser["argv"]
-    assert argv[0].endswith("chromium/chrome/chrome") and argv[1:4] == ["--no-sandbox", "--disable-dev-shm-usage",
-                                                                       "--class=Chromium"]
-    assert argv[4].startswith("--user-data-dir=") and argv[4].endswith("/.config/chromium")
-    assert argv[5:9] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=fr-FR"]
-    assert argv[9:] == [TIME_ZONE_PAGE, LOOPBACK]
+    assert argv[0].endswith("chromium/chrome/chrome") and argv[1:3] == ["--no-sandbox", "--class=Chromium"]
+    assert argv[3].startswith("--user-data-dir=") and argv[3].endswith("/.config/chromium")
+    assert argv[4].startswith("--disk-cache-dir=") and argv[4].endswith("/.cache/chromium")
+    assert argv[5:10] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=fr-FR",
+                          "--disable-dev-shm-usage"]
+    assert argv[10:] == [TIME_ZONE_PAGE, LOOPBACK]
     assert browser["listening"] == 0 and port_file["exit_code"] != 0
     assert zone.startswith("Europe/Paris") and loopback.startswith("Loopback page")
     assert {"BrowserSignin": 0, "DownloadDirectory": "${user_home}/Downloads"}.items() <= json.loads(
