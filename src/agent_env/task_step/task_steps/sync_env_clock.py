@@ -80,8 +80,8 @@ class SyncEnvClockTaskStep(TaskStep):
         self.virtual_seconds_per_real_second = virtual_seconds_per_real_second
         self.tolerate_missing_sync_time = tolerate_missing_sync_time
         self.timeout_seconds = timeout_seconds
-        self.timezone = timezone
-        self.armed_virtual_time = resolve_virtual_time(virtual_time, timezone)
+        self.timezone = timezone.strip() if isinstance(timezone, str) else timezone
+        self.armed_virtual_time = resolve_virtual_time(virtual_time, self.timezone)
 
     def to_dict(self) -> dict:
         base = super().to_dict()

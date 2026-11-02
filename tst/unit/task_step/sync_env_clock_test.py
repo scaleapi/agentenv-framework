@@ -262,3 +262,8 @@ async def test_a_server_that_does_not_advertise_clock_is_still_skipped_when_a_zo
     _mock_http(monkeypatch)
     out = await _zoned()._sync_one(_carded(await _composed_card({"mcp-email": []})), "http://gw", "email", CLOCK_URL)
     assert out == {"synced": False, "reason": "not_advertised"}
+
+
+def test_a_padded_zone_is_stored_and_sent_stripped():
+    s = _zoned(timezone=" America/New_York ")
+    assert s.timezone == "America/New_York" and s.to_dict()["timezone"] == "America/New_York"
