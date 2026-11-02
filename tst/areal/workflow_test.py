@@ -58,7 +58,8 @@ def areal(monkeypatch):
     monkeypatch.setattr(proxy.OpenAIProxyWorkflow, "_grant_capacity", AsyncMock())
     monkeypatch.setattr(workflow_context, "get_httpx_client", AsyncMock(return_value=None))
     monkeypatch.setattr(workflow_context, "get_aiohttp_session", AsyncMock(return_value=None))
-    engine = remote.RemoteInfEngine(cli_args.InferenceEngineConfig(agent=cli_args.AgentConfig(mode="inline")), None)
+    config = cli_args.InferenceEngineConfig(agent=cli_args.AgentConfig(agent_cls_path=WORKFLOW, mode="inline"))
+    engine = remote.RemoteInfEngine(config, None)
     engine.logger = logging.getLogger("areal-tier")
 
     def plays(row, url, group, **kwargs):
