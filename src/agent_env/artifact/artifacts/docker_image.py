@@ -22,7 +22,7 @@ from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id, local_image_repository
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import image_reference_problem, is_loopback_host, names_registry, registry_host_from_ref
-from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
+from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest, pinned_from
 from agent_env.utils.docker.context import BuildContext
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image, normalize_platform
 
@@ -222,7 +222,9 @@ class DockerImageArtifact(Artifact):
         sandbox that can't pull the image to build it.
 
         ``image_name`` must name its registry, read with the configured image store's credentials where it holds them;
-        one on this machine is refused unless ``id``'s image store is the local registry."""
+        one on this machine is refused unless ``id``'s image store is the local registry. One already pinned to a
+        digest, in a registry that refuses to serve it to a store holding no credentials for it, is recorded as given,
+        for a sandbox whose Docker is logged in to that registry to pull."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
@@ -240,7 +242,13 @@ class DockerImageArtifact(Artifact):
             if earlier_pin is not None and pinned_from(earlier_pin, image_name):
                 pinned = earlier_pin
             else:
-                pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
+                auth = config.get_image_store().auth(image_name)
+                try:
+                    pinned = pin_digest(image_name, auth)
+                except RegistryRefusedError:
+                    if auth is not None or "@" not in image_name:
+                        raise
+                    pinned = image_name
             if context_path is None:
                 return get_artifact_store().put_document(cls(id=id, description=description, image_name=pinned))
             image_name, _, image_digest = pinned.rpartition("@")
