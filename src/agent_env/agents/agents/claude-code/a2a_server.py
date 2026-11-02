@@ -20,7 +20,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from a2a.types import AgentSkill
 from agentenv_protocol.a2a_agent import (
@@ -58,7 +58,6 @@ from agentenv_protocol.a2a_agent import (
     extension,
 )
 from agentenv_protocol.transfers import Uploaded, download, upload
-from pydantic import BaseModel, ConfigDict, model_validator
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 
@@ -74,6 +73,7 @@ from tar_changelog import (
 )
 from claude_bridge import (
     CLAUDE_STATE_DIR,
+    ClaudeCodeTools,
     SESSION_JSONL_DIR,
     WORKSPACE_DIR,
     kill_running_clis,
@@ -120,31 +120,6 @@ _INSTALL_COMMANDS = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh cont
 # On a host there's no container working directory: the agent works in /app, as in its image.
 _HOST_WORKDIR = "/app"
 _INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + f"bash {{work_dir}}/agent/install.sh host {{agent_name}} {{a2a_port}} {_HOST_WORKDIR}"]
-
-
-# The CLI's own tools, by the names its model sees, in the pinned version. Which of them it offers by default depends
-# on the model, and its MCP resource tools come only with MCP servers.
-ClaudeCodeTool = Literal["Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
-                         "ExitWorktree", "ListAgents", "ListMcpResourcesTool", "NotebookEdit", "Read",
-                         "ReadMcpResourceDirTool", "ReadMcpResourceTool", "ReportFindings", "ScheduleWakeup",
-                         "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskStop", "TaskUpdate",
-                         "WebFetch", "WebSearch", "Workflow", "Write"]
-
-
-class ClaudeCodeTools(BaseModel):
-    """The protocol's ``BuiltinTools[ClaudeCodeTool]``, which the image's protocol floor doesn't have yet: the same
-    fields and checks, so the card's schema is the same."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    disable: Literal["*"] | list[ClaudeCodeTool] | None = None
-    only: list[ClaudeCodeTool] | None = None
-
-    @model_validator(mode="after")
-    def _one_of(self) -> ClaudeCodeTools:
-        if (self.disable is None) == (self.only is None):
-            raise ValueError("builtin_tools takes exactly one of disable and only")
-        return self
 
 
 class ClaudeCodeConfig(AgentConfig):
@@ -516,7 +491,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 effort=cfg.effort,
                 max_turns=cfg.max_turns,
                 max_thinking_tokens=cfg.max_thinking_tokens,
-                builtin_tools=None if cfg.builtin_tools is None else cfg.builtin_tools.model_dump(exclude_none=True),
+                builtin_tools=cfg.builtin_tools,
                 event_callback=request.trajectory.append,
             )
         except Exception as e:

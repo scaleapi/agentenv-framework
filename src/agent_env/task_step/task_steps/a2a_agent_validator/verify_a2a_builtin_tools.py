@@ -91,7 +91,7 @@ class VerifyA2ABuiltinToolsStep(TaskStep):
         count = response.tool_call_count
         checks = {
             "unknown_tool_refused": refused == 400,
-            "read_back": None if config is None else config.get("builtin_tools") == {"disable": "*"},
+            "read_back": None if config is None else _set(config.get("builtin_tools")) == {"disable": "*"},
             "no_tool_calls": count == 0 if count is not None else response.response.strip() == NO_TOOLS,
         }
         passed = all(check is not False for check in checks.values())
@@ -110,3 +110,8 @@ class VerifyA2ABuiltinToolsStep(TaskStep):
             fresh.update_metadata({**fresh.metadata, "validated_builtin_tools_via_agent_config": validated})
         except Exception as e:
             logger.warning("Failed to persist validated_builtin_tools_via_agent_config (CAS conflict?): %s", e)
+
+
+def _set(selection: dict | None) -> dict:
+    """A selection as read back, without the fields it leaves unset, which an agent may return as null."""
+    return {key: value for key, value in (selection or {}).items() if value is not None}

@@ -16,6 +16,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from kit import in_thread_to_its_end
 
@@ -50,6 +53,33 @@ _MODEL_ALIASES = (
 )
 # What agent-env gives an agent for [model.headers]: a JSON object of header names to values.
 MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
+
+
+# The CLI version ClaudeCodeTool names the tools of; a test holds it to the Dockerfile's CLAUDE_CODE_VERSION.
+TOOLS_CLI_VERSION = "2.1.280"
+# The CLI's own tools, by the names its model sees. Which of them it offers by default depends on the model, and its MCP
+# resource tools come only with MCP servers.
+ClaudeCodeTool = Literal["Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
+                         "ExitWorktree", "ListAgents", "ListMcpResourcesTool", "NotebookEdit", "Read",
+                         "ReadMcpResourceDirTool", "ReadMcpResourceTool", "ReportFindings", "ScheduleWakeup",
+                         "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskStop", "TaskUpdate",
+                         "WebFetch", "WebSearch", "Workflow", "Write"]
+
+
+class ClaudeCodeTools(BaseModel):
+    """The protocol's ``BuiltinTools[ClaudeCodeTool]``, which the image's protocol floor doesn't have yet: the same
+    fields and checks, so the card's schema is the same."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disable: Literal["*"] | list[ClaudeCodeTool] | None = None
+    only: list[ClaudeCodeTool] | None = None
+
+    @model_validator(mode="after")
+    def _one_of(self) -> ClaudeCodeTools:
+        if (self.disable is None) == (self.only is None):
+            raise ValueError("builtin_tools takes exactly one of disable and only")
+        return self
 
 
 def session_jsonl_path(session_id: str) -> Path:
@@ -383,7 +413,7 @@ async def run_claude(
     effort: str | None = None,
     max_turns: int | None = None,
     max_thinking_tokens: int | None = None,
-    builtin_tools: dict | None = None,
+    builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
 ) -> ClaudeResult:
     """Run one turn, resuming the CLI session when a transient upstream failure cuts it short; a resume spends what
@@ -574,7 +604,7 @@ def _with_1m_window(model: str) -> str:
 def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools: list[str] | None,
              mcp_servers: dict[str, dict] | None, system_prompt: str | None, output_format: dict | None,
              role: str | None, effort: str | None, max_turns: int | None,
-             builtin_tools: dict | None = None) -> list[str]:
+             builtin_tools: ClaudeCodeTools | None = None) -> list[str]:
     """The CLI's argv. The prompt goes on stdin, since one argument over 128 KiB fails exec. ``builtin_tools`` selects
     the CLI's own tools: ``{"disable": "*"}`` offers none, ``{"only": [...]}`` just those, and ``{"disable": [...]}``
     the CLI's defaults but those; with any selection, its MCP servers are only ``mcp_servers``."""
@@ -598,11 +628,10 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
     if allowed_tools:
         cmd += ["--allowedTools", ",".join(allowed_tools)]
     if builtin_tools is not None:
-        only, disable = builtin_tools.get("only"), builtin_tools.get("disable")
-        if only is not None or disable == "*":
-            cmd += ["--tools", ",".join(only or [])]
-        elif disable:
-            cmd += ["--disallowedTools", ",".join(disable)]
+        if builtin_tools.only is not None or builtin_tools.disable == "*":
+            cmd += ["--tools", ",".join(builtin_tools.only or [])]
+        elif builtin_tools.disable:
+            cmd += ["--disallowedTools", ",".join(builtin_tools.disable)]
         cmd.append("--strict-mcp-config")
     if mcp_servers:
         def entry(info: dict) -> dict:
@@ -633,7 +662,7 @@ async def _spawn_claude(
     effort: str | None = None,
     max_turns: int | None = None,
     max_thinking_tokens: int | None = None,
-    builtin_tools: dict | None = None,
+    builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
 ) -> ClaudeResult:
     cmd = _command(session_id, resume, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,

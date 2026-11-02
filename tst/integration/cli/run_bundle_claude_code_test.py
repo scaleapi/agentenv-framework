@@ -27,7 +27,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from tst.unit.agents.claude_code.agent import a2a_server
+from tst.unit.agents.claude_code.agent import claude_bridge
 from tst.util.fake_anthropic import FakeAnthropic, answer, delegate_then_answer, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -190,7 +190,7 @@ def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(
     defaults = run("tools", None)
     offered = defaults if builtin_tools is None else run("selected", builtin_tools)
 
-    assert defaults <= set(get_args(a2a_server.ClaudeCodeTool)), sorted(defaults)
+    assert defaults <= set(get_args(claude_bridge.ClaudeCodeTool)), sorted(defaults)
     assert offered == kept(defaults), sorted(offered)
     assert all("ping-from-tool" in result for result in endpoint.tool_results())
 

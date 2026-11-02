@@ -1791,12 +1791,8 @@ def test_builtin_tools_names_the_agents_own_tools_on_its_card_and_takes_one_sele
                                       {"disable": "*", "only": ["Read"]}, {})]
 
     request = _extension(card, AGENT_CONFIG_V1.uri)["params"]["methods"]["set"]["request"]
-    tools = ["Bash", "Read", "WebFetch"]
     assert "builtin_tools" in request["supported"] and '"enum": ["Bash", "Read", "WebFetch"]' in json.dumps(request)
     assert statuses == [200, 200, 400, 400, 400]
-    assert [BuiltinTools[str].model_validate(selection).enabled(tools)
-            for selection in ({"disable": "*"}, {"disable": ["WebFetch"]}, {"only": ["WebFetch", "Read"]})] == [
-        [], ["Bash", "Read"], ["Read", "WebFetch"]]
 
 
 def test_validation_errors_do_not_echo_rejected_values() -> None:

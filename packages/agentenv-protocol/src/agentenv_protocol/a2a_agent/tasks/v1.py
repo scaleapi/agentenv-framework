@@ -146,12 +146,6 @@ class BuiltinTools(BaseModel, Generic[ToolName]):
             raise ValueError("builtin_tools takes exactly one of disable and only")
         return self
 
-    def enabled(self, tools: Iterable[str]) -> list[str]:
-        """Those of ``tools`` the selection leaves on, in their order."""
-        if self.only is not None:
-            return [tool for tool in tools if tool in self.only]
-        return [] if self.disable == "*" else [tool for tool in tools if tool not in self.disable]
-
 
 ConfigT = TypeVar("ConfigT", bound=AgentConfig)
 

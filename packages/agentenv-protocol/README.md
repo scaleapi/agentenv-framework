@@ -1010,8 +1010,8 @@ class MyAgentConfig(AgentConfig):
 An agent that can turn its own tools off, such as its shell, file or web tools, takes `builtin_tools`, typed
 `BuiltinTools` over a `Literal` of its tools' names, so its card's schema names them. A task selects them on
 `deploy_agent`: `{"disable": "*"}` turns them all off, `{"disable": [...]}` the ones named, and `{"only": [...]}` keeps
-the ones named. `request.config.builtin_tools.enabled(<its tools>)` is what the selection leaves on, for the agent to
-pass to its runtime. The MCP tools AgentEnv gives it are not its own and stay. A selection for an agent whose config has
+the ones named; the agent applies `request.config.builtin_tools` to its runtime. The MCP tools AgentEnv gives it are not
+its own and stay. A selection for an agent whose config has
 no `builtin_tools`, or that names a tool its schema doesn't, is refused before the deploy sends it anything.
 
 ```python

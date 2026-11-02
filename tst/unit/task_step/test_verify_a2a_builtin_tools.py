@@ -32,7 +32,9 @@ class _Agent:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
-            return httpx.Response(200, json={"config": self.config})
+            # As the protocol's readback writes a selection: with the field it leaves unset as null.
+            return httpx.Response(200, json={"config": {**self.config, "builtin_tools": {
+                "disable": None, "only": None, **self.config.get("builtin_tools", {})}}})
         body = json.loads(request.content)
         if NO_SUCH_TOOL in str(body):
             return httpx.Response(400, json={"detail": "not one of the agent's tools"})

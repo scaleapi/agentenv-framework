@@ -25,7 +25,8 @@ run it. The CLI's version is the Dockerfile's
 selection picks the CLI's own tools: `{"disable": "*"}` and `{"only": [...]}` become its `--tools` list, a list to
 turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the rest, and any selection adds
 `--strict-mcp-config`, so its MCP servers are only the task env's. The names are `ClaudeCodeTool`'s in
-`a2a_server.py`: every tool the pinned CLI has, though which it offers by default depends on the model.
+`claude_bridge.py`: every tool the pinned CLI has, though which it offers by default depends on the model. A test fails
+when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements
