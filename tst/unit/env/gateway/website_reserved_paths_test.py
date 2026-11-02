@@ -37,6 +37,9 @@ async def test_a_sites_route_refuses_its_reserved_paths_and_svc_still_reaches_th
     assert (await _http(gw, "GET", "/website/mail/.well-known/agent-env.json"))[0] == 404
     assert (await _http(gw, "POST", "/website/mail/agentenv", body=b"{}"))[0] == 404
     assert (await _http(gw, "POST", "/website/mail/%61gentenv", body=b"{}"))[0] == 404
+    for spelled in ("public%2Fx/../agentenv", "public%2Fx/../.well-known/agent-env.json", "a%2F..%2Fagentenv",
+                    "a/%2E%2E/agentenv", "x/..%2Fagentenv"):
+        assert (await _http(gw, "POST", f"/website/mail/{spelled}", body=b"{}"))[0] == 404, spelled
     assert (await _http(gw, "GET", "/website/mail/inbox"))[0] == 200
     assert (await _http(gw, "GET", "/svc/mail/.well-known/agent-env.json"))[0] == 200
     assert reached == ["/inbox", "/.well-known/agent-env.json"]

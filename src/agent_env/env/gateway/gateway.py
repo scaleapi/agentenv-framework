@@ -72,7 +72,7 @@ from .changes import ChangeAttribution
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
-from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card
+from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card, upstream_url
 from .triggers import TriggerEngine, TriggerError
 from .notifications import CHECK_TOOL_NAMES, NotificationError, Notifications, build_check_tools
 
@@ -629,7 +629,7 @@ class Gateway:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
         A site's data plane and card are never reached through its route, so an agent browsing the site can't read
         what grades it; agentenv reaches them through /svc/<name>/."""
-        if reserved_site_path("/" + request.path_params.get("path", "")):
+        if reserved_site_request(request):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
@@ -1511,3 +1511,16 @@ def reserved_site_path(path: str) -> bool:
     """Whether ``path``, as a site's server would route it, is its data plane or its env card."""
     normalized = posixpath.normpath("/" + path.lstrip("/"))
     return normalized == RPC_PATH or normalized.startswith(RPC_PATH + "/") or normalized == WELL_KNOWN_PATH
+
+
+def reserved_site_request(request: Request) -> bool:
+    """Whether a request on a site's route reaches its data plane or env card: by the path as routed here, or by the
+    one its server receives, which is the raw path forwarded, its dot segments removed by httpx and then decoded. The
+    two differ when an encoded slash sits beside a dot segment (``public%2Fx/../agentenv``)."""
+    if reserved_site_path("/" + request.path_params.get("path", "")):
+        return True
+    try:
+        sent = httpx.URL(upstream_url("http://site", request)).path
+    except (ValueError, httpx.InvalidURL):
+        return False  # forward() refuses a request-target it can't route
+    return reserved_site_path(sent)
