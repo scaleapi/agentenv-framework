@@ -135,11 +135,13 @@ def test_a_rollout_that_reaches_its_turn_cap_ends_the_turn_without_a_reply(serve
     assert (played["reward"], played["agentenv_tool_calls"], len(model.requests)) == (0.0, 2, 2)
 
 
-@pytest.mark.parametrize("failing", ["env", "session", "model", "reward"])
+@pytest.mark.parametrize(("failing", "why"), [("env", "couldn't open a session on the server"),
+                                              ("session", "HTTPStatusError: Server error '503"),
+                                              ("model", "ReadTimeout"), ("reward", "the episode ended without a reward")])
 def test_an_episode_that_fails_or_ends_without_a_reward_is_flagged_and_its_group_left_out(serve, session, tmp_path,
-                                                                                           failing):
+                                                                                           failing, why):
     server = serve({"a": PLAYED}, **({"reward": _unscored} if failing == "reward" else {}))
-    row = _row(server, tmp_path, reset_timeout=5.0, model_timeout=0.5)
+    row = _row(server, tmp_path, reset_timeout=5.0, **({"model_timeout": 0.5} if failing == "model" else {}))
     model = session(_says("Added a crate."), status=503 if failing == "session" else 200,
                     delay=2.0 if failing == "model" else 0.0)
     if failing == "env":
@@ -148,7 +150,7 @@ def test_an_episode_that_fails_or_ends_without_a_reward_is_flagged_and_its_group
     played = asyncio.run(run(model.base_url, row["messages"], SAMPLING, row["metadata"]))
     server.stop()
 
-    assert played["reward"] == 0.0 and played["agentenv_failure"]
+    assert played["reward"] == 0.0 and played["agentenv_failure"].startswith(why)
     failed, scored = _sample({**played}), _sample({"reward": 1.0})
     assert keep_scored_groups(None, [scored, failed]) is False
     assert keep_scored_groups(None, [[scored], [_sample({"reward": 0.0})]]) is True
