@@ -21,6 +21,7 @@ from agent_env.bundle import BundleError, BundleKind, PreparedBundle, parse_bund
 from agent_env.bundle.installed import locate_bundle
 from agent_env.store.routing import namespace_routing
 from agent_env.task import EpisodeError, EpisodeSpec, Task
+from agent_env.task.task import reward_of
 
 from .environment import AgentEnvEnvironment, Served, ServedTask
 
@@ -156,32 +157,3 @@ def _served(splits: dict[str, list[tuple[str, Task]]],
         raise BundleError([f"no task can be served as an OpenEnv env: {why}" for why in refused.values()]
                           or ["no task can be served as an OpenEnv env: the bundle has none"])
     return served
-
-
-def reward_of(task: Task, reward: str | Callable[[dict[str, float]], float] | None
-               ) -> tuple[Callable[[dict[str, float]], float | None] | None, str | None]:
-    """``task``'s reward as a function of its scores, or why ``reward`` can't make one."""
-    if callable(reward):
-        return reward, None
-    scoring = [step.id for step in task.steps if getattr(step, "verifier_id", None)]
-    if reward is None:
-        if len(scoring) > 1:
-            return None, (f"task {task.id!r} records a score at each of {', '.join(scoring)}; name the one that is "
-                          "its reward with reward=<step id>")
-        return (_score_at(scoring[0]) if scoring else _unscored), None
-    if reward not in scoring:
-        return None, f"task {task.id!r} records no score at step {reward!r}; it records them at {scoring}"
-    return _score_at(reward), None
-
-
-def _score_at(step: str) -> Callable[[dict[str, float]], float]:
-    def score(scores: dict[str, float]) -> float:
-        if step not in scores:
-            raise LookupError(f"the run recorded no score at step {step!r}")
-        return scores[step]
-
-    return score
-
-
-def _unscored(scores: dict[str, float]) -> None:
-    return None

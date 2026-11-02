@@ -31,9 +31,9 @@ MODEL_ENDPOINT_MISSING = preflight.model_endpoint_missing  # the probe, which th
 DEPLOY = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "theirs"}
 ASK = {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "What is 6 * 7?", "depends_on": ["agent"]}
 CHECK = {"id": "check", "type": "harness_test_check", "verifier_id": "answer", "depends_on": ["ask"]}
-JUDGE = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "ask", "judge_a2a_agent_id": "theirs",
-         "agent_name": DeployAgentTaskStep.DEFAULT_AGENT_NAME, "criteria": [{"id": "c1", "description": "says 42"}],
-         "depends_on": ["ask"]}
+JUDGE = {"id": "judge", "type": "rubrics_verifier", "verifier_id": "judge", "prompt_id": "ask",
+         "judge_a2a_agent_id": "theirs", "agent_name": DeployAgentTaskStep.DEFAULT_AGENT_NAME,
+         "criteria": [{"id": "c1", "description": "says 42"}], "depends_on": ["ask"]}
 asked: list[dict] = []
 hanging = threading.Event()
 
@@ -139,7 +139,8 @@ def test_the_solver_alone_calls_the_policy_through_the_proxy_and_the_run_is_capt
     [call] = asked
     [turn] = trace.turns
     assert sorted(row["task_id"].rsplit("/", 1)[1] for row in rows) == ["broken", "hanging", "sum"]
-    assert "unprompted is left out: training needs the agent a step prompts deployed by a deploy_agent step" in caplog.text
+    assert "unprompted is left out: training needs the agent a step prompts deployed by a deploy_agent step" in (
+        caplog.text)
     assert "self-judged is left out: its rubric judge is its solver, whose grading would be trained on" in caplog.text
     assert (call["model"], call["answer"]) == ("trl-policy-v3", "It is 42.")
     assert call["overrides"]["step_params"] == {"agent": {"litellm_base_url": f"http://127.0.0.1:{factory._proxy.port}",

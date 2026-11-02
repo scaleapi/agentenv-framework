@@ -3,7 +3,8 @@ fixture takes the ``teardowns`` and ``tools`` fixtures from the conftest that im
 
 import pytest
 
-from agent_env.openenv.app import _app, _score_at
+from agent_env.openenv.app import _app
+from agent_env.task.task import _score_at
 from agent_env.openenv.environment import Served, ServedTask
 from agent_env.task import EpisodeSpec, Task
 from agent_env.training._openenv import Server

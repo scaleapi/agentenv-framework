@@ -24,7 +24,8 @@ def says(content: str) -> Reply:
 
 def shell_then_says(command: str, content: str) -> Reply:
     """Calls the request's shell tool (``bash`` in any case) with ``command`` until a tool result follows the last user
-    message, then says ``content``; a request offering no shell gets ``content`` at once, as a harness's side calls do."""
+    message, then says ``content``; a request offering no shell gets ``content`` at once, as a harness's side calls
+    do."""
 
     def reply(body: dict[str, Any]) -> dict[str, Any]:
         messages = body["messages"]

@@ -1,18 +1,18 @@
 """Train a bundle's own agents with TRL's harness rollouts (``trl.experimental.async_grpo.HarnessRolloutWorker`` with
 ``harness_adapter=None``): each rollout runs a task as ``agent-env run`` does, its agents' model calls going through
-OpenEnv's capture proxy to the trainer's vLLM, which records the tokens TRL trains on, and the task's verifiers score it."""
+OpenEnv's capture proxy to the trainer's vLLM, which records the tokens TRL trains on, and the task's verifiers score
+it."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-import asyncio
 import secrets
 import socket
 import threading
 import uuid
 from collections.abc import Callable, Sequence
-from concurrent.futures import CancelledError
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +30,8 @@ except ModuleNotFoundError as exc:
 from agent_env.bundle.plan import solver_steps
 from agent_env.bundle.resolve import build_step
 from agent_env.bundle.run import planned_tasks, prepare_bundle, solver_params
-from agent_env.openenv.app import reward_of
 from agent_env.store.routing import namespace_routing
-from agent_env.task.task import Task, recorded_scores
+from agent_env.task.task import Task, recorded_scores, reward_of
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -42,7 +41,8 @@ from agent_env.training._openenv import on_session_loop
 logger = logging.getLogger(__name__)
 #: How a row's prompt names its task, since TRL hands the factory only the prompt.
 _NAMED = re.compile(r"^AgentEnv task (\d+): (.+)$")
-#: Where every deploy runs: local Docker alone reaches the capture proxy on this machine; a remote sandbox needs a tunnel.
+#: Where every deploy runs: local Docker alone reaches the capture proxy on this machine, a remote sandbox needing a
+#: tunnel.
 _SANDBOX = "local"
 
 
@@ -60,20 +60,18 @@ class AgentEnvSessionFactory(ResourceSessionFactory):
     """OpenEnv's session factory for TRL's ``HarnessRolloutWorker``, built in its rollout process. It prepares the
     bundle to run on local Docker, checks that ``llm_url``'s engine returns token ids, and serves OpenEnv's capture
     proxy in front of it, where the task's solver reaches it: the agent a step prompts, which it deploys, its other
-    agents and judges keeping the configured endpoint. TRL sets ``model`` to the policy it publishes; ``reward`` is as ``build_app``'s, and
-    ``agent`` the agent the solver deploys, as ``agent-env run --agent``'s."""
+    agents and judges keeping the configured endpoint. TRL sets ``model`` to the policy it publishes; ``reward`` is as
+    ``build_app``'s, and ``agent`` the agent the solver deploys, as ``agent-env run --agent``'s."""
 
     def __init__(self, bundle: str | Path, *, llm_url: str, model: str, sampling: dict[str, Any] | None = None,
                  tasks: Sequence[str] = (), evals: Sequence[str] = (),
-                 reward: str | Callable[[dict[str, float]], float] | None = None, agent: str | None = None,
-                 api_key: str | None = None, max_model_calls: int = 0):
+                 reward: str | Callable[[dict[str, float]], float] | None = None, agent: str | None = None):
         self.model = model
-        self._llm_url, self._api_key, self._sampling = llm_url, api_key, sampling
-        self._max_model_calls = max_model_calls
+        self._llm_url, self._sampling = llm_url, sampling
         self._trained = _trained(bundle, tasks, evals, agent)
         self._rewards = [_reward(task, reward) for task, _ in self._trained]
-        require_llm(llm_url, model, api_key=api_key, require_tokens=True)
-        self._proxy = CaptureServer(llm_url=llm_url, model=model, port=_free_port(), api_key=api_key,
+        require_llm(llm_url, model, require_tokens=True)
+        self._proxy = CaptureServer(llm_url=llm_url, model=model, port=_free_port(),
                                     admin_key=secrets.token_urlsafe(32))
         self._proxy.start()
 
@@ -81,25 +79,27 @@ class AgentEnvSessionFactory(ResourceSessionFactory):
         index = _index_named(task, [each.id for each, _ in self._trained])
         played, solver = self._trained[index]
         capture = self._proxy.registry.create(
-            upstream=Upstream(llm_url=self._llm_url, model=self.model, api_key=self._api_key),
-            capture_level="tokens", purpose="train", sampling=self._sampling, max_model_calls=self._max_model_calls,
-            task=played.id, episode=episode_id or uuid.uuid4().hex)
+            upstream=Upstream(llm_url=self._llm_url, model=self.model), capture_level="tokens", purpose="train",
+            sampling=self._sampling, task=played.id, episode=episode_id or uuid.uuid4().hex)
         endpoint = {"litellm_base_url": f"http://127.0.0.1:{self._proxy.port}", "litellm_api_key": capture.session_id}
         overrides = {**sandbox_overrides(_SANDBOX),
                      "step_params": {step: {**params, **endpoint} for step, params in solver.items()}}
-        return AgentEnvSession(played, overrides, self._rewards[index], self._proxy.registry, capture, self.model)
+        return AgentEnvSession(task=played, overrides=overrides, reward=self._rewards[index],
+                               registry=self._proxy.registry, capture=capture, model=self.model)
 
 
 class AgentEnvSession(ResourceSession):
     """One run of a task with its own agents, their model calls captured under this session's key."""
 
-    def __init__(self, task: Task, overrides: dict[str, Any], reward: Callable[[dict[str, float]], float | None],
+    def __init__(self, *, task: Task, overrides: dict[str, Any], reward: Callable[[dict[str, float]], float | None],
                  registry: Any, capture: Any, model: str):
         self._task, self._overrides, self._reward, self._model = task, overrides, reward, model
         self._registry, self._capture = registry, capture
         self._scores: dict[str, float] | None = None
         self._lock = threading.Lock()
-        self._closed, self._running, self._done = False, None, None
+        self._closed = False
+        self._task_run: asyncio.Task | None = None  # Task.run, the one part of a run a stop cancels
+        self._done: threading.Event | None = None  # set once the run is torn down
 
     def initial_messages(self) -> list[dict[str, Any]]:
         return [{"role": "user", "content": _first_prompt(self._task)}]
@@ -117,10 +117,7 @@ class AgentEnvSession(ResourceSession):
             if self._closed:
                 return 1
             self._done = threading.Event()
-        try:
-            return on_session_loop(self._run(timeout_s), None)
-        except CancelledError:
-            return 1
+        return on_session_loop(self._run(timeout_s), None)
 
     def fetch_training_trace(self) -> TrainingTrace:
         document = export_session(self._capture, include_messages=True, capture_level="tokens")
@@ -137,44 +134,42 @@ class AgentEnvSession(ResourceSession):
                                                                     for step, score in (self._scores or {}).items()})
 
     def close(self) -> None:
-        """Stops a run still going, as TRL does to the rollouts in flight when it stops, and returns once the run is torn
-        down, so no sandbox outlives the trainer; then drops the session's captures."""
+        """Stops a run still going, as TRL does to the rollouts in flight when it stops, and returns once the run is
+        torn down, so no sandbox outlives the trainer; then drops the session's captures."""
         with self._lock:
             stopping, self._closed = not self._closed, True
-            running, done = self._running, self._done
-        if stopping and running is not None:
-            running.get_loop().call_soon_threadsafe(self._stop)
+            task_run, done = self._task_run, self._done
+        if stopping and task_run is not None:
+            task_run.get_loop().call_soon_threadsafe(task_run.cancel)
         if done is not None:
             done.wait()
         self._registry.delete(self._capture.session_id)
 
-    def _stop(self) -> None:
-        """Cancels the run if it's still in its task, decided on the session loop, where the run leaves its task for
-        its teardown, so the cancel can't land in the teardown."""
-        if self._running is not None:
-            self._running.cancel()
-
     async def _run(self, timeout: float | None) -> int:
+        """``Task.run`` in an asyncio task of its own, which a stop or the timeout cancels, then the teardown in this
+        coroutine, which nothing cancels, so a stop can't cut it short."""
+        context = TaskStepContext(metadata={"task_id": self._task.id, "user_overrides": self._overrides})
         try:
-            with self._lock:
-                if self._closed:
-                    return 1
-                self._running = asyncio.current_task()
-            context = TaskStepContext(metadata={"task_id": self._task.id, "user_overrides": self._overrides})
             with namespace_routing():
+                with self._lock:
+                    if self._closed:
+                        return 1
+                    task_run = self._task_run = asyncio.ensure_future(
+                        self._task.run(agent_model=self._model, context=context))
                 try:
-                    async with asyncio.timeout(timeout):
-                        await self._task.run(agent_model=self._model, context=context)
+                    await asyncio.wait_for(task_run, timeout)
                     self._scores = recorded_scores(self._task.steps, context)
                     return 0
                 except TimeoutError:
                     raise
+                except asyncio.CancelledError:
+                    if not task_run.cancelled():
+                        raise
+                    return 1
                 except Exception as e:
                     logger.warning("task %s failed, so its rollout is left unscored: %s", self._task.id, e)
                     return 1
                 finally:
-                    with self._lock:
-                        self._running = None  # a close from here on waits for the teardown rather than cutting it short
                     await teardown_run(context)
         finally:
             self._done.set()
