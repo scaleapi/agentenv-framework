@@ -853,7 +853,7 @@ protocol. `TaskRequest` and `TaskResult` are framework boundary types; the
 executor maps them to and from the wire-level `a2a.types.Task` lifecycle.
 
 `TaskRequest` is a frozen record whose nested JSON values are detached copies.
-Its `config`, `mcp_servers`, `skills`, `metadata`, and inbound `DataPart.data`
+Its `config`, `mcp_servers`, `cdp_endpoints`, `skills`, `metadata`, and inbound `DataPart.data`
 retain their declared `dict`/`list` types, so normal Pydantic serialization,
 copying, and `json.dumps(...)` work. `TaskRequest.trajectory` is the exception:
 it is the task's live trajectory log, described below. Within `tasks.v1`, new
@@ -1171,6 +1171,20 @@ discovery, `name` so the caller can choose the server alias the harness prefixes
 tools with (agent-env relays the env card's name: the MultiEnv's declared name, else
 `env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
 `mcp_<8 hex>`.
+
+`CDP_CONFIG_V1` gives an agent the CDP endpoints it drives itself. `add` takes
+`name`, `http_url` (`http` or `https`, for clients that discover through
+`/json/version`) and `ws_url` (`ws` or `wss`, for clients that connect
+directly), with optional `headers` and `metadata`; adding a name again replaces
+it. `GET /ext/cdp-config` returns `{"cdp_endpoints": {name: {"has_headers",
+"metadata"}}}`: neither the URLs nor the header values, since either can carry
+the endpoint's credential. `DELETE /ext/cdp-config` with `{"name"}` removes one;
+removing a name that isn't there is not an error. Every task's
+`TaskRequest.cdp_endpoints` holds them in full. `TaskRequest.cdp_endpoint(name=None)`
+returns the named endpoint, or the only one, and otherwise fails the task as an
+`infra_error` with `cdp.no_endpoint` (none, or none by that name) or
+`cdp.ambiguous` (several and no name). It fails the task by raising, so call it
+before any handler of your own that catches every exception.
 
 `PEER_AGENTS_V1` lets an agent delegate to the other agents in its task. AgentEnv
 sets the routing table with `POST /ext/peer-agents` (`{"peers": [{"name", "url",
