@@ -1,5 +1,5 @@
 """A stock MCPServerEnv deploys through a plugin's environment provider: the provider gets every option, its record is
-registered as it returns it, and the env holds no sandbox of ours. Loads hand the server a signed URL; reattaching a
+registered as it returns it, and the env holds no sandbox of ours. Loads hand the server a signed URL for each file; reattaching a
 plugin's record touches no sandbox and looks up no provider; close() closes the provider that deployed. A MultiEnv
 child is still the gateway's, whatever type it declares."""
 
@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI
 
 from agent_env.config import get_config, reset_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv
@@ -92,9 +93,12 @@ async def _deploy(env, **kwargs):
         return await env.deploy(**kwargs)
 
 
-def _artifact():
-    return SimpleNamespace(environment_name="email", get_file_artifact=lambda: SimpleNamespace(
-        filename="email.json", object_url="s3://bucket/email.json", content_type="application/json"))
+def _artifact(*paths: str):
+    """The email environment's artifact: its one file, email.json, or a file at each of ``paths``."""
+    files = {path: SimpleNamespace(filename=path.rsplit("/", 1)[-1], object_url=f"s3://bucket/{path}",
+                                   content_type="application/json") for path in paths or ("email.json",)}
+    return SimpleNamespace(environment_name="email", file_artifact_refs=dict.fromkeys(paths) if paths else None,
+                           get_file_artifact=lambda: files["email.json"], get_file_artifacts=lambda: files)
 
 
 def test_reading_a_stored_env_looks_up_no_environment_provider(monkeypatch):
@@ -149,6 +153,22 @@ async def test_a_plugin_env_loads_by_a_signed_url_with_no_staging(sent):
     assert [json.loads(r.content)["method"] for r in sent] == ["data/reset", "data/add"]
     assert [str(r.url) for r in sent] == [f"{_URL}/agentenv"] * 2
     assert json.loads(sent[1].content)["params"]["parts"][0]["file"] == {"uri": "https://signed.example/email.json?sig=1", "mimeType": "application/json", "name": "email.json"}
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_env_loads_each_of_several_files_by_its_own_signed_url_with_its_path(sent):
+    env = _env()
+    await _deploy(env)
+    store = _store(None)
+    store.signed_get_url.side_effect = lambda url, ttl: url.replace("s3://bucket/", "https://signed.example/")
+    with _stores(store):
+        await env.load_environment_artifact(_artifact("inbox/a.json", "sent.json"))
+
+    ttl = len(LOAD_OPERATIONS) * data_plane_load_timeout_s(2 * _SIZE)
+    assert [c.args for c in store.signed_get_url.call_args_list] == [("s3://bucket/inbox/a.json", ttl), ("s3://bucket/sent.json", ttl)]
+    assert json.loads(sent[1].content)["params"]["parts"] == [
+        {"kind": "file", "file": {"uri": f"https://signed.example/{path}", "mimeType": "application/json", "name": path.rsplit("/", 1)[-1]},
+         "metadata": {DATA_OBJECTS_EXTENSION_URI: {"path": path}}} for path in ("inbox/a.json", "sent.json")]
 
 
 @pytest.mark.asyncio

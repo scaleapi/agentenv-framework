@@ -15,6 +15,7 @@ import pytest
 
 from agent_env.providers.sandbox_providers.boat.provider import BoatSandboxProvider
 from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
+from agent_env.providers.sandbox_providers.coreweave.provider import CoreWeaveSandboxProvider
 from agent_env.providers.sandbox_providers.daytona.config import Settings as DaytonaSettings
 from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
@@ -28,6 +29,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import _BUILTIN_SAND
 from agent_env.providers.sandbox_providers.tenki.provider import TenkiSandboxProvider
 from agent_env.providers.sandbox_providers.tensorlake.provider import TensorlakeSandboxProvider
 from agent_env.providers.sandbox_providers.vercel.provider import VercelSandboxProvider
+from tst.unit.providers.sandbox_providers.coreweave_fakes import fake_sandbox_cls
 
 
 def _modal_provider(cls):
@@ -136,6 +138,11 @@ async def _boxd() -> Sandbox:
     return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _coreweave() -> Sandbox:
+    provider = CoreWeaveSandboxProvider(api_key="test-key", sandbox_cls=fake_sandbox_cls())
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
 async def _daytona() -> Sandbox:
     client = MagicMock()
     client.create = AsyncMock(return_value=MagicMock(id="daytona-test"))
@@ -173,6 +180,7 @@ FACTORIES = {
     "vercel": _vercel,
     "tenki": _tenki,
     "boxd": _boxd,
+    "coreweave": _coreweave,
     "daytona": _daytona,
     "boat": _boat,
     "smol_vm": _smol_vm,

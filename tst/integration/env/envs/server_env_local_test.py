@@ -2,7 +2,9 @@
 
 The env deploys, a later process restores its record and loads data into the server, and the teardown step, which
 rebuilds each sandbox from disk, removes the container. A load is timed by the size of the payload it staged, through
-the deploy's own handle and a restored one; and the server's state reads as JSON whether ``data/get`` answers with
+the deploy's own handle and a restored one; an environment of several files is staged file by file at their paths, in a
+folder of the load's own that an earlier load's file can't be in the way of, and handed to the server's data/add
+together, timed by their total size; and the server's state reads as JSON whether ``data/get`` answers with
 data or with a file bundle. A loop of one's own lists, declares and calls the server's tools through ``ToolSession``,
 and plays a task's agent as an episode, around the echo agent. Requires a docker daemon; spins up a throwaway
 ``registry:2`` and skips if it can't start.
@@ -151,6 +153,34 @@ async def test_a_load_is_timed_by_its_payload_and_the_servers_state_reads_as_jso
     await protocol_v1.invoke_extension(base_url, card, "urn:agentenv:export-as-file/v1", {"enabled": True})
     assert [part.kind for part in (await protocol_v1.get_data(base_url)).parts] == ["file"]
     assert await legacy_protocol.service_state(deployed, None, "items") == items
+
+
+@pytest.mark.asyncio
+async def test_an_environment_of_several_files_loads_each_from_its_path_in_one_add(local_stack, monkeypatch):
+    staged_sizes, timeout_for = [], constants.data_plane_load_timeout_s
+    monkeypatch.setattr(constants, "data_plane_load_timeout_s", lambda size: staged_sizes.append(size) or timeout_for(size))
+    uid = uuid.uuid4().hex[:8]
+    env = MCPServerEnv.put(id=f"server-items-{uid}", docker_image_artifact=_put_items_image(f"server-items-{uid}"),
+                           environment_name="items", env_provider_type="server")
+    deployed = await env.deploy(sandbox_type="local", ttl_seconds=900)
+    local_stack.append(f"agent-{deployed.sandbox_id}")
+    contents = {path: json.dumps({"items": items}).encode()
+                for path, items in (("inbox/a.json", ["in-a", "in-b"]), ("top.json", ["top"]))}
+    artifact = EnvironmentArtifact.put(id=f"server-items-files-{uid}", environment_name="items", file_artifacts={
+        path: FileArtifact.put_bytes(id=f"server-items-file-{index}-{uid}", description="server env e2e",
+                                     filename=path.rsplit("/", 1)[-1], content=content, content_type="application/json")
+        for index, (path, content) in enumerate(contents.items())})
+    # A file an earlier load left at /data/inbox, where this load's inbox/ folder would go.
+    earlier = EnvironmentArtifact.put(id=f"server-items-inbox-{uid}", environment_name="items", file_artifact=FileArtifact.put_bytes(
+        id=f"server-items-inbox-file-{uid}", description="server env e2e", filename="inbox",
+        content=json.dumps({"items": ["earlier"]}).encode(), content_type="application/json"))
+    restored = await Env.from_instance_id(deployed.instance_id)
+
+    await restored.load_environment_artifact(earlier)
+    await restored.load_environment_artifact(artifact)
+
+    assert await legacy_protocol.service_state(deployed, None, "items") == {"items": ["in-a", "in-b", "top"]}
+    assert staged_sizes[-1] == sum(map(len, contents.values()))
 
 
 @pytest.mark.asyncio

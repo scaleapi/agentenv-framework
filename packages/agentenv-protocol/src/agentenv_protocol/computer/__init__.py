@@ -11,13 +11,20 @@ from typing import TYPE_CHECKING, Any
 from .app import (
     APP_SETTINGS_ENV,
     AppDeclaration,
+    AppOs,
+    AptSource,
     ComputerAppEnvironment,
+    Download,
     Launch,
     Linux,
+    Packages,
     Ready,
+    RunScript,
     Service,
     computer_app,
+    install,
     install_step,
+    linux,
     ready_check,
 )
 from .errors import (
@@ -60,6 +67,7 @@ from .operations import (
     type_text,
     write_files,
 )
+from .dataplane import part_bytes
 from .keys import PRINTABLE_KEYS
 from .manifest import ManifestSegment, RecordingManifest
 from .platform import Platform
@@ -97,9 +105,10 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration",
-    "ComputerAppEnvironment", "computer_app", "install_step", "ready_check", "Linux", "Service", "Launch", "Ready",
-    "AppDeclaration",
-    "APP_SETTINGS_ENV",
+    "ComputerAppEnvironment", "computer_app", "install", "linux", "install_step", "ready_check", "Linux", "Service",
+    "Launch", "Ready", "Packages", "AptSource", "Download", "RunScript",
+    "AppDeclaration", "AppOs",
+    "APP_SETTINGS_ENV", "part_bytes",
     "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV",
     "PRINTABLE_KEYS",
     "display", "set_display", "capture", "click", "drag", "scroll", "type_text", "press",

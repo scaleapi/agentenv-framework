@@ -751,13 +751,17 @@ def gemini_request_to_openai(greq: dict, model: str) -> dict:
                     cid = f"call_{counter}"
                     counter += 1
                     pending_ids.setdefault(fc.get("name"), []).append(cid)
-                    tool_calls.append({
+                    tool_call: dict = {
                         "id": cid, "type": "function",
                         "function": {
                             "name": fc.get("name"),
                             "arguments": json.dumps(fc.get("args") or fc.get("arguments") or {}),
                         },
-                    })
+                    }
+                    sig = p.get("thoughtSignature") or p.get("thought_signature")
+                    if sig:
+                        tool_call["provider_specific_fields"] = {"thought_signature": sig}
+                    tool_calls.append(tool_call)
             msg: dict = {"role": "assistant",
                          "content": "\n".join(text_bits) if text_bits else None}
             if tool_calls:
@@ -826,8 +830,8 @@ _FINISH_MAP = {
 }
 
 
-def _thought_signature(msg: dict, tc: dict) -> str | None:
-    for holder in (tc, msg):
+def _thought_signature(*holders: dict) -> str | None:
+    for holder in holders:
         psf = holder.get("provider_specific_fields") or {}
         sig = psf.get("thought_signature") or psf.get("thoughtSignature")
         if isinstance(sig, str) and sig:
@@ -846,14 +850,15 @@ def openai_response_to_gemini(oai: dict) -> dict:
     parts: list[dict] = []
     if msg.get("content"):
         parts.append({"text": msg["content"]})
-    for tc in msg.get("tool_calls") or []:
+    for i, tc in enumerate(msg.get("tool_calls") or []):
         fn = tc.get("function") or {}
         try:
             args = json.loads(fn.get("arguments") or "{}")
         except (json.JSONDecodeError, TypeError):
             args = {}
         fcpart: dict = {"functionCall": {"name": fn.get("name"), "args": args}}
-        sig = _thought_signature(msg, tc)
+        # Gemini signs only the first call of a parallel batch, and bills each replayed copy.
+        sig = _thought_signature(tc, msg) if i == 0 else _thought_signature(tc)
         if sig:
             fcpart["thoughtSignature"] = sig
         parts.append(fcpart)

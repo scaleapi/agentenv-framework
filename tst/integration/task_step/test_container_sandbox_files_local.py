@@ -1,4 +1,5 @@
-"""Files loaded into a container sandbox are found there by verify_sandbox and collect_artifacts, on the local provider.
+"""Files loaded into a container sandbox are found there by verify_sandbox and collect_artifacts, on the local provider:
+a file universe's, and an agent's environment of several files, each at its path.
 
 A local container sandbox, a deploy_sandbox one or an agent's, runs beside the host machine, so each step has to reach
 into the container rather than act on the host. Every path here is one only the container has. Needs Docker and a
@@ -17,7 +18,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agent_env.artifact import DockerImageArtifact, FileArtifact, FileArtifactUniverse
+from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact, FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config, set_image_store
 from agent_env.store.image_store import LocalRegistryImageStore
@@ -80,31 +81,38 @@ def local_registry(monkeypatch, tmp_path):
         reset_config()
 
 
-def _probe_universe(tmp_path, suffix):
-    src = tmp_path / "probe.txt"
-    src.write_text("hello from the probe\n")
-    return FileArtifactUniverse.put(
-        id=f"probe-files-{suffix}",
-        file_artifacts={"probe.txt": FileArtifact.put(id=f"probe-file-{suffix}", description="probe", file_path=str(src))},
-    )
+_PROBE = {"probe.txt": "hello from the probe\n"}
+_SEVERAL = {**_PROBE, "deeper/second.txt": "hello from deeper\n"}
 
 
-def _load_verify_collect(target: dict, universe, probe_dir: str):
+def _probe_universe(tmp_path, suffix, texts=_PROBE, environment=False):
+    """A file universe of ``texts`` by path, or an environment artifact of them."""
+    files = {}
+    for index, (path, text) in enumerate(texts.items()):
+        src = tmp_path / f"probe-{index}.txt"
+        src.write_text(text)
+        files[path] = FileArtifact.put(id=f"probe-file-{index}-{suffix}", description="probe", file_path=str(src))
+    if environment:
+        return EnvironmentArtifact.put(f"probe-files-{suffix}", environment_name="probe", file_artifacts=files)
+    return FileArtifactUniverse.put(id=f"probe-files-{suffix}", file_artifacts=files)
+
+
+def _load_verify_collect(target: dict, universe, probe_dir: str, texts=_PROBE):
     return [
         LoadArtifactTaskStep(id="load", version=None, artifact_id=universe.id, destination_path=probe_dir, **target),
         VerifySandboxTaskStep(
             id="verify", version=None, verifier_id="probe", base_dir=probe_dir, **target,
             criteria=[{"type": "probe_file_contains", "criterion": "loaded", "paths": ["probe.txt"], "expected": "hello"}],
         ),
-        CollectArtifactsTaskStep(id="collect", version=None, base_path=probe_dir, artifact_paths=["probe.txt"], **target),
+        CollectArtifactsTaskStep(id="collect", version=None, base_path=probe_dir, artifact_paths=list(texts), **target),
     ]
 
 
-def _assert_found_in_the_container(ctx, probe_dir):
+def _assert_found_in_the_container(ctx, probe_dir, texts=_PROBE):
     assert not Path(probe_dir).exists()
     assert ctx.metadata["verifications"]["probe"]["score"] == 1.0
     universe = FileArtifactUniverse.get(ctx.metadata["collected_artifacts"]["collect"]["file_artifact_universe"]["id"])
-    assert universe.get_file_artifacts()["probe.txt"].load() == b"hello from the probe\n"
+    assert {path: universe.get_file_artifacts()[path].load().decode() for path in texts} == texts
     assert Task.get_instance(ctx.instance_id).status == "completed"
 
 
@@ -136,7 +144,9 @@ async def test_a_container_mode_deploy_sandbox(local_registry):
 
 
 @pytest.mark.asyncio
-async def test_a_local_agent(local_registry):
+@pytest.mark.parametrize("texts, environment", [(_PROBE, False), (_SEVERAL, True)],
+                         ids=["file-universe", "environment-of-several-files"])
+async def test_a_local_agent(local_registry, texts, environment):
     tmp_path = local_registry
     suffix = uuid.uuid4().hex[:8]
     agent = put_test_agent(f"files-local-agent-{suffix}")
@@ -146,8 +156,9 @@ async def test_a_local_agent(local_registry):
             id="deploy", version=None, env_ids=[], a2a_agent_id=agent.id, a2a_agent_version=agent.version,
             agent_name="solver", sandbox_type="local",
         ),
-        *_load_verify_collect({"agent_name": "solver"}, _probe_universe(tmp_path, suffix), probe_dir),
+        *_load_verify_collect({"agent_name": "solver"}, _probe_universe(tmp_path, suffix, texts, environment), probe_dir,
+                              texts),
     ])
     ctx = await task.run()
 
-    _assert_found_in_the_container(ctx, probe_dir)
+    _assert_found_in_the_container(ctx, probe_dir, texts)

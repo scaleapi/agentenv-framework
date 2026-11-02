@@ -246,3 +246,38 @@ def test_bridge_upstream_errors(vertex, client):
     assert (limited.status_code, limited.content) == (429, b'{"error":"slow down"}')
     assert (garbled.status_code, garbled.json()) == (502, {"detail": "vertex bridge: non-JSON upstream response"})
     assert (unreachable.status_code, unreachable.json()) == (502, {"detail": "vertex bridge upstream failed: refused"})
+
+
+
+def _tool_turn(*calls: tuple[str, str | None]) -> httpx.Response:
+    tool_calls = [{"id": f"call_{i}", "type": "function", "function": {"name": name, "arguments": "{}"},
+                   **({"provider_specific_fields": {"thought_signature": sig}} if sig else {})}
+                  for i, (name, sig) in enumerate(calls)]
+    return httpx.Response(200, json={"choices": [{"finish_reason": "tool_calls",
+                                                  "message": {"content": None, "tool_calls": tool_calls}}]})
+
+
+def test_each_tool_calls_thought_signature_survives_the_round_trip(vertex, client):
+    contents = list(_GREQ["contents"])
+    for reply in (_tool_turn(("get_time", "sig-1")), _tool_turn(("get_time", "sig-2"), ("get_weather", None))):
+        vertex.response = reply
+        model_turn = client.post(GENERATE, json={"contents": contents}).json()["candidates"][0]["content"]
+        results = [{"functionResponse": {"name": p["functionCall"]["name"], "response": {}}} for p in model_turn["parts"]]
+        contents += [model_turn, {"role": "user", "parts": results}]
+
+    client.post(GENERATE, json={"contents": contents})
+
+    assistant = [m for m in json.loads(vertex.requests[-1].content)["messages"] if m["role"] == "assistant"]
+    sent = [tc.get("provider_specific_fields") for m in assistant for tc in m["tool_calls"]]
+    assert sent == [{"thought_signature": "sig-1"}, {"thought_signature": "sig-2"}, None]
+
+
+def test_a_message_level_signature_goes_only_to_the_first_parallel_call(vertex, client):
+    vertex.response = httpx.Response(200, json={"choices": [{"finish_reason": "tool_calls", "message": {
+        "content": None, "provider_specific_fields": {"thought_signatures": ["sig-a"]},
+        "tool_calls": [{"id": f"call_{n}", "type": "function", "function": {"name": n, "arguments": "{}"}} for n in "ab"],
+    }}]})
+
+    parts = client.post(GENERATE, json=_GREQ).json()["candidates"][0]["content"]["parts"]
+
+    assert [p.get("thoughtSignature") for p in parts] == ["sig-a", None]

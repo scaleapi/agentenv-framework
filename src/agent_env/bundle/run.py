@@ -25,6 +25,7 @@ from pathlib import Path
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.bootstrap import InfraSetup, ensure_default_envs
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers import build_sandbox_provider
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
@@ -40,7 +41,8 @@ from .parse import BundleEntry, BundleError, BundleKind, parse_bundle
 from .plan import AliasUse, Plan, Write, plan_bundle
 from .preflight import Preflight, preflight_run
 from .requires import Declaring, declare, declaring_for
-from .resolve import BuiltImage, BundleImage, Reference, ReferencedImage, resolve_bundle, without_played_agents
+from .resolve import (BuiltImage, BundleImage, Reference, ReferencedImage, ResolvedEntry, resolve_bundle,
+                      without_played_agents)
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,8 @@ class DryRun:
         return tuple(
             f"{_label(plan, done.write)} v{done.version}: "
             + ("pulled from its registry, its tag pinned to a digest when it's written"
+               + (", with its build context beside it, which a deploy builds only when it can't pull it"
+                  if done.write.source.dockerfile else "")
                if isinstance(done.write.source, ReferencedImage)
                else f"{plan.published[done.write.id].ref}, published for its sources, which each deploy pulls by its "
                     "digest, or builds from its build context when it can't"
@@ -212,12 +216,14 @@ def run_bundle(
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
     keep: bool = False,
+    emulate: bool = True,
 ) -> BundleRun:
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
     user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
-    tasks as written; ``sandbox`` is the provider that envs,
-    agents, sandboxes and the judge deploy on. ``on_progress`` is given a line of text
+    tasks as written; ``sandbox`` is the provider that computer envs compose on and that envs,
+    agents, sandboxes and the judge deploy on; a computer env composing there emulates an arch no link runs natively
+    unless ``emulate`` is False, which leaves it skipped. ``on_progress`` is given a line of text
     at each write and step. ``id_root`` roots the ids of a bundle an installed package provides
     (``InstalledBundle.id_root``); a folder's ids otherwise come from its path.
 
@@ -237,17 +243,16 @@ def run_bundle(
     written, before any task is. Building an infra env the run needs raises what the build raises, before any task
     runs."""
     _refuse_a_running_loop()
-    if sandbox:
-        build_sandbox_provider(sandbox)
+    composing = _composing(sandbox, emulate)
     say = _progress(on_progress)
     with namespace_routing():
         prepared = _prepare(root, tasks, evals, sandbox, id_root, agent, False, say,
-                            declaring_for(Path(root), installed=id_root is not None, dry_run=False))
+                            declaring_for(Path(root), installed=id_root is not None, dry_run=False), composing)
         plan, entries = prepared.plan, [entry for entry, _ in prepared.tasks]
         with Interrupts() as interrupts:
             overrides = _overrides(sandbox, user_model, judge_model)
             runs = interrupts.run(_run_all(plan, list(prepared.tasks), model, overrides,
-                                           _solver_params(plan, prepared.materialization), keep, say, interrupts))
+                                           solver_params(plan, prepared.materialization), keep, say, interrupts))
             _mark_cancelled(runs, interrupts.reason)
             result = _bundle_run(plan, prepared.materialization, runs,
                                  _skipped(plan, entries, every=not tasks and not evals))
@@ -270,17 +275,20 @@ def prepare_bundle(
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
     played: bool = False,
+    agent: str | None = None,
+    solver_endpoint: bool = False,
 ) -> PreparedBundle:
     """Do what ``run_bundle`` with these arguments does before its first task runs, and stop there. ``played``
     leaves out what each task's only prompted agent would deploy, for a caller that plays that agent itself
-    (``EpisodeSpec``), so the agent needn't exist.
+    (``EpisodeSpec``), so the agent needn't exist. With ``solver_endpoint`` the caller gives the solver's deploys their
+    model endpoint in each run's ``step_params``, so the config needn't set one.
 
     It doesn't turn namespace routing on: the caller keeps it on for as long as it runs the tasks
     (``agent_env.store.routing.namespace_routing``), which suits a service that runs nothing else. Raises what
     ``run_bundle`` raises before its first task runs, except for a running event loop, which it doesn't need."""
-    if sandbox:
-        build_sandbox_provider(sandbox)
-    return _prepare(root, tasks, evals, sandbox, id_root, None, played, _progress(on_progress), _hint(id_root))
+    composing = _composing(sandbox)
+    return _prepare(root, tasks, evals, sandbox, id_root, agent, played, _progress(on_progress), _hint(id_root),
+                    composing, solver_endpoint=solver_endpoint)
 
 
 def _write_bundle(
@@ -295,14 +303,18 @@ def _write_bundle(
         return _written_with_infra(plan, preflight, say)
 
 
-def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None]) -> Materialization:
-    """Write ``plan``, then set up the infra envs its runs deploy on."""
+def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None],
+                        composing: Composing = Composing()) -> Materialization:
+    """Write ``plan``, its computer envs composed as ``composing`` says, then set up the infra envs its runs deploy
+    on."""
     materialization = materialize(
         plan,
         on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
         on_build=lambda write: say(f"{_label(plan, write)}: building with docker, which can take minutes"),
         on_write=lambda done: say(_written(plan, done)),
         build_here=preflight.built_here,
+        composing=composing,
+        on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"),
     )
     if preflight.infra:
         ensure_default_envs(preflight.infra_kinds, say=say)
@@ -318,22 +330,25 @@ def dry_run_bundle(
     agent: str | None = None,
     on_progress: Callable[[str], None] | None = None,
     id_root: str | None = None,
+    emulate: bool = True,
 ) -> DryRun:
     """Check what ``run_bundle`` with these arguments checks before its first task runs, and say what it would
     write and run, writing and running nothing: no entity, ledger row, lock or instance. Each write's version is
     the one it would reuse or the store's next, which another run writing the id first can take. ``on_progress``
-    is given the line ``run_bundle`` gives for each write, as it is checked.
+    is given the line ``run_bundle`` gives for each write, as it is checked, and for each computer env it reuses
+    with pairs left, what it would compose on ``sandbox`` (``emulate`` as ``run_bundle`` takes it).
 
     It raises what ``run_bundle`` raises before its first task runs, a failed preflight included. Like
     ``run_bundle``, it turns namespace routing on for the whole process while it runs, so it suits the CLI and
     scripts, not a service; it runs no event loop, so a running one isn't refused."""
-    if sandbox:
-        build_sandbox_provider(sandbox)
+    composing = _composing(sandbox, emulate)
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
         _say_plan(plan, say, declaring_for(Path(root), installed=id_root is not None, dry_run=True))
-        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)))
+        materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
+                                      composing=composing,
+                                      on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"))
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
                       preflight.built_here)
@@ -361,16 +376,19 @@ def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRu
 
 
 def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandbox: str | None, id_root: str | None,
-             agent: str | None, played: bool, say: Callable[[str], None], declaring: Declaring) -> PreparedBundle:
-    plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played)
+             agent: str | None, played: bool, say: Callable[[str], None], declaring: Declaring,
+             composing: Composing = Composing(), *, solver_endpoint: bool = False) -> PreparedBundle:
+    plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played,
+                               solver_endpoint=solver_endpoint)
     _say_plan(plan, say, declaring)
-    materialization = _written_with_infra(plan, preflight, say)
+    materialization = _written_with_infra(plan, preflight, say, composing)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
     return PreparedBundle(plan, materialization, to_run)
 
 
 def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_root: str | None,
-             sandbox: str | None, agent: str | None = None, *, played: bool = False) -> tuple[Plan, Preflight]:
+             sandbox: str | None, agent: str | None = None, *, played: bool = False,
+             solver_endpoint: bool = False) -> tuple[Plan, Preflight]:
     resolved = resolve_bundle(parse_bundle(Path(root), id_root=id_root))
     plan = plan_bundle(without_played_agents(resolved) if played else resolved, tasks=tasks, evals=evals,
                        installed=installed_bundles, agent=agent)
@@ -378,7 +396,23 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
     to_run = set(_to_run(plan))
     return plan, preflight_run(plan, [write.source for write in plan.writes
                                       if write.kind is BundleKind.TASK and write.source.entry in to_run], sandbox,
-                               played=played)
+                               played=played, solver_endpoint=solver_endpoint)
+
+
+def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
+    """How a run composes its computer envs: on the provider ``sandbox`` names, and emulating unless ``emulate`` is
+    False. Raises ValueError when ``sandbox`` names no provider."""
+    return Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
+
+
+def planned_tasks(root: Path | str, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
+                  agent: str | None = None) -> tuple[ResolvedEntry, ...]:
+    """The tasks ``run_bundle`` with these arguments would run, as resolved, without checking or writing anything.
+    Namespace routing must be on, as for ``plan_bundle``."""
+    plan = plan_bundle(resolve_bundle(parse_bundle(Path(root))), tasks=tasks, evals=evals, installed=installed_bundles,
+                       agent=agent)
+    selected = set(_to_run(plan))
+    return tuple(write.source for write in plan.writes if write.kind is BundleKind.TASK and write.source.entry in selected)
 
 
 def _to_run(plan: Plan) -> tuple[BundleEntry, ...]:
@@ -427,7 +461,7 @@ def _hint(id_root: str | None) -> Declaring:
     return Declaring.QUIET if id_root is not None else Declaring.HINT
 
 
-def _solver_params(plan: Plan, materialization: Materialization) -> dict[str, dict[str, dict]]:
+def solver_params(plan: Plan, materialization: Materialization) -> dict[str, dict[str, dict]]:
     """Each task's ``step_params`` that deploy ``Plan.agent`` at its solver steps: at the version this run wrote, for
     an agent it writes, or the store's version the plan read."""
     if plan.agent is None:
@@ -578,7 +612,7 @@ def _pinned(done: Materialized) -> str:
     if not isinstance(done.write.source, ReferencedImage) or "@" in done.write.source.ref:
         return ""
     try:
-        name = DockerImageArtifact.get(done.write.id, done.version).image_name
+        name = DockerImageArtifact.get(done.write.id, done.version).pinned_name
     except NotFoundError:  # a dry run's image, not yet written
         return ""
     algorithm, _, digest = name.rpartition("@")[2].partition(":")

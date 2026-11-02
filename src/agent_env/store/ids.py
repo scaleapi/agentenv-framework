@@ -136,3 +136,9 @@ MAX_AUTHORED_LOCAL_ID_BYTES = MAX_LOCAL_ID_BYTES - len("__files__") - 16
 def derive_id(base: str, suffix: str) -> str:
     """The id of an entity derived from ``base``: a suffix, so the base's namespace carries over."""
     return f"{base}__{suffix}"
+
+
+def derive_path_id(base: str, path: str) -> str:
+    """The id of the file at ``path`` written with ``base``, as a file universe's files are: ``<base>__<16 hex of the
+    path's sha256>``, which any path fits in."""
+    return derive_id(base, hashlib.sha256(path.encode("utf-8")).hexdigest()[:16])

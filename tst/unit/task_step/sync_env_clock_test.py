@@ -35,7 +35,7 @@ async def test_sync_one_skips_unadvertised(monkeypatch):
     async def fake_card(base_url, **kw):
         return {"capabilities": {"extensions": []}}
     monkeypatch.setattr(mod.protocol_v1, "get_card", fake_card)
-    out = await _step()._sync_one(None, "http://gw", "email", CLOCK_URL)
+    out = await _step()._sync_one(_cardless(), "http://gw", "email", CLOCK_URL)
     assert out == {"synced": False, "reason": "not_advertised"}
 
 
@@ -55,7 +55,7 @@ async def test_sync_one_invokes_advertised(monkeypatch):
 
     monkeypatch.setattr(mod.protocol_v1, "get_card", fake_card)
     monkeypatch.setattr(mod.protocol_v1, "invoke_extension", fake_invoke)
-    out = await _step()._sync_one(None, "http://gw", "email", CLOCK_URL)
+    out = await _step()._sync_one(_cardless(), "http://gw", "email", CLOCK_URL)
     assert out["synced"] is True
     assert calls["uri"] == EXT_CLOCK_URI and calls["params"] == {"env_get_time_url": CLOCK_URL}
 
@@ -66,7 +66,7 @@ async def test_sync_one_unadvertised_strict_raises(monkeypatch):
         return {"capabilities": {"extensions": []}}
     monkeypatch.setattr(mod.protocol_v1, "get_card", fake_card)
     with pytest.raises(RuntimeError):
-        await _step(tolerate_missing_sync_time=False)._sync_one(None, "http://gw", "email", CLOCK_URL)
+        await _step(tolerate_missing_sync_time=False)._sync_one(_cardless(), "http://gw", "email", CLOCK_URL)
 
 
 @pytest.mark.asyncio
@@ -142,6 +142,12 @@ async def _composed_card(children: dict[str, list]) -> dict:
 
     gw._fetch_child_card = fetch
     return json.loads((await gw._serve_env_card()).body)
+
+
+def _cardless() -> DeployedEnv:
+    """A record that kept no card, which a sync reads live from the gateway."""
+    return DeployedGatewayEnv(env_id="e1", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", db_web_url=None,
+                              sandbox_id="sb-1")
 
 
 def _carded(card: dict) -> DeployedEnv:

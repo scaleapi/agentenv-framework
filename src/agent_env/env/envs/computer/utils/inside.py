@@ -36,7 +36,7 @@ _READ_TIMEOUT_S = 120
 
 def missing(deployed: DeployedSandboxEnv) -> list[str]:
     """What the env's card doesn't serve of computer-exec/v1 ``run``, ``data/add`` and ``data/get``."""
-    operations = ((deployed.environment_card or {}).get("capabilities") or {}).get("operations")
+    operations = protocol_v1.operations(deployed.environment_card or {})
     absent = [] if deployed.supports(COMPUTER_EXEC, "run") else [f"{COMPUTER_EXEC} run"]
     return absent + [op for op in (METHOD_ADD, METHOD_GET) if operations is not None and op not in operations]
 
@@ -47,13 +47,17 @@ def max_timeout_s(deployed: DeployedSandboxEnv) -> float:
 
 
 def loopback(deployed: DeployedSandboxEnv) -> dict:
-    """The env's id, address and MCP endpoint as code inside the computer reaches them: the driver on loopback."""
+    """The env's id, address and MCP endpoint as code inside the computer reaches them, the driver on loopback, and
+    the ``headers`` its framework-only routes take: code agent-env runs in the computer gets the computer's token."""
     url = f"http://127.0.0.1:{deployed.metadata['computer']['port']}"
-    return {"id": deployed.env_id, "url": url, "mcp_url": url + deployed.mcp_url.removeprefix(deployed.environment_url)}
+    return {"id": deployed.env_id, "url": url, "mcp_url": url + deployed.mcp_url.removeprefix(deployed.environment_url),
+            "headers": deployed.control_headers}
 
 
-async def add_artifacts(deployed: DeployedSandboxEnv, files: dict[str, FileArtifact]) -> None:
-    """Write each file artifact at its path."""
+async def add_artifacts(deployed: DeployedSandboxEnv, files: dict[str, FileArtifact],
+                        url: Optional[str] = None) -> None:
+    """Write each file artifact at its path, through the data plane at ``url``, the driver's or an app's it fronts; the
+    driver's by default."""
     network = (deployed.metadata or {}).get("computer", {}).get("network")
     granted = not (network and NetworkPolicy.from_dict(network).restricts_egress)
     batch: list[FilePart] = []
@@ -61,12 +65,12 @@ async def add_artifacts(deployed: DeployedSandboxEnv, files: dict[str, FileArtif
     for path, artifact in files.items():
         part, part_size = await asyncio.to_thread(_part, path, artifact, deployed.sandbox_type, granted)
         if batch and size + part_size > BATCH_BYTES:
-            await _add(deployed, batch, size)
+            await _add(deployed, batch, size, url)
             batch, size = [], 0
         batch.append(part)
         size += part_size
     if batch:
-        await _add(deployed, batch, size)
+        await _add(deployed, batch, size, url)
 
 
 async def add_files(deployed: DeployedSandboxEnv, files: dict[str, bytes]) -> None:
@@ -77,7 +81,8 @@ async def add_files(deployed: DeployedSandboxEnv, files: dict[str, bytes]) -> No
 async def read_file(deployed: DeployedSandboxEnv, path: str) -> bytes:
     """The bytes of the file at ``path``; FileNotFoundError when there is none."""
     try:
-        answer = await protocol_v1.get_data(deployed.environment_url, timeout=_READ_TIMEOUT_S, paths=[path])
+        answer = await protocol_v1.get_data(deployed.environment_url, timeout=_READ_TIMEOUT_S, paths=[path],
+                                            headers=deployed.control_headers)
     except httpx.TransportError as e:
         raise _broken(deployed, "data/get", e) from e
     for part in answer.parts:
@@ -98,9 +103,10 @@ async def run(deployed: DeployedSandboxEnv, argv: list[str], *, timeout_s: float
         raise _broken(deployed, "computer-exec/v1 run", e) from e
 
 
-async def _add(deployed: DeployedSandboxEnv, parts: list[FilePart], size: int) -> None:
+async def _add(deployed: DeployedSandboxEnv, parts: list[FilePart], size: int, url: Optional[str] = None) -> None:
     try:
-        await protocol_v1.add_data(deployed.environment_url, parts, timeout=data_plane_load_timeout_s(size))
+        await protocol_v1.add_data(url or deployed.environment_url, parts, timeout=data_plane_load_timeout_s(size),
+                                   headers=deployed.control_headers)
     except httpx.TransportError as e:
         raise _broken(deployed, "data/add, so some of the files it carried may be written, each whole", e) from e
 

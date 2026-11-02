@@ -443,6 +443,27 @@ def test_two_images_of_one_folder_built_from_one_context_are_both_written_and_pi
     assert (imported.pulled, imported.pinned) == ((), ())
 
 
+def test_a_dockerfile_an_image_given_a_ref_shares_is_left_unpinned_for_the_image_beside_it(home):
+    """The pulled image's context is that Dockerfile, which a deploy that can't pull it builds as written."""
+    dockerfile = "FROM python:3.12-slim\nRUN pip install requests\nCOPY app.py /app.py\n"
+    context = context_image(home, "web-context", {"Dockerfile": dockerfile, "app.py": "app\n"})
+    site = "usr/local/lib/python3.12/site-packages"
+    images = [_stored_image(home, f"web-{side}", context, "Dockerfile",
+                            {f"{site}/requests-2.31.0.dist-info/METADATA": "Name: requests\nVersion: 2.31.0\n"})
+              for side in ("backend", "frontend")]
+    WebsiteEnv.put(id="web", backend_docker_image_artifact=images[0], frontend_docker_image_artifact=images[1],
+                   environment_name="web")
+    _task([{"id": "env", "type": "deploy_env", "env_id": "web"}])
+    ref = "ghcr.io/acme/web-backend:1@sha256:" + "d" * 64
+
+    imported = import_task("t", home / "t", image_refs={"web-backend": ref})
+
+    assert (imported.root / "envs/web/Dockerfile").read_text() == dockerfile
+    assert [(image.key, image.ref, image.locked, image.unlocked) for image in imported.images] == [
+        ("backend_image", ref, None, None),
+        ("frontend_image", None, None, "its Dockerfile is also the build context of backend_image, which a run pulls, "
+                                       "so a build resolves them afresh")]
+
 @pytest.mark.parametrize("registry", [True, False], ids=["names-a-registry", "names-none"])
 def test_an_image_whose_stored_context_is_gone_is_pulled_by_its_ref_or_fails_naming_it_or_stays_pinned(home,
                                                                                                          registry):

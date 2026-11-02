@@ -23,6 +23,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.artifact.store import get_artifact_store
 from agent_env.config import get_config
 from agent_env.entity.refs import EntityRef
+from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.store.base import GrantUnavailableError
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
@@ -178,7 +179,7 @@ async def end_recording(context: TaskStepContext, name: str, reason: str) -> Non
     try:
         deployed, environment_name = _deployed(context, entry["env_id"]), entry.get("environment_name")
         manifest = RecordingManifest.model_validate(await deployed.invoke(COMPUTER_RECORDING, "end", {
-            "recording_id": entry["recording_id"], "upload": _grant(deployed, entry["namespace"], environment_name),
+            "recording_id": entry["recording_id"], "upload": _grant(deployed, entry["namespace"], environment_name, "end"),
             "reason": reason}, environment_name=environment_name))
     except Exception as e:
         logger.warning("end_computer_recording %s: %s; registering what its namespace holds", name, e)
@@ -228,11 +229,15 @@ def _namespace(request_id: str) -> str:
     return config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}{_KEY_PREFIX}/{key}")
 
 
-def _grant(deployed, namespace: str, environment_name: Optional[str] = None) -> dict:
+def _grant(deployed, namespace: str, environment_name: Optional[str] = None, method: str = "start") -> dict:
     """A grant that uploads under ``namespace``, lasting the recorded env's ``max_duration_s`` and a margin, or the
-    longest the store issues."""
+    longest the store issues. EnvCapabilityUnsupported when the env's card, or its child's, declares no recording."""
     card = deployed.environment_card if environment_name is None else deployed.get_child_env_card(environment_name)
-    params = (find_extension(card or {}, COMPUTER_RECORDING) or {}).get("params") or {}
+    extension = find_extension(card or {}, COMPUTER_RECORDING)
+    if extension is None:
+        raise EnvCapabilityUnsupported(COMPUTER_RECORDING, method, deployed.env_id,
+                                       getattr(deployed, "instance_id", None), environment_name)
+    params = extension.get("params") or {}
     store = get_config().get_object_store()
     sandbox_type = getattr(deployed, "sandbox_type", None)
     if not issues_grants_to(store, sandbox_type):

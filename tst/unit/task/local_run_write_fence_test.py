@@ -264,7 +264,7 @@ class _Gmail:
         self.mcp_server_envs = [SimpleNamespace(environment_name="gmail")]
 
 
-async def _export(gateway_url, name, tmp_path, timeout, deployed=None):
+async def _export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None):
     Path(tmp_path).write_text(json.dumps({"service": name}))
     return ".json"
 

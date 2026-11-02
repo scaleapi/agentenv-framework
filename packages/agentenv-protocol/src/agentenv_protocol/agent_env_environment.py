@@ -5,6 +5,7 @@ import datetime
 import decimal
 import enum
 import functools
+import hmac
 import inspect
 import json
 import logging
@@ -14,7 +15,8 @@ import sys
 import types
 import uuid
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Union, get_args, get_origin, get_type_hints
+from typing import (Annotated, Any, Callable, ClassVar, Literal, NamedTuple, Optional, Union, get_args, get_origin,
+                    get_type_hints)
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
@@ -27,7 +29,7 @@ from .tool_access import DISABLE as TOOL_DISABLE, ENABLE as TOOL_ENABLE, PATHS a
 from .tool_access import extensions as tool_access_extensions
 from .tool_context import EMPTY, ToolContext, bound, context_from_http, context_from_mcp
 from .transfers import WriteNamespaceGrant
-from .types import DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, SKILL_EXTENSION_URI, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
+from .types import CONTROL_TOKEN_ENV, DATA_OBJECTS_EXTENSION_URI, MCP_TRANSPORT, SKILL_EXTENSION_URI, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH, AddDataRequest, AddDataResponse, EnvironmentCapabilities, EnvironmentCard, EnvironmentExtension, EnvironmentInterface, EnvironmentTool, GetDataResponse, ResetDataResponse, error_body
 
 logger = logging.getLogger(__name__)
 
@@ -342,10 +344,11 @@ class AgentEnvApplication(ABC):
         if isinstance(self.handler, AgentEnvEnvironment):
             self.handler._application = self
         self.environment_card = self._card_for(app)
-        self._add_route(app, rpc_url, ["POST"], self._dispatch)
+        guard = control_guard()
+        self._add_route(app, rpc_url, ["POST"], guard(self._dispatch))
         self._add_route(app, card_url, ["GET"], self._serve_card)
         for path, method, handler in self._ext_routes:
-            self._add_route(app, path, [method], handler)
+            self._add_route(app, path, [method], guard(handler))
         for descriptor, fn in self._tools:
             self._register_tool(app, descriptor, fn)
         for resource in self._resources:
@@ -376,7 +379,10 @@ class AgentEnvApplication(ABC):
         return self.environment_card
 
     async def _serve_card(self, request: Request) -> Response:
-        return _json_response(self.environment_card.model_dump())
+        card = self.environment_card
+        if isinstance(self.handler, AgentEnvEnvironment) and (children := await self.handler.children_environments()):
+            card = card.model_copy(update={"children_environments": children})
+        return _json_response(card.model_dump())
 
     async def update_tool(self, name: str, *, description: str) -> None:
         """Change a served tool's description after the mount: on the card and in tools/list alike."""
@@ -661,6 +667,11 @@ class AgentEnvEnvironment:
     def declared_extensions(self) -> list[EnvironmentExtension]:
         """Declaration-only extensions to advertise, like ``intake/v1``: a promise with params and no handler."""
         return []
+
+    async def children_environments(self) -> Optional[list[EnvironmentCard]]:
+        """The environments this one fronts, as each serves its card with its paths under this one's, listed on the card
+        each time it's served; None for none."""
+        return None
 
     def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
         """The ``@extension`` handlers' extensions to serve, chosen at mount: one left out is not served, and of one served
@@ -1533,6 +1544,25 @@ def _extension_handler(fn: Callable, http_method: str) -> Callable:
 
 def _error_response(error: AgentEnvError) -> Response:
     return _json_response(error_body(**error.fields()), error.status)
+
+
+def control_guard() -> Callable[[Callable], Callable]:
+    """What wraps a framework-only route, everything an env serves but its MCP endpoint and its card: with
+    ``CONTROL_TOKEN_ENV`` set, a call that doesn't carry that token as its bearer is refused before the route runs;
+    without it, nothing."""
+    token = os.environ.get(CONTROL_TOKEN_ENV)
+    if not token:
+        return lambda handler: handler
+    expected = f"Bearer {token}".encode()
+
+    def guard(handler: Callable) -> Callable:
+        async def guarded(request: Request) -> Response:
+            if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected):
+                return _error_response(AgentEnvError(
+                    "unauthorized", "this route is agent-env's own: it takes the env's control token", status=401))
+            return await handler(request)
+        return guarded
+    return guard
 
 
 def _tool_access_handler(access: ToolAccess, action: str) -> Callable:

@@ -128,5 +128,5 @@ class SyncEnvClockTaskStep(TaskStep):
             raise RuntimeError(f"gateway did not expose env_get_time_url; cannot sync {service}")
         result = await protocol_v1.invoke_extension(base_url, card, EXT_CLOCK_URI,
                                                     params={"env_get_time_url": env_get_time_url},
-                                                    timeout=self.timeout_seconds)
+                                                    timeout=self.timeout_seconds, headers=deployed.control_headers)
         return {"synced": True, "result": result}

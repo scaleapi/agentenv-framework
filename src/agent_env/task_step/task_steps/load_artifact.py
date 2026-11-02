@@ -790,9 +790,14 @@ for rel in staged:
 async def _stage_environment_payload_into_container(
     sandbox, container_name: Optional[str], environment_artifact, destination: str
 ) -> list[str]:
-    """Expand an EnvironmentArtifact's payload into a file tree at ``destination`` — in the container, or on the VM host when ``container_name`` is None."""
-    from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+    """Expand an EnvironmentArtifact's payload into a file tree at ``destination`` — in the container, or on the VM host when ``container_name`` is None.
+    One holding several files has each written at its path instead."""
+    from agent_env.providers.sandbox_providers.sandbox import VmSandbox, stage_files_into_container
 
+    if environment_artifact.file_artifact_refs is not None:
+        return list(await stage_files_into_container(
+            sandbox, environment_artifact.get_file_artifacts(), destination, container=container_name,
+            on_host=container_name is None and isinstance(sandbox, VmSandbox)))
     file_artifact = environment_artifact.get_file_artifact()
     token = uuid.uuid4().hex[:8]
     safe_name = file_artifact.filename.replace("/", "_")

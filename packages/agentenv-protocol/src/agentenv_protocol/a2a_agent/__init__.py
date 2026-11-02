@@ -102,6 +102,7 @@ from .registry import (
 from .staging import STAGING_ENDPOINT, STAGING_V1_URI, StagingStore, staging_routes
 from .tasks.v1 import (
     AgentConfig,
+    BuiltinTools,
     AgentRunResult,
     DataPart,
     FilePart,
@@ -154,6 +155,7 @@ __all__ = [
     "AgentIdentity",
     "AgentRunResult",
     "AttributionProbeResponse",
+    "BuiltinTools",
     "BundleSkillRequest",
     "ChangelogIncrement",
     "ContextEventsTrajectoryRequest",

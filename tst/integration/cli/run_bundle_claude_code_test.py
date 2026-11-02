@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
+from typing import get_args
 
 import pytest
 from click.testing import CliRunner
@@ -26,6 +27,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.unit.agents.claude_code.agent import claude_bridge
 from tst.util.fake_anthropic import FakeAnthropic, answer, delegate_then_answer, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -156,24 +158,41 @@ def test_the_alias_claude_code_names_the_shipped_agent_until_the_store_has_an_ag
     assert named == [shipped, "claude-code"]
 
 
-def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(state, endpoint):
+@pytest.mark.parametrize("builtin_tools, kept", [
+    (None, lambda defaults: defaults),
+    ({"disable": "*"}, lambda defaults: set()),
+    ({"disable": ["WebFetch"]}, lambda defaults: defaults - {"WebFetch"}),
+    ({"only": ["Read", "TaskList"]}, lambda defaults: {"Read", "TaskList"}),
+], ids=["own-tools", "none-of-its-own", "all-but-webfetch", "only-two"])
+def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(state, endpoint, builtin_tools, kept):
+    """The CLI offers only tools claude-code's card names, and a selection offers what it leaves of them: ``only``
+    the tools it names, a list to turn off the CLI's defaults but those."""
     endpoint.respond = tool_then_answer("__echo", {"text": "ping-from-tool"}, prefix="the tool said: ")
-    root = _bundle(state / "tools", "echo", [
-        {"id": "env", "type": "deploy_env", "env_id": ECHO_ENV, "sandbox_type": "local"},
-        *_ask("Call the echo tool with the text ping-from-tool.", "ping-from-tool", env_ids=[ECHO_ENV]),
-    ])
-    root.joinpath("tasks/echo.json").write_text(json.dumps(
-        [{**step, "depends_on": ["env"]} if step["id"] == "agent" else step
-         for step in json.loads(root.joinpath("tasks/echo.json").read_text())]))
 
-    result = _run(root)
+    def run(name, selection):
+        root = _bundle(state / name, "echo", [
+            {"id": "env", "type": "deploy_env", "env_id": ECHO_ENV, "sandbox_type": "local"},
+            *_ask("Call the echo tool with the text ping-from-tool.", "ping-from-tool", env_ids=[ECHO_ENV]),
+        ])
+        selected = {} if selection is None else {"builtin_tools": selection}
+        root.joinpath("tasks/echo.json").write_text(json.dumps(
+            [{**step, "depends_on": ["env"], **selected} if step["id"] == "agent" else step
+             for step in json.loads(root.joinpath("tasks/echo.json").read_text())]))
+        before = len(endpoint.messages())
+        result = _run(root)
+        offered = {tool["name"] for call in endpoint.messages()[before:] for tool in call.body.get("tools") or []}
+        seen = (result.output, sorted(offered), endpoint.tool_results())
+        assert result.exit_code == 0 and "tasks/echo.json v1: passed" in result.output, seen
+        # The fake never repeats the prompt, so the text reached the answer through the tool.
+        assert any(name.endswith("__echo") for name in offered), seen
+        return {name for name in offered if not name.startswith("mcp__")}
 
-    offered = sorted({tool["name"] for call in endpoint.messages() for tool in call.body.get("tools") or []})
-    seen = (result.output, offered, endpoint.tool_results())
-    assert result.exit_code == 0 and "tasks/echo.json v1: passed" in result.output, seen
-    # The fake never repeats the prompt, so the text reached the answer through the tool.
-    assert any(name.endswith("__echo") for name in offered), seen
-    assert ["ping-from-tool" in result for result in endpoint.tool_results()] == [True], seen
+    defaults = run("tools", None)
+    offered = defaults if builtin_tools is None else run("selected", builtin_tools)
+
+    assert defaults <= set(get_args(claude_bridge.ClaudeCodeTool)), sorted(defaults)
+    assert offered == kept(defaults), sorted(offered)
+    assert all("ping-from-tool" in result for result in endpoint.tool_results())
 
 
 async def _send_project_id(step, context):

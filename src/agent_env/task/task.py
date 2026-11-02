@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
+from agentenv_protocol import client as protocol_v1
+
 from agent_env.config import run_env_ids
 from agent_env.plugins import _registration
 from agent_env.plugins._requirements import unmet_problems
@@ -629,7 +631,8 @@ class Task:
             started_mono = time.monotonic()
             started_utc = datetime.now(timezone.utc).isoformat()
             try:
-                await step.execute(context)
+                with protocol_v1.authorized({d.environment_url: d.control_headers for d in context.deployed_envs}):
+                    await step.execute(context)
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
