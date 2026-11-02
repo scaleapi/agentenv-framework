@@ -83,3 +83,27 @@ def test_the_verifier_script_is_read_off_the_event_loop(monkeypatch):
     asyncio.run(step.execute(ctx))
 
     assert on_loop == [False] and ctx.metadata["verifications"]["v"]["results"] == [{"id": "c", "score": 1.0}]
+
+
+def test_a_trajectory_parameter_gets_the_graded_prompts_trajectory_per_turn(monkeypatch):
+    from agent_env.task_step.context import PromptResponse
+    from agent_env.task_step.task_steps.verifiers import env_outcome_verifier
+
+    stored = {"mem://t1": b'{"format": "cli/1", "events": [{"n": 1}]}', "mem://t2": b'[{"n": 2}]'}
+    monkeypatch.setattr(env_outcome_verifier, "get_config", lambda: SimpleNamespace(
+        get_object_store_at=lambda url: SimpleNamespace(get=stored.__getitem__)))
+    script = (b"async def verify(url, trajectory):\n"
+              b"    return [{'id': 'c', 'score': 1.0, 'trajectory': trajectory}]\n")
+    monkeypatch.setattr(FileArtifact, "get", staticmethod(lambda id, version=None: SimpleNamespace(load=lambda: script)))
+
+    def graded(**urls):
+        ctx = TaskStepContext()
+        ctx.deployed_envs.append(DeployedEnv(env_id="e", env_version=1, mcp_url="http://mcp"))
+        ctx.prompt_responses.append(PromptResponse(prompt_id="p", response="done", **urls))
+        step = EnvOutcomeVerifierTaskStep(id="outcome", version=None, env_id="e", file_artifact_id="s", verifier_id="v")
+        return asyncio.run(step.execute(ctx)).metadata["verifications"]["v"]["results"][0]["trajectory"]
+
+    assert graded(target_agent_per_turn_trajectory_object_urls=["mem://t1", None, "mem://t2"]) == [
+        {"format": "cli/1", "events": [{"n": 1}]}, None, [{"n": 2}]]
+    assert graded(agent_trajectory_object_url="mem://t2") == [[{"n": 2}]]
+    assert graded() is None
