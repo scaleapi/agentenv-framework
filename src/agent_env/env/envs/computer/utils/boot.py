@@ -86,16 +86,11 @@ def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str,
 
 def recorded_app_settings(apps: list[ComputerAppEnv], app_settings: dict[str, dict],
                           os_type: str) -> dict[str, dict[str, Any]]:
-    """The settings each of ``apps`` on a computer of ``os_type`` runs with, by its name, as a record keeps them: its
-    schema's defaults under ``app_settings``' values for it, a secret's withheld."""
-    recorded = {}
-    for app in apps:
-        values = {name: setting["default"] for name, setting in
-                  app.settings_schema(os_type).get("properties", {}).items() if "default" in setting}
-        values.update(app_settings.get(app.environment_name, {}))
-        secrets = app.secret_settings(os_type)
-        recorded[app.environment_name] = {name: WITHHELD if name in secrets else value for name, value in values.items()}
-    return recorded
+    """The values ``app_settings`` hands each of ``apps`` on a computer of ``os_type``, by its name, as a record keeps
+    them, a secret's withheld; its class's defaults fill in the rest."""
+    return {app.environment_name: {name: WITHHELD if name in app.secret_settings(os_type) else value
+                                   for name, value in values.items()}
+            for app in apps if (values := app_settings.get(app.environment_name))}
 
 
 def recorded_settings(computer: ComputerArtifact, values: dict[str, Any]) -> dict[str, Any]:

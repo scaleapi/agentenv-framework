@@ -235,6 +235,27 @@ def _protocol_checkout(folder):
     return source
 
 
+def test_gate_3_probes_a_build_with_its_apps_defaults_as_a_deploy_with_no_env_params_boots_it(base, driver, docker,
+                                                                                            tmp_path, monkeypatch):
+    mail = _app(base, driver, tmp_path / "mail", compose=False, settings={**MAIL_SETTINGS, "required": ["signature"]},
+                defaults={"signature": "-- Ada"})
+    env = _put(base, driver, compose=False, apps=[mail], app_settings={"mail": {"theme": "dark"}})
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs)
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(composer, "run_probe", AsyncMock(return_value="report"))
+
+    asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
+
+    assert json.loads(booted[0]["environment"]["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada",
+                                                                                      "theme": "dark"}}
+
+
 @pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
                          ids=["interrupted", "unprobed"])
 def test_the_pairs_left_to_compose_are_those_failed_interrupted_or_unprobed_on_a_native_arch(base, driver, docker,
@@ -1259,7 +1280,7 @@ async def test_a_deploy_starts_from_its_app_envs_and_computer_envs_defaults_and_
     assert json.loads(boots.boots[0]["environment"]["AGENTENV_APP_SETTINGS"]) == {"mail": {
         "signature": "-- Bo", "theme": "light", "token": "t0ken"}}
     assert deployed.metadata["computer"]["app_settings"] == {"mail": {
-        "signature": "-- Bo", "password": "<withheld>", "token": "<withheld>", "theme": "light"}}
+        "signature": "-- Bo", "theme": "light", "token": "<withheld>"}}
     assert deployed.metadata["computer"]["env_params"] == env_params
 
 
