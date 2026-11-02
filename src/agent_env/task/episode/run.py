@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -18,6 +21,8 @@ from agentenv_protocol.a2a_agent import (
 from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
+from agent_env.runner import store as run_store
+from agent_env.runner.runner import RunRecord, RunStatus
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.episode.proxy import InProcessProxy, ProxyClient, ProxyRefused
 from agent_env.task.store import record_task_cancelled
@@ -249,10 +254,15 @@ class Episode:
         resolves."""
         running.set()
         with namespace_routing():
+            _record_run(self._task, self.id, self._context.metadata)  # before any await: start() returns it listed
+            failure: BaseException | None = None
             try:
                 await self._task.run(context=self._context, instance_id=self.id)
                 self._ran = True
                 self._notify()
+            except BaseException as e:
+                failure = e
+                raise
             finally:
                 self._tearing_down = True
                 try:
@@ -264,7 +274,19 @@ class Episode:
                     if self._abandoned is not None:
                         await asyncio.to_thread(_record_cancelled, self._task.id, self.id, self._abandoned)
                 finally:
-                    del _live[self.id]
+                    try:
+                        await asyncio.to_thread(_record_ended, self._task.id, self.id, *self._outcome(failure))
+                    finally:
+                        del _live[self.id]
+
+    def _outcome(self, failure: BaseException | None) -> tuple[RunStatus, str | None]:
+        if self._abandoned is not None:
+            return RunStatus.CANCELED, self._abandoned
+        if isinstance(failure, asyncio.CancelledError):
+            return RunStatus.CANCELED, "the episode was cancelled"
+        if failure is not None:
+            return RunStatus.FAILED, f"{type(failure).__name__}: {failure}"
+        return RunStatus.COMPLETED, None
 
     async def _wait(self, changed: asyncio.Future[None]) -> None:
         """Until the run ends or what was ``changed`` when the caller last looked changes again."""
@@ -366,6 +388,27 @@ class Episode:
 
 def _episode_of(context: TaskStepContext) -> Episode:
     return _live[context.metadata["episode"]["id"]]
+
+
+def _record_run(task: Task, instance_id: str, metadata: dict[str, Any]) -> None:
+    """The episode in the run index as a runner records the runs it accepts, so the explorer lists it, in its run group
+    when ``start`` was given one; in the local stores for an ``@local`` task, as ``Task.run`` scopes its records."""
+    now = datetime.now(timezone.utc).isoformat()
+    with run_scope(task.id):
+        run_store.insert_run(RunRecord(
+            run_id=_run_id(instance_id), runner="episode", task_id=task.id, task_version=task.version,
+            instance_id=instance_id, status=RunStatus.RUNNING, started_at_utc=now,
+            owner={"host": socket.gethostname(), "pid": os.getpid(), "seen": now},
+            overrides={"metadata": {key: metadata[key] for key in ("episode", "run_group_id") if key in metadata}}))
+
+
+def _record_ended(task_id: str, instance_id: str, status: RunStatus, error: str | None) -> None:
+    with run_scope(task_id):
+        run_store.mark_terminal(_run_id(instance_id), status, error=error)
+
+
+def _run_id(instance_id: str) -> str:
+    return f"episode-{instance_id}"
 
 
 def _record_cancelled(task_id: str, instance_id: str, reason: str) -> None:

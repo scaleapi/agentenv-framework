@@ -25,6 +25,7 @@ from agentenv_protocol.a2a_agent import (
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 import agent_env.task.episode.run as episode_run
+from agent_env.runner import store as run_store
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
 from agent_env.env.env import DeployedEnv
@@ -444,6 +445,30 @@ async def test_an_episode_abandoned_as_it_starts_is_recorded_cancelled_with_the_
     for ask in (episode.next_turn, episode.result):
         with pytest.raises(EpisodeError, match="episode abandoned: the trainer moved on"):
             await ask()
+
+
+@pytest.mark.asyncio
+async def test_an_episode_is_in_the_run_index_running_then_ended_in_the_group_it_was_started_in(teardowns):
+    played = await _spec(ITEMS, ALICE, TURN, REPLIES).start(run_group_id="rg-train-0")
+    run = run_store.get_run(f"episode-{played.id}")
+    assert (run.runner, run.task_id, run.task_version, run.instance_id, run.status) == (
+        "episode", "dock", 4, played.id, "RUNNING")
+    assert run.overrides["metadata"] == {"episode": {"id": played.id, "trainer_agents": ["alice"]},
+                                         "run_group_id": "rg-train-0"}
+    await (await played.next_turn()).end("Added a crate.")
+    await played.result()
+    abandoned = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+    await abandoned.abandon("the trainer moved on")
+    failed = await _spec({**ITEMS, "fail": True}, ALICE, TURN, REPLIES).start()
+    with pytest.raises(RuntimeError):
+        await failed.result()
+
+    ended = {episode: run_store.get_run(f"episode-{episode.id}") for episode in (played, abandoned, failed)}
+    assert [(run.status, run.error) for run in ended.values()] == [
+        ("COMPLETED", None), ("CANCELED", "the trainer moved on"),
+        ("FAILED", "RuntimeError: the env didn't come up")]
+    assert all(run.finished_at_utc for run in ended.values())
+    assert "run_group_id" not in ended[abandoned].overrides["metadata"]
 
 
 @pytest.mark.asyncio
