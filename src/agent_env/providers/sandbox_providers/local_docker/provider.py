@@ -26,7 +26,7 @@ import subprocess
 import tempfile
 from ipaddress import ip_address
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -384,6 +384,27 @@ class LocalSandbox(VmSandbox):
         Returns an object with .stdout, .stderr streams and .wait() method, matching the
         interface expected by exec_with_output().
         """
+        return await self._spawn(command, asyncio.subprocess.DEVNULL)
+
+    async def _exec_with_stdin(self, script: str, stdin: AsyncIterator[bytes]) -> tuple[int, str, str]:
+        """``bash -c script`` as ``exec`` runs it, its standard input the bytes ``stdin`` yields."""
+        process = await self._spawn(("bash", "-c", script), asyncio.subprocess.PIPE)
+
+        async def feed() -> None:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                async for piece in stdin:
+                    process.stdin.write(piece)
+                    await process.stdin.drain()
+            process.stdin.close()
+
+        try:
+            _, stdout, stderr = await asyncio.gather(feed(), process.stdout.read(), process.stderr.read())
+            return await process.wait(), stdout.decode(errors="replace"), stderr.decode(errors="replace")
+        except BaseException:
+            await _stop(process)
+            raise
+
+    async def _spawn(self, command: tuple[str, ...], stdin: int) -> asyncio.subprocess.Process:
         cmd = [c for c in command if c != "sudo"]
         if not _runs_in_container(cmd):
             is_script = cmd[:2] == ["bash", "-c"]
@@ -392,14 +413,13 @@ class LocalSandbox(VmSandbox):
                 for i, c in enumerate(cmd)
             ]
         logger.debug(f"LocalSandbox exec: {' '.join(cmd)}")
-        process = await asyncio.create_subprocess_exec(
+        return await asyncio.create_subprocess_exec(
             *cmd,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=stdin,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ, _SANDBOX_ENV: self.sandbox_id},
         )
-        return process
 
     async def exec_with_output(self, *args: str) -> tuple[int, str, str]:
         """Like the base, but as a remote exec session behaves. Cancelling it kills the command and every process it

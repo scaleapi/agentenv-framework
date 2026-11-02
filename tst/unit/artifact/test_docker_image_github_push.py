@@ -15,6 +15,7 @@ import agent_env.providers as providers
 from agent_env.artifact import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.store import ImageStore, RegistryAuth, set_object_store
 from agent_env.store.object_store.local import LocalFilesystemObjectStore
 
@@ -56,14 +57,20 @@ class _ObjectStore:
         return f"https://put.example/{object_url.rsplit('/', 1)[-1]}"
 
 
-class _BuildVm:
+class _BuildVm(VmSandbox):
     files = {"/tmp/image.tar.gz": b"the saved image", "/tmp/build-context.tar.gz": b"the build context"}
 
     def __init__(self) -> None:
         self.scripts: list[str] = []
+        self.stdin: dict[str, bytes] = {}
+        self.fails: str | None = None
 
     async def exec_script(self, script: str, **kwargs) -> str:
         self.scripts.append(script)
+        if self.fails and script.startswith(self.fails):
+            raise RuntimeError("Script failed (exit 128)")
+        if script == "mktemp -d":
+            return "/tmp/tmp.Xq3\n"
         if script.startswith("wc -c < "):
             return f"{len(self.files[script.removeprefix('wc -c < ')])}\n"
         if read := re.fullmatch(r"tail -c \+(\d+) (\S+) \| head -c (\d+) \| base64", script):
@@ -72,6 +79,10 @@ class _BuildVm:
         if script.startswith("cat "):
             return "FROM scratch\nCOPY app /app\n"
         return "0123abcd\n" if "rev-parse" in script else ""
+
+    async def _exec_with_stdin(self, script, stdin):
+        self.stdin[script] = b"".join([piece async for piece in stdin])
+        return 0, "", ""
 
     async def terminate(self) -> None:
         pass
@@ -136,6 +147,41 @@ async def test_a_store_that_signs_nothing_gets_the_build_tarballs_copied_off_the
     assert store.get(result.artifact.tar_gz_object_url) == vm.files["/tmp/image.tar.gz"]
     assert store.get(result.artifact.build_context_object_url) == vm.files["/tmp/build-context.tar.gz"]
     assert not any("curl" in script for script in vm.scripts)
+
+
+@pytest.mark.asyncio
+async def test_the_github_token_and_registry_password_reach_the_vm_in_files_no_script_holds(build):
+    _, _, vm = build
+
+    await DockerImageArtifact.put_from_github("server", "https://github.com/example/repo/blob/main/Dockerfile",
+                                              github_token="ghs_s3cret")
+
+    assert vm.stdin == {
+        "cat > /tmp/tmp.Xq3/credentials": b"https://x-access-token:ghs_s3cret@github.com\n",
+        "cat > /tmp/tmp.Xq3/password": b"token",
+    }
+    clone = vm.scripts.index(
+        "GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c 'credential.helper=store --file=/tmp/tmp.Xq3/credentials' "
+        "clone --depth 1 --branch main https://github.com/example/repo.git /tmp/repo"
+    )
+    login = vm.scripts.index(
+        "docker login --username user --password-stdin registry.example < /tmp/tmp.Xq3/password"
+    )
+    assert vm.scripts[clone + 1] == vm.scripts[login + 1] == "rm -rf /tmp/tmp.Xq3"
+    assert not any(secret in script for script in vm.scripts for secret in ("ghs_s3cret", "token"))
+
+
+@pytest.mark.asyncio
+async def test_the_token_is_removed_from_the_vm_when_the_clone_fails(build):
+    _, _, vm = build
+    vm.fails = "GIT_TERMINAL_PROMPT=0 git"
+
+    with pytest.raises(RuntimeError, match="exit 128"):
+        await DockerImageArtifact.put_from_github("server", "https://github.com/example/repo/blob/main/Dockerfile",
+                                                  github_token="ghs_s3cret")
+
+    *_, clone, removal = vm.scripts
+    assert clone.startswith(vm.fails) and removal == "rm -rf /tmp/tmp.Xq3"
 
 
 @pytest.mark.asyncio
