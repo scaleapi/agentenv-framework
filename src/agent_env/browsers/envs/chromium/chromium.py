@@ -30,8 +30,8 @@ PACKAGES = ["fonts-liberation", "libasound2t64", "libatk-bridge2.0-0t64", "libat
 WINDOW_CLASS = "Chromium"
 #: Where Chrome for Testing reads managed policies; it reads neither Chromium's folder nor Chrome's.
 POLICY_DIR = Path("/etc/opt/chrome_for_testing/policies/managed")
-#: No sign-in, sync, welcome or promotional tabs, default-browser prompt, telemetry, password or autofill prompts,
-#: translation offers, updates, or location and notification prompts; and no warning bar for the flags a container
+#: No sign-in, sync, welcome or promotional tabs, default-browser prompt, telemetry, password prompts, autofill on any
+#: site, translation offers, updates, or location and notification prompts; and no warning bar for the flags a container
 #: needs, which also takes away Chrome for Testing's own bar.
 POLICIES = {
     "BrowserSignin": 0,
@@ -40,8 +40,7 @@ POLICIES = {
     "DefaultBrowserSettingEnabled": False,
     "MetricsReportingEnabled": False,
     "PasswordManagerEnabled": False,
-    "AutofillAddressEnabled": False,
-    "AutofillCreditCardEnabled": False,
+    "AutofillSettings": [{"url_pattern": "*", "blocked_types": ["all"]}],
     "TranslateEnabled": False,
     "ComponentUpdatesEnabled": False,
     "DefaultGeolocationSetting": 2,
