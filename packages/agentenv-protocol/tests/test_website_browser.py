@@ -7,7 +7,7 @@ import zipfile
 
 from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Packages, Ready, computer_app, linux
 from agentenv_protocol.website_browser import (CHROMIUM_DOWNLOADS, CHROMIUM_PACKAGES, CHROMIUM_VERSION, POLICIES,
-                                               WINDOW_CLASS, ChromiumInstall, chromium_command, install_chromium)
+                                               ChromiumInstall, chromium_command, install_chromium)
 
 
 def test_each_arch_gets_its_pinned_archive_of_the_version_in_a_place_of_its_own():
@@ -26,6 +26,7 @@ def test_the_command_runs_unsandboxed_without_dev_shm_first_runs_or_proxy_and_op
                        f"--user-data-dir={tmp_path / 'profile'}", "--disable-default-apps", "https://a.test/",
                        "https://b.test/"]
     assert not [arg for arg in command if "proxy" in arg]
+    assert "--class=Desk" in chromium_command(tmp_path, profile=tmp_path / "profile", window_class="Desk")
 
 
 def test_the_install_unpacks_the_archive_with_its_execute_bits_in_its_place_and_writes_the_policies(tmp_path):
@@ -48,7 +49,7 @@ def test_the_install_unpacks_the_archive_with_its_execute_bits_in_its_place_and_
 def test_another_app_that_starts_chromium_itself_inherits_its_install_step():
     @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
     @linux(packages=Packages(apt=[*CHROMIUM_PACKAGES, "xdotool"]), downloads=CHROMIUM_DOWNLOADS,
-           launch=Launch(command=["venv/bin/python", "desk.py"], window={"class": WINDOW_CLASS}, ready=Ready(window=True)))
+           launch=Launch(command=["venv/bin/python", "desk.py"], window={"class": "Desk"}, ready=Ready(window=True)))
     class Desk(ChromiumInstall, ComputerAppEnvironment):
         pass
 

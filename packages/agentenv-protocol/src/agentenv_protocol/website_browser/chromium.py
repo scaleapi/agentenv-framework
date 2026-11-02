@@ -25,7 +25,7 @@ CHROMIUM_PACKAGES = ["fonts-liberation", "libasound2t64", "libatk-bridge2.0-0t64
                      "libgtk-3-0t64", "libnspr4", "libnss3", "libpango-1.0-0", "libvulkan1", "libx11-6", "libxcb1",
                      "libxcomposite1", "libxdamage1", "libxext6", "libxfixes3", "libxkbcommon0", "libxrandr2",
                      "libxshmfence1", "unzip"]
-#: The window class it opens its windows with, which a launch matches.
+#: The window class agentenv's ``chromium`` app opens its windows with, which its launch matches.
 WINDOW_CLASS = "Chromium"
 #: Where Chrome for Testing reads managed policies; it reads neither Chromium's folder nor Chrome's.
 POLICY_DIR = Path("/etc/opt/chrome_for_testing/policies/managed")
@@ -78,10 +78,11 @@ def chromium_binary(folder: Path) -> Path:
     return folder / _BINARY
 
 
-def chromium_command(folder: Path, *, profile: Path, urls: Iterable[str] = (), flags: Iterable[str] = ()) -> list[str]:
+def chromium_command(folder: Path, *, profile: Path, urls: Iterable[str] = (), flags: Iterable[str] = (),
+                     window_class: str = WINDOW_CLASS) -> list[str]:
     """Chromium's command: no sandbox, which a container can't give it, and no /dev/shm, which no computer sizes; no
-    first run or default-browser check; ``WINDOW_CLASS`` for its windows; ``profile`` its profile; ``flags``, the
-    caller's own; and ``urls`` in tabs, the first active. It takes no proxy: a computer has no site proxy, and its sites
-    on loopback must stay reachable."""
+    first run or default-browser check; ``window_class`` for its windows, the app's own, since a launch is ready on any
+    window of its class; ``profile`` its profile; ``flags``, the caller's own; and ``urls`` in tabs, the first active.
+    It takes no proxy: a computer has no site proxy, and its sites on loopback must stay reachable."""
     return [str(chromium_binary(folder)), "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run",
-            "--no-default-browser-check", f"--class={WINDOW_CLASS}", f"--user-data-dir={profile}", *flags, *urls]
+            "--no-default-browser-check", f"--class={window_class}", f"--user-data-dir={profile}", *flags, *urls]

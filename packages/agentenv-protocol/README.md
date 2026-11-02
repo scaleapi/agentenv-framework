@@ -747,12 +747,11 @@ amd64 and arm64, since Google ships no Linux arm64 Chrome.
 
 ```python
 from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Packages, Ready, computer_app, linux
-from agentenv_protocol.website_browser import (CHROMIUM_DOWNLOADS, CHROMIUM_PACKAGES, WINDOW_CLASS, ChromiumInstall,
-                                               chromium_command)
+from agentenv_protocol.website_browser import CHROMIUM_DOWNLOADS, CHROMIUM_PACKAGES, ChromiumInstall, chromium_command
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
 @linux(packages=Packages(apt=CHROMIUM_PACKAGES), downloads=CHROMIUM_DOWNLOADS,
-       launch=Launch(command=["venv/bin/python", "desk.py"], window={"class": WINDOW_CLASS}, ready=Ready(window=True)))
+       launch=Launch(command=["venv/bin/python", "desk.py"], window={"class": "Desk"}, ready=Ready(window=True)))
 class Desk(ChromiumInstall, ComputerAppEnvironment):
     ...
 ```
@@ -764,10 +763,11 @@ class Desk(ChromiumInstall, ComputerAppEnvironment):
   writes the managed policies (`POLICIES`) where Chrome for Testing reads them, `/etc/opt/chrome_for_testing/policies/managed`:
   no sign-in, sync, promotional tabs, default-browser prompt, telemetry, password, autofill or translation prompts,
   updates, location or notification prompts, and no warning bar for the flags a container needs.
-- `chromium_command(folder, profile=..., urls=..., flags=...)` is its command: no sandbox, which a container can't
-  give it, and no `/dev/shm`, which no computer sizes; no first run or default-browser check; `--class=Chromium`, which
-  a launch's `window` matches; the profile; the caller's own flags; and the URLs in tabs, the first active. It sets no
-  proxy, so sites on loopback stay reachable.
+- `chromium_command(folder, profile=..., urls=..., flags=..., window_class=...)` is its command: no sandbox, which a
+  container can't give it, and no `/dev/shm`, which no computer sizes; no first run or default-browser check; the
+  window class, which the app's launch `window` matches (`desk.py` passes `window_class="Desk"`; the default,
+  `WINDOW_CLASS`, is agent-env's `chromium` app's, and a launch is ready on any window of its class); the profile; the
+  caller's own flags; and the URLs in tabs, the first active. It sets no proxy, so sites on loopback stay reachable.
 
 ## A2A agent framework
 
