@@ -16,7 +16,7 @@ from agent_env.config import configure, reset_config, set_document_store
 from agent_env.config.runtime import Config
 from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
-from agent_env.runner.runner import KEEP_KEY, RunRecord, RunStatus
+from agent_env.runner.runner import KEEP_KEY, IdempotencyConflict, RunRecord, RunStatus
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
 from tst.runner import conformance
 
@@ -694,3 +694,122 @@ async def test_conformance(case, local_stores, monkeypatch):
         await case(runner)
     finally:
         await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_same_idempotency_key_returns_the_first_handle_and_starts_one_run(docs, monkeypatch):
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    try:
+        first = await runner.submit("t1", 1, agent_model="m", metadata={"a": 1}, idempotency_key="k")
+        await _drain(runner, first.run_id)
+        second = await runner.submit("t1", 1, agent_model="m", metadata={"a": 1}, idempotency_key="k")
+    finally:
+        await runner.stop()
+    assert second == first
+    assert len(task.calls) == 1
+    assert len(run_store.list_runs(task_id="t1")) == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_on_a_failed_run_returns_the_failed_run(docs, monkeypatch):
+    async def boom(_kw):
+        raise RuntimeError("boom")
+
+    task = _FakeTask(on_run=boom)
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    try:
+        first = await runner.submit("t1", 1, idempotency_key="k")
+        assert (await _drain(runner, first.run_id)).status is RunStatus.FAILED
+        assert await runner.submit("t1", 1, idempotency_key="k") == first
+    finally:
+        await runner.stop()
+    assert len(task.calls) == 1
+    assert (await runner.status(first.run_id)).status is RunStatus.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [
+    {"task_id": "t2"},
+    {"task_version": 2},
+    {"agent_model": "other"},
+    {"agent_artifact_id": "art"},
+    {"metadata": {"a": 2}},
+])
+async def test_idempotency_key_with_a_different_request_conflicts(docs, monkeypatch, changed):
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    request = {"task_id": "t1", "task_version": 1, "agent_model": "m", "agent_artifact_id": None, "metadata": {"a": 1}}
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    try:
+        first = await runner.submit(
+            request["task_id"], request["task_version"], agent_model=request["agent_model"],
+            agent_artifact_id=request["agent_artifact_id"], metadata=request["metadata"], idempotency_key="k",
+        )
+        await _drain(runner, first.run_id)
+        request.update(changed)
+        with pytest.raises(IdempotencyConflict):
+            await runner.submit(
+                request["task_id"], request["task_version"], agent_model=request["agent_model"],
+                agent_artifact_id=request["agent_artifact_id"], metadata=request["metadata"], idempotency_key="k",
+            )
+    finally:
+        await runner.stop()
+    assert len(task.calls) == 1
+    assert len(run_store.list_runs()) == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_without_a_key_starts_a_distinct_run_each_time(docs, monkeypatch):
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    try:
+        first = await runner.submit("t1", 1)
+        second = await runner.submit("t1", 1)
+        await _drain(runner, first.run_id)
+        await _drain(runner, second.run_id)
+    finally:
+        await runner.stop()
+    assert first.run_id != second.run_id and first.instance_id != second.instance_id
+    assert len(task.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_submits_with_one_key_start_one_run(docs, monkeypatch):
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=4)
+    await runner.start()
+    try:
+        handles = await asyncio.gather(*(runner.submit("t1", 1, idempotency_key="k") for _ in range(8)))
+        await _drain(runner, handles[0].run_id)
+    finally:
+        await runner.stop()
+    assert len(set(handles)) == 1
+    assert len(task.calls) == 1
+    assert len(run_store.list_runs(task_id="t1")) == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_binds_the_instance_it_was_first_used_with(docs, monkeypatch):
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=1)
+    await runner.start()
+    try:
+        first = await runner.submit("t1", 1, instance_id="inst-1", idempotency_key="k")
+        assert first.instance_id == "inst-1"
+        assert await runner.submit("t1", 1, instance_id="inst-1", idempotency_key="k") == first
+        with pytest.raises(IdempotencyConflict):
+            await runner.submit("t1", 1, instance_id="inst-2", idempotency_key="k")
+        await _drain(runner, first.run_id)
+    finally:
+        await runner.stop()
+    assert len(task.calls) == 1
