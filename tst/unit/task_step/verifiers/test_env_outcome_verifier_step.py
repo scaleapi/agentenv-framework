@@ -107,3 +107,19 @@ def test_a_trajectory_parameter_gets_the_graded_prompts_trajectory_per_turn(monk
         {"format": "cli/1", "events": [{"n": 1}]}, None, [{"n": 2}]]
     assert graded(agent_trajectory_object_url="mem://t2") == [[{"n": 2}]]
     assert graded() is None
+
+
+def test_a_script_whose_object_was_replaced_after_its_put_is_never_run(local_stores, tmp_path):
+    script = tmp_path / "v.py"
+    script.write_text("async def verify(url):\n    return [{'id': 'c', 'score': 1.0}]\n")
+    fa = FileArtifact.put("script", description="d", file_path=str(script))
+    marker = tmp_path / "ran"
+    store = local_stores.get_object_store()
+    store.put(store.get_object_key(fa.object_url), f"open({str(marker)!r}, 'w')\n".encode(), allow_overwrite=True)
+    step = EnvOutcomeVerifierTaskStep(id="outcome", version=None, env_id="e", file_artifact_id="script", verifier_id="v")
+    ctx = TaskStepContext()
+    ctx.deployed_envs.append(DeployedEnv(env_id="e", env_version=1, mcp_url="http://mcp"))
+
+    with pytest.raises(ValueError, match="no longer holds the bytes file artifact script v1 was put with"):
+        asyncio.run(step.execute(ctx))
+    assert not marker.exists()
