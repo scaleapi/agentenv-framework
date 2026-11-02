@@ -48,6 +48,7 @@ or one of them only where it is used.
 | `make nemo-gym-test` | `tst/nemo_gym`: rollouts through `agent_env.training.nemo_gym`'s resources server in-process; needs the `nemo-gym` extra, on Python 3.13.14 or later, which the `dev` extra leaves out (`uv sync --extra dev --extra nemo-gym`) |
 | `make verl-test` | `tst/verl`: rows played through `agent_env.training.verl`'s agent loop on verl itself, with Qwen3's tokenizer from the Hub and a stand-in rollout server; needs verl and CPU torch, which the `dev` extra leaves out |
 | `make skyrl-test` | `tst/skyrl`: rows played through `agent_env.training.skyrl`'s generator and env on SkyRL itself, with Qwen3's and Qwen3.5's tokenizers from the Hub and a stand-in inference engine; needs SkyRL, skyrl-gym and CPU torch on Python 3.12+, which the `dev` extra leaves out |
+| `make miles-test` | `tst/miles`: rows played through Miles' own rollout (its agentic generate path, session server, router and mock SGLang server) with `agent_env.training.miles`' agent function, reward hook and filter, with Qwen3's tokenizer from the Hub; needs checkouts of Miles, SGLang and Megatron-LM on `PYTHONPATH`, Miles' requirements and CPU torch, which the `dev` extra leaves out |
 | `make clean-install-test` | the `clean-install` CI gate: both distributions built as the release builds them, installed into a fresh venv from public PyPI with an allowlisted environment, and `agent-env run hello` run twice by name and checked through the local store; needs Python 3.11, uv and git |
 | `npm ci && npm run typecheck && npm run lint && npm run test:smoke` | in `src/agent_env/explorer/ui`: the explorer UI checks the `ui` job runs (it also runs `npm run build:static`); needs Node 22 |
 | `pytest tst/unit/env/store_test.py -v` | one file; add `--log-cli-level=DEBUG` for debug logs |
@@ -347,6 +348,10 @@ the same triggers; it allows no skips and isn't a required check.
 environment, on the same triggers; it allows no skips and isn't a required check.
 `.github/workflows/skyrl.yml` runs `tst/skyrl` on SkyRL 0.4.0 and its main branch, with skyrl-gym and CPU torch
 installed over the dev environment on Python 3.12, on the same triggers; it allows no skips and isn't a required check.
+`.github/workflows/miles.yml` runs `tst/miles` on Miles v0.1.3 and its main branch, checked out on `PYTHONPATH` with
+SGLang and Megatron-LM at the commits a release's `release-lock.json` names or at the branches Miles' main tests against,
+and Miles' requirements and CPU torch installed over the dev environment on Python 3.12, on the same triggers; it allows
+no skips and isn't a required check.
 `.github/workflows/plugin-api.yml` runs the `plugin-api` job on every pull
 request, title edits included, and on `main`: `.github/scripts/check_plugin_api.py` compares the
 plugin surface (its `BASES` and `USED`) between `HEAD^1` and `HEAD` with griffe, pinned in the `dev` extra, and fails on a break the

@@ -1,4 +1,4 @@
-.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test nemo-gym-test verl-test skyrl-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test nemo-gym-test verl-test skyrl-test miles-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -84,6 +84,12 @@ verl-test: ## Play rows through the verl agent loop on verl itself (needs verl a
 # install them first, as .github/workflows/skyrl.yml does.
 skyrl-test: ## Play rows through the SkyRL env and generator on SkyRL itself (needs SkyRL and CPU torch, and the Hub)
 	$(PYTHON) -m pytest tst/skyrl --timeout=900 $(PYTEST_ARGS)
+
+# The Miles tier plays rows through Miles' own rollout: its agentic generate path, session server, router and mock
+# SGLang server, with Qwen3's tokenizer from the Hub. Miles isn't on PyPI: put checkouts of Miles, SGLang and Megatron-LM
+# on PYTHONPATH and install Miles' requirements and CPU torch first, as .github/workflows/miles.yml does.
+miles-test: ## Play rows through Miles' rollout and session server (needs Miles, SGLang and Megatron-LM on PYTHONPATH, CPU torch, and the Hub)
+	$(PYTHON) -m pytest tst/miles --timeout=900 $(PYTEST_ARGS)
 
 # The clean-install gate CI runs, on the same Python. The script gives every step an allowlisted
 # environment, so nothing in this shell reaches the install it checks. A failed run keeps its folder.
