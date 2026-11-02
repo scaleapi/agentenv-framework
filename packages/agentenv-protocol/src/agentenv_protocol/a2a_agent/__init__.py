@@ -5,6 +5,7 @@ from a2a.types import AgentCapabilities
 from .extensions import (
     AGENT_CONFIG_V1,
     ATTRIBUTION_PROBE_V1,
+    CDP_CONFIG_V1,
     PROXY_V1,
     INSTALL_V1,
     MCP_CONFIG_V1,
@@ -16,6 +17,8 @@ from .extensions import (
     TRIGGERS_V1,
     AttributionProbeResponse,
     BundleSkillRequest,
+    CdpAddRequest,
+    CdpRemoveRequest,
     ChangelogIncrement,
     ContextEventsTrajectoryRequest,
     ContextObjectTrajectoryRequest,
@@ -137,6 +140,7 @@ from ..transfers import (
 __all__ = [
     "AGENT_CONFIG_V1",
     "ATTRIBUTION_PROBE_V1",
+    "CDP_CONFIG_V1",
     "PROXY_V1",
     "INSTALL_V1",
     "MCP_CONFIG_V1",
@@ -157,6 +161,8 @@ __all__ = [
     "AttributionProbeResponse",
     "BuiltinTools",
     "BundleSkillRequest",
+    "CdpAddRequest",
+    "CdpRemoveRequest",
     "ChangelogIncrement",
     "ContextEventsTrajectoryRequest",
     "ContextObjectTrajectoryRequest",

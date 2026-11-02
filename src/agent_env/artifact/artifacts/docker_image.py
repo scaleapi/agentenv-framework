@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from pydantic import ConfigDict, Field, model_serializer
 
@@ -22,7 +22,7 @@ from agent_env.artifact.artifact import Artifact, _write_twin
 from agent_env.store.ids import fs_safe, image_repository, is_local_id, local_image_repository
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import image_reference_problem, is_loopback_host, names_registry, registry_host_from_ref
-from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, pinned_from
+from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest, pinned_from
 from agent_env.utils.docker.context import BuildContext
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image, normalize_platform
 
@@ -42,27 +42,17 @@ def _validate_git_name(value: str, label: str) -> str:
 
 
 
-def _git_clone_commands(owner: str, repo: str, ref: str | None, token: str | None) -> list[str]:
-    """Shell commands that clone ``owner/repo`` at ``ref`` into /tmp/repo. A token rides a
-    throwaway GIT_ASKPASS helper so it never appears on a command line, and the helper is
-    removed whether or not the clone succeeds; without a token the clone is anonymous and
-    fails fast on a private repository instead of prompting."""
+def _git_clone_command(owner: str, repo: str, ref: str | None, credentials: str | None) -> str:
+    """The command that clones ``owner/repo`` at ``ref`` into /tmp/repo, failing rather than prompting: signed in from
+    the ``credentials`` file when there is one, with git's other credential helpers off so none keeps a copy."""
     ref_flag = f"--branch {ref}" if ref else ""
-    clone_url = f"https://github.com/{owner}/{repo}.git"
-    if not token:
-        return [f"GIT_TERMINAL_PROMPT=0 git clone --depth 1 {ref_flag} {clone_url} /tmp/repo"]
-    askpass_script = (
-        '#!/bin/sh\n'
-        'case "$1" in\n'
-        '*sername*) echo x-access-token;;\n'
-        f'*) echo "{token}";;\n'
-        'esac\n'
-    )
-    return [
-        f"cat > /tmp/git-askpass.sh << 'ASKEOF'\n{askpass_script}ASKEOF",
-        "chmod +x /tmp/git-askpass.sh",
-        f"trap 'rm -f /tmp/git-askpass.sh' EXIT; GIT_ASKPASS=/tmp/git-askpass.sh git clone --depth 1 {ref_flag} {clone_url} /tmp/repo",
-    ]
+    helper = f"store --file={shlex.quote(credentials)}" if credentials else None
+    helpers = f"-c credential.helper= -c {shlex.quote(f'credential.helper={helper}')} " if helper else ""
+    return f"GIT_TERMINAL_PROMPT=0 git {helpers}clone --depth 1 {ref_flag} https://github.com/{owner}/{repo}.git /tmp/repo"
+
+
+def _github_credentials(token: str) -> bytes:
+    return f"https://x-access-token:{quote(token, safe='')}@github.com\n".encode()
 
 # How much of a build context's source digest its image's tag holds.
 _SOURCES_TAG_CHARS = 16
@@ -222,7 +212,9 @@ class DockerImageArtifact(Artifact):
         sandbox that can't pull the image to build it.
 
         ``image_name`` must name its registry, read with the configured image store's credentials where it holds them;
-        one on this machine is refused unless ``id``'s image store is the local registry."""
+        one on this machine is refused unless ``id``'s image store is the local registry. One already pinned to a
+        digest, in a registry that refuses to serve it to a store holding no credentials for it, is recorded as given,
+        for a sandbox whose Docker is logged in to that registry to pull."""
         from agent_env.artifact.store import get_artifact_store
         from agent_env.config import get_config
 
@@ -240,7 +232,13 @@ class DockerImageArtifact(Artifact):
             if earlier_pin is not None and pinned_from(earlier_pin, image_name):
                 pinned = earlier_pin
             else:
-                pinned = pin_digest(image_name, config.get_image_store().auth(image_name))
+                auth = config.get_image_store().auth(image_name)
+                try:
+                    pinned = pin_digest(image_name, auth)
+                except RegistryRefusedError:
+                    if auth is not None or "@" not in image_name:
+                        raise
+                    pinned = image_name
             if context_path is None:
                 return get_artifact_store().put_document(cls(id=id, description=description, image_name=pinned))
             image_name, _, image_digest = pinned.rpartition("@")
@@ -437,8 +435,12 @@ class DockerImageArtifact(Artifact):
             _validate_git_name(repo, "repo")
             if ref:
                 _validate_git_name(ref, "ref")
-            for command in _git_clone_commands(owner, repo, ref, github_token):
-                await sandbox.exec_script(command)
+            if github_token:
+                async with sandbox.secret_dir() as secrets:
+                    await sandbox.write_secret_file(_github_credentials(github_token), f"{secrets}/credentials")
+                    await sandbox.exec_script(_git_clone_command(owner, repo, ref, f"{secrets}/credentials"))
+            else:
+                await sandbox.exec_script(_git_clone_command(owner, repo, ref, None))
 
             commit_hash = (await sandbox.exec_script("git -C /tmp/repo rev-parse HEAD")).strip()
 
@@ -449,17 +451,10 @@ class DockerImageArtifact(Artifact):
             await sandbox.exec_script(f"docker build --platform linux/amd64 -f {dockerfile_abs} -t {shlex.quote(image_tag)} {context_abs}")
 
             log("push", "Pushing image...", 60)
-            login_cmd = ""
+            await sandbox.exec_script(f"docker tag {shlex.quote(image_tag)} {shlex.quote(image_ref)}")
             if auth is not None:
-                login_cmd = (
-                    f"echo {shlex.quote(auth.password)} | docker login "
-                    f"--username {shlex.quote(auth.username)} --password-stdin {shlex.quote(auth.registry)} && "
-                )
-            await sandbox.exec_script(
-                f"docker tag {shlex.quote(image_tag)} {shlex.quote(image_ref)} && "
-                f"{login_cmd}"
-                f"docker push {shlex.quote(image_ref)}"
-            )
+                await sandbox.docker_login(auth)
+            await sandbox.exec_script(f"docker push {shlex.quote(image_ref)}")
 
             log("save", "Saving Docker image...", 65)
             await sandbox.exec_script(f"docker save {shlex.quote(image_ref)} | gzip > /tmp/image.tar.gz")

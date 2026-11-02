@@ -91,7 +91,7 @@ class VerifyA2AAgentCardStep(TaskStep):
             logger.info(f"Agent card missing optional fields: {missing_optional}")
 
         # Log which extensions the card advertises
-        for ext_uri in [A2AAgent.EXT_MCP_CONFIG, A2AAgent.EXT_SKILL_CONFIG, A2AAgent.EXT_TRAJECTORY, A2AAgent.EXT_AGENT_CONFIG, A2AAgent.EXT_TOOLS]:
+        for ext_uri in [A2AAgent.EXT_MCP_CONFIG, A2AAgent.EXT_CDP_CONFIG, A2AAgent.EXT_SKILL_CONFIG, A2AAgent.EXT_TRAJECTORY, A2AAgent.EXT_AGENT_CONFIG, A2AAgent.EXT_TOOLS]:
             ext = A2AAgent.find_extension(card, ext_uri)
             logger.info(f"  {ext_uri}: {'advertised' if ext else 'not advertised'}")
 

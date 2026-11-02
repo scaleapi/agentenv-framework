@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
+import logging
 import os
 import platform
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -847,6 +849,28 @@ async def test_exec_leaves_a_script_for_another_program_alone(spawned):
 
     assert spawned == [("docker", "exec", "c", "bash", "-c", "cat /app/x")]
 
+
+@pytest.mark.asyncio
+async def test_a_secret_reaches_a_folder_only_its_owner_opens_on_no_command_line_or_log(monkeypatch, caplog, tmp_path):
+    sandbox = LocalSandbox(work_dir=tmp_path)
+    argvs: list[tuple[str, ...]] = []
+    spawn = ls.asyncio.create_subprocess_exec
+
+    async def recording_spawn(*argv, **kwargs):
+        argvs.append(argv)
+        return await spawn(*argv, **kwargs)
+
+    monkeypatch.setattr(ls.asyncio, "create_subprocess_exec", recording_spawn)
+    caplog.set_level(logging.DEBUG, logger=ls.__name__)
+
+    async with sandbox.secret_dir() as secrets:
+        await sandbox.write_secret_file(b"ghs_s3cret", f"{secrets}/token")
+        assert Path(secrets, "token").read_bytes() == b"ghs_s3cret"
+        assert stat.S_IMODE(os.stat(secrets).st_mode) == 0o700
+
+    assert not Path(secrets).exists()
+    assert argvs and not any("ghs_s3cret" in arg for argv in argvs for arg in argv)
+    assert "LocalSandbox exec" in caplog.text and "ghs_s3cret" not in caplog.text
 
 
 @pytest.mark.asyncio
