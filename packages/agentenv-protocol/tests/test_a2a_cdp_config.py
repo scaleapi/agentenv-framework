@@ -126,8 +126,11 @@ def test_remove_takes_a_name_and_a_name_that_is_not_there_is_not_an_error() -> N
         {"name": "chromium buyer"},
         {"http_url": "ws://browser.test/cdp/"},
         {"http_url": "/cdp/token-1/"},
+        {"http_url": "http://:8080/"},
         {"ws_url": "http://browser.test/cdp/"},
         {"ws_url": "ws:///cdp/"},
+        {"ws_url": "ws://browser.test:abc/"},
+        {"ws_url": "ws://browser.test:70000/"},
         {"extra": "field"},
     ],
 )

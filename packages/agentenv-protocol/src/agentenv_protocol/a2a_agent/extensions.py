@@ -64,9 +64,14 @@ class McpAddRequest(ExtensionRequest):
 
 
 def _absolute_url(url: str, schemes: tuple[str, ...]) -> str:
+    """``url``, once it names one of ``schemes``, a host and, if it has one, a valid port."""
     parts = urlsplit(url)
-    if parts.scheme not in schemes or not parts.netloc:
-        raise ValueError(f"must be an absolute {' or '.join(schemes)} URL")
+    try:
+        valid = parts.scheme in schemes and bool(parts.hostname) and (parts.port is None or parts.port >= 0)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(f"must be an absolute {' or '.join(schemes)} URL with a host and a valid port")
     return url
 
 
