@@ -32,7 +32,7 @@ def resolve_virtual_time(virtual_time: str, timezone: Optional[str]) -> str:
         return virtual_time
     try:
         zone = ZoneInfo(timezone.strip()) if isinstance(timezone, str) and timezone.strip() else None
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, OSError):
         zone = None
     if zone is None:
         raise ValueError(f"timezone must be a valid IANA name such as 'America/Chicago', got {timezone!r}")

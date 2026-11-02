@@ -189,7 +189,7 @@ def test_timezone_round_trips_and_is_absent_from_an_unzoned_step():
     assert SyncEnvClockTaskStep.from_dict(_step().to_dict()).timezone is None
 
 
-@pytest.mark.parametrize("name", ["", "  ", "Mars/Olympus", 7])
+@pytest.mark.parametrize("name", ["", "  ", "Mars/Olympus", 7, "Europe", "x" * 5000, "../x"])
 def test_an_invalid_zone_is_refused_when_the_step_is_built(name):
     with pytest.raises(ValueError, match="IANA"):
         _zoned(timezone=name)
