@@ -404,7 +404,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         launch = declared.launch if declared is not None else None
         self.launch = self._launch_for(launch) if launch is not None else None
         self.paths = list(declared.paths) if declared is not None else []
-        ready = self.launch.ready if self.launch is not None else None
+        ready = launch.ready if launch is not None else None
         self._computer_app = AppRuntime(
             self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(cls)
                           if hasattr(fn, _READY_CHECK_ATTR) and _runs_on(getattr(fn, _READY_CHECK_ATTR), on)},
@@ -414,7 +414,8 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             cls.data_timeout_s)
 
     def _launch_for(self, launch: Launch) -> Launch:
-        """The launch its server uses, from the one declared for its OS: as declared."""
+        """The launch its server uses, from the one declared for its OS, whose ``ready`` timeout it keeps: as
+        declared."""
         return launch
 
     def _on_desktop(self) -> bool:

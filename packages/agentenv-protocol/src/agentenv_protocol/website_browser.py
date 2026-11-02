@@ -101,6 +101,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     policy_dir: ClassVar[Path] = Path("/etc/chromium/policies/managed")
     policies: ClassVar[dict[str, Any]] = {}
     profile: ClassVar[str] = ".config/chromium"
+    #: How long its ready check waits on the debugging address's answer.
+    devtools_timeout_s: ClassVar[float] = 5.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -138,12 +140,15 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def _launch_for(self, launch: Launch) -> Launch:
         """The subclass's launch with agentenv's flags and the start tabs after its command, and the time zone in its
-        environment; alone, with no window to match or wait for, so its ready checks say when it's ready."""
+        environment; alone, with no window to match or wait for, its ``ready`` keeping its port and command, and
+        none when that leaves it nothing, so its ready checks say when it's ready."""
         _refuse_owned(type(self).__name__, launch)
         update: dict[str, Any] = {"command": [*launch.command, *self.agentenv_flags(), *self.settings.start_urls],
                                   "env": {**(launch.env or {}), "TZ": self.settings.time_zone}}
         if _alone():
-            update.update(window=None, ready=None)
+            ready = launch.ready
+            waits = ready is not None and (ready.port is not None or bool(ready.command))
+            update.update(window=None, ready=ready.model_copy(update={"window": False}) if waits else None)
         return launch.model_copy(update=update)
 
     def _on_desktop(self) -> bool:
@@ -179,7 +184,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         except (FileNotFoundError, ValueError):
             return False
         try:
-            async with httpx.AsyncClient(timeout=5, trust_env=False) as http:
+            async with httpx.AsyncClient(timeout=self.devtools_timeout_s, trust_env=False) as http:
                 return (await http.get(f"http://{address.netloc}/json/version")).status_code == 200
         except httpx.HTTPError:
             return False

@@ -78,7 +78,23 @@ def test_alone_it_goes_through_its_proxy_headless_at_its_window_and_its_launch_w
     assert launch.command[-3:] == ["--window-size=1024,768", "--headless=new", "about:blank"]
     assert launch.window is None and launch.ready is None
     assert Launch.model_validate(launch.model_dump()) == launch
-    assert browser._computer_app.desktop is False and browser._computer_app.timeout_s == app.DEFAULT_TIMEOUT_S
+    assert browser._computer_app.desktop is False and browser._computer_app.timeout_s == 30
+
+
+def test_alone_its_launch_keeps_the_port_and_command_it_waits_on_and_their_timeout(monkeypatch):
+    @linux(launch=Launch(command=["chromium/chrome"], window={"class": "Chromium"},
+                         ready=Ready(window=True, port=9000, command=["true"], timeout_s=45)))
+    class Waiting(WebsiteBrowserEnvironment):
+        pass
+
+    monkeypatch.setenv(ALONE_ENV, "1")
+    monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
+
+    waiting = Waiting()
+
+    assert waiting.launch.ready == Ready(window=False, port=9000, command=["true"], timeout_s=45)
+    assert Launch.model_validate(waiting.launch.model_dump()) == waiting.launch
+    assert waiting._computer_app.timeout_s == 45
 
 
 def test_alone_on_the_open_web_it_runs_headful(monkeypatch):
