@@ -31,6 +31,8 @@ def test_vf_eval_scores_a_played_row_and_fails_a_masked_one(serve, tmp_path, tea
     row = json.loads((folder / "data" / "all.jsonl").read_text().splitlines()[0])
     (tmp_path / "rows.jsonl").write_text(json.dumps(row) + "\n" + json.dumps({**row, "task_id": "b"}) + "\n")
     port, model = _free_port(), _model()
+    vf_help = subprocess.run([VF_EVAL, "--help"], capture_output=True, text=True, timeout=60)
+    no_push = ["--no-push"] if "--no-push" in vf_help.stdout + vf_help.stderr else []
 
     served = subprocess.Popen([sys.executable, "-m", "agent_env.training.nemo_gym", "serve", str(folder), "--port",
                                str(port), "--masked-as-error"],
@@ -38,7 +40,7 @@ def test_vf_eval_scores_a_played_row_and_fails_a_masked_one(serve, tmp_path, tea
     try:
         url = _up(served, f"http://127.0.0.1:{port}")
         (tmp_path / "eval.toml").write_text(_config(tmp_path, url, model.server_address[1]))
-        evaluated = subprocess.run([VF_EVAL, "@", str(tmp_path / "eval.toml"), "-n", "2", "-r", "1", "--no-push"],
+        evaluated = subprocess.run([VF_EVAL, "@", str(tmp_path / "eval.toml"), "-n", "2", "-r", "1", *no_push],
                                    env={**os.environ, "STAND_IN_API_KEY": "unused"}, capture_output=True, text=True,
                                    timeout=600)
     finally:
