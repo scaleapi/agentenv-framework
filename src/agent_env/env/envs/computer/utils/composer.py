@@ -27,7 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer import apps as installed_apps
@@ -255,85 +255,66 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
            builds: builder.Builds, progress: _Progress) -> dict:
     """The status of ``form`` and ``arch`` once built and pushed, or reused, or the stage that failed and why, each
     stage reported to ``progress``. A builder from ``builds`` resolves and builds it, opened when first needed."""
-    stage, key, pair = "build", None, f"{form}/{arch}"
-    try:
-        with tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened:
-            context, fetched, from_store = Path(work) / builder.CONTEXT, {}, {}
-            context.mkdir()
-            source, base_identity = _base(base, arch)
-            layer = _stage_driver(context, driver, base, from_store)
-            apps = [_stage_app(context, app, base, from_store) for app in env.composed_apps()]
-            layers = [layer, *apps]
-            wants = _wants(layers, _stage_protocol(context))
-            platform, held = f"linux/{arch}", []
+    pair = f"{form}/{arch}"
+    with (_attempting(env, form, arch) as attempt, tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work,
+          contextlib.ExitStack() as opened):
+        context, fetched, from_store = Path(work) / builder.CONTEXT, {}, {}
+        context.mkdir()
+        source, base_identity = _base(base, arch)
+        layer = _stage_driver(context, driver, base, from_store)
+        apps = [_stage_app(context, app, base, from_store) for app in env.composed_apps()]
+        layers = [layer, *apps]
+        wants = _wants(layers, _stage_protocol(context))
+        platform, held = f"linux/{arch}", []
 
-            def on() -> builder.Builder:
-                if not held:
-                    link = builds.link(platform, base.image())
-                    native = platform in link.native_platforms()
-                    progress.at(pair, "starting its builder", f"building natively {builder.where(link)}" if native else
-                                f"building emulated, which is slow, {builder.where(link)}; "
-                                f"{builder.instead_of_emulating(builds.provider, platform)}")
-                    held.append(opened.enter_context(builds.open(link, platform, Path(work), base.image(), from_store)))
-                return held[0]
+        def on() -> builder.Builder:
+            if not held:
+                link = builds.link(platform, base.image())
+                native = platform in link.native_platforms()
+                progress.at(pair, "starting its builder", f"building natively {builder.where(link)}" if native else
+                            f"building emulated, which is slow, {builder.where(link)}; "
+                            f"{builder.instead_of_emulating(builds.provider, platform)}")
+                held.append(opened.enter_context(builds.open(link, platform, Path(work), base.image(), from_store)))
+            return held[0]
 
-            inputs = packages.inputs_digest(wants, context, base_identity, arch)
-            lock = packages.stored(inputs, env.stored_id) if inputs is not None else None
-            if inputs is not None and lock is None:
-                stage = "resolve"
-                resolving = on()
-                progress.at(pair, "resolving packages")
-                lock, fetched = packages.resolve(inputs, wants, resolving, source, arch, env.stored_id)
-                progress.at(pair, "resolved", f"resolved {len(fetched)} files and stored them")
-                stage = "build"
-            dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
-            key = "sha256:" + hashlib.sha256(json.dumps({
-                "base": base_identity, "dockerfile": dockerfile, "context": _digest(context),
-                "lock": lock.digest() if lock is not None else None, "form": form, "arch": arch,
-                "format": FORMAT,
-            }, sort_keys=True).encode()).hexdigest()
-            store = get_config().get_image_store_for(env.stored_id)
-            store.ensure_repository(REPOSITORY)
-            ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
-            if (pinned := _served(ref, store)) is not None:
-                progress.at(pair, "reusing", "reusing the image of the same key, built earlier")
-                kept = labels(pinned, arch, store.auth(pinned))
-                return {"status": "unverified", "key": key, "image": pinned, "reused": True,
-                        "emulated": kept.get(EMULATED_LABEL) == "true", "lock": inputs,
-                        "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": _now()}
-            building_on = on()
-            progress.at(pair, "building the image")
-            if lock is not None:
-                packages.stage(lock, building_on, env.stored_id, fetched)
-            local, emulated = f"agentenv-computer:{key[7:23]}-{arch}", platform != building_on.platform
-            building_on.build(f"{dockerfile}LABEL {KEY_LABEL}={key}\n", local, platform, {KEY_LABEL: key})
-            if reason := _compare(building_on, local, layers, pair, progress):
-                return _failed(env, form, arch, stage, key, reason)
-            installed = building_on.installed(local, layer.prefix)
-            building_on.build(f"FROM {local}\n", local, platform, {
-                INSTALLED_LABEL: json.dumps(installed, sort_keys=True), EMULATED_LABEL: "true" if emulated else "false",
-            }, context="label")
-            stage = "push"
-            progress.at(pair, "pushing the image")
-            building_on.push(local, ref, store)
-            return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
-                    "emulated": emulated, "builder": building_on.name, "lock": inputs, "installed": installed,
-                    "built_at": _now()}
-    except builder.Skipped as e:
-        return {"status": "skipped", "reason": str(e), "skipped_at": _now()}
-    except builder.Unbuildable as e:
-        return _failed(env, form, arch, stage, key, str(e))
-    except builder.ResolveError as e:
-        return _failed(env, form, arch, "resolve", None, str(e), log=e.log or None)
-    except DockerBuildError as e:
-        # Docker can list a platform it has lost the emulation for, until it restarts; the build says so.
-        unemulated = "exec format error" in str(e)
-        return _failed(env, form, arch, stage, key, f"the builder can't run linux/{arch} programs: its Docker has no "
-                       "emulation for it" if unemulated else "the build failed", log=str(e))
-    except subprocess.CalledProcessError as e:
-        return _failed(env, form, arch, stage, key, f"{' '.join(e.cmd[:2])} failed: {(e.stderr or '').strip()}")
-    except (RuntimeError, ValueError, OSError) as e:
-        return _failed(env, form, arch, stage, key, f"{type(e).__name__}: {e}")
+        inputs = packages.inputs_digest(wants, context, base_identity, arch)
+        lock = packages.stored(inputs, env.stored_id) if inputs is not None else None
+        if inputs is not None and lock is None:
+            attempt.stage = "resolve"
+            resolving = on()
+            progress.at(pair, "resolving packages")
+            lock, fetched = packages.resolve(inputs, wants, resolving, source, arch, env.stored_id)
+            progress.at(pair, "resolved", f"resolved {len(fetched)} files and stored them")
+            attempt.stage = "build"
+        dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
+        key = attempt.key = _key(base=base_identity, dockerfile=dockerfile, context=_digest(context),
+                                 lock=lock.digest() if lock is not None else None, form=form, arch=arch, format=FORMAT)
+        store, ref, pinned = _stored(env, key)
+        if pinned is not None:
+            progress.at(pair, "reusing", "reusing the image of the same key, built earlier")
+            kept = labels(pinned, arch, store.auth(pinned))
+            return {"status": "unverified", "key": key, "image": pinned, "reused": True,
+                    "emulated": kept.get(EMULATED_LABEL) == "true", "lock": inputs,
+                    "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": _now()}
+        building_on = on()
+        progress.at(pair, "building the image")
+        if lock is not None:
+            packages.stage(lock, building_on, env.stored_id, fetched)
+        local, emulated = f"agentenv-computer:{key[7:23]}-{arch}", platform != building_on.platform
+        building_on.build(f"{dockerfile}LABEL {KEY_LABEL}={key}\n", local, platform, {KEY_LABEL: key})
+        if reason := _compare(building_on, local, layers, pair, progress):
+            return _failed(env, form, arch, attempt.stage, key, reason)
+        installed = building_on.installed(local, layer.prefix)
+        building_on.build(f"FROM {local}\n", local, platform, {
+            INSTALLED_LABEL: json.dumps(installed, sort_keys=True), EMULATED_LABEL: "true" if emulated else "false",
+        }, context="label")
+        attempt.stage = "push"
+        progress.at(pair, "pushing the image")
+        building_on.push(local, ref, store)
+        return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
+                "emulated": emulated, "builder": building_on.name, "lock": inputs, "installed": installed,
+                "built_at": _now()}
+    return attempt.result
 
 
 def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: dict, builds: builder.Builds,
@@ -342,62 +323,104 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
     reused, or the stage that failed and why. Its key is of the container's key, the base disk and the disk recipe;
     the base disk is the base's own, the one published for it, or else one made on the builder from the base's
     container and the boot recipe. Its build runs no program of ``arch``'s but that recipe's."""
-    stage, key, pair, platform = "build", None, f"disk/{arch}", f"linux/{arch}"
+    pair, platform = f"disk/{arch}", f"linux/{arch}"
+    with (_attempting(env, "disk", arch) as attempt,
+          tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened):
+        context = Path(work) / builder.CONTEXT
+        shutil.copytree(DISK / "boot", context)
+        shutil.copytree(DISK / "tools", context / "tools")
+        base_disk, base_identity, recipe = *_base_disk(base, arch), _digest(context)
+        key = attempt.key = _key(container=container["key"], base_disk=base_identity, recipe=recipe, form="disk",
+                                 arch=arch, format=FORMAT)
+        store, ref, pinned = _stored(env, key)
+        if pinned is not None:
+            progress.at(pair, "reusing", "reusing the disk of the same key, made earlier")
+            return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": _now()}
+        link = builds.link(platform, base.image())
+        progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
+        on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
+        on.login(store.auth(container["image"]))
+        if base_disk is not None:
+            on.login(get_config().get_image_store().auth(base_disk))
+        if (tools := published_pinned(DISK_TOOLS_IMAGE)) is None:
+            tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
+            on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
+                     context=f"{builder.CONTEXT}/tools")
+        dockerfile = (context / "Dockerfile").read_text()
+        if base_disk is None:
+            progress.at(pair, "making the base's disk")
+            base_disk = _made_base_disk(on, base, arch, f"{base_identity} {recipe}", tools, dockerfile)
+        progress.at(pair, "making the disk")
+        local = f"agentenv-computer:{key[7:23]}-disk-{arch}"
+        on.build(dockerfile, local, platform, {KEY_LABEL: key}, build_args={
+            "ROOTFS": container["image"], "ROOTFS_CONFIG": _encoded(_config(on, container["image"], arch)),
+            "ESP": base_disk, "TOOLS": tools})
+        attempt.stage = "push"
+        progress.at(pair, "pushing the disk")
+        on.push(local, ref, store)
+        return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
+                "builder": on.name, "built_at": _now()}
+    return attempt.result
+
+
+def _made_base_disk(on: builder.Builder, base: ComputerArtifact, arch: str, made_from: str, tools: str,
+                    dockerfile: str) -> str:
+    """The base's disk for ``arch``, made on ``on`` from the base's container with the boot recipe's ``dockerfile`` at
+    the base's size, under a tag of ``made_from``, what it's made from."""
+    source, _ = _base(base, arch)
+    tag = f"agentenv-computer:{hashlib.sha256(made_from.encode()).hexdigest()[:16]}-base-disk-{arch}"
+    on.build(dockerfile, tag, f"linux/{arch}", {}, build_args={
+        "ROOTFS": source, "ROOTFS_CONFIG": _encoded(_config(on, source, arch)), "TOOLS": tools,
+        "SIZE_GB": str(base.forms.disk.min_disk_gb)})
+    return tag
+
+
+@dataclass
+class _Attempt:
+    """How far a pair's build got, its stage and key, and, when it failed, its result (``_attempting``)."""
+
+    stage: str = "build"
+    key: str | None = None
+    result: dict | None = None
+
+
+@contextlib.contextmanager
+def _attempting(env: ComputerEnv, form: str, arch: str) -> Iterator[_Attempt]:
+    """A pair's build, whose failure becomes its result: skipped, or failed at the stage it reached, saying why."""
+    attempt = _Attempt()
     try:
-        with tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened:
-            context = Path(work) / builder.CONTEXT
-            shutil.copytree(DISK / "boot", context)
-            shutil.copytree(DISK / "tools", context / "tools")
-            base_disk, base_identity, recipe = *_base_disk(base, arch), _digest(context)
-            key = "sha256:" + hashlib.sha256(json.dumps({
-                "container": container["key"], "base_disk": base_identity, "recipe": recipe, "form": "disk",
-                "arch": arch, "format": FORMAT,
-            }, sort_keys=True).encode()).hexdigest()
-            store = get_config().get_image_store_for(env.stored_id)
-            store.ensure_repository(REPOSITORY)
-            ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
-            if (pinned := _served(ref, store)) is not None:
-                progress.at(pair, "reusing", "reusing the disk of the same key, made earlier")
-                return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": _now()}
-            link = builds.link(platform, base.image())
-            progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
-            on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
-            on.login(store.auth(container["image"]))
-            if base_disk is not None:
-                on.login(get_config().get_image_store().auth(base_disk))
-            if (tools := published_pinned(DISK_TOOLS_IMAGE)) is None:
-                tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
-                on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
-                         context=f"{builder.CONTEXT}/tools")
-            dockerfile = (context / "Dockerfile").read_text()
-            if base_disk is None:
-                progress.at(pair, "making the base's disk")
-                source, _ = _base(base, arch)
-                made = hashlib.sha256(f"{base_identity} {recipe}".encode()).hexdigest()[:16]
-                base_disk = f"agentenv-computer:{made}-base-disk-{arch}"
-                on.build(dockerfile, base_disk, platform, {}, build_args={
-                    "ROOTFS": source, "ROOTFS_CONFIG": _encoded(_config(on, source, arch)), "TOOLS": tools,
-                    "SIZE_GB": str(base.forms.disk.min_disk_gb)})
-            progress.at(pair, "making the disk")
-            local = f"agentenv-computer:{key[7:23]}-disk-{arch}"
-            on.build(dockerfile, local, platform, {KEY_LABEL: key}, build_args={
-                "ROOTFS": container["image"], "ROOTFS_CONFIG": _encoded(_config(on, container["image"], arch)),
-                "ESP": base_disk, "TOOLS": tools})
-            stage = "push"
-            progress.at(pair, "pushing the disk")
-            on.push(local, ref, store)
-            return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
-                    "builder": on.name, "built_at": _now()}
+        yield attempt
     except builder.Skipped as e:
-        return {"status": "skipped", "reason": str(e), "skipped_at": _now()}
+        attempt.result = {"status": "skipped", "reason": str(e), "skipped_at": _now()}
     except builder.Unbuildable as e:
-        return _failed(env, "disk", arch, stage, key, str(e))
+        attempt.result = _failed(env, form, arch, attempt.stage, attempt.key, str(e))
+    except builder.ResolveError as e:
+        attempt.result = _failed(env, form, arch, "resolve", None, str(e), log=e.log or None)
     except DockerBuildError as e:
-        return _failed(env, "disk", arch, stage, key, "the build failed", log=str(e))
+        # Docker can list a platform it has lost the emulation for, until it restarts; the build says so.
+        unemulated = "exec format error" in str(e)
+        attempt.result = _failed(env, form, arch, attempt.stage, attempt.key,
+                                 f"the builder can't run linux/{arch} programs: its Docker has no emulation for it"
+                                 if unemulated else "the build failed", log=str(e))
     except subprocess.CalledProcessError as e:
-        return _failed(env, "disk", arch, stage, key, f"{' '.join(e.cmd[:2])} failed: {(e.stderr or '').strip()}")
+        attempt.result = _failed(env, form, arch, attempt.stage, attempt.key,
+                                 f"{' '.join(e.cmd[:2])} failed: {(e.stderr or '').strip()}")
     except (RuntimeError, ValueError, OSError) as e:
-        return _failed(env, "disk", arch, stage, key, f"{type(e).__name__}: {e}")
+        attempt.result = _failed(env, form, arch, attempt.stage, attempt.key, f"{type(e).__name__}: {e}")
+
+
+def _key(**inputs: Any) -> str:
+    """A build's key: a digest of everything that goes into it."""
+    return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
+def _stored(env: ComputerEnv, key: str) -> tuple[Any, str, str | None]:
+    """The env's image store, the ref there of the image of ``key``, and that ref pinned when the store serves one
+    already, for any env that built it."""
+    store = get_config().get_image_store_for(env.stored_id)
+    store.ensure_repository(REPOSITORY)
+    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
+    return store, ref, _served(ref, store)
 
 
 def _base_disk(base: ComputerArtifact, arch: str) -> tuple[str | None, str]:
