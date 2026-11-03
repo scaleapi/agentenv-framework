@@ -104,6 +104,11 @@ miles = [
 slime = [
     "agentenv-framework[openenv]",
 ]
+# agent_env.training.tinker: tinker-cookbook's rl.train on a bundle's tasks, each rollout an episode played in process;
+# openenv for the reward rules build_app applies. tinker-cookbook, Tinker and torch are the trainer's to pin.
+tinker = [
+    "agentenv-framework[openenv]",
+]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
     "boto3>=1.35.0",
@@ -152,7 +157,7 @@ coreweave = [
     "cwsandbox>=1.19.6,<2",  # Reject exec streams that close without an exit status.
 ]
 dev = [
-    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,harness,openenv,sail,skyrl,tensorlake,tenki,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
+    "agentenv-framework[aws,boat,boxd,coreweave,daytona,gcp,harness,openenv,sail,skyrl,tensorlake,tenki,tinker,trl,vercel,verl]",  # exercise portable optional providers and stores in CI
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
