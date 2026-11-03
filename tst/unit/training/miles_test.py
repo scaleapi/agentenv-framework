@@ -1,7 +1,7 @@
-"""``agent_env.training.miles`` on the OpenEnv server ``build_app`` makes, served on loopback over the Episode API's fake
-steps: the rows ``write_rows`` writes, and the agent function playing a row's task through a stand-in for Miles'
-session endpoint, which answers each chat request from a script and records it; with the reward hook and the filter
-Miles calls beside it."""
+"""``agent_env.training.miles``, and the chat rows and episode it shares with ``agent_env.training.slime``, on the
+OpenEnv server ``build_app`` makes, served on loopback over the Episode API's fake steps: the rows ``write_rows`` writes
+and both helpers' commands, and the agent function playing a row's task through a stand-in for a trainer's session
+endpoint, which answers each chat request from a script and records it; with the reward hook and the filter beside it."""
 
 import asyncio
 import json
@@ -16,9 +16,10 @@ from starlette.routing import Route
 from agent_env.openenv.environment import END_TURN
 from agent_env.openenv.reward import _unscored
 from agent_env.training._openenv import Server
-from agent_env.training.miles.__main__ import main
+from agent_env.training.miles.__main__ import main as miles_main
 from agent_env.training.miles.agent import keep_scored_groups, reward, run
 from agent_env.training.miles.prepare import write_rows
+from agent_env.training.slime.__main__ import main as slime_main
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
 from tst.unit.training.nemo_gym_test import PLAYED
 
@@ -165,7 +166,8 @@ def test_the_reward_hook_reads_each_samples_reward_from_its_metadata():
     assert asyncio.run(reward(None, [one, two])) == [0.25, 0.0]
 
 
-def test_the_command_writes_the_rows(serve, tmp_path, teardowns):
+@pytest.mark.parametrize("main", [miles_main, slime_main], ids=["miles", "slime"])
+def test_the_command_writes_the_rows(serve, tmp_path, teardowns, main):
     server = serve({"a": PLAYED})
 
     result = CliRunner().invoke(main, [server.url, str(tmp_path / "rows"), "--max-turns", "2"])
