@@ -37,8 +37,10 @@ from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
 from agent_env.env.env import DeployedEnv
-from agent_env.env.envs.computer.utils import boot, builder, composer, gate, inside, packages, resolve_in_base
-from agent_env.env.envs.computer.utils.composer import Composing, _probe
+from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, probing,
+                                               resolve_in_base)
+from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer import app_env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
@@ -248,7 +250,7 @@ def test_gate_3_probes_a_build_with_its_apps_defaults_as_a_deploy_with_no_env_pa
 
     monkeypatch.setattr(boot, "boot", fake_boot)
     monkeypatch.setattr(boot, "discard", AsyncMock())
-    monkeypatch.setattr(composer, "run_probe", AsyncMock(return_value="report"))
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value="report"))
 
     asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
 
@@ -288,7 +290,7 @@ def test_the_probe_boots_a_build_at_the_envs_settings_with_a_token_of_its_own_as
     monkeypatch.setattr(boot, "boot", fake_boot)
     monkeypatch.setattr(boot, "discard", AsyncMock())
     probed = AsyncMock(return_value="report")
-    monkeypatch.setattr(composer, "run_probe", probed)
+    monkeypatch.setattr(probing, "run_probe", probed)
 
     assert asyncio.run(_probe([SimpleNamespace()], env, driver, "img")) == (
         "report", CARD, "SimpleNamespace")
@@ -310,10 +312,10 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
     async def overran(*args):
         raise TimeoutError
 
-    monkeypatch.setattr(composer, "_probe", never_ready)
+    monkeypatch.setattr(probing, "_probe", never_ready)
     unbooted = Env.get(_put(base, driver, id="@local/~/kit/other", environment_name="other").id).metadata[
         "composed"]["container"]["arm64"]
-    monkeypatch.setattr(composer, "_probe", overran)
+    monkeypatch.setattr(probing, "_probe", overran)
     stuck = Env.get(_put(base, driver, id="@local/~/kit/stuck", environment_name="stuck").id).metadata[
         "composed"]["container"]["arm64"]
 
@@ -324,7 +326,7 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
     assert unbooted["reason"].startswith("it didn't boot: LocalSandboxProvider: the computer at http://127.0.0.1:1 "
                                          "wasn't ready within 180 s")
     assert (stuck["status"], stuck["stage"], stuck["reason"]) == (
-        "failed", "probe", f"the probe didn't finish within {composer._PROBE_TIMEOUT_S} s")
+        "failed", "probe", f"the probe didn't finish within {probing._PROBE_TIMEOUT_S} s")
 
 
 @pytest.mark.parametrize("result, stored, replaces", [
@@ -338,7 +340,7 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
 ], ids=["unprobed-over-ready", "build-failure-over-built", "building-over-built", "probe-failure-over-unprobed",
         "probe-failure-over-ready", "ready-over-probe-failure", "building-over-build-failure"])
 def test_a_result_takes_a_pairs_place_only_when_it_got_at_least_as_far(result, stored, replaces):
-    assert (composer._rank(result) >= composer._rank(stored)) is replaces
+    assert (composed._rank(result) >= composed._rank(stored)) is replaces
 
 
 def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, docker, caplog):

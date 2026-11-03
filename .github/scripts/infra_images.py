@@ -2,11 +2,13 @@
 the release workflow's jobs that only read: this imports agent-env, so it runs where agent-env and its dependencies are
 installed, and no job that holds a token to push images or publish to PyPI runs it (those run ``infra_build.py``).
 
-``plan`` prints each image's name, repository, tag, Dockerfile and context as JSON, ``--missing`` only those the
+``plan`` prints each image's name, repository, tag, Dockerfile and context as JSON, and for an image built over other
+published images, its build args, each naming one by its repository and tag or giving a value, ``--missing`` only those the
 registry hasn't published: it has no image under the tag, or refuses to show one, as GHCR does for a package that
-doesn't exist yet, so the first publish can start. ``--only infra`` lists only the infra images, and ``--only agents``
+doesn't exist yet, so the first publish can start. ``--only infra`` lists only the infra images, ``--only agents``
 only the images that install the protocol, the agents' and the website browser's, which a release builds after it
-publishes the protocol, as their protocol floor may name it. ``write PATH`` records the digest the registry serves under every
+publishes the protocol, as their protocol floor may name it, and ``--only disks`` the base computers' disk forms, built
+over their published images. ``write PATH`` records the digest the registry serves under every
 image's tag as a release wheel carries them, and fails if any is missing. ``public`` warns about each image a user, who
 pulls anonymously, can't. The registry is read with ``GHCR_TOKEN`` (as ``GITHUB_ACTOR``) when it's set, anonymously
 otherwise, and always anonymously by ``public``.
@@ -21,7 +23,7 @@ import sys
 from pathlib import Path
 
 from agent_env.env.bootstrap import PLAYWRIGHT_MCP_DOCKERFILE, PUBLISHED_IMAGES
-from agent_env.env.published_images import BUNDLE_IMAGES, REGISTRY, PublishedImage, write_release_digests
+from agent_env.env.published_images import BUNDLE_IMAGES, DISK_IMAGES, REGISTRY, PublishedImage, write_release_digests
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest
 
@@ -30,7 +32,8 @@ REPO = Path(__file__).resolve().parents[2]
 # example env's, and the Playwright MCP browser's, whose recorder installs it, matched by its Dockerfile.
 _AFTER_PROTOCOL = BUNDLE_IMAGES + tuple(image for image in PUBLISHED_IMAGES
                                        if image.dockerfile == PLAYWRIGHT_MCP_DOCKERFILE)
-_GROUPS = {"infra": tuple(image for image in PUBLISHED_IMAGES if image not in _AFTER_PROTOCOL), "agents": _AFTER_PROTOCOL}
+_GROUPS = {"infra": tuple(image for image in PUBLISHED_IMAGES if image not in _AFTER_PROTOCOL + DISK_IMAGES),
+           "agents": _AFTER_PROTOCOL, "disks": DISK_IMAGES}
 
 
 def main() -> int:
@@ -59,9 +62,13 @@ def main() -> int:
     return 0
 
 
-def _described(image: PublishedImage) -> dict[str, str]:
-    return {"name": image.name, "repository": image.repository, "tag": image.tag(),
-            "dockerfile": str(image.dockerfile.relative_to(REPO)), "context": str(image.dockerfile.parent.relative_to(REPO))}
+def _described(image: PublishedImage) -> dict:
+    described = {"name": image.name, "repository": image.repository, "tag": image.tag(),
+                 "dockerfile": str(image.dockerfile.relative_to(REPO)),
+                 "context": str(image.dockerfile.parent.relative_to(REPO))}
+    if image.args or image.build_args:
+        described["args"] = {**{arg: built.ref() for arg, built in image.args}, **dict(image.build_args)}
+    return described
 
 
 def _digest(image: PublishedImage) -> str | None:

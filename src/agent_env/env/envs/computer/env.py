@@ -23,7 +23,7 @@ from agent_env.env.envs._deployment import (
     deploy_through_provider,
     provider_or_class,
 )
-from agent_env.env.envs.computer.utils import composer, gate, inside
+from agent_env.env.envs.computer.utils import boot, composer, gate, inside
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_DESTINATION = "Downloads"
 #: The computer app env's type: an app composed into a computer env, and a computer env of its own.
 APP_TYPE = "computer_app"
+#: The statuses of a build a deploy boots, by form: a disk may also boot unprobed, as KVM is where a disk is probed.
+_DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified")}
 
 
 class ComputerEnv(Env):
@@ -160,16 +162,29 @@ class ComputerEnv(Env):
         return {app.environment_name: {**app.settings, **self.app_settings.get(app.environment_name, {})}
                 for app in self.composed_apps()}
 
+    def computer_values(self) -> dict[str, Any]:
+        """The env's values of its base's settings: its ``computer_settings``, and its display as the resolution."""
+        display = self.display
+        return {**self.computer_settings, **({"resolution": f"{display['width']}x{display['height']}"} if display else {})}
+
     def computer_artifact(self) -> ComputerArtifact:
         """The env's computer: its base composed with its driver, over the images built."""
         return ComputerArtifact.get(self.metadata["computer"]["id"], self.metadata["computer"]["version"])
 
-    def ready_builds(self, form: Optional[str] = None) -> list[tuple[str, str, dict]]:
-        """Each ready build, as (form, arch, record), in the base's order of forms and of arches; only
-        ``form``'s when it's given."""
+    def deployable_builds(self, form: Optional[str] = None) -> list[tuple[str, str, dict]]:
+        """Each build a deploy may boot, as (form, arch, record), in the base's order of forms and of arches; only
+        ``form``'s when it's given: a ready one, or a disk no compose could probe (unverified), which its first boot on
+        a provider that boots it natively probes before it's used."""
         composed, arches = self.metadata.get("composed", {}), self.computer.arch
         return [(name, arch, composed[name][arch]) for name in gate.forms(self.computer) if form in (None, name)
-                for arch in arches if composed.get(name, {}).get(arch, {}).get("status") == "ready"]
+                for arch in arches if composed.get(name, {}).get(arch, {}).get("status") in _DEPLOYABLE[name]]
+
+    def disk_size_refusal(self, form: str, disk_size_gb: float) -> Optional[str]:
+        """Why a deploy of ``form`` can't have ``disk_size_gb``: a disk is the size its base makes it, which a deploy
+        doesn't enlarge."""
+        if form == "disk" and disk_size_gb > (size := self.computer.forms.disk.min_disk_gb):
+            return f"{self.id}'s disk is {size} GB, which a deploy doesn't enlarge, and it asks for {disk_size_gb:g} GB"
+        return None
 
     def build_statuses(self) -> dict[str, str]:
         return {f"{form}/{arch}": result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()
@@ -196,12 +211,13 @@ class ComputerEnv(Env):
 
         if refusal := deploy_refusal(self, provider_or_class(self), {**options, "env_params": env_params}):
             return refusal
-        _, _, problems = computer_params.checked(self, env_params)
+        params, _, problems = computer_params.checked(self, env_params)
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
         links, arches = sandbox_provider.links, gate.arches(self.computer, self.driver, self.composed_apps())
-        if not any(f"linux/{arch}" in link.native_platforms() for link in links for arch in arches):
+        forms = [params.form] if params.form else gate.forms(self.computer)
+        if not any(boot.native_links(sandbox_provider, arch, form) for form in forms for arch in arches):
             problems.append(f"{', '.join(type(link).__name__ for link in links)} runs none of its arches "
-                            f"({', '.join(arches)}) natively")
+                            f"({', '.join(arches)}) natively as {' or '.join(forms)}")
         policy = NetworkPolicy.from_dict(self.network) if self.network else None
         if policy is not None and not any(link.supports_network_policy(policy) for link in links):
             problems.append(f"{', '.join(type(link).__name__ for link in links)} can't enforce its network")

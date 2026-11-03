@@ -39,6 +39,7 @@ from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
+from agent_env.providers.sandbox_providers.local_docker.disk import kvm_platforms, launcher_args, machine_image
 from agent_env.providers.sandbox_providers.local_docker.relay import relay_image
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
@@ -115,6 +116,8 @@ _CONTAINER_MODE_MARKER = ".agent-container-mode"
 _PORT_MAP_FILE = ".port-map.json"
 # The internal network a container with no network runs on, so a sandbox rebuilt from its id removes it and its relay.
 _CLOSED_NETWORK_FILE = ".closed-network"
+# The size of the VM a disk booted on, so a reset boots it at the same size.
+_VM_SIZE_FILE = ".vm-size.json"
 # The host ports sandboxes publish on: below the default ranges outgoing connections take their local ports from (32768
 # up on Linux, the VM Docker Desktop or Rancher Desktop runs Docker in included; 49152 up on macOS and Windows) and
 # below Kubernetes' node ports (30000-32767).
@@ -658,6 +661,10 @@ class LocalSandboxProvider(SandboxProvider):
         return frozenset({host_platform()})
 
     @classmethod
+    def disk_image_platforms(cls) -> frozenset[str]:
+        return kvm_platforms()
+
+    @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
         """Unrestricted, or a container with no network at all (``create_container``)."""
         return not policy.restricts_egress or policy.closed
@@ -675,10 +682,15 @@ class LocalSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        env: Optional[dict[str, str]] = None,
     ) -> LocalSandbox:
+        """This machine as a VM, or with ``image``, a computer's disk form booted under KVM in the QEMU launcher's
+        container, reached on each of ``exposed_ports``, at the disk's own size: ``disk_size_gb`` is this machine's."""
         refuse_unenforceable_policy(self, network_policy)
         if network_policy is not None and network_policy.restricts_egress:
             raise NetworkPolicyUnsupportedError(f"{type(self).__name__} takes a container's network away, not a VM's")
+        if image is not None and host_platform() not in self.disk_image_platforms():
+            raise ValueError(f"{type(self).__name__} boots a disk only where this machine's Docker can pass it /dev/kvm")
         # Allocated here rather than in the sandbox constructor: probing for a free port
         # is I/O, and callers that only need a handle must not pay for it. Off the event
         # loop, since a draw waits for any other process's draw to finish.
@@ -687,7 +699,39 @@ class LocalSandboxProvider(SandboxProvider):
         (sandbox.work_dir / _PORT_MAP_FILE).write_text(json.dumps(sandbox._port_map))
         sandbox.network_policy = self.effective_network_policy(network_policy)
         sandbox.prepared = frozenset(self._prepared)
+        if image is not None:
+            (sandbox.work_dir / _VM_SIZE_FILE).write_text(json.dumps({"cpu": cpu, "memory": memory}))
+            try:
+                await self._boot_disk(sandbox, image=image, env=env or {})
+                (sandbox.work_dir / _CONTAINER_MODE_MARKER).write_text(sandbox.container_name)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await sandbox.terminate()
+                    await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
+                raise
         return sandbox
+
+    async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
+        await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} > /dev/null")
+        await self._boot_disk(sandbox, image=image, env=env)
+
+    async def _boot_disk(self, sandbox: LocalSandbox, *, image: str, env: dict[str, str]) -> None:
+        """The launcher booting ``image`` as the sandbox's container, its ports published as a container's are."""
+        size = json.loads((sandbox.work_dir / _VM_SIZE_FILE).read_text())
+        await sandbox.pull_images([image])
+        machine = await machine_image(image)
+        ports = list(sandbox._port_map)
+        publish = [arg for port in ports for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port)
+                   for arg in ("-p", spec)]
+        running = asyncio.ensure_future(asyncio.to_thread(
+            _docker, "run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
+            *publish, *launcher_args(ports, env, size["cpu"], size["memory"]), machine))
+        try:
+            await asyncio.shield(running)
+        except asyncio.CancelledError:  # the container docker is still starting must exist before teardown removes it
+            with contextlib.suppress(Exception):
+                await running
+            raise
 
     async def create_container(
         self,

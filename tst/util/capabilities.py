@@ -61,6 +61,10 @@ MILES = "miles_installed"
 #: so collecting off a local sandbox needs GNU stat first on PATH.
 GNU_STAT = "gnu_stat"
 
+#: Booting a computer's disk form on local Docker needs KVM: /dev/kvm on this host, which Docker passes to the launcher.
+#: Docker Desktop on a Mac has none, nor has a host without nested virtualization.
+KVM = "kvm"
+
 
 def missing_capability_reason(capability: str) -> str:
     return f"{MISSING_CAPABILITY_PREFIX}{capability}"
@@ -194,3 +198,15 @@ def skip_without_gnu_stat() -> pytest.MarkDecorator:
         not gnu_stat_is_available(),
         reason=missing_capability_reason(GNU_STAT),
     )
+
+
+def kvm_is_available() -> bool:
+    """Whether the local sandbox provider boots disks here: this host's /dev/kvm, readable and writable."""
+    from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+
+    return bool(LocalSandboxProvider.disk_image_platforms())
+
+
+def skip_without_kvm() -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for tests that boot a computer's disk form on local Docker."""
+    return pytest.mark.skipif(not kvm_is_available(), reason=missing_capability_reason(KVM))

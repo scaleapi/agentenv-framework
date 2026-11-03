@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import compileall
+import dataclasses
 import importlib.metadata
 import json
 import os
@@ -85,10 +86,8 @@ def problems(name: str, runs: int, before: dict[str, list[str]]) -> list[str]:
         found.append(f"agent-env found the config file {config}; the gate runs with none")
     for plugin in plugins():
         found.append(f"{plugin} is installed; the gate tests agent-env without plugins")
-    installed_src = Path(agent_env.__file__).parent.parent
     for image in PUBLISHED_IMAGES:
-        checkout = PublishedImage(image.name, CHECKOUT_SRC / image.dockerfile.relative_to(installed_src))
-        if (tag := image.tag()) != (expected := checkout.tag()):
+        if (tag := image.tag()) != (expected := _checkout(image).tag()):
             found.append(f"{image.name}: the installed sources tag it {tag}, the checkout's {expected}; an install "
                          "wouldn't find the image published for its sources")
     bundle = find_bundle(name)
@@ -119,6 +118,13 @@ def problems(name: str, runs: int, before: dict[str, list[str]]) -> list[str]:
         if changed := sorted(set(after[kind]) ^ set(before[kind])):
             found.append(f"a later run changed {kind}: {', '.join(_described(entry) for entry in changed[:3])}")
     return found
+
+
+def _checkout(image: PublishedImage) -> PublishedImage:
+    """``image`` as the checkout's sources make it, with the images it's built from."""
+    installed_src = Path(agent_env.__file__).parent.parent
+    return dataclasses.replace(image, dockerfile=CHECKOUT_SRC / image.dockerfile.relative_to(installed_src),
+                               args=tuple((arg, _checkout(built)) for arg, built in image.args))
 
 
 def plugins() -> list[str]:

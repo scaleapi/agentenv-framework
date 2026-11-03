@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import io
 import json
+import re
 import logging
 import os
 import shlex
 import shutil
 import subprocess
 import tarfile
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -28,6 +31,7 @@ import httpx
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
 from agent_env.config import get_config
 from agent_env.env.envs.computer.utils import layers_in_image
+from agent_env.env.published_images import COMPUTER_IMAGES
 from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
 from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
@@ -125,9 +129,18 @@ class Builder(ABC):
         """Make each of ``paths`` executable that starts as a script or a Linux binary does."""
 
     @abstractmethod
-    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT) -> None:
-        """Build ``context`` with ``dockerfile``, written into it, as the image ``tag`` for ``platform``. Raises
-        DockerBuildError."""
+    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT,
+              build_args: dict[str, str] | None = None) -> None:
+        """Build ``context`` with ``dockerfile``, written into it, and ``build_args``, as the image ``tag`` for
+        ``platform``. Raises DockerBuildError."""
+
+    @abstractmethod
+    def image_config(self, tag: str) -> dict:
+        """The ``config`` object of the image config of ``tag``, an image its Docker holds."""
+
+    @abstractmethod
+    def login(self, auth) -> None:
+        """Sign its Docker in to the registry ``auth``, image store credentials or None, names."""
 
     @abstractmethod
     def installed(self, tag: str, prefix: str) -> dict[str, str]:
@@ -156,9 +169,9 @@ class Builds:
         self.provider, self.emulate = provider, emulate
         self._refused = [(link, _refused(link, store_id, repository)) for link in provider.links]
 
-    def link(self, platform: str) -> SandboxProvider:
-        """The link that builds ``platform``. Raises Unbuildable, or Skipped when only emulation would build it and the
-        put turned emulation off."""
+    def link(self, platform: str, base: DockerImageArtifact) -> SandboxProvider:
+        """The link that builds ``platform`` ``FROM`` ``base``. Raises Unbuildable, or Skipped when only emulation would
+        build it and the put turned emulation off."""
         links = [link for link, problem in self._refused if problem is None]
         if native := [link for link in links if platform in link.native_platforms()]:
             return native[0]
@@ -169,7 +182,7 @@ class Builds:
             raise Skipped("emulation is off, and " + "; ".join(
                 f"{type(link).__name__} doesn't run {platform} natively" for link, _ in self._refused))
         for link in links:
-            if not _docker_here(link) or platform in _emulated_platforms():
+            if not _docker_here(link) or _runs_here(platform, _platform_check(base)):
                 return link
         unemulated = f"this machine can't build {platform}: its Docker has no emulation for it"
         raise Unbuildable("; ".join(problem or unemulated for _, problem in self._refused))
@@ -227,14 +240,30 @@ def _docker_here(link: SandboxProvider) -> bool:
     return link.ON_THIS_MACHINE and link.REACHES_HOST_AT is None
 
 
-def _emulated_platforms() -> set[str]:
-    """The platforms this machine's Docker builds, its own and those it emulates."""
-    inspected = subprocess.run(["docker", "buildx", "inspect", "--bootstrap"], capture_output=True, text=True)
-    platforms = set()
-    for line in inspected.stdout.splitlines():
-        if line.strip().startswith("Platforms:"):
-            platforms |= {item.strip().rstrip("*") for item in line.split(":", 1)[1].split(",")}
-    return platforms
+@functools.cache
+def _runs_here(platform: str, image: str) -> bool:
+    """Whether this machine's Docker runs ``platform``'s programs, natively or emulated, as a container of ``image`` for
+    it shows: what its builder lists can leave out a platform it runs, as colima's does Rosetta's linux/amd64."""
+    try:
+        return subprocess.run(["docker", "run", "--rm", "--platform", platform, "--entrypoint", "true", image],
+                              capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _platform_check(base: DockerImageArtifact) -> str:
+    """The image ``_runs_here`` starts for a build ``FROM`` ``base``, one the build pulls anyway: ``base`` when it's a
+    registry's, signed in to it, else the image the shipped Linux base builds from, as its build pulls it."""
+    if not names_registry(base.image_name):
+        return _shipped_base_from()
+    docker_login(get_config().get_image_store().auth(base.pinned_name))
+    return base.pinned_name
+
+
+@functools.cache
+def _shipped_base_from() -> str:
+    """The image the shipped Linux base computer's Dockerfile builds ``FROM``, pinned by its digest there."""
+    return re.search(r"^FROM\s+(\S+)", COMPUTER_IMAGES[0].dockerfile.read_text(), re.MULTILINE).group(1)
 
 
 def _resolver(source: str, arch: str, context: str, out: str) -> list[str]:
@@ -253,17 +282,28 @@ class LocalBuilder(Builder):
             build_for(base, platform)
 
     def resolve(self, request: dict, source: str, arch: str, timeout: int) -> dict:
+        """With the build context and what the resolver reads copied into its container, and what it wrote copied out,
+        rather than bind-mounted: a Docker in a VM, as on a Mac, mounts only the folders the VM shares, colima's only the
+        home, and keeps no owner on them."""
         out = self.work / RESOLVED / "out"
         out.mkdir(parents=True)
         (out / "request.json").write_text(json.dumps({**request, "owner": [os.getuid(), os.getgid()]}))
         shutil.copy(RESOLVER, out / "resolve.py")
+        container, deadline = f"agentenv-resolve-{uuid.uuid4().hex[:12]}", time.monotonic() + timeout
         try:
-            ran = subprocess.run(_resolver(source, arch, str(self.work / CONTEXT), str(out)), capture_output=True,
-                                 text=True, timeout=timeout)
+            _docker("create", "--name", container, "--platform", f"linux/{arch}", "--user", "root", "--entrypoint",
+                    "python3", source, "/out/resolve.py", "/out/request.json", "/out", deadline=deadline)
+            _docker("cp", f"{self.work / CONTEXT}/.", f"{container}:/ctx", deadline=deadline)
+            _docker("cp", f"{out}/.", f"{container}:/out", deadline=deadline)
+            ran = subprocess.run(["docker", "start", "--attach", container], capture_output=True, text=True,
+                                 timeout=max(deadline - time.monotonic(), 0))
+            if ran.returncode != 0:
+                raise ResolveError("resolving the packages failed", ran.stdout + ran.stderr)
+            _docker("cp", f"{container}:/out/.", str(out), deadline=deadline)
         except subprocess.TimeoutExpired as e:
             raise ResolveError(f"resolving took over {timeout} s", str(e.stdout or "")) from None
-        if ran.returncode != 0:
-            raise ResolveError("resolving the packages failed", ran.stdout + ran.stderr)
+        finally:
+            subprocess.run(["docker", "rm", "--force", container], capture_output=True)
         return json.loads((out / "result.json").read_text())
 
     def download(self, url: str, sha256: str, path: str) -> None:
@@ -310,10 +350,21 @@ class LocalBuilder(Builder):
                 if file.read(4).startswith(RUN_ONLY):
                     (self.work / path).chmod(EXECUTABLE)
 
-    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT) -> None:
+    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT,
+              build_args: dict[str, str] | None = None) -> None:
         (self.work / context).mkdir(parents=True, exist_ok=True)
         (self.work / context / "Dockerfile").write_text(dockerfile)
-        build_image(self.work / context / "Dockerfile", self.work / context, tag, platform=platform, labels=labels)
+        build_image(self.work / context / "Dockerfile", self.work / context, tag, platform=platform, labels=labels,
+                    build_args=build_args)
+
+    def image_config(self, tag: str) -> dict:
+        inspected = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config}}", tag],
+                                   capture_output=True, text=True, check=True)
+        return json.loads(inspected.stdout)
+
+    def login(self, auth) -> None:
+        if auth is not None:
+            docker_login(auth)
 
     def installed(self, tag: str, prefix: str) -> dict[str, str]:
         created = subprocess.run(["docker", "create", tag], capture_output=True, text=True, check=True).stdout.strip()
@@ -423,14 +474,22 @@ class VmBuilder(Builder):
     def mark_runnable(self, paths: list[str]) -> None:
         self._each([f"{self.helper} runnable {self._at(path)}" for path in paths])
 
-    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT) -> None:
+    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT,
+              build_args: dict[str, str] | None = None) -> None:
         folder = f"{self.work}/{context}"
         self._write(f"{folder}/Dockerfile", dockerfile.encode())
-        options = " ".join(f"--label {shlex.quote(f'{name}={value}')}" for name, value in labels.items())
+        options = " ".join([*(f"--label {shlex.quote(f'{name}={value}')}" for name, value in labels.items()),
+                            *(f"--build-arg {shlex.quote(f'{name}={value}')}" for name, value in (build_args or {}).items())])
         code, stdout, stderr = self._output(f"cd {folder} && docker build --platform {shlex.quote(platform)} {options} "
                                             f"-f Dockerfile -t {shlex.quote(tag)} . 2>&1")
         if code != 0:
             raise DockerBuildError(f"docker build of {tag} failed (exit {code}):\n{(stdout + stderr).rstrip()}")
+
+    def image_config(self, tag: str) -> dict:
+        return json.loads(self._exec(f"docker image inspect --format '{{{{json .Config}}}}' {shlex.quote(tag)}"))
+
+    def login(self, auth) -> None:
+        self._login(auth)
 
     def installed(self, tag: str, prefix: str) -> dict[str, str]:
         listed = self._exec(f"{self.helper} installed {shlex.quote(tag)} {shlex.quote(f'{prefix}/installed.json')}")
@@ -534,6 +593,15 @@ def _inline(context: Path, skip: set[str]) -> bytes:
 
 def _packages(listed: bytes) -> dict[str, str]:
     return {package["name"]: package["version"] for package in json.loads(listed)}
+
+
+def _docker(*args: str, deadline: float) -> str:
+    """What ``docker`` printed for ``args``, by the ``time.monotonic()`` ``deadline``; a failure raises, with what it
+    said, and running past the deadline raises TimeoutExpired."""
+    ran = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=max(deadline - time.monotonic(), 0))
+    if ran.returncode != 0:
+        raise RuntimeError(f"docker {args[0]} failed: {ran.stderr.strip()}")
+    return ran.stdout
 
 
 def save_image(tag: str, path: Path) -> None:

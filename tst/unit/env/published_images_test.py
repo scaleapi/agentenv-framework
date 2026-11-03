@@ -1,21 +1,29 @@
-"""The images agent-env publishes for its infra envs, its agents and an example's env: one per shipped Dockerfile,
-tagged by its sources, and the record of their digests a release wheel carries."""
+"""The images agent-env publishes for its infra envs, its agents, an example's env, its base computers and their disk
+forms: one per shipped Dockerfile, tagged by its sources (a disk form's by its base's too), and the record of their
+digests a release wheel carries."""
 
+import dataclasses
 import hashlib
 import json
 import shutil
+import tomllib
 
 import pytest
 
 from agent_env.env import bootstrap, published_images
 from agent_env.env.published_images import (
     AGENT_IMAGES,
+    COMPUTER_IMAGES,
+    DISK,
+    DISK_IMAGES,
+    DISK_TOOLS_IMAGE,
     EXAMPLE_IMAGES,
     REGISTRY,
     PublishedImage,
     _registry_digest,
     published_bundle_image,
     published_digest,
+    published_disk,
     release_digests,
     write_release_digests,
 )
@@ -26,11 +34,14 @@ _DIGEST = "sha256:" + "b" * 64
 
 
 def test_every_shipped_dockerfile_is_published_once_under_a_name_of_its_own():
-    """The infra envs', every shipped agent's, the env `a2a-agent validate` deploys and every shipped base computer's."""
+    """The infra envs', every shipped agent's, the env `a2a-agent validate` deploys, every shipped base computer's, and
+    the Linux disk form's recipe: its disk tools, its QEMU launcher, and each base's disk, from the boot recipe."""
     shipped = [dockerfile for dockerfiles in bootstrap._DOCKERFILES.values() for dockerfile in dockerfiles]
     shipped += published_images._AGENTS.glob("*/Dockerfile")
     shipped.append(published_images._EXAMPLES / "mail-mcp" / "envs" / "mail" / "Dockerfile")
     shipped += published_images._COMPUTERS.glob("*/Dockerfile")
+    shipped += DISK.glob("*/Dockerfile")
+    shipped += [DISK / "boot" / "Dockerfile"] * (len(COMPUTER_IMAGES) - 1)
 
     assert sorted(image.dockerfile for image in bootstrap.PUBLISHED_IMAGES) == sorted(shipped)
     assert len({image.name for image in bootstrap.PUBLISHED_IMAGES}) == len(bootstrap.PUBLISHED_IMAGES)
@@ -163,3 +174,27 @@ def test_a_shipped_agents_sources_whose_image_isnt_published_find_none(monkeypat
 
     assert published_bundle_image(sources) is None
 
+
+
+def test_a_disk_forms_tag_is_of_its_boot_recipe_its_bases_sources_and_the_disk_tools_and_it_is_found_by_its_bases(
+        tmp_path, monkeypatch):
+    (disk,), (base,) = DISK_IMAGES, COMPUTER_IMAGES
+    recipe = BuildContext.of(disk.dockerfile.parent, disk.dockerfile).source_digest(None).removeprefix("sha256:")
+    served = {}
+    monkeypatch.setattr(published_images, "_registry_digest", served.get)
+    other = tmp_path / "base"
+    shutil.copytree(base.dockerfile.parent, other)
+    (other / "start-desktop").write_text("#!/bin/sh\n")
+    moved = PublishedImage(disk.name, disk.dockerfile, (("ROOTFS", PublishedImage(base.name, other / "Dockerfile")),
+                                                        ("TOOLS", DISK_TOOLS_IMAGE)))
+    sources = BuildContext.of(base.dockerfile.parent, base.dockerfile).source_digest(None)
+
+    size = tomllib.loads(base.dockerfile.with_name("artifact.toml").read_text())["forms"]["disk"]["min_disk_gb"]
+    assert disk.name == "agentenv-ubuntu-24.04-disk" and dict(disk.args) == {"ROOTFS": base, "TOOLS": DISK_TOOLS_IMAGE}
+    assert disk.build_args == (("SIZE_GB", str(size)),)
+    assert disk.tag() == "src-" + hashlib.sha256("\0".join(
+        [recipe, f"ROOTFS={base.tag()}", f"TOOLS={DISK_TOOLS_IMAGE.tag()}", f"SIZE_GB={size}"]).encode()).hexdigest()
+    assert moved.tag() != disk.tag() != dataclasses.replace(disk, build_args=(("SIZE_GB", "32"),)).tag()
+    assert published_disk(sources) is None
+    served[disk.ref()] = _DIGEST
+    assert published_disk(sources) == f"{disk.ref()}@{_DIGEST}" and published_disk("sha256:" + "0" * 64) is None

@@ -137,7 +137,7 @@ def test_an_image_the_store_has_no_image_artifact_for_refuses_the_put_inspected_
 
 @pytest.mark.parametrize("changes, message", [
     ({"os": {"type": "windows", "version": "11"}}, "os.type 'windows' isn't supported yet"),
-    ({"forms": {"disk": {}}}, "the disk form isn't supported yet"),
+    ({"forms": {"lume": {}}}, "the lume form isn't supported yet"),
     ({"arch": ["amd64", "amd64"]}, "lists an architecture twice"),
     ({"arch": ["riscv64"]}, "arch.0"),
     ({"session": {"user": "Root User"}}, "session.user"),

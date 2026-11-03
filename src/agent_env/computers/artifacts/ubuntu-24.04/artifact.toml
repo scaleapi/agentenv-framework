@@ -9,6 +9,12 @@ image = { dockerfile = "Dockerfile" }
 init = "supervisord"
 input_channel = "env"
 
+[forms.disk]
+init = "supervisord"
+input_channel = "nocloud"
+firmware = ["efi"]
+min_disk_gb = 16
+
 [config.resolution]
 default = "1280x800"
 phase = "deploy"

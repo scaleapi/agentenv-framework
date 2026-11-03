@@ -1,5 +1,6 @@
 """The wheel check in ``.github/scripts/clean_install.py``: every tracked file of each shipped bundle, and every bundle
-entry point, must be in the built wheel."""
+entry point, must be in the built wheel; and the published images as the checkout makes them, which
+``check_clean_install.py`` compares the installed ones' tags with."""
 
 from __future__ import annotations
 
@@ -9,6 +10,10 @@ import zipfile
 from pathlib import Path
 
 import pytest
+
+import agent_env
+from agent_env.env import bootstrap
+from tst.util.scripts import load_script
 
 SCRIPT = Path(__file__).resolve().parents[2] / ".github" / "scripts" / "clean_install.py"
 sys.path.insert(0, str(SCRIPT.parent))  # as running the script does, so it imports its sibling shipped_bundles
@@ -69,3 +74,13 @@ def test_the_gate_checks_the_folder_of_every_shipped_bundle():
                      "echo-mcp": "src/agent_env/examples/echo-mcp", "hello": "src/agent_env/examples/hello",
                      "mail-mcp": "src/agent_env/examples/mail-mcp",
                      "next-env-event": "src/agent_env/examples/next-env-event"}
+
+
+def test_the_checkout_makes_each_published_image_as_the_installed_sources_do_when_they_are_its_own(monkeypatch):
+    """Every field of an image is kept in the checkout's copy, its build args too, so the tags differ only when the
+    sources do."""
+    check = load_script("check_clean_install.py")
+    monkeypatch.setattr(check, "CHECKOUT_SRC", Path(agent_env.__file__).parent.parent)
+
+    assert [check._checkout(image) for image in bootstrap.PUBLISHED_IMAGES] == list(bootstrap.PUBLISHED_IMAGES)
+    assert any(image.build_args for image in bootstrap.PUBLISHED_IMAGES)

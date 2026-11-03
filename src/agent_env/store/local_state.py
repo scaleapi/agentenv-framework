@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
-from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from agent_env.config.errors import ConfigError
@@ -18,6 +19,8 @@ except ImportError:  # Windows: writers of one id aren't serialized
     fcntl = resource = None
 
 _OTHER_FILES = 256
+#: How often a coroutine waiting for a lock another holder has tries it again.
+_LOCK_POLL_S = 0.2
 
 
 def ensure_state_dir(path: Path) -> None:
@@ -66,6 +69,27 @@ def holding_locks(ids: Iterable[str], on_wait: Callable[[], None] | None = None)
     finally:
         for fd in fds:
             os.close(fd)
+
+
+@asynccontextmanager
+async def awaiting_lock(id: str) -> AsyncIterator[None]:
+    """``holding_locks`` for one id, waited for on the event loop: tried again every ``_LOCK_POLL_S`` while another
+    holder has it, so no thread is held waiting, which the holder may need to finish and release it."""
+    if fcntl is None:
+        yield
+        return
+    ensure_state_dir(state_root() / "locks")
+    fd = os.open(_lock_path(id), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(_LOCK_POLL_S)
+        yield
+    finally:
+        os.close(fd)
 
 
 def _allow_open(locks: int) -> None:

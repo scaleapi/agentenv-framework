@@ -1,6 +1,6 @@
-"""Booting a composed computer: one build of it in a container, on a sandbox provider that runs its arch natively, with
-its settings in the environment the base and the driver read them from, until its driver says it's ready. A deploy and
-gate 3 boot computers this way."""
+"""Booting a composed computer: one build of it, its container in a container or its disk in a VM, on a sandbox provider
+that runs its arch natively, with its settings in the environment the base and the driver read them from (a disk's in
+its NoCloud seed), until its driver says it's ready. A deploy and gate 3 boot computers this way."""
 
 from __future__ import annotations
 
@@ -38,6 +38,8 @@ _POLL_S = 0.5
 WITHHELD = "<withheld>"
 #: How many random bytes a computer's control token carries: 256 bits, past guessing.
 CONTROL_TOKEN_BYTES = 32
+#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in.
+DISK_CPU, DISK_MEMORY_MB = 2.0, 4096
 
 
 @dataclass
@@ -47,9 +49,11 @@ class Booted:
     card: dict
 
 
-def native_links(sandbox_provider: SandboxProvider, arch: str) -> list[SandboxProvider]:
-    """The providers a boot of ``arch`` may run on, in the order a chain tries them: those that run it natively."""
-    return [link for link in sandbox_provider.links if f"linux/{arch}" in link.native_platforms()]
+def native_links(sandbox_provider: SandboxProvider, arch: str, form: str = "container") -> list[SandboxProvider]:
+    """The providers a boot of ``form`` for ``arch`` may run on, in the order a chain tries them: those that run its
+    container, or boot its disk, natively."""
+    return [link for link in sandbox_provider.links if f"linux/{arch}" in (
+        link.disk_image_platforms() if form == "disk" else link.native_platforms())]
 
 
 def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, environment_name: str,
@@ -114,13 +118,20 @@ def control_environment(token: Optional[str]) -> dict[str, str]:
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
-               ready_s: float = READY_TIMEOUT_S) -> Booted:
-    """``image`` booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the caller chose
-    to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that token, says
-    the computer is ready; a boot that fails is torn down."""
-    sandbox = await sandbox_provider.create_container(
-        image_name=image, port=port, env={**environment, **control_environment(token)}, network_policy=network_policy,
-        disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
+               ready_s: float = READY_TIMEOUT_S, form: str = "container") -> Booted:
+    """``image``, of ``form``, booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the
+    caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that
+    token, says the computer is ready; a boot that fails is torn down."""
+    environment = {**environment, **control_environment(token)}
+    if form == "disk":
+        sandbox = await sandbox_provider.create_vm(
+            image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
+            disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}),
+            cpu=cpu or DISK_CPU, memory=memory_mb or DISK_MEMORY_MB)
+    else:
+        sandbox = await sandbox_provider.create_container(
+            image_name=image, port=port, env=environment, network_policy=network_policy, disk_size_gb=disk_size_gb,
+            timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
     try:
         url = sandbox.tunnel_urls[port]
         return Booted(sandbox, url, await ready(url, ready_s, token))

@@ -4,6 +4,7 @@ standard library only, and every entry it's handed checked against the images ag
 from __future__ import annotations
 
 import ast
+import base64
 import json
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.env import bootstrap
-from agent_env.env.published_images import REGISTRY, write_release_digests
+from agent_env.env.published_images import DISK_IMAGES, REGISTRY, write_release_digests
 from tst.util.scripts import SCRIPTS, load_script
 
 REPO = SCRIPTS.parents[1]
@@ -24,6 +25,18 @@ _TAG = "src-" + "a" * 64
 @pytest.fixture
 def script():
     return load_script(SCRIPT.name)
+
+
+@pytest.fixture
+def workflow(monkeypatch, tmp_path) -> Path:
+    """What a workflow step's environment holds: its output file, which is returned, the actor and the job's token, the
+    repository and the commit."""
+    output = tmp_path / "output"
+    output.touch()
+    for name, value in {"GITHUB_OUTPUT": str(output), "GITHUB_ACTOR": "bot", "GHCR_TOKEN": "t0ken",
+                        "GITHUB_REPOSITORY": "scaleapi/agentenv-framework", "GITHUB_SHA": "c0ffee"}.items():
+        monkeypatch.setenv(name, value)
+    return output
 
 
 def _run(script, monkeypatch, *args: str) -> int:
@@ -46,7 +59,8 @@ def test_it_imports_only_the_standard_library():
 def test_its_images_are_the_ones_agent_env_ships(script):
     assert script.REGISTRY == REGISTRY
     assert script.IMAGES == {image.name: str(image.dockerfile.relative_to(REPO)) for image in bootstrap.PUBLISHED_IMAGES}
-    assert set(script._SMOKES) | {"agentenv-service-db"} == set(script.IMAGES)
+    assert set(script._SMOKES) | {"agentenv-service-db", *script.DISK_ARGS} == set(script.IMAGES)
+    assert script.DISK_ARGS == {image.name: {arg: built.name for arg, built in image.args} for image in DISK_IMAGES}
 
 
 def test_check_accepts_every_image_the_plan_lists(script, monkeypatch, capsys):
@@ -62,8 +76,22 @@ def _gateway(**changes) -> str:
     return json.dumps({key: value for key, value in {**entry, **changes}.items() if value is not None})
 
 
+def _disk(**args) -> str:
+    image = "agentenv-ubuntu-24.04-disk"
+    return json.dumps({"name": image, "repository": f"{REGISTRY}/{image}", "tag": _TAG,
+                       "dockerfile": "src/agent_env/computers/disk/linux/boot/Dockerfile",
+                       "context": "src/agent_env/computers/disk/linux/boot", "args": {
+                           "ROOTFS": f"{REGISTRY}/agentenv-ubuntu-24.04:{_TAG}", "TOOLS": f"{REGISTRY}/agentenv-disk-tools:{_TAG}",
+                           "SIZE_GB": "16", **args}})
+
+
 @pytest.mark.parametrize("entry, problem", [
     (_gateway(name="agentenv-evil"), "'agentenv-evil' isn't an image agent-env ships"),
+    (_gateway(args={"ROOTFS": "evil"}), "agentenv-gateway: unexpected args"),
+    (_disk(ROOTFS="ghcr.io/someone/ubuntu:latest"), "agentenv-ubuntu-24.04-disk: ROOTFS is 'ghcr.io/someone/ubuntu:latest'"),
+    (_disk(TOOLS=f"{REGISTRY}/agentenv-disk-tools:latest"), "agentenv-ubuntu-24.04-disk: TOOLS is 'ghcr.io/scaleapi/"),
+    (_disk(EXTRA="x"), "agentenv-ubuntu-24.04-disk: args is "),
+    (_disk(SIZE_GB="32"), "agentenv-ubuntu-24.04-disk: SIZE_GB is '32', not its base's min_disk_gb, 16"),
     (_gateway(repository="ghcr.io/someone/agentenv-gateway"), "agentenv-gateway: repository is 'ghcr.io/someone/"),
     (_gateway(dockerfile="tst/data/agentenv_mcp/Dockerfile"), "agentenv-gateway: dockerfile is 'tst/data/agentenv_mcp"),
     (_gateway(context="."), "agentenv-gateway: context is '.'"),
@@ -107,6 +135,100 @@ def test_exists_says_yes_no_or_that_it_cant_tell(script, monkeypatch, capsys, an
     assert _run(script, monkeypatch, "exists", ref) == code
 
     assert ("::error::couldn't tell whether the registry has" in capsys.readouterr().out) is (code == 2)
+
+
+@pytest.mark.parametrize("answer, code, output", [(_DIGEST, 0, "build=false\n"), ("ERROR: not found", 0, "build=true\n"),
+                                                  ("ERROR: connection refused", 1, "")], ids=["served", "missing", "unknown"])
+def test_wanted_signs_in_and_builds_only_a_tag_the_registry_says_it_lacks(script, monkeypatch, capsys, workflow, answer,
+                                                                          code, output):
+    calls, tokens = [], []
+    docker = _docker({f"{REGISTRY}/agentenv-gateway:{_TAG}": answer}, calls)
+
+    def run(command, **kw):
+        tokens.append(kw.get("input"))
+        return docker(command, **kw)
+
+    monkeypatch.setattr(script.subprocess, "run", run)
+
+    assert _run(script, monkeypatch, "wanted", _gateway()) == code
+
+    assert (calls[0], tokens[0]) == (["docker", "login", "ghcr.io", "--username", "bot", "--password-stdin"], "t0ken")
+    assert workflow.read_text() == output
+    assert ("is published already, so it isn't built again" in capsys.readouterr().out) is (answer == _DIGEST)
+
+
+@pytest.mark.parametrize("command", [["wanted"], ["build", "amd64"]])
+def test_wanted_and_build_refuse_an_entry_before_signing_in_or_building(script, monkeypatch, capsys, workflow, command):
+    calls, runs = [], []
+    monkeypatch.setattr(script.subprocess, "run", _docker({}, calls))
+    monkeypatch.setattr(script.subprocess, "Popen", lambda argv, **kw: runs.append(argv))
+
+    assert _run(script, monkeypatch, command[0], _gateway(context="."), *command[1:]) == 1
+
+    assert calls == runs == [] and workflow.read_text() == ""
+    assert "::error::agentenv-gateway: context is '.'" in capsys.readouterr().out
+
+
+def test_build_builds_an_image_for_its_platform_under_its_tag_with_its_source_on_it(script, monkeypatch, workflow):
+    runs, waits = _attempts(script, monkeypatch, [(_LIMITED, 1), ("#1 DONE\n", 0)])
+
+    assert _run(script, monkeypatch, "build", _gateway(), "arm64") == 0
+
+    assert runs[1] == ["docker", "build", "--platform", "linux/arm64", "--provenance=false", "-f",
+                       "src/agent_env/env/gateway/Dockerfile", "-t", f"{REGISTRY}/agentenv-gateway:{_TAG}-arm64",
+                       "--label", "org.opencontainers.image.source=https://github.com/scaleapi/agentenv-framework",
+                       "--label", "org.opencontainers.image.revision=c0ffee", "--label", f"io.agentenv.source-tag={_TAG}",
+                       "src/agent_env/env/gateway"]
+    assert runs[0] == runs[1] and waits == [script._RETRY_WAITS_SECONDS[0]]
+
+
+def test_build_makes_a_disk_form_of_its_bases_image_of_the_arch_with_that_images_config_the_tools_and_its_size(
+        script, monkeypatch, workflow):
+    runs, _ = _attempts(script, monkeypatch, [("pulled\n", 0), ("#1 DONE\n", 0)])
+    inspected = []
+    config = '{"Env": ["A=1"]}'
+    monkeypatch.setattr(script.subprocess, "run", lambda command, **kw: inspected.append(command) or (
+        subprocess.CompletedProcess(command, 0, config + "\n", "")))
+    rootfs = f"{REGISTRY}/agentenv-ubuntu-24.04:{_TAG}-amd64"
+
+    assert _run(script, monkeypatch, "build", _disk(), "amd64") == 0
+
+    assert runs[0] == ["docker", "pull", "--platform", "linux/amd64", rootfs]
+    assert inspected == [["docker", "image", "inspect", "--format", "{{json .Config}}", rootfs]]
+    assert runs[1][runs[1].index("-t"):runs[1].index("--label")] == [
+        "-t", f"{REGISTRY}/agentenv-ubuntu-24.04-disk:{_TAG}-amd64", "--build-arg", f"ROOTFS={rootfs}",
+        "--build-arg", f"TOOLS={REGISTRY}/agentenv-disk-tools:{_TAG}", "--build-arg", "SIZE_GB=16",
+        "--build-arg", f"ROOTFS_CONFIG={base64.b64encode(config.encode()).decode()}"]
+
+
+def test_publish_tags_each_new_images_platform_builds_as_one_and_leaves_a_published_tag_as_it_is(script, monkeypatch,
+                                                                                                 capsys, workflow):
+    published, new = f"{REGISTRY}/agentenv-gateway:{_TAG}", f"{REGISTRY}/agentenv-ubuntu-24.04-disk:{_TAG}"
+    calls = []
+    monkeypatch.setattr(script.subprocess, "run", _docker({published: _DIGEST}, calls))
+    runs, _ = _attempts(script, monkeypatch, [("pushed\n", 0)])
+
+    assert _run(script, monkeypatch, "publish", json.dumps([json.loads(_gateway()), json.loads(_disk())])) == 0
+
+    assert calls[0] == ["docker", "login", "ghcr.io", "--username", "bot", "--password-stdin"]
+    assert runs == [["docker", "buildx", "imagetools", "create", "-t", new,
+                     "--annotation", "index:org.opencontainers.image.source=https://github.com/scaleapi/agentenv-framework",
+                     "--annotation", "index:org.opencontainers.image.revision=c0ffee", f"{new}-amd64", f"{new}-arm64"]]
+    assert f"{published} is published already, so it's left as it is" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("first, served", [
+    (_gateway(context="."), {}),
+    (_gateway(), {f"{REGISTRY}/agentenv-gateway:{_TAG}": "ERROR: connection refused"}),
+], ids=["refused", "unknown"])
+def test_publish_tags_nothing_more_after_an_entry_it_refuses_or_whose_tag_it_cant_look_up(script, monkeypatch, workflow,
+                                                                                         first, served):
+    monkeypatch.setattr(script.subprocess, "run", _docker(served))
+    runs, _ = _attempts(script, monkeypatch, [])
+
+    assert _run(script, monkeypatch, "publish", json.dumps([json.loads(first), json.loads(_disk())])) == 1
+
+    assert runs == []
 
 
 def _record(tmp_path, digests: dict[str, str] | None = None) -> Path:
@@ -195,6 +317,58 @@ def test_the_service_db_smoke_waits_for_its_health_check_and_removes_the_contain
     assert _run(script, monkeypatch, "smoke", "agentenv-service-db", "pg") == 0
 
     assert calls[0] == ["docker", "run", "-d", "pg"] and calls[-1] == ["docker", "rm", "-f", "c123"]
+
+
+@pytest.mark.parametrize("kvm, machine, how", [(True, "aarch64", "with KVM"), (False, "aarch64", "under TCG"),
+                                               (True, "x86_64", "under TCG")], ids=["kvm", "no-kvm", "another-arch"])
+def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(script, monkeypatch, capsys, kvm, machine,
+                                                                           how):
+    calls, logs = [], iter(["agentenv-init: starting", "success: xvfb entered RUNNING\nsuccess: dbus entered RUNNING\n"
+                                                      "success: desktop entered RUNNING"])
+
+    def run(command, **kw):
+        calls.append((command, kw.get("input")))
+        answers = {"inspect": "arm64\n", "run": "c1\n", "logs": next(logs) if command[1] == "logs" else ""}
+        return subprocess.CompletedProcess(command, 0, answers.get(command[1], answers.get(command[2], "")), "")
+
+    monkeypatch.setattr(script.subprocess, "run", run)
+    monkeypatch.setattr(script.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(script.Path, "exists", lambda self: kvm)
+    monkeypatch.setattr(script.platform, "machine", lambda: machine)
+
+    assert _run(script, monkeypatch, "smoke", "agentenv-ubuntu-24.04-disk", "disk:1-arm64", "--launcher", "launcher:1") == 0
+
+    commands = [command for command, _ in calls]
+    assert calls[1] == (["docker", "build", "-q", "-t", "disk:1-arm64-machine", "-"],
+                        "FROM --platform=linux/arm64 disk:1-arm64 AS disk\nFROM launcher:1\nCOPY --from=disk /disk/ /disk/\n")
+    assert commands[2] == ["docker", "run", "-d", *(["--device", "/dev/kvm"] if kvm else []), "-e", "VM_ARCH=arm64",
+                           "disk:1-arm64-machine"]
+    assert commands[-1] == ["docker", "rm", "-f", "c1"] and commands.count(["docker", "logs", "c1"]) == 2
+    assert f"booted to its desktop {how}" in capsys.readouterr().out
+
+
+def test_a_disk_forms_smoke_waits_for_every_program_its_bases_supervisord_conf_declares(script, monkeypatch, capsys,
+                                                                                      tmp_path):
+    conf = tmp_path / Path(script.IMAGES["agentenv-ubuntu-24.04"]).with_name("supervisord.conf")
+    conf.parent.mkdir(parents=True)
+    conf.write_text("[supervisord]\nnodaemon=true\n\n[program:xvfb]\ncommand=Xvfb\n\n[program:recorder]\ncommand=rec\n")
+    monkeypatch.setattr(script, "REPO", tmp_path)
+    monkeypatch.setattr(script, "_BOOTED_WITHIN_SECONDS", 0.01)
+    monkeypatch.setattr(script.time, "sleep", lambda seconds: None)
+    console = "success: xvfb entered RUNNING\nsuccess: dbus entered RUNNING\nsuccess: desktop entered RUNNING\n"
+    monkeypatch.setattr(script.subprocess, "run", lambda command, **kw: subprocess.CompletedProcess(
+        command, 0, {"image": "amd64\n", "run": "c1\n", "logs": console}.get(command[1], ""), ""))
+
+    assert _run(script, monkeypatch, "smoke", "agentenv-ubuntu-24.04-disk", "disk:1", "--launcher", "launcher:1") == 1
+
+    assert "::error::disk:1 didn't boot to its desktop within 0.01s" in capsys.readouterr().out
+
+
+def test_a_disk_forms_smoke_needs_the_launcher_to_boot_it_in(script, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exited:
+        _run(script, monkeypatch, "smoke", "agentenv-ubuntu-24.04-disk", "disk:1")
+
+    assert exited.value.code == 2 and "--launcher" in capsys.readouterr().err
 
 
 def test_a_service_db_that_never_turns_healthy_fails_with_its_logs(script, monkeypatch, capsys):
