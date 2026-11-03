@@ -201,12 +201,13 @@ def test_what_each_run_wrote_is_read_from_the_newest_layer_a_shell_ran_its_comma
 
 
 def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on(base, driver, docker, monkeypatch):
+    """By each builder, and before the check that this machine runs the arch it emulates starts the base."""
     signed = []
     monkeypatch.setattr(builder, "docker_login", signed.append)
 
     _put(base, driver)
 
-    assert len(signed) == 2 and len(docker.builds) == 2
+    assert len(signed) == 3 and len(docker.builds) == 2
 
 
 def test_the_builder_vms_helper_lists_plain_files_marks_runnables_links_checks_and_downloads(tmp_path):

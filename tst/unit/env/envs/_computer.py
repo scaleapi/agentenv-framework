@@ -56,7 +56,7 @@ class FakeDocker:
     def __init__(self, registry: Registry):
         self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
         self.probed, self.probe_fails, self.resolved, self.timeouts = [], {}, [], {}
-        self.writes, self.saved, self.disk_builds = {}, [], []
+        self.writes, self.saved, self.disk_builds, self.disk_sizes = {}, [], [], {}
 
     def resolve(self, request, context, source, arch, work):
         """The resolver in the base: each apt package as one .deb, each venv's requirements as one wheel."""
@@ -102,6 +102,8 @@ class FakeDocker:
         if build_args is not None or context.name == "tools":
             self.disk_builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
                                      "args": build_args, "context": context.name, "labels": labels})
+            args = build_args or {}
+            self.disk_sizes[tag] = int(args["SIZE_GB"]) if "SIZE_GB" in args else self.disk_sizes.get(args.get("ESP"), 16)
             return
         self.builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
                             "files": sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()),
@@ -129,7 +131,7 @@ class FakeDocker:
         saved_image(path, layers)
 
     def push(self, local, ref, store):
-        layer = disk_layer() if "-disk-" in local else UBUNTU_LAYER
+        layer = disk_layer(self.disk_sizes.get(local, 16) << 30) if "-disk-" in local else UBUNTU_LAYER
         self.registry.tags[ref] = self.registry.image(layer, arch=local.rsplit("-", 1)[1], labels=self.labels.get(local))
 
     def image_config(self, tag):
