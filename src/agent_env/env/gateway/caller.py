@@ -1,6 +1,7 @@
 """Who the gateway acts for on one inbound request.
 
-A ``Caller`` is the role the request's ``AgentEnv-Role`` header named (``default`` when it named none) and the key of
+A ``Caller`` is the role the request's ``AgentEnv-Role`` header named (``default`` when it named none, or named another
+without the deploy's ``AgentEnv-Role-Key`` when the deploy has one) and the key of
 the MCP session the request belongs to (empty on the REST and harness paths, which have no session). It is bound in
 three scopes, which read in order in ``gateway.py``: per HTTP request by the served app (the role), per inbound MCP
 session by the session lifespan (the key, kept for every tools/call of that session), and never per process. Every

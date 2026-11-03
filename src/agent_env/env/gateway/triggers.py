@@ -738,7 +738,8 @@ class TriggerEngine:
         _normalize_provoked_when(when, tid)
 
     def _normalize_website_when(self, when: dict, tid: str) -> None:
-        """Validate a website `when`: a known app, upper-cased method, `path`/`status` predicates, `where`, `repeat`."""
+        """Validate a website `when`: a known app, upper-cased method, the `op` (a route the site's card names),
+        `path`/`status` predicates, `where`, `repeat`."""
         w = f"trigger '{tid}'"
         app = when.get("app")
         if not isinstance(app, str) or not app:
@@ -751,6 +752,17 @@ class TriggerEngine:
             raise TriggerError(f"{w}: when.method must be a non-empty HTTP method, e.g. 'POST'")
         else:
             when["method"] = when["method"].strip().upper()
+        if when.get("op") is None:
+            when.pop("op", None)
+        elif not isinstance(when["op"], str) or not when["op"]:
+            raise TriggerError(f"{w}: when.op must be a non-empty string naming one of the website's routes")
+        else:
+            names = self._gw.website_route_names(app)
+            if names is None:
+                raise TriggerError(f"{w}: when.op names a route of website {app!r}, whose card the gateway could not "
+                                   "read; match its path instead")
+            if when["op"] not in names:
+                raise TriggerError(f"{w}: when.op names no route of website {app!r} (routes: {sorted(names)})")
         for key in ("path", "status"):
             if when.get(key) is None:
                 when.pop(key, None)
@@ -949,17 +961,18 @@ class TriggerEngine:
         return pending, timeout_s
 
     def on_website_request(self, role: str, app: str, method: str, path: str, status: int,
-                           args: dict) -> tuple[list[asyncio.Task], float | None]:
-        """Detection hook for an answered website request, before its response goes out; returns what on_tool_call does."""
+                           args: dict, op: str | None = None) -> tuple[list[asyncio.Task], float | None]:
+        """Detection hook for an answered website request, before its response goes out, `op` naming the route of
+        the site's card it reached; returns what on_tool_call does."""
         provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
         if not provokable:
             return [], None
         if self._has_time_triggers:
             self._eval_time_triggers()
-        request = {"app": app, "method": method, "path": path, "status": status}
+        request = {"app": app, "method": method, "path": path, "status": status, **({"op": op} if op else {})}
         provoking = {"source": "website", **request, "role": role}
         matched = [(tid, trig) for tid, trig in provokable
-                   if _website_matches(trig["spec"]["when"], app, method, path, status)]
+                   if _website_matches(trig["spec"]["when"], app, method, path, status, op)]
         pending, timeout_s = self._detect(matched, provoking, {"args": args, "request": request})
         if method not in _SAFE_METHODS and status < 400:
             self._reevaluate_states(provokable, provoking)
@@ -991,10 +1004,12 @@ class TriggerEngine:
                 trig["evaluating"] = True
                 self._schedule(self._eval_state(tid, trig, provoking))
 
-    def may_hold_website_request(self, role: str, app: str, method: str, path: str, status: int) -> bool:
+    def may_hold_website_request(self, role: str, app: str, method: str, path: str, status: int,
+                                 op: str | None = None) -> bool:
         """Whether a `provoking_call` barrier could hold this website request: a matcher check, `where` and status aside."""
         return any((trig["spec"].get("barrier") or {}).get("at") == "provoking_call" and self._provoked_by(trig, role)
-                   and _website_matches(trig["spec"]["when"], app, method, path, status) for trig in self._triggers.values())
+                   and _website_matches(trig["spec"]["when"], app, method, path, status, op)
+                   for trig in self._triggers.values())
 
     @property
     def has_website_triggers(self) -> bool:
@@ -1648,9 +1663,12 @@ def _normalize_provoked_when(when: dict, tid: str) -> None:
         raise TriggerError(f"trigger '{tid}': when.repeat must be a boolean")
 
 
-def _website_matches(when: dict, app: str, method: str, path: str, status: int) -> bool:
-    """Whether a request matches a website `when` (`where` aside); without `status`, only a response below 400 does."""
+def _website_matches(when: dict, app: str, method: str, path: str, status: int, op: str | None = None) -> bool:
+    """Whether a request matches a website `when` (`where` aside); with `op`, only one reaching that route does, and
+    without `status`, only a response below 400 does."""
     if when["type"] != "website" or when["app"] != app or when.get("method", method) != method:
+        return False
+    if "op" in when and when["op"] != op:
         return False
     if "path" in when and not _eval_predicate(when["path"], path):
         return False

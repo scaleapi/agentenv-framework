@@ -10,12 +10,17 @@ its response streamed through, under four invariants:
   round-trip through str), minus the hop-by-hop set, in both directions;
 - the role header is the gateway's to write: the client's copies are dropped and the role the gateway attributed
   the request to goes in their place, and a POST to a backing MCP server's own endpoint gets the same treatment
-  inside its JSON-RPC ``params._meta``;
+  inside its JSON-RPC ``params._meta``; so is the role key, which goes upstream only beside a role other than
+  ``default`` the key verified, so a site holding the same key believes the role;
+- the upstream learns the address the client reached it at: ``X-Forwarded-Host`` and ``X-Forwarded-Proto`` (a front's
+  own, when one before the gateway sent them, else the request's ``Host`` and scheme) and ``X-Forwarded-Prefix``, the
+  route prefix (``/svc/{service}`` or ``/website/{service}``) the gateway strips, which a client never sets;
 - the upstream response and the client it came through are closed when the response ends, iterated or not.
 
 A backing server's env card names its endpoints relative to itself; :func:`rewrite_child_card` roots them under
 ``/svc/{key}`` so they resolve against the env's address, keeping the gateway's own routes where the gateway offers
-the same operation.
+the same operation. A website's card names its routes on ``urn:agentenv:website/v1``; :func:`website_routes` reads
+them so :func:`route_name` can name the route a proxied request reached.
 """
 from __future__ import annotations
 
@@ -23,8 +28,9 @@ import copy
 import json
 import logging
 import posixpath
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import unquote
 
 import httpx
@@ -35,9 +41,12 @@ from starlette.types import Receive, Scope, Send
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
     AGENT_ENV_ROLE_HEADER,
+    AGENT_ENV_ROLE_KEY_HEADER,
     AGENT_ENV_ROLE_META_KEY,
     AGENT_ENV_SESSION_META_KEY,
     CARD_FETCH_TIMEOUT_S,
+    DEFAULT_ROLE,
+    EXT_WEBSITE_URI,
     WELL_KNOWN_PATH,
 )
 
@@ -51,11 +60,16 @@ HOP_BY_HOP = frozenset({
 
 # The role header as it appears in the raw ASGI header list (lower-cased by the server).
 ROLE_HEADER_BYTES = AGENT_ENV_ROLE_HEADER.lower().encode()
+ROLE_KEY_HEADER_BYTES = AGENT_ENV_ROLE_KEY_HEADER.lower().encode()
+
+FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX = "x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix"
+_FORWARDED = frozenset(name.encode() for name in (FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX))
 
 
 async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.Timeout, mcp_server: bool,
-                  on_done: Callable[[int], Awaitable[None]] | None = None) -> Response:
-    """Forward `request` to the service at `base_url` as `role` and stream the response through. `mcp_server` says
+                  role_key: str | None = None, on_done: Callable[[int], Awaitable[None]] | None = None) -> Response:
+    """Forward `request` to the service at `base_url` as `role`, vouched for by `role_key` when the deploy has one,
+    and stream the response through. `mcp_server` says
     the service is a backing MCP server, whose own endpoint takes the role in its JSON-RPC `_meta` as well as in the
     header. A 400 names a request-target the proxy cannot route; a 502 names an upstream that never answered.
     `on_done` is awaited with the status once the response has ended, after its last byte when streamed."""
@@ -64,7 +78,7 @@ async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.
     except ValueError as e:  # an escaped slash inside the route prefix; refuse rather than forward a wrong path
         return await _done(_json_response({"error": str(e)}, 400), on_done)
     content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
-    headers = upstream_headers(request, role)
+    headers = upstream_headers(request, role, role_key)
     if mcp_server and request.method == "POST" and is_child_mcp_path(request.path_params.get("path", "")):
         # The gateway is the trust boundary for identity: a child's proxied MCP endpoint stays reachable, but the
         # role in its JSON-RPC `_meta` is the gateway's to write, like the header above.
@@ -101,16 +115,47 @@ def upstream_url(base_url: str, request: Request) -> str:
     return url
 
 
-def upstream_headers(request: Request, role: str) -> httpx.Headers:
+def upstream_headers(request: Request, role: str, role_key: str | None = None) -> httpx.Headers:
     """One entry per raw header, so repeated fields (cookie, x-forwarded-for) keep their multiplicity. The role
-    header is the gateway's to set: the client's copies are dropped and the role the gateway attributed the
-    request to goes in their place, so the upstream never reads a value the gateway did not write."""
+    and role key headers are the gateway's to set: the client's copies are dropped and the role the gateway
+    attributed the request to goes in their place, with `role_key` beside any role but `default`, so the upstream
+    never reads a value the gateway did not write. So are the forwarded-address headers (`forwarded_address`)."""
     headers = httpx.Headers([(k, v) for k, v in request.headers.raw
-                             if k.lower() not in HOP_BY_HOP and k.lower() != ROLE_HEADER_BYTES])
+                             if k.lower() not in HOP_BY_HOP and k.lower() not in (ROLE_HEADER_BYTES, ROLE_KEY_HEADER_BYTES)
+                             and k.lower() not in _FORWARDED])
     headers[AGENT_ENV_ROLE_HEADER] = role
+    if role_key and role != DEFAULT_ROLE:
+        headers[AGENT_ENV_ROLE_KEY_HEADER] = role_key
+    headers.update(forwarded_address(request))
     # Bytes are forwarded undecoded, so only ask upstream for encodings the caller can take.
     headers.setdefault("accept-encoding", "identity")
     return headers
+
+
+def forwarded_address(request: Request) -> dict[str, str]:
+    """Where the client reached the proxied service: the host and scheme it addressed (as a front before the gateway
+    names them in its own ``X-Forwarded-Host``/``X-Forwarded-Proto``, else the request's ``Host`` and scheme; the
+    client could set ``Host`` anyway, so believing its front names nothing it couldn't), and the route prefix as sent.
+    A header with nothing to say is left out."""
+    host = _first(request.headers.get(FORWARDED_HOST, "")) or request.headers.get("host", "")
+    proto = _first(request.headers.get(FORWARDED_PROTO, "")).lower()
+    address = {FORWARDED_HOST: host, FORWARDED_PROTO: proto if proto in ("http", "https") else request.url.scheme,
+               FORWARDED_PREFIX: route_prefix(request)}
+    return {name: value for name, value in address.items() if value}
+
+
+def _first(value: str) -> str:
+    return value.split(",")[0].strip()
+
+
+def route_prefix(request: Request) -> str:
+    """The path the client reached the proxied service under, as it sent it: the request-target up to the `{path}`
+    remainder, without its trailing slash, e.g. ``/website/notes``, or under a root path ``/env/website/notes``."""
+    raw_path = request.scope.get("raw_path") or request.scope["path"].encode()
+    decoded_rest = request.path_params.get("path", "")
+    if decoded_rest:
+        raw_path = raw_path[:-len(raw_remainder(raw_path, request.scope["path"], decoded_rest))]
+    return raw_path.decode("latin-1").rstrip("/")
 
 
 def is_child_mcp_path(decoded_rest: str) -> bool:
@@ -324,6 +369,70 @@ def operations(params: dict) -> list[tuple[str | None, dict | None, dict, str, s
         found = [(None, None, params, "POST")]
     return [(name, method, holder, verb, holder["endpoint"]) for name, method, holder, verb in found
             if isinstance(holder.get("endpoint"), str) and holder["endpoint"]]
+
+
+class WebsiteRoute(NamedTuple):
+    """One route a website's card names: its verb, the pattern its path matches (a Starlette converter's own, one
+    path segment for any other converter or none), and its name, None for a route the site builds in."""
+
+    method: str
+    pattern: re.Pattern
+    name: str | None
+
+
+_CONVERTERS = {"path": ".*", "int": "[0-9]+", "float": r"[0-9]+(?:\.[0-9]+)?",
+               "uuid": "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"}
+_PATH_PARAM = re.compile(r"{\w+(?::(\w+))?}")
+
+
+def website_routes(card: dict | None) -> list[WebsiteRoute]:
+    """The routes a website's card names on ``urn:agentenv:website/v1``, in its order: each one's method, its path
+    (``/api/notes/{note_id}``, with or without a Starlette converter such as ``{note_id:int}``) and its name. An entry
+    missing any of the three is skipped; a card naming none, or no card, has none.
+
+    Before them come, unnamed, the built-in routes the card names, which answer before any of its routes would: a GET
+    to its ``health`` path, and a GET or DELETE to its ``session_path`` unless one of its routes is at that very path
+    (then the site serves its own there). A request one of them answers is named by no route.
+
+    >>> [(r.method, r.pattern.pattern, r.name) for r in website_routes({"capabilities": {"extensions": [
+    ...     {"uri": "urn:agentenv:website/v1", "params": {"health": "/healthz", "routes": [
+    ...         {"method": "get", "path": "/api/notes/{note_id:int}", "name": "get_note"}, {"path": "/x"}]}}]}})]
+    [('GET', '/healthz', None), ('GET', '/api/notes/(?:[0-9]+)', 'get_note')]
+    """
+    found: list[WebsiteRoute] = []
+    for ext in ((card or {}).get("capabilities") or {}).get("extensions") or []:
+        params = ext.get("params") if isinstance(ext, dict) and ext.get("uri") == EXT_WEBSITE_URI else None
+        routes = params.get("routes") if isinstance(params, dict) else None
+        named = [route for route in (routes if isinstance(routes, list) else [])
+                 if isinstance(route, dict) and all(isinstance(route.get(k), str) and route[k]
+                                                    for k in ("method", "path", "name"))]
+        health, session = (params.get(k) if isinstance(params, dict) else None for k in ("health", "session_path"))
+        if isinstance(health, str) and health:
+            found.append(WebsiteRoute("GET", _path_pattern(health), None))
+        if isinstance(session, str) and session and all(route["path"] != session for route in named):
+            found += [WebsiteRoute(verb, _path_pattern(session), None) for verb in ("GET", "DELETE")]
+        found += [WebsiteRoute(route["method"].upper(), _path_pattern(route["path"]), route["name"]) for route in named]
+    return found
+
+
+def _path_pattern(path: str) -> re.Pattern:
+    parts, end = [], 0
+    for param in _PATH_PARAM.finditer(path):
+        parts += [re.escape(path[end:param.start()]), f"(?:{_CONVERTERS.get(param.group(1) or '', '[^/]+')})"]
+        end = param.end()
+    return re.compile("".join(parts) + re.escape(path[end:]))
+
+
+def route_name(routes: list[WebsiteRoute], method: str, path: str) -> str | None:
+    """The name of the first of `routes` a `method` request to `path` reaches (a HEAD reaches a GET route), else None,
+    as it is when that first one is a built-in route.
+
+    >>> route_name(website_routes({"capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {
+    ...     "routes": [{"method": "GET", "path": "/api/notes/{note_id}", "name": "get_note"}]}}]}}), "HEAD", "/api/notes/7")
+    'get_note'
+    """
+    verbs = {method.upper(), "GET"} if method.upper() == "HEAD" else {method.upper()}
+    return next((route.name for route in routes if route.method in verbs and route.pattern.fullmatch(path)), None)
 
 
 def _json_response(data: dict | list, status_code: int) -> Response:

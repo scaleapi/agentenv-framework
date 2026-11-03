@@ -52,6 +52,16 @@ def test_codegen_compiles_and_renders_help():
         assert "Auto-generated CLI for slack" in group_help.stdout
 
 
+def test_the_generated_cli_sends_the_role_key_beside_its_role_only_when_one_is_set(monkeypatch, tmp_path):
+    namespace: dict = {"__name__": "generated_cli", "__file__": str(tmp_path / "svc")}
+    exec(compile(generate_cli_script("svc"), "svc", "exec"), namespace)
+    monkeypatch.setenv("AGENT_ENV_ROLE", "admin")
+    monkeypatch.delenv("AGENT_ENV_ROLE_KEY", raising=False)
+    assert namespace["_role_headers"]() == {"AgentEnv-Role": "admin"}
+    monkeypatch.setenv("AGENT_ENV_ROLE_KEY", "deploy-secret")
+    assert namespace["_role_headers"]() == {"AgentEnv-Role": "admin", "AgentEnv-Role-Key": "deploy-secret"}
+
+
 def test_codegen_loads_sibling_env_file():
     src = generate_cli_script("svc")
 

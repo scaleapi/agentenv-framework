@@ -45,11 +45,12 @@ class _EpisodeAgentStep(TaskStep):
         episode = _episode_of(context)
         agent = self.step.agent_name
         if not self.sandboxed:
-            mcp_urls = {}
+            mcp_urls, role_keys = {}, {}
             for env_id in getattr(self.step, "env_ids", None) or []:
                 deployed = bound_deployment(context, env_id, env_step_id=self.step.env_step_id, step_id=self.id)
                 mcp_urls[env_id] = deployed.mcp_url if deployed is not None else live_mcp_url(env_id)
-            deployed = await episode._serve_in_process(agent, getattr(self.step, "role", None), mcp_urls)
+                role_keys[env_id] = deployed.role_key if deployed is not None else None
+            deployed = await episode._serve_in_process(agent, getattr(self.step, "role", None), mcp_urls, role_keys)
             context.deployed_agents.append(deployed)
             if system_prompt := getattr(self.step, "system_prompt", None):
                 config = A2AAgent.negotiate_agent_config(deployed.a2a_card, {"system_prompt": system_prompt})

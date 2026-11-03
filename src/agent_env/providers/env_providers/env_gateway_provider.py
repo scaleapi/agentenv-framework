@@ -31,7 +31,9 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
 from agent_env.env.gateway.constants import (
     DEFAULT_MCP_SERVER_NAME,
+    GATEWAY_ROLE_KEY_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
+    WEBSITE_ROLE_KEY_ENV,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
     tool_name_clashes_text,
@@ -126,6 +128,7 @@ class DeployedGateway:
     # The env card the readiness probe read, and when (ISO 8601, UTC).
     environment_card: dict | None = None
     environment_card_read_at_utc: str | None = None
+    role_key: str | None = None
 
 
 @dataclass
@@ -290,6 +293,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         host_ips: tuple[str, ...] = (),
         extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
+        role_key: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
 
@@ -301,6 +305,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_image: Docker image for the gateway.
             gateway_port: Port to expose for the gateway.
             website_configs: Optional list of website configurations (frontend + backend pairs).
+            role_key: The deploy's role key, given to the gateway as AGENTENV_ROLE_KEY and to each website server as
+                WEBSITE_ROLE_KEY; without one, both believe the AgentEnv-Role header as before it.
 
         Returns:
             docker-compose.yml content as a string.
@@ -498,6 +504,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_env.append(f"      - REST_PROXY_URLS={','.join(rest_proxy_urls)}")
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
+        if role_key:
+            gateway_env.append(f"      - {GATEWAY_ROLE_KEY_ENV}={role_key}")
         publish = host_port or (lambda port: port)
         exposed_gateway_ports = []
         if expose_gateway_port:
@@ -544,6 +552,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
                 f"      - {SESSION_SECRET_ENV}={secrets.token_hex(32)}",
                 "      - PYTHONUNBUFFERED=1",
+                *([f"      - {WEBSITE_ROLE_KEY_ENV}={role_key}"] if role_key else []),
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'
                 f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
@@ -611,10 +620,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         attribution: Optional[Attribution] = None,
         artifact_id: str | None = None,
         artifact_version: int | None = None,
+        keyed_roles: bool = False,
     ) -> DeployedGatewayEnv:
         """A gateway in front of the env, with the state store it acquires (local Postgres by default); returns the record.
 
         A MultiEnv's gateway fronts its MCP servers and websites, a WebsiteEnv's its website, and any other env's its one MCP server.
+        With ``keyed_roles``, the deploy draws a role key (see ``create_gateway``).
         """
         from agent_env.config import get_config, service_db_env_id
         from agent_env.env.env import Env
@@ -633,6 +644,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             mcp_server_images=topology.mcp_server_images, website_configs=topology.website_configs,
             website_images=topology.website_images, mcp_server_name=topology.mcp_server_name, gateway_mode=gateway_mode,
             ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
+            keyed_roles=keyed_roles,
         )
         return DeployedGatewayEnv(
             env_id=env.id,
@@ -649,6 +661,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             website_frontend_urls=deployed.website_frontend_urls,
             gateway_mode=gateway_mode.value,
             env_state_instance_ids=deployed.env_state_instance_ids,
+            role_key=deployed.role_key,
         )
 
     async def create_gateway(
@@ -671,6 +684,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
         *,
         attribution: Optional[Attribution] = None,
+        keyed_roles: bool = False,
     ) -> DeployedGateway:
         """Create and start a gateway from explicit topology, for a caller that builds its own record rather than calling ``deploy()``.
 
@@ -684,20 +698,26 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         ``mcp_server_name`` is the name the gateway presents on its card and as its MCP server; drawn as ``env`` +
         4 random digits when the env declares none; the record takes it from the gateway's card.
+
+        ``keyed_roles`` draws a secret role key for the deploy, given to the gateway and each website server and kept on
+        the record: the gateway then believes a role other than ``default`` only beside it, so every caller acting as one
+        must send it. Off, as before the key, the role header alone is believed.
         """
         return await self._launch(
             sandbox_provider, env_id, state_instance=state_instance, mcp_servers=mcp_servers, mcp_server_images=mcp_server_images,
             gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
             gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             existing_sandbox=existing_sandbox, sidecars=sidecars, mcp_server_name=mcp_server_name,
-            attribution=attribution,
+            attribution=attribution, keyed_roles=keyed_roles,
         )
 
-    async def _launch(self, sandbox_provider: SandboxProvider, env_id: str | None, *, mcp_server_name: str | None = None, **gateway) -> DeployedGateway:
+    async def _launch(self, sandbox_provider: SandboxProvider, env_id: str | None, *, mcp_server_name: str | None = None,
+                      keyed_roles: bool = False, **gateway) -> DeployedGateway:
         """One gateway, deployed on the sandbox provider or each chained member in turn, then its tools probed."""
         attempt = functools.partial(
             self._deploy_gateway, **gateway,
             mcp_server_name=mcp_server_name or random_mcp_server_name(),  # drawn once, so every chained attempt presents the same name
+            role_key=secrets.token_urlsafe(32) if keyed_roles else None,
         )
         earlier_sandbox = self._sandbox
         result = await self._run(sandbox_provider, env_id, attempt)
@@ -749,6 +769,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
+        role_key: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
         from agent_env.config import gateway_env_id, get_config, website_browser_env_id
@@ -840,6 +861,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
+            role_key=role_key,
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
 
@@ -933,7 +955,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_url=gateway_url, mcp_url=mcp_url, db_web_url=db_web_url, db_mcp_url=db_mcp_url,
             website_frontend_urls=website_frontend_urls, mcp_server_name=mcp_server_name,
             env_state_instance_ids=[state_instance.instance_id],
-            environment_card=card, environment_card_read_at_utc=card_read_at_utc,
+            environment_card=card, environment_card_read_at_utc=card_read_at_utc, role_key=role_key,
         )
 
     async def _deploy_via_containers(
@@ -950,6 +972,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
         mcp_server_name: str | None = None,
+        role_key: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
         from agent_env.config import gateway_env_id, get_config
@@ -1046,6 +1069,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "GATEWAY_MODE": gateway_mode.value,
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
+                **({GATEWAY_ROLE_KEY_ENV: role_key} if role_key else {}),
             }
             gateway_sb = await sandbox_provider.create_container(
                 image_name=gateway_env.docker_image_artifact.image_name,
@@ -1079,6 +1103,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 env_state_instance_ids=[state_instance.instance_id],
                 environment_card=card,
                 environment_card_read_at_utc=card_read_at_utc,
+                role_key=role_key,
             )
         except Exception:
             await self.close()
@@ -1380,6 +1405,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
         attribution: Optional[Attribution] = None,
+        role_key: str | None = None,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
         server on its private network."""
@@ -1404,7 +1430,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 sandbox_provider, mcp_servers, mcp_server_images,
                 gateway_port=gateway_port, website_configs=website_configs, gateway_mode=gateway_mode,
                 ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
-                cpu=cpu, memory_mb=memory_mb, mcp_server_name=mcp_server_name, **deploy_kwargs,
+                cpu=cpu, memory_mb=memory_mb, mcp_server_name=mcp_server_name, role_key=role_key, **deploy_kwargs,
             )
         earlier_sandbox = self._sandbox
         try:
@@ -1413,7 +1439,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
                 gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
                 cpu=cpu, memory_mb=memory_mb, existing_sandbox=existing_sandbox, sidecars=sidecars,
-                mcp_server_name=mcp_server_name, **deploy_kwargs,
+                mcp_server_name=mcp_server_name, role_key=role_key, **deploy_kwargs,
             )
         except BaseException:
             await self._terminate_new_sandbox(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)
@@ -1576,7 +1602,7 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
 # Compose `environment:` keys whose values are secrets and must be masked before the
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
-_SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+_SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY|ROLE_KEY)[A-Za-z0-9_]*)=.*$")
 
 
 def _compose_ps_rows(text: str) -> list[dict]:

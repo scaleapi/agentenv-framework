@@ -273,11 +273,13 @@ async def test_executor_hours_for_an_agent_no_trigger_uses_raise(monkeypatch):
     ([{"id": "x", "when": {"type": "action", "tool": "t"}, "actions": [{"type": "nl", "instruction": "x"}]}],
      {"exec-1": _HOURS}, "executor_hours"),
     ([{"id": "x", "when": {"type": "website", "app": "mail", "method": "POST"}, "actions": []}], None, "website"),
-], ids=["delay", "unless", "hours", "website"])
+    ([{"id": "x", "when": {"type": "website", "app": "mail", "op": "send"}, "actions": []}], None, "website_op"),
+], ids=["delay", "unless", "hours", "website", "website-op"])
 async def test_a_gateway_without_a_feature_refuses_the_triggers_that_use_it(monkeypatch, triggers, hours, missing):
     sent = _mock_gateway(monkeypatch, {})
     context = _context(with_executor=True)
-    context.deployed_envs = [_record(_with_features("named_executors", "provoking_roles"))]
+    features = ("named_executors", "provoking_roles", "website") if missing == "website_op" else ("named_executors", "provoking_roles")
+    context.deployed_envs = [_record(_with_features(*features))]
     with pytest.raises(RuntimeError, match=rf"does not declare \['{missing}'\]"):
         await _step(triggers=triggers, executor_agent_name="exec-1", executor_hours=hours).execute(context)
     assert sent == []

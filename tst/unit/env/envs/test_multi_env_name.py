@@ -67,7 +67,7 @@ async def test_a_deploy_records_the_mcp_url_and_name_its_gateway_card_gives():
     card = {"name": "crm", "additionalInterfaces": [{"url": "/mcp", "transport": "mcp"}]}
     result = SimpleNamespace(gateway_url="https://gw.example", mcp_url="https://gw.example/mcp", db_web_url=None, db_mcp_url=None,
                              website_frontend_urls=None, environment_card=card, environment_card_read_at_utc="t",
-                             env_state_instance_ids=[], mcp_server_name="crm")
+                             env_state_instance_ids=[], mcp_server_name="crm", role_key=None)
 
     async def deploy_gateway(self, sandbox_provider, **kwargs):
         self._sandbox = SimpleNamespace(sandbox_id="gw", type="modal_vm")

@@ -375,6 +375,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
                 ttl_seconds=60,
                 disk_size_gb=10,
                 mcp_server_name="crm",
+                role_key="deploy-secret",
             )
 
     # Last create_container call is the gateway. Inspect its env var.
@@ -395,6 +396,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
     assert re.search(r"^postgresql://agentenv:agentenv@\[fdaa::fake:[0-9a-f]+\]:5432/agentenv", env["SERVICE_DB_URL"]), env["SERVICE_DB_URL"]
     assert env["MCP_SERVER_NAME"] == "crm"
     assert result.mcp_server_name == "crm"
+    assert env["AGENTENV_ROLE_KEY"] == result.role_key == "deploy-secret"
 
     # Each MCP got DATABASE_URL with its scoped search_path
     mcp_calls = [c for c in create_calls if c["image_name"].startswith("mcp-")]
@@ -1191,6 +1193,30 @@ def test_redact_compose_secrets_masks_only_secret_env_lines():
     assert "s3cr3t-token-value" in compose
 
 
+@pytest.mark.parametrize("role_key", ["deploy-secret", None], ids=["keyed", "unkeyed"])
+def test_compose_gives_the_role_key_to_the_gateway_and_every_website_server_and_masks_it_in_the_log(role_key):
+    """The gateway believes a role only beside the deploy's key, and a site holds the same key to believe the role the
+    gateway forwards; without a key neither is set, as before it."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+        gateway_image="agent-gateway",
+        website_configs=[WebsiteConfig(backend_image="notes-be", frontend_image=None, environment_name="notes")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        role_key=role_key,
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    keyed = {name: [entry for entry in service.get("environment") or [] if "ROLE_KEY" in entry]
+             for name, service in services.items()}
+    expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_ROLE_KEY={role_key}"], "notes-website-backend": [f"WEBSITE_ROLE_KEY={role_key}"]}
+    assert {name: entries for name, entries in keyed.items() if entries} == (expected if role_key else {})
+    if role_key:
+        assert role_key not in _redact_compose_secrets(compose) and "      - AGENTENV_ROLE_KEY=***" in _redact_compose_secrets(compose)
+
+
 @pytest.mark.asyncio
 async def test_acquire_state_for_deploy_local_returns_none():
     """Local Postgres cannot be pre-provisioned (its container's host doesn't exist yet), so the
@@ -1964,12 +1990,28 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
 
     [call] = vm.await_args_list
     assert call.args == (provider, args.pop("mcp_servers"), args.pop("mcp_server_images"))
-    assert call.kwargs == {**args, "attribution": forwarded}
+    assert call.kwargs == {**args, "attribution": forwarded, "role_key": None}
     assert call.kwargs["attribution"] is not attribution
 
 
 @pytest.mark.asyncio
-async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
+@pytest.mark.parametrize("keyed_roles", [True, False], ids=["keyed", "unkeyed"])
+async def test_create_gateway_draws_a_role_key_only_for_a_deploy_with_keyed_roles(keyed_roles):
+    """A keyed deploy draws a fresh secret for its gateway; any other deploy draws none, so its callers' role header
+    alone is believed, as before the key."""
+    gp, provider = EnvironmentGatewayProvider(), _vm_provider()
+    with patch.object(gp, "_deploy_via_vm", AsyncMock(return_value=_probed())) as vm, \
+         patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())):
+        await gp.create_gateway(sandbox_provider=provider, mcp_servers=[MagicMock()], mcp_server_images=[MagicMock()],
+                                env_id="crm-env", keyed_roles=keyed_roles)
+
+    role_key = vm.await_args.kwargs["role_key"]
+    assert (isinstance(role_key, str) and len(role_key) >= 32) if keyed_roles else role_key is None, role_key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keyed_roles", [False, True], ids=["unkeyed", "keyed"])
+async def test_deploy_returns_the_gateway_record_for_the_env(caplog, keyed_roles):
     """deploy(env) on a scripted VM: the env's image behind the gateway, its state acquired, and main's record plus its provider type."""
     from agent_env.env.gateway import GatewayMode
     from agent_env.providers.env_state import DatabaseStateProvider
@@ -1995,7 +2037,7 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value={"slack_send"})), \
          patch("agent_env.providers.env_providers.env_gateway_provider.asyncio.sleep", AsyncMock()):
         record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), gateway_mode=GatewayMode.CONSISTENT,
-                                   ttl_seconds=60, env_state_type="remote")
+                                   ttl_seconds=60, env_state_type="remote", keyed_roles=keyed_roles)
 
     clashes_checked.assert_awaited_once_with("https://vm.example")
 
@@ -2008,7 +2050,9 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
         env_id="crm-env", env_version=3, gateway_url="https://vm.example", mcp_url="https://vm.example/mcp", db_web_url=None,
         sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={}, db_mcp_url=None,
         environment_card_url="https://vm.example/.well-known/agent-env.json", environment_card=card,
-        environment_card_read_at_utc=record.environment_card_read_at_utc, gateway_mode="consistent", env_state_instance_ids=["st-ext"]))
+        environment_card_read_at_utc=record.environment_card_read_at_utc, gateway_mode="consistent", env_state_instance_ids=["st-ext"],
+        role_key=compose.call_args.kwargs["role_key"]))
+    assert (record.role_key and len(record.role_key) >= 32) if keyed_roles else record.role_key is None
     assert record.environment_card_read_at_utc and record.instance_id is None  # unregistered: the env registers it
     assert (record.mcp_url, record.mcp_server_name, record.env_provider_type) == ("https://vm.example/mcp", "env1234", "gateway")
     messages = [r.getMessage() for r in caplog.records if r.getMessage().startswith(("env_deploy_provider_attempt ", "env_deploy_tools_probe "))]

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
 from .constants import (
     AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
+    AGENT_ENV_ROLE_KEY_HEADER,
     AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
     CARD_FETCH_TIMEOUT_S,
@@ -72,7 +74,19 @@ from .changes import ChangeAttribution
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
-from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, operations, rewrite_child_card, upstream_url
+from .rest_proxy import (
+    ROLE_HEADER_BYTES,
+    ROLE_KEY_HEADER_BYTES,
+    UpstreamResponse,
+    WebsiteRoute,
+    fetch_child_card,
+    forward,
+    operations,
+    rewrite_child_card,
+    route_name,
+    upstream_url,
+    website_routes,
+)
 from .triggers import TriggerEngine, TriggerError
 from .notifications import CHECK_TOOL_NAMES, NotificationError, Notifications, build_check_tools
 
@@ -119,7 +133,10 @@ class Gateway:
         rest_proxy_urls: dict[str, str] | None = None,
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
+        role_key: str | None = None,
     ):
+        """`role_key` is the deploy's secret: with one, a request is believed to act as a role other than `default`
+        only when it carries the key beside the role; without one, as before it, the role header alone is believed."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -129,6 +146,8 @@ class Gateway:
         self._site_reserved: dict[str, frozenset[str]] = {}
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
+        self._role_key = role_key or None
+        self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
             self._db_conn = psycopg2.connect(service_db_url)
@@ -240,13 +259,15 @@ class Gateway:
         async def step_endpoint(request: Request) -> Response:
             return await self._handle_step(request)
 
-        async def _trigger_write(request: Request, method) -> Response:
-            """Shared body for the trigger write routes: parse JSON, invoke the engine method,
-            map a TriggerError (bad config) to a 400."""
+        async def _trigger_write(request: Request, method, prepare=None) -> Response:
+            """Shared body for the trigger write routes: parse JSON, await `prepare` with it, invoke the engine
+            method, map a TriggerError (bad config) to a 400."""
             try:
                 body = await request.json()
             except Exception:
                 return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if prepare is not None:
+                await prepare(body)
             try:
                 return self._json_response(method(body), 200)
             except TriggerError as e:
@@ -254,7 +275,7 @@ class Gateway:
 
         @self._mcp.custom_route("/triggers/register", methods=["POST"])
         async def triggers_register(request: Request) -> Response:
-            return await _trigger_write(request, self._trigger_engine.register)
+            return await _trigger_write(request, self._trigger_engine.register, prepare=self._read_trigger_website_routes)
 
         @self._mcp.custom_route("/triggers/remove", methods=["POST"])
         async def triggers_remove(request: Request) -> Response:
@@ -408,7 +429,7 @@ class Gateway:
             anyio.run(server.serve)
 
     # The three scopes a Caller is bound in, innermost first. Request: the served app binds the role the
-    # AgentEnv-Role header named. Session: mcp's Server.run enters the session lifespan once per inbound MCP
+    # AgentEnv-Role header named, as `_attributed_role` believes it. Session: mcp's Server.run enters the session lifespan once per inbound MCP
     # session, in the session's server task before any handler task is spawned, so the key bound there is inherited
     # by every tools/call of that session (and the role is the one its initialize request carried, which that task
     # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
@@ -423,11 +444,13 @@ class Gateway:
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
-            role = DEFAULT_ROLE
+            claimed, given_key = None, None
             for name, value in scope.get("headers", ()):
-                if name == ROLE_HEADER_BYTES:
-                    role = value.decode(errors="ignore").strip() or DEFAULT_ROLE
-                    break
+                if name == ROLE_HEADER_BYTES and claimed is None:
+                    claimed = value.decode(errors="ignore")
+                elif name == ROLE_KEY_HEADER_BYTES and given_key is None:
+                    given_key = value.decode(errors="ignore")
+            role = self._attributed_role(claimed or "", given_key or "")
             token = Caller(role=role, session=Caller.current().session).bind()
             try:
                 await inner(scope, receive, send)
@@ -603,7 +626,8 @@ class Gateway:
         role = self._request_role(request)
         mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
         if request.method in _SAFE_METHODS:
-            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server)
+            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
+                                 role_key=self._role_key)
         changelog_before = self._query_changelog_id()
         attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
@@ -611,12 +635,16 @@ class Gateway:
             changelog_after = self._query_changelog_id()
             if changelog_after is None or changelog_after <= (changelog_before or 0):
                 return  # only a request that wrote changelog rows is a write window
+            path = "/" + request.path_params.get("path", "")
+            op = (self._website_op(service_name, request.method, site_request_path(request) or path)
+                  if url_map is self.website_urls else None)
             await self._log_event({
                 "event_type": "http_request",
                 "route": "website" if url_map is self.website_urls else "svc",
                 "service": service_name,
                 "method": request.method,
-                "path": "/" + request.path_params.get("path", ""),
+                "path": path,
+                **({"op": op} if op else {}),
                 "status": status,
                 **attribution,
                 "changelog_id_before": changelog_before,
@@ -624,7 +652,7 @@ class Gateway:
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                             on_done=log_write)
+                             role_key=self._role_key, on_done=log_write)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
@@ -640,9 +668,10 @@ class Gateway:
         app = request.path_params["service_name"]
         engine = self._trigger_engine
         if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
+            path = site_request_path(request) or "/" + request.path_params.get("path", "")
             if isinstance(response, UpstreamResponse):
-                if not engine.may_hold_website_request(self._request_role(request), app, request.method,
-                                                       "/" + request.path_params.get("path", ""), response.status_code):
+                if not engine.may_hold_website_request(self._request_role(request), app, request.method, path,
+                                                       response.status_code, self._website_op(app, request.method, path)):
                     response.after_body(lambda status: self._fire_website_triggers(request, app, status))  # answered at its last byte
                     return response
                 await response.read_ahead_if_sized(self.BARRIER_READ_AHEAD_MAX_BYTES)  # its window ends before its triggers run
@@ -656,16 +685,55 @@ class Gateway:
         try:
             # Only a website trigger reads the request's args; a state re-check needs just the method and status.
             args = _request_args(request, await request.body()) if self._trigger_engine.has_website_triggers else {}
-            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method,
-                                                           "/" + request.path_params.get("path", ""), status, args)
+            path = site_request_path(request) or "/" + request.path_params.get("path", "")
+            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method, path,
+                                                           status, args, self._website_op(app, request.method, path))
         except Exception:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
-    @staticmethod
-    def _request_role(request: Request) -> str:
-        """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
-        return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+    def _request_role(self, request: Request) -> str:
+        """The role the gateway attributes a REST request to: the first AgentEnv-Role header, as `_attributed_role`
+        believes it, else the default role."""
+        return self._attributed_role(request.headers.get(AGENT_ENV_ROLE_HEADER, ""),
+                                     request.headers.get(AGENT_ENV_ROLE_KEY_HEADER, ""))
+
+    def _attributed_role(self, claimed: str, given_key: str) -> str:
+        """The role a request claiming `claimed` acts as: `default` when it claims none, and when the deploy has a
+        role key the request did not send. Without a key (a deploy without keyed_roles) the claim alone is believed."""
+        role = claimed.strip() or DEFAULT_ROLE
+        if self._role_key is None or role == DEFAULT_ROLE:
+            return role
+        return role if hmac.compare_digest(given_key.encode(), self._role_key.encode()) else DEFAULT_ROLE
+
+    async def _read_trigger_website_routes(self, body: Any) -> None:
+        """Read the routes of each website a website trigger in a register `body` names an `op` of, so registration
+        can check the op and requests can be matched by it; one whose card could not be read before is read again."""
+        triggers = body.get("triggers") if isinstance(body, dict) else None
+        apps = {trigger["when"]["app"] for trigger in triggers if isinstance(trigger, dict)
+                and isinstance(trigger.get("when"), dict) and trigger["when"].get("type") == "website"
+                and trigger["when"].get("op") is not None and isinstance(trigger["when"].get("app"), str)
+                and trigger["when"]["app"] in self.website_urls} if isinstance(triggers, list) else set()
+        await asyncio.gather(*(self._read_website_routes(app, again=True) for app in apps))
+
+    async def _read_website_routes(self, app: str, *, again: bool = False) -> None:
+        """Read website `app`'s routes from its card once (`again`: once more, when its card could not be read). The
+        env card's composition reads them too, so a deploy, which reads that card, leaves them read."""
+        if app in self._website_routes and not (again and self._website_routes[app] is None):
+            return
+        async with httpx.AsyncClient() as client:
+            card = await fetch_child_card(client, app, self.rest_proxy_urls.get(app) or self.website_urls[app])
+        self._website_routes[app] = website_routes(card) if card is not None else None
+
+    def website_route_names(self, app: str) -> set[str] | None:
+        """The names of the routes website `app`'s card names, as last read; None when it has not been read."""
+        routes = self._website_routes.get(app)
+        return None if routes is None else {route.name for route in routes if route.name is not None}
+
+    def _website_op(self, app: str, method: str, path: str) -> str | None:
+        """The name of the route of website `app` a request reached, by the routes last read from its card; never a
+        read of its own, so answering a request waits on no card."""
+        return route_name(self._website_routes.get(app) or [], method, path)
 
     async def _site_reserved_paths(self, app: str) -> frozenset[str] | None:
         """The paths ``app``'s card advertises for agentenv (``site_reserved_paths``), read once from its server, the one
@@ -702,8 +770,11 @@ class Gateway:
         return rewrite_child_card(key, card, self._gateway_extensions())
 
     async def _fetch_child_card(self, client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:
-        """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON."""
+        """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON. A
+        website's card read here also refreshes the routes its requests are named by."""
         child = await fetch_child_card(client, key, base_url)
+        if child is not None and key in self.website_urls:
+            self._website_routes[key] = website_routes(child)
         return None if child is None else self._rewrite_child_card(key, child)
 
     def _gateway_extensions(self) -> list[dict]:
@@ -1563,16 +1634,22 @@ def site_reserved_paths(card: dict) -> frozenset[str]:
     return frozenset(_normalized(p) for p in paths if isinstance(p, str) and p.startswith("/") and _normalized(p) != "/")
 
 
+def site_request_path(request: Request) -> str | None:
+    """The path a site's server receives for a request on its route: the raw path forwarded, its dot segments removed
+    by httpx and then decoded. It differs from the path as routed here when an encoded slash sits beside a dot segment
+    (``public%2Fx/../api`` reaches ``/api``). None for a request-target the proxy can't build a URL for: ``forward()``
+    refuses it."""
+    try:
+        return httpx.URL(upstream_url("http://site", request)).path
+    except (ValueError, httpx.InvalidURL):
+        return None
+
+
 def reserved_site_request(request: Request, reserved: frozenset[str] = frozenset()) -> bool:
     """Whether a request on a site's route reaches its data plane or env card, or one of the paths ``reserved`` names
-    (``site_reserved_paths``): by the path as routed here, or by the one its server receives, which is the raw path
-    forwarded, its dot segments removed by httpx and then decoded. The two differ when an encoded slash sits beside a
-    dot segment (``public%2Fx/../agentenv``). A request-target the proxy can't build a URL for isn't reserved here:
-    ``forward()`` refuses it."""
+    (``site_reserved_paths``): by the path as routed here, or by the one its server receives (``site_request_path``).
+    A request-target the proxy can't build a URL for isn't reserved here: ``forward()`` refuses it."""
     if reserved_site_path("/" + request.path_params.get("path", ""), reserved):
         return True
-    try:
-        sent = httpx.URL(upstream_url("http://site", request)).path
-    except (ValueError, httpx.InvalidURL):
-        return False
-    return reserved_site_path(sent, reserved)
+    sent = site_request_path(request)
+    return sent is not None and reserved_site_path(sent, reserved)

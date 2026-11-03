@@ -169,12 +169,12 @@ class WebsiteEnv(Env):
             ctx.refuse([ctx.config_problem(problem)])
         return ctx.accept_env(data, cls, named_by="backend_image")
 
-    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
+    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None, keyed_roles: bool = False) -> DeployedEnv:
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            artifact_id=artifact_id, artifact_version=artifact_version,
+            artifact_id=artifact_id, artifact_version=artifact_version, **({"keyed_roles": True} if keyed_roles else {}),
         )
 
     def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:

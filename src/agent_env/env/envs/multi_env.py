@@ -91,6 +91,7 @@ class MultiEnv(Env):
         self._gateway_mode = GatewayMode.PERFORMANCE
         self._env_provider = None
         self._mcp_server_name: Optional[str] = None
+        self._role_key: Optional[str] = None
         self._deployed: Optional[DeployedEnv] = None
         self._replaced: list[tuple] = []  # the provider and sandbox of each deployment a later deploy replaced, for close()
 
@@ -156,15 +157,16 @@ class MultiEnv(Env):
             ctx.refuse(problems)
         return fields
 
-    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
+    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None, keyed_roles: bool = False) -> DeployedEnv:
         deployed_env = await deploy_through_provider(
             self, environment_name=None, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            artifact_id=artifact_id, artifact_version=artifact_version,
+            artifact_id=artifact_id, artifact_version=artifact_version, **({"keyed_roles": True} if keyed_roles else {}),
         )
         self._gateway_mode = gateway_mode
         self._mcp_server_name = deployed_env.mcp_server_name
+        self._role_key = deployed_env.role_key
         _hand_provider_to_child_envs(self)
         _hand_record_to_child_envs(self, deployed_env)
         return deployed_env
@@ -190,6 +192,7 @@ class MultiEnv(Env):
         _hand_record_to_child_envs(env, deployed)
         env._instance_id = deployed.instance_id
         env._mcp_server_name = deployed.mcp_server_name
+        env._role_key = deployed.role_key
         return env
 
     async def load_environment_artifact(self, environment_artifact: EnvironmentArtifact) -> None:

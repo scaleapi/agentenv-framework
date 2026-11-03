@@ -55,8 +55,9 @@ class ApiRoute(NamedTuple):
     fn: Callable
 
     def advertised(self) -> dict:
-        return {"method": self.method, "path": openapi_path(self.path), "name": self.name,
-                "roles": list(self.roles) or None}
+        """The route as the card names it: its path is the Starlette path it is served at, converters and all
+        (``/files/{rest:path}``), so a gateway matches the requests it answers, nested paths included."""
+        return {"method": self.method, "path": self.path, "name": self.name, "roles": list(self.roles) or None}
 
 
 class _Api:
@@ -159,11 +160,23 @@ class ApiContext:
 
 def base_url(request: Request) -> str:
     """The site's address as the browser reached it: ``X-Forwarded-Proto`` and ``X-Forwarded-Host`` when a proxy
-    sent them, the request's own scheme and ``Host`` otherwise."""
+    sent them, the request's own scheme and ``Host`` otherwise, under the path ``X-Forwarded-Prefix`` names when the
+    proxy serves the site below one (the gateway's ``/website/<name>``)."""
     proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip() or request.url.scheme
     host = (request.headers.get("x-forwarded-host", "").split(",")[0].strip() or request.headers.get("host")
             or request.url.netloc)
-    return f"{proto}://{host}"
+    return f"{proto}://{host}{forwarded_prefix(request.headers.get('x-forwarded-prefix', ''))}"
+
+
+def forwarded_prefix(value: str) -> str:
+    """The path an ``X-Forwarded-Prefix`` value names, without its trailing slash; empty for none, and for one that is
+    not an absolute path or would make the site's URLs name another host (``//host``).
+
+    >>> [forwarded_prefix(v) for v in ("/website/notes/", "/a, /b", "", "/", "website", "//evil.example", "/a//b")]
+    ['/website/notes', '/a', '', '', '', '', '']
+    """
+    prefix = value.split(",")[0].strip().rstrip("/")
+    return prefix if prefix.startswith("/") and "//" not in prefix and prefix.isprintable() else ""
 
 
 ROLE_KEY_ENV = "WEBSITE_ROLE_KEY"
@@ -172,7 +185,8 @@ ROLE_KEY_HEADER = "AgentEnv-Role-Key"
 
 def request_role(request: Request) -> str:
     """The role ``AgentEnv-Role`` names, believed only from a caller that also sends ``AgentEnv-Role-Key`` equal to
-    ``WEBSITE_ROLE_KEY``; every other caller, and every caller of a site with no key set, is ``default``. The gateway
+    ``WEBSITE_ROLE_KEY``; every other caller, and every caller of a site with no key set, is ``default``. A deploy with
+    ``keyed_roles`` sets the key and its gateway sends it on beside a role it verified the same way; any other gateway
     forwards whatever role a browser sends, so without the key a page could claim any role."""
     claimed = caller_from_request(None, request.headers).role or DEFAULT_ROLE
     key = os.environ.get(ROLE_KEY_ENV, "")
