@@ -1,6 +1,7 @@
 """The reference computer driver, for an X11 desktop: mss captures the screen and XTEST, through python-xlib, sends the
 input. X calls run off the event loop, one at a time, on a connection checked before each call and reopened when it
-drops, so the driver outlives a restarted X server. It records the display through FFmpeg's ``x11grab``, by PyAV. It
+drops, so the driver outlives a restarted X server, and input that lets go of a button returns once the server has let
+go of it. It records the display through FFmpeg's ``x11grab``, by PyAV. It
 needs ``agentenv-framework-protocol[computer]``, ``mss`` and ``python-xlib`` where it runs."""
 from __future__ import annotations
 
@@ -51,6 +52,8 @@ from agentenv_protocol.computer import (
 )
 
 BUTTONS = {"left": 1, "middle": 2, "right": 3, "back": 8, "forward": 9}
+#: The pointer state's bit for each button that has one.
+BUTTON_MASKS = {"left": X.Button1Mask, "middle": X.Button2Mask, "right": X.Button3Mask}
 SCROLL = {"up": 4, "down": 5, "left": 6, "right": 7}
 #: W3C key values and their X keysym names; any other single character is typed as its own keysym.
 KEYSYMS = {
@@ -63,6 +66,9 @@ KEYSYMS = {
 TYPED = {"\n": "Return", "\t": "Tab"}
 #: The pause between the presses of a double or triple click, in seconds.
 CLICK_GAP_S = 0.04
+#: How long a button's release may take to reach the app, and how often the driver looks.
+RELEASE_WAIT_S = 5.0
+RELEASE_POLL_S = 0.005
 #: How far apart a drag's pointer moves are, in pixels.
 DRAG_STEP_PX = 20
 DROPPED = (ConnectionClosedError, DisplayConnectionError, OSError)
@@ -130,6 +136,7 @@ class ReferenceDriver(ComputerDriverEnvironment):
                 if i + 1 < count:
                     c.d.sync()
                     time.sleep(CLICK_GAP_S)
+            c.released(button)
             c.release(reversed(held))
         await self._send(act)
 
@@ -147,6 +154,7 @@ class ReferenceDriver(ComputerDriverEnvironment):
 
         def finish(c):
             c.button(button, False)
+            c.released(button)
             c.release(reversed(held))
 
         try:
@@ -183,7 +191,10 @@ class ReferenceDriver(ComputerDriverEnvironment):
 
     @pointer_up
     async def up(self, button) -> None:
-        await self._send(lambda c: c.button(button, False))
+        def act(c):
+            c.button(button, False)
+            c.released(button)
+        await self._send(act)
 
     @pointer_position
     async def where(self) -> tuple[int, int]:
@@ -286,6 +297,14 @@ class _Connection:
 
     def button(self, button: str, down: bool) -> None:
         xtest.fake_input(self.d, X.ButtonPress if down else X.ButtonRelease, BUTTONS[button])
+
+    def released(self, button: str) -> None:
+        """Wait, up to RELEASE_WAIT_S, until the server has let go of ``button``. A window manager's passive grab holds
+        a click on a window until it replays it to the app, while keys reach the app at once, so a key sent before then
+        overtakes the click, and so do the next click's moves."""
+        deadline = time.monotonic() + RELEASE_WAIT_S
+        while self.d.screen().root.query_pointer().mask & BUTTON_MASKS.get(button, 0) and time.monotonic() < deadline:
+            time.sleep(RELEASE_POLL_S)
 
     def hold(self, keysyms: list[int]) -> list[int]:
         """``hold_each``'s keycodes, in the order they were pressed."""

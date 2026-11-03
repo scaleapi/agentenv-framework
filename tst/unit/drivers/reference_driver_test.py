@@ -26,6 +26,7 @@ WIDTH, HEIGHT = 640, 400
 TOKYO = [0x01000000 | ord(ch) for ch in "東京"]
 #: The fake keymap puts the named keys, such as Shift_L, from this keycode up; printable ASCII is its keysym + 8.
 NAMED_KEYS = 200
+BUTTON1_MASK = 1 << 8
 
 
 class ConnectionClosedError(Exception):
@@ -34,8 +35,9 @@ class ConnectionClosedError(Exception):
 
 class FakeX:
     """An X display: its screen and pointer, a US-like keymap whose capital letters are the second level of their
-    keys, the keys down, the XTEST events sent, ``drops`` syncs and the ``fail_at``-th event that fail, and the
-    ``spare`` keycodes the keymap leaves empty."""
+    keys, the keys down, the XTEST events sent, ``drops`` syncs and the ``fail_at``-th event that fail, the ``spare``
+    keycodes the keymap leaves empty, and ``held``, how many more queries of the pointer find the left button down
+    after its release, as while a window manager's grab holds a click before replaying it."""
 
     def __init__(self) -> None:
         self.events: list = []
@@ -46,12 +48,18 @@ class FakeX:
         self.drops = 0
         self.fail_at = None
         self.spare = {8}
+        self.held = 0
         self.display = types.SimpleNamespace(info=types.SimpleNamespace(min_keycode=8, max_keycode=255))
 
     def screen(self):
-        query = lambda: types.SimpleNamespace(root_x=self.pointer[0], root_y=self.pointer[1])  # noqa: E731
         return types.SimpleNamespace(width_in_pixels=WIDTH, height_in_pixels=HEIGHT,
-                                     root=types.SimpleNamespace(query_pointer=query))
+                                     root=types.SimpleNamespace(query_pointer=self.query_pointer))
+
+    def query_pointer(self):
+        held, self.held = self.held > 0, max(0, self.held - 1)
+        if held and not self.held:
+            self.events.append(("replayed", 1))
+        return types.SimpleNamespace(root_x=self.pointer[0], root_y=self.pointer[1], mask=BUTTON1_MASK if held else 0)
 
     def sync(self) -> None:
         if self.drops:
@@ -156,7 +164,8 @@ def x11(monkeypatch):
         return m
 
     X = module("Xlib.X", MotionNotify="move", ButtonPress="button-down", ButtonRelease="button-up",
-               KeyPress="key-down", KeyRelease="key-up")
+               KeyPress="key-down", KeyRelease="key-up", Button1Mask=BUTTON1_MASK, Button2Mask=BUTTON1_MASK << 1,
+               Button3Mask=BUTTON1_MASK << 2)
     XK = module("Xlib.XK", string_to_keysym=lambda name: keysyms.setdefault(name, 0xff00 + len(keysyms)))
     display = module("Xlib.display", Display=open_display)
     module("Xlib.error", ConnectionClosedError=ConnectionClosedError, DisplayConnectionError=ConnectionClosedError)
@@ -228,6 +237,24 @@ async def test_tool_calls_become_the_xtest_events_they_mean(x11):
                      ("key-up", code("Control_L"))]
     assert capital == [("key-down", shift), ("key-down", a), ("key-up", a), ("key-up", shift)]
     assert not fake.down
+
+
+@pytest.mark.asyncio
+async def test_input_that_lets_go_of_a_button_returns_once_a_window_manager_holding_it_has_replayed_it(x11):
+    driver, fake, code = x11
+    shift = code("Shift_L")
+    async with mcp_session(driver) as session:
+        await session.call_tool("computer_screenshot", {})
+        fake.held = 3
+        clicked = await _events(fake, session, "computer_click", {"x": 10, "y": 20, "modifiers": ["Shift"]})
+        fake.held = 3
+        dragged = await _events(fake, session, "computer_drag", {"path": [[0, 0], [40, 0]], "duration_ms": 0})
+        await session.call_tool("computer_pointer_down", {"x": 5, "y": 5})
+        fake.held = 3
+        up = await _events(fake, session, "computer_pointer_up", {})
+    assert clicked == [("key-down", shift), ("move", (10, 20)), ("button-down", 1), ("button-up", 1), ("replayed", 1),
+                       ("key-up", shift)]
+    assert dragged[-2:] == up == [("button-up", 1), ("replayed", 1)] and fake.held == 0
 
 
 @pytest.mark.asyncio

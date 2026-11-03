@@ -229,7 +229,7 @@ async def test_effects_without_spaces_right_or_double_clicks_leave_those_out_and
     assert "a click in norm space hits its cell" not in got and "a right click arrives as one" not in got
     assert "a double click arrives as one" not in got and "norm points land on the same pixels" not in got
     assert got["16 clicks sent at once all land"] == ("failed", "16 of 16 were refused")
-    assert got["a click in frame space hits its cell, and the next frame shows it"][1].startswith("AssertionError")
+    assert got["a click in frame space hits its cell, and a frame shows it"][1].startswith("AssertionError")
 
 
 @pytest.mark.asyncio
