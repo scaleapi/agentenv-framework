@@ -20,8 +20,10 @@ them. The page shows the universe's time.
   `edit_note`, `toggle_note` and `delete_note`. Errors are raised as `NotFound`, `BadRequest` and `Unauthorized`.
 - **Roles.** `all_notes` (`GET /api/admin/notes`) is declared with `roles=["admin"]`. It answers only a caller that
   sends `AgentEnv-Role: admin` with `AgentEnv-Role-Key` equal to the container's `WEBSITE_ROLE_KEY`; any other caller
-  gets 403. The gateway passes on whatever role a browser sends, so without the key a page could claim `admin`; with no
-  `WEBSITE_ROLE_KEY` set, every caller is `default` and the route is closed.
+  gets 403. A deploy with `keyed_roles` gives the site its own role key as `WEBSITE_ROLE_KEY` and its gateway sends it
+  on only beside a role it verified with the same key, so a page cannot claim `admin` through it. Any other deploy sets
+  no key, and its gateway passes on whatever role a browser sends; with no `WEBSITE_ROLE_KEY` set, every caller is
+  `default` and the route is closed.
 - **Users.** `ApiContext.user` is the user in the signed session cookie. With no cookie, it is the acting user (the
   store's `current_user`), and `GET /api/session` signs that user in. `POST /api/sign-in` switches to another seeded
   user. A user's notes are invisible to every other user, and another user's note answers 404.

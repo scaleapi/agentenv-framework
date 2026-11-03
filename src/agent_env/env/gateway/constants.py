@@ -126,9 +126,10 @@ TRIGGER_WEBSITE = "website"
 TRIGGER_EXECUTOR_HOURS_TIME_ZONE = "executor_hours_time_zone"
 TRIGGER_NEXT_EVENT_AT = "next_event_at"
 TRIGGER_NOTIFY = "notify"
+TRIGGER_WEBSITE_OP = "website_op"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
                     TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT,
-                    TRIGGER_NOTIFY)
+                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP)
 
 # The one `source` a /step call may name instead of step_api, with the id of the hook artifact that made it.
 STEP_SOURCE_POST_TURN_HOOK = "post_turn_hook"
@@ -142,6 +143,9 @@ GATEWAY_TRAJECTORY_FILE = os.environ.get(
 )
 
 AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
+AGENT_ENV_ROLE_KEY_HEADER = "AgentEnv-Role-Key"
+GATEWAY_ROLE_KEY_ENV = "AGENTENV_ROLE_KEY"
+WEBSITE_ROLE_KEY_ENV = "WEBSITE_ROLE_KEY"
 # MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a
 # key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.
 AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"

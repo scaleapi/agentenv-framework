@@ -14,10 +14,11 @@ from typing import Any
 
 from agentenv_protocol import MANIFEST_VERSION, manifest_compatible
 
-from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
+from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, AGENT_ENV_ROLE_KEY_HEADER
 
 GATEWAY_URL_ENV_VAR = "AGENT_ENV_GATEWAY_URL"
 ROLE_ENV_VAR = "AGENT_ENV_ROLE"
+ROLE_KEY_ENV_VAR = "AGENT_ENV_ROLE_KEY"
 DEFAULT_CLI_ROLE = "cli"
 _COMMAND_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]*$")
 _WORD_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|[0-9]+")
@@ -166,6 +167,8 @@ def generate_cli_script(
         role_env_var=ROLE_ENV_VAR,
         default_role=DEFAULT_CLI_ROLE,
         role_header=AGENT_ENV_ROLE_HEADER,
+        role_key_env_var=ROLE_KEY_ENV_VAR,
+        role_key_header=AGENT_ENV_ROLE_KEY_HEADER,
     )
 
 
@@ -186,6 +189,8 @@ GATEWAY_URL_ENV = "{gateway_env_var}"
 ROLE_ENV = "{role_env_var}"
 DEFAULT_ROLE = "{default_role}"
 ROLE_HEADER = "{role_header}"
+ROLE_KEY_ENV = "{role_key_env_var}"
+ROLE_KEY_HEADER = "{role_key_header}"
 SERVICE_NAME = {environment_name}
 INTERFACE_MANIFEST = {interface_manifest_literal}
 _CONFIG_FILE_NAME = ".env"
@@ -226,11 +231,17 @@ def _role():
     return os.environ.get(ROLE_ENV, DEFAULT_ROLE)
 
 
+def _role_headers():
+    """The role header, with the deploy's role key beside it when one is set, so the gateway believes the role."""
+    key = os.environ.get(ROLE_KEY_ENV)
+    return {{ROLE_HEADER: _role(), **({{ROLE_KEY_HEADER: key}} if key else {{}})}}
+
+
 def _post_step(payload):
     response = httpx.post(
         f"{{_gateway_url()}}/step",
         json=payload,
-        headers={{ROLE_HEADER: _role()}},
+        headers=_role_headers(),
         timeout=120,
     )
     response.raise_for_status()
@@ -248,7 +259,7 @@ def _list_tools():
     allowed_names = {{t.get("name") for t in (role_filtered.get("tools") or []) if t.get("name")}}
     state_resp = httpx.get(
         f"{{_gateway_url()}}/state",
-        headers={{ROLE_HEADER: _role()}},
+        headers=_role_headers(),
         timeout=120,
     )
     state_resp.raise_for_status()

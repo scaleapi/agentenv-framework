@@ -48,6 +48,7 @@ class DeployEnvTaskStep(TaskStep):
         artifact_id: Optional[str] = None,
         artifact_version: Optional[int] = None,
         env_params: Optional[dict] = None,
+        keyed_roles: bool = False,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
@@ -66,6 +67,7 @@ class DeployEnvTaskStep(TaskStep):
         self.metadata = metadata or {}
         # The env type's own deploy options, which this step passes to its deploy() without reading them.
         self.env_params = env_params
+        self.keyed_roles = keyed_roles
 
     def run_state(self, user_overrides: Mapping[str, Any]) -> tuple[str | None, str | None]:
         """The env state type and attached state instance a run with ``user_overrides`` deploys on: each the run's,
@@ -89,6 +91,7 @@ class DeployEnvTaskStep(TaskStep):
         base["env_state_instance_id"] = self.env_state_instance_id
         base["metadata"] = self.metadata
         base["env_params"] = self.env_params
+        base["keyed_roles"] = self.keyed_roles
         return base
 
     @classmethod
@@ -109,6 +112,7 @@ class DeployEnvTaskStep(TaskStep):
             env_state_instance_id=data.get("env_state_instance_id"),
             metadata=dict(data.get("metadata") or {}),
             env_params=data.get("env_params"),
+            keyed_roles=bool(data.get("keyed_roles", False)),
         )
 
     def preflight(self) -> list[str]:
@@ -133,7 +137,8 @@ class DeployEnvTaskStep(TaskStep):
         return [f"deploy_env '{self.id}': {refusal}"] if refusal else []
 
     def _env_params_option(self) -> dict:
-        return {"env_params": self.env_params} if self.env_params else {}
+        return {**({"env_params": self.env_params} if self.env_params else {}),
+                **({"keyed_roles": True} if self.keyed_roles else {})}
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.env.env import Env
@@ -188,6 +193,10 @@ class DeployEnvTaskStep(TaskStep):
             if "env_params" not in params and not accepts_kwargs:
                 raise ValueError(f"deploy_env '{self.id}': {env.type} envs take no env_params")
             deploy_kwargs["env_params"] = self.env_params
+        if self.keyed_roles:
+            if "keyed_roles" not in params and not accepts_kwargs:
+                raise ValueError(f"deploy_env '{self.id}': {env.type} envs take no keyed_roles")
+            deploy_kwargs["keyed_roles"] = True
         deployed_env = await env.deploy(**deploy_kwargs)
         # create_instance runs inside env.deploy(), so an annotation set after it
         # returns has to be persisted explicitly to reach the instance record.

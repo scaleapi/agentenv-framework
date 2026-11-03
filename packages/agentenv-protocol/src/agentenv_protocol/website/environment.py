@@ -16,12 +16,14 @@ import os
 import re
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple, Optional
+from urllib.parse import unquote
 
 from starlette.applications import Starlette
 from starlette.datastructures import MutableHeaders
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
+from starlette._utils import get_route_path
 from starlette.routing import Route
 
 from ..agent_env_environment import (
@@ -39,7 +41,8 @@ from ..types import DataPart
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, UniverseClock, clock_patch_script, iso
 from .errors import NotFound
 from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
-from .routes import ApiContext, ApiRoute, endpoint, error_response, openapi, openapi_path, request_role, reserved_path, routes_of
+from .routes import (ApiContext, ApiRoute, endpoint, error_response, forwarded_prefix, openapi, openapi_path, request_role,
+                     reserved_path, routes_of)
 from .session import SESSION_COOKIE, SessionSigner, expires_at
 from .store import Collections
 
@@ -284,9 +287,11 @@ def _check_health(cls: type) -> None:
 
 
 class _Forwarded:
-    """Puts the address the browser reached the site at in the scope, from ``X-Forwarded-Host`` and
-    ``X-Forwarded-Proto``, before anything routes it, so redirects, ``request.url`` and a mounted app's ``url_for``
-    name that address and not the internal one the proxy reached the server at."""
+    """Puts the address the browser reached the site at in the scope, from ``X-Forwarded-Host``,
+    ``X-Forwarded-Proto`` and ``X-Forwarded-Prefix``, before anything routes it, so redirects, ``request.url`` and a
+    mounted app's ``url_for`` name that address and not the internal one the proxy reached the server at. A prefix
+    becomes the scope's ``root_path`` and leads its ``path``, as ASGI has a mounted app's, so routing still sees the
+    site's own path."""
 
     def __init__(self, app: Any) -> None:
         self.app = app
@@ -301,6 +306,12 @@ class _Forwarded:
                 scope["headers"] = [(k, v) for k, v in scope["headers"] if k != b"host"] + [(b"host", host.encode())]
             if proto in ("http", "https"):
                 scope["scheme"] = proto if scope["type"] == "http" else {"http": "ws", "https": "wss"}[proto]
+            prefix = forwarded_prefix(_first(headers.get(b"x-forwarded-prefix")))
+            if prefix:
+                scope["root_path"] = unquote(prefix) + scope.get("root_path", "")
+                scope["path"] = unquote(prefix) + scope["path"]
+                if scope.get("raw_path") is not None:
+                    scope["raw_path"] = prefix.encode("latin-1") + scope["raw_path"]
         await self.app(scope, receive, send)
 
 
@@ -381,7 +392,7 @@ class _Fallback:
             if self.app is not None:
                 await self.app(scope, receive, send)
             return
-        path, reading = scope["path"], scope["method"] in ("GET", "HEAD")
+        path, reading = get_route_path(scope) or "/", scope["method"] in ("GET", "HEAD")
         if reserved_path(path):
             return await error_response(NotFound("not found"))(scope, receive, send)
         if reading and (file := self._file(path)) is not None:

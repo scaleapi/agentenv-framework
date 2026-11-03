@@ -102,6 +102,18 @@ def test_static_files_and_index_fallback_answer_for_any_host(client: TestClient)
     assert client.post("/orders").status_code == 404
 
 
+def test_behind_a_forwarded_prefix_the_site_serves_its_own_paths_and_the_fallback_still_guards_reserved_ones(
+        client: TestClient) -> None:
+    behind = {"X-Forwarded-Prefix": "/website/shop"}
+    assert "home" in client.get("/", headers=behind).text
+    assert client.get("/assets/app.js", headers=behind).text == "console.log(1)"
+    assert "home" in client.get("/orders/42/edit", headers=behind).text
+    assert client.get("/api/orders", headers=behind).json() == []
+    assert client.get("/.well-known/agent-env.json", headers=behind).json()["name"] == "Shop"
+    assert client.get("/website/shop/assets/app.js", headers=behind).status_code == 404
+    assert client.post("/agentenv/x", headers=behind).status_code in (404, 405)
+
+
 def test_a_link_out_of_the_static_folder_is_never_served(dist: Path) -> None:
     secret = dist.parent / "secret.txt"
     (dist / "leak.txt").symlink_to(secret)

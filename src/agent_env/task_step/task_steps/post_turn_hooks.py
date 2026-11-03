@@ -22,7 +22,6 @@ from agentenv_protocol import client as protocol_v1
 from agent_env.artifact import FileArtifact
 from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import (
-    AGENT_ENV_ROLE_HEADER,
     EXT_CLOCK_URI,
     EXT_NOTIFICATIONS_URI,
     EXT_STEP_URI,
@@ -152,7 +151,7 @@ class HookEnv:
                 "source": STEP_SOURCE_POST_TURN_HOOK, "hook_artifact_id": self._hook_artifact_id}
         async with httpx.AsyncClient() as client:
             resp = await client.request(op["method"], f"{self._deployed.environment_url}{op['endpoint']}", json=body,
-                                        headers={AGENT_ENV_ROLE_HEADER: role, **self._deployed.control_headers},
+                                        headers={**self._deployed.role_headers(role), **self._deployed.control_headers},
                                         timeout=_TOOL_CALL_TIMEOUT_S)
         if resp.status_code >= 400:
             raise RuntimeError(f"env '{self.env_id}': /step call_tool {tool!r} failed (HTTP {resp.status_code}): "

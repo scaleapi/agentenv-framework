@@ -346,4 +346,34 @@ async def test_a_cli_gets_the_gateway_url_its_agent_reaches(
     await LoadArtifactTaskStep(id="cli", version=None, env_id="env-x", artifact_id=cli.id,
                                artifact_version=cli.version, agent_name="solver").execute(context)
 
-    assert installed == [(expected, {"on_host": True} if on_host else {})]
+    assert installed == [(expected, {"role_key": None, **({"on_host": True} if on_host else {})})]
+
+
+@pytest.mark.asyncio
+async def test_each_cli_is_installed_with_the_role_key_of_the_deploy_it_talks_to(monkeypatch, local_stores, tmp_path):
+    (tmp_path / "cli").mkdir()
+    (tmp_path / "cli" / "run.sh").write_text("#!/bin/sh\n")
+    clis = [CliArtifact.put(f"{name}-cli", command_name=name, entrypoint="run.sh", cli_dir=tmp_path / "cli")
+            for name in ("slack", "crm")]
+    installed = []
+
+    async def install_cli(deployed, cli_artifact, gateway_url, **placed):
+        installed.append((cli_artifact.command_name, gateway_url, placed["role_key"]))
+        return f"/opt/cli/{cli_artifact.command_name}/run.sh"
+
+    monkeypatch.setattr(A2AAgent, "install_cli", staticmethod(install_cli))
+    monkeypatch.setattr(agent_store, "get_a2a_agent_instance_store",
+                        lambda: types.SimpleNamespace(get=lambda instance_id: object()))
+    context = TaskStepContext(
+        deployed_envs=[DeployedGatewayEnv(env_id=f"env-{name}", env_version=1, gateway_url=f"https://{name}.gw",
+                                          mcp_url="", sandbox_id=f"sb-{name}", sandbox_type="modal_vm",
+                                          role_key=f"key-{name}") for name in ("slack", "crm")],
+        deployed_agents=[DeployedAgent(agent_name="solver", api_url="http://agent", sandbox_id="sb-agent",
+                                       sandbox_type="modal_vm", instance_id="inst-1")],
+    )
+    for cli in clis:
+        await LoadArtifactTaskStep(id=f"load-{cli.command_name}", version=None, env_id=f"env-{cli.command_name}",
+                                   artifact_id=cli.id, artifact_version=cli.version, agent_name="solver"
+                                   ).execute(context)
+
+    assert installed == [("slack", "https://slack.gw", "key-slack"), ("crm", "https://crm.gw", "key-crm")]

@@ -14,7 +14,7 @@ from agentenv_protocol.a2a_agent import AgentConfig, BuiltinTools
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.env.env import DeployedGatewayEnv
-from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
+from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, AGENT_ENV_ROLE_KEY_HEADER
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import deploy_agent
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -225,6 +225,30 @@ def test_a_selection_takes_exactly_one_of_disable_and_only():
             DeployAgentTaskStep(id="ag", version=None, builtin_tools=selection)
     step = DeployAgentTaskStep(id="ag", version=None, builtin_tools={"disable": ["Bash"]})
     assert DeployAgentTaskStep.from_dict({**step.to_dict(), "version": 1}).builtin_tools == {"disable": ["Bash"]}
+
+
+@pytest.mark.asyncio
+async def test_a_keyed_deploy_s_registration_carries_its_role_key_and_the_agent_s_environment_does_not(wiring):
+    wiring.context.deployed_envs[0].role_key = "deploy-secret"
+
+    await wiring.deploy(_card(HEADERS_MCP), role="executor", env_ids=["crm", "ext"])
+
+    assert wiring.bodies("/ext/mcp-config") == [
+        {"url": _GATEWAY_MCP_URL, "headers": {AGENT_ENV_ROLE_HEADER: "executor", AGENT_ENV_ROLE_KEY_HEADER: "deploy-secret"},
+         "name": "crm"},
+        {"url": _LIVE_MCP_URL, "headers": {AGENT_ENV_ROLE_HEADER: "executor"}},
+    ]
+    assert wiring.env_vars == {ROLE_ENV_VAR: "executor"}
+
+
+@pytest.mark.asyncio
+async def test_a_keyed_deploy_gives_its_key_to_no_agent_without_a_role(wiring):
+    wiring.context.deployed_envs[0].role_key = "deploy-secret"
+
+    await wiring.deploy(_card(HEADERS_MCP), role=None)
+
+    assert wiring.bodies("/ext/mcp-config") == [{"url": _GATEWAY_MCP_URL, "name": "crm"}]
+    assert wiring.env_vars is None
 
 
 class _Wiring:
