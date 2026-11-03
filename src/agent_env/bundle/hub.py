@@ -172,7 +172,7 @@ def _fetch(reference: HubReference, api: HfApi, say: Callable[[str], None]) -> H
         card = _card(folder)
         path = _pick(reference, sha, commit.files, card)
         id_root = _id_root(reference, path)
-        plugins, setup = _needs(reference.repo, card, path.rpartition("/")[2] or reference.repo.partition("/")[2])
+        plugins, setup = _needs(reference.repo, card, _bundle_name(reference, path))
         source = HubSource(reference.repo, reference.revision or "main", sha, path)
         declared = _within(path, BUNDLE_TOML) in commit.files
         hub = HubBundle(folder / path, id_root, source, plugins=() if declared else plugins, setup=setup)
@@ -275,16 +275,20 @@ def _patterns(path: str) -> list[str]:
 
 
 def _id_root(reference: HubReference, path: str) -> str:
-    """``@hf/<org>/<repo>``, then the bundle's name for one under ``bundles/``, or its path for one elsewhere."""
-    parts = path.split("/") if path else []
-    if len(parts) == 2 and parts[0] == BUNDLES:
-        parts = parts[1:]
-    id_root = "/".join([f"{HF_PREFIX}{reference.repo}", *parts])
+    """``@hf/<org>/<repo>``, then for a bundle below the root its name."""
+    id_root = f"{HF_PREFIX}{reference.repo}" + (f"/{_bundle_name(reference, path)}" if path else "")
     try:
         validate_local_id(id_root)
     except ValueError as e:
         raise BundleError([f"{SCHEME}{reference.repo}/{path}: can't be an id root: {e}"]) from None
     return id_root
+
+
+def _bundle_name(reference: HubReference, path: str) -> str:
+    """The bundle's name, which keys its table in the card and ends its id root: its folder under ``bundles/``, its
+    path for a folder elsewhere, or the repo's name for the root."""
+    parts = path.split("/")
+    return parts[1] if len(parts) == 2 and parts[0] == BUNDLES else path or reference.repo.partition("/")[2]
 
 
 def _within(folder: str, name: str) -> str:

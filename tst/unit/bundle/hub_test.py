@@ -196,6 +196,16 @@ def test_a_path_names_any_bundle_folder_and_its_ids_follow_it(hub):
                                      "artifacts/, skills/, tasks/, evals/",)
 
 
+def test_a_bundle_is_named_by_its_path_outside_bundles_so_two_folders_of_one_name_keep_apart(hub):
+    hub.layout({"a/x/tasks/t.json": TASK, "b/x/tasks/t.json": TASK, "bundles/x/tasks/t.json": TASK})
+    hub.card({"bundles": {"a/x": {"setup": "set up a/x"}, "x": {"setup": "set up bundles/x"}}})
+
+    a, b, x = (fetch_bundle(f"hf://me/ds/{path}") for path in ("a/x", "b/x", "bundles/x"))
+
+    assert [(bundle.id_root, bundle.setup) for bundle in (a, b, x)] == [
+        ("@hf/me/ds/a/x", "set up a/x"), ("@hf/me/ds/b/x", None), ("@hf/me/ds/x", "set up bundles/x")]
+
+
 def test_the_root_is_the_bundle_when_nothing_is_under_bundles_and_its_other_folders_stay_on_the_hub(hub, tmp_path):
     hub.layout({"tasks/t.json": TASK, "bundle.toml": "requires = []\n", "data/rows.parquet": "rows"})
 
