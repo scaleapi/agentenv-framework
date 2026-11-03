@@ -1115,7 +1115,7 @@ export function TaskInstanceViewer({
                             {typeof r.weight === 'number' && r.weight < 0 && (
                               <span
                                 className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600"
-                                title={`Penalty check (weight −${Math.abs(r.weight)}): when it fails, weighted_average subtracts ${Math.abs(r.weight)} from the weighted sum; passing adds nothing`}
+                                title={`Penalty check (weight −${Math.abs(r.weight)}): weighted_average subtracts (1 − score) × ${Math.abs(r.weight)} from the weighted sum, ${Number(penaltySubtracted(r.score, r.result, r.weight).toFixed(2))} here`}
                               >
                                 penalty −{Math.abs(r.weight)}
                               </span>
@@ -1398,6 +1398,12 @@ function AggregateScoreCard({
       )}
     </div>
   );
+}
+
+/** What weighted_average subtracts for a penalty check, as scoring.py computes it: (1 − score) × |weight|, the score
+ * the check's own or else 1 when it passed and 0 when it didn't. */
+function penaltySubtracted(score: number | undefined, result: boolean, weight: number): number {
+  return (1 - (typeof score === 'number' ? score : result ? 1 : 0)) * Math.abs(weight);
 }
 
 /** Sandbox-side verifier outcomes from a `verify_sandbox` step. Per-criterion rows show the criterion
