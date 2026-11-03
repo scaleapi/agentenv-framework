@@ -682,7 +682,8 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             task_id=cfg.task_id,
                             event_callback=_record_event,
                             config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
-                                              *codex_config.builtin_tools_overrides(cfg.builtin_tools)],
+                                              *codex_config.builtin_tools_overrides(cfg.builtin_tools),
+                                              *await codex_config.catalog_overrides(cfg.builtin_tools)],
                         )
                 except Exception as e:
                     logger.error(f"codex CLI invocation raised: {e}", exc_info=True)

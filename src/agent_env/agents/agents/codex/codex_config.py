@@ -32,13 +32,14 @@ _TRUST_ENV = ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_F
 
 # The CLI version CodexTool names the tools of; a test holds it to package.json's @openai/codex.
 TOOLS_CLI_VERSION = "0.147.0"
-# The CLI's own tools, by the names its model sees, that a `-c` override turns off. Some only go together, as one
+# The CLI's own tools, by the names its model sees, that a selection can turn off. Some only go together, as one
 # setting turns them on: the shell's two, the six collaboration tools `multi_agent_v2` brings, and the three goal tools.
-# Left out: `apply_patch`, which a model's catalog entry turns on and no setting turns off, and the MCP tools
-# (`tool_search`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`) that come with MCP servers.
-CodexTool = Literal["create_goal", "exec_command", "followup_task", "get_goal", "interrupt_agent", "list_agents",
-                    "request_user_input", "send_message", "spawn_agent", "update_goal", "update_plan", "view_image",
-                    "wait_agent", "web_search", "write_stdin"]
+# `apply_patch` is turned off through the model catalog (`catalog_overrides`), the others by `_TOOL_SWITCHES`. Left out:
+# the MCP tools (`tool_search`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`) that come
+# with MCP servers.
+CodexTool = Literal["apply_patch", "create_goal", "exec_command", "followup_task", "get_goal", "interrupt_agent",
+                    "list_agents", "request_user_input", "send_message", "spawn_agent", "update_goal", "update_plan",
+                    "view_image", "wait_agent", "web_search", "write_stdin"]
 # Each setting that turns some of the CLI's tools off: those tools, and the `-c` overrides that turn them off. Turning
 # off `multi_agent_v2` alone would bring back the v1 collaboration tools behind `tool_search`, so both go.
 _TOOL_SWITCHES: tuple[tuple[frozenset[str], tuple[str, ...]], ...] = (
@@ -87,6 +88,56 @@ def builtin_tools_overrides(builtin_tools: CodexTools | None) -> list[str]:
     return [override for tools, overrides in _TOOL_SWITCHES if tools in off for override in overrides]
 
 
+# No setting turns off `apply_patch`: a model's entry in the CLI's model catalog offers it when its
+# `apply_patch_tool_type` is set, as it is for every GPT model 0.147.0 ships with. A selection without it points the CLI,
+# with `model_catalog_json`, at a copy of the catalog it would use whose models all have the field null. The copy is
+# made from the installed CLI's own catalog each time, so it follows the pinned version.
+CATALOG_WITHOUT_APPLY_PATCH = "model_catalog_without_apply_patch.json"
+_CATALOG_TIMEOUT_S = 60
+
+
+def removes_apply_patch(builtin_tools: CodexTools | None) -> bool:
+    """Whether a selection turns `apply_patch` off; never without one."""
+    if builtin_tools is None:
+        return False
+    if builtin_tools.only is not None:
+        return "apply_patch" not in builtin_tools.only
+    return builtin_tools.disable == "*" or "apply_patch" in builtin_tools.disable
+
+
+async def _catalog() -> dict[str, Any]:
+    """The model catalog the CLI uses: the file config.toml's `model_catalog_json` names (relative to CODEX_HOME, as
+    the CLI reads it), or else the one the installed CLI ships with, from `codex debug models --bundled`."""
+    configured = _read().get("model_catalog_json")
+    if configured:
+        return json.loads((_config_path().parent / Path(configured).expanduser()).read_text())
+    process = await asyncio.create_subprocess_exec(
+        "codex", "debug", "models", "--bundled", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), _CATALOG_TIMEOUT_S)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(f"codex debug models gave no catalog within {_CATALOG_TIMEOUT_S}s") from None
+    if process.returncode != 0:
+        raise RuntimeError(f"codex debug models exited {process.returncode}: {stderr.decode(errors='replace')[-500:]}")
+    return json.loads(stdout)
+
+
+async def catalog_overrides(builtin_tools: CodexTools | None) -> list[str]:
+    """The `-c` override that points the CLI at a catalog copy without `apply_patch`, when the selection turns it off;
+    none otherwise. Raises when the catalog can't be read, so a turn never gets the tool its selection turned off."""
+    if not removes_apply_patch(builtin_tools):
+        return []
+    catalog = await _catalog()
+    for model in catalog["models"]:
+        model["apply_patch_tool_type"] = None
+    path = _config_path().with_name(CATALOG_WITHOUT_APPLY_PATCH)
+    async with _write_lock:
+        _replace(path, json.dumps(catalog, ensure_ascii=False))
+    return [f"model_catalog_json={json.dumps(str(path))}"]
+
+
 def _config_path() -> Path:
     home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
     return Path(home) / "config.toml"
@@ -103,12 +154,15 @@ def _write(cfg: dict[str, Any]) -> bool:
     """Replace config.toml whole, never truncating it in place: a codex CLI starting in
     another context reads it at launch. Unchanged content is left alone. Returns whether
     the file was written."""
-    path = _config_path()
+    return _replace(_config_path(), tomli_w.dumps(cfg))
+
+
+def _replace(path: Path, text: str) -> bool:
+    """Replace a file under CODEX_HOME whole, unless its content is already ``text``; see `_write`."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = tomli_w.dumps(cfg)
     if path.exists() and path.read_text() == text:
         return False
-    # It carries MCP and model headers: keep the existing file's permissions (owner-only when new).
+    # config.toml carries MCP and model headers: keep the existing file's permissions (owner-only when new).
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     staged = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with os.fdopen(os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w") as handle:

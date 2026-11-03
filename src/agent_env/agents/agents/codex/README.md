@@ -53,9 +53,13 @@ tools it names, and a list to turn off those whose tools it names. A list names 
 | `create_goal`, `get_goal`, `update_goal` | `features.goals=false` |
 | `web_search` | `web_search="disabled"` |
 
-Codex 0.147.0 can't turn off `apply_patch` with a setting: a model's entry in its catalog turns it on (every GPT model it
-ships with does), so `{"disable": "*"}` still leaves it for those models, and it isn't a name a selection takes. The MCP
-tools agent-env gives the agent stay with any selection, and so do the tools Codex adds for them: `tool_search`,
-`list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource`. The names are `CodexTool`'s in
-`codex_config.py`; a test fails when package.json's `@openai/codex` moves, until `CodexTool` and `TOOLS_CLI_VERSION`
-move with it.
+No setting turns off `apply_patch`: a model's entry in Codex's model catalog offers it (every GPT model 0.147.0 ships
+with does). So a selection without it (`{"disable": "*"}`, a list naming it, or an `{"only": [...]}` that doesn't)
+writes a copy of the catalog the CLI would use, with `apply_patch_tool_type` null for every model, to
+`$CODEX_HOME/model_catalog_without_apply_patch.json`, and points the task's CLI at it with `-c model_catalog_json=...`.
+The copy is made from `codex debug models --bundled`, or from the file config.toml's own `model_catalog_json` names.
+
+The MCP tools agent-env gives the agent stay with any selection, and so do the tools Codex adds for them:
+`tool_search`, `list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource`. The names are `CodexTool`'s
+in `codex_config.py`; a test fails when package.json's `@openai/codex` moves, until `CodexTool` and
+`TOOLS_CLI_VERSION` move with it.
