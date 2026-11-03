@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import platform
 import posixpath
 import re
 import subprocess
@@ -305,7 +306,8 @@ def _boots(image: str) -> int:
             logs = subprocess.run(["docker", "logs", container], capture_output=True, text=True, errors="replace")
             logs = logs.stdout + logs.stderr
             if len(set(_BOOTED.findall(logs))) == 3:
-                print(f"{image} booted to its desktop{' with KVM' if kvm else ' under TCG'}")
+                native = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine()) == arch
+                print(f"{image} booted to its desktop {'with KVM' if kvm and native else 'under TCG'}")
                 return 0
             time.sleep(_HEALTH_POLL_SECONDS)
         tail = "\n".join(logs.splitlines()[-_LOG_TAIL_LINES:])

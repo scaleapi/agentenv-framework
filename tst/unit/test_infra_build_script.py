@@ -211,8 +211,10 @@ def test_the_service_db_smoke_waits_for_its_health_check_and_removes_the_contain
     assert calls[0] == ["docker", "run", "-d", "pg"] and calls[-1] == ["docker", "rm", "-f", "c123"]
 
 
-@pytest.mark.parametrize("kvm", [True, False], ids=["kvm", "tcg"])
-def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(script, monkeypatch, capsys, kvm):
+@pytest.mark.parametrize("kvm, machine, how", [(True, "aarch64", "with KVM"), (False, "aarch64", "under TCG"),
+                                               (True, "x86_64", "under TCG")], ids=["kvm", "no-kvm", "another-arch"])
+def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(script, monkeypatch, capsys, kvm, machine,
+                                                                           how):
     calls, logs = [], iter(["agentenv-init: starting", "success: xvfb entered RUNNING\nsuccess: dbus entered RUNNING\n"
                                                       "success: desktop entered RUNNING"])
 
@@ -224,6 +226,7 @@ def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(scri
     monkeypatch.setattr(script.subprocess, "run", run)
     monkeypatch.setattr(script.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(script.Path, "exists", lambda self: kvm)
+    monkeypatch.setattr(script.platform, "machine", lambda: machine)
 
     assert _run(script, monkeypatch, "smoke", "agentenv-ubuntu-24.04-disk", "disk:1-arm64") == 0
 
@@ -234,7 +237,7 @@ def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(scri
     assert commands[2] == ["docker", "run", "-d", *(["--device", "/dev/kvm"] if kvm else []), "-e", "VM_ARCH=arm64",
                            "disk:1-arm64-machine"]
     assert commands[-1] == ["docker", "rm", "-f", "c1"] and commands.count(["docker", "logs", "c1"]) == 2
-    assert f"booted to its desktop {'with KVM' if kvm else 'under TCG'}" in capsys.readouterr().out
+    assert f"booted to its desktop {how}" in capsys.readouterr().out
 
 
 def test_a_service_db_that_never_turns_healthy_fails_with_its_logs(script, monkeypatch, capsys):
