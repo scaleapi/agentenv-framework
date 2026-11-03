@@ -293,3 +293,23 @@ async def test_a_site_that_refuses_the_handshake_has_its_answer_relayed():
         await site_server.shutdown()
 
     assert refused.value.response.status_code == 403 and unknown.value.response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_sites_own_authorization_reaches_it_and_the_control_token_never_does():
+    site = EchoSite()
+    site_server, site_port = await serve(site.app)
+    gateway = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[], control_token="control-secret",
+                      website_urls={"notes": f"http://127.0.0.1:{site_port}"})
+    gateway_server, gateway_port = await serve(gateway._asgi_app())
+    route = f"ws://127.0.0.1:{gateway_port}/website/notes"
+    try:
+        for authorization in ("Bearer user-token", "Bearer control-secret"):
+            async with connect(f"{route}/live", additional_headers=[("Authorization", authorization)]) as websocket:
+                await websocket.send("ping")
+                assert await asyncio.wait_for(websocket.recv(), 5) == "PING"
+    finally:
+        await gateway_server.shutdown()
+        await site_server.shutdown()
+
+    assert [headers.get("authorization") for _, headers in site.handshakes] == ["Bearer user-token", None]

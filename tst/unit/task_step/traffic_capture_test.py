@@ -1,0 +1,158 @@
+"""collect_traffic_capture against a real gateway serving traffic/v1 from a capture folder: each capture file stored
+as a pcap FileArtifact, named for its container and its place among that container's files, in one universe the run
+records; what's recorded when the env doesn't capture, isn't deployed or refuses the token; and teardown collecting a
+capturing env the run didn't, before the env closes."""
+
+from __future__ import annotations
+
+import os
+from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
+
+from agent_env.artifact import Artifact
+from agent_env.artifact.store import get_artifact_store
+from agent_env.env.env import DeployedGatewayEnv
+from agent_env.env.gateway import gateway as gw_mod
+from agent_env.env.gateway.constants import PCAP_MEDIA_TYPE, TRAFFIC_EXTENSION
+from agent_env.env.gateway.gateway import Gateway
+from agent_env.task.teardown import recorded_sandboxes, tear_down
+from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.registry import get_task_step_registry
+from agent_env.task_step.task_steps.traffic_capture import (
+    TRAFFIC_KEY,
+    CollectTrafficCaptureTaskStep,
+    collect_uncollected_captures,
+)
+
+TOKEN = "control-secret"
+_RealAsyncClient = httpx.AsyncClient
+_PCAP = bytes.fromhex("d4c3b2a1020004000000000000000000ffff000001000000")
+
+
+@pytest.fixture
+def gateway(tmp_path, monkeypatch, local_stores):
+    """A capturing gateway every httpx client in the test reaches, its folder holding two rotated files of the
+    server's capture, the newer named first, and one of its frontend's."""
+    monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
+    folder = tmp_path / "traffic"
+    folder.mkdir()
+    for name, body, mtime in (("notes-website-backend.pcap0", b"newer", 2000), ("notes-website-backend.pcap1", b"older", 1000),
+                              ("notes-website-frontend.pcap0", b"front", 1500)):
+        (folder / name).write_bytes(_PCAP + body)
+        os.utime(folder / name, (mtime, mtime))
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[], traffic_dir=str(folder),
+                 control_token=TOKEN)
+    app = gw._asgi_app()
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _RealAsyncClient(
+        transport=httpx.ASGITransport(app=app), **{k: v for k, v in kw.items() if k != "verify"}))
+    yield gw
+    gw._close_trajectory_file()
+
+
+def _deployed(env_id: str = "notes-env", *, token: str | None = TOKEN, capturing: bool = True) -> DeployedGatewayEnv:
+    card = {"name": "env1", "capabilities": {"extensions": [TRAFFIC_EXTENSION] if capturing else []}}
+    return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url="http://gateway", sandbox_id="vm-1",
+                              environment_card_url="http://gateway/.well-known/agent-env.json", environment_card=card,
+                              control_token=token)
+
+
+def _context(*envs) -> TaskStepContext:
+    return TaskStepContext(instance_id="run-1", deployed_envs=list(envs), metadata={})
+
+
+def _step(**kw) -> CollectTrafficCaptureTaskStep:
+    return CollectTrafficCaptureTaskStep(id="collect", version=None, env_id="notes-env", **kw)
+
+
+def test_the_step_is_registered_and_roundtrips():
+    step = _step(fail_task_on_error=True)
+    assert get_task_step_registry()["collect_traffic_capture"] is CollectTrafficCaptureTaskStep
+    again = CollectTrafficCaptureTaskStep.from_dict(step.to_dict())
+    assert (again.env_id, again.fail_task_on_error) == ("notes-env", True)
+    assert CollectTrafficCaptureTaskStep.from_dict({"id": "c", "env_id": "e"}).fail_task_on_error is False
+    with pytest.raises(ValueError, match="needs the env_id"):
+        CollectTrafficCaptureTaskStep(id="c", version=None, env_id="")
+
+
+@pytest.mark.asyncio
+async def test_each_capture_is_stored_as_a_pcap_in_one_universe_oldest_first(gateway):
+    context = await _step().execute(_context(_deployed()))
+
+    entry = context.metadata[TRAFFIC_KEY]["notes-env"]
+    assert entry["state"] == "collected"
+    assert entry["files"] == ["notes-website-backend-00.pcap", "notes-website-backend-01.pcap",
+                              "notes-website-frontend-00.pcap"]
+    assert entry["containers"] == ["notes-website-backend", "notes-website-frontend"]
+    assert entry["bytes"] == 3 * len(_PCAP) + 15
+    universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+    files = universe.get_file_artifacts()
+    assert sorted(files) == entry["files"]
+    first = files["notes-website-backend-00.pcap"]
+    assert first.content_type == PCAP_MEDIA_TYPE
+    assert get_artifact_store().get_object(first.object_url) == _PCAP + b"older"
+    assert get_artifact_store().get_object(files["notes-website-backend-01.pcap"].object_url) == _PCAP + b"newer"
+
+
+@pytest.mark.asyncio
+async def test_an_env_that_doesnt_capture_is_recorded_as_failed_and_fails_the_task_only_when_asked(gateway):
+    context = await _step().execute(_context(_deployed(capturing=False)))
+    assert context.metadata[TRAFFIC_KEY]["notes-env"]["state"] == "failed"
+    assert "traffic/v1" in context.metadata[TRAFFIC_KEY]["notes-env"]["error"]
+    with pytest.raises(RuntimeError, match="weren't collected"):
+        await _step(fail_task_on_error=True).execute(_context(_deployed(capturing=False)))
+
+
+@pytest.mark.asyncio
+async def test_a_record_without_the_gateways_token_is_refused(gateway):
+    context = await _step().execute(_context(_deployed(token="stale")))
+    entry = context.metadata[TRAFFIC_KEY]["notes-env"]
+    assert entry["state"] == "failed" and "401" in entry["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_env_the_run_didnt_deploy_is_recorded(gateway):
+    context = await _step().execute(_context())
+    assert context.metadata[TRAFFIC_KEY]["notes-env"] == {
+        "state": "failed", "error": "RuntimeError: env 'notes-env' isn't deployed in this run"}
+    with pytest.raises(RuntimeError, match="isn't deployed"):
+        await _step(fail_task_on_error=True).execute(_context())
+
+
+@pytest.mark.asyncio
+async def test_teardown_collects_only_capturing_envs_the_run_didnt_collect(gateway):
+    capturing, plain, done = _deployed(), _deployed("plain-env", capturing=False), _deployed("done-env")
+    context = _context(capturing, plain, done)
+    context.metadata[TRAFFIC_KEY] = {"done-env": {"state": "collected", "artifact": None}}
+
+    await collect_uncollected_captures(context, context.deployed_envs)
+
+    assert context.metadata[TRAFFIC_KEY]["notes-env"]["state"] == "collected"
+    assert "plain-env" not in context.metadata[TRAFFIC_KEY]
+    assert context.metadata[TRAFFIC_KEY]["done-env"] == {"state": "collected", "artifact": None}
+
+
+@pytest.mark.asyncio
+async def test_tear_down_collects_a_capture_before_its_env_closes(gateway):
+    context = _context(_deployed())
+    collected_at_close: list[bool] = []
+
+    async def close(env, timeout):
+        collected_at_close.append(context.metadata[TRAFFIC_KEY]["notes-env"]["state"] == "collected")
+
+    with patch("agent_env.task.teardown._close", close), \
+         patch("agent_env.task.teardown.terminate", AsyncMock(return_value=False)):
+        report = await tear_down(context, recorded_sandboxes(context), context.deployed_envs, timeout=30)
+
+    assert collected_at_close == [True] and [s.sandbox_id for s in report.terminated] == ["vm-1"]
+
+
+@pytest.mark.asyncio
+async def test_tear_down_leaves_an_env_already_torn_down_alone(gateway):
+    context = _context(_deployed())
+    context.metadata["torn_down_sandbox_ids"] = ["vm-1"]
+    with patch("agent_env.task.teardown._close", AsyncMock()), \
+         patch("agent_env.task.teardown.terminate", AsyncMock(return_value=False)):
+        await tear_down(context, recorded_sandboxes(context), context.deployed_envs, timeout=30)
+    assert TRAFFIC_KEY not in context.metadata

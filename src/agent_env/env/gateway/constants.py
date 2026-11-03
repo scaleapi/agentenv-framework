@@ -83,6 +83,11 @@ EXT_WEBSITE_URI = "urn:agentenv:website/v1"
 EXT_BROWSER_URI = "urn:agentenv:browser/v1"
 EXT_COMPUTER_APP_URI = "urn:agentenv:computer-app/v1"
 WEBSITE_READY_OP = "ready"
+EXT_TRAFFIC_URI = "urn:agentenv:traffic/v1"
+TRAFFIC_LIST_OP = "list"
+TRAFFIC_GET_OP = "get"
+TRAFFIC_CAPTURE_DIR_ENV = "TRAFFIC_CAPTURE_DIR"
+PCAP_MEDIA_TYPE = "application/vnd.tcpdump.pcap"
 WEBSITE_BROWSE_URL_PARAM = "browse_url"
 
 # Rows per GET /changes page: the default, and the most a client may ask for.
@@ -149,6 +154,7 @@ AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
 # Sent by a computer's site proxy, which serves a website's route at the root of the site's own name.
 AGENT_ENV_SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 GATEWAY_PROVIDER_HEADERS_ENV = "AGENTENV_PROVIDER_REQUEST_HEADERS"
+CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 # MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a
 # key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.
 AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"
@@ -271,3 +277,12 @@ GATEWAY_EXTENSIONS = [
         "required": False,
     },
 ]
+TRAFFIC_EXTENSION = {
+    "uri": EXT_TRAFFIC_URI,
+    "description": "Traffic (urn:agentenv:traffic/v1): the packets each website's server and frontend containers sent and received, captured by tcpdump in each container's network namespace as rotating classic pcap files. list names each capture file with the container it holds, its size and when it was last written, oldest first; get streams one as application/vnd.tcpdump.pcap. A container's oldest file is overwritten once its rotation is full. Harness control path: with a control token, each call takes it as its bearer.",
+    "params": {"endpoint": "/traffic/captures", "format": "pcap", "methods": {
+        TRAFFIC_LIST_OP: {"method": "GET", "endpoint": "/traffic/captures", "request": {"type": "object", "properties": {}}},
+        TRAFFIC_GET_OP: {"method": "GET", "endpoint": "/traffic/capture", "request": {"type": "object", "properties": {
+            "name": {"type": "string", "minLength": 1}}, "required": ["name"]}}}},
+    "required": False,
+}

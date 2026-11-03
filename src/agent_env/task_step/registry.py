@@ -40,6 +40,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
     from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
     from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
+    from agent_env.task_step.task_steps.traffic_capture import CollectTrafficCaptureTaskStep
     from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
     from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
     from agent_env.task_step.task_steps.modify_env_tool_access import ModifyEnvToolAccessStep
@@ -92,6 +93,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(CollectArtifactsTaskStep): CollectArtifactsTaskStep,
         _get_type(StartComputerRecordingTaskStep): StartComputerRecordingTaskStep,
         _get_type(EndComputerRecordingTaskStep): EndComputerRecordingTaskStep,
+        _get_type(CollectTrafficCaptureTaskStep): CollectTrafficCaptureTaskStep,
         _get_type(DeployAgentTaskStep): DeployAgentTaskStep,
         _get_type(DeployEnvTaskStep): DeployEnvTaskStep,
         _get_type(DeployHumanAgentTaskStep): DeployHumanAgentTaskStep,
