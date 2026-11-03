@@ -3,7 +3,8 @@ for each; a subclass refused for carrying one of them; the start tabs, the time 
 its launch run with no desktop when alone; a CDP connection over a new debugging pipe at each launch, which its ready
 check asks, and a browser launched again when its server restarts; its shared memory in files only on a small
 /dev/shm; an empty cache and the deploy's prompt answers in its profile at each launch; its policies, card params and
-skill; and an app that isn't a browser launched and declared as before."""
+skill; its record's titles read from the browser, which sends no event for a page's; and an app that isn't a browser
+launched and declared as before."""
 from __future__ import annotations
 
 import asyncio
@@ -490,6 +491,28 @@ async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_
     assert [call[0] for call in devtools.calls[:3]] == ["Target.setDiscoverTargets", "Target.setAutoAttach",
                                                         "Browser.setDownloadBehavior"]
     assert devtools.calls[2][1] == {"behavior": "default", "eventsEnabled": True}
+
+
+@pytest.mark.asyncio
+async def test_its_record_reads_each_tabs_title_when_read_and_when_its_page_loads_since_no_event_says(tmp_path):
+    now = {"a": "Inbox", "b": "Draft"}
+    devtools = StubDevTools({"Target.getTargets": lambda params, session: {"targetInfos": [
+        _page(target, f"https://mail.test/{target}", title)["targetInfo"] for target, title in now.items()]}})
+    control = BrowserControl(devtools, "agent")
+    await control.attach()
+    for target in ("a", "b"):
+        devtools.send("Target.targetCreated", _page(target, f"https://mail.test/{target}", f"mail.test/{target}"))
+        devtools.send("Target.attachedToTarget", {"sessionId": f"s-{target}", **_page(target)})
+    devtools.send("Page.loadEventFired", {"timestamp": 1}, session="s-b")
+    await asyncio.sleep(0)
+    del now["b"]
+    devtools.send("Target.targetDestroyed", {"targetId": "b"})
+    now["a"] = "Inbox (1)"
+    record = await control.record()
+
+    assert [(tab["id"], tab["title"]) for tab in record["tabs"]] == [("a", "Inbox (1)")]
+    assert [(tab["id"], tab["title"]) for tab in record["closed_tabs"]] == [("b", "Draft")]
+    assert ("Target.getTargets", {"filter": [{"type": "page"}]}, None) in devtools.calls
 
 
 @pytest.mark.asyncio

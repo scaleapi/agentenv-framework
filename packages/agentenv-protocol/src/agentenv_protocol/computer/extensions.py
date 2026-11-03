@@ -10,14 +10,13 @@ from .card import (
     COMPUTER_DISPLAY,
     COMPUTER_EXEC,
     COMPUTER_KEYBOARD,
-    COMPUTER_READY,
     COMPUTER_RECORDING,
     COMPUTER_SPACES,
     KEYBOARD_RANGES,
     MAX_EXEC_TIMEOUT_S,
 )
 from .errors import Internal, InvalidArgument, Unsupported
-from .operations import Display, ExecResult
+from .operations import COMPUTER_READY, Display, ExecResult
 from .skill import skill
 from .spaces import check_space
 

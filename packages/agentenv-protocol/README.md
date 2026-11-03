@@ -511,9 +511,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
   its own returns it from `bundled_skill()` (its description, body and other files), and the
   computer skill leads with it, the computer's part following.
-- **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
+- **Framework extensions.** `computer-ready/v1` (`status`: `{ready, checks}`, real checks of the display and a
   capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
-  own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  own server (see Computer apps), with `failed` too from an app's front door once it can't be ready again; tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
   descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
   request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
   with `recording`, `computer-recording/v1` (below).
@@ -741,6 +741,21 @@ hook runs in a thread, which the reset and relaunch after it wait for. The drive
 its card lists each one's card as a child environment, rooted at `/svc/<app>/`, where it forwards
 requests to the app's server.
 
+An app that runs alone, with no computer around it, as a website browser does, has a front door in the
+driver's place: `python -m agentenv_protocol.computer.front_door <folder> <file>:<Class>
+[--site-proxy COMMAND] [--port 8000]`, run from the app's venv as its container's command. It runs the
+app's server in `<folder>`, and the site proxy command when it's given one, and starts each again
+whenever it ends, after 0.5 s, then longer each time it ends within a minute of starting, up to 30 s.
+On its port it serves the app's card, with no interface for agents, since nothing alone serves them
+yet, and with `computer-ready/v1`, whose `status` (GET) is `{ready, checks, failed?}`: one check for
+the app, its own readiness or why its server isn't answering, and one for whether the site proxy runs.
+Once the app's launch log has an `exit`, the app ended on its own, which nothing that runs it alone
+launches it again after, so `status` says `failed`, with when and the code or signal, for good, even
+once its server restarts and launches it again. Every other request goes on to the app's server at its
+path, its answer streamed back. Everything but the card takes the control token (`CONTROL_TOKEN_ENV`),
+which the front door takes out of each request it sends on and out of the environment of each program
+it runs.
+
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
 JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
@@ -791,7 +806,9 @@ are the profile's template. The base class adds:
   `devtools_answers` asks `Browser.getVersion` over the pipe.
 - **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
   to every page with flattened sessions and keeps a record, `since` its server started: open tabs in
-  opened order, the one whose page has focus `active`; `closed_tabs`, each with `closed_at` and
+  opened order, each with its URL and title as the browser has them when the record is read (Chrome sends no
+  event for a title), the one whose page has focus `active`; `closed_tabs`, each as of its page's last load,
+  with `closed_at` and
   `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
   ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
   and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.
@@ -801,7 +818,7 @@ are the profile's template. The base class adds:
   launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
   and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.
   Nothing relaunches a browser that exits on its own: in a computer the agent can, and alone it's an infra
-  failure, its ready check false.
+  failure, its ready check false and its front door's `computer-ready/v1` status `failed`.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 

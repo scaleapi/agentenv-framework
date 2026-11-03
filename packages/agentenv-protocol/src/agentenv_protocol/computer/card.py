@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .dataplane import DEFAULT_DATA_PATHS
+from .operations import COMPUTER_READY  # noqa: F401
 from .recording import recording_params
 from ..types import METHOD_ADD, EnvironmentExtension, EnvironmentTool, IntakeDeclaration, IntakeFormat, intake_extension
 
@@ -13,7 +14,6 @@ if TYPE_CHECKING:
     from .driver import ComputerDriverEnvironment
 
 COMPUTER = "urn:agentenv:computer/v1"
-COMPUTER_READY = "urn:agentenv:computer-ready/v1"
 COMPUTER_DISPLAY = "urn:agentenv:computer-display/v1"
 COMPUTER_SPACES = "urn:agentenv:computer-spaces/v1"
 COMPUTER_POINTER = "urn:agentenv:computer-pointer/v1"
