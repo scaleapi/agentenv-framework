@@ -24,6 +24,7 @@ from agent_env.env.envs.computer.utils.boot import (
     native_links,
     ready,
     ready_timeout,
+    recorded_app_settings,
     recorded_settings,
     settings_environment,
 )
@@ -102,6 +103,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                 raise RuntimeError(f"{env.id}'s {form}/{arch} failed its probe on its first boot: {build['reason']}")
         computer, name, token = env.computer_artifact(), env.environment_name, control_token()
         values = _values(computer, values)
+        app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
+                                             env.computer.os.type)
         policy = NetworkPolicy.from_dict(env.network) if env.network else None
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
@@ -123,6 +126,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
                     "port": env.driver.port, "display": values.get("resolution"), "network": env.network,
                     "computer_settings": recorded_settings(computer, values),
+                    **({"app_settings": app_settings} if app_settings else {}),
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )
             await _require_display(record, values.get("resolution"))
@@ -178,7 +182,8 @@ def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
                  params: computer_params.ComputerParams) -> dict[str, str]:
     return {**settings_environment(computer, values, environment_name=env.environment_name,
                                    driver_settings=params.driver_settings),
-            **app_settings_environment(env.composed_apps(), params.app_settings, env.computer.os.type)}
+            **app_settings_environment(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
+                                       env.computer.os.type)}
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:

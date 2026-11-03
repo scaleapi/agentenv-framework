@@ -50,13 +50,15 @@ class AppRuntime:
 
     def __init__(self, launch: Optional[Launch], ready_checks: dict[str, Callable[[], Any]], timeout_s: float, *,
                  desktop: bool = True, launch_fds: Optional[Callable[[], Awaitable[dict[int, int]]]] = None,
-                 relaunch_on_start: bool = False) -> None:
+                 relaunch_on_start: bool = False,
+                 launch_running: Optional[Callable[[], Awaitable[None]]] = None) -> None:
         self.launch = launch
         self.ready_checks = ready_checks
         self.timeout_s = timeout_s
         self.desktop = desktop
         self.launch_fds = launch_fds
         self.relaunch_on_start = relaunch_on_start
+        self.launch_running = launch_running
         self.started = time.time()
         self.launch_failed: Optional[str] = None
         self.checking: dict[str, asyncio.Future] = {}
@@ -84,7 +86,11 @@ class AppRuntime:
 
     async def launch_app(self) -> int:
         """Start the app from its folder, marked as launched, with the fds the app gives it, whose copies here are
-        closed once it has them; its pid."""
+        closed once it has them; its pid. With ``launch_running``, an app this server launched that still runs does
+        that instead of starting a second copy, as a browser opens another window."""
+        if self.launch_running is not None and (running := _running()) is not None:
+            await self.launch_running()
+            return running
         fds = await self.launch_fds() if self.launch_fds is not None else {}
         try:
             pid = await session.launch(self.launch.command, Path.cwd(),
@@ -154,6 +160,15 @@ def _launched_at() -> Optional[float]:
         return _mark().stat().st_mtime
     except FileNotFoundError:
         return None
+
+
+def _running() -> Optional[int]:
+    """The pid of the app this server launched last, while it runs."""
+    try:
+        pid = int(PID.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+    return pid if session.alive(pid) else None
 
 
 async def _bounded(name: str, check: Awaitable[Optional[str]]) -> Optional[str]:
