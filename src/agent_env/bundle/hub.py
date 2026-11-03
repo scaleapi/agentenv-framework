@@ -28,6 +28,7 @@ from huggingface_hub.repocard import metadata_load
 from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import HF_PREFIX, validate_local_id
+from agent_env.store.local_state import holding_locks
 
 from .parse import BUNDLE_TOML, BundleError, BundleKind
 from .requires import UnmetRequirements
@@ -145,27 +146,27 @@ def _fetch(reference: HubReference, api: HfApi, say: Callable[[str], None]) -> H
     sha = reference.revision if reference.revision and _SHA.fullmatch(reference.revision) else api.repo_info(
         reference.repo, repo_type="dataset", revision=reference.revision).sha
     folder = cache_root() / reference.repo / sha
-    commit = _Commit.read(folder)
-    if commit is None:
-        commit = _Commit(api.list_repo_files(reference.repo, repo_type="dataset", revision=sha))
-        if CARD in commit.files:
-            api.hf_hub_download(reference.repo, CARD, repo_type="dataset", revision=sha, local_dir=folder)
-        commit.save(folder)
-    card = _card(folder)
-    path = _pick(reference, sha, commit.files, card)
-    id_root = _id_root(reference, path)
-    source = {"hub": "hf", "repo": reference.repo, "revision": reference.revision or "main", "sha": sha, "path": path}
-    say(describe(source))
-    if path not in commit.downloaded:
-        api.snapshot_download(reference.repo, repo_type="dataset", revision=sha, local_dir=folder,
-                              allow_patterns=_patterns(path))
-        commit.downloaded.append(path)
-        commit.save(folder)
-    name = path.rpartition("/")[2] or reference.repo.partition("/")[2]
-    needs = (card.get("bundles") or {}).get(name) or {}
+    with holding_locks([f"{SCHEME}{reference.repo}@{sha}"]):
+        commit = _Commit.read(folder)
+        if commit is None:
+            commit = _Commit(api.list_repo_files(reference.repo, repo_type="dataset", revision=sha))
+            if CARD in commit.files:
+                api.hf_hub_download(reference.repo, CARD, repo_type="dataset", revision=sha, local_dir=folder)
+            commit.save(folder)
+        card = _card(folder)
+        path = _pick(reference, sha, commit.files, card)
+        id_root = _id_root(reference, path)
+        plugins, setup = _needs(reference.repo, card, path.rpartition("/")[2] or reference.repo.partition("/")[2])
+        source = {"hub": "hf", "repo": reference.repo, "revision": reference.revision or "main", "sha": sha,
+                  "path": path}
+        say(describe(source))
+        if path not in commit.downloaded:
+            api.snapshot_download(reference.repo, repo_type="dataset", revision=sha, local_dir=folder,
+                                  allow_patterns=_patterns(path))
+            commit.downloaded.append(path)
+            commit.save(folder)
     declared = _within(path, BUNDLE_TOML) in commit.files
-    return HubBundle(folder / path, id_root, source, plugins=() if declared else tuple(needs.get("plugins") or ()),
-                     setup=needs.get("setup"))
+    return HubBundle(folder / path, id_root, source, plugins=() if declared else plugins, setup=setup)
 
 
 def _card(folder: Path) -> dict[str, Any]:
@@ -173,6 +174,24 @@ def _card(folder: Path) -> dict[str, Any]:
     readme = folder / CARD
     table = (metadata_load(readme) or {}).get("agentenv") if readme.is_file() else None
     return table if isinstance(table, dict) else {}
+
+
+def _needs(repo: str, card: Mapping[str, Any], name: str) -> tuple[tuple[str, ...], str | None]:
+    """What the card's ``agentenv: bundles: <name>`` table says the bundle needs: the plugins it requires, and the
+    command that sets it up. Raises BundleError for a value of the wrong shape."""
+    where = f"{repo}'s card: agentenv: bundles"
+    bundles = card.get("bundles") or {}
+    if not isinstance(bundles, Mapping):
+        raise BundleError([f"{where} must map each bundle's name to what it needs"])
+    needs = bundles.get(name) or {}
+    if not isinstance(needs, Mapping):
+        raise BundleError([f"{where}: {name} must be a table of plugins and setup"])
+    plugins, setup = needs.get("plugins") or [], needs.get("setup")
+    if not isinstance(plugins, list) or not all(isinstance(plugin, str) for plugin in plugins):
+        raise BundleError([f"{where}: {name}: plugins must be a list of pip requirements"])
+    if setup is not None and not isinstance(setup, str):
+        raise BundleError([f"{where}: {name}: setup must be a command"])
+    return tuple(plugins), setup
 
 
 def _pick(reference: HubReference, sha: str, files: Sequence[str], card: Mapping[str, Any]) -> str:

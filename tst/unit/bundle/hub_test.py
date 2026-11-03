@@ -16,8 +16,10 @@ from agent_env.bundle import BundleError
 from agent_env.bundle import hub as hub_module
 from agent_env.bundle.hub import HubReference, fetch_bundle, parse_reference
 from agent_env.bundle.ledger import LEDGER_COLLECTION
+from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli import cli
 from agent_env.config.runtime import Config
+from agent_env.openenv import build_app
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task.store import task_instances
@@ -283,6 +285,31 @@ def test_a_bundle_without_a_bundle_toml_needs_the_plugins_its_card_names(hub, lo
             "plugin add 'agentenv-not-installed>=1'") in refused.output
     assert "Tasks:" not in refused.output
     assert declared.exit_code == 0, declared.output
+
+
+@pytest.mark.parametrize("bundles, problem", [
+    (["hello"], "me/ds's card: agentenv: bundles must map each bundle's name to what it needs"),
+    ({"hello": "agentenv-x"}, "me/ds's card: agentenv: bundles: hello must be a table of plugins and setup"),
+    ({"hello": {"plugins": "agentenv-x"}}, "me/ds's card: agentenv: bundles: hello: plugins must be a list of pip "
+                                          "requirements"),
+    ({"hello": {"setup": ["agent-env", "x"]}}, "me/ds's card: agentenv: bundles: hello: setup must be a command"),
+])
+def test_a_card_that_says_what_a_bundle_needs_in_the_wrong_shape_is_refused(hub, bundles, problem):
+    hub.layout({"bundles/hello/tasks/t.json": TASK})
+    hub.card({"bundles": bundles})
+
+    with pytest.raises(BundleError) as caught:
+        fetch_bundle("hf://me/ds")
+
+    assert caught.value.problems == (problem,)
+
+
+def test_an_openenv_server_of_a_hub_bundle_needs_the_plugins_its_card_names_too(hub):
+    hub.layout({"bundles/hello/tasks/t.json": TASK})
+    hub.card({"bundles": {"hello": {"plugins": ["agentenv-not-installed>=1"]}}})
+
+    with pytest.raises(UnmetRequirements, match="agent-env plugin add 'agentenv-not-installed>=1'"):
+        build_app("hf://me/ds")
 
 
 def test_a_failed_run_shows_the_cards_setup_command_and_never_runs_it(hub, local_stores, quiet_logs):

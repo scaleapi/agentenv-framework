@@ -61,10 +61,20 @@ def _spelled_folder(text: str) -> bool:
         return False
     above = Path()
     for part in Path(text).parts:
-        if part not in (".", "..") and _nfc(part) not in {_nfc(name) for name in os.listdir(above)}:
+        if part not in (".", "..") and not _lists(above, part):
             return False
         above /= part
     return True
+
+
+def _lists(folder: Path, name: str) -> bool:
+    """Whether ``folder`` lists ``name`` as spelled; a folder that can be passed through but not read takes it as
+    written."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return True
+    return _nfc(name) in {_nfc(listed) for listed in names}
 
 
 def _nfc(name: str) -> str:

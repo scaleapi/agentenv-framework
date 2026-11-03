@@ -344,6 +344,13 @@ def test_a_folder_wins_only_when_spelled_as_written_so_desktop_isnt_a_case_insen
     assert locate_bundle("demo-bundles/desktop").root == site / "demo_bundles" / "desktop"
     assert locate_bundle("Desktop") == (Path("Desktop"), None, None)
     assert locate_bundle("demo-bundles/Desktop") == (Path("demo-bundles/Desktop"), None, None)
+    listed = os.listdir
+    monkeypatch.setattr(os, "listdir", lambda path: _refused() if Path(path) == Path("demo-bundles") else listed(path))
+    assert locate_bundle("demo-bundles/Desktop").root == Path("demo-bundles/Desktop")
+
+
+def _refused():
+    raise PermissionError("a folder that can be passed through but not listed")
 
 
 def test_the_cli_reports_installed_metadata_it_cant_read(monkeypatch):
