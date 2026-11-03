@@ -308,6 +308,8 @@ class BrowserControl:
         if params["targetInfo"].get("type") == "page":
             self._sessions[params["sessionId"]] = params["targetInfo"]["targetId"]
             self._spawn(self.devtools.call("Page.enable", session_id=params["sessionId"]))
+            # A page attached as it opens, a popup say, waits for this before it navigates.
+            self._spawn(self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=params["sessionId"]))
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
         self._sessions.pop(params["sessionId"], None)

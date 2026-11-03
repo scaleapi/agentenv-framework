@@ -494,6 +494,18 @@ async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_
 
 
 @pytest.mark.asyncio
+async def test_each_page_it_attaches_to_is_told_to_run_so_a_popup_it_attached_to_as_it_opened_navigates(tmp_path):
+    devtools = StubDevTools()
+    control = BrowserControl(devtools, "agent")
+    await control.attach()
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.sleep(0)
+
+    assert ("Page.enable", {}, "s-popup") in devtools.calls
+    assert ("Runtime.runIfWaitingForDebugger", {}, "s-popup") in devtools.calls
+
+
+@pytest.mark.asyncio
 async def test_its_record_reads_each_tabs_title_when_read_and_when_its_page_loads_since_no_event_says(tmp_path):
     now = {"a": "Inbox", "b": "Draft"}
     devtools = StubDevTools({"Target.getTargets": lambda params, session: {"targetInfos": [
