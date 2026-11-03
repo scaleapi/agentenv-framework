@@ -35,7 +35,7 @@ from agent_env.env.store import get_env_store
 from agent_env.store.ids import is_local_id
 from agent_env.store.local_state import awaiting_lock
 from agent_env.store.routing import in_local_run
-from agent_env.task.progress import current_progress
+from agent_env.utils.progress import current_progress
 from agent_env.providers.env_providers.env_computer_provider import end_recordings
 from agent_env.utils.paths import validate_relative_filename
 

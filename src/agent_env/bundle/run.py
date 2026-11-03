@@ -31,7 +31,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.store import record_task_cancelled
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.progress import run_progress
+from agent_env.utils.progress import run_progress
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
