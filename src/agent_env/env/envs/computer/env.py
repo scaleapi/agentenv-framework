@@ -16,6 +16,7 @@ from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
 from agent_env.attribution import Attribution
+from agent_env.config import get_config
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, LoadFileArtifactUniverseResult, gateway_url_of
 from agent_env.env.envs._deployment import (
@@ -32,9 +33,7 @@ from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import get_env_store
-from agent_env.store.ids import is_local_id
 from agent_env.store.local_state import awaiting_lock
-from agent_env.store.routing import in_local_run
 from agent_env.utils.progress import current_progress
 from agent_env.providers.env_providers.env_computer_provider import end_recordings
 from agent_env.utils.paths import validate_relative_filename
@@ -175,20 +174,20 @@ class ComputerEnv(Env):
         display = self.display
         return {**self.computer_settings, **({"resolution": f"{display['width']}x{display['height']}"} if display else {})}
 
+    def composed_arches(self) -> list[str]:
+        """The arches the env composes: those its base, driver and apps all run on."""
+        return gate.arches(self.computer, self.driver, self.composed_apps())
+
     def computer_artifact(self) -> ComputerArtifact:
         """The env's computer: its base composed with its driver, over the images built."""
         return ComputerArtifact.get(self.metadata["computer"]["id"], self.metadata["computer"]["version"])
 
     async def compose_unstarted(self, sandbox_provider: SandboxProvider, form: Optional[str] = None) -> None:
-        """Compose first the pairs a deploy on ``sandbox_provider`` boots, of ``form`` when it names one, that no compose
-        has started (``composer.unstarted``), as a run that composed for another sandbox leaves them; deploys of the env
-        at once, in this process or another, compose them once, each after the one composing, a deploy that finds them
-        building included. A local run composes none for an env the configured stores hold: its record is a write the
-        run's fence refuses, so the deploy refuses for want of a ready build instead. What it does, and what a deploy
-        waiting for another says it waits for, goes to the log and, in a run, to the run's progress."""
-        if in_local_run() and not is_local_id(self.stored_id):
+        """Compose first what a deploy on ``sandbox_provider`` boots that no compose started, once for deploys at once,
+        unless the run's fence would refuse the record; the rules are in ``computers/README.md``."""
+        if get_config().local_run_refuses_write(self.stored_id):
             return
-        if not composer.unstarted(self, sandbox_provider, form, building=True):
+        if not composer.unstarted_or_building(self, sandbox_provider, form):
             return
         say, progress = _telling(self.id, current_progress())
         awaited: dict[tuple[str, str], str | None] = {}
@@ -196,8 +195,8 @@ class ComputerEnv(Env):
         async def waiting(seconds: float) -> None:
             self.metadata = (await asyncio.to_thread(Env.get, self.stored_id, self.version)).metadata
             composed = self.metadata.get("composed", {})
-            awaited.update({(name, arch): composed[name][arch].get("started_at") for name, arch in composer.unstarted(
-                self, sandbox_provider, form, building=True) if arch in composed.get(name, {})})
+            awaited.update({(name, arch): composed[name][arch].get("started_at") for name, arch in
+                            composer.unstarted_or_building(self, sandbox_provider, form) if arch in composed.get(name, {})})
             say(_waiting(awaited, seconds))
 
         async with awaiting_lock(f"computer-compose:{self.stored_id}:{self.version}", waiting, composer.HEARTBEAT_S):
@@ -254,7 +253,7 @@ class ComputerEnv(Env):
             return refusal
         params, _, problems = computer_params.checked(self, env_params)
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
-        links, arches = sandbox_provider.links, gate.arches(self.computer, self.driver, self.composed_apps())
+        links, arches = sandbox_provider.links, self.composed_arches()
         forms = [params.form] if params.form else gate.forms(self.computer)
         if not any(boot.native_links(sandbox_provider, arch, form) for form in forms for arch in arches):
             problems.append(f"{', '.join(type(link).__name__ for link in links)} runs none of its arches "

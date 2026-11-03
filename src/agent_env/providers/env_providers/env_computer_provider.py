@@ -21,7 +21,7 @@ from agent_env.env.envs.computer.utils.boot import (
     control_environment,
     control_token,
     discard,
-    native_links,
+    first_native,
     ready,
     ready_timeout,
     recorded_app_settings,
@@ -92,11 +92,11 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
-        native = [(form, arch, build) for form, arch, build in builds if native_links(sandbox_provider, arch, form)]
-        if not native:
+        if (picked := first_native(sandbox_provider, [(form, arch) for form, arch, _ in builds])) is None:
             raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
-        form, arch, build = native[0]
+        form, arch = picked
+        build = next(build for name, at, build in builds if (name, at) == picked)
         if refusal := env.disk_size_refusal(form, disk_size_gb):
             raise ValueError(refusal)
         if build["status"] == "unverified":
