@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import shlex
+import signal
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -26,6 +29,11 @@ CHECK_TIMEOUT_S = 10.0
 #: Where an app's server keeps the pid of the app it launched last, in the app's folder, so a server that restarts can
 #: still stop it.
 PID = Path(".agentenv/app.pid")
+#: Where an app's server logs each launch, stop and exit of the app, beside its pid; a boot starts the app's folder as
+#: its image has it, so the log is the boot's.
+LAUNCHES = Path(".agentenv/launches")
+#: How long an app that ended on its own may take to be reaped, for its exit code.
+EXIT_WAIT_S = 5.0
 #: How long a stopped app may take to exit before it's killed.
 STOP_TIMEOUT_S = 10.0
 
@@ -59,6 +67,7 @@ class AppRuntime:
         self.launch_fds = launch_fds
         self.relaunch_on_start = relaunch_on_start
         self.launch_running = launch_running
+        self.exits: set[asyncio.Future] = set()
         self.started = time.time()
         self.launch_failed: Optional[str] = None
         self.checking: dict[str, asyncio.Future] = {}
@@ -80,14 +89,14 @@ class AppRuntime:
             try:
                 if relaunch:
                     await self.stop_app()
-                await self.launch_app()
+                await self.launch_app("server_restart" if relaunch else "boot")
             except Exception as e:
                 self.launch_failed = f"{type(e).__name__}: {e}"
 
-    async def launch_app(self) -> int:
+    async def launch_app(self, cause: str = "launch") -> int:
         """Start the app from its folder, marked as launched, with the fds the app gives it, whose copies here are
-        closed once it has them; its pid. With ``launch_running``, an app this server launched that still runs does
-        that instead of starting a second copy, as a browser opens another window."""
+        closed once it has them, and logged with ``cause``; its pid. With ``launch_running``, an app this server
+        launched that still runs does that instead of starting a second copy, as a browser opens another window."""
         if self.launch_running is not None and (running := _running()) is not None:
             await self.launch_running()
             return running
@@ -104,6 +113,7 @@ class AppRuntime:
         PID.write_text(str(pid))
         _mark().parent.mkdir(parents=True, exist_ok=True)
         _mark().touch()
+        self.log("launch", pid, cause=cause)
         return pid
 
     async def stop_app(self) -> bool:
@@ -115,8 +125,38 @@ class AppRuntime:
         PID.unlink()
         if not session.alive(pid):
             return False
+        self.log("stop", pid)
         await session.stop(pid, STOP_TIMEOUT_S)
         return True
+
+    def exited(self) -> bool:
+        """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
+        it, unless the server stopped it; whether it did."""
+        if (pid := _recorded_pid()) is None:
+            return False
+        noting = asyncio.ensure_future(self._log_exit(pid))
+        self.exits.add(noting)
+        noting.add_done_callback(self.exits.discard)
+        return True
+
+    async def _log_exit(self, pid: int) -> None:
+        code = await session.returncode(pid, EXIT_WAIT_S)
+        self.log("exit", pid, **({} if code is None else
+                                 {"signal": signal.Signals(-code).name} if code < 0 else {"code": code}))
+
+    def log(self, event: str, pid: int, **fields: Any) -> None:
+        """Append ``event`` for the app's ``pid`` to its launch log, which outlives its server for the boot."""
+        entry = {"at": datetime.now(timezone.utc).isoformat(), "event": event, "pid": pid, **fields}
+        _log().parent.mkdir(parents=True, exist_ok=True)
+        with _log().open("a", encoding="utf-8") as log:
+            log.write(json.dumps(entry) + "\n")
+
+    def launches(self) -> list[dict]:
+        """Every launch, stop and exit of the app since the computer booted, in order."""
+        try:
+            return [json.loads(line) for line in _log().read_text(encoding="utf-8").splitlines() if line]
+        except FileNotFoundError:
+            return []
 
     async def readiness(self) -> AppReadiness:
         ready = self.launch.ready if self.launch is not None else None
@@ -154,6 +194,17 @@ def _mark() -> Path:
     return LAUNCHED / Path.cwd().name
 
 
+def _log() -> Path:
+    return LAUNCHES
+
+
+def _recorded_pid() -> Optional[int]:
+    try:
+        return int(PID.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
 def _launched_at() -> Optional[float]:
     """When the app was last launched since the computer booted, by its mark."""
     try:
@@ -164,11 +215,8 @@ def _launched_at() -> Optional[float]:
 
 def _running() -> Optional[int]:
     """The pid of the app this server launched last, while it runs."""
-    try:
-        pid = int(PID.read_text())
-    except (FileNotFoundError, ValueError):
-        return None
-    return pid if session.alive(pid) else None
+    pid = _recorded_pid()
+    return pid if pid is not None and session.alive(pid) else None
 
 
 async def _bounded(name: str, check: Awaitable[Optional[str]]) -> Optional[str]:
