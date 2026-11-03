@@ -40,7 +40,7 @@ function queueSave(id, fields) {
   }
   const state = { next: fields };
   saving.set(id, state);
-  run(async () => {
+  state.done = run(async () => {
     try {
       while (state.next) {
         const next = state.next;
@@ -180,14 +180,31 @@ async function start() {
   const [session, users] = await Promise.all([api("api/session"), api("api/users")]);
   $("user").replaceChildren(...users.map((user) => new Option(user.name || user.id, user.id)));
   $("user").value = session.user ?? "";
-  $("user").addEventListener("change", (event) =>
-    run(() => api("api/sign-in", { method: "POST", body: { user: event.target.value } })));
+  $("user").addEventListener("change", (event) => {
+    const user = event.target.value;
+    $("user").disabled = true;
+    run(async () => {
+      try {
+        while (saving.size) await Promise.all([...saving.values()].map((state) => state.done));
+        await api("api/sign-in", { method: "POST", body: { user } });
+      } finally {
+        $("user").disabled = false;
+      }
+    });
+  });
 
+  const add = $("new-note").querySelector("button[type=submit]");
   $("new-note").addEventListener("submit", (event) => {
     event.preventDefault();
+    if (add.disabled) return;
     const body = { title: $("new-title").value, body: $("new-body").value };
+    add.disabled = true;
     run(async () => {
-      await api("api/notes", { method: "POST", body });
+      try {
+        await api("api/notes", { method: "POST", body });
+      } finally {
+        add.disabled = false;
+      }
       if ($("new-title").value === body.title) $("new-title").value = "";
       if ($("new-body").value === body.body) $("new-body").value = "";
     });
