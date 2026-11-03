@@ -7,11 +7,13 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
 import tarfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,7 +34,7 @@ from tst.unit.env.envs._computer import _base, _put, FakeVm, FakeVmProvider, sav
 def test_a_stage_that_goes_on_is_said_to_go_on_and_a_failed_pair_says_why(base, driver, docker, monkeypatch):
     docker.fail["linux/amd64"] = "#7 ERROR: pip install failed"
     build = docker.build_image
-    monkeypatch.setattr(composer, "_HEARTBEAT_S", 0.1)
+    monkeypatch.setattr(composer, "HEARTBEAT_S", 0.1)
     monkeypatch.setattr(builder, "build_image", lambda *args, **kwargs: (time.sleep(0.5), build(*args, **kwargs))[1])
     told = []
 
@@ -83,12 +85,94 @@ def test_a_base_built_from_its_context_is_built_here_for_each_arch_and_keyed_by_
         "amd64": "unverified", "arm64": "ready"}
 
 
-def test_the_platforms_this_machine_builds_are_read_from_its_builder(monkeypatch):
-    inspected = ("Name:          desktop-linux\nDriver:        docker\nNodes:\nName:             desktop-linux\n"
-                 "Platforms:        linux/arm64, linux/amd64, linux/amd64/v2, linux/riscv64*\nLabels:\n")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=inspected, returncode=0))
+def test_whether_this_machine_runs_a_platform_is_whether_a_container_of_it_runs_once_per_platform(monkeypatch):
+    """Not what its builder lists: colima's lists linux/arm64 and linux/386 alone, and runs Rosetta's linux/amd64."""
+    ran = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **k: ran.append(command) or SimpleNamespace(
+        returncode=0 if "linux/amd64" in command else 125))
+    builder._runs_here.cache_clear()
 
-    assert builder._emulated_platforms() == {"linux/arm64", "linux/amd64", "linux/amd64/v2", "linux/riscv64"}
+    answers = [builder._runs_here(platform, "img") for platform in ("linux/amd64", "linux/riscv64", "linux/amd64")]
+    builder._runs_here.cache_clear()
+
+    assert answers == [True, False, True]
+    assert ran == [["docker", "run", "--rm", "--platform", platform, "--entrypoint", "true", "img"]
+                   for platform in ("linux/amd64", "linux/riscv64")]
+
+
+def test_the_platform_check_starts_the_base_or_the_pinned_image_the_shipped_base_builds_from(monkeypatch):
+    logins = []
+    monkeypatch.setattr(builder, "docker_login", logins.append)
+    registry = SimpleNamespace(image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1@sha256:" + "a" * 64)
+    context = SimpleNamespace(image_name="local/base-1234:abcd", pinned_name="local/base-1234:abcd")
+
+    assert builder._platform_check(registry) == registry.pinned_name and len(logins) == 1
+    assert re.fullmatch(r"public\.ecr\.aws/docker/library/ubuntu:24\.04@sha256:[0-9a-f]{64}",
+                        builder._platform_check(context))
+
+
+def test_a_resolve_copies_its_inputs_into_the_resolvers_container_and_its_outputs_out_with_no_bind_mount(
+        tmp_path, monkeypatch):
+    ran, timeouts = [], []
+
+    def docker(command, **kwargs):
+        ran.append(command)
+        timeouts.append(kwargs.get("timeout"))
+        if command[1] == "cp" and command[3] == str(tmp_path / "work" / builder.RESOLVED / "out"):
+            (Path(command[3]) / "result.json").write_text(json.dumps({"apt": [], "wheels": {"driver": []}}))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    work, local = _resolving(tmp_path, monkeypatch, docker)
+
+    result = local.resolve({"apt": [], "python": []}, "base@sha256:" + "b" * 64, "amd64", 60)
+
+    out, container = str(work / builder.RESOLVED / "out"), ran[0][3]
+    assert result == {"apt": [], "wheels": {"driver": []}} and container.startswith("agentenv-resolve-")
+    assert ran == [
+        ["docker", "create", "--name", container, "--platform", "linux/amd64", "--user", "root", "--entrypoint",
+         "python3", "base@sha256:" + "b" * 64, "/out/resolve.py", "/out/request.json", "/out"],
+        ["docker", "cp", f"{work / builder.CONTEXT}/.", f"{container}:/ctx"],
+        ["docker", "cp", f"{out}/.", f"{container}:/out"], ["docker", "start", "--attach", container],
+        ["docker", "cp", f"{container}:/out/.", out], ["docker", "rm", "--force", container]]
+    assert all(0 < timeout <= 60 for timeout in timeouts[:-1]) and timeouts == sorted(timeouts[:-1], reverse=True) + [None]
+    assert not [arg for command in ran for arg in command if arg in ("-v", "--volume", "--mount")]
+    assert json.loads((work / builder.RESOLVED / "out" / "request.json").read_text())["owner"] == [os.getuid(),
+                                                                                                   os.getgid()]
+
+
+@pytest.mark.parametrize("stalls", ["create", "start"])
+def test_one_deadline_bounds_a_resolve_from_its_containers_pull_to_its_output_and_its_container_goes(
+        tmp_path, monkeypatch, stalls):
+    """A pull that stalls, as a registry can, ends at the resolve's deadline as one that runs too long does."""
+    now, ran = [0.0], []
+
+    def docker(command, **kwargs):
+        ran.append(command)
+        if command[1] == stalls:
+            now[0] += kwargs["timeout"]
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="Pulling from acme/base")
+        now[0] += 0 if command[1] == "rm" else 1
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(builder.time, "monotonic", lambda: now[0])
+    _, local = _resolving(tmp_path, monkeypatch, docker)
+
+    with pytest.raises(builder.ResolveError, match="resolving took over 60 s") as failed:
+        local.resolve({"apt": [], "python": []}, "base", "amd64", 60)
+
+    assert now[0] == 60 and ran[-1] == ["docker", "rm", "--force", ran[0][3]]
+    assert failed.value.log == "Pulling from acme/base"
+
+
+def _resolving(tmp_path, monkeypatch, docker):
+    """A builder of this machine's Docker in ``tmp_path``, its build context a driver's, ``docker`` its subprocess.run."""
+    work = tmp_path / "work"
+    (work / builder.CONTEXT / "driver").mkdir(parents=True)
+    (work / builder.CONTEXT / "driver" / "requirements.txt").write_text("mss\n")
+    monkeypatch.setattr(builder.subprocess, "run", docker)
+    monkeypatch.setattr(builder, "docker_login", lambda auth: None)
+    return work, builder.LocalBuilder("LocalSandboxProvider", work, SimpleNamespace(
+        image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/arm64")
 
 
 def test_the_packages_a_build_installed_are_read_from_its_image_without_running_it(monkeypatch):
@@ -146,12 +230,13 @@ def test_what_each_run_wrote_is_read_from_the_newest_layer_a_shell_ran_its_comma
 
 
 def test_a_registry_base_is_signed_in_to_before_its_image_is_built_on(base, driver, docker, monkeypatch):
+    """By each builder, and before the check that this machine runs the arch it emulates starts the base."""
     signed = []
     monkeypatch.setattr(builder, "docker_login", signed.append)
 
     _put(base, driver)
 
-    assert len(signed) == 2 and len(docker.builds) == 2
+    assert len(signed) == 3 and len(docker.builds) == 2
 
 
 def test_the_builder_vms_helper_lists_plain_files_marks_runnables_links_checks_and_downloads(tmp_path):
@@ -185,7 +270,7 @@ def test_the_builder_vms_helper_lists_plain_files_marks_runnables_links_checks_a
 def test_a_put_on_a_vm_provider_builds_each_arch_in_a_vm_of_its_own_and_its_images_are_reused_by_key_here(
         base, driver, docker, signing, tmp_path, monkeypatch):
     vms = FakeVmProvider(docker, tmp_path / "vms")
-    for name in ("build_image", "push_local_image", "docker_login", "_emulated_platforms"):
+    for name in ("build_image", "push_local_image", "docker_login", "_runs_here"):
         monkeypatch.setattr(builder, name, lambda *args, **kwargs: pytest.fail("this machine's Docker was used"))
 
     told = []

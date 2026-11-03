@@ -1,7 +1,8 @@
 """verifiers' NeMo Gym taskset, prime-rl's, plays a written server's rows against ``serve`` with the null harness:
 ``vf-eval`` seeds each row, calls its tools natively, and takes the reward from verify. A rollout the environment
 fails is masked, and with ``--masked-as-error`` it comes back failed, which prime-rl leaves out of training, rather
-than scored 0. The model is a streamed stand-in. CI runs it on verifiers 0.4.0 and on verifiers' main branch."""
+than scored 0. The model is a streamed stand-in. CI runs it on verifiers 0.4.0, through ``vf-eval``, and on verifiers' main
+branch, through ``vf-run``, which replaced it there and exits non-zero when an episode isn't ok."""
 
 import json
 import os
@@ -16,13 +17,13 @@ import pytest
 
 from agent_env.training.nemo_gym.prepare import write_server
 from tst.nemo_gym.server_test import _free_port, _up
-from tst.unit.training.nemo_gym_test import PLAYED
+from tst.unit.training._support import PLAYED
 from tst.util.capabilities import NEMO_GYM, VERIFIERS, missing_capability_reason
 
 pytest.importorskip("agent_env.training.nemo_gym.server", reason=missing_capability_reason(NEMO_GYM),
                     exc_type=ImportError)
-VF_EVAL = shutil.which("vf-eval")
-pytestmark = pytest.mark.skipif(VF_EVAL is None, reason=missing_capability_reason(VERIFIERS))
+VF_EVAL, VF_RUN = shutil.which("vf-eval"), shutil.which("vf-run")
+pytestmark = pytest.mark.skipif(VF_EVAL is None and VF_RUN is None, reason=missing_capability_reason(VERIFIERS))
 
 
 def test_vf_eval_scores_a_played_row_and_fails_a_masked_one(serve, tmp_path, teardowns):
@@ -38,22 +39,31 @@ def test_vf_eval_scores_a_played_row_and_fails_a_masked_one(serve, tmp_path, tea
     try:
         url = _up(served, f"http://127.0.0.1:{port}")
         (tmp_path / "eval.toml").write_text(_config(tmp_path, url, model.server_address[1]))
-        evaluated = subprocess.run([VF_EVAL, "@", str(tmp_path / "eval.toml"), "-n", "2", "-r", "1", "--no-push"],
-                                   env={**os.environ, "STAND_IN_API_KEY": "unused"}, capture_output=True, text=True,
-                                   timeout=600)
+        evaluated = subprocess.run(_command(tmp_path / "eval.toml"), env={**os.environ, "STAND_IN_API_KEY": "unused"},
+                                   capture_output=True, text=True, timeout=600)
     finally:
         served.terminate()
         served.wait(timeout=30)
         model.shutdown()
     bundle_server.stop()
 
-    assert evaluated.returncode == 0, evaluated.stdout + evaluated.stderr
+    assert evaluated.returncode == (0 if VF_EVAL else 1), evaluated.stdout + evaluated.stderr
     traces = {trace["task"]["data"]["name"]: trace for trace in _traces(tmp_path / "out")}
     played, masked = traces["rows:0"], traces["rows:1"]
     assert (played["ok"], played.get("dropped"), played["rewards"]["nemo_gym"]["score"]) == (True, None, 1.0)
     assert not masked["ok"]
     assert "503 Service Unavailable" in masked["errors"][-1]["message"]
     assert len(teardowns.finished) == 3
+
+
+def _command(config):
+    """Two rows of ``config``, once each: through ``vf-eval``, with ``--no-push`` after the config when its help names
+    it, or else through ``vf-run``, which only saves its traces."""
+    rows = ["@", str(config), "-n", "2", "-r", "1"]
+    if VF_EVAL is None:
+        return [VF_RUN, *rows]
+    vf_help = subprocess.run([VF_EVAL, "--help"], capture_output=True, text=True, timeout=60)
+    return [VF_EVAL, *rows, *(["--no-push"] if "--no-push" in vf_help.stdout + vf_help.stderr else [])]
 
 
 def _config(tmp_path, url, model_port):

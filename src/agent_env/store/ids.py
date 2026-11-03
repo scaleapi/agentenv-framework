@@ -1,7 +1,8 @@
 """Namespaced entity ids, and the object keys, image repositories and filenames derived from them.
 
-An id opening ``@<namespace>/`` names the store it lives in; ``@local/…`` is the only namespace
-today. Documents keep an id verbatim. Everything derived from an ``@local`` id uses one bounded
+An id opening ``@<namespace>/`` names the store it lives in. The local namespaces, ``@local/…`` and ``@hf/…``
+(a bundle ``agent-env run hf://`` downloaded from the Hugging Face Hub), are this machine's local stores; no other
+exists today. Documents keep an id verbatim. Everything derived from a local id uses one bounded
 segment, ``local/<slug>-<sha256(id)[:12]>``; an object key or image repository takes a bare id over
 200 bytes as ``<slug>-<sha256(id)[:12]>``; every other id passes through byte-identical.
 The encoders never raise: they expect ids that ``validate_local_id`` accepts, and still return a
@@ -19,6 +20,9 @@ from typing import Optional
 
 LOCAL_NAMESPACE = "local"
 LOCAL_PREFIX = f"@{LOCAL_NAMESPACE}/"
+HF_NAMESPACE = "hf"
+HF_PREFIX = f"@{HF_NAMESPACE}/"
+LOCAL_NAMESPACES = (LOCAL_NAMESPACE, HF_NAMESPACE)
 MAX_LOCAL_ID_BYTES = 4096
 # A filesystem path component holds at most 255 bytes, so a bare id over this many gets a bounded segment.
 MAX_BARE_SEGMENT_BYTES = 200
@@ -44,29 +48,42 @@ def parse_namespace(entity_id: str) -> Optional[str]:
 
 
 def is_local_id(entity_id: str) -> bool:
-    return entity_id.startswith(LOCAL_PREFIX)
+    """Whether ``entity_id`` is in a local namespace, ``@local`` or ``@hf``, which only this machine's stores hold."""
+    return local_namespace(entity_id) is not None
+
+
+def local_namespace(entity_id: str) -> Optional[str]:
+    """The local namespace ``entity_id`` is in, or None for a bare id or another namespace's."""
+    return next((namespace for namespace in LOCAL_NAMESPACES if entity_id.startswith(namespace_prefix(namespace))), None)
+
+
+def namespace_prefix(namespace: str) -> str:
+    """What every id in ``namespace`` opens with: ``@<namespace>/``."""
+    return f"@{namespace}/"
 
 
 def validate_local_id(entity_id: str) -> None:
-    """Raise ValueError unless ``entity_id`` is ``@local/`` followed by non-empty path segments,
+    """Raise ValueError unless ``entity_id`` is ``@local/`` or ``@hf/`` followed by non-empty path segments,
     none of them ``.`` or ``..`` or opening or closing with a space, made only of letters, digits,
     spaces and ``. _ - ~ / @ ( ) + , &``, and at most 4096 bytes of UTF-8 in all (Linux's PATH_MAX).
     Only the leading ``@`` names a namespace, so one inside a segment is an ordinary character.
 
     Letters include every script's, with its combining marks, as long as each mark follows a
     letter, digit or mark. The invisible (default-ignorable) letters and marks are refused."""
-    if not entity_id.startswith(LOCAL_PREFIX):
-        raise ValueError(f"local id {entity_id!r} must start with {LOCAL_PREFIX!r}")
+    namespace = local_namespace(entity_id)
+    if namespace is None:
+        raise ValueError(f"local id {entity_id!r} must start with {LOCAL_PREFIX!r} or {HF_PREFIX!r}")
+    prefix = namespace_prefix(namespace)
     size = len(entity_id.encode("utf-8", "surrogatepass"))
     if size > MAX_LOCAL_ID_BYTES:
         raise ValueError(f"local id is {size} bytes; the limit is {MAX_LOCAL_ID_BYTES}: {entity_id[:64]!r}…")
-    disallowed = sorted({c for c in entity_id[len(LOCAL_PREFIX):] if not _allowed_in_id(c)})
+    disallowed = sorted({c for c in entity_id[len(prefix):] if not _allowed_in_id(c)})
     if disallowed:
         raise ValueError(
             f"local id {entity_id!r} contains {ascii(''.join(disallowed))}; "
             "a local id may contain only letters, digits, spaces and . _ - ~ / @ ( ) + , &"
         )
-    segments = entity_id[len(LOCAL_PREFIX):].split("/")
+    segments = entity_id[len(prefix):].split("/")
     if any(segment in ("", ".", "..") for segment in segments):
         raise ValueError(f"local id {entity_id!r} has an empty, '.' or '..' path segment")
     if any(segment != segment.strip(" ") for segment in segments):
@@ -110,7 +127,7 @@ def key_segment(entity_id: str) -> str:
 
 
 def image_repository(entity_id: str) -> str:
-    """The image repository for ``entity_id``; an ``@local`` id yields a valid OCI repository path."""
+    """The image repository for ``entity_id``; a local id yields a valid OCI repository path."""
     return key_segment(entity_id)
 
 
@@ -121,7 +138,7 @@ def local_image_repository(entity_id: str) -> str:
 
 
 def fs_safe(entity_id: str) -> str:
-    """A filename for an ``@local`` id: its key segment with no ``/``. Any other id is returned
+    """A filename for a local id: its key segment with no ``/``. Any other id is returned
     unchanged, so it is only as filename-safe as it already was."""
     return _local_segment(entity_id).replace("/", "-", 1) if is_local_id(entity_id) else entity_id
 

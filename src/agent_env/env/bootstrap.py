@@ -23,7 +23,14 @@ from agent_env.env.env import Env
 from agent_env.env.envs import GatewayEnv, MCPServerEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
 from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME, PLAYWRIGHT_MCP_IMAGE_TAG
-from agent_env.env.published_images import BUNDLE_IMAGES, PublishedImage, published_digest
+from agent_env.env.published_images import (
+    BUNDLE_IMAGES,
+    DISK_IMAGES,
+    DISK_TOOLS_IMAGE,
+    LAUNCHER_IMAGE,
+    PublishedImage,
+    published_digest,
+)
 from agent_env.store.base import NotFoundError
 from agent_env.store.document_store import LocalSqliteDocumentStore
 from agent_env.store.ids import derive_id
@@ -155,14 +162,18 @@ _DOCKERFILES = {
     SERVICE_DB: [SERVICE_DB_DOCKERFILE, DB_WEB_DOCKERFILE, DB_MCP_DOCKERFILE],
     WEBSITE_BROWSER: [PLAYWRIGHT_MCP_DOCKERFILE],
 }
-# The image each shipped Dockerfile is published as: the infra envs', the shipped agents' and an example env's.
+# The image each shipped Dockerfile is published as: the infra envs', the disk tools and QEMU launcher, the shipped
+# agents', an example env's, the base computers' and their disk forms.
 PUBLISHED_IMAGES = (
     PublishedImage("agentenv-gateway", GATEWAY_DOCKERFILE),
     PublishedImage("agentenv-service-db", SERVICE_DB_DOCKERFILE),
     PublishedImage("agentenv-db-web", DB_WEB_DOCKERFILE),
     PublishedImage("agentenv-db-mcp", DB_MCP_DOCKERFILE),
     PublishedImage("agentenv-playwright-mcp", PLAYWRIGHT_MCP_DOCKERFILE),
+    DISK_TOOLS_IMAGE,
+    LAUNCHER_IMAGE,
     *BUNDLE_IMAGES,
+    *DISK_IMAGES,
 )
 _PUBLISHED = {image.dockerfile: image for image in PUBLISHED_IMAGES}
 

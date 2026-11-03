@@ -100,6 +100,16 @@ async def test_an_app_folder_is_written_with_its_files_and_what_its_class_declar
         await env.deploy()
 
 
+def test_an_app_folders_settings_table_is_stored_as_the_defaults_each_deploy_starts_from(bundle_dir):
+    _bundle(bundle_dir, toml=f'{TOML}\n[settings]\nsignature = "-- Ada"\npassword = "env:MAIL_PASSWORD"\n')
+
+    materialize(plan_of(bundle_dir))
+    env = Env.get(f"{ROOT}/mail")
+
+    assert env.settings == {"signature": "-- Ada", "password": "env:MAIL_PASSWORD"}
+    assert env.app_defaults() == {"mail": env.settings}
+
+
 @pytest.mark.parametrize("toml, extra, skill, problem", [
     ('type = "computer_app"\n', {}, "skill.md", "module is required"),
     ('type = "computer_app"\nmodule = "app.py:Desk"\n', {"envs/mail/app.py": DRIVER.format(supports=LINUX,
@@ -112,7 +122,10 @@ async def test_an_app_folder_is_written_with_its_files_and_what_its_class_declar
     (f'{TOML}image = "x"\n', {}, "skill.md", "unknown key 'image'"),
     (f'{TOML}build_settings = {{ colour = "blue" }}\n', {}, "skill.md",
      "build_settings.colour: @local/~/apps/mail declares no build setting 'colour'"),
-], ids=["no-module", "a-driver", "install-python", "skill", "linux-skill", "unknown-key", "build-setting"])
+    (f'{TOML}[settings]\ncolour = "blue"\n', {}, "skill.md",
+     "settings.colour: @local/~/apps/mail declares no setting 'colour'"),
+], ids=["no-module", "a-driver", "install-python", "skill", "linux-skill", "unknown-key", "build-setting",
+        "setting"])
 def test_an_app_folder_that_cant_be_read_is_refused_before_any_write(bundle_dir, toml, extra, skill, problem):
     _bundle(bundle_dir, toml=toml, skill=skill, **{path: data for path, data in extra.items() if data is not None})
     for path in (path for path, data in extra.items() if data is None):

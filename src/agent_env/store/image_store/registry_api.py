@@ -163,6 +163,26 @@ def read_blob(ref: str, digest: str, auth: RegistryAuth | None, path: Path, *,
         raise ValueError(f"{ref}: the blob {image.host} served for {digest} hashes to sha256:{hashed.hexdigest()}")
 
 
+def read_blob_start(ref: str, digest: str, auth: RegistryAuth | None, size: int, *,
+                    timeout: float = _TIMEOUT_SECONDS) -> bytes:
+    """The first ``size`` bytes of the blob ``digest`` in ``ref``'s repository, or all of a smaller one, read without
+    fetching the rest, so unchecked against its digest."""
+    image = _parse(ref)
+    if not digest.startswith("sha256:") or not _DIGEST.match(digest):
+        raise ValueError(f"{ref}: {digest!r} isn't a sha256 digest")
+    start = bytearray()
+    with _Repository(image, auth, timeout, ref) as repository:
+        try:
+            with repository.stream(f"blobs/{digest}") as response:
+                for chunk in response.iter_bytes():
+                    start += chunk
+                    if len(start) >= size:
+                        break
+        except httpx.HTTPError as e:
+            raise ValueError(f"{ref}: reading the blob {digest} from {image.host} failed: {type(e).__name__}: {e}") from e
+    return bytes(start[:size])
+
+
 def write_index(ref: str, images: dict[str, str], auth: RegistryAuth | None, *,
                 timeout: float = _TIMEOUT_SECONDS) -> None:
     """Write under ``ref``'s tag an index of ``images``, by their platforms, each pinned by its digest in ``ref``'s

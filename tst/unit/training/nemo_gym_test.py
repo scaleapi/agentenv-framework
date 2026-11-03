@@ -23,8 +23,8 @@ from tst.unit.task.episode.run_test import (
     TURN,
     _tool_sessions,
 )
+from tst.unit.training._support import PLAYED
 
-PLAYED = [ITEMS, ALICE, TURN, REPLIES]
 STYLE = {**REPLIES, "id": "style", "verifier_id": "style"}
 ADD_ITEM = {"type": "function", "name": "add_item", "description": "add_item.", "parameters": {"type": "object"},
             "strict": False}

@@ -23,3 +23,10 @@ def state_root() -> Path:
     if sys.platform == "win32" and os.path.isabs(local_app_data):
         return Path(local_app_data) / _APP_DIR
     return Path.home() / ".local" / "state" / _APP_DIR
+
+
+def cache_root() -> Path:
+    """The per-user cache root, for what can be fetched again: ``$XDG_CACHE_HOME/agentenv`` when that is an absolute
+    path, else ``~/.cache/agentenv``. A path only; nothing is created."""
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    return (Path(xdg) if os.path.isabs(xdg) else Path.home() / ".cache") / "agentenv"

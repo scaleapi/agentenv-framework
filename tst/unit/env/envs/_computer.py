@@ -29,6 +29,9 @@ from tst.util.oci_registry import UBUNTU_LAYER, Registry
 OS = {"type": "linux", "distribution": "ubuntu", "version": "24.04", "display": "x11"}
 
 
+DISK_FORM = {"init": "supervisord", "input_channel": "nocloud", "min_disk_gb": 16}
+
+
 CONFIG = {"resolution": {"default": "1280x800", "phase": "deploy"}, "timezone": {"default": "UTC", "phase": "deploy"},
           "theme": {"default": "light", "phase": "build"}}
 
@@ -53,7 +56,7 @@ class FakeDocker:
     def __init__(self, registry: Registry):
         self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
         self.probed, self.probe_fails, self.resolved, self.timeouts = [], {}, [], {}
-        self.writes, self.saved = {}, []
+        self.writes, self.saved, self.disk_builds, self.disk_sizes = {}, [], [], {}
 
     def resolve(self, request, context, source, arch, work):
         """The resolver in the base: each apt package as one .deb, each venv's requirements as one wheel."""
@@ -81,9 +84,9 @@ class FakeDocker:
             return (resolve or self.resolve)(request, on.work / builder.CONTEXT, source, arch, on.work / builder.RESOLVED)
         return resolving
 
-    async def probe(self, links, env, driver, image):
+    async def probe(self, links, env, driver, image, form="container"):
         arch = self._arch(self.registry.manifests[image.rpartition("@")[2]]["config"]["digest"])
-        self.probed.append((arch, image))
+        self.probed.append((arch, image) if form == "container" else (form, arch, image))
         if arch in self.probe_fails:
             checks = [CheckResult(check="P4", name="clicks show their effect", status="failed", detail=self.probe_fails[arch])]
         else:
@@ -96,6 +99,12 @@ class FakeDocker:
             return
         if platform in self.fail:
             raise DockerBuildError(self.fail[platform])
+        if build_args is not None or context.name == "tools":
+            self.disk_builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
+                                     "args": build_args, "context": context.name, "labels": labels})
+            args = build_args or {}
+            self.disk_sizes[tag] = int(args["SIZE_GB"]) if "SIZE_GB" in args else self.disk_sizes.get(args.get("ESP"), 16)
+            return
         self.builds.append({"platform": platform, "tag": tag, "dockerfile": dockerfile.read_text(),
                             "files": sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()),
                             "conf": next(context.glob("agentenv-*.conf")).read_text(),
@@ -122,8 +131,11 @@ class FakeDocker:
         saved_image(path, layers)
 
     def push(self, local, ref, store):
-        self.registry.tags[ref] = self.registry.image(UBUNTU_LAYER, arch=local.rsplit("-", 1)[1],
-                                                      labels=self.labels.get(local))
+        layer = disk_layer(self.disk_sizes.get(local, 16) << 30) if "-disk-" in local else UBUNTU_LAYER
+        self.registry.tags[ref] = self.registry.image(layer, arch=local.rsplit("-", 1)[1], labels=self.labels.get(local))
+
+    def image_config(self, tag):
+        return {"Env": ["PATH=/usr/bin"], "Entrypoint": ["/usr/bin/tini", "--"], "User": "user", "Labels": {"tag": tag}}
 
     def joined(self, index, images, auth):
         self.registry.tags[index] = self.registry.index(**{
@@ -131,6 +143,20 @@ class FakeDocker:
 
     def _arch(self, config_digest):
         return json.loads(self.registry.blobs[config_digest])["architecture"]
+
+
+def disk_layer(virtual_size=16 << 30, owner=107, path="disk/disk.img"):
+    """A disk form's one layer, gzipped: its folder, then a qcow2 of ``virtual_size`` owned by ``owner``."""
+    head = b"QFI\xfb" + bytes(20) + virtual_size.to_bytes(8, "big") + bytes(480)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        folder = tarfile.TarInfo(path.rpartition("/")[0])
+        folder.type = tarfile.DIRTYPE
+        tar.addfile(folder)
+        disk = tarfile.TarInfo(path)
+        disk.size, disk.uid = len(head), owner
+        tar.addfile(disk, io.BytesIO(head))
+    return buffer.getvalue()
 
 
 def saved_image(path, layers):
@@ -325,11 +351,12 @@ MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/pyt
 
 
 def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
-         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", paths=None, **changes):
+         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", paths=None, defaults=None,
+         **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
     them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
     its build settings, ``linux_settings``, that of its settings on Linux, ``name``, its id's last part and its
-    environment name, and ``paths``, where it keeps its data on Linux."""
+    environment name, ``paths``, where it keeps its data on Linux, and ``defaults``, its env's ``[settings]``."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
@@ -347,4 +374,5 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
                 "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
     return ComputerAppEnv.put(**{"id": f"@local/~/kit/{name}", "environment_name": name, "module": "app.py:Mail",
                                  "files": files, "declaration": declaration, "computer": base, "driver": driver,
-                                 "compose": compose, **changes})
+                                 "compose": compose, **({"settings": defaults} if defaults is not None else {}),
+                                 **changes})

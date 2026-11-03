@@ -8,6 +8,28 @@ container form's image is built from the folder's `Dockerfile`, and a release pu
 building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.toml` gives it, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04`.
 
+It also has a disk form, a disk a VM boots from UEFI, which is the container form's root filesystem on the Linux boot
+recipe in `disk/linux/`: a GPT disk of an EFI system partition holding one UKI, Ubuntu's kernel with a busybox initramfs,
+and an ext4 root filesystem that is the image's own, with `/etc/agentenv/vm/image.env`, its entrypoint, command,
+user, working folder and environment, from its OCI config. The init mounts it, brings up the network, reads the deploy's
+settings from a NoCloud seed (`CIDATA`) and becomes the image's entrypoint, as its user. A release publishes it as
+`ghcr.io/scaleapi/agentenv-ubuntu-24.04-disk:src-<hex>`, tagged by both its sources; without it, composing makes it.
+Composing a computer env makes each arch's disk from its composed container, the root filesystem rebuilt with
+`mkfs.ext4 -d` by the disk tools (`disk/linux/tools/`) on the builder's own platform and the base disk's EFI system
+partition kept, so nothing is emulated or privileged. A disk boots where `/dev/kvm` is, in the QEMU launcher
+(`disk/linux/launcher/`): gate 3 probes it there, and elsewhere it stays `unverified` until a deploy's first boot with
+KVM probes it. A deploy boots it with `env_params = { form = "disk" }`.
+
+A put, `env build` and the release compose every form; a run composes only the forms its sandbox's deploys boot: on each
+link of a chain, the first form it boots natively, as a deploy picks, so local Docker composes containers, and a sandbox
+that boots only disks composes disks. A compose of a disk also composes the container it's made from, unless that's
+built. A deploy that boots a form no compose has started, a disk named by `env_params` included, composes it first,
+reusing what's built, as every build is reused by its key; deploys of one env at once compose it once, the others
+waiting for it, a deploy that finds it building included. In `agent-env run` it says why and each stage as it goes, and
+a deploy waiting for another's compose says what it waits for and since when. A local run doesn't compose a registered
+env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the
+deploy refuses for want of a ready build and names `agent-env env build`.
+
 Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAME>`, read as it starts:
 
 | Setting | Default | What it does |

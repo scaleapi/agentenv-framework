@@ -1,27 +1,35 @@
 """WebsiteBrowserEnvironment: agentenv's flags after a subclass's command, in a computer and alone, and the proxy rule
 for each; a subclass refused for carrying one of them; the start tabs, the time zone and the window from its settings;
 its launch run with no desktop when alone; a CDP connection over a new debugging pipe at each launch, which its ready
-check asks, and a browser launched again when its server restarts; its policies, card params and skill; and an app that
-isn't a browser launched and declared as before."""
+check asks, and a browser launched again when its server restarts; its shared memory in files only on a small
+/dev/shm; an empty cache and the deploy's prompt answers in its profile at each launch; its policies, card params and
+skill; its record's titles read from the browser, which sends no event for a page's; and an app that isn't a browser
+launched and declared as before."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
+import signal
 import sys
 
 import pytest
 
 from agentenv_protocol.computer import APP_SETTINGS_ENV, ComputerAppEnvironment, Launch, Ready, app, linux, session
+from agentenv_protocol import website_browser
 from agentenv_protocol.computer import app_runtime
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.website_browser import (ALONE_BYPASS, ALONE_ENV, BROWSER, COMPUTER_BYPASS, OPEN_WEB_ENV,
-                                               POLICIES, SITE_PROXY_ENV, SKILL, DevToolsError,
+                                               POLICIES, SITE_PROXY_ENV, SKILL, BrowserControl, DevToolsError,
                                                WebsiteBrowserEnvironment)
 
 PROXY = "http://127.0.0.1:3128"
-OWNED = ["--user-data-dir", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=en-US"]
-# A browser that answers CDP on its debugging pipe, fds 3 and 4, as a Chromium does: Browser.getVersion with its product,
-# Target.createTarget by writing the tab's URL to tabs.txt beside it, anything else with an error.
+OWNED = ["--user-data-dir", "--disk-cache-dir", "--remote-debugging-pipe", "--no-first-run",
+         "--no-default-browser-check", "--lang=en-US"]
+# A browser that answers CDP on its debugging pipe, fds 3 and 4, as a Chromium does: Browser.getVersion with its
+# product, Target.createTarget by writing the tab's URL to tabs.txt beside it, a new window's after "window ", anything
+# else with an error.
 FAKE_BROWSER = """import json, os
 buffer = b""
 while chunk := os.read(3, 65536):
@@ -31,9 +39,14 @@ while chunk := os.read(3, 65536):
         message = json.loads(raw)
         if message["method"] == "Browser.getVersion":
             answer = {"result": {"product": "Fake/1"}}
-        elif message["method"] == "Target.createTarget" and message["params"]["background"]:
+        elif message["method"] in ("Target.setDiscoverTargets", "Target.setAutoAttach", "Browser.setDownloadBehavior"):
+            answer = {"result": {}}
+            if message["method"] == "Target.setDiscoverTargets":
+                created = {"targetInfo": {"targetId": "start", "type": "page", "url": "about:blank", "title": ""}}
+                os.write(4, json.dumps({"method": "Target.targetCreated", "params": created}).encode() + b"\\0")
+        elif message["method"] == "Target.createTarget":
             with open("tabs.txt", "a") as tabs:
-                tabs.write(message["params"]["url"] + "\\n")
+                tabs.write(("window " if message["params"].get("newWindow") else "") + message["params"]["url"] + "\\n")
             answer = {"result": {"targetId": message["params"]["url"]}}
         else:
             answer = {"error": {"code": -32601, "message": "unknown method"}}
@@ -60,8 +73,10 @@ class OnDemandBrowser(WebsiteBrowserEnvironment):
 
 @pytest.fixture(autouse=True)
 def browser_home(monkeypatch, tmp_path):
-    """A browser on Linux, its session user's home under ``tmp_path``, inside a computer with no site proxy."""
+    """A browser on Linux, its session user's home under ``tmp_path``, inside a computer with no site proxy and 1 GiB
+    of /dev/shm."""
     monkeypatch.setattr(app, "detect", lambda: Platform(os="linux"))
+    monkeypatch.setattr(website_browser, "_shm_bytes", lambda path="/dev/shm": 1 << 30)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
@@ -78,7 +93,8 @@ def test_in_a_computer_its_flags_follow_its_command_then_its_start_tabs_and_its_
     launch = Browser().launch
 
     profile = f"--user-data-dir={browser_home / '.config/chromium'}"
-    assert launch.command == ["chromium/chrome", "--no-sandbox", profile, *OWNED[1:], "about:blank"]
+    cache = f"--disk-cache-dir={browser_home / '.cache/chromium'}"
+    assert launch.command == ["chromium/chrome", "--no-sandbox", profile, cache, *OWNED[2:], "about:blank"]
     assert launch.env == {"TZ": "UTC"}
     assert launch.window == {"class": "Chromium"} and launch.ready == Ready(window=True, timeout_s=30)
 
@@ -89,7 +105,7 @@ def test_in_a_computer_with_a_site_proxy_only_loopback_bypasses_it(monkeypatch):
     command = Browser().launch.command
 
     assert [f"--proxy-server={PROXY}", f"--proxy-bypass-list={COMPUTER_BYPASS}",
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"] == command[7:10]
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"] == command[8:11]
     assert not any(flag.startswith(("--headless", "--window-size")) for flag in command)
 
 
@@ -142,7 +158,8 @@ def test_alone_it_refuses_to_launch_without_a_site_proxy(monkeypatch):
 
 
 @pytest.mark.parametrize("flag", ["--remote-debugging-port=9222", "--remote-allow-origins=*", "--headless",
-                                  "--proxy-server=http://elsewhere:3128", "--user-data-dir=/tmp/profile"])
+                                  "--proxy-server=http://elsewhere:3128", "--user-data-dir=/tmp/profile",
+                                  "--disk-cache-dir=/tmp/cache", "--disable-dev-shm-usage"])
 def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_declared(flag):
     @linux(launch=Launch(command=["chromium/chrome", flag]))
     class Widened(WebsiteBrowserEnvironment):
@@ -150,6 +167,37 @@ def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_d
 
     with pytest.raises(ValueError, match="agentenv sets for every website browser"):
         Widened.declaration()
+
+
+@pytest.mark.parametrize("mib, in_files", [(64, True), (1024, False)], ids=["docker-default", "sized"])
+def test_it_keeps_its_shared_memory_in_files_only_when_dev_shm_is_under_1_gib(monkeypatch, mib, in_files):
+    monkeypatch.setattr(website_browser, "_shm_bytes", lambda path="/dev/shm": mib * 2**20)
+
+    assert ("--disable-dev-shm-usage" in Browser().launch.command) is in_files
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings, prompts", [
+    ({}, {"geolocation": 2, "notifications": 2}),
+    ({"notifications": "ask"}, {"geolocation": 2}),
+], ids=["deny", "ask"])
+async def test_each_launch_starts_with_an_empty_cache_and_the_deploys_prompt_answers_in_its_profile(
+        browser_home, monkeypatch, settings, prompts):
+    _settings(monkeypatch, **settings)
+    preferences = browser_home / ".config/chromium/Default/Preferences"
+    preferences.parent.mkdir(parents=True)
+    preferences.write_text(json.dumps({"homepage": "about:blank", "profile": {"default_content_setting_values": {
+        "notifications": 1, "cookies": 1}}}))
+    (browser_home / ".cache/chromium/Cache").mkdir(parents=True)
+    browser = Browser()
+
+    for fd in (await browser._launch_fds()).values():
+        os.close(fd)
+    browser.devtools.close()
+
+    assert json.loads(preferences.read_text()) == {"homepage": "about:blank", "profile": {
+        "default_content_setting_values": {"cookies": 1, **prompts}}}
+    assert not (browser_home / ".cache/chromium").exists()
 
 
 def test_its_settings_give_its_start_tabs_language_and_time_zone_and_no_start_url_is_a_flag(monkeypatch):
@@ -229,17 +277,37 @@ async def test_each_launch_gets_a_new_pipe_its_server_talks_cdp_over_and_its_rea
     version = await browser.devtools.call("Browser.getVersion")
     with pytest.raises(DevToolsError, match="unknown method"):
         await browser.devtools.call("Page.navigate", {"url": "about:blank"})
-    launched = await browser.devtools_answers()
+    launched = await _answering(browser)
     await runtime.stop_app()
     stopped = await browser.devtools_answers()
     await runtime.launch_app()
-    relaunched = await browser.devtools_answers()
+    relaunched = await _answering(browser)
     await runtime.stop_app()
     browser.devtools.close()
 
     assert unlaunched is False and version == {"product": "Fake/1"} and launched is True
     assert stopped is False and relaunched is True
     assert "devtools_answers" in runtime.ready_checks
+
+
+@pytest.mark.asyncio
+async def test_a_launch_while_it_runs_opens_a_window_over_its_pipe_and_starts_no_second_copy(monkeypatch, tmp_path,
+                                                                                             browser_home):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
+    browser = FakeBrowser()
+    runtime = browser._computer_app
+
+    first = await runtime.launch_app()
+    (browser_home / ".cache/chromium").mkdir(parents=True, exist_ok=True)
+    (browser_home / ".cache/chromium/kept").touch()
+    second = await runtime.launch_app()
+    answers = await _answering(browser)
+    await runtime.stop_app()
+    browser.devtools.close()
+
+    assert second == first and answers is True and (browser_home / ".cache/chromium/kept").exists()
+    assert (tmp_path / "tabs.txt").read_text().splitlines() == ["window about:blank"]
 
 
 @pytest.mark.asyncio
@@ -331,13 +399,13 @@ def test_its_policies_are_agentenvs_with_its_own_over_them_where_its_build_reads
 
 
 def test_its_card_declares_browser_v1_with_its_build_and_clock_and_alone_its_window(monkeypatch):
-    in_computer = next(e for e in Browser().declared_extensions() if e.uri == BROWSER)
+    in_computer = Browser().extension_params(BROWSER)
     monkeypatch.setenv(ALONE_ENV, "1")
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
-    alone = next(e for e in Browser().declared_extensions() if e.uri == BROWSER)
+    alone = Browser().extension_params(BROWSER)
 
-    assert in_computer.params == {"chromium": "156.0.8078.4", "clock": "real"}
-    assert alone.params == {"chromium": "156.0.8078.4", "clock": "real", "window": {"width": 1280, "height": 800}}
+    assert in_computer == {"chromium": "156.0.8078.4", "clock": "real"}
+    assert alone == {"chromium": "156.0.8078.4", "clock": "real", "window": {"width": 1280, "height": 800}}
 
 
 @pytest.mark.asyncio
@@ -356,6 +424,201 @@ def test_an_app_that_isnt_a_browser_launches_and_declares_as_before():
     stored = Mail.declaration().model_dump(mode="json", exclude_none=True)
 
     assert mail.launch is Mail._installs["linux"].launch and mail._computer_app.desktop is True
+    assert mail._computer_app.launch_running is None
     assert stored["os"]["linux"]["launch"] == {"at": "boot", "command": ["mail"], "window": {"class": "Mail"},
                                                "ready": {"window": True, "timeout_s": 60.0}}
 
+
+#: How long a test waits on the fake browser, and how often it looks.
+WAIT_S, POLL_S = 5.0, 0.05
+
+
+async def _answering(browser) -> bool:
+    """Whether ``browser``'s ready check says it answers, within ``WAIT_S``."""
+    for _ in range(int(WAIT_S / POLL_S)):
+        if await browser.devtools_answers():
+            return True
+        await asyncio.sleep(POLL_S)
+    return False
+
+
+class StubDevTools:
+    """A browser connection that answers each call from ``answers`` by method, records it, and hands the control the
+    events a test sends."""
+
+    def __init__(self, answers=None):
+        self.calls, self.answers, self.listener = [], answers or {}, None
+
+    def listen(self, listener):
+        self.listener = listener
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        self.calls.append((method, params or {}, session_id))
+        answer = self.answers.get(method, {})
+        return answer(params, session_id) if callable(answer) else answer
+
+    def send(self, method, params, session=None):
+        self.listener({"method": method, "params": params, **({"sessionId": session} if session else {})})
+
+
+def _page(target, url="about:blank", title=""):
+    return {"targetInfo": {"targetId": target, "type": "page", "url": url, "title": title}}
+
+
+@pytest.mark.asyncio
+async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_leaves_out_its_hidden_pages(tmp_path):
+    devtools = StubDevTools({"Target.createTarget": {"targetId": "hidden"},
+                             "Target.attachToTarget": {"sessionId": "s-hidden"}})
+    control = BrowserControl(devtools, "agent")
+    await control.attach()
+
+    for target in ("a", "b", "c"):
+        devtools.send("Target.targetCreated", _page(target))
+    devtools.send("Target.targetInfoChanged", _page("a", "https://slack.com/", "Slack"))
+    devtools.send("Target.targetDestroyed", {"targetId": "b"})
+    await control.close_tab("c")
+    devtools.send("Target.targetDestroyed", {"targetId": "c"})
+    async with control.hidden_page() as session:
+        devtools.send("Target.targetCreated", _page("hidden"))
+    record = await control.record()
+    await control.attach()
+
+    assert [tab["id"] for tab in record["tabs"]] == ["a"] and record["tabs"][0]["title"] == "Slack"
+    assert [(tab["id"], tab["closed_by"]) for tab in record["closed_tabs"]] == [("b", "unknown"), ("c", "agentenv")]
+    assert record["since"] == control.since
+    assert session == "s-hidden" and ("Target.closeTarget", {"targetId": "hidden"}, None) in devtools.calls
+    assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs][-1] == ("a", "stop")
+    assert [call[0] for call in devtools.calls[:3]] == ["Target.setDiscoverTargets", "Target.setAutoAttach",
+                                                        "Browser.setDownloadBehavior"]
+    assert devtools.calls[2][1] == {"behavior": "default", "eventsEnabled": True}
+
+
+@pytest.mark.asyncio
+async def test_each_page_it_attaches_to_is_told_to_run_so_a_popup_it_attached_to_as_it_opened_navigates(tmp_path):
+    devtools = StubDevTools()
+    control = BrowserControl(devtools, "agent")
+    await control.attach()
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.sleep(0)
+
+    assert ("Page.enable", {}, "s-popup") in devtools.calls
+    assert ("Runtime.runIfWaitingForDebugger", {}, "s-popup") in devtools.calls
+
+
+@pytest.mark.asyncio
+async def test_its_record_reads_each_tabs_title_when_read_and_when_its_page_loads_since_no_event_says(tmp_path):
+    now = {"a": "Inbox", "b": "Draft"}
+    devtools = StubDevTools({"Target.getTargets": lambda params, session: {"targetInfos": [
+        _page(target, f"https://mail.test/{target}", title)["targetInfo"] for target, title in now.items()]}})
+    control = BrowserControl(devtools, "agent")
+    await control.attach()
+    for target in ("a", "b"):
+        devtools.send("Target.targetCreated", _page(target, f"https://mail.test/{target}", f"mail.test/{target}"))
+        devtools.send("Target.attachedToTarget", {"sessionId": f"s-{target}", **_page(target)})
+    devtools.send("Page.loadEventFired", {"timestamp": 1}, session="s-b")
+    await asyncio.sleep(0)
+    del now["b"]
+    devtools.send("Target.targetDestroyed", {"targetId": "b"})
+    now["a"] = "Inbox (1)"
+    record = await control.record()
+
+    assert [(tab["id"], tab["title"]) for tab in record["tabs"]] == [("a", "Inbox (1)")]
+    assert [(tab["id"], tab["title"]) for tab in record["closed_tabs"]] == [("b", "Draft")]
+    assert ("Target.getTargets", {"filter": [{"type": "page"}]}, None) in devtools.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialogs, kind, sent, answer, by", [
+    ("accept", "prompt", {"accept": True, "promptText": "yes"}, "accepted", "agentenv"),
+    ("dismiss", "prompt", {"accept": False, "promptText": "yes"}, "dismissed", "agentenv"),
+    ("dismiss", "beforeunload", {"accept": True, "promptText": "yes"}, "accepted", "agentenv"),
+    ("agent", "prompt", None, "dismissed", "agent"),
+], ids=["accept", "dismiss", "dismiss-leaves", "agent"])
+async def test_its_control_answers_a_dialog_on_its_pages_session_as_its_setting_says_and_records_who_did(
+        tmp_path, dialogs, kind, sent, answer, by):
+    devtools = StubDevTools()
+    control = BrowserControl(devtools, dialogs)
+    devtools.send("Target.targetCreated", _page("a"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-a", **_page("a")})
+
+    devtools.send("Page.javascriptDialogOpening", {"type": kind, "message": "Sure?", "url": "https://a.test/",
+                                                   "defaultPrompt": "yes"}, "s-a")
+    await asyncio.sleep(0)
+    devtools.send("Page.javascriptDialogClosed", {"result": answer == "accepted"}, "s-a")
+
+    assert ("Page.enable", {}, "s-a") in devtools.calls
+    handled = [(params, session) for method, params, session in devtools.calls
+               if method == "Page.handleJavaScriptDialog"]
+    assert handled == ([(sent, "s-a")] if sent else [])
+    (dialog,) = control.dialog_log
+    assert (dialog["tab"], dialog["type"], dialog["message"], dialog["answer"], dialog["by"]) == (
+        "a", kind, "Sure?", answer, by)
+
+
+@pytest.mark.asyncio
+async def test_its_control_records_a_completed_download_with_its_size_and_sha256(tmp_path):
+    devtools = StubDevTools()
+    control = BrowserControl(devtools, "agent")
+    (tmp_path / "report.pdf").write_bytes(b"%PDF-1.7 report")
+
+    devtools.send("Browser.downloadWillBegin", {"guid": "g", "url": "https://a.test/report.pdf",
+                                                "suggestedFilename": "report.pdf"})
+    devtools.send("Browser.downloadProgress", {"guid": "g", "state": "inProgress", "receivedBytes": 3})
+    in_progress = dict(control.downloads["g"])
+    devtools.send("Browser.downloadProgress", {"guid": "g", "state": "completed",
+                                               "filePath": str(tmp_path / "report.pdf")})
+    for _ in range(int(WAIT_S / POLL_S)):
+        if "sha256" in control.downloads["g"]:
+            break
+        await asyncio.sleep(POLL_S)
+
+    done = control.downloads["g"]
+    assert in_progress["state"] == "inProgress" and "sha256" not in in_progress
+    assert (done["state"], done["size"], done["path"]) == ("completed", 15, str(tmp_path / "report.pdf"))
+    assert done["sha256"] == hashlib.sha256(b"%PDF-1.7 report").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_its_control_says_the_tab_whose_page_has_focus_is_active_else_the_first_visible_one(tmp_path):
+    states = {"s-a": ["hidden", False], "s-b": ["visible", False], "s-c": ["visible", True]}
+    devtools = StubDevTools({"Runtime.evaluate": lambda params, session: {"result": {"value": states[session]}}})
+    control = BrowserControl(devtools, "agent")
+    for target in ("a", "b", "c"):
+        devtools.send("Target.targetCreated", _page(target))
+        devtools.send("Target.attachedToTarget", {"sessionId": f"s-{target}", **_page(target)})
+
+    focused = await control.active_tab()
+    states["s-c"] = ["hidden", False]
+    visible = await control.active_tab()
+
+    assert (focused, visible) == ("c", "b")
+
+
+@pytest.mark.asyncio
+async def test_its_connection_hears_events_its_server_logs_each_launch_and_an_exit_it_didnt_ask_for(monkeypatch,
+                                                                                                    tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
+    browser = FakeBrowser()
+    runtime = browser._computer_app
+
+    first = await runtime.launch_app("boot")
+    await _answering(browser)
+    record = await browser.browser_record()
+    await runtime.stop_app()
+    second = await runtime.launch_app("data/reset")
+    await _answering(browser)
+    os.killpg(second, signal.SIGKILL)
+    for _ in range(int(WAIT_S / POLL_S)):
+        if any(entry["event"] == "exit" for entry in runtime.launches()):
+            break
+        await asyncio.sleep(POLL_S)
+    after_exit = await browser.browser_record()
+    browser.devtools.close()
+
+    assert [tab["id"] for tab in record["tabs"]] == ["start"]
+    assert after_exit["tabs"] == [] and [(tab["id"], tab["closed_by"]) for tab in after_exit["closed_tabs"]] == [
+        ("start", "stop"), ("start", "exit")]
+    assert [(entry["event"], entry.get("cause"), entry["pid"]) for entry in runtime.launches()] == [
+        ("launch", "boot", first), ("stop", None, first), ("launch", "data/reset", second), ("exit", None, second)]
+    assert runtime.launches()[-1]["signal"] == "SIGKILL"

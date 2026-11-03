@@ -1,0 +1,6 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "@local/agentenv-framework/desktop/desktop", "env_params": {"form": "disk"}},
+  {"id": "probe", "type": "env_outcome_verifier", "env_id": "@local/agentenv-framework/desktop/desktop", "file_artifact_id": "@local/agentenv-framework/desktop/check_probe", "verifier_id": "probe", "depends_on": ["env"]},
+  {"id": "reset", "type": "reset_env", "env_id": "@local/agentenv-framework/desktop/desktop", "depends_on": ["probe"], "fail_task_on_error": true},
+  {"id": "again", "type": "env_outcome_verifier", "env_id": "@local/agentenv-framework/desktop/desktop", "file_artifact_id": "@local/agentenv-framework/desktop/check_probe", "verifier_id": "again", "depends_on": ["reset"]}
+]

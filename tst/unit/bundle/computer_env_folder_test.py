@@ -107,18 +107,23 @@ def test_a_reused_computer_env_composes_what_it_has_left_on_the_runs_provider_an
                           on_progress=lambda write, line: told.append((write.id, line)))
     again = materialize(_plan(root), build_here=local_builds(_plan(root)), composing=Composing(provider),
                         on_progress=lambda write, line: told.append((write.id, line)))
-    env.update_metadata({**env.metadata, "computer": {"id": "c", "version": 1, "images": {"amd64": "a", "arm64": "b"}},
-                         "composed": {"container": {"amd64": {"status": "ready", "image": "a"},
-                                                    "arm64": {"status": "ready", "image": "b"}}}})
+    built_ = {form: {arch: {"status": "ready", "image": f"{form}-{arch}"} for arch in ("amd64", "arm64")}
+              for form in ("container", "disk")}
+    env.update_metadata({**env.metadata, "composed": built_, "computer": {
+        "id": "c", "version": 1, "images": {"amd64": "container-amd64", "arm64": "container-arm64"},
+        "disks": {"amd64": "disk-amd64", "arm64": "disk-arm64"}}})
     built = materialize(_plan(root), build_here=local_builds(_plan(root)), composing=Composing(provider))
 
     assert built.composing == () and checked.composing == again.composing == (env.id,) and all(item.reused for item in again.writes)
-    assert told == [(env.id, "would compose container/amd64, container/arm64"), (env.id, "composing")]
+    assert told == [(env.id, "would compose container/amd64, container/arm64, disk/amd64, disk/arm64"),
+                    (env.id, "composing")]
     assert composed == [(env.id, UBUNTU, REFERENCE, None),
-                        (env.id, UBUNTU, REFERENCE, provider, [("container", "amd64"), ("container", "arm64")])]
+                        (env.id, UBUNTU, REFERENCE, provider, [("container", "amd64"), ("container", "arm64"),
+                                                               ("disk", "amd64"), ("disk", "arm64")])]
 
 
 def test_a_dry_run_says_what_it_would_compose_of_a_reused_computer_env(tmp_path, composed):
+    """Only the forms its deploys on the run's sandbox boot: local Docker's, the containers."""
     root = _bundle(tmp_path / "desk")
     materialize(_plan(root), build_here=local_builds(_plan(root)))
     told = []
@@ -143,6 +148,17 @@ def test_the_env_alone_is_planned_whatever_the_bundles_tasks_would_deploy(tmp_pa
                          installed=lambda: (*installed_bundles(), *claims))
 
     assert f"{resolved.bundle.id_root}/desktop" in {write.id for write in plan.writes}
+
+
+def test_an_apps_settings_beside_it_are_stored_as_the_computer_envs_defaults_for_it(tmp_path, composed):
+    with_settings = WITH_APPS.replace('install = "build"', 'install = "build", settings = { signature = "-- Ada" }')
+    plan = _plan(_bundle(tmp_path / "desk", with_settings, APPS))
+
+    materialize(plan, build_here=local_builds(plan))
+
+    env = Env.get(f"{plan.bundle.bundle.id_root}/desktop")
+    assert env.app_settings == {"mail": {"signature": "-- Ada"}}
+    assert env.app_defaults() == {"notes": {}, "mail": {"signature": "-- Ada"}}
 
 
 def test_a_computer_env_folder_names_its_apps_in_order_each_written_before_it(tmp_path, composed):
@@ -193,7 +209,12 @@ def test_a_universe_loaded_into_a_computer_env_seeds_its_files_and_each_of_its_a
     (WITH_APPS.replace('["notes", ', '["notes", "notes", '), "apps: @local/~/desk/notes is listed twice"),
     (WITH_APPS.replace('install = "build"', 'mode = "build"'), 'apps[1].env: expected an id or { env = "<id>", version = '
      '<n> }, the version optional'),
-], ids=["no-computer", "no-driver", "unknown-key", "display", "boot", "twice", "key-beside"])
+    (WITH_APPS.replace('install = "build"', 'settings = "dark"'), "apps[1]: settings must be a table of the app's "
+     "setting values, not 'dark'"),
+    (WITH_APPS.replace('install = "build"', 'settings = { colour = "blue" }'), "apps.mail.settings.colour: "
+     "@local/~/desk/mail declares no setting 'colour'"),
+], ids=["no-computer", "no-driver", "unknown-key", "display", "boot", "twice", "key-beside", "settings-type",
+        "setting"])
 def test_a_computer_env_folder_that_declares_what_cant_compose_is_refused_naming_the_folder(tmp_path, composed, toml,
                                                                                             problem):
     with pytest.raises(BundleError) as refused:

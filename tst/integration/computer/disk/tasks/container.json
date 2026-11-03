@@ -1,0 +1,4 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "@local/agentenv-framework/desktop/desktop"},
+  {"id": "probe", "type": "env_outcome_verifier", "env_id": "@local/agentenv-framework/desktop/desktop", "file_artifact_id": "@local/agentenv-framework/desktop/check_probe", "verifier_id": "probe", "depends_on": ["env"]}
+]

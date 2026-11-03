@@ -661,8 +661,9 @@ class MailApp(ComputerAppEnvironment):
 
 - **`@computer_app`** names the platforms the app supports, as a driver names them, and the
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
-  (`environment_name`), the `computer` and `driver` it deploys alone on, and `build_settings`, its
-  build settings' values (`build_settings = { locale = "fr_FR" }`).
+  (`environment_name`), the `computer` and `driver` it deploys alone on, `build_settings`, its
+  build settings' values (`build_settings = { locale = "fr_FR" }`), and `[settings]`, defaults for its
+  `Settings` each deploy starts from.
 - **`@linux(...)`** is how a Linux computer installs it, `Linux`'s fields: `files`, a folder of the app's
   copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
   (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
@@ -698,9 +699,13 @@ class MailApp(ComputerAppEnvironment):
 - **Its data** is under the `paths` its OS's decorator names, relative to the session user's home,
   none inside another (`@linux(..., paths=["Mail", ".config/mail/accounts.json"])`), or what its own
   `@add_data`, `@get_data` and `@reset_data` hooks serve instead (below).
-- **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
-  in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
-  its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+- **`Settings`** is typed. Its values come from the app env's `[settings]`, then the computer env's
+  `settings` beside the app in its `apps` (`apps = [{ env = "mail", settings = { signature = "-- Ada" } }]`),
+  then the deploy's `env_params` `app_settings`, each over the one before by top-level field (a table
+  or list is replaced whole). Each is checked at put; a required one may be left to the deploy, which
+  checks them merged. A computer hands each app its values as one JSON value in `APP_SETTINGS_ENV`
+  (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads its own, by
+  `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
 - **`BuildSettings`** is typed too: values the app's env fixes in its computer's image, which only
   another image changes, so a deploy can't give one. The composer writes them to
   `.agentenv/build_settings.json` in the app's folder, and the base class reads them, over the
@@ -752,9 +757,15 @@ are the profile's template. The base class adds:
 - **Its settings**, `BrowserSettings`, which a subclass's `Settings` extends: `start_urls`, opened in
   tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`), headless
   the first from its command line and the rest over its pipe, since headless Chromium takes one; `window`,
-  1280 × 800, alone only; `locale`; and `time_zone`, set as `TZ` in its launch's `env`.
-- **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile,
-  `--remote-debugging-pipe`, `--no-first-run`, `--no-default-browser-check` and `--lang`. With
+  1280 × 800, alone only; `locale`; `time_zone`, set as `TZ` in its launch's `env`; `geolocation` and
+  `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`; and `dialogs`, who
+  answers a page's JavaScript dialogs: `agent` (the default), or agentenv, accepting (`accept`, a `prompt()`
+  with its default text) or dismissing (`dismiss`) each. Either way agentenv leaves a page that asks before
+  it's left (`beforeunload`), so none of its answers blocks a navigation.
+- **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile, its
+  HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
+  `--no-default-browser-check`, `--lang` and, when `/dev/shm` holds under 1 GiB (Docker gives 64 MiB),
+  `--disable-dev-shm-usage`, so it keeps its shared memory in files. With
   `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
   Alone it bypasses nothing, loopback included; in a computer it bypasses loopback (`127.0.0.1`,
   `[::1]`, `localhost`), so the apps beside it stay reachable while `*.localhost` names still go
@@ -762,6 +773,9 @@ are the profile's template. The base class adds:
   except on the open web (`AGENTENV_BROWSER_OPEN_WEB=1`), and refuses to start with no proxy.
   `declaration()` refuses a subclass whose command carries any of these, or `--remote-allow-origins`, or
   any other way to open a debugging port.
+- **Before each launch** it empties its cache, so no launch inherits another's, and writes the deploy's
+  prompt answers into its profile's `Default/Preferences` (`profile.default_content_setting_values`,
+  `2` to deny, left out to ask), which it reads as it starts.
 - **Alone, no desktop**: its launch matches and waits on no window, its server adds no launcher and,
   without `DISPLAY`, waits for no display, and its ready checks say when it's ready.
 - **`write_policies`**, an install step that writes agentenv's unattended-use policies (`POLICIES`)
@@ -772,9 +786,24 @@ are the profile's template. The base class adds:
   the result or raises `DevToolsError`, and `ConnectionError` with no browser connected. No port
   listens and no `DevToolsActivePort` is written, so nothing else in the computer can reach it over
   CDP. Since only the server that launched it holds the pipe, a server that restarts stops it and
-  launches it again. The ready check `devtools_answers` asks `Browser.getVersion` over the pipe.
-- **`browser/v1`** on its card, params only: `chromium` (its `version`), `clock: "real"` and, alone,
-  `window`.
+  launches it again, and a launch while it runs, from its menu launcher say, opens another window over
+  the pipe rather than a second copy, which would hand its window to the first and exit. The ready check
+  `devtools_answers` asks `Browser.getVersion` over the pipe.
+- **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
+  to every page with flattened sessions, telling each page it attached to as it opened, a popup say, to run, and keeps a
+  record, `since` its server started: open tabs in opened order, each with its URL and title as the browser has them
+  when the record is read (Chrome sends no event for a title), the one whose page has focus `active`; `closed_tabs`,
+  each as of its page's last load, with `closed_at` and
+  `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
+  ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
+  and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.
+  `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
+- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
+  `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
+  launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
+  and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.
+  Nothing relaunches a browser that exits on its own: in a computer the agent can, and alone it's an infra
+  failure, its ready check false.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 

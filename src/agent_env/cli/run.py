@@ -1,4 +1,5 @@
-"""``agent-env run``: run the tasks and evals of a bundle, a folder or one an installed package provides."""
+"""``agent-env run``: run the tasks and evals of a bundle, a folder, one an installed package provides or one in a
+Hugging Face Hub dataset."""
 
 from __future__ import annotations
 
@@ -12,8 +13,10 @@ import click
 
 from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun,
                               dry_run_bundle, run_bundle)
+from agent_env.bundle.hub import SOURCE_KEY, HubSource
 from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
                                         path_like, run_name)
+from agent_env.bundle.plan import NotInStore
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli._install_prompt import offer_to_install
 from agent_env.plugins._bundles import ALIAS_TABLES, installed_aliases
@@ -56,8 +59,14 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
         dry_run: bool, no_emulate: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
-    BUNDLE is a folder, or the name of a bundle an installed package provides (PACKAGE/NAME when several
-    packages provide that name). Without BUNDLE, it lists the installed bundles.
+    BUNDLE is a folder, the name of a bundle an installed package provides (PACKAGE/NAME when several
+    packages provide that name), or hf://ORG/REPO[@REVISION][/PATH], a bundle in a Hugging Face Hub dataset. Without
+    BUNDLE, it lists the installed bundles.
+
+    A Hub bundle is downloaded at the commit REVISION names (the main branch by default), PATH being its folder in the
+    repo, and runs as a folder does, with its ids under @hf/ORG/REPO; the run first prints the repo, commit and bundle.
+    The README's "Run a bundle from the Hub" says which bundle a run without PATH takes, where it's kept, and what the
+    dataset card can say it needs.
 
     A bundle's bundle.toml names the plugin packages it requires, and a run refuses to start without them; in a
     terminal it offers to install them with agent-env plugin add. A folder with no bundle.toml that uses plugin
@@ -86,9 +95,10 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                                    "--dry-run and --no-emulate need a BUNDLE to run")
         _list_installed()
         return
-    root, id_root = locate_bundle(bundle, _installed)
     verbose = ctx.find_root().params.get("verbose")
+    root = id_root = hub = None
     try:
+        root, id_root, hub = locate_bundle(bundle, _installed, on_progress=click.echo)
         if dry_run:
             click.echo(_DRY_RUN)
             _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent,
@@ -96,9 +106,12 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
             return
         result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
                             judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
-                            id_root=id_root, keep=keep, emulate=not no_emulate)
+                            id_root=id_root, keep=keep, emulate=not no_emulate, source=hub.source if hub else None)
     except BundleError as e:
-        _note_an_installed_namesake(e, bundle, root, id_root)
+        if root is not None:
+            _note_an_installed_namesake(e, bundle, root, id_root)
+        if isinstance(e, NotInStore) and hub is not None and hub.setup_note:
+            e.add_note(hub.setup_note)
         if isinstance(e, UnmetRequirements) and not dry_run:
             offer_to_install(e)
         raise
@@ -114,6 +127,7 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
         _report_teardown(result)
     if result.failed:
         raise SystemExit(1)
+
 
 
 def _note_an_installed_namesake(error: BundleError, text: str, root: Path, id_root: str | None) -> None:
@@ -183,6 +197,8 @@ def _count(entries, kind: BundleKind, noun: str) -> str:
 
 def _summarize(result: BundleRun, verbose: bool) -> None:
     click.echo()
+    if source := next((run.context.metadata.get(SOURCE_KEY) for run in result.runs), None):
+        click.echo(f"From {HubSource.from_metadata(source).describe()}")
     click.echo("Tasks:")
     for run in result.runs:
         click.echo(click.style(f"  {_described(result, run)}", fg=_COLORS[run.outcome]))

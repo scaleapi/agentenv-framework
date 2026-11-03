@@ -16,7 +16,9 @@ pytest.importorskip("PIL")
 from computer_fake import FakeDriver, http_client, rpc  # noqa: E402
 
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI  # noqa: E402
+from agentenv_protocol.computer import dataplane  # noqa: E402
 from agentenv_protocol.computer.dataplane import DEFAULT_DATA_PATHS  # noqa: E402
+from agentenv_protocol.transfers import TransferError  # noqa: E402
 
 
 @pytest.fixture
@@ -166,6 +168,47 @@ async def test_data_get_uploads_under_a_write_namespace_grant(home):
     assert upload.await_args.args[0] == "notes.md" and upload.await_args.args[1] == home / "notes.md"
     assert parts == [{"kind": "file", "file": {"uri": "notes.md", "mimeType": "text/markdown", "name": "notes.md"},
                       "metadata": {DATA_OBJECTS_EXTENSION_URI: {"path": "notes.md"}}}]
+
+
+@pytest.mark.asyncio
+async def test_data_get_leaves_out_a_file_removed_after_its_listed(home):
+    (home / "app").mkdir()
+    (home / "app" / "kept.txt").write_text("kept")
+    gone = home / "app" / "gone.pma"
+    gone.write_text("metrics")
+    listed = dataplane._data_files
+
+    def listed_then_removed(*args):
+        found = listed(*args)
+        gone.unlink()
+        return found
+
+    with patch("agentenv_protocol.computer.dataplane._data_files", side_effect=listed_then_removed):
+        async with http_client(FakeDriver()) as http:
+            parts = (await http.post("/agentenv", json=rpc("data/get", {"paths": ["app"]}))).json()["result"]["parts"]
+    assert [p["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for p in parts] == ["app/kept.txt"]
+
+
+@pytest.mark.asyncio
+async def test_data_get_under_a_grant_leaves_out_a_file_removed_before_its_uploaded(home):
+    (home / "kept.txt").write_text("kept")
+    grant = {"root_path": "runs/1", "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+             "max_objects": 5, "max_object_bytes": 100, "max_total_bytes": 500,
+             "write": {"kind": "http-post-policy", "url": "https://store.test/", "fields": {},
+                       "path_field": "key", "file_field": "file"}}
+
+    async def upload(relative, source):
+        if relative == "gone.txt":
+            raise TransferError("invalid_transfer", "The transfer source is unavailable.")
+
+    with patch("agentenv_protocol.computer.dataplane._data_files",
+               return_value=[("gone.txt", home / "gone.txt"), ("kept.txt", home / "kept.txt")]), \
+            patch("agentenv_protocol.computer.dataplane.NamespaceUploader") as uploader:
+        uploader.return_value.upload = upload
+        async with http_client(FakeDriver()) as http:
+            parts = (await http.post("/agentenv", json=rpc("data/get", {"write_namespace": grant, "paths": ["kept.txt"]}))
+                     ).json()["result"]["parts"]
+    assert [p["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for p in parts] == ["kept.txt"]
 
 
 @pytest.mark.asyncio

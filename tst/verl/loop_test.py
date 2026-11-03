@@ -17,7 +17,7 @@ from transformers import AutoTokenizer
 
 from agent_env.training.verl.prepare import LOOP, write_dataset
 from tst.unit.task.episode import run_test
-from tst.unit.training.nemo_gym_test import PLAYED
+from tst.unit.training._support import PLAYED
 from tst.util.capabilities import VERL, missing_capability_reason
 
 verl_loop = pytest.importorskip("agent_env.training.verl.loop", reason=missing_capability_reason(VERL),

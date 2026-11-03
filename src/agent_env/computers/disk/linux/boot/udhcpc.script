@@ -1,0 +1,11 @@
+#!/bin/busybox sh
+case "$1" in
+    bound|renew)
+        ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}" up
+        for router in ${router:-}; do route add default gw "$router" dev "$interface" && break; done
+        : > /resolv.conf
+        for server in ${dns:-}; do echo "nameserver $server" >> /resolv.conf; done
+        [ -n "${domain:-}" ] && echo "search $domain" >> /resolv.conf
+        ;;
+esac
+exit 0

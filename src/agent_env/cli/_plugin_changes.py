@@ -886,7 +886,7 @@ def _config_owner(path: Optional[Path], names: list[str], tools: Tools) -> Optio
 
 def _local_namespace_documents_exist(config) -> bool:
     store = config.get_document_store()
-    return isinstance(store, RoutingDocumentStore) and store.local.path.is_file()
+    return isinstance(store, RoutingDocumentStore) and any(local.path.is_file() for local in store.namespaces.values())
 
 
 def _stored_usage(installed: Snapshot, targets: list[str], *, check_remote: bool) -> list[str]:

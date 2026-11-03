@@ -1,0 +1,90 @@
+"""Gate 3: a computer env's build booted on a provider that runs it natively and probed at ``full``, by its compose or,
+for a build its compose couldn't boot, on its first deploy."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+from agentenv_protocol.computer.conformance import run_probe
+
+from agent_env.artifact.artifacts.file import FileArtifact
+from agent_env.env.env import Env
+from agent_env.env.envs.computer.utils import boot
+from agent_env.env.envs.computer.utils.composed import Record, failed, now
+from agent_env.store.ids import derive_id
+from agent_env.store.local_state import awaiting_lock
+
+if TYPE_CHECKING:
+    from agentenv_protocol.computer.conformance import ProbeReport
+
+    from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
+    from agent_env.env.envs.computer.env import ComputerEnv
+    from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+
+#: How long a probe's computer may run before its sandbox provider stops it.
+_PROBE_TTL_S = 1800
+#: How long the probe at full may take on a computer that booted: about ten seconds on a healthy one.
+_PROBE_TIMEOUT_S = 120
+
+
+async def probe_first_boot(env: ComputerEnv, form: str, arch: str, sandbox_provider: SandboxProvider) -> dict:
+    """Gate 3 for a build its compose couldn't probe, on its first boot on ``sandbox_provider``, which boots it
+    natively: the result, recorded. Deploys of one build at once, in this process or another, probe it once: each
+    waits for the one probing, then takes the result it recorded, a failure's too, which keeps the build's key."""
+    build = env.metadata["composed"][form][arch]
+    async with awaiting_lock(f"computer-first-boot:{env.stored_id}:{form}:{arch}:{build['image']}"):
+        recorded = (await asyncio.to_thread(Env.get, env.stored_id, env.version)).metadata["composed"][form][arch]
+        if recorded.get("key") == build["key"] and recorded["status"] != "unverified":
+            return recorded
+        result = await checked([sandbox_provider], env, env.driver, form, arch, recorded)
+        await asyncio.to_thread(Record(env).finished, form, arch, result)
+        return result
+
+
+async def checked(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str,
+                  result: dict) -> dict:
+    """The build of ``result`` booted on the first of ``links`` that boots it and probed at ``full``: ready, with the
+    driver's card, or failed at the probe; each with a summary of the probe and its report stored."""
+    try:
+        report, card, provider = await _probe(links, env, driver, result["image"], form)
+    except TimeoutError:
+        return failed(env, form, arch, "probe", result["key"], f"the probe didn't finish within {_PROBE_TIMEOUT_S} s")
+    except Exception as e:
+        return failed(env, form, arch, "probe", result["key"], f"it didn't boot: {e}")
+    stored = FileArtifact.put_bytes(derive_id(env.stored_id, f"probe_report_{form}_{arch}"), description=(
+        f"the {form}/{arch} probe of {env.stored_id} v{env.version}"), filename="probe.json",
+        content=report.model_dump_json(indent=1).encode(), content_type="application/json")
+    probe = {"level": report.level, "provider": provider, "passed": report.passed, "checks": report.counts(),
+             "extensions": report.extensions, "report": {"id": stored.id, "version": stored.version},
+             "probed_at": now()}
+    if not report.passed:
+        failing = "; ".join(f"{c.check} {c.name}: {c.detail}" for c in report.checks if c.status == "failed")
+        return {**result, "status": "failed", "stage": "probe", "reason": f"the probe failed: {failing}",
+                "failed_at": now(), "probe": probe}
+    return {**result, "status": "ready", "card": card, "probe": probe}
+
+
+async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, image: str,
+                 form: str = "container") -> tuple[ProbeReport, dict, str]:
+    """``image``, of ``form``, booted at the env's settings and its apps' defaults with a control token of its own, as
+    a deploy with no ``env_params`` boots it, on the first of ``links`` that boots it, probed at ``full`` with that
+    token within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name."""
+    token = boot.control_token()
+    environment = {**boot.settings_environment(env.computer, env.computer_values(), environment_name=env.environment_name),
+                   **boot.app_settings_environment(env.composed_apps(), env.app_defaults(), env.computer.os.type)}
+    problems = []
+    for link in links:
+        try:
+            booted = await boot.boot(link, image=image, port=driver.port, environment=environment, token=token,
+                                     network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
+                                     ready_s=boot.ready_timeout(env.composed_apps(), env.computer.os.type), form=form)
+        except Exception as e:
+            problems.append(f"{type(link).__name__}: {e}")
+            continue
+        try:
+            async with asyncio.timeout(_PROBE_TIMEOUT_S):
+                return await run_probe(booted.url, "full", token=token), booted.card, type(link).__name__
+        finally:
+            await boot.discard(booted.sandbox)
+    raise RuntimeError("; ".join(problems))

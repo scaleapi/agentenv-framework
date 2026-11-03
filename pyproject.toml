@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1417"
+version = "0.9.1425"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,6 +34,7 @@ dependencies = [
     "click>=8.0.0",
     "cryptography>=42",  # the local transfer CA
     "httpx>=0.27.0",
+    "huggingface_hub>=1.0",  # agent-env run hf:// resolves and downloads a Hub bundle; checked on 1.0, 1.33 and 2.4
     "jsonschema>=4.20",  # checks an app's settings against its Settings' schema before a deploy
     "litellm>=1.96.0,<1.97",
     "mcp>=1.25,<2",  # same floor as env/gateway/requirements.txt and agentenv-protocol; 2.0.0 removed mcp.server.fastmcp, imported at module scope by env/gateway
@@ -91,6 +92,16 @@ skyrl = [
     "agentenv-framework[openenv]",
     "pyarrow>=19",
     "transformers>=5",
+]
+# agent_env.training.miles: Miles' trainers on a bundle served as an OpenEnv env; installed into Miles' own environment,
+# whose Miles, SGLang and torch are the trainer's to pin. It needs nothing beyond the openenv extra.
+miles = [
+    "agentenv-framework[openenv]",
+]
+# agent_env.training.slime: slime's trainers on a bundle served as an OpenEnv env; installed into slime's own environment,
+# whose slime, SGLang and torch are the trainer's to pin. It needs nothing beyond the openenv extra.
+slime = [
+    "agentenv-framework[openenv]",
 ]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [

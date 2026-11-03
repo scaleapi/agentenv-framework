@@ -22,7 +22,7 @@ class Registry:
         self.manifests, self.blobs, self.tags, self.fetched = {}, {}, {}, []
 
     def serve(self, monkeypatch) -> "Registry":
-        for name in ("pin_digest", "read_manifest", "read_blob"):
+        for name in ("pin_digest", "read_manifest", "read_blob", "read_blob_start"):
             monkeypatch.setattr(image_contents, name, getattr(self, name))
         return self
 
@@ -62,6 +62,10 @@ class Registry:
     def read_blob(self, ref, digest, auth, path):
         self.fetched.append(digest)
         path.write_bytes(self.blobs[digest])
+
+    def read_blob_start(self, ref, digest, auth, size):
+        self.fetched.append(digest)
+        return self.blobs[digest][:size]
 
 
 def layer(files: dict[str, bytes | str]) -> bytes:
