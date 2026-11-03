@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notes</title>
+  </head>
+  <body>
+    <header class="bar">
+      <h1>Notes</h1>
+      <div class="who">
+        <label>Signed in as
+          <select id="user" aria-label="Signed-in user"></select>
+        </label>
+        <time id="universe-now" title="The universe's time, from X-Universe-Now"></time>
+      </div>
+    </header>
+    <main>
+      <form id="new-note" class="card">
+        <input id="new-title" name="title" placeholder="New note title" autocomplete="off" required />
+        <textarea id="new-body" name="body" placeholder="Details (optional)" rows="2"></textarea>
+        <button type="submit">Add note</button>
+      </form>
+      <nav class="filters" aria-label="Filter notes">
+        <button data-filter="all" class="active">All</button>
+        <button data-filter="open">Open</button>
+        <button data-filter="done">Done</button>
+      </nav>
+      <p id="error" role="alert" hidden></p>
+      <ul id="notes"></ul>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

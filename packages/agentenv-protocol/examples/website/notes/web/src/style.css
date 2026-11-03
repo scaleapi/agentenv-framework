@@ -1,0 +1,57 @@
+:root {
+  --bg: #f6f6f3;
+  --card: #ffffff;
+  --text: #1d1d1b;
+  --muted: #6b6b66;
+  --line: #deded8;
+  --accent: #2f5bd3;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+.bar h1 { margin: 0; font-size: 1.25rem; }
+.who { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; color: var(--muted); font-size: 0.9rem; }
+.who time { font-variant-numeric: tabular-nums; }
+
+main { max-width: 720px; margin: 0 auto; padding: 16px; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+
+input, textarea, select, button { font: inherit; color: inherit; }
+input, textarea { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: transparent; }
+textarea { resize: vertical; }
+button { border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; background: var(--card); cursor: pointer; }
+button[type="submit"], .filters .active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+#new-note { display: grid; gap: 8px; }
+#new-note button { justify-self: end; }
+
+.filters { display: flex; gap: 8px; margin: 16px 0; }
+
+#error { color: #b3261e; margin: 0 0 12px; }
+
+#notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.note { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: start; }
+.note .text { display: grid; gap: 6px; min-width: 0; }
+.note .title { font-weight: 600; border-color: transparent; }
+.note .body { border-color: transparent; color: var(--muted); }
+.note .title:focus, .note .body:focus { border-color: var(--line); }
+.note small { color: var(--muted); }
+.note.done .title { text-decoration: line-through; color: var(--muted); }
+.note input[type="checkbox"] { width: auto; margin-top: 10px; }
+.delete { color: #b3261e; }
+.empty { color: var(--muted); text-align: center; padding: 24px; }
