@@ -100,16 +100,10 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                                    "--dry-run and --no-emulate need a BUNDLE to run")
         _list_installed()
         return
+    verbose = ctx.find_root().params.get("verbose")
+    root = id_root = hub = None
     try:
         root, id_root, hub = locate_bundle(bundle, _installed, on_progress=click.echo)
-    except UnmetRequirements as e:
-        if not dry_run:
-            offer_to_install(e)
-        raise
-    verbose = ctx.find_root().params.get("verbose")
-    try:
-        if hub is not None:
-            hub.check_plugins()
         if dry_run:
             click.echo(_DRY_RUN)
             _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent,
@@ -119,8 +113,9 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                             judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
                             id_root=id_root, keep=keep, emulate=not no_emulate, source=hub.source if hub else None)
     except BundleError as e:
-        _note_an_installed_namesake(e, bundle, root, id_root)
-        if isinstance(e, (UnmetRequirements, NotInStore)) and hub is not None and hub.setup_note:
+        if root is not None:
+            _note_an_installed_namesake(e, bundle, root, id_root)
+        if isinstance(e, NotInStore) and hub is not None and hub.setup_note:
             e.add_note(hub.setup_note)
         if isinstance(e, UnmetRequirements) and not dry_run:
             offer_to_install(e)

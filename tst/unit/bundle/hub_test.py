@@ -14,7 +14,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 
 from agent_env.bundle import BundleError
 from agent_env.bundle import hub as hub_module
-from agent_env.bundle.hub import HubReference, HubSource, fetch_bundle, parse_reference
+from agent_env.bundle.hub import HubBundle, HubReference, HubSource, _select, fetch_bundle, parse_reference
 from agent_env.bundle.ledger import LEDGER_COLLECTION
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli import cli
@@ -25,6 +25,7 @@ from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing
 from agent_env.task.store import task_instances
 from agent_env.task_step.task_step import TaskStep
+from tst.unit.bundle._support import fake_plugins
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 TASK = json.dumps([{"id": "check", "type": "noop_hub_test"}])
@@ -349,6 +350,41 @@ def test_an_openenv_server_of_a_hub_bundle_needs_the_plugins_its_card_names_befo
         build_app("hf://me/ds")
 
     assert hub.calls == ["repo_info", "list_repo_files", "hf_hub_download README.md"]
+
+
+def test_a_cached_commit_is_refused_while_a_plugin_its_card_names_is_missing_by_the_cli_and_openenv_alike(
+        hub, monkeypatch, local_stores, quiet_logs):
+    hub.layout({"bundles/hello/tasks/t.json": TASK})
+    hub.card({"bundles": {"hello": {"plugins": ["agentenv-gone>=1"], "setup": "agent-env demo setup"}}})
+    fake_plugins(monkeypatch, versions={"agentenv-gone": "1.0"})
+    fetch_bundle(f"hf://me/ds@{SHA}")
+    fake_plugins(monkeypatch)
+    hub.calls.clear()
+
+    refused = CliRunner().invoke(cli, ["run", f"hf://me/ds@{SHA}"])
+    with pytest.raises(UnmetRequirements) as served:
+        build_app(f"hf://me/ds@{SHA}")
+
+    assert refused.exit_code == 1
+    assert ("plugin add 'agentenv-gone>=1'\nme/ds's card sets this bundle up with: agent-env demo setup\n"
+            in refused.output)
+    assert refused.output.count("sets this bundle up with") == 1
+    assert served.value.__notes__ == ["me/ds's card sets this bundle up with: agent-env demo setup"]
+    assert hub.calls == []
+
+
+def test_selecting_a_bundle_from_a_commits_files_and_card_reads_nothing(tmp_path):
+    files = ["README.md", "tasks/train.parquet", "bundles/a/bundle.toml", "bundles/a/tasks/t.json",
+             "bundles/b/tasks/t.json"]
+    card = {"default": "b", "bundles": {"a": {"plugins": ["agentenv-a"]}, "b": {"plugins": ["agentenv-b"],
+                                                                                "setup": "set up b"}}}
+
+    default = _select(parse_reference("hf://me/ds@v1"), SHA, files, card, tmp_path)
+    declared = _select(parse_reference("hf://me/ds/bundles/a"), SHA, files, card, tmp_path)
+
+    assert default == HubBundle(tmp_path / "bundles/b", "@hf/me/ds/b", HubSource("me/ds", "v1", SHA, "bundles/b"),
+                                plugins=("agentenv-b",), setup="set up b")
+    assert (declared.id_root, declared.plugins, declared.setup) == ("@hf/me/ds/a", (), None)
 
 
 def test_the_cards_setup_command_is_shown_only_when_setting_up_could_fix_the_run(hub, local_stores, quiet_logs):

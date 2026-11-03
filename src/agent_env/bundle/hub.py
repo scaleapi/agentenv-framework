@@ -91,13 +91,6 @@ class HubBundle:
         """What a run refused for something setting the bundle up provides ends with: the card's command for it."""
         return f"{self.source.repo}'s card sets this bundle up with: {self.setup}" if self.setup else None
 
-    def check_plugins(self) -> None:
-        """Refuse the run when a plugin the card names isn't installed, naming the command that installs it. Raises
-        UnmetRequirements."""
-        problems, unmet = unmet_problems(self.plugins, f"{self.source.repo}'s card")
-        if problems:
-            raise UnmetRequirements(problems, unmet) if unmet else BundleError(problems)
-
 
 @dataclass
 class _Commit:
@@ -163,36 +156,54 @@ def _fetch(reference: HubReference, api: HfApi, say: Callable[[str], None]) -> H
         reference.repo, repo_type="dataset", revision=reference.revision).sha
     folder = cache_root() / "hf" / reference.repo / sha
     with holding_locks([f"{SCHEME}{reference.repo}@{sha}"]):
-        commit = _Commit.read(folder)
-        if commit is None:
-            commit = _Commit(api.list_repo_files(reference.repo, repo_type="dataset", revision=sha))
-            if CARD in commit.files:
-                api.hf_hub_download(reference.repo, CARD, repo_type="dataset", revision=sha, local_dir=folder)
-            commit.save(folder)
-        card = _card(folder)
-        path = _pick(reference, sha, commit.files, card)
-        id_root = _id_root(reference, path)
-        plugins, setup = _needs(reference.repo, card, _bundle_name(reference, path))
-        source = HubSource(reference.repo, reference.revision or "main", sha, path)
-        declared = _within(path, BUNDLE_TOML) in commit.files
-        hub = HubBundle(folder / path, id_root, source, plugins=() if declared else plugins, setup=setup)
-        say(source.describe())
-        if path not in commit.downloaded:
-            if declared:
-                api.hf_hub_download(reference.repo, _within(path, BUNDLE_TOML), repo_type="dataset", revision=sha,
-                                    local_dir=folder)
-            _refuse_unmet(hub, declared)
-            api.snapshot_download(reference.repo, repo_type="dataset", revision=sha, local_dir=folder,
-                                  allow_patterns=_patterns(path))
-            commit.downloaded.append(path)
-            commit.save(folder)
+        commit, card = _commit(api, reference, sha, folder)
+        hub = _select(reference, sha, commit.files, card, folder)
+        say(hub.source.describe())
+        _download(api, hub, commit, folder)
     return hub
 
 
-def _refuse_unmet(hub: HubBundle, declared: bool) -> None:
-    """Refuse the run before the bundle is downloaded when what it requires isn't installed: its bundle.toml's
-    requires, by a folder's rules, once that file alone is here, else the plugins the card names. The refusal ends
-    with the card's setup command. Raises UnmetRequirements, or BundleError for a bundle.toml a folder's run refuses."""
+def _commit(api: HfApi, reference: HubReference, sha: str, folder: Path) -> tuple[_Commit, dict[str, Any]]:
+    """What this machine holds of the commit, and its card's ``agentenv`` table: listed, with the card downloaded,
+    the first time."""
+    commit = _Commit.read(folder)
+    if commit is None:
+        commit = _Commit(api.list_repo_files(reference.repo, repo_type="dataset", revision=sha))
+        if CARD in commit.files:
+            api.hf_hub_download(reference.repo, CARD, repo_type="dataset", revision=sha, local_dir=folder)
+        commit.save(folder)
+    return commit, _card(folder)
+
+
+def _select(reference: HubReference, sha: str, files: Sequence[str], card: Mapping[str, Any], folder: Path) -> HubBundle:
+    """The bundle ``reference`` names in the commit of ``files``, kept under ``folder``: picked, with its id root,
+    where it came from and what the card says it needs."""
+    path = _pick(reference, sha, files, card)
+    plugins, setup = _needs(reference.repo, card, _bundle_name(reference, path))
+    source = HubSource(reference.repo, reference.revision or "main", sha, path)
+    declared = _within(path, BUNDLE_TOML) in files
+    return HubBundle(folder / path, _id_root(reference, path), source, plugins=() if declared else plugins, setup=setup)
+
+
+def _download(api: HfApi, hub: HubBundle, commit: _Commit, folder: Path) -> None:
+    """Check what the bundle requires, its bundle.toml downloaded alone first when it has one, then download the
+    bundle unless the commit's record has it."""
+    path = hub.source.path
+    declared, downloaded = _within(path, BUNDLE_TOML) in commit.files, path in commit.downloaded
+    if declared and not downloaded:
+        api.hf_hub_download(hub.source.repo, _within(path, BUNDLE_TOML), repo_type="dataset", revision=hub.source.sha,
+                            local_dir=folder)
+    _check_requirements(hub, declared)
+    if not downloaded:
+        api.snapshot_download(hub.source.repo, repo_type="dataset", revision=hub.source.sha, local_dir=folder,
+                              allow_patterns=_patterns(path))
+        commit.downloaded.append(path)
+        commit.save(folder)
+
+
+def _check_requirements(hub: HubBundle, declared: bool) -> None:
+    """Refuse a bundle whose bundle.toml (by a folder's rules) or, without one, card names a plugin not installed,
+    the refusal ending with the card's setup command. Raises UnmetRequirements, or BundleError."""
     if declared:
         requires, refused = read_requires(hub.root / BUNDLE_TOML)
         if refused:
