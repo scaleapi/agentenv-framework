@@ -24,6 +24,7 @@ from agent_env.config.runtime import Config
 from agent_env.env.envs.computer.utils import boot, composer, probing
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.published_images import DISK
+from agent_env import providers
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
@@ -180,12 +181,26 @@ def test_what_a_run_composes_is_what_each_link_of_its_sandbox_then_boots(disk_ba
     composed is one a link picks: the two share ``boot.first_native``."""
     env = _put(disk_base, driver, compose=False)
     links = _SANDBOXES[sandbox]
-    composed = composer.pending(env, forms=Composing.for_run(SimpleNamespace(links=tuple(links))).forms(env))
+    sandbox = SimpleNamespace(links=tuple(links))
+    composed = composer.pending(env, forms=Composing.for_run(sandbox).forms(env, sandbox))
     with_containers = composer._with_containers(env, composed)
 
     picked = {boot.first_native(link, with_containers) for link in links}
 
     assert None not in picked and {form for form, _ in picked} == {form for form, _ in composed}
+
+
+def test_a_runs_compose_looks_up_the_default_sandbox_once_and_only_when_a_computer_env_needs_it(disk_base, driver,
+                                                                                                docker, monkeypatch):
+    """So a run of a bundle with no computer env never builds a default provider it may not load."""
+    looked_up = []
+    monkeypatch.setattr(providers, "get_env_sandbox_provider", lambda: looked_up.append(1) or (
+        local_sandbox.LocalSandboxProvider()))
+    composing = Composing.for_run(None)
+    assert looked_up == []
+    env = _put(disk_base, driver, compose=False)
+
+    assert composing.forms(env, composing.provider()) == ["container"] and looked_up == [1]
 
 
 def test_a_compose_of_disks_alone_builds_the_containers_they_are_made_of_rather_than_skip_them(disk_base, driver,
@@ -206,7 +221,8 @@ def test_a_put_composes_every_form_and_a_run_only_those_its_sandboxs_deploys_boo
 
     assert set(put.metadata["composed"]) == {"container", "disk"} and put.computer_artifact().forms.disk is not None
     assert set(run.metadata["composed"]) == {"container"} and run.computer_artifact().forms.disk is None
-    assert composer.pending(run, forms=Composing.for_run(None).forms(run)) == [] and composer.current(run)
+    composing = Composing.for_run(None)
+    assert composer.pending(run, forms=composing.forms(run, composing.provider())) == [] and composer.current(run)
 
 
 @pytest.fixture

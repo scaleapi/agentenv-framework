@@ -321,7 +321,8 @@ def _compose_reused(write: Write, version: int, composing: Composing, dry_run: b
     env = Env.get(write.id, version)
     if not isinstance(env, ComputerEnv) or env.computer is None:
         return False
-    pairs = composer.pending(env, composing.sandbox_provider, composing.forms(env))
+    provider = composing.provider()
+    pairs = composer.pending(env, provider, composing.forms(env, provider))
     if not pairs and composer.current(env):
         return False
     if not dry_run:

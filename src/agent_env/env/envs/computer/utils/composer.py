@@ -26,7 +26,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from agentenv_protocol.computer import apps as installed_apps
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
@@ -81,25 +81,29 @@ _SHOWN = 10
 @dataclass(frozen=True)
 class Composing:
     """How a put composes a computer env: on ``sandbox_provider``, by default the env's; emulating an arch no link runs
-    natively unless ``emulate`` is False; each pair's stages told to ``on_progress``; every form of the base, or for a
-    run (``for_run``) those its deploys on ``deploys_on`` boot."""
+    natively unless ``emulate`` is False; each pair's stages told to ``on_progress``; the forms of the base, or for a
+    run (``for_run``) those its deploys on the provider boot (``forms_of``)."""
 
     sandbox_provider: SandboxProvider | None = None
     emulate: bool = True
     on_progress: Callable[[str], None] | None = None
-    deploys_on: SandboxProvider | None = None
+    forms_of: Literal["base", "deploys"] = "base"
 
     @classmethod
     def for_run(cls, sandbox_provider: SandboxProvider | None, emulate: bool = True) -> Composing:
         """How a run composes: on ``sandbox_provider``, by default the env's, the forms its deploys there boot."""
+        return cls(sandbox_provider, emulate, forms_of="deploys")
+
+    def provider(self) -> SandboxProvider:
+        """``sandbox_provider``, else the env's default, looked up by each compose that needs it, once: a run with no
+        computer env never builds a default it may not load."""
         from agent_env.providers import get_env_sandbox_provider
 
-        provider = sandbox_provider or get_env_sandbox_provider()
-        return cls(provider, emulate, deploys_on=provider)
+        return self.sandbox_provider or get_env_sandbox_provider()
 
-    def forms(self, env: ComputerEnv) -> list[str]:
-        """The forms of ``env``'s base this compose builds."""
-        return gate.forms(env.computer) if self.deploys_on is None else booted_forms(env, self.deploys_on)
+    def forms(self, env: ComputerEnv, provider: SandboxProvider) -> list[str]:
+        """The forms of ``env``'s base this compose on ``provider``, its ``provider()``, builds."""
+        return gate.forms(env.computer) if self.forms_of == "base" else booted_forms(env, provider)
 
 
 def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, composing: Composing = Composing()) -> None:
@@ -107,13 +111,10 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, compos
     each disk among them is made from unless it's built, in parallel, as ``composing`` says, and probe each one its
     provider runs natively (gate 3), recording each as it starts and finishes, then write the env's computer over every
     pair built so far. Each pair's stages and how it ended go to the log too (``_Progress``)."""
-    from agent_env.providers import get_env_sandbox_provider
-
-    base, driver = env.computer, env.driver
-    provider = composing.sandbox_provider or get_env_sandbox_provider()
+    base, driver, provider = env.computer, env.driver, composing.provider()
     builds = builder.Builds(provider, env.stored_id, REPOSITORY, composing.emulate)
     pairs = _with_containers(env, pairs if pairs is not None else [
-        (form, arch) for form in composing.forms(env) for arch in env.composed_arches()])
+        (form, arch) for form in composing.forms(env, provider) for arch in env.composed_arches()])
     record = Record(env)
     record.started(pairs)
     with _Progress(env, composing.on_progress) as progress, ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
