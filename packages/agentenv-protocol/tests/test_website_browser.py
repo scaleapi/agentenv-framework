@@ -478,7 +478,8 @@ async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_
     await control.attach()
 
     assert [tab["id"] for tab in record["tabs"]] == ["a"] and record["tabs"][0]["title"] == "Slack"
-    assert [(tab["id"], tab["closed_by"]) for tab in record["closed_tabs"]] == [("b", "browser"), ("c", "agentenv")]
+    assert [(tab["id"], tab["closed_by"]) for tab in record["closed_tabs"]] == [("b", "unknown"), ("c", "agentenv")]
+    assert record["since"] == control.since
     assert session == "s-hidden" and ("Target.closeTarget", {"targetId": "hidden"}, None) in devtools.calls
     assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs][-1] == ("a", "stop")
     assert [call[0] for call in devtools.calls[:3]] == ["Target.setDiscoverTargets", "Target.setAutoAttach",
@@ -486,19 +487,20 @@ async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dialogs, sent, answer, by", [
-    ("accept", {"accept": True, "promptText": "yes"}, "accepted", "agentenv"),
-    ("dismiss", {"accept": False, "promptText": "yes"}, "dismissed", "agentenv"),
-    ("agent", None, "dismissed", "agent"),
-])
+@pytest.mark.parametrize("dialogs, kind, sent, answer, by", [
+    ("accept", "prompt", {"accept": True, "promptText": "yes"}, "accepted", "agentenv"),
+    ("dismiss", "prompt", {"accept": False, "promptText": "yes"}, "dismissed", "agentenv"),
+    ("dismiss", "beforeunload", {"accept": True, "promptText": "yes"}, "accepted", "agentenv"),
+    ("agent", "prompt", None, "dismissed", "agent"),
+], ids=["accept", "dismiss", "dismiss-leaves", "agent"])
 async def test_its_control_answers_a_dialog_on_its_pages_session_as_its_setting_says_and_records_who_did(
-        tmp_path, dialogs, sent, answer, by):
+        tmp_path, dialogs, kind, sent, answer, by):
     devtools = StubDevTools()
     control = BrowserControl(devtools, tmp_path, dialogs)
     devtools.send("Target.targetCreated", _page("a"))
     devtools.send("Target.attachedToTarget", {"sessionId": "s-a", **_page("a")})
 
-    devtools.send("Page.javascriptDialogOpening", {"type": "prompt", "message": "Sure?", "url": "https://a.test/",
+    devtools.send("Page.javascriptDialogOpening", {"type": kind, "message": "Sure?", "url": "https://a.test/",
                                                    "defaultPrompt": "yes"}, "s-a")
     await asyncio.sleep(0)
     devtools.send("Page.javascriptDialogClosed", {"result": answer == "accepted"}, "s-a")
@@ -509,7 +511,7 @@ async def test_its_control_answers_a_dialog_on_its_pages_session_as_its_setting_
     assert handled == ([(sent, "s-a")] if sent else [])
     (dialog,) = control.dialog_log
     assert (dialog["tab"], dialog["type"], dialog["message"], dialog["answer"], dialog["by"]) == (
-        "a", "prompt", "Sure?", answer, by)
+        "a", kind, "Sure?", answer, by)
 
 
 @pytest.mark.asyncio
@@ -577,3 +579,4 @@ async def test_its_connection_hears_events_its_server_logs_each_launch_and_an_ex
         ("start", "stop"), ("start", "exit")]
     assert [(entry["event"], entry.get("cause"), entry["pid"]) for entry in runtime.launches()] == [
         ("launch", "boot", first), ("stop", None, first), ("launch", "data/reset", second), ("exit", None, second)]
+    assert runtime.launches()[-1]["signal"] == "SIGKILL"

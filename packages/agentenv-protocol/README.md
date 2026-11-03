@@ -759,8 +759,9 @@ are the profile's template. The base class adds:
   the first from its command line and the rest over its pipe, since headless Chromium takes one; `window`,
   1280 × 800, alone only; `locale`; `time_zone`, set as `TZ` in its launch's `env`; `geolocation` and
   `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`; and `dialogs`, who
-  answers a page's JavaScript dialogs, `beforeunload` included: `agent` (the default), or agentenv,
-  accepting (`accept`, a `prompt()` with its default text) or dismissing (`dismiss`) each.
+  answers a page's JavaScript dialogs: `agent` (the default), or agentenv, accepting (`accept`, a `prompt()`
+  with its default text) or dismissing (`dismiss`) each. Either way agentenv leaves a page that asks before
+  it's left (`beforeunload`), so none of its answers blocks a navigation.
 - **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile, its
   HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
   `--no-default-browser-check`, `--lang` and, when `/dev/shm` holds under 1 GiB (Docker gives 64 MiB),
@@ -789,16 +790,18 @@ are the profile's template. The base class adds:
   the pipe rather than a second copy, which would hand its window to the first and exit. The ready check
   `devtools_answers` asks `Browser.getVersion` over the pipe.
 - **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
-  to every page with flattened sessions and keeps a record: open tabs in opened order, the one whose page
-  has focus `active`; `closed_tabs`, each with `closed_at` and `closed_by` (`agentenv`, over this
-  connection; `browser`, anything else; `exit` or `stop`, when the browser ended on its own or its server
-  stopped it); `downloads`, into `~/Downloads`, each with its state
+  to every page with flattened sessions and keeps a record, `since` its server started: open tabs in
+  opened order, the one whose page has focus `active`; `closed_tabs`, each with `closed_at` and
+  `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
+  ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
   and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.
   `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
 - **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
   `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
   launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
-  and each exit it didn't, since the computer booted.
+  and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.
+  Nothing relaunches a browser that exits on its own: in a computer the agent can, and alone it's an infra
+  failure, its ready check false.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 

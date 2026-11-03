@@ -17,6 +17,8 @@ POLL_S = 0.2
 WITH_FDS = Path(__file__).with_name("_with_fds.py")
 #: The processes launched into the session, kept until they exit so each is reaped.
 _running: set[asyncio.Task] = set()
+#: Each launched process's reaping, by pid, until its exit is asked for: its return code, negative for a signal.
+_exits: dict[int, asyncio.Future] = {}
 
 
 async def wait_until_up() -> None:
@@ -38,7 +40,22 @@ async def launch(argv: list[str], cwd: Path, env: dict[str, str], fds: Optional[
     reaped = asyncio.ensure_future(process.wait())
     _running.add(reaped)
     reaped.add_done_callback(_running.discard)
+    _exits[process.pid] = reaped
     return process.pid
+
+
+async def returncode(pid: int, timeout_s: float) -> Optional[int]:
+    """The return code the process ``launch`` started as ``pid`` exited with, negative for the signal that ended it,
+    once it's reaped within ``timeout_s``; None for one ``launch`` didn't start or that hasn't exited."""
+    reaped = _exits.get(pid)
+    if reaped is None:
+        return None
+    try:
+        code = await asyncio.wait_for(asyncio.shield(reaped), timeout_s)
+    except TimeoutError:
+        return None
+    _exits.pop(pid, None)
+    return code
 
 
 async def stop(pid: int, timeout_s: float) -> None:

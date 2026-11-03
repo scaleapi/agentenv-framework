@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 import shlex
+import signal
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -31,6 +32,8 @@ PID = Path(".agentenv/app.pid")
 #: Where an app's server logs each launch, stop and exit of the app, beside its pid; a boot starts the app's folder as
 #: its image has it, so the log is the boot's.
 LAUNCHES = Path(".agentenv/launches")
+#: How long an app that ended on its own may take to be reaped, for its exit code.
+EXIT_WAIT_S = 5.0
 #: How long a stopped app may take to exit before it's killed.
 STOP_TIMEOUT_S = 10.0
 
@@ -64,6 +67,7 @@ class AppRuntime:
         self.launch_fds = launch_fds
         self.relaunch_on_start = relaunch_on_start
         self.launch_running = launch_running
+        self.exits: set[asyncio.Future] = set()
         self.started = time.time()
         self.launch_failed: Optional[str] = None
         self.checking: dict[str, asyncio.Future] = {}
@@ -126,14 +130,21 @@ class AppRuntime:
         return True
 
     def exited(self) -> bool:
-        """Log that the app this server launched last ended on its own, unless the server stopped it; whether it
-        did."""
+        """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
+        it, unless the server stopped it; whether it did."""
         if (pid := _recorded_pid()) is None:
             return False
-        self.log("exit", pid)
+        noting = asyncio.ensure_future(self._log_exit(pid))
+        self.exits.add(noting)
+        noting.add_done_callback(self.exits.discard)
         return True
 
-    def log(self, event: str, pid: int, **fields: str) -> None:
+    async def _log_exit(self, pid: int) -> None:
+        code = await session.returncode(pid, EXIT_WAIT_S)
+        self.log("exit", pid, **({} if code is None else
+                                 {"signal": signal.Signals(-code).name} if code < 0 else {"code": code}))
+
+    def log(self, event: str, pid: int, **fields: Any) -> None:
         """Append ``event`` for the app's ``pid`` to its launch log, which outlives its server for the boot."""
         entry = {"at": datetime.now(timezone.utc).isoformat(), "event": event, "pid": pid, **fields}
         _log().parent.mkdir(parents=True, exist_ok=True)

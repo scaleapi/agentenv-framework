@@ -39,9 +39,9 @@ OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins
 SHM_MIN_BYTES = 1 << 30
 #: Chromium's content setting that denies a permission without a prompt.
 BLOCK = 2
-#: Who closed a tab: agentenv over its own connection, or anything else in the browser; or how its browser ended, on
-#: its own or stopped by its server.
-AGENTENV, BROWSER_CLOSED, EXIT, STOP = "agentenv", "browser", "exit", "stop"
+#: Who closed a tab: agentenv over its own connection, or someone it can't tell; or how its browser ended, on its own
+#: or stopped by its server.
+AGENTENV, UNKNOWN, EXIT, STOP = "agentenv", "unknown", "exit", "stop"
 #: How long the active tab's check waits on each page.
 ACTIVE_CHECK_TIMEOUT_S = 2.0
 #: How much of a download each read hashes.
@@ -181,11 +181,15 @@ def _heard(callback: Callable, *args: Any) -> None:
 
 class BrowserControl:
     """agentenv's control of a browser over its pipe: at each launch it attaches to every page with flattened sessions
-    and keeps a record of the browser, its open tabs in opened order, those closed and who closed them, its downloads
-    with their size and sha256, and its JavaScript dialogs, which it answers when ``dialogs`` says to."""
+    and keeps a record of the browser since this server started, its open tabs in opened order, those closed and who
+    closed them, its downloads with their size and sha256, and its JavaScript dialogs, which it answers when
+    ``dialogs`` says to: always leaving a page that asks before it's left, so no answer of agentenv's blocks a
+    navigation."""
 
     def __init__(self, devtools: DevToolsPipe, downloads: Path, dialogs: str) -> None:
         self.devtools, self.downloads_dir, self.dialogs = devtools, downloads, dialogs
+        #: When this record starts: a server that restarts starts another.
+        self.since = _now()
         self.tabs: dict[str, dict] = {}
         self.closed_tabs: list[dict] = []
         self.downloads: dict[str, dict] = {}
@@ -255,10 +259,10 @@ class BrowserControl:
         return visible
 
     async def record(self) -> dict:
-        """The record: open ``tabs``, each with whether it's ``active``, ``closed_tabs``, ``downloads`` and
-        ``dialogs``."""
+        """The record ``since`` it started: open ``tabs``, each with whether it's ``active``, ``closed_tabs``,
+        ``downloads`` and ``dialogs``."""
         active = await self.active_tab()
-        return {"tabs": [{**tab, "active": tab["id"] == active} for tab in self.tabs.values()],
+        return {"since": self.since, "tabs": [{**tab, "active": tab["id"] == active} for tab in self.tabs.values()],
                 "closed_tabs": list(self.closed_tabs), "downloads": list(self.downloads.values()),
                 "dialogs": list(self.dialog_log)}
 
@@ -282,7 +286,7 @@ class BrowserControl:
         target = params["targetId"]
         if (tab := self.tabs.pop(target, None)) is not None:
             self.closed_tabs.append({**tab, "closed_at": _now(),
-                                     "closed_by": AGENTENV if target in self._closing else BROWSER_CLOSED})
+                                     "closed_by": AGENTENV if target in self._closing else UNKNOWN})
         self._closing.discard(target)
         self._hidden.discard(target)
 
@@ -301,8 +305,10 @@ class BrowserControl:
         self._open_dialogs[session] = dialog
         if self.dialogs != AGENT:
             self._answering.add(session)
+            leave = params.get("type") == "beforeunload"
             self._spawn(self.devtools.call("Page.handleJavaScriptDialog", {
-                "accept": self.dialogs == "accept", "promptText": params.get("defaultPrompt", "")}, session_id=session))
+                "accept": leave or self.dialogs == "accept", "promptText": params.get("defaultPrompt", "")},
+                session_id=session))
 
     def _on_Page_javascriptDialogClosed(self, params: dict, session: Optional[str]) -> None:
         if (dialog := self._open_dialogs.pop(session, None)) is not None:
