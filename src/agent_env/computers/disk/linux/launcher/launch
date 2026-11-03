@@ -99,13 +99,20 @@ boot() {
 while true; do
     boot
     qemu=$(cat "$control/qemu.pid")
+    while kill -0 "$qemu" 2>/dev/null; do
+        for front in "${fronts[@]}"; do
+            if ! kill -0 "$front" 2>/dev/null; then
+                status=0
+                wait "$front" || status=$?
+                echo "launch: the proxy in front of a forwarded port exited ($status), so the computer is stopped" >&2
+                kill "$qemu" 2>/dev/null || true
+                exit 1
+            fi
+        done
+        sleep 0.2
+    done
     status=0
-    wait -n -p ended "$qemu" "${fronts[@]}" || status=$?
-    if [ "$ended" != "$qemu" ]; then
-        echo "launch: the proxy in front of a forwarded port exited ($status), so the computer is stopped" >&2
-        kill "$qemu" 2>/dev/null || true
-        exit 1
-    fi
+    wait "$qemu" || status=$?
     [ -e "$control/reset" ] || exit "$status"
     for name in $(compgen -e); do
         case "$name" in VM_ENV_*) unset "$name" ;; esac

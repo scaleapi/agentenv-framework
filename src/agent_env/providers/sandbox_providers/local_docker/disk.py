@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 from agent_env.artifact.artifacts.computer import DISK_FILE
+from agent_env.artifact.artifacts.docker_image import docker_login
+from agent_env.config import get_config
 from agent_env.config.paths import cache_root
 from agent_env.env.published_images import LAUNCHER_IMAGE, published_pinned
 from agent_env.providers.sandbox_providers.host_images import host_platform, present
@@ -77,7 +79,10 @@ def _computer_variables(env: dict[str, str]) -> dict[str, str]:
 
 
 def _export(image: str, path: Path) -> None:
+    """Signed in to the image store first, as a boot's pull is, since ``docker create`` pulls ``image`` when it isn't
+    here."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    docker_login(get_config().get_image_store().auth(image))
     container = _docker("create", image, "disk").strip()
     try:
         with tempfile.TemporaryDirectory(prefix="export-", dir=path.parent) as work:

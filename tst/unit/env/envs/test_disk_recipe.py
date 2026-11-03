@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -95,14 +96,15 @@ def test_the_launcher_gets_kvm_the_vms_ports_and_size_and_its_environment_under_
 
 
 #: Stand-ins for what the launcher runs, each a bash script logging its arguments as a line to $CALLS. QEMU runs until
-#: it's stopped, or for $QEMU_RUNS_S seconds, logging the seed it boots with; socat exits 7 after $SOCAT_EXITS_S.
+#: it's stopped, or for $QEMU_RUNS_S seconds, logging the seed it boots with; socat exits 7 after $SOCAT_EXITS_S; zstd
+#: takes $ZSTD_TAKES_S.
 _STAND_INS = {
     "dpkg": "echo amd64",
     "qemu-img": 'echo "qemu-img $*" >> "$CALLS"',
     "mkfs.vfat": ":",
     "mcopy": ":",
     "cp": 'touch "${@: -1}"',
-    "zstd": 'echo "zstd $*" >> "$CALLS"; touch "${@: -1}"',
+    "zstd": 'echo "zstd $*" >> "$CALLS"; sleep "${ZSTD_TAKES_S:-0}"; touch "${@: -1}"',
     "socat": 'echo "socat $*" >> "$CALLS"; sleep "${SOCAT_EXITS_S:-30}"; exit 7',
     **{qemu: f'echo "{qemu} $* seed=$(grep -vc "^#" "$VM_STATE/boot/user-data")'
              f' $(sed -n 2,9p "$VM_STATE/boot/user-data" | tr "\\n" " ")" >> "$CALLS"\n'
@@ -179,10 +181,14 @@ def test_the_launcher_refuses_a_port_whose_forward_behind_the_proxy_has_no_port_
     assert not calls.exists() or "qemu" not in calls.read_text()
 
 
-def test_the_launcher_stops_the_computer_when_a_proxy_exits(launcher):
+@pytest.mark.parametrize("variables", [{"SOCAT_EXITS_S": "0.5"},
+                                       {"SOCAT_EXITS_S": "0", "ZSTD_TAKES_S": "0.5", "VM_DISK": "/disk/disk.img.zst"}],
+                         ids=["while-it-runs", "before-it-boots"])
+def test_the_launcher_stops_the_computer_when_a_proxy_exits(launcher, variables):
+    """Whenever the proxy exits: one that can't bind its port exits as the disk is expanded, before QEMU starts."""
     launch, calls = launcher
 
-    stopped = launch(VM_PORTS="18765", SOCAT_EXITS_S="0.5")
+    stopped = launch(VM_PORTS="18765", **variables)
 
     assert stopped.wait(10) == 1
     assert "the proxy in front of a forwarded port exited (7), so the computer is stopped" in stopped.stderr.read()
@@ -250,8 +256,8 @@ def launched(monkeypatch):
     monkeypatch.setattr(local_sandbox, "machine_image", AsyncMock(return_value="agentenv-vm:0123"))
     monkeypatch.setattr(local_sandbox, "_free_host_port", lambda: 20001)
     monkeypatch.setattr(local_sandbox, "_host_ips", lambda: ("127.0.0.1",))
-    monkeypatch.setattr(local_sandbox, "_docker",
-                        lambda *args, input=None: ran.append(args if input is None else (*args, input)) or "")
+    monkeypatch.setattr(local_sandbox, "_docker", lambda *args, input=None, timeout=None: ran.append(
+        args if input is None else (*args, input, timeout)) or "")
     monkeypatch.setattr(LocalSandbox, "pull_images", AsyncMock())
     monkeypatch.setattr(LocalSandbox, "exec_script", AsyncMock(side_effect=lambda script: ran.append(script) or ""))
     return ran
@@ -271,7 +277,8 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
                      "-p", "127.0.0.1:20001:18765", *local_disk.launcher_args([18765], {"ENVIRONMENT_NAME": "desk"},
                                                                                2, 4096), "agentenv-vm:0123")
     assert reset == ("exec", "-i", sandbox.container_name, "/usr/local/bin/launch", "reset",
-                     "VM_ENV_ENVIRONMENT_NAME=YWdhaW4=\n")
+                     "VM_ENV_ENVIRONMENT_NAME=YWdhaW4=\n", local_sandbox._RESET_SECONDS)
+    assert local_sandbox._RESET_SECONDS > 60
     LocalSandbox.pull_images.assert_awaited_once_with(["localhost:5000/disk@sha256:" + "a" * 64])
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"} and rebuilt.owns_container
 
@@ -311,10 +318,14 @@ async def test_a_disk_isnt_booted_where_docker_cant_pass_kvm(launched, monkeypat
 
 
 def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path, monkeypatch):
-    """By this machine's Docker: the disk copied out of a container of its image, then compressed in the launcher."""
+    """By this machine's Docker, signed in to the image store as a boot's pull is: the disk copied out of a container of
+    its image, then compressed in the launcher."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr(local_disk, "_launcher", lambda: "agentenv-qemu-launcher:src-1")
     ran, compressed = [], []
+    store = SimpleNamespace(auth=lambda ref: f"credentials for {ref}")
+    monkeypatch.setattr(local_disk, "get_config", lambda: SimpleNamespace(get_image_store=lambda: store))
+    monkeypatch.setattr(local_disk, "docker_login", lambda auth: ran.append(("login", auth)))
 
     def docker(*args):
         ran.append(args)
@@ -336,7 +347,8 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
 
     assert exported[0] == exported[1] != exported[2] and exported[0].parent == tmp_path / "cache" / "agentenv" / "disks"
     assert exported[0].read_bytes() == b"zstd:disk of container1:/disk/disk.img" and exported[0].name.endswith(".img.zst")
-    assert [args[0] for args in ran] == ["create", "cp", "create", "cp"] and ran[0][1:] == (first, "disk")
+    assert [args[0] for args in ran] == ["login", "create", "cp", "login", "create", "cp"]
+    assert ran[0] == ("login", f"credentials for {first}") and ran[1][1:] == (first, "disk")
     assert compressed[0] == ["docker", "run", "--rm", "-i", "--entrypoint", "zstd", "agentenv-qemu-launcher:src-1",
                              "-q", "-3", "-T0", "-c"] and len(compressed) == 2
     assert sorted(p.name for p in exported[0].parent.iterdir()) == sorted({exported[0].name, exported[2].name})

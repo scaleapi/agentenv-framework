@@ -719,7 +719,8 @@ class LocalSandboxProvider(SandboxProvider):
 
     async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
         """The launcher in the sandbox's container booting its disk afresh with ``env``."""
-        await asyncio.to_thread(_docker, "exec", "-i", sandbox.container_name, *RESET, input=reset_input(env))
+        await asyncio.to_thread(_docker, "exec", "-i", sandbox.container_name, *RESET, input=reset_input(env),
+                                timeout=_RESET_SECONDS)
 
     async def _boot_disk(self, sandbox: LocalSandbox, *, image: str, env: dict[str, str]) -> None:
         """The launcher booting ``image`` as the sandbox's container, its ports published as a container's are."""
@@ -952,12 +953,14 @@ def _host_ips() -> tuple[str, ...]:
     return ("127.0.0.1", _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"))
 
 
-def _docker(*args: str, input: str | None = None) -> str:
+_DOCKER_QUERY_SECONDS = 30
+#: How long a reset may take: longer than the minute the launcher's reset waits for the computer to start again.
+_RESET_SECONDS = 90
+
+
+def _docker(*args: str, input: str | None = None, timeout: int = _DOCKER_QUERY_SECONDS) -> str:
     """A docker CLI query's output, ``input`` on its stdin. A failure raises, so the cache above never keeps it."""
-    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=_DOCKER_QUERY_SECONDS, input=input)
+    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, input=input)
     if run.returncode:
         raise RuntimeError(f"docker {' '.join(args)} failed: {run.stderr.strip()}")
     return run.stdout.strip()
-
-
-_DOCKER_QUERY_SECONDS = 30
