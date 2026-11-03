@@ -243,12 +243,17 @@ async def _record(deployed, card: dict, until) -> dict:
 
 
 async def _tab_to(deployed, title: str):
-    """Control+Tab pressed as an agent presses it, again while the window still shows the tab before, which a press
+    """Control+Tab pressed as an agent presses it, after a click into Chromium's window, which a window opened with no
+    input may need before it has the keyboard, and again while the window still shows the tab before, which a press
     can reach before the next tab opens; the last press's result, and the window titles once one starts with
     ``title``."""
+    x, y = await _window_center(deployed)
     async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
+            await session.call_tool("computer_screenshot", {})
+            clicked = await session.call_tool("computer_click", {"x": x, "y": y})
+            assert not clicked.isError, clicked
             for attempt in range(3):
                 keyed = await session.call_tool("computer_key", {"keys": ["Control", "Tab"]})
                 try:
@@ -256,6 +261,16 @@ async def _tab_to(deployed, title: str):
                 except TimeoutError:
                     if attempt == 2:
                         raise
+
+
+async def _window_center(deployed) -> tuple[int, int]:
+    """The middle of Chromium's largest window, in screen pixels."""
+    tree = (await inside.run(deployed, ["xwininfo", "-root", "-tree"], timeout_s=30))["stdout"]
+    windows = [(int(w) * int(h), int(x) + int(w) // 2, int(y) + int(h) // 2) for w, h, x, y in re.findall(
+        r'\("[^"]*" "Chromium"\)\s+(\d+)x(\d+)\+-?\d+\+-?\d+\s+\+(-?\d+)\+(-?\d+)', tree)]
+    assert windows, tree
+    _, x, y = max(windows)
+    return x, y
 
 
 async def _chromium_windows(deployed, title: str, seconds: int = 60, count: int = 1) -> list[str]:

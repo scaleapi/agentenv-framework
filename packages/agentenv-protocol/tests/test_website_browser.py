@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import sys
 
 import pytest
@@ -427,12 +428,16 @@ def test_an_app_that_isnt_a_browser_launches_and_declares_as_before():
                                                "ready": {"window": True, "timeout_s": 60.0}}
 
 
+#: How long a test waits on the fake browser, and how often it looks.
+WAIT_S, POLL_S = 5.0, 0.05
+
+
 async def _answering(browser) -> bool:
-    """Whether ``browser``'s ready check says it answers, within five seconds."""
-    for _ in range(100):
+    """Whether ``browser``'s ready check says it answers, within ``WAIT_S``."""
+    for _ in range(int(WAIT_S / POLL_S)):
         if await browser.devtools_answers():
             return True
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(POLL_S)
     return False
 
 
@@ -525,10 +530,10 @@ async def test_its_control_records_a_completed_download_with_its_size_and_sha256
     devtools.send("Browser.downloadProgress", {"guid": "g", "state": "inProgress", "receivedBytes": 3})
     in_progress = dict(control.downloads["g"])
     devtools.send("Browser.downloadProgress", {"guid": "g", "state": "completed"})
-    for _ in range(50):
+    for _ in range(int(WAIT_S / POLL_S)):
         if "sha256" in control.downloads["g"]:
             break
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(POLL_S)
 
     done = control.downloads["g"]
     assert in_progress["state"] == "inProgress" and "sha256" not in in_progress
@@ -566,11 +571,11 @@ async def test_its_connection_hears_events_its_server_logs_each_launch_and_an_ex
     await runtime.stop_app()
     second = await runtime.launch_app("data/reset")
     await _answering(browser)
-    os.killpg(second, 9)
-    for _ in range(50):
+    os.killpg(second, signal.SIGKILL)
+    for _ in range(int(WAIT_S / POLL_S)):
         if any(entry["event"] == "exit" for entry in runtime.launches()):
             break
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(POLL_S)
     after_exit = await browser.browser_record()
     browser.devtools.close()
 

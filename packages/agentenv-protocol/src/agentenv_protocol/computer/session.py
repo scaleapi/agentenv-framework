@@ -19,6 +19,8 @@ WITH_FDS = Path(__file__).with_name("_with_fds.py")
 _running: set[asyncio.Task] = set()
 #: Each launched process's reaping, by pid, until its exit is asked for: its return code, negative for a signal.
 _exits: dict[int, asyncio.Future] = {}
+#: How many exits no one has asked for are kept, the latest.
+KEPT_EXITS = 16
 
 
 async def wait_until_up() -> None:
@@ -41,7 +43,14 @@ async def launch(argv: list[str], cwd: Path, env: dict[str, str], fds: Optional[
     _running.add(reaped)
     reaped.add_done_callback(_running.discard)
     _exits[process.pid] = reaped
+    reaped.add_done_callback(lambda _: _forget_old_exits())
     return process.pid
+
+
+def _forget_old_exits() -> None:
+    """Drop all but the latest ``KEPT_EXITS`` exits no one has asked for."""
+    for pid in [pid for pid, reaped in _exits.items() if reaped.done()][:-KEPT_EXITS]:
+        del _exits[pid]
 
 
 async def returncode(pid: int, timeout_s: float) -> Optional[int]:
