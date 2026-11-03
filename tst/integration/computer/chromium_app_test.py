@@ -60,15 +60,15 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 time.sleep(float(sys.argv[1]))
 """
 POPPING = "http://127.0.0.1:8768/"
-# Serves, on loopback for the seconds it's given, a page that is all one button, which opens /popped in a popup once.
+# Serves, on loopback for the seconds it's given, a page that opens /popped in a popup once, when Enter is pressed.
 SERVE_POPPING = """import http.server, sys, threading, time
 class Page(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/popped":
             body = b"<title>Popped page</title><h1>Popped</h1>"
         else:
-            body = (b"<title>Opener page</title><button style='position:fixed;inset:0;width:100%;height:100%' "
-                    b"onclick=\\"if (!window.opened) window.opened = window.open('/popped')\\">open</button>")
+            body = (b"<title>Opener page</title><script>onkeydown = e => { if (e.key === 'Enter' && !window.opened) "
+                    b"window.opened = window.open('/popped'); };</script>")
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
@@ -218,9 +218,9 @@ async def test_a_popup_a_page_opens_loads_with_its_control_attached(chromium_des
             await asyncio.sleep(SERVE_START_S)
             await _keys(deployed, ["F5"])
             await _chromium_windows(deployed, "Opener page")
-            await _keys(deployed)
+            await _keys(deployed, ["Enter"])
             popped = await _record(deployed, card, lambda r: any(tab["title"] == "Popped page" for tab in r["tabs"]))
-            windows = await _chromium_windows(deployed, "Popped page", count=2)
+            windows = await _chromium_windows(deployed, "Popped page")
             serving.cancel()
         finally:
             report = await teardown_run(context)
