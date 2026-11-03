@@ -318,9 +318,9 @@ def test_a_folder_wins_over_an_installed_name_and_a_folder_that_isnt_a_bundle_na
     _registered(monkeypatch, _ep("hello", "demo_bundles"))
     monkeypatch.chdir(tmp_path)
     (tmp_path / "hello").mkdir()
-    assert locate_bundle("hello") == (Path("hello"), None)
-    assert locate_bundle("./elsewhere") == (Path("./elsewhere"), None)
-    assert locate_bundle("demo-bundles/hello") == (site / "demo_bundles" / "hello", "@local/demo-bundles/hello")
+    assert locate_bundle("hello") == (Path("hello"), None, None)
+    assert locate_bundle("./elsewhere") == (Path("./elsewhere"), None, None)
+    assert locate_bundle("demo-bundles/hello") == (site / "demo_bundles" / "hello", "@local/demo-bundles/hello", None)
 
     result = CliRunner().invoke(cli, ["run", "hello"])
 
@@ -328,6 +328,29 @@ def test_a_folder_wins_over_an_installed_name_and_a_folder_that_isnt_a_bundle_na
     assert "not a bundle" in result.output
     assert "an installed bundle is also named 'hello': run it with agent-env run demo-bundles/hello" in result.output
     assert CliRunner().invoke(cli, ["run", "demo-bundles/hello"]).exit_code == 0
+
+
+def test_a_folder_wins_only_when_spelled_as_written_so_desktop_isnt_a_case_insensitive_desktop_folder(
+        site, monkeypatch, tmp_path):
+    _package(site, "demo_bundles", ["desktop"])
+    _registered(monkeypatch, _ep("desktop", "demo_bundles"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Desktop").mkdir()
+    (tmp_path / "demo-bundles" / "Desktop").mkdir(parents=True)
+    exact = os.path.isdir
+    monkeypatch.setattr(os.path, "isdir", lambda path: exact(path) or exact(str(path).replace("desktop", "Desktop")))
+
+    assert locate_bundle("desktop").root == site / "demo_bundles" / "desktop"
+    assert locate_bundle("demo-bundles/desktop").root == site / "demo_bundles" / "desktop"
+    assert locate_bundle("Desktop") == (Path("Desktop"), None, None)
+    assert locate_bundle("demo-bundles/Desktop") == (Path("demo-bundles/Desktop"), None, None)
+    listed = os.listdir
+    monkeypatch.setattr(os, "listdir", lambda path: _refused() if Path(path) == Path("demo-bundles") else listed(path))
+    assert locate_bundle("demo-bundles/Desktop").root == Path("demo-bundles/Desktop")
+
+
+def _refused():
+    raise PermissionError("a folder that can be passed through but not listed")
 
 
 def test_the_cli_reports_installed_metadata_it_cant_read(monkeypatch):

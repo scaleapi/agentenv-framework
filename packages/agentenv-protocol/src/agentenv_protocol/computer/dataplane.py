@@ -15,7 +15,7 @@ import httpx
 from pydantic import TypeAdapter, ValidationError
 
 from ..agent_env_environment import add_data, get_data
-from ..transfers import NamespaceUploader, ReadObject, RelativePath, WriteNamespaceGrant, download
+from ..transfers import NamespaceUploader, ReadObject, RelativePath, TransferError, WriteNamespaceGrant, download
 from ..types import DATA_OBJECTS_EXTENSION_URI, FilePart, FileWithBytes, FileWithUri, uploaded_file_part, uploaded_object_path
 
 if TYPE_CHECKING:
@@ -64,22 +64,31 @@ class DataPlane:
 async def file_parts(home: Path, paths: list[str], write_namespace: Optional[WriteNamespaceGrant],
                      leaving_out: list[str] = ()) -> list:
     """A part for each file under ``paths`` of ``home`` but under none of ``leaving_out``, naming its path relative to
-    ``home``: uploaded under ``write_namespace`` when there is one, else inline."""
+    ``home``: uploaded under ``write_namespace`` when there is one, else inline. A file a running app removes before it's
+    read is left out."""
     files = [(relative, source) for relative, source in _data_files(home, paths)
              if not any(PurePosixPath(relative).is_relative_to(owned) for owned in leaving_out)]
+    parts = []
     if write_namespace is not None:
         uploader = NamespaceUploader(write_namespace)
-        parts = []
         for relative, source in files:
-            await uploader.upload(relative, source)
+            try:
+                await uploader.upload(relative, source)
+            except (TransferError, OSError):
+                if source.exists():
+                    raise
+                continue
             parts.append(uploaded_file_part(relative, name=source.name, mime_type=_mime(source)))
         return parts
-    return [
-        FilePart(file=FileWithBytes(bytes=base64.b64encode(source.read_bytes()).decode("ascii"),
-                                    name=source.name, mimeType=_mime(source)),
-                 metadata={DATA_OBJECTS_EXTENSION_URI: {"path": relative}})
-        for relative, source in files
-    ]
+    for relative, source in files:
+        try:
+            data = source.read_bytes()
+        except FileNotFoundError:
+            continue
+        parts.append(FilePart(file=FileWithBytes(bytes=base64.b64encode(data).decode("ascii"), name=source.name,
+                                                 mimeType=_mime(source)),
+                              metadata={DATA_OBJECTS_EXTENSION_URI: {"path": relative}}))
+    return parts
 
 
 async def part_bytes(part: FilePart) -> bytes:

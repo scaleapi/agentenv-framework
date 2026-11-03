@@ -80,7 +80,7 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVer
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_missing, docker_unreachable
 
 from .parse import BundleError, BundleKind
-from .plan import AgentOverride, Plan, solver_steps
+from .plan import AgentOverride, NotInStore, Plan, solver_steps
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step, played_deploys
 
 _SHOWN = 3
@@ -133,6 +133,7 @@ class _Walk:
         self.plan, self.sandbox = plan, sandbox
         self.problems: dict[str, dict[str, None]] = {}  # each deploy's problem, and the deploys it's found at
         self.run_problems: list[str] = []  # the run's as a whole
+        self.missing: list[tuple[str, str]] = []  # each agent the deploys need that the store doesn't hold
         self.infra: set[str] = set()  # the infra kinds a deploy on the local provider needs
         self.docker_users: list[str] = []
         self.compose_users: list[str] = []  # gateway deploys whose stack runs on this machine
@@ -203,7 +204,7 @@ class _Walk:
             more = f" (and {len(others)} more deploy{'s' if len(others) > 1 else ''})" if others else ""
             problems.append(f"{first}{more}: {problem}")
         if problems:
-            raise BundleError(problems)
+            raise NotInStore(problems, self.missing) if self.missing else BundleError(problems)
         return Preflight(frozenset(self.infra), tuple(infra), built_here)
 
     # Deploys, each resolving its provider as its step does when it runs
@@ -502,6 +503,7 @@ class _Walk:
             A2AAgent.get(agent_id)
             return
         except NotFoundError:
+            self.missing.append((EntityKind.AGENT.value, agent_id))
             problem = (f"there is no agent {agent_id!r} in the store; register one under that id, or point "
                        "[agents] default_a2a_agent_id at an agent that is")
         except (ValueError, KeyError, TypeError) as e:

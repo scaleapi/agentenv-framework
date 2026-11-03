@@ -11,7 +11,7 @@ from agent_env.artifact.store import reset_artifact_store
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import plan as plan_module
 from agent_env.bundle import resolve as resolve_module
-from agent_env.bundle.plan import check_bundle, plan_bundle
+from agent_env.bundle.plan import NotInStore, check_bundle, plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.config import configure
 from agent_env.entity.refs import EntityKind, EntityRef
@@ -278,6 +278,23 @@ def test_a_store_id_must_exist(make, steps, problem):
     assert problems(make(tasks={"t": steps})) == (f"tasks/t.json: {problem}",)
 
 
+def test_an_agent_the_store_doesnt_hold_is_one_problem_at_its_first_use_and_says_its_a_store_gap(make):
+    agent = {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "ghost"}
+    other = deploy(f"{ROOT}/tickts")
+
+    with pytest.raises(NotInStore) as mixed:
+        plan_bundle(make(tasks={"a": [agent], "b": [agent], "c": [agent, other]}))
+    with pytest.raises(BundleError) as neither:
+        plan_bundle(make(tasks={"a": [other], "b": [other], "c": [other]}))
+
+    assert mixed.value.problems == (
+        "tasks/a.json: step 'agent': a2a_agent_id (and 2 more uses): there is no agent 'ghost' in the store",
+        f"tasks/c.json: step 'deploy': env_id: '{ROOT}/tickts' isn't in this bundle",
+    )
+    assert mixed.value.missing == (("agent", "ghost"),)
+    assert not isinstance(neither.value, NotInStore)
+
+
 def test_another_bundles_local_id_is_read_from_the_local_namespace_like_a_store_id(make, local_stores, cli_routing):
     put_env("@local/~/other/crm")
     FileArtifact.put_bytes("@local/~/other/golden", description="golden", filename="g.txt", content=b"g",
@@ -311,7 +328,7 @@ def test_an_id_under_the_bundles_own_root_that_it_doesnt_write_is_refused_withou
 
 
 def test_planning_a_read_of_another_bundles_local_id_without_namespace_routing_is_refused(make):
-    with pytest.raises(RuntimeError, match="reading an @local id from the store needs namespace routing"):
+    with pytest.raises(RuntimeError, match="reading a local id from the store needs namespace routing"):
         plan_bundle(make(tasks={"t": [deploy("@local/~/other/crm")]}))
 
 

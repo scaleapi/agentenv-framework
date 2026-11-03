@@ -38,8 +38,9 @@ def build_app(
     max_concurrent_envs: int = 8,
     token: str | None = None,
 ) -> FastAPI:
-    """The OpenEnv server for ``bundle``'s tasks: a folder or an installed bundle's name, as ``agent-env run BUNDLE``
-    reads it, served as the split ``all`` and a split per eval; or a mapping of split name to bundle. Each session
+    """The OpenEnv server for ``bundle``'s tasks: a folder, an installed bundle's name or an ``hf://`` reference, as
+    ``agent-env run BUNDLE`` reads it, served as the split ``all`` and a split per eval; or a mapping of split name to
+    bundle. Each session
     plays one episode of a task at a time, deploying where ``sandbox`` names, as ``agent-env run --sandbox`` does.
 
     ``reward`` makes the reward of a task's scores: a step id, or a function of the scores by step id; without it a
@@ -103,7 +104,7 @@ def _sources(bundle: _Source | Mapping[str, _Source]) -> dict[str | None, _Sourc
 
 def _prepared(source: _Source, sandbox: str | None) -> PreparedBundle:
     """``source`` prepared with every task and eval selected, so ``all`` holds every task, evals or not."""
-    root, id_root = (source, None) if isinstance(source, Path) else locate_bundle(source)
+    root, id_root = (source, None) if isinstance(source, Path) else locate_bundle(source)[:2]
     entries = parse_bundle(Path(root), id_root=id_root).entries
     return prepare_bundle(
         root, tasks=[entry.name for entry in entries if entry.kind is BundleKind.TASK],

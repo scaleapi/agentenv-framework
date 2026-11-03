@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from ..agent_env_environment import OP_ADD_DATA, OP_GET_DATA, OP_RESET_DATA
 from ..transfers import WriteNamespaceGrant
-from ..types import FilePart, uploaded_object_path
+from ..types import METHOD_ADD, METHOD_RESET, FilePart, uploaded_object_path
 from .dataplane import file_parts, part_bytes
 
 if TYPE_CHECKING:
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: The cause a launch after each data call logs.
+_CAUSES = {OP_ADD_DATA: METHOD_ADD, OP_RESET_DATA: METHOD_RESET}
 #: Where an app's server keeps its paths as installed, in the app's folder.
 INITIAL = Path(".agentenv/initial")
 
@@ -80,7 +82,7 @@ class AppDataPlane:
                 raise
             finally:
                 if running:
-                    await self.runtime.launch_app()
+                    await self.runtime.launch_app(_CAUSES[op])
         except Exception as e:
             if not answer.done():
                 answer.set_exception(e)

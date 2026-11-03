@@ -1,18 +1,18 @@
-"""Namespace-addressed stores: an ``@local/…`` id lives in the ``@local`` namespace's local stores,
-every other id in the configured ones.
+"""Namespace-addressed stores: an id in a local namespace, ``@local/…`` or ``@hf/…`` (a bundle run from the Hugging
+Face Hub), lives in that namespace's local stores, every other id in the configured ones.
 
 Routing runs only once a process turns it on (the CLI does, for the length of a command). Everywhere
 else each getter returns the configured store exactly as before, so a service keeps rejecting every
-``@`` id. The ``@local`` namespace keeps its documents in a file of its own beside the default local
+``@`` id. Each local namespace keeps its documents in a file of its own beside the default local
 store's, so each file only ever holds one namespace's documents; objects and images share the
 per-user object store and local registry, whose urls and repositories say whose they are.
 
 Entity documents route by their id. What a task run records (instances, journals, state, runs,
 reviews, conversations, snapshots) and the objects it writes under keys of its own follow the run
-scope ``Task.run()`` sets from its task id. A read that neither rule places reads both stores, the
-reader's own namespace first: an ``@local`` run sees its records before the registry's, and anyone
-else sees the registry's first. While an ``@local`` task runs, a write that would reach a configured
-store is refused (the write fence), and a bare entity may never name an ``@local`` id (references
+scope ``Task.run()`` sets from its task id. A read that neither rule places reads every store, the
+reader's own namespace first: a local run sees its records before the registry's, and anyone
+else sees the registry's first. While a local task runs, a write that would reach a configured
+store is refused (the write fence), and a bare entity may never name a local id (references
 point outward only).
 """
 
@@ -26,7 +26,6 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional, TypeVar
 
 from agent_env.config.errors import ConfigError
@@ -41,7 +40,15 @@ from agent_env.store.document_store.document_store import (
     is_entity_collection,
 )
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
-from agent_env.store.ids import LOCAL_NAMESPACE, LOCAL_PREFIX, is_local_id, parse_namespace, validate_local_id
+from agent_env.store.ids import (
+    LOCAL_NAMESPACE,
+    LOCAL_NAMESPACES,
+    is_local_id,
+    local_namespace,
+    namespace_prefix,
+    parse_namespace,
+    validate_local_id,
+)
 from agent_env.store.image_store import ImageStore, OciRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import (
     RegistryAuth,
@@ -57,7 +64,7 @@ from agent_env.store.object_store.object_store import (
     UploadPolicy,
 )
 
-# The fields a run-time document names its owner by: one holding an @local id places it locally.
+# The fields a run-time document names its owner by: one holding a local id places it in that id's namespace.
 _OWNER_FIELDS = ("id", "instance_id", "task_id", "task_instance_id", "env_id", "agent_id")
 _LOCAL_REPOSITORY_PREFIX = f"{LOCAL_NAMESPACE}/"
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
@@ -70,15 +77,15 @@ _run_namespace: ContextVar[Optional[str]] = ContextVar("agent_env_run_namespace"
 
 
 class LocalRunWriteError(ValueError):
-    """A write an ``@local`` task run may not make, since it would land in a configured store."""
+    """A write a local task run may not make, since it would land in a configured store."""
 
 
 class OutwardReferenceError(ValueError):
-    """A write that would point outside the ``@local`` namespace's stores at an ``@local`` id."""
+    """A write that would point outside the local namespaces' stores at a local id."""
 
 
 def enable_namespace_routing() -> None:
-    """Route ``@local`` ids to the per-user local stores in this process. The CLI turns this on; a
+    """Route local ids to the per-user local stores in this process. The CLI turns this on; a
     service never does, so its stores stay exactly the configured ones."""
     global _enabled
     _enabled = True
@@ -110,34 +117,41 @@ def namespace_routing() -> Iterator[None]:
 @contextmanager
 def run_scope(owner_id: str) -> Iterator[None]:
     """The run in progress, a task's or a deployment the CLI makes: what it records follows its owner id's
-    namespace. A run started inside an ``@local`` run stays local, so a nested registry task can't reopen
-    the configured stores."""
+    namespace. A run started inside a local run stays in that run's namespace unless its own id is local, so a
+    nested registry task can't reopen the configured stores."""
     outer = _run_namespace.get()
-    token = _run_namespace.set(LOCAL_NAMESPACE if outer == LOCAL_NAMESPACE else parse_namespace(owner_id) or "")
+    inherited = outer if outer in LOCAL_NAMESPACES else parse_namespace(owner_id) or ""
+    token = _run_namespace.set(local_namespace(owner_id) or inherited)
     try:
         yield
     finally:
         _run_namespace.reset(token)
 
 
+def local_run_namespace() -> Optional[str]:
+    """The local namespace of the task running, which its records go to; None outside a local run."""
+    namespace = _run_namespace.get()
+    return namespace if namespace_routing_enabled() and namespace in LOCAL_NAMESPACES else None
+
+
 def in_local_run() -> bool:
-    return namespace_routing_enabled() and _run_namespace.get() == LOCAL_NAMESPACE
+    return local_run_namespace() is not None
 
 
 def refuse_in_local_run(what: str) -> None:
-    if in_local_run():
+    if (namespace := local_run_namespace()) is not None:
         raise LocalRunWriteError(
-            f"an @local task run writes only to the local stores, and {what} would reach a configured store"
+            f"an @{namespace} task run writes only to the local stores, and {what} would reach a configured store"
         )
 
 
 def refuse_local_references(entity_id: object, value: Any) -> None:
-    """Refuse a bare entity naming an ``@local`` id anywhere in ``value``: a shared store must
+    """Refuse a bare entity naming a local id anywhere in ``value``: a shared store must
     never point into one person's local stores."""
     path = _local_reference(value, "")
     if path is not None:
         raise OutwardReferenceError(
-            f"{entity_id!r} is not an @local id, so it can't reference one: {path or 'its value'} names an @local id"
+            f"{entity_id!r} is not a local id, so it can't reference one: {path or 'its value'} names a local id"
         )
 
 
@@ -214,38 +228,47 @@ def _filter_owner(filter: Filter) -> dict:
     return {path: preds[0].value for path, preds in filter.conditions.items() if len(preds) == 1 and isinstance(preds[0], Eq)}
 
 
-def _filter_is_local(filter: Filter) -> Optional[bool]:
-    """Whether the ids a filter pins are all ``@local`` (True) or all bare (False); None when it pins
-    none, or both kinds."""
+def _filter_namespace(filter: Filter) -> Optional[str]:
+    """The local namespace the ids a filter pins are all in, or ``""`` when they are all bare; None when it pins
+    none, or ids of more than one namespace."""
     values: list[Any] = []
     for pred in filter.conditions.get("id", ()):
         if isinstance(pred, Eq):
             values.append(pred.value)
         elif isinstance(pred, In):
             values.extend(pred.values)
-    kinds = {is_local_id(value) for value in values if isinstance(value, str)}
-    return kinds.pop() if len(kinds) == 1 else None
+    namespaces = {local_namespace(value) or "" for value in values if isinstance(value, str)}
+    return namespaces.pop() if len(namespaces) == 1 else None
 
 
 class LocalNamespaceDocumentStore(LocalSqliteDocumentStore):
-    """The ``@local`` namespace's documents: its entities, and what its runs record."""
+    """A local namespace's documents, ``@local``'s or ``@hf``'s: its entities, and what its runs record."""
+
+    def __init__(self, path: str, namespace: str = LOCAL_NAMESPACE) -> None:
+        super().__init__(path)
+        self.namespace = namespace
 
     def check_id(self, entity_id: str) -> None:
-        if not is_local_id(entity_id):
-            raise ValueError(f"id {entity_id!r} isn't an @local id, and the @local namespace's store holds only those")
+        if local_namespace(entity_id) != self.namespace:
+            raise ValueError(f"id {entity_id!r} isn't an @{self.namespace} id, and the @{self.namespace} namespace's "
+                             "store holds only those")
         validate_local_id(entity_id)
 
 
 class RoutingDocumentStore(DocumentStore):
-    """The configured document store, with ``@local`` documents and ``@local`` runs' records kept in
-    the ``@local`` namespace's store. Reads never create that store; writes open it with its indexes."""
+    """The configured document store, with each local namespace's documents and its runs' records kept in
+    that namespace's own store, ``namespaces`` by name. Reads never create one; writes open it with its indexes."""
 
-    def __init__(self, configured: DocumentStore, local: DocumentStore, local_path: Path) -> None:
+    def __init__(self, configured: DocumentStore, namespaces: Mapping[str, LocalNamespaceDocumentStore]) -> None:
         self.configured = configured
-        self.local = local
-        self._local_path = local_path
+        self.namespaces = dict(namespaces)
         self._lock = threading.Lock()
-        self._pending_local_indexes: Optional[list[tuple]] = []
+        self._pending_local_indexes: dict[str, Optional[list[tuple]]] = {namespace: [] for namespace in namespaces}
+
+    @property
+    def local(self) -> LocalNamespaceDocumentStore:
+        """The ``@local`` namespace's store."""
+        return self.namespaces[LOCAL_NAMESPACE]
 
     def find_one(self, collection: str, filter: Filter, sort: Optional[Sort] = None) -> Optional[dict]:
         found = [
@@ -441,80 +464,93 @@ class RoutingDocumentStore(DocumentStore):
         ttl_seconds: Optional[int] = None,
     ) -> None:
         self.configured.ensure_index(collection, fields, unique, ttl_seconds)
-        with self._lock:
-            if self._pending_local_indexes is not None:
-                self._pending_local_indexes.append((collection, fields, unique, ttl_seconds))
-                return
-        self.local.ensure_index(collection, fields, unique, ttl_seconds)
+        for namespace, store in self.namespaces.items():
+            with self._lock:
+                pending = self._pending_local_indexes[namespace]
+                if pending is not None:
+                    pending.append((collection, fields, unique, ttl_seconds))
+                    continue
+            store.ensure_index(collection, fields, unique, ttl_seconds)
 
     def check_id(self, entity_id: str) -> None:
-        if is_local_id(entity_id):
-            self.local.check_id(entity_id)
+        namespace = local_namespace(entity_id)
+        if namespace is not None:
+            self.namespaces[namespace].check_id(entity_id)
             return
-        if LOCAL_PREFIX in entity_id:
+        if (inside := next((namespace for namespace in self.namespaces if namespace_prefix(namespace) in entity_id),
+                           None)):
             raise ValueError(
-                f"id {entity_id!r} contains an @local id but isn't one: an id derived from an @local id "
-                "has to keep the @local namespace"
+                f"id {entity_id!r} contains an @{inside} id but isn't one: an id derived from an @{inside} id "
+                f"has to keep the @{inside} namespace"
             )
         self.configured.check_id(entity_id)
 
-    def _placed(self, collection: str, filter: Filter) -> Optional[DocumentStore]:
-        if not is_entity_collection(collection):
-            return None
-        local = _filter_is_local(filter)
-        return None if local is None else self.local if local else self.configured
+    def _placed(self, collection: str, filter: Filter) -> Optional[str]:
+        """The local namespace whose store holds ``filter``'s match, ``""`` for the configured store; None when it
+        can be in any."""
+        return _filter_namespace(filter) if is_entity_collection(collection) else None
 
     def _readers(self, collection: str, filter: Filter) -> list[DocumentStore]:
-        """The stores a read consults, the reader's own namespace first: a key can be in both, when
-        an ``@local`` run and a registry run each recorded it."""
+        """The stores a read consults, the reader's own namespace first: a key can be in several, when
+        a local run and a registry run each recorded it."""
         placed = self._placed(collection, filter)
-        if placed is self.configured:
+        if placed == "":
             return [self.configured]
-        local = [self.local] if self._local_path.exists() else []
-        if placed is self.local:
-            return local
-        return [*local, self.configured] if in_local_run() else [self.configured, *local]
+        if placed is not None:
+            return self._existing([placed])
+        own = local_run_namespace()
+        local = self._existing(self._own_first(own))
+        return [*local, self.configured] if own else [self.configured, *local]
+
+    def _own_first(self, own: Optional[str]) -> list[str]:
+        return sorted(self.namespaces, key=lambda namespace: namespace != own)
+
+    def _existing(self, namespaces: list[str]) -> list[LocalNamespaceDocumentStore]:
+        return [self.namespaces[namespace] for namespace in namespaces if self.namespaces[namespace].path.exists()]
 
     def _read(self, store: DocumentStore, read: Callable[[], _T]) -> _T:
-        if store is not self.local:
+        if store is self.configured:
             return read()
         try:
             return read()
         except (sqlite3.DatabaseError, OSError) as e:
             raise ConfigError(
-                f"the @local store at {self._local_path} can't be read ({e}); move it aside to start a new one"
+                f"the @{store.namespace} store at {store.path} can't be read ({e}); move it aside to start a new one"
             ) from e
 
     def _writer(self, collection: str, owner: Mapping, payload: Any) -> DocumentStore:
         if is_entity_collection(collection):
             if isinstance(owner.get("id"), str):
                 self.check_id(owner["id"])
-            local = isinstance(owner.get("id"), str) and is_local_id(owner["id"])
+            namespace = local_namespace(owner["id"]) if isinstance(owner.get("id"), str) else None
         else:
-            local = in_local_run() or any(isinstance(owner.get(f), str) and is_local_id(owner[f]) for f in _OWNER_FIELDS)
-        if local:
-            return self._open_local()
+            namespace = local_run_namespace() or next(
+                (found for field in _OWNER_FIELDS
+                 if isinstance(owner.get(field), str) and (found := local_namespace(owner[field]))), None)
+        if namespace is not None:
+            return self._open(namespace)
         self._check_configured_write(collection, owner.get("id"), payload)
         return self.configured
 
     def _updaters(self, collection: str, filter: Filter, payload: Any) -> Iterator[DocumentStore]:
         """The stores an update of ``filter``'s match tries, in order: the one its id places it in,
-        else the caller's own namespace's first. Inside an ``@local`` run only the local store is
+        else the caller's own namespace's first. Inside a local run only the local stores are
         written, and a match that lives only in the configured store is refused rather than missed."""
         placed = self._placed(collection, filter)
-        local = placed is not self.configured and self._local_path.exists()
-        if placed is None and not in_local_run():
+        own = local_run_namespace()
+        if placed is None and own is None:
             self._check_configured_write(collection, _filter_owner(filter).get("id"), payload)
             yield self.configured
-            if local:
-                yield self._open_local()
+            for store in self._existing(list(self.namespaces)):
+                yield self._open(store.namespace)
             return
-        if local:
-            yield self._open_local()
-        if placed is self.configured:
+        if placed == "":
             self._check_configured_write(collection, _filter_owner(filter).get("id"), payload)
             yield self.configured
-        elif placed is None and self.configured.find_one(collection, filter) is not None:
+            return
+        for store in self._existing([placed] if placed is not None else self._own_first(own)):
+            yield self._open(store.namespace)
+        if placed is None and self.configured.find_one(collection, filter) is not None:
             refuse_in_local_run(f"updating {collection!r} (its record is in the configured store)")
 
     def _check_configured_write(self, collection: str, entity_id: object, payload: Any) -> None:
@@ -522,12 +558,13 @@ class RoutingDocumentStore(DocumentStore):
         if is_entity_collection(collection) and payload is not None:
             refuse_local_references(entity_id, payload)
 
-    def _open_local(self) -> DocumentStore:
+    def _open(self, namespace: str) -> LocalNamespaceDocumentStore:
+        store = self.namespaces[namespace]
         with self._lock:
-            for spec in self._pending_local_indexes or ():
-                self._read(self.local, lambda: self.local.ensure_index(*spec))
-            self._pending_local_indexes = None
-        return self.local
+            for spec in self._pending_local_indexes[namespace] or ():
+                self._read(store, lambda: store.ensure_index(*spec))
+            self._pending_local_indexes[namespace] = None
+        return store
 
 
 def object_store_holding(object_url: str, configured: ObjectStore, local: ObjectStore) -> ObjectStore:
@@ -550,7 +587,7 @@ def image_store_holding(ref: str, configured: ImageStore, local: ImageStore) -> 
 
 
 class LocalRunObjectStore(ObjectStore):
-    """The object store an ``@local`` task run sees: keys go to the local store, an object_url to the
+    """The object store a local task run sees: keys go to the local store, an object_url to the
     store it addresses, and a write that would reach the configured store is refused."""
 
     def __init__(self, configured: ObjectStore, local: ObjectStore) -> None:
@@ -621,7 +658,7 @@ class LocalRunObjectStore(ObjectStore):
         return self._writing(object_url).signed_put_url(object_url, expires_in)
 
     def shared_credentials_env(self) -> dict[str, str]:
-        """None: an ``@local`` run's objects reach its sandboxes through grants, staging or pushed bytes, so the
+        """None: a local run's objects reach its sandboxes through grants, staging or pushed bytes, so the
         configured store's credentials, the caller's own, stay with the caller."""
         return {}
 
@@ -649,7 +686,7 @@ class LocalRunObjectStore(ObjectStore):
 
 
 class LocalRunImageStore(ImageStore):
-    """The image store an ``@local`` task run sees: ``@local`` repositories are the local registry's,
+    """The image store a local task run sees: local ids' repositories are the local registry's,
     pull auth comes from the store a ref names, and creating a configured repository is refused."""
 
     def __init__(self, configured: ImageStore, local: ImageStore) -> None:

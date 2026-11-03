@@ -61,10 +61,17 @@ def test_only_the_local_namespaces_store_takes_local_ids(tmp_path):
         with pytest.raises(ValueError, match="only the @local namespace's store holds"):
             store.check_id(LOCAL_ID)
     for refused, reason in (("registry-env", "isn't an @local id"), ("@other/x", "isn't an @local id"),
-                            ("@local/a/../b", "'..' path segment")):
+                            ("@hf/acme/ds/x", "isn't an @local id"), ("@local/a/../b", "'..' path segment")):
         with pytest.raises(ValueError, match=reason):
             namespace.check_id(refused)
-    assert not (tmp_path / "local.db").exists()
+    hub = LocalNamespaceDocumentStore(str(tmp_path / "hf.db"), namespace="hf")
+    hub.check_id("@hf/acme/ds/x")
+    with pytest.raises(ValueError, match="isn't an @hf id"):
+        hub.check_id(LOCAL_ID)
+    for store in (LocalSqliteDocumentStore(str(tmp_path / "documents.db")), FakeDocumentStore()):
+        with pytest.raises(ValueError, match="only the @hf namespace's store holds"):
+            store.check_id("@hf/acme/ds/x")
+    assert not (tmp_path / "local.db").exists() and not (tmp_path / "hf.db").exists()
 
 
 @pytest.mark.parametrize("entity_id", [

@@ -8,7 +8,7 @@ build Playwright 1.64.1 pins, fetched by sha256 when a computer env that lists i
 flags, and writes managed policies to `/etc/opt/chrome_for_testing/policies/managed/` for unattended use. It runs
 without Chromium's sandbox, which a container can't give it. Its env.toml spells out its settings and their defaults
 under `[settings]`: `start_urls`, opened at boot, the first tab active; `window`, alone only; `locale`; `time_zone`; and
-`geolocation` and `notifications`, `deny` or `ask`. A computer env sets its own beside it
+`geolocation` and `notifications`, `deny` or `ask`; and `dialogs`, `agent`, `accept` or `dismiss`. A computer env sets its own beside it
 (`apps = [{ env = "chromium", settings = { start_urls = ["https://example.test/"] } }]`), and a deploy overrides any of
 them (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which
 the image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
