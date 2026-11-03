@@ -45,6 +45,7 @@ from agent_env.store.ids import (
     LOCAL_NAMESPACES,
     is_local_id,
     local_namespace,
+    namespace_prefix,
     parse_namespace,
     validate_local_id,
 )
@@ -476,7 +477,8 @@ class RoutingDocumentStore(DocumentStore):
         if namespace is not None:
             self.namespaces[namespace].check_id(entity_id)
             return
-        if (inside := next((namespace for namespace in self.namespaces if f"@{namespace}/" in entity_id), None)):
+        if (inside := next((namespace for namespace in self.namespaces if namespace_prefix(namespace) in entity_id),
+                           None)):
             raise ValueError(
                 f"id {entity_id!r} contains an @{inside} id but isn't one: an id derived from an @{inside} id "
                 f"has to keep the @{inside} namespace"

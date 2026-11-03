@@ -54,7 +54,12 @@ def is_local_id(entity_id: str) -> bool:
 
 def local_namespace(entity_id: str) -> Optional[str]:
     """The local namespace ``entity_id`` is in, or None for a bare id or another namespace's."""
-    return next((namespace for namespace in LOCAL_NAMESPACES if entity_id.startswith(f"@{namespace}/")), None)
+    return next((namespace for namespace in LOCAL_NAMESPACES if entity_id.startswith(namespace_prefix(namespace))), None)
+
+
+def namespace_prefix(namespace: str) -> str:
+    """What every id in ``namespace`` opens with: ``@<namespace>/``."""
+    return f"@{namespace}/"
 
 
 def validate_local_id(entity_id: str) -> None:
@@ -68,7 +73,7 @@ def validate_local_id(entity_id: str) -> None:
     namespace = local_namespace(entity_id)
     if namespace is None:
         raise ValueError(f"local id {entity_id!r} must start with {LOCAL_PREFIX!r} or {HF_PREFIX!r}")
-    prefix = f"@{namespace}/"
+    prefix = namespace_prefix(namespace)
     size = len(entity_id.encode("utf-8", "surrogatepass"))
     if size > MAX_LOCAL_ID_BYTES:
         raise ValueError(f"local id is {size} bytes; the limit is {MAX_LOCAL_ID_BYTES}: {entity_id[:64]!r}…")

@@ -17,7 +17,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agent_env.a2a_agent.store import A2A_AGENTS_COLLECTION
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
@@ -98,7 +98,7 @@ class Ledger:
     @classmethod
     def for_plan(cls, plan: Plan) -> Ledger:
         config = get_config()
-        return cls(lambda entity_id: config.local_namespace_document_store(local_namespace(entity_id)), plan)
+        return cls(lambda entity_id: config.local_namespace_document_store(cast(str, local_namespace(entity_id))), plan)
 
     def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
         """Compare ``write`` with the latest version the ledger records for it. ``needs`` holds, by (store, id),

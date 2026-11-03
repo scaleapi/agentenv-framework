@@ -543,6 +543,8 @@ class TestDeclaredIds:
                                       "a bundle run from the Hugging Face Hub")
         assert parse_bundle(build(tmp_path / "c", {"envs/t/Dockerfile": ""}),
                             id_root="@hf/acme/ds").entries[0].id == "@hf/acme/ds/t"
+        bare = build(tmp_path / "d", {"envs/t/env.toml": 'id = "bare"\n'})
+        assert "must start with '@local/' or '@hf/acme/ds/x/'" in problems(bare, id_root="@hf/acme/ds/x")[0]
 
     def test_artifact_leaf_may_not_contain_double_underscore(self, tmp_path):
         root = build(tmp_path / "b", {

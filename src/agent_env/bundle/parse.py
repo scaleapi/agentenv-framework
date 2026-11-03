@@ -450,8 +450,8 @@ class _Parser:
 
     def _check_declared(self, entity_id: Any, where: Path, *, what: str = "id", artifact: bool = False) -> None:
         if not isinstance(entity_id, str) or not is_local_id(entity_id):
-            self._skip(where, f"{what} {_brief(entity_id)}: ids declared in a bundle must start with "
-                       f"{LOCAL_PREFIX!r}, since a bare id names an entity in a shared store")
+            self._skip(where, f"{what} {_brief(entity_id)}: ids declared in this bundle must start with "
+                       f"{self._declarable()}, since a bare id names an entity in a shared store")
         if foreign_hub_id(entity_id, self.id_root):
             self._skip(where, f"{what} {_brief(entity_id)}: an {HF_PREFIX!r} id names an entity of a bundle run from "
                        "the Hugging Face Hub, so a bundle declares one only under its own id root, which "
@@ -468,6 +468,11 @@ class _Parser:
             self._skip(where, f"{what} {_brief(entity_id)} must be NFC-normalized")
         if artifact and "__" in entity_id.rsplit("/", 1)[1]:
             self._skip(where, f'{what} {_brief(entity_id)}: "__" is reserved for derived artifact ids')
+
+    def _declarable(self) -> str:
+        """What an id this bundle declares may start with: ``@local/``, and for a Hub bundle its own root."""
+        own = f" or {self.id_root + '/'!r}" if local_namespace(self.id_root) == HF_NAMESPACE else ""
+        return f"{LOCAL_PREFIX!r}{own}"
 
     # Across entities
 
