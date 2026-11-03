@@ -264,9 +264,13 @@ class ComputerEnv(Env):
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
         links, arches = sandbox_provider.links, self.composed_arches()
         forms = [params.form] if params.form else gate.forms(self.computer)
-        if not any(boot.native_links(sandbox_provider, arch, form) for form in forms for arch in arches):
+        if not any(boot.native_links(sandbox_provider, arch, form, self.stored_id) for form in forms
+                   for arch in arches):
+            unpulled = [type(link).__name__ for link in links if not boot.pulls_containers(link, self.stored_id)]
             problems.append(f"{', '.join(type(link).__name__ for link in links)} runs none of its arches "
-                            f"({', '.join(arches)}) natively as {' or '.join(forms)}")
+                            f"({', '.join(arches)}) natively as {' or '.join(forms)}" + (
+                                f", and {', '.join(unpulled)} can't pull its containers from the image store's registry "
+                                "on this machine" if "container" in forms and unpulled else ""))
         policy = NetworkPolicy.from_dict(self.network) if self.network else None
         if policy is not None and not any(link.supports_network_policy(policy) for link in links):
             problems.append(f"{', '.join(type(link).__name__ for link in links)} can't enforce its network")

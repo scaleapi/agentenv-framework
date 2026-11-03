@@ -18,8 +18,10 @@ from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTING
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
 
 from agent_env.config import get_config
+from agent_env.env.envs.computer.utils.composed import REPOSITORY
 from agent_env.providers.env_providers.env_provider import _size_kwargs
 from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
+from agent_env.store.image_store.oci_registry_credentials import is_loopback_host, registry_host_from_ref
 
 if TYPE_CHECKING:
     from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -50,17 +52,27 @@ class Booted:
     card: dict
 
 
-def native_links(sandbox_provider: SandboxProvider, arch: str, form: str = "container") -> list[SandboxProvider]:
-    """The providers a boot of ``form`` for ``arch`` may run on, in the order a chain tries them: those that run its
-    container, or boot its disk, natively."""
-    return [link for link in sandbox_provider.links if f"linux/{arch}" in (
-        link.disk_image_platforms() if form == "disk" else link.native_platforms())]
+def native_links(sandbox_provider: SandboxProvider, arch: str, form: str, store_id: str) -> list[SandboxProvider]:
+    """The providers a boot of ``form`` for ``arch`` of the env stored as ``store_id`` may run on, in the order a chain
+    tries them: those that boot its disk natively, which they carry themselves, or run its container natively and pull
+    it from the env's image store."""
+    if form == "disk":
+        return [link for link in sandbox_provider.links if f"linux/{arch}" in link.disk_image_platforms()]
+    return [link for link in sandbox_provider.links if f"linux/{arch}" in link.native_platforms()
+            and pulls_containers(link, store_id)]
 
 
-def first_native(link: SandboxProvider, pairs: Iterable[tuple[str, str]]) -> tuple[str, str] | None:
+def first_native(link: SandboxProvider, pairs: Iterable[tuple[str, str]], store_id: str) -> tuple[str, str] | None:
     """The first of ``pairs``, forms and arches in the base's order, that ``link`` boots natively: the one a deploy on it
     boots, and so the one a run composes for it."""
-    return next(((form, arch) for form, arch in pairs if native_links(link, arch, form)), None)
+    return next(((form, arch) for form, arch in pairs if native_links(link, arch, form, store_id)), None)
+
+
+def pulls_containers(link: SandboxProvider, store_id: str) -> bool:
+    """Whether ``link`` pulls the containers the env stored as ``store_id`` composes: from a registry on this machine's
+    loopback, only a link on this machine does."""
+    ref = get_config().get_image_store_for(store_id).image_ref(REPOSITORY, "key")
+    return link.ON_THIS_MACHINE or not is_loopback_host(registry_host_from_ref(ref))
 
 
 def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, environment_name: str,

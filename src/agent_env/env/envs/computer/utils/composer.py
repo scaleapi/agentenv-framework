@@ -37,7 +37,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, packages, probing
-from agent_env.env.envs.computer.utils.composed import BUILT, Record, failed, now
+from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
 from agent_env.providers.sandbox_providers.host_images import platform_tag
@@ -56,8 +56,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: The image store repository composed computers are pushed to, tagged by their keys.
-REPOSITORY = "agentenv-computers"
 #: What the composer and its builders make of a build's inputs beyond what its key shows of them (the base, the
 #: Dockerfile, the build files with their executable bits, the lock): raise it with a change that alters what an image
 #: holds some other way, its labels or how it's built, and leave it for any other, so images aren't built again for
@@ -154,7 +152,8 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
 
     def left(form: str, arch: str, record: dict | None) -> bool:
         status = (record or {}).get("status")
-        return status not in BUILT or (status == "unverified" and bool(boot.native_links(provider, arch, form)))
+        return status not in BUILT or (status == "unverified" and bool(boot.native_links(provider, arch, form,
+                                                                                        env.stored_id)))
 
     return _pairs(env, gate.forms(env.computer) if forms is None else forms, left)
 
@@ -177,7 +176,7 @@ def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str 
     link, the one ``boot.first_native`` picks, as the deploy does."""
     forms = gate.forms(env.computer)
     booted = {picked[0] for link in sandbox_provider.links if (picked := boot.first_native(
-        link, [(name, arch) for name in ([form] if form else forms) for arch in env.composed_arches()]))}
+        link, [(name, arch) for name in ([form] if form else forms) for arch in env.composed_arches()], env.stored_id))}
     return [name for name in forms if name in booted]
 
 
@@ -224,7 +223,7 @@ def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, r
             sandbox_provider: SandboxProvider, progress: _Progress) -> dict:
     """Gate 3: the build of ``result`` booted on the first link of ``sandbox_provider`` that runs ``arch``'s ``form``
     natively, and probed at ``full`` (``probing.checked``). Still unverified, saying why, when no link does."""
-    if not (links := boot.native_links(sandbox_provider, arch, form)):
+    if not (links := boot.native_links(sandbox_provider, arch, form, env.stored_id)):
         how = f"boots linux/{arch} disks" if form == "disk" else f"runs linux/{arch}"
         return {**result, "reason": f"no link of the sandbox provider {how} natively to probe it"}
     progress.at(f"{form}/{arch}", "probing", f"probing on {type(links[0]).__name__}")

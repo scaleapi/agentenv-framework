@@ -301,7 +301,7 @@ def test_a_put_on_a_vm_provider_builds_each_arch_in_a_vm_of_its_own_and_its_imag
 
 
 def test_a_run_on_a_vm_provider_composes_the_forms_its_deploys_boot_with_this_machines_docker(base, driver, docker,
-                                                                                            tmp_path):
+                                                                                            signing, tmp_path):
     """The run's sandbox picks the forms and the env's default provider, this machine's Docker, builds them."""
     vms = FakeVmProvider(docker, tmp_path / "vms")
 
