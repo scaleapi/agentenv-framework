@@ -123,6 +123,7 @@ def test_a_reused_computer_env_composes_what_it_has_left_on_the_runs_provider_an
 
 
 def test_a_dry_run_says_what_it_would_compose_of_a_reused_computer_env(tmp_path, composed):
+    """Only the forms its deploys on the run's sandbox boot: local Docker's, the containers."""
     root = _bundle(tmp_path / "desk")
     materialize(_plan(root), build_here=local_builds(_plan(root)))
     told = []
@@ -131,7 +132,7 @@ def test_a_dry_run_says_what_it_would_compose_of_a_reused_computer_env(tmp_path,
 
     env_id = f"{_plan(root).bundle.bundle.id_root}/desktop"
     assert dry.materialization.composing == (env_id,) and len(composed) == 1
-    assert "envs/desktop: would compose container/amd64, container/arm64, disk/amd64, disk/arm64" in told
+    assert "envs/desktop: would compose container/amd64, container/arm64" in told
 
 
 def test_the_env_alone_is_planned_whatever_the_bundles_tasks_would_deploy(tmp_path, composed, monkeypatch):

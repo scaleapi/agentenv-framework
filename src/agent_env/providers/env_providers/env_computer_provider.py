@@ -63,7 +63,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         env_params: Optional[dict] = None,
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
-        provider runs natively, booted; returns the record once the driver is ready with the env's display."""
+        provider runs natively, booted, once what it boots that no compose started is composed; returns the record once
+        the driver is ready with the env's display."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
         if not isinstance(env, ComputerEnv):
@@ -73,6 +74,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         params, values, problems = computer_params.checked(env, env_params)
         if problems:
             raise DeployRefused(f"{env.id}: " + "; ".join(problems))
+        await env.compose_unstarted(sandbox_provider, params.form)
         if not (builds := env.deployable_builds(params.form)):
             raise DeployRefused(f"{env.id} has no ready build to deploy; its builds are {env.build_statuses() or 'none yet'}")
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,

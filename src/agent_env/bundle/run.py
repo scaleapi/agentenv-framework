@@ -400,9 +400,9 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
 
 
 def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
-    """How a run composes its computer envs: on the provider ``sandbox`` names, and emulating unless ``emulate`` is
-    False. Raises ValueError when ``sandbox`` names no provider."""
-    return Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
+    """How a run composes its computer envs: on the provider ``sandbox`` names, emulating unless ``emulate`` is False,
+    only the forms its deploys there boot. Raises ValueError when ``sandbox`` names no provider."""
+    return Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate, booted_only=True)
 
 
 def planned_tasks(root: Path | str, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),

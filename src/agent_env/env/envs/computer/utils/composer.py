@@ -82,15 +82,25 @@ _SHOWN = 10
 class Composing:
     """How a put composes a computer env: on ``sandbox_provider``, by default the env's; emulating an arch no link of
     it runs natively unless ``emulate`` is False, which leaves the arch skipped for a later compose; each pair's
-    stages told to ``on_progress``, a line at a time."""
+    stages told to ``on_progress``, a line at a time; every form of the base, or for a run's (``booted_only``) only
+    those its deploys on that provider boot (``booted_forms``), leaving the rest to a compose that needs them."""
 
     sandbox_provider: SandboxProvider | None = None
     emulate: bool = True
     on_progress: Callable[[str], None] | None = None
+    booted_only: bool = False
+
+    def forms(self, env: ComputerEnv) -> list[str]:
+        """The forms of ``env``'s base this compose builds."""
+        from agent_env.providers import get_env_sandbox_provider
+
+        if not self.booted_only:
+            return gate.forms(env.computer)
+        return booted_forms(env, self.sandbox_provider or get_env_sandbox_provider())
 
 
 def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, composing: Composing = Composing()) -> None:
-    """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel, as
+    """Build each of ``pairs``, by default each of ``composing``'s forms in each arch the env composes, in parallel, as
     ``composing`` says, and probe each one its provider runs natively (gate 3), recording each as it starts and
     finishes, then write the env's computer over every pair built so far. Each pair's stages and how it ended go to the
     log too (``_Progress``)."""
@@ -99,7 +109,7 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, compos
     base, driver = env.computer, env.driver
     provider = composing.sandbox_provider or get_env_sandbox_provider()
     builds = builder.Builds(provider, env.stored_id, REPOSITORY, composing.emulate)
-    pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base)
+    pairs = pairs if pairs is not None else [(form, arch) for form in composing.forms(env)
                                              for arch in gate.arches(base, driver, env.composed_apps())]
     record = Record(env)
     record.started(pairs)
@@ -127,17 +137,40 @@ def current(env: ComputerEnv) -> bool:
         "disks", {}) == record.built("disk")
 
 
-def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None) -> list[tuple[str, str]]:
-    """The forms and arches of ``env`` left to compose: never started, failed, left building by a put that stopped, or
-    built but unprobed though ``sandbox_provider``, by default the env's, runs the arch natively."""
+def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
+            forms: list[str] | None = None) -> list[tuple[str, str]]:
+    """The pairs of ``forms``, by default every form of the base, left to compose in ``env``: never started, failed,
+    left building by a put that stopped, or built but unprobed though ``sandbox_provider``, by default the env's, runs
+    the arch natively."""
     from agent_env.providers import get_env_sandbox_provider
 
     composed, provider = env.metadata.get("composed", {}), sandbox_provider or get_env_sandbox_provider()
     statuses = {(form, arch): composed.get(form, {}).get(arch, {}).get("status")
-                for form in gate.forms(env.computer)
+                for form in (gate.forms(env.computer) if forms is None else forms)
                 for arch in gate.arches(env.computer, env.driver, env.composed_apps())}
     return [(form, arch) for (form, arch), status in statuses.items()
             if status not in BUILT or (status == "unverified" and boot.native_links(provider, arch, form))]
+
+
+def unstarted(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[tuple[str, str]]:
+    """The pairs a deploy on ``sandbox_provider`` boots, of ``form`` when it names one (``booted_forms``), that no
+    compose has started, as a run that composed for another sandbox leaves them."""
+    composed = env.metadata.get("composed", {})
+    return [(name, arch) for name in booted_forms(env, sandbox_provider, form)
+            for arch in gate.arches(env.computer, env.driver, env.composed_apps()) if arch not in composed.get(name, {})]
+
+
+def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[str]:
+    """The forms of the env's base to compose for deploys on ``sandbox_provider``, in the base's order: on each link of
+    a chain, ``form`` when a deploy names it, else the first form the link boots natively in an arch the env composes,
+    as a deploy picks; and the container form beside a disk, which is made from it."""
+    forms, arches = gate.forms(env.computer), gate.arches(env.computer, env.driver, env.composed_apps())
+    booted = {next((name for name in ([form] if form else forms)
+                    if any(boot.native_links(link, arch, name) for arch in arches)), None)
+              for link in sandbox_provider.links}
+    if "disk" in booted:
+        booted.add("container")
+    return [name for name in forms if name in booted]
 
 
 def _composed(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,

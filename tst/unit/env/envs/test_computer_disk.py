@@ -1,8 +1,9 @@
 """Computer envs of a base with a disk form: each arch's disk is made from its built container, on the base's disk or on
 one made from the base's container and the boot recipe, by a build that runs on the builder's own platform; reused by
 its key; probed where a provider boots disks natively, else left unverified for a deploy's first boot with KVM to
-probe; and written as the computer's disk form. A deploy that names the disk form boots it in a VM, its settings in its
-seed, and a reset boots it afresh. Docker and the registry are faked."""
+probe; and written as the computer's disk form. A put composes every form and a run only those its sandbox's deploys
+boot, and a deploy composes first what it boots that no compose started. A deploy that names the disk form boots it in
+a VM, its settings in its seed, and a reset boots it afresh. Docker and the registry are faked."""
 
 import asyncio
 import base64
@@ -18,6 +19,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import boot, composer, probing
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.published_images import DISK
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
@@ -140,6 +142,42 @@ def test_a_disk_is_probed_on_a_provider_that_boots_its_arch_natively(disk_base, 
     assert env.computer_artifact().metadata["validated_boot"]["disk"] == {"arm64": disks["arm64"]["probe"]}
 
 
+def _link(containers=(), disks=()):
+    """A sandbox provider that runs containers of ``containers`` and boots disks of ``disks`` natively."""
+    link = SimpleNamespace(native_platforms=lambda: frozenset(f"linux/{arch}" for arch in containers),
+                           disk_image_platforms=lambda: frozenset(f"linux/{arch}" for arch in disks))
+    link.links = (link,)
+    return link
+
+
+@pytest.mark.parametrize("links, form, forms", [
+    ([_link(["arm64"])], None, ["container"]),
+    ([_link(["arm64"], ["arm64"])], None, ["container"]),
+    ([_link(["arm64"], ["arm64"])], "disk", ["container", "disk"]),
+    ([_link(disks=["amd64"])], None, ["container", "disk"]),
+    ([_link(["arm64"]), _link(disks=["amd64"])], None, ["container", "disk"]),
+    ([_link(["arm64"]), _link(["amd64"])], None, ["container"]),
+    ([_link(["riscv64"], ["riscv64"])], None, []),
+], ids=["local", "local-with-kvm", "local-with-kvm-asked-for-its-disk", "vm", "chain", "chain-of-containers",
+        "none-native"])
+def test_the_forms_composed_for_a_sandbox_are_those_its_deploys_boot_with_a_disks_container(disk_base, driver, docker,
+                                                                                             links, form, forms):
+    """On each link the first form it boots natively, as a deploy picks, unless the deploy names one."""
+    env = _put(disk_base, driver, compose=False)
+
+    assert composer.booted_forms(env, SimpleNamespace(links=tuple(links)), form) == forms
+
+
+def test_a_put_composes_every_form_and_a_run_only_those_its_sandboxs_deploys_boot(disk_base, driver, docker):
+    put = Env.get(_put(disk_base, driver).id)
+    run = Env.get(_put(disk_base, driver, id="@local/~/kit/run", environment_name="run",
+                       composing=Composing(booted_only=True)).id)
+
+    assert set(put.metadata["composed"]) == {"container", "disk"} and put.computer_artifact().forms.disk is not None
+    assert set(run.metadata["composed"]) == {"container"} and run.computer_artifact().forms.disk is None
+    assert composer.pending(run, forms=Composing(booted_only=True).forms(run)) == [] and composer.current(run)
+
+
 @pytest.fixture
 def vms(monkeypatch):
     """The VMs a deploy's boots of a disk ask the local provider for, each serving the desktop driver's card."""
@@ -235,6 +273,25 @@ async def test_first_deploys_of_an_unverified_disk_at_once_share_one_probe_and_i
     else:
         assert recorded["status"] == "ready" and len(vms.created) == 3
         assert all(record.metadata["computer"]["form"] == "disk" for record in deployed)
+
+
+@pytest.mark.asyncio
+async def test_deploys_of_a_disk_no_compose_started_compose_it_once_first_reusing_the_containers(disk_base, driver,
+                                                                                                docker, vms):
+    """As a run that composed for local Docker, which boots containers, leaves an env a later deploy boots as a disk."""
+    env = _put(disk_base, driver, composing=Composing(booted_only=True))
+    containers, built = Env.get(env.id).metadata["composed"]["container"], len(docker.builds)
+
+    deployed = await asyncio.gather(*(Env.get(env.id).deploy(env_params={"form": "disk"}) for _ in range(3)))
+
+    stored = Env.get(env.id)
+    disks = stored.metadata["composed"]["disk"]
+    assert {arch: r["status"] for arch, r in disks.items()} == {"amd64": "unverified", "arm64": "ready"}
+    assert stored.metadata["composed"]["container"] == containers and len(docker.builds) == built
+    assert sorted(build["tag"].split(":")[1].split("-", 1)[1] for build in docker.disk_builds
+                  if build["context"] != "tools") == ["base-disk-amd64", "base-disk-arm64", "disk-amd64", "disk-arm64"]
+    assert stored.computer_artifact().forms.disk is not None and len(vms.created) == 3
+    assert all(record.metadata["computer"]["image"] == disks["arm64"]["image"] for record in deployed)
 
 
 @pytest.mark.asyncio

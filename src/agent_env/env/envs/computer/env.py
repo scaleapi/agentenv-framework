@@ -4,6 +4,7 @@ metadata as it builds (``composed``), and the arches built written as its comput
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import posixpath
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
@@ -29,6 +30,7 @@ from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import get_env_store
+from agent_env.store.local_state import awaiting_lock
 from agent_env.providers.env_providers.env_computer_provider import end_recordings
 from agent_env.utils.paths import validate_relative_filename
 
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv
     from agent_env.env.envs.computer.app_env import ComputerAppEnv
     from agent_env.providers.env_providers.env_provider import EnvironmentProvider
+    from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +173,17 @@ class ComputerEnv(Env):
     def computer_artifact(self) -> ComputerArtifact:
         """The env's computer: its base composed with its driver, over the images built."""
         return ComputerArtifact.get(self.metadata["computer"]["id"], self.metadata["computer"]["version"])
+
+    async def compose_unstarted(self, sandbox_provider: SandboxProvider, form: Optional[str] = None) -> None:
+        """Compose first the pairs a deploy on ``sandbox_provider`` boots, of ``form`` when it names one, that no compose
+        has started (``composer.unstarted``), as a run that composed for another sandbox leaves them; deploys of the env
+        at once, in this process or another, compose them once, each after the one composing."""
+        if not composer.unstarted(self, sandbox_provider, form):
+            return
+        async with awaiting_lock(f"computer-compose:{self.stored_id}:{self.version}"):
+            self.metadata = (await asyncio.to_thread(Env.get, self.stored_id, self.version)).metadata
+            if pairs := composer.unstarted(self, sandbox_provider, form):
+                await asyncio.to_thread(composer.compose, self, pairs, Composing(sandbox_provider))
 
     def deployable_builds(self, form: Optional[str] = None) -> list[tuple[str, str, dict]]:
         """Each build a deploy may boot, as (form, arch, record), in the base's order of forms and of arches; only
