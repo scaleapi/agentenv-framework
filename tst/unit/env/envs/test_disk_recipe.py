@@ -184,15 +184,27 @@ def test_the_launcher_refuses_a_port_whose_forward_behind_the_proxy_has_no_port_
 @pytest.mark.parametrize("variables", [{"SOCAT_EXITS_S": "0.5"},
                                        {"SOCAT_EXITS_S": "0", "ZSTD_TAKES_S": "0.5", "VM_DISK": "/disk/disk.img.zst"}],
                          ids=["while-it-runs", "before-it-boots"])
-def test_the_launcher_stops_the_computer_when_a_proxy_exits(launcher, variables):
+def test_the_launcher_stops_the_computer_when_a_proxy_exits(launcher, variables, tmp_path):
     """Whenever the proxy exits: one that can't bind its port exits as the disk is expanded, before QEMU starts."""
-    launch, calls = launcher
+    launch, _ = launcher
 
     stopped = launch(VM_PORTS="18765", **variables)
 
     assert stopped.wait(10) == 1
     assert "the proxy in front of a forwarded port exited (7), so the computer is stopped" in stopped.stderr.read()
-    assert _logged(calls, "stopped")
+    assert _gone(int((tmp_path / "state" / "control" / "qemu.pid").read_text()))
+
+
+def _gone(pid: int) -> bool:
+    """Whether process ``pid`` ends within 10 s."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def test_the_launcher_fails_rather_than_emulate_where_kvm_is_required_and_cant_run_the_disk(launcher):
