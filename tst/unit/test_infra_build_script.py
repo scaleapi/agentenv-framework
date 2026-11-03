@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.env import bootstrap
-from agent_env.env.published_images import REGISTRY, write_release_digests
+from agent_env.env.published_images import DISK_IMAGES, REGISTRY, write_release_digests
 from tst.util.scripts import SCRIPTS, load_script
 
 REPO = SCRIPTS.parents[1]
@@ -46,7 +46,8 @@ def test_it_imports_only_the_standard_library():
 def test_its_images_are_the_ones_agent_env_ships(script):
     assert script.REGISTRY == REGISTRY
     assert script.IMAGES == {image.name: str(image.dockerfile.relative_to(REPO)) for image in bootstrap.PUBLISHED_IMAGES}
-    assert set(script._SMOKES) | {"agentenv-service-db"} == set(script.IMAGES)
+    assert set(script._SMOKES) | {"agentenv-service-db", *script.DISK_ARGS} == set(script.IMAGES)
+    assert script.DISK_ARGS == {image.name: {arg: built.name for arg, built in image.args} for image in DISK_IMAGES}
 
 
 def test_check_accepts_every_image_the_plan_lists(script, monkeypatch, capsys):
@@ -62,8 +63,21 @@ def _gateway(**changes) -> str:
     return json.dumps({key: value for key, value in {**entry, **changes}.items() if value is not None})
 
 
+def _disk(**args) -> str:
+    image = "agentenv-ubuntu-24.04-disk"
+    return json.dumps({"name": image, "repository": f"{REGISTRY}/{image}", "tag": _TAG,
+                       "dockerfile": "src/agent_env/computers/disk/linux/boot/Dockerfile",
+                       "context": "src/agent_env/computers/disk/linux/boot", "args": {
+                           "ROOTFS": f"{REGISTRY}/agentenv-ubuntu-24.04:{_TAG}", "TOOLS": f"{REGISTRY}/agentenv-disk-tools:{_TAG}",
+                           **args}})
+
+
 @pytest.mark.parametrize("entry, problem", [
     (_gateway(name="agentenv-evil"), "'agentenv-evil' isn't an image agent-env ships"),
+    (_gateway(args={"ROOTFS": "evil"}), "agentenv-gateway: unexpected args"),
+    (_disk(ROOTFS="ghcr.io/someone/ubuntu:latest"), "agentenv-ubuntu-24.04-disk: ROOTFS is 'ghcr.io/someone/ubuntu:latest'"),
+    (_disk(TOOLS=f"{REGISTRY}/agentenv-disk-tools:latest"), "agentenv-ubuntu-24.04-disk: TOOLS is 'ghcr.io/scaleapi/"),
+    (_disk(EXTRA="x"), "agentenv-ubuntu-24.04-disk: args is "),
     (_gateway(repository="ghcr.io/someone/agentenv-gateway"), "agentenv-gateway: repository is 'ghcr.io/someone/"),
     (_gateway(dockerfile="tst/data/agentenv_mcp/Dockerfile"), "agentenv-gateway: dockerfile is 'tst/data/agentenv_mcp"),
     (_gateway(context="."), "agentenv-gateway: context is '.'"),
@@ -195,6 +209,31 @@ def test_the_service_db_smoke_waits_for_its_health_check_and_removes_the_contain
     assert _run(script, monkeypatch, "smoke", "agentenv-service-db", "pg") == 0
 
     assert calls[0] == ["docker", "run", "-d", "pg"] and calls[-1] == ["docker", "rm", "-f", "c123"]
+
+
+@pytest.mark.parametrize("kvm", [True, False], ids=["kvm", "tcg"])
+def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(script, monkeypatch, capsys, kvm):
+    calls, logs = [], iter(["agentenv-init: starting", "success: xvfb entered RUNNING\nsuccess: dbus entered RUNNING\n"
+                                                      "success: desktop entered RUNNING"])
+
+    def run(command, **kw):
+        calls.append((command, kw.get("input")))
+        answers = {"inspect": "arm64\n", "run": "c1\n", "logs": next(logs) if command[1] == "logs" else ""}
+        return subprocess.CompletedProcess(command, 0, answers.get(command[1], answers.get(command[2], "")), "")
+
+    monkeypatch.setattr(script.subprocess, "run", run)
+    monkeypatch.setattr(script.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(script.Path, "exists", lambda self: kvm)
+
+    assert _run(script, monkeypatch, "smoke", "agentenv-ubuntu-24.04-disk", "disk:1-arm64") == 0
+
+    commands = [command for command, _ in calls]
+    assert calls[1] == (["docker", "build", "-q", "-t", "disk:1-arm64-machine", "-"],
+                        "FROM agentenv-qemu-launcher\nCOPY --from=disk:1-arm64 /disk/ /disk/\n")
+    assert commands[2] == ["docker", "run", "-d", *(["--device", "/dev/kvm"] if kvm else []), "-e", "VM_ARCH=arm64",
+                           "disk:1-arm64-machine"]
+    assert commands[-1] == ["docker", "rm", "-f", "c1"] and commands.count(["docker", "logs", "c1"]) == 2
+    assert f"booted to its desktop {'with KVM' if kvm else 'under TCG'}" in capsys.readouterr().out
 
 
 def test_a_service_db_that_never_turns_healthy_fails_with_its_logs(script, monkeypatch, capsys):

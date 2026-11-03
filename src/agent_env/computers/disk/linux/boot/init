@@ -1,0 +1,65 @@
+#!/bin/busybox sh
+# The disk form's first process: mounts the root filesystem the computer's image became, brings up the network, reads
+# the image's start (/etc/agentenv/vm/image.env, from its OCI config) and the deploy's environment (the NoCloud seed's
+# user-data), then becomes that start, as its user, as the container runtime would: PID 1 is the image's entrypoint.
+/bin/busybox --install -s /bin
+export PATH=/bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+log() { echo "agentenv-init: $*" > /dev/console; }
+fail() { log "$*"; sleep 2; poweroff -f; }
+while read -r module; do insmod "$module" 2>/dev/null; done < /modules.order
+root=""
+for _ in $(seq 200); do root=$(findfs LABEL=agentenv-root 2>/dev/null) && break; sleep 0.05; done
+[ -n "$root" ] || fail "no filesystem labelled agentenv-root"
+mount -t ext4 -o rw,noatime "$root" /newroot || fail "can't mount $root"
+ifconfig lo 127.0.0.1 up
+iface=$(ls /sys/class/net | grep -vx lo | head -n 1)
+[ -n "$iface" ] && ifconfig "$iface" up && timeout 30 udhcpc -i "$iface" -s /udhcpc.script -q -n -t 10 -T 2 -f >/dev/null 2>&1 \
+    || log "no DHCP lease on ${iface:-any interface}"
+seed=$(findfs LABEL=CIDATA 2>/dev/null || true)
+[ -n "$seed" ] && mount -o ro "$seed" /seed
+config=/newroot/etc/agentenv/vm/image.env
+[ -f "$config" ] || fail "the root filesystem has no $config"
+for name in $(env | cut -d= -f1); do case "$name" in PATH|PWD|SHLVL) ;; *) unset "$name" ;; esac; done
+user=root workdir=/
+set --
+while read -r line; do
+    key=${line%%=*} value=${line#*=}
+    case "$key" in
+        env) export "$(echo "$value" | base64 -d)" ;;
+        argv) set -- "$@" "$(echo "$value" | base64 -d)" ;;
+        user) user=$(echo "$value" | base64 -d) ;;
+        workdir) workdir=$(echo "$value" | base64 -d) ;;
+    esac
+done < "$config"
+if [ -f /seed/user-data ]; then
+    while read -r line; do
+        key=${line%%=*} value=${line#*=}
+        case "$key" in ''|\#*) continue ;; esac
+        export "$key=$(echo "$value" | base64 -d)"
+    done < /seed/user-data
+fi
+hostname=$( [ -f /seed/meta-data ] && sed -n 's/^local-hostname: *//p' /seed/meta-data)
+hostname "${hostname:-computer}"
+hostname > /newroot/etc/hostname
+printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n' "$(hostname)" > /newroot/etc/hosts
+[ -s /resolv.conf ] && cp /resolv.conf /newroot/etc/resolv.conf
+entry=$(awk -F: -v u="${user%%:*}" '$1 == u || $3 == u' /newroot/etc/passwd | head -n 1)
+[ -n "$entry" ] || fail "the image's user ${user%%:*} isn't in /etc/passwd"
+uid=$(echo "$entry" | cut -d: -f3) gid=$(echo "$entry" | cut -d: -f4)
+export HOME="${HOME:-$(echo "$entry" | cut -d: -f6)}" HOSTNAME="$(hostname)"
+[ "$PATH" = /bin ] && export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umount /seed 2>/dev/null
+[ "$#" -gt 0 ] || fail "the image names no command"
+mount --move /sys /newroot/sys
+mount --move /dev /newroot/dev
+mkdir -p /newroot/dev/pts /newroot/dev/shm
+mount -t devpts -o gid=5,mode=620,ptmxmode=666 devpts /newroot/dev/pts
+mount -t tmpfs -o mode=1777,size=512m shm /newroot/dev/shm
+log "starting $* as $user ($uid:$gid) in $workdir"
+# Last, as busybox runs its applets through /proc/self/exe.
+mount --move /proc /newroot/proc
+exec /bin/busybox switch_root /newroot /usr/bin/setpriv --reuid="$uid" --regid="$gid" --init-groups \
+    /usr/bin/env -C "$workdir" "$@"

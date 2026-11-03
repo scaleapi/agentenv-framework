@@ -9,11 +9,12 @@ name: Publish to PyPI
 # rerun is safe.
 #
 # It also publishes the images agent-env ships (agent_env.env.published_images), its infra images and its bundles'
-# (its agents' and the mail example's env),
+# (its agents' and the mail example's env), and its base computers' disk forms,
 # whose tags the registry lacks, and records their digests in the wheel and the release notes, once the repository
 # variable PUBLISH_INFRA_IMAGES is "true". The infra images are published before agentenv-framework-protocol. The
 # bundles' images keep a protocol floor, so each is built only when its folder changes, once the protocol is on PyPI,
-# as a raised floor may name the protocol this release ships. agentenv-framework waits for every image. Every job that
+# as a raised floor may name the protocol this release ships. A disk form is built over its base computer's published
+# image with the published disk tools, so after both. agentenv-framework waits for every image. Every job that
 # reads the shipped bundles' folders first pins the protocol in their envs and artifacts as the wheel does
 # (.github/scripts/shipped_bundles.py pin), so an image's tag, its build and the wheel all see the same sources. Run
 # by hand on main, the workflow publishes the images alone, with nothing sent to PyPI; an agent's image then installs
@@ -71,6 +72,7 @@ jobs:
     outputs:
       missing_infra: ${{ steps.plan.outputs.missing_infra }}
       missing_agents: ${{ steps.plan.outputs.missing_agents }}
+      missing_disks: ${{ steps.plan.outputs.missing_disks }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -90,8 +92,10 @@ jobs:
           uv sync --locked --no-dev
           missing_infra=$(uv run --no-sync python .github/scripts/infra_images.py plan --missing --only infra)
           missing_agents=$(uv run --no-sync python .github/scripts/infra_images.py plan --missing --only agents)
+          missing_disks=$(uv run --no-sync python .github/scripts/infra_images.py plan --missing --only disks)
           echo "missing_infra=$missing_infra" >> "$GITHUB_OUTPUT"
           echo "missing_agents=$missing_agents" >> "$GITHUB_OUTPUT"
+          echo "missing_disks=$missing_disks" >> "$GITHUB_OUTPUT"
 
   # Once main's CI has passed, so nothing is pushed for a commit that fails it: builds each missing infra image on a
   # runner of each platform, checks that it runs, and pushes it under its tag and platform (src-<hex>-amd64), which
@@ -343,17 +347,139 @@ jobs:
               "${ref}-amd64" "${ref}-arm64"
           done
 
+  # Each base computer's disk form whose tag the registry lacks, built on a runner of each platform from the base's
+  # published image of that platform and the published disk tools, booted with the QEMU launcher built from this
+  # checkout (with KVM on x64 runners, under TCG where a runner has none, arm64's), and pushed under its tag and
+  # platform as infra-build does; disk-publish then tags the two as one multi-platform image.
+  disk-build:
+    needs: [main-ci, infra-plan, infra-publish, agent-publish]
+    if: >-
+      !cancelled() && needs.main-ci.result == 'success' && needs.infra-plan.result == 'success'
+      && needs.infra-plan.outputs.missing_disks != '[]'
+      && contains(fromJSON('["success", "skipped"]'), needs.infra-publish.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.agent-publish.result)
+    strategy:
+      fail-fast: true
+      matrix:
+        image: ${{ fromJSON(needs.infra-plan.outputs.missing_disks) }}
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ENTRY: ${{ toJSON(matrix.image) }}
+      NAME: ${{ matrix.image.name }}
+      DOCKERFILE: ${{ matrix.image.dockerfile }}
+      CONTEXT: ${{ matrix.image.context }}
+      TAG: ${{ matrix.image.tag }}
+      REF: ${{ matrix.image.repository }}:${{ matrix.image.tag }}
+      BUILT: ${{ matrix.image.repository }}:${{ matrix.image.tag }}-${{ matrix.arch }}
+      ROOTFS: ${{ matrix.image.args.ROOTFS }}-${{ matrix.arch }}
+      TOOLS: ${{ matrix.image.args.TOOLS }}
+      PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Pin agentenv-framework-protocol in the shipped bundles, as the release does
+        run: python3 .github/scripts/shipped_bundles.py pin
+      - name: Check that it's an image agent-env ships, and that no run has published it
+        id: wanted
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/infra_build.py check "$ENTRY"
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          code=0
+          python3 .github/scripts/infra_build.py exists "$REF" || code=$?
+          case "$code" in
+            0) echo "build=false" >> "$GITHUB_OUTPUT"; echo "$REF is published already, so it isn't built again" ;;
+            1) echo "build=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit 1 ;;
+          esac
+      - name: Pull its base images, and the launcher's, from mirror.gcr.io, as public.ecr.aws can rate-limit a runner
+        if: steps.wanted.outputs.build == 'true'
+        run: python3 .github/scripts/mirror_base_images.py "$DOCKERFILE" src/agent_env/computers/disk/linux/launcher/Dockerfile
+      - name: Let the launcher use KVM, where the runner has it
+        if: steps.wanted.outputs.build == 'true'
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          fi
+      - name: Build
+        if: steps.wanted.outputs.build == 'true'
+        run: |
+          python3 .github/scripts/infra_build.py retry docker pull --platform "$PLATFORM" "$ROOTFS"
+          config=$(python3 .github/scripts/infra_build.py config "$ROOTFS")
+          # No provenance attestation, which would show in the multi-platform image as an unknown platform.
+          python3 .github/scripts/infra_build.py retry \
+            docker build --platform "$PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$BUILT" \
+            --build-arg "ROOTFS=$ROOTFS" --build-arg "TOOLS=$TOOLS" --build-arg "ROOTFS_CONFIG=$config" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "io.agentenv.source-tag=${TAG}" "$CONTEXT"
+      - name: Check that it runs
+        if: steps.wanted.outputs.build == 'true'
+        run: |
+          docker build -q -t agentenv-qemu-launcher src/agent_env/computers/disk/linux/launcher
+          python3 .github/scripts/infra_build.py smoke "$NAME" "$BUILT"
+      - name: Push it under its tag and platform
+        if: steps.wanted.outputs.build == 'true'
+        run: python3 .github/scripts/infra_build.py retry docker push "$BUILT"
+
+  # Each new disk form's platform builds tagged as one multi-platform image, as infra-publish does the infra images.
+  disk-publish:
+    needs: [main-ci, infra-plan, disk-build]
+    if: >-
+      !cancelled() && needs.main-ci.result == 'success' && needs.disk-build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      MISSING: ${{ needs.infra-plan.outputs.missing_disks }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Tag each image's platform builds as one multi-platform image under its source tag
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          jq -c '.[]' <<< "$MISSING" | while read -r entry; do
+            python3 .github/scripts/infra_build.py check "$entry"
+            ref=$(jq -r '"\(.repository):\(.tag)"' <<< "$entry")
+            code=0
+            python3 .github/scripts/infra_build.py exists "$ref" || code=$?
+            if [ "$code" = 0 ]; then
+              echo "$ref is published already, so it's left as it is"
+              continue
+            fi
+            [ "$code" = 1 ] || exit 1
+            python3 .github/scripts/infra_build.py retry docker buildx imagetools create -t "$ref" \
+              --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
+              "${ref}-amd64" "${ref}-arm64"
+          done
+
   # The digest the registry serves under every image's tag, for the wheel and the release notes, which the framework
   # job checks against the registry before the wheel carries it; and a warning for each image an anonymous pull, as an
   # install makes, doesn't get: GHCR keeps a new package private until its admin makes it public.
   infra-record:
-    needs: [infra-plan, infra-build, infra-publish, agent-build, agent-publish]
+    needs: [infra-plan, infra-build, infra-publish, agent-build, agent-publish, disk-build, disk-publish]
     if: >-
       !cancelled() && needs.infra-plan.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.infra-build.result)
       && contains(fromJSON('["success", "skipped"]'), needs.infra-publish.result)
       && contains(fromJSON('["success", "skipped"]'), needs.agent-build.result)
       && contains(fromJSON('["success", "skipped"]'), needs.agent-publish.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.disk-build.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.disk-publish.result)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

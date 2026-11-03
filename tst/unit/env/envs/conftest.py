@@ -14,7 +14,7 @@ from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 from tst.util.oci_registry import UBUNTU_LAYER, Registry
-from tst.unit.env.envs._computer import FakeDocker, _base, _driver
+from tst.unit.env.envs._computer import DISK_FORM, FakeDocker, _base, _driver
 
 
 @pytest.fixture
@@ -33,9 +33,11 @@ def docker(local_stores, cli_routing, monkeypatch):
     monkeypatch.setattr(composer, "_probe", fake.probe)
     monkeypatch.setattr(builder, "_emulated_platforms", lambda: {"linux/arm64", *fake.emulates})
     monkeypatch.setattr(builder.LocalBuilder, "installed", lambda self, tag, prefix: {"mss": "10.1.0"})
+    monkeypatch.setattr(builder.LocalBuilder, "image_config", lambda on, tag: fake.image_config(tag))
     monkeypatch.setattr(composer, "_protocol_source", lambda: None)
     monkeypatch.setattr(builder.LocalBuilder, "resolve", fake.resolving())
     monkeypatch.setattr(LocalRegistryImageStore, "ensure_repository", lambda self, repository: None)
+    monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset())
     return fake
 
 
@@ -46,6 +48,12 @@ def base(docker):
     image = get_artifact_store().put_document(DockerImageArtifact(id="base-image", description="",
                                                                   image_name=f"ghcr.io/acme/base:1@{index}"))
     return _base(image)
+
+
+@pytest.fixture
+def disk_base(base):
+    """``base`` with a disk form made from its container when composed."""
+    return _base(base.image(), forms={**base.forms.model_dump(exclude_none=True), "disk": DISK_FORM})
 
 
 @pytest.fixture

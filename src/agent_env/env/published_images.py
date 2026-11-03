@@ -1,10 +1,12 @@
-"""The images agent-env publishes for the infra envs, the agents it ships, an example's env and its base computers, for
-linux/amd64 and linux/arm64: one per Dockerfile, built from the Dockerfile's folder. Each is tagged by its build context's content, so
-an install holding the same sources finds the image built from them; a release wheel also records the digest its
-release published under each tag."""
+"""The images agent-env publishes for the infra envs, the agents it ships, an example's env, its base computers and their
+disk forms, for linux/amd64 and linux/arm64: one per Dockerfile, built from the Dockerfile's folder. Each is tagged by
+its build context's content, and an image built over other published images by theirs too, so an install holding the
+same sources finds the image built from them; a release wheel also records the digest its release published under each
+tag."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -28,24 +30,31 @@ _SERVED: dict[str, str] = {}  # the digest the registry served each ref under, w
 _AGENTS = Path(__file__).parents[1] / "agents" / "agents"
 _EXAMPLES = Path(__file__).parents[1] / "examples"
 _COMPUTERS = Path(__file__).parents[1] / "computers" / "artifacts"
+# The Linux disk form's boot recipe, disk tools and QEMU launcher.
+DISK = Path(__file__).parents[1] / "computers" / "disk" / "linux"
 
 
 @dataclass(frozen=True)
 class PublishedImage:
     """An image agent-env publishes, under ``name`` in the registry, built from ``dockerfile`` with its folder as the
-    build context."""
+    build context, and with each of ``args``, a build arg its Dockerfile builds from, set to that published image."""
 
     name: str
     dockerfile: Path
+    args: tuple[tuple[str, PublishedImage], ...] = ()
 
     @property
     def repository(self) -> str:
         return f"{REGISTRY}/{self.name}"
 
     def tag(self) -> str:
-        """``src-`` and the hex of the build context's source digest, the same for the same sources on any platform."""
-        digest = BuildContext.of(self.dockerfile.parent, self.dockerfile).source_digest(None)
-        return f"src-{digest.removeprefix('sha256:')}"
+        """``src-`` and the hex of the build context's source digest, with each of ``args``' tags when it has any: the
+        same for the same sources on any platform."""
+        digest = BuildContext.of(self.dockerfile.parent, self.dockerfile).source_digest(None).removeprefix("sha256:")
+        if self.args:
+            digest = hashlib.sha256("\0".join([digest, *(f"{arg}={image.tag()}" for arg, image in self.args)])
+                                    .encode()).hexdigest()
+        return f"src-{digest}"
 
     def ref(self) -> str:
         """The repository and the tag of the image built from these sources."""
@@ -61,6 +70,13 @@ EXAMPLE_IMAGES = (PublishedImage("agentenv-mail-mcp", _EXAMPLES / "mail-mcp" / "
 COMPUTER_IMAGES = (PublishedImage("agentenv-ubuntu-24.04", _COMPUTERS / "ubuntu-24.04" / "Dockerfile"),)
 # The shipped bundles' published images, whose requirements keep a protocol floor.
 BUNDLE_IMAGES = AGENT_IMAGES + EXAMPLE_IMAGES + COMPUTER_IMAGES
+# What makes and boots a Linux disk form: the disk tools a build runs on its own platform, and the QEMU launcher.
+DISK_TOOLS_IMAGE = PublishedImage("agentenv-disk-tools", DISK / "tools" / "Dockerfile")
+LAUNCHER_IMAGE = PublishedImage("agentenv-qemu-launcher", DISK / "launcher" / "Dockerfile")
+# Each base computer's disk form: its container form's root filesystem on the boot recipe, so a run pulls it rather than
+# building it from the two.
+DISK_IMAGES = tuple(PublishedImage(f"{image.name}-disk", DISK / "boot" / "Dockerfile",
+                                   (("ROOTFS", image), ("TOOLS", DISK_TOOLS_IMAGE))) for image in COMPUTER_IMAGES)
 
 
 def published_digest(image: PublishedImage) -> str | None:
@@ -68,6 +84,19 @@ def published_digest(image: PublishedImage) -> str | None:
     the one the registry serves under its tag now; None when it serves none or can't be asked."""
     ref = image.ref()
     return release_digests(RELEASE_FILE).get(ref) or _registry_digest(ref)
+
+
+def published_pinned(image: PublishedImage) -> str | None:
+    """``image``'s ref pinned to the digest it's published under for the sources installed, or None."""
+    digest = published_digest(image)
+    return f"{image.ref()}@{digest}" if digest else None
+
+
+def published_disk(sources: str) -> str | None:
+    """The pinned disk form published for the shipped base computer whose container image's installed build context has
+    the source digest ``sources``, or None when no shipped base has those sources or its disk isn't published."""
+    tag = f"src-{sources.removeprefix('sha256:')}"
+    return next((published_pinned(disk) for disk in DISK_IMAGES if dict(disk.args)["ROOTFS"].tag() == tag), None)
 
 
 def published_bundle_image(sources: str) -> tuple[str, str] | None:

@@ -50,13 +50,15 @@ with `exposed_ports=[port]` and returns the VM, and the deploy then loads and st
 
 | Method | Required | Called by |
 |---|---|---|
-| `create_vm(*, image, boot_mode, cpu, memory, disk_size_gb, timeout, exposed_ports, setup_for_gateway, attribution, network_policy) -> VmSandbox` | VM backend | env deploys, `deploy_sandbox` in VM mode, `create_container`, and your `create_sandbox` |
+| `create_vm(*, image, boot_mode, cpu, memory, disk_size_gb, timeout, exposed_ports, setup_for_gateway, attribution, network_policy, env) -> VmSandbox` | VM backend | env deploys, `deploy_sandbox` in VM mode, `create_container`, and your `create_sandbox`; with a computer's disk form as `image` (an image holding `/disk/disk.img`) and its `env`, a computer env's deploy and gate 3, on a provider whose `disk_image_platforms()` names the disk's platform: boot the disk, `env` in its NoCloud seed (`computers/disk/linux/launcher/` boots one under QEMU), reached on `exposed_ports`, with no exec channel into it |
 | `create_sandbox(*, image_name, port, env, cpu, memory, disk_size_gb, timeout, attribution, network_policy) -> Sandbox` | yes (a VM backend wraps `create_vm`) | an agent's sandbox (`provider.create_sandbox`); `create_container` of a container-only backend |
 | `get_sandbox(sandbox_id) -> Sandbox` | yes | every step after the one that created the sandbox, and teardown |
 | `terminate_sandbox(sandbox_id)` | no | teardown. The default calls `get_sandbox` then `terminate()`, and treats `SandboxNotFoundError` as done; override when you can terminate without a live handle |
 | `create_container(...)` | inherited | containers that run an env or agent image. Override only when the platform boots images natively |
 | `reset_container(sandbox, *, image_name, port, env)` | inherited | a computer env's reset, which replaces the container `create_container` ran with a fresh one on the same sandbox and port. The default works on a VM backend; one whose sandbox is the container itself raises `NotImplementedError` |
 | `native_platforms()` | no | a computer env's deploy and gate 3, which boot a build only on a provider that runs its arch without emulation. The default is `linux/amd64`; local Docker returns this machine's |
+| `disk_image_platforms()` | no | the same for a computer's disk form: the platforms whose disks `create_vm` boots without emulation. The default is none; local Docker returns this machine's where it can pass `/dev/kvm` to a container |
+| `reset_vm(sandbox, *, image, env)` | no | a computer env's reset of a disk `create_vm` booted: boot it afresh on the same sandbox and ports. The default raises `NotImplementedError` |
 | `prepare_image(image, *, attribution)` | no | before a sandbox is asked for an image, outside any creation deadline; build a context-only image here, and pull one with an `image_digest` by it, building it from its context when it can't be pulled |
 | `from_config(**config)` | no | receives `[sandbox.providers.<name>.config]` with `secret:` references resolved. Override to fail early with a `ConfigError` that names the missing key (`boxd` also rejects unknown keys) |
 | `close()` | no | release SDK clients |

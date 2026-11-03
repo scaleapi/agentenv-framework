@@ -9,7 +9,16 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -17,13 +26,15 @@ from agent_env.artifact.ref import ArtifactRef
 from agent_env.entity.refs import EntityRef
 from agent_env.store.base import NotFoundError
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.store.image_store.image_contents import UnreadableLayerError, os_release, platform_manifests
+from agent_env.store.image_store.image_contents import UnreadableLayerError, disk_layer, os_release, platform_manifests
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
 
 OS_TYPES = ("linux",)
-FORMS = ("container",)
+FORMS = ("container", "disk")
+#: The file a disk form's image holds, as KubeVirt's containerDisk has it, owned by the uid its QEMU runs as.
+DISK_FILE, DISK_OWNER = "disk/disk.img", 107
 #: What a setting holds: its default's type, which a value an env or a deploy gives must share.
 SettingValue = str | int | float | bool
 
@@ -81,10 +92,30 @@ class ContainerForm(BaseModel):
     input_channel: Literal["env"]
 
 
+class DiskForm(BaseModel):
+    """The computer as a disk a VM boots from UEFI: an EFI system partition holding one UKI, whose init reads deploy
+    settings from a NoCloud seed (``input_channel``) and starts the image's own ``init``, and its root filesystem. With
+    no ``image``, it's the container form's root filesystem on agent-env's Linux boot recipe, made when composed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: ArtifactRef | None = None
+    init: Literal["supervisord"]
+    input_channel: Literal["nocloud"]
+    firmware: list[Literal["efi"]] = Field(default=["efi"], min_length=1)
+    min_disk_gb: int = Field(ge=1, description="Its virtual size, which a deploy's disk is at least")
+
+
 class Forms(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     container: ContainerForm
+    disk: DiskForm | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_absent_forms(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Only the forms the computer has, so a computer of one form is stored as it was before others existed."""
+        return {form: value for form, value in handler(self).items() if value is not None}
 
 
 class ImageCheck(BaseModel):
@@ -115,8 +146,9 @@ class ComputerArtifact(Artifact):
     forms: Forms
     config: dict[str, Setting] = Field(default_factory=dict, description="Its settings, by name")
 
-    toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("forms.container.image",
-                                                                     artifact_type="docker_image"),)
+    toml_refs: ClassVar[tuple[EntityRef, ...]] = (
+        EntityRef.artifact("forms.container.image", artifact_type="docker_image"),
+        EntityRef.artifact("forms.disk.image", artifact_type="docker_image"))
     toml_keys: ClassVar[dict[str, type]] = {"description": str, "arch": list, "os": dict, "session": dict,
                                             "forms": dict, "config": dict}
 
@@ -158,9 +190,14 @@ class ComputerArtifact(Artifact):
         from agent_env.artifact.store import get_artifact_store
 
         computer = cls(**fields)
-        image = computer.image()
+        image, disk = computer.image(), computer.forms.disk
         checks = {"container": _inspect_container(image, computer.arch, computer.os) if inspect
                   else _unread(computer.arch, "inspection was skipped")}
+        if disk is not None and disk.image is None:
+            checks["disk"] = _unread(computer.arch, "it's made from the container form when composed")
+        elif disk is not None:
+            checks["disk"] = (_inspect_disk(computer.disk_image(), computer.arch, disk.min_disk_gb) if inspect
+                              else _unread(computer.arch, "inspection was skipped"))
         problems = [f"forms.{form} ({arch}): {check.problem}"
                     for form, by_arch in checks.items() for arch, check in by_arch.items() if check.status == "failed"]
         if problems:
@@ -175,10 +212,10 @@ class ComputerArtifact(Artifact):
         """Write the computer an artifact.toml declares, its form's image as the bundle wrote it or the artifact the
         key names."""
         fields = {key: value for key, value in data.items() if key not in ("id", "type", "version")}
-        container = (fields.get("forms") or {}).get("container")
-        if isinstance(container, dict) and "image" in container:
-            image = ctx.artifact(container["image"])
-            container["image"] = {"id": image.id, "version": image.version}
+        for form in (fields.get("forms") or {}).values():
+            if isinstance(form, dict) and "image" in form:
+                image = ctx.artifact(form["image"])
+                form["image"] = {"id": image.id, "version": image.version}
         try:
             return cls.put(id=ctx.id, **fields)
         except ValidationError as e:
@@ -189,11 +226,18 @@ class ComputerArtifact(Artifact):
     def image(self) -> DockerImageArtifact:
         """The container form's image artifact, refused when the store has no docker_image artifact of that id and
         version."""
-        ref = self.forms.container.image
+        return self._image("container", self.forms.container.image)
+
+    def disk_image(self) -> DockerImageArtifact | None:
+        """The disk form's image artifact, None when it has none, refused as ``image`` is."""
+        disk = self.forms.disk
+        return None if disk is None or disk.image is None else self._image("disk", disk.image)
+
+    def _image(self, form: str, ref: ArtifactRef) -> DockerImageArtifact:
         try:
             return DockerImageArtifact.get(ref.id, ref.version)
         except (NotFoundError, TypeError) as e:
-            raise ValueError(f"computer {self.id!r}: forms.container.image: {e}") from e
+            raise ValueError(f"computer {self.id!r}: forms.{form}.image: {e}") from e
 
 
 def _inspect_container(image: DockerImageArtifact, arches: list[str], os: LinuxOS) -> dict[str, ImageCheck]:
@@ -229,6 +273,42 @@ def _inspect_container(image: DockerImageArtifact, arches: list[str], os: LinuxO
                     if release.get(key) != want]
         checks[arch] = ImageCheck(status="failed" if problems else "passed", image=ref, manifest=digest,
                                   os_release={key: release[key] for key in expected if key in release},
+                                  problem="; ".join(problems) or None)
+    return checks
+
+
+def _inspect_disk(image: DockerImageArtifact, arches: list[str], min_disk_gb: int) -> dict[str, ImageCheck]:
+    """Each arch's disk image read from the start of its one layer: its file, its owner and its virtual size."""
+    from agent_env.config import get_config
+
+    if not names_registry(image.image_name):
+        return _unread(arches, "it's stored under a tag no registry serves, so its first boot checks it")
+    ref = image.pinned_name
+    auth = get_config().get_image_store().auth(ref)
+    try:
+        ref, manifests = platform_manifests(ref, auth)
+    except ValueError as e:
+        return {arch: ImageCheck(status="failed", image=ref, problem=str(e)) for arch in arches}
+    checks = {}
+    for arch in arches:
+        if (digest := manifests.get(arch)) is None:
+            checks[arch] = ImageCheck(status="failed", image=ref, problem=f"it has no linux/{arch} image")
+            continue
+        try:
+            found = disk_layer(ref, digest, auth)
+        except UnreadableLayerError as e:
+            checks[arch] = ImageCheck(status="uninspected", image=ref, manifest=digest,
+                                      reason=f"{e}, so its first boot checks it")
+            continue
+        except ValueError as e:
+            checks[arch] = ImageCheck(status="failed", image=ref, manifest=digest, problem=str(e))
+            continue
+        problems = [problem for problem, wrong in (
+            (f"its first file is {found.path}, not {DISK_FILE}", found.path != DISK_FILE),
+            (f"{found.path} is owned by uid {found.uid}, not {DISK_OWNER}", found.uid != DISK_OWNER),
+            (f"its virtual size is {found.virtual_size / 2**30:.1f} GiB, under min_disk_gb ({min_disk_gb})",
+             found.virtual_size < min_disk_gb * 2**30)) if wrong]
+        checks[arch] = ImageCheck(status="failed" if problems else "passed", image=ref, manifest=digest,
                                   problem="; ".join(problems) or None)
     return checks
 

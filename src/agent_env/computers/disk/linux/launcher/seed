@@ -1,0 +1,12 @@
+#!/bin/sh
+# seed DIR: the NoCloud seed's files for the computer launch boots, in DIR: user-data holding each VM_ENV_<NAME> variable
+# as NAME and its value base64'd, a line each, as the disk's init reads them, and meta-data naming the instance.
+set -eu
+{
+    echo "#agentenv-environment"
+    for name in $(env | sed -n 's/^VM_ENV_\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort -u); do
+        eval "value=\${VM_ENV_$name}"
+        printf '%s=%s\n' "$name" "$(printf %s "$value" | base64 | tr -d '\n')"
+    done
+} > "$1/user-data"
+printf 'instance-id: %s\nlocal-hostname: computer\n' "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" > "$1/meta-data"

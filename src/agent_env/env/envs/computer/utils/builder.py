@@ -125,9 +125,18 @@ class Builder(ABC):
         """Make each of ``paths`` executable that starts as a script or a Linux binary does."""
 
     @abstractmethod
-    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT) -> None:
-        """Build ``context`` with ``dockerfile``, written into it, as the image ``tag`` for ``platform``. Raises
-        DockerBuildError."""
+    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT,
+              build_args: dict[str, str] | None = None) -> None:
+        """Build ``context`` with ``dockerfile``, written into it, and ``build_args``, as the image ``tag`` for
+        ``platform``. Raises DockerBuildError."""
+
+    @abstractmethod
+    def image_config(self, tag: str) -> dict:
+        """The ``config`` object of the image config of ``tag``, an image its Docker holds."""
+
+    @abstractmethod
+    def login(self, auth) -> None:
+        """Sign its Docker in to the registry ``auth``, image store credentials or None, names."""
 
     @abstractmethod
     def installed(self, tag: str, prefix: str) -> dict[str, str]:
@@ -310,10 +319,21 @@ class LocalBuilder(Builder):
                 if file.read(4).startswith(RUN_ONLY):
                     (self.work / path).chmod(EXECUTABLE)
 
-    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT) -> None:
+    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT,
+              build_args: dict[str, str] | None = None) -> None:
         (self.work / context).mkdir(parents=True, exist_ok=True)
         (self.work / context / "Dockerfile").write_text(dockerfile)
-        build_image(self.work / context / "Dockerfile", self.work / context, tag, platform=platform, labels=labels)
+        build_image(self.work / context / "Dockerfile", self.work / context, tag, platform=platform, labels=labels,
+                    build_args=build_args)
+
+    def image_config(self, tag: str) -> dict:
+        inspected = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config}}", tag],
+                                   capture_output=True, text=True, check=True)
+        return json.loads(inspected.stdout)
+
+    def login(self, auth) -> None:
+        if auth is not None:
+            docker_login(auth)
 
     def installed(self, tag: str, prefix: str) -> dict[str, str]:
         created = subprocess.run(["docker", "create", tag], capture_output=True, text=True, check=True).stdout.strip()
@@ -423,14 +443,22 @@ class VmBuilder(Builder):
     def mark_runnable(self, paths: list[str]) -> None:
         self._each([f"{self.helper} runnable {self._at(path)}" for path in paths])
 
-    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT) -> None:
+    def build(self, dockerfile: str, tag: str, platform: str, labels: dict[str, str], context: str = CONTEXT,
+              build_args: dict[str, str] | None = None) -> None:
         folder = f"{self.work}/{context}"
         self._write(f"{folder}/Dockerfile", dockerfile.encode())
-        options = " ".join(f"--label {shlex.quote(f'{name}={value}')}" for name, value in labels.items())
+        options = " ".join([*(f"--label {shlex.quote(f'{name}={value}')}" for name, value in labels.items()),
+                            *(f"--build-arg {shlex.quote(f'{name}={value}')}" for name, value in (build_args or {}).items())])
         code, stdout, stderr = self._output(f"cd {folder} && docker build --platform {shlex.quote(platform)} {options} "
                                             f"-f Dockerfile -t {shlex.quote(tag)} . 2>&1")
         if code != 0:
             raise DockerBuildError(f"docker build of {tag} failed (exit {code}):\n{(stdout + stderr).rstrip()}")
+
+    def image_config(self, tag: str) -> dict:
+        return json.loads(self._exec(f"docker image inspect --format '{{{{json .Config}}}}' {shlex.quote(tag)}"))
+
+    def login(self, auth) -> None:
+        self._login(auth)
 
     def installed(self, tag: str, prefix: str) -> dict[str, str]:
         listed = self._exec(f"{self.helper} installed {shlex.quote(tag)} {shlex.quote(f'{prefix}/installed.json')}")

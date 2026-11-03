@@ -85,7 +85,8 @@ def test_the_agent_image_jobs_are_the_infra_image_jobs_on_the_agents_list(agent_
     assert yaml.safe_load(yaml.safe_dump(body(infra_job)).replace("missing_infra", "missing_agents")) == body(agent_job)
 
 
-@pytest.mark.parametrize("job", ["infra-build", "infra-publish", "agent-build", "agent-publish"])
+@pytest.mark.parametrize("job", ["infra-build", "infra-publish", "agent-build", "agent-publish", "disk-build",
+                                 "disk-publish"])
 def test_nothing_is_pushed_before_mains_ci_passes(job):
     """A condition with ``!cancelled()`` runs whatever the jobs it needs ended as, so it checks main-ci's itself."""
     assert "main-ci" in JOBS[job]["needs"]
@@ -113,7 +114,7 @@ def test_the_framework_waits_for_every_image_job():
     assert _condition("framework").startswith("!cancelled()")
     assert ("(needs.infra-plan.result == 'skipped' || (needs.infra-plan.result == 'success' "
             "&& needs.infra-record.result == 'success'))") in _condition("framework")
-    for image_job in ("infra-build", "infra-publish", "agent-build", "agent-publish"):
+    for image_job in ("infra-build", "infra-publish", "agent-build", "agent-publish", "disk-build", "disk-publish"):
         assert image_job in JOBS["infra-record"]["needs"] and _finished(image_job) in _condition("infra-record")
 
 
@@ -121,7 +122,7 @@ def test_every_job_that_reads_the_shipped_bundles_pins_the_protocol_first():
     """The pin is a source of the shipped envs: a job without it would tag, build, record or ship other sources."""
     readers = {job: "\n".join(_runs(job)) for job in JOBS if _READS_SHIPPED_SOURCES.search("\n".join(_runs(job)))}
 
-    assert set(readers) == {"infra-plan", "infra-build", "agent-build", "infra-record", "framework"}
+    assert set(readers) == {"infra-plan", "infra-build", "agent-build", "disk-build", "infra-record", "framework"}
     for job, runs in readers.items():
         pins = [pin.start() for pin in _PIN.finditer(runs)]
         assert len(pins) == 1 and pins[0] < _READS_SHIPPED_SOURCES.search(runs).start(), job
@@ -202,7 +203,8 @@ def test_what_a_registry_can_rate_limit_is_tried_again():
 
 def test_every_infra_image_pins_its_bases_by_digest_and_dependabot_bumps_them():
     """A release rebuilds an image only when its sources change, so a base behind a bare tag never picks up its
-    fixes; pinned, the pin is a source, and Dependabot bumping it is what rebuilds and republishes the image."""
+    fixes; pinned, the pin is a source, and Dependabot bumping it is what rebuilds and republishes the image. A base a
+    build arg names is another published image, whose tag is a source of this one's."""
     dependabot = yaml.safe_load((REPO / ".github" / "dependabot.yml").read_text())
     (docker,) = [update for update in dependabot["updates"] if update["package-ecosystem"] == "docker"]
 
@@ -210,7 +212,7 @@ def test_every_infra_image_pins_its_bases_by_digest_and_dependabot_bumps_them():
         text = image.dockerfile.read_text()
         stages = set(re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", text, re.IGNORECASE | re.MULTILINE))
         bases = [ref for ref in re.findall(r"^FROM\s+(?:--\S+\s+)*(\S+)", text, re.IGNORECASE | re.MULTILINE)
-                 if ref not in stages]
+                 if ref not in stages and ref != "scratch" and not ref.startswith("${")]
         assert bases and all(re.search(r"@sha256:[0-9a-f]{64}$", ref) for ref in bases), (image.name, bases)
         assert f"/{image.dockerfile.parent.relative_to(REPO)}" in docker["directories"], image.name
 
@@ -223,3 +225,18 @@ def test_dependabot_proposes_a_bases_fixes_and_never_an_upgrade():
 
     assert {"dependency-name": "*", "update-types": ["version-update:semver-major", "version-update:semver-minor"]} in (
         docker["ignore"])
+
+
+def test_a_disk_form_is_built_over_its_bases_published_image_with_the_published_tools_and_booted_before_its_push():
+    """Its base's image, an agent image, and the disk tools, an infra image, are published first; its build is checked
+    and pushed as the infra images' are."""
+    build = "\n".join(_runs("disk-build"))
+    publish = "\n".join(_runs("disk-publish"))
+
+    assert {"infra-publish", "agent-publish"} <= set(JOBS["disk-build"]["needs"])
+    assert all(_finished(job) in _condition("disk-build") for job in ("infra-publish", "agent-publish"))
+    assert 'infra_build.py check "$ENTRY"' in build and build.index("infra_build.py check") < build.index("docker build")
+    assert '--build-arg "ROOTFS=$ROOTFS" --build-arg "TOOLS=$TOOLS"' in build
+    assert build.index('infra_build.py smoke "$NAME" "$BUILT"') < build.index('docker push "$BUILT"')
+    assert 'infra_build.py check "$entry"' in publish and publish.index("check") < publish.index("imagetools create")
+    assert JOBS["disk-build"]["env"]["ROOTFS"] == "${{ matrix.image.args.ROOTFS }}-${{ matrix.arch }}"

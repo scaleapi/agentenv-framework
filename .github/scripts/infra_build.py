@@ -4,8 +4,11 @@ jobs install nothing; what they're handed by the jobs that run agent-env (``infr
 images agent-env ships before it's built, pushed or recorded.
 
 ``check ENTRY`` fails unless ENTRY, a JSON object as ``infra_images.py plan`` lists an image, names an image agent-env
-ships, with its Dockerfile, context, repository and a source tag. ``exists REF`` exits 0 when the registry has REF, 1
-when it says it doesn't, and 2 when it can't tell. ``smoke NAME IMAGE`` checks that IMAGE, a local build of NAME, runs.
+ships, with its Dockerfile, context, repository and a source tag, and for a disk form, the build args naming its base
+computer's image and the disk tools by their repositories and source tags. ``exists REF`` exits 0 when the registry has
+REF, 1 when it says it doesn't, and 2 when it can't tell. ``config IMAGE`` prints the config object of IMAGE's OCI
+config, base64'd, as a disk form's build takes its base's. ``smoke NAME IMAGE`` checks that IMAGE, a local build of
+NAME, runs: a disk form boots to its desktop in the QEMU launcher built here as ``agentenv-qemu-launcher``.
 ``verify-record PATH`` fails unless PATH records each image agent-env ships once, with the digest the registry serves
 under its tag now. ``retry COMMAND...`` runs COMMAND, again while a registry rate-limits it or PyPI doesn't serve
 yet the agentenv-framework-protocol an agent image's build installs.
@@ -14,6 +17,7 @@ yet the agentenv-framework-protocol an agent image's build installs.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import posixpath
 import re
@@ -43,12 +47,20 @@ IMAGES = {
     "agentenv-pydantic-ai": "src/agent_env/agents/agents/pydantic-ai/Dockerfile",
     "agentenv-mail-mcp": "src/agent_env/examples/mail-mcp/envs/mail/Dockerfile",
     "agentenv-ubuntu-24.04": "src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile",
+    "agentenv-disk-tools": "src/agent_env/computers/disk/linux/tools/Dockerfile",
+    "agentenv-qemu-launcher": "src/agent_env/computers/disk/linux/launcher/Dockerfile",
+    "agentenv-ubuntu-24.04-disk": "src/agent_env/computers/disk/linux/boot/Dockerfile",
 }
+# Each disk form's build args, by the images agent-env ships that they name.
+DISK_ARGS = {"agentenv-ubuntu-24.04-disk": {"ROOTFS": "agentenv-ubuntu-24.04", "TOOLS": "agentenv-disk-tools"}}
 _TAG = re.compile(r"^src-[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEALTHY_WITHIN_SECONDS = 120
 _HEALTH_POLL_SECONDS = 2
 _LOG_TAIL_LINES = 30  # of a container that never turned healthy, in the error
+# How long a disk form may take to boot to its desktop: seconds with KVM, minutes under TCG.
+_BOOTED_WITHIN_SECONDS = 900
+_BOOTED = re.compile(r"success: (xvfb|dbus|desktop) entered RUNNING")
 _PRINTED_CHARS = 200  # of what docker printed in place of a manifest, in the error
 # What a registry answers when it rate-limits a request: ECR Public's 429, and the toomanyrequests error code GHCR and
 # Docker Hub send.
@@ -94,6 +106,11 @@ _SMOKES = {
                               " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
                               " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
                               " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
+    "agentenv-disk-tools": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+                            "command -v disk image-env mkfs.ext4 mkfs.vfat mcopy sfdisk qemu-img"],
+    "agentenv-qemu-launcher": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+                               "qemu-system-x86_64 --version && qemu-system-aarch64 --version"
+                               " && test -f /usr/share/OVMF/OVMF_CODE_4M.fd && test -f /usr/share/AAVMF/AAVMF_CODE.fd"],
 }
 
 
@@ -102,6 +119,7 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check").add_argument("entry")
     commands.add_parser("exists").add_argument("ref")
+    commands.add_parser("config").add_argument("image")
     smoke = commands.add_parser("smoke")
     smoke.add_argument("name", choices=sorted(IMAGES))
     smoke.add_argument("image")
@@ -112,6 +130,9 @@ def main() -> int:
         return _tried_again(lambda: _streamed(args.argv)).returncode
     if args.command == "exists":
         return _exists(args.ref)
+    if args.command == "config":
+        print(_config(args.image))
+        return 0
     if args.command == "smoke":
         return _smoke(args.name, args.image)
     problems = _check(args.entry) if args.command == "check" else _verify_record(args.path)
@@ -134,8 +155,23 @@ def _check(entry: str) -> list[str]:
                 for key, value in expected.items() if image.get(key) != value]
     if not _TAG.match(str(image.get("tag"))):
         problems.append(f"{name}: {image.get('tag')!r} isn't a source tag")
-    if extra := sorted(set(image) - {*expected, "tag"}):
+    if name in DISK_ARGS:
+        problems += _check_args(name, image.get("args"))
+    if extra := sorted(set(image) - {*expected, "tag", *(("args",) if name in DISK_ARGS else ())}):
         problems.append(f"{name}: unexpected {', '.join(extra)}")
+    return problems
+
+
+def _check_args(name: str, args: object) -> list[str]:
+    """The problems with a disk form's build args: each must name the image agent-env ships it's for, by a source tag."""
+    wanted = DISK_ARGS[name]
+    if not isinstance(args, dict) or set(args) != set(wanted):
+        return [f"{name}: args is {args!r}, not {', '.join(sorted(wanted))}"]
+    problems = []
+    for arg, image in wanted.items():
+        repository, _, tag = str(args[arg]).rpartition(":")
+        if repository != f"{REGISTRY}/{image}" or not _TAG.match(tag):
+            problems.append(f"{name}: {arg} is {args[arg]!r}, not {REGISTRY}/{image} under a source tag")
     return problems
 
 
@@ -232,14 +268,50 @@ def _verify_record(path: Path) -> list[str]:
     return problems
 
 
+def _config(image: str) -> str:
+    """The config object of ``image``'s OCI config, a local image's, as base64'd JSON."""
+    inspected = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config}}", image],
+                               capture_output=True, text=True, check=True)
+    return base64.b64encode(inspected.stdout.strip().encode()).decode()
+
+
 def _smoke(name: str, image: str) -> int:
     if name == "agentenv-service-db":
         return _healthy(image)
+    if name in DISK_ARGS:
+        return _boots(image)
     command = [part.replace("{image}", image) for part in _SMOKES[name]]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"::error::{name}: `{' '.join(command)}` exited {result.returncode}:\n{result.stdout}{result.stderr}")
     return result.returncode
+
+
+def _boots(image: str) -> int:
+    """Boot ``image``, a disk form, in the launcher built here, with KVM where it can, and wait for its desktop's
+    programs to run, which its console shows."""
+    arch = subprocess.run(["docker", "image", "inspect", "--format", "{{.Architecture}}", image], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    machine = f"{image}-machine"
+    subprocess.run(["docker", "build", "-q", "-t", machine, "-"], text=True, check=True, capture_output=True,
+                   input=f"FROM agentenv-qemu-launcher\nCOPY --from={image} /disk/ /disk/\n")
+    kvm = ["--device", "/dev/kvm"] if Path("/dev/kvm").exists() else []
+    container = subprocess.run(["docker", "run", "-d", *kvm, "-e", f"VM_ARCH={arch}", machine], capture_output=True,
+                               text=True, check=True).stdout.strip()
+    try:
+        deadline, logs = time.monotonic() + _BOOTED_WITHIN_SECONDS, ""
+        while time.monotonic() < deadline:
+            logs = subprocess.run(["docker", "logs", container], capture_output=True, text=True, errors="replace")
+            logs = logs.stdout + logs.stderr
+            if len(set(_BOOTED.findall(logs))) == 3:
+                print(f"{image} booted to its desktop{' with KVM' if kvm else ' under TCG'}")
+                return 0
+            time.sleep(_HEALTH_POLL_SECONDS)
+        tail = "\n".join(logs.splitlines()[-_LOG_TAIL_LINES:])
+        print(f"::error::{image} didn't boot to its desktop within {_BOOTED_WITHIN_SECONDS}s:\n{tail}")
+        return 1
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
 
 
 def _healthy(image: str) -> int:

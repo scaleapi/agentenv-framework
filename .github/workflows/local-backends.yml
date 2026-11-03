@@ -138,6 +138,12 @@ jobs:
         run: |
           docker run --detach --name registry --publish 5000:5000 mirror.gcr.io/library/registry:2
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
+      # x64 hosted runners have /dev/kvm; the disk form's tests boot under it, and skip without it, which fails below.
+      - name: Let the local provider boot disks with KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          test -w /dev/kvm
       - name: Slow integration tier on the local defaults
         env:
           AGENTENV_TEST_SHARD: ${{ matrix.shard }}/8
