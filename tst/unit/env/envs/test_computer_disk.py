@@ -17,7 +17,7 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env import Env
-from agent_env.env.envs.computer.utils import boot, composer
+from agent_env.env.envs.computer.utils import boot, composer, probing
 from agent_env.env.published_images import DISK
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
@@ -215,7 +215,7 @@ async def test_first_deploys_of_an_unverified_disk_at_once_share_one_probe_and_i
         waited.append(args[1:3])
         return await first_boot(*args)
 
-    monkeypatch.setattr(composer, "_probe", slow)
+    monkeypatch.setattr(probing, "_probe", slow)
     monkeypatch.setattr(env_computer_provider, "probe_first_boot", counted)
     if fails == "probe":
         docker.probe_fails["arm64"] = "the click never landed"

@@ -14,7 +14,7 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import params as computer_params
-from agent_env.env.envs.computer.utils.composer import probe_first_boot
+from agent_env.env.envs.computer.utils.probing import probe_first_boot
 from agent_env.env.envs.computer.utils.boot import (
     app_settings_environment,
     boot,
@@ -94,9 +94,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
         form, arch, build = native[0]
-        if form == "disk" and disk_size_gb > (size := env.computer.forms.disk.min_disk_gb):
-            raise ValueError(f"{env.id}'s disk is {size} GB, which a deploy doesn't enlarge, and it asks for "
-                             f"{disk_size_gb:g} GB")
+        if refusal := env.disk_size_refusal(form, disk_size_gb):
+            raise ValueError(refusal)
         if build["status"] == "unverified":
             build = await probe_first_boot(env, form, arch, sandbox_provider)
             if build["status"] != "ready":

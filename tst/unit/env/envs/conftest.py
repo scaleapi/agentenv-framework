@@ -8,7 +8,7 @@ import pytest
 from agent_env.artifact.artifacts import docker_image
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
-from agent_env.env.envs.computer.utils import builder, composer
+from agent_env.env.envs.computer.utils import builder, composer, probing
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
@@ -30,7 +30,7 @@ def docker(local_stores, cli_routing, monkeypatch):
     monkeypatch.setattr(docker_image, "pin_digest", registry.pin_digest)
     monkeypatch.setattr(builder, "host_platform", lambda: "linux/arm64")
     monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/arm64")
-    monkeypatch.setattr(composer, "_probe", fake.probe)
+    monkeypatch.setattr(probing, "_probe", fake.probe)
     monkeypatch.setattr(builder, "_runs_here", lambda platform, image: platform in {"linux/arm64", *fake.emulates})
     monkeypatch.setattr(builder.LocalBuilder, "installed", lambda self, tag, prefix: {"mss": "10.1.0"})
     monkeypatch.setattr(builder.LocalBuilder, "image_config", lambda on, tag: fake.image_config(tag))

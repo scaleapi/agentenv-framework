@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import copy
 import hashlib
 import importlib.metadata
 import json
@@ -25,36 +24,30 @@ import time
 import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer import apps as installed_apps
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
-from agentenv_protocol.computer.conformance import run_probe
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
-from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, packages
+from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, packages, probing
+from agent_env.env.envs.computer.utils.composed import BUILT, Record, failed, now
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
 from agent_env.providers.sandbox_providers.host_images import platform_tag
-from agent_env.store.base import ConcurrentModificationError
 from agent_env.store.ids import derive_id
-from agent_env.store.local_state import awaiting_lock
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, write_index
 from agent_env.utils.docker.build import DockerBuildError
 
 if TYPE_CHECKING:
-    from agentenv_protocol.computer.conformance import ProbeReport
 
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
     from agent_env.env.envs.computer.env import ComputerEnv
@@ -76,13 +69,6 @@ APPS = str(installed_apps.APPS)
 KEY_LABEL = "dev.agentenv.computer-key"
 # What a build installed and whether it was emulated, kept on its image for an env that reuses it.
 INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
-# A pair's statuses once its image is in the store.
-_BUILT = ("unverified", "ready")
-_WRITE_TRIES = 4
-#: How long a probe's computer may run before its sandbox provider stops it.
-_PROBE_TTL_S = 1800
-#: How long the probe at full may take on a computer that booted: about ten seconds on a healthy one.
-_PROBE_TIMEOUT_S = 120
 #: How often a compose says a pair is still at a stage, which can take most of an hour under emulation.
 _HEARTBEAT_S = 600
 _PROTOCOL = "agentenv-framework-protocol"
@@ -115,7 +101,7 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, compos
     builds = builder.Builds(provider, env.stored_id, REPOSITORY, composing.emulate)
     pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base)
                                              for arch in gate.arches(base, driver, env.composed_apps())]
-    record = _Record(env)
+    record = Record(env)
     record.started(pairs)
     with _Progress(env, composing.on_progress) as progress, ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
         progress.say(f"composing {', '.join(f'{form}/{arch}' for form, arch in pairs)} on "
@@ -136,7 +122,7 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, compos
 def current(env: ComputerEnv) -> bool:
     """Whether the env's computer was written over every pair built, as a put or env build that failed writing it
     leaves it not."""
-    computer, record = env.metadata.get("computer"), _Record(env)
+    computer, record = env.metadata.get("computer"), Record(env)
     return computer is not None and computer.get("images") == record.built() and computer.get(
         "disks", {}) == record.built("disk")
 
@@ -151,7 +137,7 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None) -
                 for form in gate.forms(env.computer)
                 for arch in gate.arches(env.computer, env.driver, env.composed_apps())}
     return [(form, arch) for (form, arch), status in statuses.items()
-            if status not in _BUILT or (status == "unverified" and boot.native_links(provider, arch, form))]
+            if status not in BUILT or (status == "unverified" and boot.native_links(provider, arch, form))]
 
 
 def _composed(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
@@ -169,86 +155,24 @@ def _composed_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDri
     when it built (gate 3)."""
     built = container.result() if container is not None else env.metadata.get("composed", {}).get(
         "container", {}).get(arch, {})
-    if built.get("status") not in _BUILT:
+    if built.get("status") not in BUILT:
         return {"status": "skipped", "reason": f"its container form didn't build ({built.get('status', 'never')})",
-                "skipped_at": _now()}
+                "skipped_at": now()}
     result = _built_disk(env, base, arch, built, builds, progress)
     if result["status"] != "unverified":
         return result
     return _probed(env, driver, "disk", arch, result, builds.provider, progress)
 
 
-async def probe_first_boot(env: ComputerEnv, form: str, arch: str, sandbox_provider: SandboxProvider) -> dict:
-    """Gate 3 for a build its compose couldn't probe, on its first boot on ``sandbox_provider``, which boots it
-    natively: the result, recorded. Deploys of one build at once, in this process or another, probe it once: each
-    waits for the one probing, then takes the result it recorded, a failure's too, which keeps the build's key."""
-    build = env.metadata["composed"][form][arch]
-    async with awaiting_lock(f"computer-first-boot:{env.stored_id}:{form}:{arch}:{build['image']}"):
-        recorded = (await asyncio.to_thread(Env.get, env.stored_id, env.version)).metadata["composed"][form][arch]
-        if recorded.get("key") == build["key"] and recorded["status"] != "unverified":
-            return recorded
-        result = await _checked([sandbox_provider], env, env.driver, form, arch, recorded)
-        await asyncio.to_thread(_Record(env).finished, form, arch, result)
-        return result
-
-
 def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,
             sandbox_provider: SandboxProvider, progress: _Progress) -> dict:
     """Gate 3: the build of ``result`` booted on the first link of ``sandbox_provider`` that runs ``arch``'s ``form``
-    natively, and probed at ``full`` (``_checked``). Still unverified, saying why, when no link does."""
+    natively, and probed at ``full`` (``probing.checked``). Still unverified, saying why, when no link does."""
     if not (links := boot.native_links(sandbox_provider, arch, form)):
         how = f"boots linux/{arch} disks" if form == "disk" else f"runs linux/{arch}"
         return {**result, "reason": f"no link of the sandbox provider {how} natively to probe it"}
     progress.at(f"{form}/{arch}", "probing", f"probing on {type(links[0]).__name__}")
-    return asyncio.run(_checked(links, env, driver, form, arch, result))
-
-
-async def _checked(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str,
-                   result: dict) -> dict:
-    """The build of ``result`` booted on the first of ``links`` that boots it and probed at ``full``: ready, with the
-    driver's card, or failed at the probe; each with a summary of the probe and its report stored."""
-    try:
-        report, card, provider = await _probe(links, env, driver, result["image"], form)
-    except TimeoutError:
-        return _failed(env, form, arch, "probe", result["key"], f"the probe didn't finish within {_PROBE_TIMEOUT_S} s")
-    except Exception as e:
-        return _failed(env, form, arch, "probe", result["key"], f"it didn't boot: {e}")
-    stored = FileArtifact.put_bytes(derive_id(env.stored_id, f"probe_report_{form}_{arch}"), description=(
-        f"the {form}/{arch} probe of {env.stored_id} v{env.version}"), filename="probe.json",
-        content=report.model_dump_json(indent=1).encode(), content_type="application/json")
-    probe = {"level": report.level, "provider": provider, "passed": report.passed, "checks": report.counts(),
-             "extensions": report.extensions, "report": {"id": stored.id, "version": stored.version},
-             "probed_at": _now()}
-    if not report.passed:
-        failing = "; ".join(f"{c.check} {c.name}: {c.detail}" for c in report.checks if c.status == "failed")
-        return {**result, "status": "failed", "stage": "probe", "reason": f"the probe failed: {failing}",
-                "failed_at": _now(), "probe": probe}
-    return {**result, "status": "ready", "card": card, "probe": probe}
-
-
-async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, image: str,
-                 form: str = "container") -> tuple[ProbeReport, dict, str]:
-    """``image``, of ``form``, booted at the env's settings and its apps' defaults with a control token of its own, as
-    a deploy with no ``env_params`` boots it, on the first of ``links`` that boots it, probed at ``full`` with that
-    token within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name."""
-    token = boot.control_token()
-    environment = {**boot.settings_environment(env.computer, _values(env), environment_name=env.environment_name),
-                   **boot.app_settings_environment(env.composed_apps(), env.app_defaults(), env.computer.os.type)}
-    problems = []
-    for link in links:
-        try:
-            booted = await boot.boot(link, image=image, port=driver.port, environment=environment, token=token,
-                                     network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
-                                     ready_s=boot.ready_timeout(env.composed_apps(), env.computer.os.type), form=form)
-        except Exception as e:
-            problems.append(f"{type(link).__name__}: {e}")
-            continue
-        try:
-            async with asyncio.timeout(_PROBE_TIMEOUT_S):
-                return await run_probe(booted.url, "full", token=token), booted.card, type(link).__name__
-        finally:
-            await boot.discard(booted.sandbox)
-    raise RuntimeError("; ".join(problems))
+    return asyncio.run(probing.checked(links, env, driver, form, arch, result))
 
 
 def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
@@ -295,7 +219,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             kept = labels(pinned, arch, store.auth(pinned))
             return {"status": "unverified", "key": key, "image": pinned, "reused": True,
                     "emulated": kept.get(EMULATED_LABEL) == "true", "lock": inputs,
-                    "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": _now()}
+                    "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": now()}
         building_on = on()
         progress.at(pair, "building the image")
         if lock is not None:
@@ -303,7 +227,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
         local, emulated = f"agentenv-computer:{key[7:23]}-{arch}", platform != building_on.platform
         building_on.build(f"{dockerfile}LABEL {KEY_LABEL}={key}\n", local, platform, {KEY_LABEL: key})
         if reason := _compare(building_on, local, layers, pair, progress):
-            return _failed(env, form, arch, attempt.stage, key, reason)
+            return failed(env, form, arch, attempt.stage, key, reason)
         installed = building_on.installed(local, layer.prefix)
         building_on.build(f"FROM {local}\n", local, platform, {
             INSTALLED_LABEL: json.dumps(installed, sort_keys=True), EMULATED_LABEL: "true" if emulated else "false",
@@ -313,7 +237,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
         building_on.push(local, ref, store)
         return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
                 "emulated": emulated, "builder": building_on.name, "lock": inputs, "installed": installed,
-                "built_at": _now()}
+                "built_at": now()}
     return attempt.result
 
 
@@ -335,7 +259,7 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
         store, ref, pinned = _stored(env, key)
         if pinned is not None:
             progress.at(pair, "reusing", "reusing the disk of the same key, made earlier")
-            return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": _now()}
+            return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": now()}
         link = builds.link(platform, base.image())
         progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
         on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
@@ -359,7 +283,7 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
         progress.at(pair, "pushing the disk")
         on.push(local, ref, store)
         return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
-                "builder": on.name, "built_at": _now()}
+                "builder": on.name, "built_at": now()}
     return attempt.result
 
 
@@ -391,22 +315,22 @@ def _attempting(env: ComputerEnv, form: str, arch: str) -> Iterator[_Attempt]:
     try:
         yield attempt
     except builder.Skipped as e:
-        attempt.result = {"status": "skipped", "reason": str(e), "skipped_at": _now()}
+        attempt.result = {"status": "skipped", "reason": str(e), "skipped_at": now()}
     except builder.Unbuildable as e:
-        attempt.result = _failed(env, form, arch, attempt.stage, attempt.key, str(e))
+        attempt.result = failed(env, form, arch, attempt.stage, attempt.key, str(e))
     except builder.ResolveError as e:
-        attempt.result = _failed(env, form, arch, "resolve", None, str(e), log=e.log or None)
+        attempt.result = failed(env, form, arch, "resolve", None, str(e), log=e.log or None)
     except DockerBuildError as e:
         # Docker can list a platform it has lost the emulation for, until it restarts; the build says so.
         unemulated = "exec format error" in str(e)
-        attempt.result = _failed(env, form, arch, attempt.stage, attempt.key,
+        attempt.result = failed(env, form, arch, attempt.stage, attempt.key,
                                  f"the builder can't run linux/{arch} programs: its Docker has no emulation for it"
                                  if unemulated else "the build failed", log=str(e))
     except subprocess.CalledProcessError as e:
-        attempt.result = _failed(env, form, arch, attempt.stage, attempt.key,
+        attempt.result = failed(env, form, arch, attempt.stage, attempt.key,
                                  f"{' '.join(e.cmd[:2])} failed: {(e.stderr or '').strip()}")
     except (RuntimeError, ValueError, OSError) as e:
-        attempt.result = _failed(env, form, arch, attempt.stage, attempt.key, f"{type(e).__name__}: {e}")
+        attempt.result = failed(env, form, arch, attempt.stage, attempt.key, f"{type(e).__name__}: {e}")
 
 
 def _key(**inputs: Any) -> str:
@@ -598,14 +522,8 @@ def _protocol_source() -> Path | None:
 
 def _build_settings(env: ComputerEnv, base: ComputerArtifact) -> dict[str, Any]:
     """The env's values of the base's build-phase settings, which the composed image fixes."""
-    values = _values(env)
+    values = env.computer_values()
     return {name: values[name] for name, setting in base.config.items() if setting.phase == "build" and name in values}
-
-
-def _values(env: ComputerEnv) -> dict[str, Any]:
-    """The env's values of its base's settings: its ``computer_settings``, and its display as the resolution."""
-    display = env.display
-    return {**env.computer_settings, **({"resolution": f"{display['width']}x{display['height']}"} if display else {})}
 
 
 def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict,
@@ -686,20 +604,6 @@ def _served(ref: str, store) -> str | None:
         return None
 
 
-def _failed(env: ComputerEnv, form: str, arch: str, stage: str, key: str | None, reason: str,
-            log: str | None = None) -> dict:
-    result = {"status": "failed", "stage": stage, "reason": reason, "failed_at": _now()}
-    if key is not None:
-        result["key"] = key
-    if log is not None:
-        stored = FileArtifact.put_bytes(derive_id(env.stored_id, f"build_log_{form}_{arch}"), description=(
-            f"the {form}/{arch} build of {env.stored_id} v{env.version}, which failed"), filename="build.log",
-            content=log.encode(), content_type="text/plain")
-        result["log"] = {"id": stored.id, "version": stored.version}
-        result["reason"] = f"{reason}: {log.strip().splitlines()[-1] if log.strip() else 'no output'}"
-    return result
-
-
 def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], disks: dict[str, str]) -> dict | None:
     """Write the env's computer over the images ``built``, by arch, joined into one index in the env's image store, signed
     in to it: its arches those, its OS and session the base's, its settings the base's with the env's values as their
@@ -709,7 +613,7 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], d
     arches = [arch for arch in base.arch if arch in built]
     image = _joined(env, "computer_image", "composed computer", built, arches)
     config = {name: setting.model_dump() for name, setting in base.config.items()}
-    for name, value in _values(env).items():
+    for name, value in env.computer_values().items():
         config[name]["default"] = value
     forms = {"container": {"image": {"id": image.id, "version": image.version}, "init": base.forms.container.init,
                            "input_channel": base.forms.container.input_channel}}
@@ -744,54 +648,6 @@ def _digest(folder: Path) -> str:
         hashed.update(path.relative_to(folder).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest()
                       + (b"x" if path.stat().st_mode & 0o100 else b"-"))
     return "sha256:" + hashed.hexdigest()
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-class _Record:
-    """The env's ``composed`` metadata, by form and arch. Each result is merged into the stored table pair by pair, the
-    table read again when another build wrote it first, so builds of one env at once keep each other's pairs, and a
-    result never undoes one that got further (``_rank``)."""
-
-    def __init__(self, env: ComputerEnv):
-        self.env, self.lock = env, threading.Lock()
-
-    def started(self, pairs: list[tuple[str, str]]) -> None:
-        now = _now()
-        self._merge({pair: {"status": "building", "started_at": now} for pair in pairs})
-
-    def finished(self, form: str, arch: str, result: dict) -> None:
-        self._merge({(form, arch): result})
-
-    def built(self, form: str = "container") -> dict[str, str]:
-        """Each arch's image of ``form``, of the pairs built or reused."""
-        return {arch: result["image"] for arch, result in self.env.metadata.get("composed", {}).get(form, {}).items()
-                if result.get("status") in _BUILT}
-
-    def computer(self, ref: dict | None) -> None:
-        """Record the env's computer, with the images it was written over, the disks' apart."""
-        if ref is not None:
-            with self.lock:
-                disks = self.built("disk")
-                self.env.merge_metadata({"computer": {**ref, "images": self.built(), **({"disks": disks} if disks else {})}})
-
-    def _merge(self, results: dict[tuple[str, str], dict]) -> None:
-        with self.lock:
-            for attempt in range(_WRITE_TRIES):
-                composed = copy.deepcopy(self.env.metadata.get("composed", {}))
-                for (form, arch), result in results.items():
-                    stored = composed.setdefault(form, {}).get(arch, {})
-                    if _rank(result) >= _rank(stored):
-                        composed[form][arch] = {"started_at": stored.get("started_at"), **result}
-                try:
-                    self.env.update_metadata({**self.env.metadata, "composed": composed})
-                    return
-                except ConcurrentModificationError:
-                    if attempt == _WRITE_TRIES - 1:
-                        raise
-                    self.env.metadata = Env.get(self.env.stored_id, self.env.version).metadata
 
 
 class _Progress:
@@ -848,11 +704,3 @@ class _Progress:
 def _took(seconds: float) -> str:
     minutes, seconds = divmod(round(seconds), 60)
     return f"{minutes} min {seconds} s" if minutes else f"{seconds} s"
-
-
-def _rank(result: dict) -> int:
-    """How far a pair got: ready, then built and either unprobed or failed at its probe, then anything short of an
-    image. A result takes a stored one's place only when it got at least as far."""
-    if result.get("status") == "ready":
-        return 2
-    return 1 if result.get("status") == "unverified" or result.get("stage") == "probe" else 0

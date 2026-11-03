@@ -162,6 +162,11 @@ class ComputerEnv(Env):
         return {app.environment_name: {**app.settings, **self.app_settings.get(app.environment_name, {})}
                 for app in self.composed_apps()}
 
+    def computer_values(self) -> dict[str, Any]:
+        """The env's values of its base's settings: its ``computer_settings``, and its display as the resolution."""
+        display = self.display
+        return {**self.computer_settings, **({"resolution": f"{display['width']}x{display['height']}"} if display else {})}
+
     def computer_artifact(self) -> ComputerArtifact:
         """The env's computer: its base composed with its driver, over the images built."""
         return ComputerArtifact.get(self.metadata["computer"]["id"], self.metadata["computer"]["version"])
@@ -173,6 +178,13 @@ class ComputerEnv(Env):
         composed, arches = self.metadata.get("composed", {}), self.computer.arch
         return [(name, arch, composed[name][arch]) for name in gate.forms(self.computer) if form in (None, name)
                 for arch in arches if composed.get(name, {}).get(arch, {}).get("status") in _DEPLOYABLE[name]]
+
+    def disk_size_refusal(self, form: str, disk_size_gb: float) -> Optional[str]:
+        """Why a deploy of ``form`` can't have ``disk_size_gb``: a disk is the size its base makes it, which a deploy
+        doesn't enlarge."""
+        if form == "disk" and disk_size_gb > (size := self.computer.forms.disk.min_disk_gb):
+            return f"{self.id}'s disk is {size} GB, which a deploy doesn't enlarge, and it asks for {disk_size_gb:g} GB"
+        return None
 
     def build_statuses(self) -> dict[str, str]:
         return {f"{form}/{arch}": result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()
