@@ -93,7 +93,8 @@ class SandboxProvider(ABC):
         env: Optional[dict[str, str]] = None,
     ) -> VmSandbox:
         """A VM. A provider whose ``disk_image_platforms`` names a platform boots a computer's disk form, ``image``, an
-        image holding /disk/disk.img, for it, its ``env`` in the disk's NoCloud seed; such a sandbox has no exec channel."""
+        image holding ``computer.DISK_FILE``, for it, its ``env`` in the disk's NoCloud seed; such a sandbox has no exec
+        channel."""
         raise NotImplementedError(f"{type(self).__name__} does not support create_vm")
 
     async def create_container(

@@ -9,8 +9,9 @@ import math
 import os
 import subprocess
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+from agent_env.artifact.artifacts.computer import DISK_FILE
 from agent_env.env.published_images import LAUNCHER_IMAGE, published_pinned
 from agent_env.providers.sandbox_providers.host_images import host_platform, present
 from agent_env.utils.docker.build import build_image
@@ -26,11 +27,12 @@ def kvm_platforms() -> frozenset[str]:
 
 
 async def machine_image(disk: str) -> str:
-    """An image of the launcher holding ``disk``'s /disk/disk.img for this machine's platform, built unless held."""
+    """An image of the launcher holding ``disk``'s ``DISK_FILE`` for this machine's platform, built unless held."""
     launcher = await asyncio.to_thread(_launcher)
     tag = "agentenv-vm:" + hashlib.sha256(f"{launcher} {disk}".encode()).hexdigest()[:16]
     if not await asyncio.to_thread(present, tag):
-        await asyncio.to_thread(_build, f"FROM {launcher}\nCOPY --from={disk} /disk/ /disk/\n", tag)
+        folder = f"/{PurePosixPath(DISK_FILE).parent}/"
+        await asyncio.to_thread(_build, f"FROM {launcher}\nCOPY --from={disk} {folder} {folder}\n", tag)
     return tag
 
 
