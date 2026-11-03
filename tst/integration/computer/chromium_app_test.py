@@ -32,6 +32,8 @@ from agent_env.task_step.context import TaskStepContext
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
+#: A page server's time to listen, the record's wait and poll, and the Control+Tab presses for one tab change.
+SERVE_START_S, RECORD_WAIT_S, RECORD_POLL_S, TAB_PRESSES = 3, 60, 1, 3
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 ALPHA = "data:text/html,<title>Alpha page</title><h1>Alpha</h1>"
 BRAVO = "data:text/html,<title>Bravo page</title><h1>Bravo</h1>"
@@ -136,7 +138,7 @@ async def test_it_runs_chrome_itself_on_its_pipe_answers_prompts_as_the_deploy_s
             browser = await _browser_process(deployed)
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_PERMISSIONS, "60"],
                                                        timeout_s=90))
-            await asyncio.sleep(3)
+            await asyncio.sleep(SERVE_START_S)
             await _keys(deployed, ["F5"])
             permissions = await _chromium_windows(deployed, "denied")
             await serving
@@ -192,7 +194,7 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
             card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_RECORDED, "90"],
                                                        timeout_s=120))
-            await asyncio.sleep(3)
+            await asyncio.sleep(SERVE_START_S)
             await _keys(deployed, ["F5"])
             accepted = await _chromium_windows(deployed, "accepted")
             await _keys(deployed, ["Control", "t"], ["Control", "w"])
@@ -265,28 +267,28 @@ def _hashed(record: dict) -> list[dict]:
 
 
 async def _record(deployed, card: dict, until) -> dict:
-    """The browser's record, once ``until`` says it has what's waited for, or as it last was within a minute."""
+    """The browser's record, once ``until`` says it has what's waited for, or as it last was within ``RECORD_WAIT_S``."""
     path = protocol_v1.find_extension_method(card, BROWSER, "record")["endpoint"]
-    for _ in range(60):
+    for _ in range(RECORD_WAIT_S // RECORD_POLL_S):
         try:
             record = await _app(deployed, path, "chromium")
             if until(record):
                 return record
         except httpx.HTTPError:
             pass
-        await asyncio.sleep(1)
+        await asyncio.sleep(RECORD_POLL_S)
     return record
 
 
 async def _tab_to(deployed, title: str) -> list[str]:
     """Control+Tab pressed as an agent presses it, and again while the window still shows the tab before, which a
     press can reach before the next tab opens; the window titles once one starts with ``title``."""
-    for attempt in range(3):
+    for attempt in range(TAB_PRESSES):
         await _keys(deployed, ["Control", "Tab"])
         try:
             return await _chromium_windows(deployed, title, seconds=20)
         except TimeoutError:
-            if attempt == 2:
+            if attempt == TAB_PRESSES - 1:
                 raise
 
 
