@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import compileall
+import dataclasses
 import importlib.metadata
 import json
 import os
@@ -122,8 +123,8 @@ def problems(name: str, runs: int, before: dict[str, list[str]]) -> list[str]:
 def _checkout(image: PublishedImage) -> PublishedImage:
     """``image`` as the checkout's sources make it, with the images it's built from."""
     installed_src = Path(agent_env.__file__).parent.parent
-    return PublishedImage(image.name, CHECKOUT_SRC / image.dockerfile.relative_to(installed_src),
-                          tuple((arg, _checkout(built)) for arg, built in image.args))
+    return dataclasses.replace(image, dockerfile=CHECKOUT_SRC / image.dockerfile.relative_to(installed_src),
+                               args=tuple((arg, _checkout(built)) for arg, built in image.args))
 
 
 def plugins() -> list[str]:
