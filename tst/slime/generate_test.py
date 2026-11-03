@@ -4,6 +4,7 @@ model from a script with Qwen3's tokenizer; slime's dynamic-sampling filter deci
 
 import asyncio
 import json
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -42,21 +43,24 @@ def fresh_adapter(monkeypatch):
 
 @pytest.fixture
 def model():
-    """A stand-in for SGLang's ``/generate``: adds a crate, then says so once the tool has answered; or answers 500 when
-    ``.broken``."""
+    """A stand-in for SGLang's ``/generate``: adds a crate, then says so once the tool has answered, that reply held
+    back ``.stall`` seconds with ``.stalled`` set meanwhile; or answers 500 when ``.broken``."""
     tokenizer = transformers.AutoTokenizer.from_pretrained(CHECKPOINT)
 
     async def generate(request):
         if server.broken:
             return JSONResponse({"error": "engine down"}, status_code=500)
         prompt = tokenizer.decode((await request.json())["input_ids"])
+        if "<tool_response>" in prompt and server.stall:
+            server.stalled.set()
+            await asyncio.sleep(server.stall)
         ids = tokenizer.encode("Added a crate.<|im_end|>" if "<tool_response>" in prompt else ADDS_A_CRATE,
                                add_special_tokens=False)
         return JSONResponse({"meta_info": {"output_token_logprobs": [[-0.01, each] for each in ids],
                                            "finish_reason": {"type": "stop"}}})
 
     server = Server(Starlette(routes=[Route("/generate", generate, methods=["POST"])]))
-    server.broken, server.tokenizer = False, tokenizer
+    server.broken, server.stall, server.stalled, server.tokenizer = False, 0.0, threading.Event(), tokenizer
     yield server
     server.stop()
 
@@ -74,6 +78,41 @@ def test_slime_plays_a_row_through_its_adapter_and_trains_on_the_models_turns_wi
                for sample in samples)
     trained = "".join(_trained(sample, model.tokenizer) for sample in samples)
     assert '"crate"' in trained and "Added a crate." in trained and "<tool_response>" not in trained
+
+
+def test_an_eval_gives_slime_one_sample_per_episode_so_its_mean_is_over_episodes(serve, model, tmp_path):
+    server = serve({"a": PLAYED})
+    row = _row(server, tmp_path)
+    args = _args(model, tmp_path)
+
+    [sample] = _generate(row, args, evaluation=True)
+    server.stop()
+
+    assert (sample.reward, sample.status, sample.loss_mask) == (1.0, types.Sample.Status.COMPLETED, [0])
+    assert sample.metadata["agentenv_scores"] == {"replies": 1.0}
+    assert slime_generate._Adapter(args).adapter.store == {}
+
+
+def test_a_rollout_slime_cancels_drops_its_session_and_closes_its_episode(serve, model, tmp_path, teardowns):
+    server = serve({"a": PLAYED})
+    row = _row(server, tmp_path)
+    args = _args(model, tmp_path)
+    model.stall = 5.0
+
+    async def cancelled():
+        rollout = asyncio.ensure_future(slime_generate.generate(args, _sample(row), dict(SAMPLING)))
+        while not model.stalled.is_set():
+            await asyncio.sleep(0.05)
+        rollout.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await rollout
+
+    asyncio.run(cancelled())
+    server.stop()
+
+    assert slime_generate.generate.abort_mode == "request"
+    assert slime_generate._Adapter(args).adapter.store == {}
+    assert len(teardowns.finished) == 2
 
 
 def test_an_episode_the_env_failed_is_flagged_and_slime_leaves_its_group_out(serve, model, tmp_path):
@@ -118,10 +157,13 @@ def _row(server, tmp_path):
     return json.loads((folder / "all.jsonl").read_text().splitlines()[0])
 
 
-def _generate(row, args):
+def _generate(row, args, evaluation=False):
     """The samples slime's rollout gets back for ``row``, as it calls the generate function."""
-    sample = types.Sample(prompt=row["messages"], metadata=row["metadata"], index=0)
-    return asyncio.run(slime_generate.generate(args, sample, dict(SAMPLING)))
+    return asyncio.run(slime_generate.generate(args, _sample(row), dict(SAMPLING), evaluation=evaluation))
+
+
+def _sample(row):
+    return types.Sample(prompt=row["messages"], metadata=row["metadata"], index=0)
 
 
 def _trained(sample, tokenizer):

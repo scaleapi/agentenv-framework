@@ -5,6 +5,7 @@ environment, on its rollout's event loop."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -22,21 +23,37 @@ __all__ = ["generate", "keep_scored_groups"]
 async def generate(args: Any, sample: Sample, sampling_params: dict[str, Any], evaluation: bool = False) -> list[Sample]:
     """Plays the sample's row as one episode, the model chatting through a session of its own on slime's OpenAI
     adapter, which records its turns. Returns the session's turns as training samples carrying the episode's reward and
-    ``play``'s metadata: one sample, or one per turn the adapter couldn't join to the turn before. An episode with no
-    recorded turn comes back as a single aborted sample, which ``keep_scored_groups`` leaves out with its group."""
+    ``play``'s metadata: one sample, or one per turn the adapter couldn't join to the turn before. In an eval it returns
+    one sample per episode, carrying only the reward, so slime's eval reward is a mean over episodes, not turns. An
+    episode with no recorded turn comes back as a single aborted sample, which ``keep_scored_groups`` leaves out with its
+    group. slime cancels a rollout it no longer needs (``abort_mode``): its session is dropped and its episode closed."""
     adapter = _Adapter(args)
     sid = uuid.uuid4().hex
     adapter.adapter.open_session(
         sid, sampling_defaults=sampling_params, max_context_tokens=args.rollout_max_context_len or 0,
         apply_chat_template_kwargs={**args.apply_chat_template_kwargs, **(sample.apply_chat_template_kwargs or {})})
-    played = await play(adapter.url, sample.prompt, {"user": sid}, sample.metadata)
-    samples = await adapter.adapter.finish_session(sid, base_sample=sample, reward=played["reward"],
-                                                   extra_metadata=played)
-    if samples:
-        return samples
+    try:
+        played = await play(adapter.url, sample.prompt, {"user": sid}, sample.metadata)
+        if evaluation:
+            await adapter.adapter.drop_session(sid)
+            return _bare(sample, played, Sample.Status.COMPLETED)
+        samples = await adapter.adapter.finish_session(sid, base_sample=sample, reward=played["reward"],
+                                                       extra_metadata=played)
+    except asyncio.CancelledError:
+        await adapter.adapter.drop_session(sid)
+        raise
+    return samples or _bare(sample, played, Sample.Status.ABORTED)
+
+
+generate.abort_mode = "request"
+
+
+def _bare(sample: Sample, played: dict[str, Any], status: Sample.Status) -> list[Sample]:
+    """``sample`` with no turns to train on, as slime's own agent examples return one: a masked placeholder token, the
+    episode's reward and metadata, and ``remove_sample``."""
     sample.tokens, sample.response, sample.response_length = [0, 0], "", 1
     sample.loss_mask, sample.rollout_log_probs = [0], [0.0]
-    sample.reward, sample.remove_sample, sample.status = played["reward"], True, Sample.Status.ABORTED
+    sample.reward, sample.remove_sample, sample.status = played["reward"], True, status
     sample.metadata = {**sample.metadata, **played}
     return [sample]
 
