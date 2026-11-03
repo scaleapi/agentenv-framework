@@ -154,14 +154,16 @@ def test_the_launcher_serves_each_port_through_socat_in_front_of_qemus_forward_o
     """socat's listen backlog takes a burst of connections, which QEMU's own forward, with a backlog of 1, drops."""
     launch, calls = launcher
 
-    done = launch(VM_PORTS="18765 6080", QEMU_RUNS_S="0.3")
+    running = launch(VM_PORTS="18765 6080")
 
-    assert done.wait(10) == 0, done.stderr.read()
-    assert _logged(calls, "socat", 2) == ["socat TCP-LISTEN:18765,fork,reuseaddr,backlog=1024 TCP:127.0.0.1:28765",
-                                          "socat TCP-LISTEN:6080,fork,reuseaddr,backlog=1024 TCP:127.0.0.1:16080"]
+    assert sorted(_logged(calls, "socat", 2)) == [
+        "socat TCP-LISTEN:18765,fork,reuseaddr,backlog=1024 TCP:127.0.0.1:28765",
+        "socat TCP-LISTEN:6080,fork,reuseaddr,backlog=1024 TCP:127.0.0.1:16080"]
     (qemu,) = _logged(calls, "qemu-system-x86_64")
     assert "-netdev user,id=net,hostfwd=tcp:127.0.0.1:28765-:18765,hostfwd=tcp:127.0.0.1:16080-:6080 " in qemu
     assert "-machine q35,accel=tcg" in qemu or "-machine q35,accel=kvm" in qemu
+    running.terminate()
+    assert running.wait(10) == 143
 
 
 @pytest.mark.parametrize("ports, why", [("55536", "above 65535"), ("6080 16080", "another of VM_PORTS")])
