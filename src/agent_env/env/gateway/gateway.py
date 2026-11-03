@@ -1516,11 +1516,12 @@ def reserved_site_path(path: str) -> bool:
 def reserved_site_request(request: Request) -> bool:
     """Whether a request on a site's route reaches its data plane or env card: by the path as routed here, or by the
     one its server receives, which is the raw path forwarded, its dot segments removed by httpx and then decoded. The
-    two differ when an encoded slash sits beside a dot segment (``public%2Fx/../agentenv``)."""
+    two differ when an encoded slash sits beside a dot segment (``public%2Fx/../agentenv``). A request-target the proxy
+    can't build a URL for isn't reserved here: ``forward()`` refuses it."""
     if reserved_site_path("/" + request.path_params.get("path", "")):
         return True
     try:
         sent = httpx.URL(upstream_url("http://site", request)).path
     except (ValueError, httpx.InvalidURL):
-        return False  # forward() refuses a request-target it can't route
+        return False
     return reserved_site_path(sent)
