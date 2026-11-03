@@ -69,10 +69,6 @@ class ExecResult:
     truncated: bool = False
 
 
-#: The extension whose status says, by these checks, whether a computer, or an app running alone, is ready.
-COMPUTER_READY = "urn:agentenv:computer-ready/v1"
-
-
 @dataclass(frozen=True)
 class ReadyCheck:
     name: str

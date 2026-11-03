@@ -44,7 +44,6 @@ from .errors import (
     Unsupported,
 )
 from .operations import (
-    COMPUTER_READY,
     Display,
     Effect,
     ExecResult,
@@ -81,6 +80,7 @@ if TYPE_CHECKING:
         COMPUTER_EXEC,
         COMPUTER_KEYBOARD,
         COMPUTER_POINTER,
+        COMPUTER_READY,
         COMPUTER_RECORDING,
         COMPUTER_SPACES,
     )
@@ -90,7 +90,7 @@ if TYPE_CHECKING:
 # The names whose modules need the computer extra (mcp, av and Pillow), by module.
 _ON_USE = {
     "driver": ("ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration"),
-    "card": ("COMPUTER", "COMPUTER_DISPLAY", "COMPUTER_SPACES", "COMPUTER_POINTER",
+    "card": ("COMPUTER", "COMPUTER_READY", "COMPUTER_DISPLAY", "COMPUTER_SPACES", "COMPUTER_POINTER",
              "COMPUTER_KEYBOARD", "COMPUTER_EXEC", "COMPUTER_RECORDING"),
     "recording": ("Recording", "RecordHints", "RecordedFrame", "RecordedSegment", "frames_in_thread"),
 }

@@ -28,13 +28,13 @@ from ..card import (
     COMPUTER_EXEC,
     COMPUTER_KEYBOARD,
     COMPUTER_POINTER,
+    COMPUTER_READY,
     COMPUTER_RECORDING,
     COMPUTER_SPACES,
     GROUP_TOOLS,
     POINT_TOOLS,
 )
 from ..manifest import RecordingManifest
-from ..operations import COMPUTER_READY
 from ..recording import RECORDINGS_DIR
 from .client import Driver, image
 from .mp4 import read_mp4

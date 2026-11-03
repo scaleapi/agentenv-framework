@@ -54,7 +54,7 @@ async def check(folder: Path) -> ReadyCheck:
 async def children(folders: list[Path]) -> list[EnvironmentCard]:
     """Each app in ``folders`` as a child environment of its computer: its server's card, rooted at ``/svc/<name>/``,
     or, while its server isn't answering, its name and route alone."""
-    cards = await asyncio.gather(*(served_card(folder) for folder in folders))
+    cards = await asyncio.gather(*(_card(folder) for folder in folders))
     return [EnvironmentCard.model_validate(child_card(folder.name, card)) if card is not None
             else EnvironmentCard(name=folder.name, url=f"/svc/{folder.name}{RPC_PATH}")
             for folder, card in zip(folders, cards)]
@@ -85,7 +85,7 @@ def child_card(name: str, card: dict) -> dict:
 
 async def owned_paths(folders: list[Path]) -> list[str]:
     """The paths under the session user's home that the apps in ``folders`` keep their data in, as their cards say."""
-    cards = await asyncio.gather(*(served_card(folder) for folder in folders))
+    cards = await asyncio.gather(*(_card(folder) for folder in folders))
     return [path for card in cards if card is not None
             for path in client.extension_params(card, COMPUTER_APP).get("paths") or []]
 
@@ -104,7 +104,7 @@ def endpoint(card: dict, method: str) -> str:
     return client.find_extension_method(card, COMPUTER_APP, method)["endpoint"]
 
 
-async def served_card(folder: Path) -> Optional[dict]:
+async def _card(folder: Path) -> Optional[dict]:
     """The card the app in ``folder`` serves, or None while its server isn't answering."""
     try:
         async with _client(folder / SOCKET) as http:
