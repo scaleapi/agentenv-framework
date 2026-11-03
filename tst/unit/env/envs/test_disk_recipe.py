@@ -137,7 +137,9 @@ def launcher(tmp_path):
     for process in started:
         if process.poll() is None:
             process.kill()
-        process.communicate()
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
 
 
 def _logged(calls: Path, what: str, count: int = 1) -> list[str]:
