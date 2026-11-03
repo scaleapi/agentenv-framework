@@ -89,7 +89,6 @@ MCP_HC_RETRIES = 30
 
 MCP_HC_START_PERIOD = "60s"
 
-# How long a deploy waits for each site to say it's ready, and how often it asks.
 WEBSITE_READY_TIMEOUT_S = 300.0
 WEBSITE_READY_POLL_S = 2.0
 
@@ -538,8 +537,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
                 "      - PYTHONUNBUFFERED=1",
                 "    healthcheck:",
-                # Up once it answers its card, or for a site serving none its health path; the deploy then waits
-                # for it to be ready through the card (_wait_for_websites).
                 f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'
                 f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
                 "      interval: 10s",
