@@ -9,7 +9,7 @@ import shlex
 import pytest
 
 from tst.unit.agents.opencode.agent import opencode_bridge
-from tst.unit.agents.opencode.fake_cli import FakeCLI
+from tst.unit.agents.opencode.fake_cli import FakeCLI, FakeStdin
 
 MAX_ARG_STRLEN = 131072  # Linux single-argument limit (PAGE_SIZE * 32)
 
@@ -168,3 +168,48 @@ def test_a_cli_that_exits_before_reading_its_prompt_still_ends_the_turn(
     )
 
     assert result.error == "Error: bad config"
+
+
+def test_a_real_cli_that_prints_before_reading_its_prompt_does_not_deadlock(
+    monkeypatch, tmp_path
+):
+    # The CLI fills its stdout and stderr pipes before it reads stdin. Were the prompt written to completion before
+    # stdout and stderr were read, both sides would block on a full pipe until the turn timed out.
+    stop = shlex.quote(_lines(_STOP).decode())
+    fake_opencode = tmp_path / "opencode"
+    fake_opencode.write_text(
+        "#!/bin/sh\n"
+        "head -c 300000 /dev/zero | tr '\\0' a; echo\n"
+        "head -c 300000 /dev/zero | tr '\\0' b >&2\n"
+        "cat > /dev/null\n"
+        f"printf '%s' {stop}\n"
+    )
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {})
+
+    result = asyncio.run(
+        opencode_bridge.run_opencode(
+            prompt="x" * (1024 * 1024),
+            context_id="ctx",
+            workspace=str(tmp_path),
+            timeout_s=20,
+        )
+    )
+
+    assert result.error is None, result.error
+
+
+def test_a_failed_prompt_write_fails_the_turn(spawned, monkeypatch):
+    # Only a CLI that has closed stdin (broken pipe, connection reset) is tolerated; any other write error means the
+    # CLI may have got part of the prompt, so the turn must not report success.
+    async def drain_fails(_self):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(FakeStdin, "drain", drain_fails)
+
+    with pytest.raises(OSError, match="Input/output error"):
+        asyncio.run(opencode_bridge.run_opencode(prompt="summarise", context_id="ctx"))
+
+    (call,) = spawned
+    assert call["proc"].stdin.closed
