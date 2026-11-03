@@ -27,19 +27,20 @@ __all__ = ["BUNDLES", "CORE", "InstalledBundle", "Located", "checked", "find_bun
 
 
 class Located(NamedTuple):
+    """A bundle's folder, the id root of an installed or Hub bundle (a folder's ids come from its path), and what a Hub
+    bundle was downloaded as."""
+
     root: Path
-    id_root: str | None  # an installed or Hub bundle's; a folder's ids come from its path
-    hub: HubBundle | None  # what a Hub bundle was downloaded as
+    id_root: str | None
+    hub: HubBundle | None
 
 
 def locate_bundle(
     text: str, installed: Callable[[], tuple[InstalledBundle, ...]] = installed_bundles, *,
     on_progress: Callable[[str], None] | None = None,
 ) -> Located:
-    """The folder ``text`` names, as ``agent-env run BUNDLE`` reads it: ``hf://`` names a bundle in a Hugging Face Hub
-    dataset, downloaded first (``on_progress`` is told which); an existing folder spelled exactly as written wins, and
-    text that starts like a path is always one; anything else names a bundle ``installed`` lists. Raises
-    BundleError."""
+    """The bundle ``text`` names, as ``agent-env run BUNDLE`` reads it: an ``hf://`` reference, fetched first; else a folder,
+    when it starts like a path or exists spelled as written; else a bundle ``installed`` lists. Raises BundleError."""
     if is_hub_reference(text):
         hub = fetch_bundle(text, on_progress=on_progress)
         return Located(hub.root, hub.id_root, hub)

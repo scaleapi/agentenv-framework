@@ -259,7 +259,7 @@ class _Planner:
         self.others: tuple[InstalledBundle, ...] | None = None  # the installed bundles but this one, once listed
         self.pullable: dict[str, _Pullable | str] = {}  # each installed bundle read, by id root, or why it can't be
         self.unpulled: dict[tuple[EntityKind, str, int | None], str] = {}  # why an installed bundle's id isn't pulled
-        self.missing: dict[tuple[str, str], None] = {}  # each agent, env and artifact the store doesn't hold, as read
+        self.missing: dict[tuple[str, str], None] = {}
         # By kind: its installed aliases, once a plan reads them; each of them the plan names, by alias; and the store's
         # latest version of each alias's id, as read.
         self.alias_tables: dict[EntityKind, InstalledAliases] = {}
@@ -715,7 +715,7 @@ class _Planner:
         read: dict[tuple[EntityKind, str, int | None], Any] = {}
         checked: dict[tuple[EntityKind, str, int | None], Reference] = {}
         latest: dict[tuple[EntityKind, str], int] = {}
-        gaps: dict[str, list[str]] = {}  # each problem of a missing agent, env or artifact, with where it's used
+        gaps: dict[str, list[str]] = {}
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BundleImage):

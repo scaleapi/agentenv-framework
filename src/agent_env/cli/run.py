@@ -63,15 +63,10 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     packages provide that name), or hf://ORG/REPO[@REVISION][/PATH], a bundle in a Hugging Face Hub dataset. Without
     BUNDLE, it lists the installed bundles.
 
-    A Hub bundle is downloaded at the commit REVISION names (a branch, tag or commit, percent-encoded when it holds a
-    /; the main branch by default) into a folder for that commit under $XDG_CACHE_HOME/agentenv/hf, and runs as a
-    folder does, with its ids under @hf/ORG/REPO. PATH names its folder in the repo; without it, the run takes the
-    only bundle under bundles/, or the one the dataset card's agentenv: default names, else the repo's root. Only
-    the bundle and the card are downloaded, and a commit already downloaded is reused. The run first prints the repo,
-    commit and bundle. A bundle with no bundle.toml requires the plugins the card's agentenv: bundles: NAME: plugins
-    lists, checked, as a bundle.toml's requires are, before the bundle is downloaded. A run refused for a missing
-    plugin, or for an agent, env or artifact the store doesn't hold, shows the card's setup command, which it never
-    runs. A gated or private repo needs hf auth login or HF_TOKEN.
+    A Hub bundle is downloaded at the commit REVISION names (the main branch by default), PATH being its folder in the
+    repo, and runs as a folder does, with its ids under @hf/ORG/REPO; the run first prints the repo, commit and bundle.
+    The README's "Run a bundle from the Hub" says which bundle a run without PATH takes, where it's kept, and what the
+    dataset card can say it needs.
 
     A bundle's bundle.toml names the plugin packages it requires, and a run refuses to start without them; in a
     terminal it offers to install them with agent-env plugin add. A folder with no bundle.toml that uses plugin

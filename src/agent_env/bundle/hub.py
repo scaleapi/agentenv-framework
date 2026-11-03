@@ -1,14 +1,6 @@
-"""Bundles run straight from a Hugging Face Hub dataset repo, named ``hf://<org>/<repo>[@<revision>][/<path>]``.
-
-The revision, a branch, tag or commit (the main branch by default), resolves to a commit, and the bundle is picked from
-that commit's file list before anything is downloaded, so a results dataset's recordings never are. Only the bundle's
-files and the repo's card are downloaded, into a plain folder for the commit: the Hub's own cache keeps files as links
-into its blob store, and the bundle parser refuses a link that leaves the bundle. A commit never changes, so what was
-downloaded for it is reused; a reference pinned to the commit then needs no network at all. The bundle's ids are rooted
-at ``@hf/<org>/<repo>``, plus ``/<name>`` for a bundle under ``bundles/``, a local namespace of its own: the id says the
-bundle came from the Hub, and a rerun of the same commit reuses what the last one wrote. A gated or private repo is read
-with the Hub library's own login (``hf auth login`` or ``HF_TOKEN``).
-"""
+"""Bundles run straight from a Hugging Face Hub dataset repo, named ``hf://<org>/<repo>[@<revision>][/<path>]``. Each
+commit's bundle is downloaded once into a plain folder, since the Hub's own cache keeps files as links that would leave
+the bundle, and its ids are rooted in the ``@hf`` namespace, which only this path produces."""
 
 from __future__ import annotations
 
@@ -37,7 +29,6 @@ from .requires import UnmetRequirements
 SCHEME = "hf://"
 BUNDLES = "bundles"
 CARD = "README.md"
-# The key a run's context records where its bundle came from under, in its metadata.
 SOURCE_KEY = "bundle_source"
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -48,9 +39,11 @@ _FORM = "hf://<org>/<repo>[@<revision>][/<path>]"
 
 @dataclass(frozen=True)
 class HubReference:
-    repo: str  # <org>/<repo>
-    revision: str | None  # None for the main branch
-    path: str | None  # the bundle's folder in the repo, when named
+    """An ``hf://`` reference's parts: ``<org>/<repo>``, the revision named, and the bundle's folder in the repo."""
+
+    repo: str
+    revision: str | None
+    path: str | None
 
 
 @dataclass(frozen=True)
@@ -78,13 +71,13 @@ class HubSource:
 @dataclass(frozen=True)
 class HubBundle:
     """A bundle downloaded from the Hub: its folder, the id root it runs under, where it came from, and what the repo's
-    card says it needs."""
+    card says it needs: the plugins it requires when it has no bundle.toml, and the command that sets it up."""
 
     root: Path
     id_root: str
     source: HubSource
-    plugins: tuple[str, ...]  # the card's, for a bundle without a bundle.toml
-    setup: str | None  # the card's command that sets the bundle up, shown when setting up could fix a run, never run
+    plugins: tuple[str, ...]
+    setup: str | None
 
     @property
     def setup_note(self) -> str | None:
