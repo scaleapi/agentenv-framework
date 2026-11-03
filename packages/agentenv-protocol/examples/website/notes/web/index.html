@@ -4,6 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Notes</title>
+    <script>
+      if (!location.pathname.endsWith("/")) location.replace(`${location.pathname}/${location.search}${location.hash}`);
+    </script>
   </head>
   <body>
     <header class="bar">
