@@ -26,7 +26,7 @@ from agentenv_protocol import client as protocol_v1
 from agent_env.env import Env
 from agentenv_protocol.types import WELL_KNOWN_PATH
 from agentenv_protocol.website_browser import BROWSER
-from tst.integration.computer.website_browser_test import _app, _browser_process, _keys, _ready
+from tst.integration.computer.website_browser_test import _app, _browser_process, _ready
 from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
@@ -85,6 +85,8 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 time.sleep(float(sys.argv[1]))
 """
 REPORT_SHA256 = hashlib.sha256(b"agentenv report\n" * 64).hexdigest()
+#: How long apart the key chords a test presses into Chromium are.
+KEY_GAP_S = 2.0
 # Each window the window manager manages, its class and its title.
 WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); do '
            'xprop -id "$w" WM_CLASS _NET_WM_NAME; done')
@@ -135,7 +137,7 @@ async def test_it_runs_chrome_itself_on_its_pipe_answers_prompts_as_the_deploy_s
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_PERMISSIONS, "60"],
                                                        timeout_s=90))
             await asyncio.sleep(3)
-            await _keys(deployed, ["F5"])
+            await _keys_in_chromium(deployed, ["F5"])
             permissions = await _chromium_windows(deployed, "denied")
             await serving
             await inside.run(deployed, ["sh", "-c", "mkdir -p ~/.cache/chromium && touch ~/.cache/chromium/kept"],
@@ -191,11 +193,9 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_RECORDED, "45"],
                                                        timeout_s=75))
             await asyncio.sleep(3)
-            await _keys(deployed, ["F5"])
+            await _keys_in_chromium(deployed, ["F5"])
             accepted = await _chromium_windows(deployed, "accepted")
-            await _keys(deployed, ["Control", "t"])
-            await asyncio.sleep(2)
-            await _keys(deployed, ["Control", "w"])
+            await _keys_in_chromium(deployed, ["Control", "t"], ["Control", "w"])
             await serving
             recorded = await _record(deployed, card, lambda r: r["downloads"] and "sha256" in r["downloads"][0]
                                      and r["closed_tabs"])
@@ -242,18 +242,34 @@ async def _record(deployed, card: dict, until) -> dict:
     return record
 
 
-async def _tab_to(deployed, title: str):
-    """Control+Tab pressed as an agent presses it, after a click into Chromium's window, which a window opened with no
-    input may need before it has the keyboard, and again while the window still shows the tab before, which a press
-    can reach before the next tab opens; the last press's result, and the window titles once one starts with
-    ``title``."""
-    x, y = await _window_center(deployed)
+async def _keys_in_chromium(deployed, *chords: list[str]) -> None:
+    """Each chord pressed as an agent presses it, ``KEY_GAP_S`` apart, after a click into Chromium's window."""
     async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
         async with ClientSession(read, write) as session:
-            await session.initialize()
-            await session.call_tool("computer_screenshot", {})
-            clicked = await session.call_tool("computer_click", {"x": x, "y": y})
-            assert not clicked.isError, clicked
+            await _click_into_chromium(deployed, session)
+            for keys in chords:
+                pressed = await session.call_tool("computer_key", {"keys": keys})
+                assert not pressed.isError, pressed
+                await asyncio.sleep(KEY_GAP_S)
+
+
+async def _click_into_chromium(deployed, session: ClientSession) -> None:
+    """A click into the middle of Chromium's window, which a window opened with no input may need before it has the
+    keyboard."""
+    x, y = await _window_center(deployed)
+    await session.initialize()
+    await session.call_tool("computer_screenshot", {})
+    clicked = await session.call_tool("computer_click", {"x": x, "y": y})
+    assert not clicked.isError, clicked
+
+
+async def _tab_to(deployed, title: str):
+    """Control+Tab pressed as an agent presses it, after a click into Chromium's window, and again while the window
+    still shows the tab before, which a press can reach before the next tab opens; the last press's result, and the
+    window titles once one starts with ``title``."""
+    async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await _click_into_chromium(deployed, session)
             for attempt in range(3):
                 keyed = await session.call_tool("computer_key", {"keys": ["Control", "Tab"]})
                 try:

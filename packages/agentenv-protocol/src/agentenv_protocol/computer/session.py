@@ -69,7 +69,8 @@ async def returncode(pid: int, timeout_s: float) -> Optional[int]:
 
 async def stop(pid: int, timeout_s: float) -> None:
     """End the session ``launch`` started as ``pid``, every process in it: asked to exit, then killed after
-    ``timeout_s``."""
+    ``timeout_s``. No one asks how it exited once it's stopped."""
+    _exits.pop(pid, None)
     try:
         os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
