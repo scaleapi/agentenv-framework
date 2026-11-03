@@ -220,6 +220,7 @@ def test_the_built_page_loads_its_assets_and_api_under_the_gateways_prefix() -> 
     browser = TestClient(_behind_gateway_prefix(notes_site.Notes().create_app()), base_url="http://gateway.test")
     page = browser.get(page_url)
     assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
+    assert page.text.index('location.pathname.endsWith("/")') < page.text.index("<script type=\"module\"")
 
     assets = [urljoin(page_url, ref) for ref in re.findall(r'(?:src|href)="([^"]+)"', page.text)]
     assert assets and all(urlsplit(url).path.startswith(GATEWAY_PREFIX + "/") for url in assets), assets

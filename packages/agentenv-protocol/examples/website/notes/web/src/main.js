@@ -49,6 +49,7 @@ function queueSave(id, fields) {
       }
       landed.set(id, renders);
     } catch (error) {
+      state.error = error;
       lastSent.set(id, {});
       landed.delete(id);
       throw error;
@@ -179,15 +180,23 @@ async function run(action) {
 async function start() {
   const [session, users] = await Promise.all([api("api/session"), api("api/users")]);
   $("user").replaceChildren(...users.map((user) => new Option(user.name || user.id, user.id)));
-  $("user").value = session.user ?? "";
+  let signedInAs = session.user ?? "";
+  $("user").value = signedInAs;
   $("user").addEventListener("change", (event) => {
     const user = event.target.value;
     $("user").disabled = true;
     run(async () => {
       try {
-        while (saving.size) await Promise.all([...saving.values()].map((state) => state.done));
+        while (saving.size) {
+          const pending = [...saving.values()];
+          await Promise.all(pending.map((state) => state.done));
+          const failed = pending.find((state) => state.error);
+          if (failed) throw failed.error;
+        }
         await api("api/sign-in", { method: "POST", body: { user } });
+        signedInAs = user;
       } finally {
+        $("user").value = signedInAs;
         $("user").disabled = false;
       }
     });
