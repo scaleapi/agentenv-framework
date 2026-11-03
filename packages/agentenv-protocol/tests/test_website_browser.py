@@ -480,7 +480,7 @@ async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_
     assert [tab["id"] for tab in record["tabs"]] == ["a"] and record["tabs"][0]["title"] == "Slack"
     assert [(tab["id"], tab["closed_by"]) for tab in record["closed_tabs"]] == [("b", "browser"), ("c", "agentenv")]
     assert session == "s-hidden" and ("Target.closeTarget", {"targetId": "hidden"}, None) in devtools.calls
-    assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs][-1] == ("a", "relaunch")
+    assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs][-1] == ("a", "stop")
     assert [call[0] for call in devtools.calls[:3]] == ["Target.setDiscoverTargets", "Target.setAutoAttach",
                                                         "Browser.setDownloadBehavior"]
 
@@ -569,8 +569,11 @@ async def test_its_connection_hears_events_its_server_logs_each_launch_and_an_ex
         if any(entry["event"] == "exit" for entry in runtime.launches()):
             break
         await asyncio.sleep(0.05)
+    after_exit = await browser.browser_record()
     browser.devtools.close()
 
     assert [tab["id"] for tab in record["tabs"]] == ["start"]
+    assert after_exit["tabs"] == [] and [(tab["id"], tab["closed_by"]) for tab in after_exit["closed_tabs"]] == [
+        ("start", "stop"), ("start", "exit")]
     assert [(entry["event"], entry.get("cause"), entry["pid"]) for entry in runtime.launches()] == [
         ("launch", "boot", first), ("stop", None, first), ("launch", "data/reset", second), ("exit", None, second)]

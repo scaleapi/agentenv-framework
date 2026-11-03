@@ -39,8 +39,13 @@ OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins
 SHM_MIN_BYTES = 1 << 30
 #: Chromium's content setting that denies a permission without a prompt.
 BLOCK = 2
-#: Who closed a tab: agentenv over its own connection, anything else in the browser, or the browser's relaunch.
-AGENTENV, BROWSER_CLOSED, RELAUNCH = "agentenv", "browser", "relaunch"
+#: Who closed a tab: agentenv over its own connection, or anything else in the browser; or how its browser ended, on
+#: its own or stopped by its server.
+AGENTENV, BROWSER_CLOSED, EXIT, STOP = "agentenv", "browser", "exit", "stop"
+#: How long the active tab's check waits on each page.
+ACTIVE_CHECK_TIMEOUT_S = 2.0
+#: How much of a download each read hashes.
+HASH_CHUNK_BYTES = 1 << 20
 #: Who answered a dialog when agentenv didn't.
 AGENT = "agent"
 #: The targets agentenv's connection follows.
@@ -194,18 +199,22 @@ class BrowserControl:
         devtools.listen(self._event)
 
     async def attach(self) -> None:
-        """Follow a browser just launched: the tabs of the one before closed by its relaunch, and every page this one
-        has or opens attached, its downloads going to ``downloads_dir`` with their events."""
-        now = _now()
-        self.closed_tabs += [{**tab, "closed_at": now, "closed_by": RELAUNCH} for tab in self.tabs.values()]
-        self.tabs.clear()
-        self._sessions.clear()
-        self._open_dialogs.clear()
+        """Follow a browser just launched: any tabs the one before left open closed by its server's stop, and every
+        page this one has or opens attached, its downloads going to ``downloads_dir`` with their events."""
+        self.ended(STOP)
         await self.devtools.call("Target.setDiscoverTargets", {"discover": True, "filter": PAGES})
         await self.devtools.call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": False,
                                                           "flatten": True, "filter": PAGES})
         await self.devtools.call("Browser.setDownloadBehavior", {"behavior": "allow", "eventsEnabled": True,
                                                                  "downloadPath": str(self.downloads_dir)})
+
+    def ended(self, how: str) -> None:
+        """The browser is gone, ``how`` it ended: its open tabs are closed by that, and its sessions with them."""
+        now = _now()
+        self.closed_tabs += [{**tab, "closed_at": now, "closed_by": how} for tab in self.tabs.values()]
+        self.tabs.clear()
+        self._sessions.clear()
+        self._open_dialogs.clear()
 
     async def close_tab(self, target: str) -> None:
         """Close the tab ``target``, which the record says agentenv closed."""
@@ -235,7 +244,8 @@ class BrowserControl:
             try:
                 state = (await self.devtools.call(
                     "Runtime.evaluate", {"expression": "[document.visibilityState, document.hasFocus()]",
-                                         "returnByValue": True}, session_id=session, timeout_s=2))["result"]["value"]
+                                         "returnByValue": True}, session_id=session,
+                    timeout_s=ACTIVE_CHECK_TIMEOUT_S))["result"]["value"]
             except (ConnectionError, DevToolsError, asyncio.TimeoutError, KeyError):
                 continue
             if state[1]:
@@ -334,7 +344,7 @@ class BrowserControl:
 def _size_and_sha256(path: Path) -> tuple[int, str]:
     digest = hashlib.sha256()
     with path.open("rb") as file:
-        while chunk := file.read(1 << 20):
+        while chunk := file.read(HASH_CHUNK_BYTES):
             digest.update(chunk)
     return path.stat().st_size, digest.hexdigest()
 
@@ -395,7 +405,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
             (Path.home() / folder).mkdir(exist_ok=True)
         #: agentenv's control of it over that connection, and the record it keeps.
         self.control = BrowserControl(self.devtools, Path.home() / DOWNLOADS, self.settings.dialogs)
-        self.devtools.on_close(self._computer_app.exited)
+        self.devtools.on_close(self._pipe_closed)
 
     @classmethod
     def declaration(cls) -> AppDeclaration:
@@ -466,6 +476,11 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self._following = asyncio.ensure_future(self._follow(self.settings.start_urls[len(self._command_line_tabs()):]))
         self._following.add_done_callback(lambda done: done.cancelled() or done.exception())
         return {PIPE_IN: to_browser_read, PIPE_OUT: from_browser_write}
+
+    def _pipe_closed(self) -> None:
+        """The browser closed its pipe: its tabs closed by its exit when it ended on its own, else by its server's
+        stop."""
+        self.control.ended(EXIT if self._computer_app.exited() else STOP)
 
     async def _follow(self, urls: list[str]) -> None:
         """Its control attached, then each of ``urls`` in a tab behind the active one, in order."""

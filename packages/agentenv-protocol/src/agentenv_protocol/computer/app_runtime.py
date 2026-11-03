@@ -28,6 +28,9 @@ CHECK_TIMEOUT_S = 10.0
 #: Where an app's server keeps the pid of the app it launched last, in the app's folder, so a server that restarts can
 #: still stop it.
 PID = Path(".agentenv/app.pid")
+#: Where an app's server logs each launch, stop and exit of the app, beside its pid; a boot starts the app's folder as
+#: its image has it, so the log is the boot's.
+LAUNCHES = Path(".agentenv/launches")
 #: How long a stopped app may take to exit before it's killed.
 STOP_TIMEOUT_S = 10.0
 
@@ -122,14 +125,16 @@ class AppRuntime:
         await session.stop(pid, STOP_TIMEOUT_S)
         return True
 
-    def exited(self) -> None:
-        """Log that the app this server launched last ended on its own; nothing once the server has stopped it."""
-        if (pid := _recorded_pid()) is not None:
-            self.log("exit", pid)
+    def exited(self) -> bool:
+        """Log that the app this server launched last ended on its own, unless the server stopped it; whether it
+        did."""
+        if (pid := _recorded_pid()) is None:
+            return False
+        self.log("exit", pid)
+        return True
 
     def log(self, event: str, pid: int, **fields: str) -> None:
-        """Append ``event`` for the app's ``pid`` to its launch log, which outlives its server until the computer
-        reboots."""
+        """Append ``event`` for the app's ``pid`` to its launch log, which outlives its server for the boot."""
         entry = {"at": datetime.now(timezone.utc).isoformat(), "event": event, "pid": pid, **fields}
         _log().parent.mkdir(parents=True, exist_ok=True)
         with _log().open("a", encoding="utf-8") as log:
@@ -179,7 +184,7 @@ def _mark() -> Path:
 
 
 def _log() -> Path:
-    return LAUNCHED / f"{Path.cwd().name}.launches"
+    return LAUNCHES
 
 
 def _recorded_pid() -> Optional[int]:

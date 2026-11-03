@@ -210,15 +210,13 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
             report = await teardown_run(context)
 
     assert accepted[0].startswith("accepted")
-    (dialog,) = recorded["dialogs"]
-    assert (dialog["type"], dialog["message"], dialog["answer"], dialog["by"]) == ("confirm", "Proceed?", "accepted",
-                                                                                 "agentenv")
-    (download,) = recorded["downloads"]
-    assert (download["filename"], download["state"], download["size"], download["sha256"]) == (
-        "report.bin", "completed", len(b"agentenv report\n" * 64), REPORT_SHA256)
-    assert [tab["closed_by"] for tab in recorded["closed_tabs"]] == ["browser"]
-    assert [tab["url"] for tab in recorded["tabs"]] == [RECORDED] and recorded["tabs"][0]["active"] is True
-    assert [entry["event"] for entry in exited["launches"]] == ["launch", "exit"]
+    assert [(d["type"], d["message"], d["answer"], d["by"]) for d in recorded["dialogs"]] == [
+        ("confirm", "Proceed?", "accepted", "agentenv")], recorded
+    assert [(d["filename"], d["state"], d["size"], d["sha256"]) for d in recorded["downloads"]] == [
+        ("report.bin", "completed", len(b"agentenv report\n" * 64), REPORT_SHA256)], recorded
+    assert [tab["closed_by"] for tab in recorded["closed_tabs"]] == ["browser"], recorded
+    assert [(tab["url"], tab["active"]) for tab in recorded["tabs"]] == [(RECORDED, True)], recorded
+    assert [entry["event"] for entry in exited["launches"]] == ["launch", "exit"], exited
     assert exited["launches"][0]["cause"] == "boot" and relaunched["ready"] is True, relaunched
     events = [(entry["event"], entry.get("cause")) for entry in restarted["launches"]]
     assert events[:3] == [("launch", "boot"), ("exit", None), ("launch", "launch")]

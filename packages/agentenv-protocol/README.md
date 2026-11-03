@@ -791,7 +791,8 @@ are the profile's template. The base class adds:
 - **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
   to every page with flattened sessions and keeps a record: open tabs in opened order, the one whose page
   has focus `active`; `closed_tabs`, each with `closed_at` and `closed_by` (`agentenv`, over this
-  connection; `browser`, anything else; `relaunch`); `downloads`, into `~/Downloads`, each with its state
+  connection; `browser`, anything else; `exit` or `stop`, when the browser ended on its own or its server
+  stopped it); `downloads`, into `~/Downloads`, each with its state
   and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.
   `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
 - **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
