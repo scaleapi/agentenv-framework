@@ -11,6 +11,7 @@ import functools
 import hashlib
 import io
 import json
+import re
 import logging
 import os
 import shlex
@@ -30,6 +31,7 @@ import httpx
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
 from agent_env.config import get_config
 from agent_env.env.envs.computer.utils import layers_in_image
+from agent_env.env.published_images import COMPUTER_IMAGES
 from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
 from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
@@ -54,10 +56,6 @@ IN_VM = Path(__file__).with_name("builder_in_vm.sh")
 #: since the stores keep no file modes.
 RUN_ONLY = (b"#!", b"\x7fELF")
 EXECUTABLE = 0o755
-#: What shows whether this machine's Docker runs a platform, for a base that's only a build context: the image the shipped
-#: Linux bases build from, which their build pulls for the platform anyway.
-PLATFORM_CHECK = ("public.ecr.aws/docker/library/ubuntu:24.04"
-                  "@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c")
 #: What registers QEMU in a builder VM's kernel, for a platform no link runs natively: Docker Hub's image through
 #: Google's mirror of it, which doesn't limit anonymous pulls by IP as Docker Hub does.
 BINFMT = ("mirror.gcr.io/tonistiigi/binfmt:qemu-v9.2.2"
@@ -255,11 +253,17 @@ def _runs_here(platform: str, image: str) -> bool:
 
 def _platform_check(base: DockerImageArtifact) -> str:
     """The image ``_runs_here`` starts for a build ``FROM`` ``base``, one the build pulls anyway: ``base`` when it's a
-    registry's, signed in to it, else ``PLATFORM_CHECK``."""
+    registry's, signed in to it, else the image the shipped Linux base builds from, as its build pulls it."""
     if not names_registry(base.image_name):
-        return PLATFORM_CHECK
+        return _shipped_base_from()
     docker_login(get_config().get_image_store().auth(base.pinned_name))
     return base.pinned_name
+
+
+@functools.cache
+def _shipped_base_from() -> str:
+    """The image the shipped Linux base computer's Dockerfile builds ``FROM``, pinned by its digest there."""
+    return re.search(r"^FROM\s+(\S+)", COMPUTER_IMAGES[0].dockerfile.read_text(), re.MULTILINE).group(1)
 
 
 def _resolver(source: str, arch: str, context: str, out: str) -> list[str]:

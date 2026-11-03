@@ -19,7 +19,6 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-import agent_env
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.cli import cli
@@ -101,15 +100,15 @@ def test_whether_this_machine_runs_a_platform_is_whether_a_container_of_it_runs_
                    for platform in ("linux/amd64", "linux/riscv64")]
 
 
-def test_the_platform_check_starts_the_base_or_the_image_the_shipped_bases_build_from(monkeypatch):
-    shipped = (Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04" / "Dockerfile").read_text()
+def test_the_platform_check_starts_the_base_or_the_pinned_image_the_shipped_base_builds_from(monkeypatch):
     logins = []
     monkeypatch.setattr(builder, "docker_login", logins.append)
     registry = SimpleNamespace(image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1@sha256:" + "a" * 64)
     context = SimpleNamespace(image_name="local/base-1234:abcd", pinned_name="local/base-1234:abcd")
 
     assert builder._platform_check(registry) == registry.pinned_name and len(logins) == 1
-    assert builder._platform_check(context) == builder.PLATFORM_CHECK and f"FROM {builder.PLATFORM_CHECK}\n" in shipped
+    assert re.fullmatch(r"public\.ecr\.aws/docker/library/ubuntu:24\.04@sha256:[0-9a-f]{64}",
+                        builder._platform_check(context))
 
 
 def test_a_resolve_copies_its_inputs_into_the_resolvers_container_and_its_outputs_out_with_no_bind_mount(
