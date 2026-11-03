@@ -1,0 +1,15 @@
+{
+  "current_user": "ann",
+  "users": [
+    {"id": "ann", "name": "Ann Lee"},
+    {"id": "ben", "name": "Ben Ortiz"}
+  ],
+  "notes": [
+    {"id": 1, "owner": "ann", "title": "Buy milk", "body": "Oat, two cartons.", "done": false,
+     "created_at": "2026-01-05T09:00:00.000Z", "updated_at": "2026-01-05T09:00:00.000Z"},
+    {"id": 2, "owner": "ann", "title": "Book dentist", "body": "", "done": true,
+     "created_at": "2026-01-04T15:30:00.000Z", "updated_at": "2026-01-06T08:10:00.000Z"},
+    {"id": 3, "owner": "ben", "title": "Draft the quarterly report", "body": "Due Friday.", "done": false,
+     "created_at": "2026-01-03T11:00:00.000Z", "updated_at": "2026-01-03T11:00:00.000Z"}
+  ]
+}
