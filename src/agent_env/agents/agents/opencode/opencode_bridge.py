@@ -230,18 +230,28 @@ def _mcp_tool_prefix(server: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", server) + "_"
 
 
+# The permissions opencode-ai 1.17.18 asks that aren't the name of a tool, and that its own defaults set.
+_NON_TOOL_PERMISSIONS = ("external_directory", "doom_loop")
+
+
 def _permission(builtin_tools: OpenCodeTools | None, mcp_servers: dict[str, dict] | None) -> dict[str, str]:
     """The config's ``permission``: which tools the CLI offers the model. A denied tool is left out of the model's
     tool list, not only refused when called. Without a selection every tool is allowed; ``{"disable": "*"}`` and
     ``{"only": [...]}`` deny every tool but those named and the tools of ``mcp_servers``, which a ``"*"`` deny would
     remove too; ``{"disable": [...]}`` denies those alone. ``question`` is denied in every case, and last, since the
-    CLI applies the last rule that matches a tool."""
+    CLI applies the last rule that matches a tool.
+
+    A ``"*"`` deny would also deny the CLI's checks that aren't tools: ``external_directory``, which every file tool
+    asks before it touches a path outside the run directory, and ``doom_loop``, which it asks when the model repeats
+    a call. Those stay allowed, as ``"*": "allow"`` leaves them, so a kept tool works as it does without a
+    selection."""
     if builtin_tools is None:
         return {"*": "allow", "question": "deny"}
     if isinstance(builtin_tools.disable, list):
         return {"*": "allow", **{tool: "deny" for tool in builtin_tools.disable}, "question": "deny"}
     return {
         "*": "deny",
+        **{check: "allow" for check in _NON_TOOL_PERMISSIONS},
         **{tool: "allow" for tool in builtin_tools.only or []},
         **{f"{_mcp_tool_prefix(name)}*": "allow" for name in mcp_servers or {}},
         "question": "deny",

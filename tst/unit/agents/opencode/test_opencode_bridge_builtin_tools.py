@@ -14,10 +14,14 @@ from agentenv_protocol.a2a_agent import BuiltinTools
 from agent_env.a2a_agent import A2AAgent
 from agent_env.task_step.task_steps.deploy_agent import _check_builtin_tools
 from tst.unit.agents.opencode.agent import AGENT_DIR, a2a_server, opencode_bridge
+from tst.unit.agents.opencode.conftest import result
 from tst.unit.agents.opencode.fake_cli import FakeCLI
 
 MODEL = "fireworks_ai/kimi-k3"
 _STOP = {"type": "step_finish", "sessionID": "ses_1", "part": {"type": "step-finish", "reason": "stop"}}
+# What a "*" deny would otherwise deny that isn't a tool: the check a file tool makes before it touches a path outside
+# the run directory, and the one made when the model repeats a call.
+_CHECKS = {"external_directory": "allow", "doom_loop": "allow"}
 _SERVERS = {"env4821": {"url": "https://gw/mcp", "headers": None},
             "peer_agents": {"url": "http://127.0.0.1:8000/ext/peer-agents/mcp", "headers": None},
             "fake-env.x": {"url": "https://gw2/mcp", "headers": None}}
@@ -70,11 +74,11 @@ def test_no_selection_leaves_the_config_and_argv_as_they_were(monkeypatch, spawn
 
 
 @pytest.mark.parametrize("selection, permission", [
-    ({"disable": "*"}, {"*": "deny", "env4821_*": "allow", "peer_agents_*": "allow", "fake-env_x_*": "allow",
+    ({"disable": "*"}, {"*": "deny", **_CHECKS, "env4821_*": "allow", "peer_agents_*": "allow", "fake-env_x_*": "allow",
                         "question": "deny"}),
-    ({"only": ["read", "grep"]}, {"*": "deny", "read": "allow", "grep": "allow", "env4821_*": "allow",
+    ({"only": ["read", "grep"]}, {"*": "deny", **_CHECKS, "read": "allow", "grep": "allow", "env4821_*": "allow",
                                   "peer_agents_*": "allow", "fake-env_x_*": "allow", "question": "deny"}),
-    ({"only": []}, {"*": "deny", "env4821_*": "allow", "peer_agents_*": "allow", "fake-env_x_*": "allow",
+    ({"only": []}, {"*": "deny", **_CHECKS, "env4821_*": "allow", "peer_agents_*": "allow", "fake-env_x_*": "allow",
                     "question": "deny"}),
     ({"disable": ["bash", "webfetch"]}, {"*": "allow", "bash": "deny", "webfetch": "deny", "question": "deny"}),
 ])
@@ -86,7 +90,7 @@ def test_a_selection_is_the_permission_and_agent_envs_mcp_tools_stay(selection, 
 
 
 def test_without_mcp_servers_disable_all_denies_every_tool():
-    assert _permission({"disable": "*"}) == {"*": "deny", "question": "deny"}
+    assert _permission({"disable": "*"}) == {"*": "deny", **_CHECKS, "question": "deny"}
 
 
 def test_the_selection_reaches_the_cli(spawned):
@@ -95,8 +99,37 @@ def test_the_selection_reaches_the_cli(spawned):
     asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", builtin_tools=tools))
 
     ((argv, env),) = spawned
-    assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny", "question": "deny"}
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny", **_CHECKS, "question": "deny"}
     assert argv[-1] == "go"
+
+
+def test_turns_get_the_selection_the_agent_config_set(monkeypatch, oc):
+    """The agent passes the stored selection to each turn's run_opencode: none before one is set, then the one set,
+    whose permission keeps the tools of the MCP servers registered with the agent."""
+    monkeypatch.setenv("A2A_PORT", "8000")
+    permissions = []
+
+    async def fake_run_opencode(**kwargs):
+        config = opencode_bridge._build_config(MODEL, kwargs["mcp_servers"], {}, None,
+                                               builtin_tools=kwargs.get("builtin_tools"))
+        permissions.append(config["permission"])
+        return result()
+
+    monkeypatch.setattr(a2a_server, "run_opencode", fake_run_opencode)
+
+    async def exercise():
+        async with oc.client() as client:
+            await client.post("/ext/mcp-config", json={"name": "env4821", "url": "https://gw/mcp"})
+            await oc.send(client, "one")
+            assert (await client.post("/ext/agent-config", json={"builtin_tools": {"disable": "*"}})).status_code == 200
+            await oc.send(client, "two")
+
+    asyncio.run(exercise())
+
+    assert permissions == [
+        {"*": "allow", "question": "deny"},
+        {"*": "deny", **_CHECKS, "env4821_*": "allow", "peer_agents_*": "allow", "question": "deny"},
+    ]
 
 
 @pytest.mark.parametrize("selection, match", [

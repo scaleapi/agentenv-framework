@@ -44,7 +44,9 @@ state is under `/data`, its `HOME`, whatever the uid.
 A `deploy_agent` `builtin_tools` selection picks the CLI's own tools through the config's `permission`, which leaves a
 denied tool out of the model's tool list rather than refusing it when called. `{"disable": "*"}` and `{"only": [...]}`
 deny every tool but those named and the tools of the MCP servers agent-env gives the agent (`<server>_*`), a list to
-turn off denies those alone, and `question` is denied in every case. The names are `OpenCodeTool`'s in
+turn off denies those alone, and `question` is denied in every case. The CLI's checks that aren't tools stay
+allowed, as they are without a selection: `external_directory`, which a file tool asks before it touches a path outside
+the workspace, and `doom_loop`. The names are `OpenCodeTool`'s in
 `opencode_bridge.py`, the CLI's permission names: `edit` also covers `write` and `apply_patch`, which can't be selected
 alone, and `read` covers the MCP resource tools. A test fails when package.json's `opencode-ai` moves, until
 `OpenCodeTool` and `TOOLS_CLI_VERSION` move with it.
