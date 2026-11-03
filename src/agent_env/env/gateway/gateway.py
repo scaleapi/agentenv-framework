@@ -12,6 +12,7 @@ import posixpath
 import re
 import socket
 import subprocess
+import tempfile
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -139,6 +140,8 @@ class Gateway:
     REST_PROXY_TIMEOUT_S = float(DATA_PLANE_LOAD_TIMEOUT_MAX_S)  # data-plane loads
     REST_PROXY_CONNECT_TIMEOUT_S = 10.0  # a service that never answers the TCP connect fails in seconds, not an hour
     REST_PROXY_TIMEOUT = httpx.Timeout(REST_PROXY_TIMEOUT_S, connect=REST_PROXY_CONNECT_TIMEOUT_S)
+    CAPTURE_READ_BYTES = 64 * 1024
+    CAPTURE_SNAPSHOT_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -448,7 +451,8 @@ class Gateway:
 
             @self._mcp.custom_route("/traffic/capture", methods=["GET"])
             async def traffic_capture(request: Request) -> Response:
-                return self._refuse_uncontrolled(request) or self._serve_capture(request.query_params.get("name", ""))
+                return self._refuse_uncontrolled(request) or await asyncio.to_thread(
+                    self._serve_capture, request.query_params.get("name", ""))
 
         @self._mcp.custom_route("/changes", methods=["GET"])
         async def env_changes(request: Request) -> Response:
@@ -1644,8 +1648,10 @@ class Gateway:
         return self._json_response({"format": "pcap", "captures": captures}, 200)
 
     def _serve_capture(self, name: str) -> Response:
-        """traffic/v1's get: the capture file ``name``, one ``list`` names, streamed as it stands; tcpdump writes each
-        packet as it captures it, so a file still being written ends on a whole packet, or at worst one torn."""
+        """traffic/v1's get: the capture file ``name``, one ``list`` names, as a copy taken whole before any of it is
+        sent (``_snapshot_capture``), so a file tcpdump's rotation rewrites while it downloads never arrives mixed or
+        cut short; 503 when every copy was rewritten under it. A file still being written ends on a whole packet, or at
+        worst one torn."""
         if not _CAPTURE_FILE.fullmatch(name):
             return self._json_response({"ok": False, "error": {"code": "invalid_params",
                                         "message": f"{name!r} is not a capture's name, as list gives it"}}, 400)
@@ -1657,14 +1663,42 @@ class Gateway:
         except OSError:
             return self._json_response({"ok": False, "error": {"code": "not_found",
                                         "message": f"no capture named {name!r}"}}, 404)
+        with handle:
+            snapshot = self._snapshot_capture(handle)
+        if snapshot is None:
+            return self._json_response({"ok": False, "error": {"code": "unavailable",
+                                        "message": f"capture {name!r} kept being rewritten while it was copied; "
+                                                   "ask again"}}, 503)
+        size = os.fstat(snapshot.fileno()).st_size
 
         def chunks():
-            with handle:
-                while chunk := handle.read(65536):
+            with snapshot:
+                while chunk := snapshot.read(self.CAPTURE_READ_BYTES):
                     yield chunk
 
         return StreamingResponse(chunks(), media_type=PCAP_MEDIA_TYPE,
-                                 headers={"Content-Disposition": f'attachment; filename="{name}"'})
+                                 headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                          "Content-Length": str(size)})
+
+    def _snapshot_capture(self, handle: Any) -> Any | None:
+        """A copy of the open capture ``handle`` in an unlinked temp file, read back from its start, or None when each
+        of ``CAPTURE_SNAPSHOT_ATTEMPTS`` copies found the file shorter than what it had copied: tcpdump truncated it to
+        reuse it, so the copy would mix two rounds of packets. The copy is gone once it's closed."""
+        for _ in range(self.CAPTURE_SNAPSHOT_ATTEMPTS):
+            handle.seek(0)
+            copy = tempfile.TemporaryFile()
+            copied, rewritten = 0, False
+            while chunk := handle.read(self.CAPTURE_READ_BYTES):
+                copy.write(chunk)
+                copied += len(chunk)
+                if os.fstat(handle.fileno()).st_size < copied:
+                    rewritten = True
+                    break
+            if not rewritten and os.fstat(handle.fileno()).st_size >= copied:
+                copy.seek(0)
+                return copy
+            copy.close()
+        return None
 
     def _serve_trajectory(self) -> Response:
         """Stream the whole env trajectory as JSONL; only a mid-write tail line can arrive torn."""

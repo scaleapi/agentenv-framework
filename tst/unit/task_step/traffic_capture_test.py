@@ -5,7 +5,9 @@ capturing env the run didn't, before the env closes."""
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -20,6 +22,7 @@ from agent_env.env.gateway.gateway import Gateway
 from agent_env.task.teardown import recorded_sandboxes, tear_down
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.task_step.task_steps import traffic_capture as traffic_capture_module
 from agent_env.task_step.task_steps.traffic_capture import (
     TRAFFIC_KEY,
     CollectTrafficCaptureTaskStep,
@@ -93,6 +96,46 @@ async def test_each_capture_is_stored_as_a_pcap_in_one_universe_oldest_first(gat
     assert first.content_type == PCAP_MEDIA_TYPE
     assert get_artifact_store().get_object(first.object_url) == _PCAP + b"older"
     assert get_artifact_store().get_object(files["notes-website-backend-01.pcap"].object_url) == _PCAP + b"newer"
+
+
+@pytest.mark.asyncio
+async def test_two_collections_of_one_env_in_the_same_second_are_each_stored_under_a_prefix_of_their_own(gateway):
+    context = _context(_deployed())
+    first = dict(await traffic_capture_module.collect_captures(context, _deployed()))
+    second = await traffic_capture_module.collect_captures(context, _deployed())
+
+    assert (first["state"], second["state"]) == ("collected", "collected")
+    urls = [{name: artifact.object_url for name, artifact in
+             Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"]).get_file_artifacts().items()}
+            for entry in (first, second)]
+    assert sorted(urls[0]) == sorted(urls[1]) and not set(urls[0].values()) & set(urls[1].values())
+
+
+@pytest.mark.asyncio
+async def test_a_collection_cancelled_mid_upload_leaves_the_upload_its_file_to_finish(gateway, monkeypatch):
+    started, release, uploaded = threading.Event(), threading.Event(), []
+    real = traffic_capture_module._upload
+
+    def held(universe_id, object_url, path):
+        started.set()
+        release.wait(10)
+        uploaded.append((path, os.path.exists(path)))
+        return real(universe_id, object_url, path)
+
+    monkeypatch.setattr(traffic_capture_module, "_upload", held)
+    collecting = asyncio.ensure_future(traffic_capture_module.collect_captures(_context(_deployed()), _deployed()))
+    assert await asyncio.to_thread(started.wait, 10)
+    collecting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await collecting
+    release.set()
+    for _ in range(200):
+        if uploaded and not os.path.exists(uploaded[0][0]):
+            break
+        await asyncio.sleep(0.01)
+
+    [(path, existed)] = uploaded
+    assert existed and not os.path.exists(path)
 
 
 @pytest.mark.asyncio

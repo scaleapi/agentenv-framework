@@ -90,6 +90,7 @@ _TRAJECTORY_READ_ATTEMPTS = 3
 # How much of a service's output a failed deploy's error carries: enough for the end of a traceback.
 _LOG_TAIL_LINES = 30
 _LOG_LINE_CHARS = 300
+_CAPTURE_CHECK_ERROR_CHARS = 500
 # Gathering it may stall with the connection; past this, the deploy raises the error it had.
 _DOWN_SERVICES_TIMEOUT_S = 60.0
 
@@ -1254,7 +1255,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             return
         if exit_code != 0:
             logger.warning(f"Can't check the traffic captures are running: docker compose ps exited {exit_code}: "
-                           f"{stderr.strip()[-500:]}")
+                           f"{stderr.strip()[-_CAPTURE_CHECK_ERROR_CHARS:]}")
             return
         rows = {row.get("Service"): row for row in _compose_ps_rows(stdout)}
         stopped = []
@@ -1624,14 +1625,14 @@ def _traffic_mount(path: str, *, read_only: bool = False) -> str:
 
 
 def _traffic_capture_service(gateway_image: str, container: str) -> list[str]:
-    """The compose lines of the service capturing ``container``'s traffic: tcpdump, from the gateway's image, on the
-    container's own interface, every packet whole and written as it's captured, rotating through
-    ``TRAFFIC_CAPTURE_FILES`` files of ``TRAFFIC_CAPTURE_FILE_MB`` million bytes named for the container, its oldest
-    overwritten once they're full, so a long run holds at most their product per container on the VM's disk. It joins
+    """The compose lines of the service capturing ``container``'s traffic: tcpdump, from the gateway's image, on every
+    interface of the container's, its loopback among them, every packet whole and written as it's captured, rotating
+    through ``TRAFFIC_CAPTURE_FILES`` files of ``TRAFFIC_CAPTURE_FILE_MB`` million bytes named for the container, its
+    oldest overwritten once they're full, so a long run holds at most their product per container on the VM's disk. It joins
     the container's network namespace, so it sees what the container sends and receives and nothing else, and is the
     only service given the capabilities a capture needs. It writes to ``TRAFFIC_VOLUME``, which the gateway mounts
     read-only and no website container mounts at all."""
-    argv = ["-i", "eth0", "-n", "-s", "0", "-U", "-Z", "root", "-C", str(TRAFFIC_CAPTURE_FILE_MB),
+    argv = ["-i", "any", "-n", "-s", "0", "-U", "-Z", "root", "-C", str(TRAFFIC_CAPTURE_FILE_MB),
             "-W", str(TRAFFIC_CAPTURE_FILES), "-w", f"{TRAFFIC_SIDECAR_DIR}/{container}.pcap"]
     return [
         f"    image: {gateway_image}",

@@ -5,11 +5,10 @@ FileArtifactUniverse, recorded in ``context.metadata[TRAFFIC_KEY][env_id]``. Tea
 didn't, before the env closes (``collect_uncollected_captures``), so a capture isn't lost with its VM."""
 from __future__ import annotations
 
-import asyncio
+import functools
 import logging
 import os
 import tempfile
-import time
 from collections.abc import Sequence
 from typing import ClassVar, Optional
 
@@ -32,12 +31,14 @@ from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.thread_work import finish_on_thread
 
 logger = logging.getLogger(__name__)
 
 #: ``context.metadata[TRAFFIC_KEY][env_id]``: each env whose captures a run collected, or tried to.
 TRAFFIC_KEY = "traffic_captures"
 _ARTIFACT_TYPE = "traffic_captures"
+_ERROR_CHARS = 500
 
 
 class CollectTrafficCaptureTaskStep(TaskStep):
@@ -116,7 +117,8 @@ async def _store(context: TaskStepContext, deployed: DeployedEnv, captures: list
     if is_local_id(universe_id):
         validate_local_id(universe_id)
     get_config().check_local_run_write(universe_id)
-    store, version = get_artifact_store(), int(time.time())
+    store = get_artifact_store()
+    prefix = store.attempt_prefix(_ARTIFACT_TYPE, universe_id)
     files, total, seen = {}, 0, {}
     for capture in captures:
         container = capture.container
@@ -127,10 +129,12 @@ async def _store(context: TaskStepContext, deployed: DeployedEnv, captures: list
         try:
             total += await fetch_traffic_capture(deployed.environment_url, deployed.environment_card, capture.name,
                                                  path, headers=deployed.control_headers)
-            url = await asyncio.to_thread(store.put_object_file, _ARTIFACT_TYPE, universe_id, version, filename, path,
-                                          PCAP_MEDIA_TYPE)
-        finally:
-            os.unlink(path)
+        except BaseException:
+            _remove(path)
+            raise
+        url = await finish_on_thread(functools.partial(_upload, universe_id, prefix + filename, path),
+                                     f"Uploading traffic capture {filename} of env {deployed.env_id!r}",
+                                     if_never_run=functools.partial(_remove, path))
         files[filename] = store.put_document(FileArtifact(
             id=derive_id(universe_id, filename), filename=filename, content_type=PCAP_MEDIA_TYPE, object_url=url,
             description=f"Traffic capture of {container} in env {deployed.env_id!r}, task instance {context.instance_id}"))
@@ -143,5 +147,22 @@ async def _store(context: TaskStepContext, deployed: DeployedEnv, captures: list
             "containers": sorted(seen)}
 
 
+def _upload(universe_id: str, object_url: str, path: str) -> str:
+    """Upload the capture at ``path`` to ``object_url``, write-once, and remove it: the upload owns the file, so a
+    cancelled collection never removes it from under the upload."""
+    try:
+        return get_config().get_object_store_to_write(object_url, universe_id).put_file_at(object_url, path,
+                                                                                            PCAP_MEDIA_TYPE)
+    finally:
+        _remove(path)
+
+
+def _remove(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 def _failed(error: BaseException) -> dict:
-    return {"state": "failed", "error": f"{type(error).__name__}: {error}"[:500]}
+    return {"state": "failed", "error": f"{type(error).__name__}: {error}"[:_ERROR_CHARS]}

@@ -71,7 +71,7 @@ def test_each_website_container_gets_a_capture_in_its_own_network_namespace():
         assert capture["depends_on"] == [container]
         assert capture["cap_add"] == ["NET_RAW", "NET_ADMIN"]
         assert capture["entrypoint"] == ["tcpdump"]
-        assert capture["command"] == ["-i", "eth0", "-n", "-s", "0", "-U", "-Z", "root", "-C", str(TRAFFIC_CAPTURE_FILE_MB),
+        assert capture["command"] == ["-i", "any", "-n", "-s", "0", "-U", "-Z", "root", "-C", str(TRAFFIC_CAPTURE_FILE_MB),
                                       "-W", str(TRAFFIC_CAPTURE_FILES), "-w", f"/captures/{container}.pcap"]
         assert capture["volumes"] == ["traffic-captures:/captures"]
     assert TRAFFIC_CAPTURE_FILE_MB * TRAFFIC_CAPTURE_FILES <= 500  # a long run can't fill the VM's disk

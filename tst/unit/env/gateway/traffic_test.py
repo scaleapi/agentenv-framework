@@ -71,6 +71,68 @@ async def test_list_names_each_capture_by_its_container_oldest_first_and_get_str
     assert (got.status_code, got.headers["content-type"], got.content) == (200, PCAP_MEDIA_TYPE, _PCAP_HEADER + b"first")
 
 
+class _Rewritten:
+    """An open capture file tcpdump reuses ``times`` times, each time just after a read of it: it truncates the file
+    and writes its next round's first packets, shorter than what was read."""
+
+    def __init__(self, path, times: int):
+        self.path, self.times, self.handle = path, times, open(path, "rb")
+        self.round = path.read_bytes()
+
+    def read(self, size: int) -> bytes:
+        chunk = self.handle.read(size)
+        if chunk and self.times:
+            self.times -= 1
+            self.path.write_bytes(_PCAP_HEADER + b"next")
+        return chunk
+
+    def seek(self, offset: int) -> None:
+        if self.times:
+            self.path.write_bytes(self.round)
+        self.handle.seek(offset)
+
+    def fileno(self) -> int:
+        return self.handle.fileno()
+
+
+def test_a_capture_rewritten_while_it_is_copied_is_copied_again_whole(traffic_dir):
+    path = traffic_dir / "notes-website-backend.pcap0"
+    path.write_bytes(_PCAP_HEADER + b"the round tcpdump overwrites")
+    gw = _gateway(traffic_dir)
+
+    with gw._snapshot_capture(_Rewritten(path, times=1)) as copy:
+        assert copy.read() == _PCAP_HEADER + b"next"
+    path.write_bytes(_PCAP_HEADER + b"the round tcpdump overwrites")
+    assert gw._snapshot_capture(_Rewritten(path, times=gw.CAPTURE_SNAPSHOT_ATTEMPTS)) is None
+
+
+@pytest.mark.asyncio
+async def test_get_answers_503_when_every_copy_of_a_capture_was_rewritten(traffic_dir, monkeypatch):
+    _write(traffic_dir, "notes-website-backend.pcap0", _PCAP_HEADER + b"x", 1000)
+    monkeypatch.setattr(Gateway, "_snapshot_capture", lambda self, handle: None)
+    response = await _get(_gateway(traffic_dir), "/traffic/capture", headers=_bearer(),
+                          params={"name": "notes-website-backend.pcap0"})
+    assert response.status_code == 503 and response.json()["error"]["code"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_get_sends_the_copy_it_took_whatever_the_file_becomes_after(traffic_dir, monkeypatch):
+    path = traffic_dir / "notes-website-backend.pcap0"
+    path.write_bytes(_PCAP_HEADER + b"whole")
+    real = Gateway._snapshot_capture
+
+    def snapshot_then_rewrite(self, handle):
+        copy = real(self, handle)
+        path.write_bytes(_PCAP_HEADER + b"the next round, longer")
+        return copy
+
+    monkeypatch.setattr(Gateway, "_snapshot_capture", snapshot_then_rewrite)
+    response = await _get(_gateway(traffic_dir), "/traffic/capture", headers=_bearer(),
+                          params={"name": "notes-website-backend.pcap0"})
+    assert (response.content, response.headers["content-length"]) == (_PCAP_HEADER + b"whole",
+                                                                     str(len(_PCAP_HEADER) + 5))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name, status", [
     ("../trajectory.jsonl", 400), ("notes-website-backend.pcap0/../../x", 400), ("stray.txt", 400),
