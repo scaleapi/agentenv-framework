@@ -19,6 +19,7 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env import Env
+from agent_env.env.envs.computer import env as computer_env
 from agent_env.env.envs.computer.utils import boot, composer, probing
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.published_images import DISK
@@ -26,7 +27,6 @@ from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
-from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.unit.env.envs._computer import DISK_FORM, _base, _put, disk_layer
@@ -299,13 +299,15 @@ async def test_deploys_of_a_disk_no_compose_started_compose_it_once_first_reusin
 
 @pytest.mark.asyncio
 async def test_a_local_run_refuses_a_registered_envs_form_no_compose_started_rather_than_compose_it(disk_base, driver,
-                                                                                                   docker, vms):
-    env = _put(disk_base, driver, composing=Composing(booted_only=True), id="kit-desktop")
+                                                                                                   docker, vms,
+                                                                                                   monkeypatch):
+    env = _put(disk_base, driver, composing=Composing(booted_only=True))
     builds = len(docker.disk_builds)
+    monkeypatch.setattr(computer_env, "in_local_run", lambda: True)
+    monkeypatch.setattr(computer_env, "is_local_id", lambda entity_id: False)
 
-    with namespace_routing(), run_scope("@local/~/kit/task"):
-        with pytest.raises(DeployRefused, match="has no ready build to deploy"):
-            await Env.get(env.id).deploy(env_params={"form": "disk"})
+    with pytest.raises(DeployRefused, match="has no ready build to deploy"):
+        await Env.get(env.id).deploy(env_params={"form": "disk"})
 
     assert "disk" not in Env.get(env.id).metadata["composed"]
     assert len(docker.disk_builds) == builds and not vms.created
