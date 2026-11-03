@@ -17,7 +17,7 @@ from agent_env.cli.utils import (
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
-from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.envs.website import WebsiteEnv, health_path_problem
 from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_HEALTH_PATH
 from agent_env.store.ids import derive_id, image_repository
 
@@ -92,6 +92,9 @@ def put(
     if server_image_ref and not environment_name:
         click.echo("Error: --server-image-ref needs --environment-name, which a registry image's card can't give here",
                    err=True)
+        sys.exit(1)
+    if problem := health_path_problem(health_path):
+        click.echo(f"Error: {problem}", err=True)
         sys.exit(1)
     if frontend_dockerfile or frontend_dockerfile_github_url:
         click.echo("Warning: a separate frontend image is deprecated; build the site's pages into its server image",

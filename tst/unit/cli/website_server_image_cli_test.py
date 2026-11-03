@@ -52,9 +52,24 @@ def test_put_refuses_no_server_image_two_of_them_an_unnamed_registry_image_and_a
     assert "exactly one of" in _put("--server-dockerfile", str(tmp_path / "Dockerfile"),
                                     "--server-image-ref", "ghcr.io/acme/mail:3").output
     assert "needs --environment-name" in _put("--server-image-ref", "ghcr.io/acme/mail:3").output
-    with patch("agent_env.cli.env.website.DockerImageArtifact.put_ref", side_effect=lambda id, **k: _stored(id)):
+    with patch("agent_env.cli.env.website.DockerImageArtifact.put_ref", side_effect=lambda id, **k: _stored(id)) as put_ref:
         refused = _put("--server-image-ref", "ghcr.io/acme/mail:3", "--environment-name", "mail", "--health-path", "ok")
     assert refused.exit_code == 1 and "health: 'ok' is not a path" in refused.output
+    put_ref.assert_not_called()
+
+
+def test_a_bad_health_path_fails_before_any_build_or_github_clone(local_stores, tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    with patch("agent_env.cli.env.website.build_image") as build, \
+            patch("agent_env.cli.env.website.WebsiteEnv.put_from_github") as from_github:
+        local = _put("--server-dockerfile", str(tmp_path / "Dockerfile"), "--environment-name", "mail",
+                     "--health-path", "healthz")
+        github = _put("--server-dockerfile-github-url", "https://github.com/acme/mail/blob/main/Dockerfile",
+                      "--environment-name", "mail", "--health-path", "healthz")
+    for refused in (local, github):
+        assert refused.exit_code == 1 and "health: 'healthz' is not a path" in refused.output
+    build.assert_not_called()
+    from_github.assert_not_called()
 
 
 def test_a_separate_frontend_image_still_builds_and_is_warned_of(local_stores, tmp_path):
