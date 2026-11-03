@@ -757,8 +757,10 @@ are the profile's template. The base class adds:
 - **Its settings**, `BrowserSettings`, which a subclass's `Settings` extends: `start_urls`, opened in
   tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`), headless
   the first from its command line and the rest over its pipe, since headless Chromium takes one; `window`,
-  1280 × 800, alone only; `locale`; `time_zone`, set as `TZ` in its launch's `env`; and `geolocation` and
-  `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`.
+  1280 × 800, alone only; `locale`; `time_zone`, set as `TZ` in its launch's `env`; `geolocation` and
+  `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`; and `dialogs`, who
+  answers a page's JavaScript dialogs, `beforeunload` included: `agent` (the default), or agentenv,
+  accepting (`accept`, a `prompt()` with its default text) or dismissing (`dismiss`) each.
 - **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile, its
   HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
   `--no-default-browser-check`, `--lang` and, when `/dev/shm` holds under 1 GiB (Docker gives 64 MiB),
@@ -786,8 +788,16 @@ are the profile's template. The base class adds:
   launches it again, and a launch while it runs, from its menu launcher say, opens another window over
   the pipe rather than a second copy, which would hand its window to the first and exit. The ready check
   `devtools_answers` asks `Browser.getVersion` over the pipe.
-- **`browser/v1`** on its card, params only: `chromium` (its `version`), `clock: "real"` and, alone,
-  `window`.
+- **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
+  to every page with flattened sessions and keeps a record: open tabs in opened order, the one whose page
+  has focus `active`; `closed_tabs`, each with `closed_at` and `closed_by` (`agentenv`, over this
+  connection; `browser`, anything else; `relaunch`); `downloads`, into `~/Downloads`, each with its state
+  and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.
+  `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
+- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
+  `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
+  launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
+  and each exit it didn't, since the computer booted.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 

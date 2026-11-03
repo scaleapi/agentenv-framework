@@ -7,19 +7,22 @@ variables agentenv sets, never from its settings."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import itertools
 import json
 import logging
 import os
 import shutil
+from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from .agent_env_environment import agent_skill
+from .agent_env_environment import agent_skill, extension
 from .computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
-from .types import EnvironmentExtension
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,12 @@ OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins
 SHM_MIN_BYTES = 1 << 30
 #: Chromium's content setting that denies a permission without a prompt.
 BLOCK = 2
+#: Who closed a tab: agentenv over its own connection, anything else in the browser, or the browser's relaunch.
+AGENTENV, BROWSER_CLOSED, RELAUNCH = "agentenv", "browser", "relaunch"
+#: Who answered a dialog when agentenv didn't.
+AGENT = "agent"
+#: The targets agentenv's connection follows.
+PAGES = [{"type": "page"}]
 #: Alone, loopback goes through the proxy too. In a computer, the apps on loopback beside it stay reachable; ``<-loopback>``
 #: removes Chromium's own rule, so ``*.localhost`` names still don't.
 ALONE_BYPASS = "<-loopback>"
@@ -77,7 +86,8 @@ class DevToolsError(RuntimeError):
 
 class DevToolsPipe:
     """A CDP connection over a Chromium's debugging pipe, each message JSON ended by a NUL. It connects anew at every
-    launch; a call with no browser connected, or whose browser exits before answering, raises ConnectionError."""
+    launch; a call with no browser connected, or whose browser exits before answering, raises ConnectionError. Each
+    event, a message with no ``id``, goes to every listener, and each closer hears when the browser closes the pipe."""
 
     #: How long a call waits for the browser's answer when it names no wait of its own.
     call_timeout_s: ClassVar[float] = 30.0
@@ -87,6 +97,16 @@ class DevToolsPipe:
         self._waiting: dict[int, asyncio.Future] = {}
         self._writer: Optional[asyncio.WriteTransport] = None
         self._reading: Optional[asyncio.Task] = None
+        self._listeners: list[Callable[[dict], None]] = []
+        self._closers: list[Callable[[], None]] = []
+
+    def listen(self, listener: Callable[[dict], None]) -> None:
+        """Hand ``listener`` each event: its ``method``, ``params`` and, on a page's session, ``sessionId``."""
+        self._listeners.append(listener)
+
+    def on_close(self, closer: Callable[[], None]) -> None:
+        """Call ``closer`` when the browser closes its end of the pipe, not when this end closes it."""
+        self._closers.append(closer)
 
     async def connect(self, to_browser: int, from_browser: int) -> None:
         """Take over this end of a new pipe, ending any connection to a browser launched before."""
@@ -128,6 +148,10 @@ class DevToolsPipe:
         try:
             while True:
                 message = json.loads((await reader.readuntil(b"\0"))[:-1])
+                if "id" not in message:
+                    for listener in self._listeners:
+                        _heard(listener, message)
+                    continue
                 answer = self._waiting.get(message.get("id"))
                 if answer is not None and not answer.done():
                     answer.set_result(message)
@@ -135,11 +159,188 @@ class DevToolsPipe:
             if self._writer is not None:
                 self._writer.close()
             self._fail_waiting()
+            for closer in self._closers:
+                _heard(closer)
 
     def _fail_waiting(self) -> None:
         for answer in self._waiting.values():
             if not answer.done():
                 answer.set_exception(ConnectionError("the browser closed its debugging pipe"))
+
+
+def _heard(callback: Callable, *args: Any) -> None:
+    try:
+        callback(*args)
+    except Exception:
+        logger.exception("a DevToolsPipe listener failed")
+
+class BrowserControl:
+    """agentenv's control of a browser over its pipe: at each launch it attaches to every page with flattened sessions
+    and keeps a record of the browser, its open tabs in opened order, those closed and who closed them, its downloads
+    with their size and sha256, and its JavaScript dialogs, which it answers when ``dialogs`` says to."""
+
+    def __init__(self, devtools: DevToolsPipe, downloads: Path, dialogs: str) -> None:
+        self.devtools, self.downloads_dir, self.dialogs = devtools, downloads, dialogs
+        self.tabs: dict[str, dict] = {}
+        self.closed_tabs: list[dict] = []
+        self.downloads: dict[str, dict] = {}
+        self.dialog_log: list[dict] = []
+        self._sessions: dict[str, str] = {}
+        self._hidden: set[str] = set()
+        self._closing: set[str] = set()
+        self._open_dialogs: dict[str, dict] = {}
+        self._answering: set[str] = set()
+        self._tasks: set[asyncio.Future] = set()
+        devtools.listen(self._event)
+
+    async def attach(self) -> None:
+        """Follow a browser just launched: the tabs of the one before closed by its relaunch, and every page this one
+        has or opens attached, its downloads going to ``downloads_dir`` with their events."""
+        now = _now()
+        self.closed_tabs += [{**tab, "closed_at": now, "closed_by": RELAUNCH} for tab in self.tabs.values()]
+        self.tabs.clear()
+        self._sessions.clear()
+        self._open_dialogs.clear()
+        await self.devtools.call("Target.setDiscoverTargets", {"discover": True, "filter": PAGES})
+        await self.devtools.call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": False,
+                                                          "flatten": True, "filter": PAGES})
+        await self.devtools.call("Browser.setDownloadBehavior", {"behavior": "allow", "eventsEnabled": True,
+                                                                 "downloadPath": str(self.downloads_dir)})
+
+    async def close_tab(self, target: str) -> None:
+        """Close the tab ``target``, which the record says agentenv closed."""
+        self._closing.add(target)
+        await self.devtools.call("Target.closeTarget", {"targetId": target})
+
+    @contextlib.asynccontextmanager
+    async def hidden_page(self, url: str = "about:blank") -> AsyncIterator[str]:
+        """A page of agentenv's own for reading state, in no window and never in the record; its session's id. It's
+        closed after."""
+        target = (await self.devtools.call("Target.createTarget",
+                                           {"url": url, "hidden": True, "background": True}))["targetId"]
+        self._hidden.add(target)
+        self.tabs.pop(target, None)
+        try:
+            yield (await self.devtools.call("Target.attachToTarget", {"targetId": target, "flatten": True}))["sessionId"]
+        finally:
+            with contextlib.suppress(ConnectionError, DevToolsError):
+                await self.devtools.call("Target.closeTarget", {"targetId": target})
+
+    async def active_tab(self) -> Optional[str]:
+        """The tab whose page has focus, else the first visible one; CDP has no event for a tab made active."""
+        visible = None
+        for session, target in list(self._sessions.items()):
+            if target not in self.tabs:
+                continue
+            try:
+                state = (await self.devtools.call(
+                    "Runtime.evaluate", {"expression": "[document.visibilityState, document.hasFocus()]",
+                                         "returnByValue": True}, session_id=session, timeout_s=2))["result"]["value"]
+            except (ConnectionError, DevToolsError, asyncio.TimeoutError, KeyError):
+                continue
+            if state[1]:
+                return target
+            if state[0] == "visible" and visible is None:
+                visible = target
+        return visible
+
+    async def record(self) -> dict:
+        """The record: open ``tabs``, each with whether it's ``active``, ``closed_tabs``, ``downloads`` and
+        ``dialogs``."""
+        active = await self.active_tab()
+        return {"tabs": [{**tab, "active": tab["id"] == active} for tab in self.tabs.values()],
+                "closed_tabs": list(self.closed_tabs), "downloads": list(self.downloads.values()),
+                "dialogs": list(self.dialog_log)}
+
+    def _event(self, message: dict) -> None:
+        handler = getattr(self, "_on_" + message.get("method", "").replace(".", "_"), None)
+        if handler is not None:
+            handler(message.get("params", {}), message.get("sessionId"))
+
+    def _on_Target_targetCreated(self, params: dict, session: Optional[str]) -> None:
+        info = params["targetInfo"]
+        if info.get("type") == "page" and info["targetId"] not in self._hidden and info["targetId"] not in self.tabs:
+            self.tabs[info["targetId"]] = {"id": info["targetId"], "url": info.get("url", ""),
+                                           "title": info.get("title", ""), "opened_at": _now()}
+
+    def _on_Target_targetInfoChanged(self, params: dict, session: Optional[str]) -> None:
+        info = params["targetInfo"]
+        if (tab := self.tabs.get(info["targetId"])) is not None:
+            tab.update(url=info.get("url", tab["url"]), title=info.get("title", tab["title"]))
+
+    def _on_Target_targetDestroyed(self, params: dict, session: Optional[str]) -> None:
+        target = params["targetId"]
+        if (tab := self.tabs.pop(target, None)) is not None:
+            self.closed_tabs.append({**tab, "closed_at": _now(),
+                                     "closed_by": AGENTENV if target in self._closing else BROWSER_CLOSED})
+        self._closing.discard(target)
+        self._hidden.discard(target)
+
+    def _on_Target_attachedToTarget(self, params: dict, session: Optional[str]) -> None:
+        if params["targetInfo"].get("type") == "page":
+            self._sessions[params["sessionId"]] = params["targetInfo"]["targetId"]
+            self._spawn(self.devtools.call("Page.enable", session_id=params["sessionId"]))
+
+    def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
+        self._sessions.pop(params["sessionId"], None)
+
+    def _on_Page_javascriptDialogOpening(self, params: dict, session: Optional[str]) -> None:
+        dialog = {"tab": self._sessions.get(session), "type": params.get("type"), "message": params.get("message", ""),
+                  "url": params.get("url", ""), "opened_at": _now(), "answer": None, "by": None}
+        self.dialog_log.append(dialog)
+        self._open_dialogs[session] = dialog
+        if self.dialogs != AGENT:
+            self._answering.add(session)
+            self._spawn(self.devtools.call("Page.handleJavaScriptDialog", {
+                "accept": self.dialogs == "accept", "promptText": params.get("defaultPrompt", "")}, session_id=session))
+
+    def _on_Page_javascriptDialogClosed(self, params: dict, session: Optional[str]) -> None:
+        if (dialog := self._open_dialogs.pop(session, None)) is not None:
+            dialog.update(answer="accepted" if params.get("result") else "dismissed", answered_at=_now(),
+                          by=AGENTENV if session in self._answering else AGENT,
+                          **({"input": params["userInput"]} if params.get("userInput") else {}))
+        self._answering.discard(session)
+
+    def _on_Browser_downloadWillBegin(self, params: dict, session: Optional[str]) -> None:
+        self.downloads[params["guid"]] = {"guid": params["guid"], "url": params.get("url", ""),
+                                          "filename": params.get("suggestedFilename", ""), "state": "inProgress",
+                                          "started_at": _now()}
+
+    def _on_Browser_downloadProgress(self, params: dict, session: Optional[str]) -> None:
+        if (download := self.downloads.get(params["guid"])) is None:
+            return
+        download["state"] = params["state"]
+        if params["state"] == "completed":
+            path = params.get("filePath") or str(self.downloads_dir / download["filename"])
+            self._spawn(self._hashed(download, Path(path)))
+        elif params["state"] == "canceled":
+            download["ended_at"] = _now()
+
+    async def _hashed(self, download: dict, path: Path) -> None:
+        size, sha256 = await asyncio.to_thread(_size_and_sha256, path)
+        download.update(path=str(path), size=size, sha256=sha256, ended_at=_now())
+
+    def _spawn(self, work: Awaitable) -> None:
+        task = asyncio.ensure_future(work)
+        self._tasks.add(task)
+        task.add_done_callback(self._finished)
+
+    def _finished(self, task: asyncio.Future) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning(f"the browser's control connection: {type(error).__name__}: {error}")
+
+
+def _size_and_sha256(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while chunk := file.read(1 << 20):
+            digest.update(chunk)
+    return path.stat().st_size, digest.hexdigest()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class Window(BaseModel):
@@ -160,6 +361,8 @@ class BrowserSettings(BaseModel):
     #: Whether a page asking for the location, or to show notifications, is denied without a prompt or asks.
     geolocation: Literal["deny", "ask"] = "deny"
     notifications: Literal["deny", "ask"] = "deny"
+    #: Who answers a page's JavaScript dialogs: the agent, or agentenv accepting or dismissing each.
+    dialogs: Literal["agent", "accept", "dismiss"] = "agent"
 
     @field_validator("start_urls")
     @classmethod
@@ -186,10 +389,13 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     def __init__(self) -> None:
         #: Its CDP connection, over the pipe its server launches it with.
         self.devtools = DevToolsPipe()
-        self._start_tabs: Optional[asyncio.Future] = None
+        self._following: Optional[asyncio.Future] = None
         super().__init__()
         for folder in (UPLOADS, DOWNLOADS):
             (Path.home() / folder).mkdir(exist_ok=True)
+        #: agentenv's control of it over that connection, and the record it keeps.
+        self.control = BrowserControl(self.devtools, Path.home() / DOWNLOADS, self.settings.dialogs)
+        self.devtools.on_close(self._computer_app.exited)
 
     @classmethod
     def declaration(cls) -> AppDeclaration:
@@ -250,18 +456,22 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     async def _launch_fds(self) -> dict[int, int]:
         """Before each launch, an empty cache and the deploy's prompt answers in its profile; and a new debugging pipe:
-        the browser's ends as its fds 3 and 4, this server's ends its CDP connection, over which the start tabs its
-        command line can't open are opened."""
+        the browser's ends as its fds 3 and 4, this server's ends its CDP connection, which follows the browser and
+        then opens the start tabs its command line can't."""
         shutil.rmtree(self.cache_dir(), ignore_errors=True)
         self._write_prompt_answers()
         to_browser_read, to_browser_write = os.pipe()
         from_browser_read, from_browser_write = os.pipe()
         await self.devtools.connect(to_browser_write, from_browser_read)
-        rest = self.settings.start_urls[len(self._command_line_tabs()):]
-        self._start_tabs = asyncio.ensure_future(self._open_tabs(rest)) if rest else None
-        if self._start_tabs is not None:
-            self._start_tabs.add_done_callback(lambda done: done.cancelled() or done.exception())
+        self._following = asyncio.ensure_future(self._follow(self.settings.start_urls[len(self._command_line_tabs()):]))
+        self._following.add_done_callback(lambda done: done.cancelled() or done.exception())
         return {PIPE_IN: to_browser_read, PIPE_OUT: from_browser_write}
+
+    async def _follow(self, urls: list[str]) -> None:
+        """Its control attached, then each of ``urls`` in a tab behind the active one, in order."""
+        await self.control.attach()
+        for url in urls:
+            await self.devtools.call("Target.createTarget", {"url": url, "background": True})
 
     def _write_prompt_answers(self) -> None:
         """Its profile's preferences, which it reads as it starts, denying location and notification prompts or
@@ -280,11 +490,6 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                 defaults.pop(name, None)
         preferences.parent.mkdir(parents=True, exist_ok=True)
         preferences.write_text(json.dumps(current), encoding="utf-8")
-
-    async def _open_tabs(self, urls: list[str]) -> None:
-        """Each of ``urls`` in a tab behind the active one, in order."""
-        for url in urls:
-            await self.devtools.call("Target.createTarget", {"url": url, "background": True})
 
     def _relaunch_on_start(self) -> bool:
         return True
@@ -306,22 +511,30 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @ready_check
     async def devtools_answers(self) -> bool:
-        """It answers over its pipe and has opened its start tabs."""
+        """It answers over its pipe, its control follows it and it has opened its start tabs."""
         try:
             await self.devtools.call("Browser.getVersion", timeout_s=self.devtools_timeout_s)
         except (ConnectionError, DevToolsError, asyncio.TimeoutError):
             return False
-        tabs = self._start_tabs
-        return tabs is None or (tabs.done() and not tabs.cancelled() and tabs.exception() is None)
+        following = self._following
+        return following is not None and following.done() and not following.cancelled() and \
+            following.exception() is None
 
-    def declared_extensions(self) -> list[EnvironmentExtension]:
-        params: dict[str, Any] = {"chromium": self.version, "clock": "real"}
-        if _alone():
-            params["window"] = self.settings.window.model_dump()
-        browser = EnvironmentExtension(
-            uri=BROWSER, params=params,
-            description="A website browser agentenv runs: its build, the clock its pages see and, alone, its window.")
-        return [*super().declared_extensions(), browser]
+    @extension(BROWSER, op="record", method="GET", description=(
+        "A website browser agentenv runs: its build, the clock its pages see and, alone, its window. record returns "
+        "what agentenv's own connection to it saw: its open tabs, each with whether it's active, the tabs closed and "
+        "who closed them, its downloads with their size and sha256, its JavaScript dialogs and who answered each, and "
+        "each launch, stop and exit of it since the computer booted, with its cause."))
+    async def browser_record(self) -> dict:
+        return {**await self.control.record(), "launches": self._computer_app.launches()}
+
+    def extension_params(self, uri: str) -> dict:
+        if uri == BROWSER:
+            params: dict[str, Any] = {"chromium": self.version, "clock": "real"}
+            if _alone():
+                params["window"] = self.settings.window.model_dump()
+            return params
+        return super().extension_params(uri)
 
     @agent_skill
     def browser_skill(self) -> tuple[str, str]:

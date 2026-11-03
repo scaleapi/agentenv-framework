@@ -80,7 +80,7 @@ class AppDataPlane:
                 raise
             finally:
                 if running:
-                    await self.runtime.launch_app()
+                    await self.runtime.launch_app(op)
         except Exception as e:
             if not answer.done():
                 answer.set_exception(e)

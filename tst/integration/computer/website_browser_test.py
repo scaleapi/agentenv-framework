@@ -127,7 +127,8 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
     assert zone.startswith("Europe/Paris") and loopback.startswith("Loopback page")
     assert {"BrowserSignin": 0, "DownloadDirectory": "${user_home}/Downloads"}.items() <= json.loads(
         policies["stdout"]).items()
-    assert protocol_v1.extension_params(card, BROWSER) == {"chromium": "156.0.8078.4", "clock": "real"}
+    params = protocol_v1.extension_params(card, BROWSER)
+    assert (params["chromium"], params["clock"], list(params["methods"])) == ("156.0.8078.4", "real", ["record"])
     assert readiness["ready"] is True, readiness
     assert relaunched["pid"] != browser["pid"] and relaunched["listening"] == 0
     assert relaunched_readiness["ready"] is True, relaunched_readiness
