@@ -165,6 +165,16 @@ def test_an_output_id_derived_from_another_bundles_entity_is_named_under_this_ta
     assert [output.id for output in entry.outputs] == [entry.config[0]["cli_artifact_id"]] == [f"{ROOT}/t/crm__cli"]
 
 
+def test_an_output_named_by_an_hf_id_is_refused_outside_a_hub_bundles_own_root(make):
+    folder = make(tasks={"t": [{"id": "snap", "type": "snapshot_env", "env_id": "tickets",
+                                "snapshot_id": "@hf/acme/ds/t/snap"}]})
+    assert problems(folder) == ("tasks/t.json: step 'snap': snapshot_id: '@hf/acme/ds/t/snap' is an '@hf/' id outside "
+                                "this bundle's id root, which only a bundle run from the Hugging Face Hub writes "
+                                "under its own",)
+    hub = resolved(parse_bundle(folder.root, id_root="@hf/acme/ds"), "t")
+    assert [output.id for output in hub.outputs] == ["@hf/acme/ds/t/snap"]
+
+
 def test_a_resolved_task_still_builds_its_steps(make):
     entry = resolved(make(tasks={"t": [
         {"id": "deploy", "type": "deploy_env", "env_id": "tickets"},

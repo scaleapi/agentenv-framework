@@ -53,7 +53,7 @@ from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGa
 from agent_env.providers.env_providers.env_provider import _env_provider_class
 from agent_env.store import Filter, Sort
 from agent_env.store.base import NotFoundError
-from agent_env.store.ids import LOCAL_PREFIX
+from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
@@ -413,7 +413,7 @@ class _Planner:
         (its latest version, or None, cached in ``alias_stored``), recorded in ``alias_uses``; why it can't be named
         so; or None when it's no alias, or names the store's as any store reference does: pinned, or with the alias
         refused."""
-        if id.startswith(LOCAL_PREFIX):
+        if is_local_id(id):
             return None
         table, uses, stored = self.alias_tables[kind], self.alias_uses[kind], self.alias_stored[kind]
         refusal, named = table.refusal(id), table.target(id)
@@ -720,10 +720,10 @@ class _Planner:
         return tuple(checked.values()), latest
 
     def _bundle_ref_problem(self, ref: Reference) -> str | None:
-        """What makes an ``@local`` id wrong without reading a store: it names one of this bundle's outputs by id,
+        """What makes a local id wrong without reading a store: it names one of this bundle's outputs by id,
         one of its entities of another kind, or an id under its root that it doesn't write. Another bundle's id is
         read like any store id."""
-        if not ref.id.startswith(LOCAL_PREFIX):
+        if not is_local_id(ref.id):
             return None
         kind, key = ref.kind.value, _nfc(ref.id)
         if (kind, key) in self.outputs:
@@ -739,8 +739,8 @@ class _Planner:
         return None
 
     def _store_ref_problem(self, ref: Reference, read: dict) -> str | None:
-        if ref.id.startswith(LOCAL_PREFIX) and not namespace_routing_enabled():
-            raise RuntimeError("reading an @local id from the store needs namespace routing, which the agent-env CLI "
+        if is_local_id(ref.id) and not namespace_routing_enabled():
+            raise RuntimeError("reading a local id from the store needs namespace routing, which the agent-env CLI "
                                "turns on; call plan_bundle inside agent_env.store.routing.namespace_routing()")
         kind = ref.kind.value
         lookup = (ref.kind, ref.id, ref.version)

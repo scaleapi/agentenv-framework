@@ -103,7 +103,7 @@ def _sources(bundle: _Source | Mapping[str, _Source]) -> dict[str | None, _Sourc
 
 def _prepared(source: _Source, sandbox: str | None) -> PreparedBundle:
     """``source`` prepared with every task and eval selected, so ``all`` holds every task, evals or not."""
-    root, id_root = (source, None) if isinstance(source, Path) else locate_bundle(source)
+    root, id_root = (source, None) if isinstance(source, Path) else locate_bundle(source)[:2]
     entries = parse_bundle(Path(root), id_root=id_root).entries
     return prepare_bundle(
         root, tasks=[entry.name for entry in entries if entry.kind is BundleKind.TASK],

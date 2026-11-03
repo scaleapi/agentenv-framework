@@ -1,4 +1,5 @@
-"""``agent-env run``: run the tasks and evals of a bundle, a folder or one an installed package provides."""
+"""``agent-env run``: run the tasks and evals of a bundle, a folder, one an installed package provides or one in a
+Hugging Face Hub dataset."""
 
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import click
 
 from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun,
                               dry_run_bundle, run_bundle)
+from agent_env.bundle.hub import SOURCE_KEY, HubBundle, describe
 from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
                                         path_like, run_name)
 from agent_env.bundle.requires import UnmetRequirements
@@ -56,8 +58,18 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
         dry_run: bool, no_emulate: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
-    BUNDLE is a folder, or the name of a bundle an installed package provides (PACKAGE/NAME when several
-    packages provide that name). Without BUNDLE, it lists the installed bundles.
+    BUNDLE is a folder, the name of a bundle an installed package provides (PACKAGE/NAME when several
+    packages provide that name), or hf://ORG/REPO[@REVISION][/PATH], a bundle in a Hugging Face Hub dataset. Without
+    BUNDLE, it lists the installed bundles.
+
+    A Hub bundle is downloaded at the commit REVISION names (a branch, tag or commit, percent-encoded when it holds a
+    /; the main branch by default) into a folder for that commit under $XDG_CACHE_HOME/agentenv/hf, and runs as a
+    folder does, with its ids under @hf/ORG/REPO. PATH names its folder in the repo; without it, the run takes the
+    only bundle under bundles/, or the one the dataset card's agentenv: default names, else the repo's root. Only
+    the bundle and the card are downloaded, and a commit already downloaded is reused. The run first prints the repo,
+    commit and bundle. A bundle with no bundle.toml requires the plugins the card's agentenv: bundles: NAME: plugins
+    lists, and a run that fails shows the card's setup command, which it never runs. A gated or private repo needs
+    hf auth login or HF_TOKEN.
 
     A bundle's bundle.toml names the plugin packages it requires, and a run refuses to start without them; in a
     terminal it offers to install them with agent-env plugin add. A folder with no bundle.toml that uses plugin
@@ -86,9 +98,11 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                                    "--dry-run and --no-emulate need a BUNDLE to run")
         _list_installed()
         return
-    root, id_root = locate_bundle(bundle, _installed)
+    root, id_root, hub = locate_bundle(bundle, _installed, on_progress=click.echo)
     verbose = ctx.find_root().params.get("verbose")
     try:
+        if hub is not None:
+            hub.check_plugins()
         if dry_run:
             click.echo(_DRY_RUN)
             _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent,
@@ -96,9 +110,11 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
             return
         result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
                             judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
-                            id_root=id_root, keep=keep, emulate=not no_emulate)
+                            id_root=id_root, keep=keep, emulate=not no_emulate, source=hub.source if hub else None)
     except BundleError as e:
         _note_an_installed_namesake(e, bundle, root, id_root)
+        if setup := _setup(hub):
+            e.add_note(setup)
         if isinstance(e, UnmetRequirements) and not dry_run:
             offer_to_install(e)
         raise
@@ -113,7 +129,16 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
             result = _hold(result, interrupts)
         _report_teardown(result)
     if result.failed:
+        if setup := _setup(hub):
+            click.echo(setup)
         raise SystemExit(1)
+
+
+def _setup(hub: HubBundle | None) -> str | None:
+    """The note a failed run of a Hub bundle ends with, naming the command the dataset card sets the bundle up with."""
+    if hub is None or not hub.setup:
+        return None
+    return f"{hub.source['repo']}'s card sets this bundle up with: {hub.setup}"
 
 
 def _note_an_installed_namesake(error: BundleError, text: str, root: Path, id_root: str | None) -> None:
@@ -183,6 +208,8 @@ def _count(entries, kind: BundleKind, noun: str) -> str:
 
 def _summarize(result: BundleRun, verbose: bool) -> None:
     click.echo()
+    if source := next((run.context.metadata.get(SOURCE_KEY) for run in result.runs), None):
+        click.echo(f"From {describe(source)}")
     click.echo("Tasks:")
     for run in result.runs:
         click.echo(click.style(f"  {_described(result, run)}", fg=_COLORS[run.outcome]))

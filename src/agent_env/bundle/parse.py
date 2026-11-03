@@ -26,7 +26,8 @@ from packaging.requirements import InvalidRequirement, Requirement
 from agent_env.bundle._fs import Unreadable, fold, home, on_disk, read_regular, show, with_article
 from agent_env.entity.refs import EntityKind
 from agent_env.plugins._bundles import AGENT_ALIASES, ALIASES_FILE, ARTIFACT_ALIASES, ENV_ALIASES, read_aliases
-from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, validate_local_id
+from agent_env.store.ids import (HF_NAMESPACE, HF_PREFIX, LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, is_local_id,
+                                 local_namespace, validate_local_id)
 from agent_env.utils.paths import LEAVINGS, os_reason
 
 BUNDLE_TOML = "bundle.toml"
@@ -115,7 +116,8 @@ def is_ignored(name: str) -> bool:
 
 def parse_bundle(root: Path, *, id_root: str | None = None, name: str | None = None) -> Bundle:
     """Parse the bundle at ``root``. An entry-point bundle passes its ``@local/<dist>/<name>``
-    root and name; otherwise both come from the folder's canonical path. Raises BundleError."""
+    root and name, and a bundle downloaded from the Hugging Face Hub its ``@hf/<org>/<repo>[/<name>]`` root;
+    otherwise both come from the folder's canonical path. Raises BundleError."""
     return _Parser(_canonical(Path(root)), id_root, name).parse()
 
 
@@ -472,9 +474,13 @@ class _Parser:
         return entity_id
 
     def _check_declared(self, entity_id: Any, where: Path, *, what: str = "id", artifact: bool = False) -> None:
-        if not isinstance(entity_id, str) or not entity_id.startswith(LOCAL_PREFIX):
+        if not isinstance(entity_id, str) or not is_local_id(entity_id):
             self._skip(where, f"{what} {_brief(entity_id)}: ids declared in a bundle must start with "
                        f"{LOCAL_PREFIX!r}, since a bare id names an entity in a shared store")
+        if foreign_hub_id(entity_id, self.id_root):
+            self._skip(where, f"{what} {_brief(entity_id)}: an {HF_PREFIX!r} id names an entity of a bundle run from "
+                       "the Hugging Face Hub, so a bundle declares one only under its own id root, which "
+                       "agent-env run hf:// gives it")
         size = _size(entity_id)
         if size > MAX_AUTHORED_LOCAL_ID_BYTES:
             limit = MAX_AUTHORED_LOCAL_ID_BYTES
@@ -613,6 +619,13 @@ class _Parser:
         if text.startswith(self.root_text + os.sep):
             text = text[len(self.root_text) + 1:]
         return show(text)
+
+
+def foreign_hub_id(entity_id: str, id_root: str) -> bool:
+    """Whether ``entity_id`` is an ``@hf`` id outside ``id_root``. Only ``agent-env run hf://`` roots a bundle in the
+    ``@hf`` namespace, so an id there says the entity came from the Hub; a bundle may declare one only under its own
+    root."""
+    return local_namespace(entity_id) == HF_NAMESPACE and entity_id != id_root and not entity_id.startswith(f"{id_root}/")
 
 
 def root_problems(root: Path) -> list[str]:
