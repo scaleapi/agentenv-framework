@@ -3,7 +3,7 @@ the release workflow's jobs that only read: this imports agent-env, so it runs w
 installed, and no job that holds a token to push images or publish to PyPI runs it (those run ``infra_build.py``).
 
 ``plan`` prints each image's name, repository, tag, Dockerfile and context as JSON, and for an image built over other
-published images, the build args naming each by its repository and tag, ``--missing`` only those the
+published images, its build args, each naming one by its repository and tag or giving a value, ``--missing`` only those the
 registry hasn't published: it has no image under the tag, or refuses to show one, as GHCR does for a package that
 doesn't exist yet, so the first publish can start. ``--only infra`` lists only the infra images, ``--only agents``
 only the images that install the protocol, the agents' and the website browser's, which a release builds after it
@@ -66,8 +66,8 @@ def _described(image: PublishedImage) -> dict:
     described = {"name": image.name, "repository": image.repository, "tag": image.tag(),
                  "dockerfile": str(image.dockerfile.relative_to(REPO)),
                  "context": str(image.dockerfile.parent.relative_to(REPO))}
-    if image.args:
-        described["args"] = {arg: built.ref() for arg, built in image.args}
+    if image.args or image.build_args:
+        described["args"] = {**{arg: built.ref() for arg, built in image.args}, **dict(image.build_args)}
     return described
 
 

@@ -16,7 +16,7 @@ import pytest
 
 from agent_env.env.published_images import DISK
 from agent_env.providers.sandbox_providers.host_images import host_platform
-from agent_env.utils.docker.build import build_image
+from agent_env.utils.docker.build import DockerBuildError, build_image
 
 pytestmark = pytest.mark.integration
 
@@ -80,6 +80,17 @@ def test_a_disk_is_a_root_filesystem_with_its_start_beside_a_new_esp_and_one_mad
                              ("env", "GREETING=hello disk"), ("argv", "sh"), ("argv", "-c"), ("argv", "echo $GREETING"),
                              ("user", "nobody"), ("workdir", "/tmp")]
     assert ("env", "EXTRA=1") in over["start"] and over["esp"] == made["esp"] and over["root"] != made["root"]
+
+
+def test_a_new_disk_without_its_size_is_refused_rather_than_made_at_some_default(tools, images, tmp_path):
+    platform = host_platform()
+    arch = platform.rsplit("/", 1)[1]
+    rootfs = _built(images, ROOTFS, platform)
+    uki = _built(images, _folder(tmp_path / "uki", {"Dockerfile": f"FROM scratch\nCOPY {UKI[arch]} /\n",
+                                                    UKI[arch]: "a UKI"}), platform)
+
+    with pytest.raises(DockerBuildError, match="a new disk needs its size, SIZE_GB"):
+        _disk(images, tools, rootfs, uki, platform, tmp_path)
 
 
 def _built(images: list, folder: Path, platform: str) -> str:

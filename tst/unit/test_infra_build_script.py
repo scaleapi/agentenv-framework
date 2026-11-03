@@ -69,7 +69,7 @@ def _disk(**args) -> str:
                        "dockerfile": "src/agent_env/computers/disk/linux/boot/Dockerfile",
                        "context": "src/agent_env/computers/disk/linux/boot", "args": {
                            "ROOTFS": f"{REGISTRY}/agentenv-ubuntu-24.04:{_TAG}", "TOOLS": f"{REGISTRY}/agentenv-disk-tools:{_TAG}",
-                           **args}})
+                           "SIZE_GB": "16", **args}})
 
 
 @pytest.mark.parametrize("entry, problem", [
@@ -78,6 +78,7 @@ def _disk(**args) -> str:
     (_disk(ROOTFS="ghcr.io/someone/ubuntu:latest"), "agentenv-ubuntu-24.04-disk: ROOTFS is 'ghcr.io/someone/ubuntu:latest'"),
     (_disk(TOOLS=f"{REGISTRY}/agentenv-disk-tools:latest"), "agentenv-ubuntu-24.04-disk: TOOLS is 'ghcr.io/scaleapi/"),
     (_disk(EXTRA="x"), "agentenv-ubuntu-24.04-disk: args is "),
+    (_disk(SIZE_GB="32"), "agentenv-ubuntu-24.04-disk: SIZE_GB is '32', not its base's min_disk_gb, 16"),
     (_gateway(repository="ghcr.io/someone/agentenv-gateway"), "agentenv-gateway: repository is 'ghcr.io/someone/"),
     (_gateway(dockerfile="tst/data/agentenv_mcp/Dockerfile"), "agentenv-gateway: dockerfile is 'tst/data/agentenv_mcp"),
     (_gateway(context="."), "agentenv-gateway: context is '.'"),

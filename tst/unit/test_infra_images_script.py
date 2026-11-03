@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tomllib
 
 import pytest
 
@@ -66,9 +67,11 @@ def test_plan_only_lists_the_infra_images_the_agents_images_or_the_disk_forms(sc
                      "agents": after, "disks": disks}
     assert "agentenv-disk-tools" in names["infra"] and "agentenv-qemu-launcher" in names["infra"]
     (disk,) = planned["disks"]
-    assert disk["args"] == {"ROOTFS": next(image.ref() for image in BUNDLE_IMAGES if image.name == "agentenv-ubuntu-24.04"),
-                            "TOOLS": next(image.ref() for image in bootstrap.PUBLISHED_IMAGES
-                                          if image.name == "agentenv-disk-tools")}
+    base = next(image for image in BUNDLE_IMAGES if image.name == "agentenv-ubuntu-24.04")
+    assert disk["args"] == {"ROOTFS": base.ref(), "TOOLS": next(image.ref() for image in bootstrap.PUBLISHED_IMAGES
+                                                                if image.name == "agentenv-disk-tools"),
+                            "SIZE_GB": str(tomllib.loads(base.dockerfile.with_name("artifact.toml").read_text())[
+                                "forms"]["disk"]["min_disk_gb"])}
     assert "args" not in planned["infra"][0]
     assert "agentenv-gateway" in names["infra"] and bundles == [
         "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-hermes", "agentenv-letta-code",

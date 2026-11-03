@@ -1,11 +1,11 @@
 #!/bin/sh
-# disk ARCH ROOTFS ESP OUT [SIZE_GB]: a Linux computer's disk form, written to OUT as qcow2: a GPT disk of an EFI system
+# disk ARCH ROOTFS ESP OUT SIZE_GB: a Linux computer's disk form, written to OUT as qcow2: a GPT disk of an EFI system
 # partition and an ext4 root filesystem made from the folder ROOTFS, ownership kept. ESP is a folder holding either a
 # disk form's image, disk/disk.img, whose EFI system partition and size the disk keeps byte for byte, or a UKI, which a
 # new EFI system partition holds on a disk of SIZE_GB. Nothing is mounted or booted, so it runs unprivileged, on any
 # architecture, for either.
 set -eu
-arch=$1 rootfs=$2 esp=$3 out=$4 size_gb=${5:-16}
+arch=$1 rootfs=$2 esp=$3 out=$4 size_gb=$5
 case "$arch" in
     amd64) uki=BOOTX64.EFI roottype=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709 ;;
     arm64) uki=BOOTAA64.EFI roottype=B921B045-1DF0-41C3-AF44-4C6F280D3FAE ;;
@@ -29,6 +29,7 @@ if [ -f "$esp/disk/disk.img" ]; then
     dd if="$work/base.raw" of="$work/esp.img" bs=$sector skip="$esp_start" count="$esp_sectors" status=none
     rm "$work/base.raw"
 elif [ -f "$esp/$uki" ]; then
+    [ -n "$size_gb" ] || { echo "disk: a new disk needs its size, SIZE_GB" >&2; exit 2; }
     size=$((size_gb * 1024 * mib * sector)) esp_start=$mib esp_sectors=$((esp_mib * mib))
     mkfs.vfat -C -n ESP "$work/esp.img" $((esp_sectors * sector / 1024)) >/dev/null
     mmd -i "$work/esp.img" ::/EFI ::/EFI/BOOT

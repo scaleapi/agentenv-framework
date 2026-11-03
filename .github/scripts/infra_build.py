@@ -25,10 +25,12 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
 REGISTRY = "ghcr.io/scaleapi"
+REPO = Path(__file__).resolve().parents[2]
 # Each image agent-env ships, by name, and the Dockerfile it's built from, with its folder as the context.
 IMAGES = {
     "agentenv-gateway": "src/agent_env/env/gateway/Dockerfile",
@@ -52,7 +54,8 @@ IMAGES = {
     "agentenv-qemu-launcher": "src/agent_env/computers/disk/linux/launcher/Dockerfile",
     "agentenv-ubuntu-24.04-disk": "src/agent_env/computers/disk/linux/boot/Dockerfile",
 }
-# Each disk form's build args, by the images agent-env ships that they name.
+# Each disk form's build args, by the images agent-env ships that they name; its SIZE_GB is its base's [forms.disk]
+# min_disk_gb, read from the artifact.toml beside the base's Dockerfile.
 DISK_ARGS = {"agentenv-ubuntu-24.04-disk": {"ROOTFS": "agentenv-ubuntu-24.04", "TOOLS": "agentenv-disk-tools"}}
 _TAG = re.compile(r"^src-[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -164,16 +167,25 @@ def _check(entry: str) -> list[str]:
 
 
 def _check_args(name: str, args: object) -> list[str]:
-    """The problems with a disk form's build args: each must name the image agent-env ships it's for, by a source tag."""
+    """The problems with a disk form's build args: each image arg must name the image agent-env ships it's for, by a
+    source tag, and SIZE_GB must be its base's size."""
     wanted = DISK_ARGS[name]
-    if not isinstance(args, dict) or set(args) != set(wanted):
-        return [f"{name}: args is {args!r}, not {', '.join(sorted(wanted))}"]
+    if not isinstance(args, dict) or set(args) != {*wanted, "SIZE_GB"}:
+        return [f"{name}: args is {args!r}, not {', '.join(sorted({*wanted, 'SIZE_GB'}))}"]
     problems = []
     for arg, image in wanted.items():
         repository, _, tag = str(args[arg]).rpartition(":")
         if repository != f"{REGISTRY}/{image}" or not _TAG.match(tag):
             problems.append(f"{name}: {arg} is {args[arg]!r}, not {REGISTRY}/{image} under a source tag")
+    if args["SIZE_GB"] != (size := str(_disk_size(name))):
+        problems.append(f"{name}: SIZE_GB is {args['SIZE_GB']!r}, not its base's min_disk_gb, {size}")
     return problems
+
+
+def _disk_size(name: str) -> int:
+    """The min_disk_gb of the base computer a disk form is made of, as its artifact.toml declares it."""
+    toml = Path(IMAGES[DISK_ARGS[name]["ROOTFS"]]).with_name("artifact.toml")
+    return tomllib.loads((REPO / toml).read_text())["forms"]["disk"]["min_disk_gb"]
 
 
 def _tried_again(attempt: Callable[[], subprocess.CompletedProcess]) -> subprocess.CompletedProcess:

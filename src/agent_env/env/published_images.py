@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,24 +38,27 @@ DISK = Path(__file__).parents[1] / "computers" / "disk" / "linux"
 @dataclass(frozen=True)
 class PublishedImage:
     """An image agent-env publishes, under ``name`` in the registry, built from ``dockerfile`` with its folder as the
-    build context, and with each of ``args``, a build arg its Dockerfile builds from, set to that published image."""
+    build context, with each of ``args``, a build arg its Dockerfile builds from, set to that published image, and each
+    of ``build_args`` set to its value."""
 
     name: str
     dockerfile: Path
     args: tuple[tuple[str, PublishedImage], ...] = ()
+    build_args: tuple[tuple[str, str], ...] = ()
 
     @property
     def repository(self) -> str:
         return f"{REGISTRY}/{self.name}"
 
     def tag(self) -> str:
-        """``src-`` and the hex of the build context's source digest, with each of ``args``' tags when it has any: the
-        same for the same sources on any platform."""
-        digest = BuildContext.of(self.dockerfile.parent, self.dockerfile).source_digest(None).removeprefix("sha256:")
-        if self.args:
-            digest = hashlib.sha256("\0".join([digest, *(f"{arg}={image.tag()}" for arg, image in self.args)])
-                                    .encode()).hexdigest()
-        return f"src-{digest}"
+        """``src-`` and the hex of the build context's source digest, with each of ``args``' tags and ``build_args``'
+        values when it has any: the same for the same sources on any platform."""
+        digest = BuildContext.of(self.dockerfile.parent, self.dockerfile).source_digest(None)
+        if self.args or self.build_args:
+            digest = hashlib.sha256("\0".join([digest.removeprefix("sha256:"),
+                                               *(f"{arg}={image.tag()}" for arg, image in self.args),
+                                               *(f"{arg}={value}" for arg, value in self.build_args)]).encode()).hexdigest()
+        return source_tag(digest)
 
     def ref(self) -> str:
         """The repository and the tag of the image built from these sources."""
@@ -73,10 +77,17 @@ BUNDLE_IMAGES = AGENT_IMAGES + EXAMPLE_IMAGES + COMPUTER_IMAGES
 # What makes and boots a Linux disk form: the disk tools a build runs on its own platform, and the QEMU launcher.
 DISK_TOOLS_IMAGE = PublishedImage("agentenv-disk-tools", DISK / "tools" / "Dockerfile")
 LAUNCHER_IMAGE = PublishedImage("agentenv-qemu-launcher", DISK / "launcher" / "Dockerfile")
-# Each base computer's disk form: its container form's root filesystem on the boot recipe, so a run pulls it rather than
-# building it from the two.
-DISK_IMAGES = tuple(PublishedImage(f"{image.name}-disk", DISK / "boot" / "Dockerfile",
-                                   (("ROOTFS", image), ("TOOLS", DISK_TOOLS_IMAGE))) for image in COMPUTER_IMAGES)
+# Each base computer's disk form: its container form's root filesystem on the boot recipe, at the size its [forms.disk]
+# declares, so a run pulls it rather than building it from the two.
+DISK_IMAGES = tuple(PublishedImage(
+    f"{image.name}-disk", DISK / "boot" / "Dockerfile", (("ROOTFS", image), ("TOOLS", DISK_TOOLS_IMAGE)),
+    (("SIZE_GB", str(tomllib.loads((image.dockerfile.parent / "artifact.toml").read_text())["forms"]["disk"][
+        "min_disk_gb"])),)) for image in COMPUTER_IMAGES)
+
+
+def source_tag(digest: str) -> str:
+    """The tag of a published image whose sources have the digest ``digest``."""
+    return f"src-{digest.removeprefix('sha256:')}"
 
 
 def published_digest(image: PublishedImage) -> str | None:
@@ -95,8 +106,8 @@ def published_pinned(image: PublishedImage) -> str | None:
 def published_disk(sources: str) -> str | None:
     """The pinned disk form published for the shipped base computer whose container image's installed build context has
     the source digest ``sources``, or None when no shipped base has those sources or its disk isn't published."""
-    tag = f"src-{sources.removeprefix('sha256:')}"
-    return next((published_pinned(disk) for disk in DISK_IMAGES if dict(disk.args)["ROOTFS"].tag() == tag), None)
+    return next((published_pinned(disk) for disk in DISK_IMAGES if dict(disk.args)["ROOTFS"].tag() == source_tag(sources)),
+                None)
 
 
 def published_bundle_image(sources: str) -> tuple[str, str] | None:
@@ -106,9 +117,8 @@ def published_bundle_image(sources: str) -> tuple[str, str] | None:
     shipped image has those sources or the registry doesn't serve it anonymously, as a sandbox pulls it: a new package
     stays private until a package admin makes it public, and a sandbox running an image by name can't build it
     instead."""
-    tag = f"src-{sources.removeprefix('sha256:')}"
     for image in BUNDLE_IMAGES:
-        if image.tag() == tag:
+        if image.tag() == source_tag(sources):
             ref = image.ref()
             if (served := _registry_digest(ref)) is None:
                 return None

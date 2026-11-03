@@ -2,9 +2,11 @@
 forms: one per shipped Dockerfile, tagged by its sources (a disk form's by its base's too), and the record of their
 digests a release wheel carries."""
 
+import dataclasses
 import hashlib
 import json
 import shutil
+import tomllib
 
 import pytest
 
@@ -187,10 +189,12 @@ def test_a_disk_forms_tag_is_of_its_boot_recipe_its_bases_sources_and_the_disk_t
                                                         ("TOOLS", DISK_TOOLS_IMAGE)))
     sources = BuildContext.of(base.dockerfile.parent, base.dockerfile).source_digest(None)
 
+    size = tomllib.loads(base.dockerfile.with_name("artifact.toml").read_text())["forms"]["disk"]["min_disk_gb"]
     assert disk.name == "agentenv-ubuntu-24.04-disk" and dict(disk.args) == {"ROOTFS": base, "TOOLS": DISK_TOOLS_IMAGE}
+    assert disk.build_args == (("SIZE_GB", str(size)),)
     assert disk.tag() == "src-" + hashlib.sha256("\0".join(
-        [recipe, f"ROOTFS={base.tag()}", f"TOOLS={DISK_TOOLS_IMAGE.tag()}"]).encode()).hexdigest()
-    assert moved.tag() != disk.tag()
+        [recipe, f"ROOTFS={base.tag()}", f"TOOLS={DISK_TOOLS_IMAGE.tag()}", f"SIZE_GB={size}"]).encode()).hexdigest()
+    assert moved.tag() != disk.tag() != dataclasses.replace(disk, build_args=(("SIZE_GB", "32"),)).tag()
     assert published_disk(sources) is None
     served[disk.ref()] = _DIGEST
     assert published_disk(sources) == f"{disk.ref()}@{_DIGEST}" and published_disk("sha256:" + "0" * 64) is None

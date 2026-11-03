@@ -31,7 +31,7 @@ FROM ${ESP} AS esp
 
 FROM --platform=$BUILDPLATFORM ${TOOLS} AS disk
 ARG TARGETARCH
-ARG SIZE_GB=16
+ARG SIZE_GB
 RUN --mount=type=bind,from=root,target=/rootfs --mount=type=bind,from=esp,target=/esp \
     disk "$TARGETARCH" /rootfs /esp /out/disk.img "$SIZE_GB"
 
