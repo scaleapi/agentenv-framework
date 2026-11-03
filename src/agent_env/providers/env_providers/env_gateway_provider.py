@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
@@ -22,7 +23,9 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
 from agent_env.env.gateway.constants import (
     DEFAULT_MCP_SERVER_NAME,
+    EXT_WEBSITE_URI,
     STATE_TOOL_NAME_CLASHES_KEY,
+    WEBSITE_READY_OP,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
     tool_name_clashes_text,
@@ -86,6 +89,10 @@ MCP_HC_RETRIES = 30
 
 MCP_HC_START_PERIOD = "60s"
 
+# How long a deploy waits for each site to say it's ready, and how often it asks.
+WEBSITE_READY_TIMEOUT_S = 300.0
+WEBSITE_READY_POLL_S = 2.0
+
 
 @dataclass
 class MCPServerConfig:
@@ -118,7 +125,8 @@ class DeployedGateway:
 @dataclass
 class WebsiteConfig:
     """Configuration for a website in a gateway deployment: its server image, which serves the site's pages and API and
-    answers at ``health_path`` once usable, and a deprecated separate frontend image for a site built on one."""
+    says when it's ready by its card's ``website/v1`` ``ready`` (``health_path``, deprecated, for a site whose card
+    has none), and a deprecated separate frontend image for a site built on one."""
 
     backend_image: str
     frontend_image: str | None
@@ -530,7 +538,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
                 "      - PYTHONUNBUFFERED=1",
                 "    healthcheck:",
-                f'      test: ["CMD", "curl", "-f", "http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
+                # Up once it answers its card, or for a site serving none its health path; the deploy then waits
+                # for it to be ready through the card (_wait_for_websites).
+                f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'
+                f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
                 "      interval: 10s",
                 "      timeout: 5s",
                 "      start_period: 30s",
@@ -896,6 +907,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         card = await self._wait_for_tunnel(gateway_url, timeout=120)
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
+        await _wait_for_websites(gateway_url, website_configs or [])
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
         await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)
@@ -1602,6 +1614,52 @@ _STATE_READ_TIMEOUT_S = 60.0
 
 # Cap on the post-readiness tools/list probe; it only logs, so a slow gateway costs deploy time, never the deploy.
 _TOOLS_PROBE_TIMEOUT_S = 10.0
+
+
+async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConfig], *,
+                             timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
+    """Wait until each site is ready, as its card says through ``/svc/<name>/``: by ``website/v1``'s ``ready``, or,
+    for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
+    Raises naming each site still not ready, and why, once ``timeout_s`` has passed."""
+    deadline = time.monotonic() + timeout_s
+    waiting = {wc.environment_name: wc for wc in website_configs}
+    why: dict[str, str] = {}
+    warned: set[str] = set()
+    while waiting:
+        for name, wc in list(waiting.items()):
+            ready, why[name] = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
+            if ready is None and name not in warned:
+                warned.add(name)
+                logger.warning(f"website {name!r} has no {EXT_WEBSITE_URI} {WEBSITE_READY_OP} on its card, so its "
+                               f"readiness is read at its health path {wc.health_path}, which is deprecated")
+            if ready is not False:
+                del waiting[name]
+        if not waiting:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("websites not ready after %ds: %s" % (
+                timeout_s, "; ".join(f"{name} ({why[name]})" for name in waiting)))
+        await asyncio.sleep(poll_s)
+
+
+async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool], str]:
+    """Whether the site at ``base_url`` is ready and, when not, why: True or False by its card's ``website/v1``
+    ``ready``; with no card or no ``ready`` on it, None once its health path answers 200 and False before."""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(base_url + WELL_KNOWN_PATH, timeout=10)
+            card = response.json() if response.status_code == 200 else None
+            if isinstance(card, dict) and protocol_v1.find_extension_method(card, EXT_WEBSITE_URI, WEBSITE_READY_OP):
+                answer = await protocol_v1.invoke_extension(base_url, card, EXT_WEBSITE_URI, method=WEBSITE_READY_OP,
+                                                            timeout=10)
+                if isinstance(answer, dict) and answer.get("ready") is True:
+                    return True, ""
+                problems = answer.get("problems") if isinstance(answer, dict) else None
+                return False, ", ".join(map(str, problems)) if problems else f"{WEBSITE_READY_OP} says not ready"
+            health = await client.get(base_url + health_path, timeout=10)
+        except (httpx.HTTPError, ValueError) as e:
+            return False, f"{type(e).__name__}: {e}"
+    return (None, "") if health.status_code == 200 else (False, f"{health_path} answered {health.status_code}")
 
 
 async def _probe_tools(env_id: str | None, gateway: DeployedGateway) -> None:

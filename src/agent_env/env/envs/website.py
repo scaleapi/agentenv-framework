@@ -1,5 +1,9 @@
 """Website environment: one site, served by one server image that holds its pages and API. A site
-built before the server image held its pages may still name a separate frontend image, which is deprecated."""
+built before the server image held its pages may still name a separate frontend image, which is deprecated.
+
+A deploy reads whether the site is ready from its env card, the protocol layer: ``website/v1``'s ``ready``, as
+``computer-app/v1``'s says of an app. ``health_path`` (env.toml's ``health``) is read only for a site whose card has no
+``ready``, or that serves no card, and is deprecated."""
 
 from __future__ import annotations
 
