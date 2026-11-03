@@ -58,13 +58,15 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 time.sleep(float(sys.argv[1]))
 """
 RECORDED = "http://127.0.0.1:8767/"
-# Serves, on loopback for the seconds it's given, a page that asks to confirm and then downloads report.bin.
+# Serves, on loopback for the seconds it's given, a page that asks to confirm and then downloads report.bin, whose
+# content differs at each request: the nth is _report(n).
 SERVE_RECORDED = """import http.server, sys, threading, time
-REPORT = b"agentenv report\\n" * 64
+served = []
 class Page(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/report.bin":
-            body, kind = REPORT, "application/octet-stream"
+            served.append(1)
+            body, kind = b"agentenv report %d\\n" % len(served) * 64, "application/octet-stream"
         else:
             body = (b"<title>asking</title><script>setTimeout(() => { document.title = confirm('Proceed?') ? "
                     b"'accepted' : 'dismissed'; setTimeout(() => location.href = '/report.bin', 500); }, 500)</script>")
@@ -82,7 +84,9 @@ server = http.server.ThreadingHTTPServer(("127.0.0.1", 8767), Page)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 time.sleep(float(sys.argv[1]))
 """
-REPORT_SHA256 = hashlib.sha256(b"agentenv report\n" * 64).hexdigest()
+# A page that asks to confirm as soon as it loads, and says in its title what it was told.
+AGENT_DIALOG = ("data:text/html,<title>asking</title><script>setTimeout(() => document.title = "
+                "confirm('Proceed?') ? 'accepted' : 'dismissed', 1000)</script>")
 # Each window the window manager manages, its class and its title.
 WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); do '
            'xprop -id "$w" WM_CLASS _NET_WM_NAME; done')
@@ -186,15 +190,16 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
-            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_RECORDED, "45"],
-                                                       timeout_s=75))
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_RECORDED, "90"],
+                                                       timeout_s=120))
             await asyncio.sleep(3)
             await _keys(deployed, ["F5"])
             accepted = await _chromium_windows(deployed, "accepted")
             await _keys(deployed, ["Control", "t"], ["Control", "w"])
+            first = await _record(deployed, card, lambda r: _hashed(r) and r["closed_tabs"])
+            await _keys(deployed, ["F5"])
+            recorded = await _record(deployed, card, lambda r: len(_hashed(r)) > len(_hashed(first)))
             await serving
-            recorded = await _record(deployed, card, lambda r: r["downloads"] and "sha256" in r["downloads"][0]
-                                     and r["closed_tabs"])
             browser = await _browser_process(deployed)
             await inside.run(deployed, ["kill", "-9", str(browser["pid"])], timeout_s=30)
             exited = await _record(deployed, card, lambda r: r["launches"][-1]["event"] == "exit")
@@ -210,9 +215,13 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
     # may run more than once; each run's dialog and download must be recorded alike.
     assert recorded["dialogs"] and {(d["type"], d["message"], d["answer"], d["by"]) for d in recorded["dialogs"]} == {
         ("confirm", "Proceed?", "accepted", "agentenv")}, recorded
-    assert recorded["downloads"] and {(d["filename"], d["state"], d["size"], d["sha256"])
-                                      for d in recorded["downloads"]} == {
-        ("report.bin", "completed", len(b"agentenv report\n" * 64), REPORT_SHA256)}, recorded
+    # Every download is named report.bin, so Chrome saves the later ones as report (1).bin and on: each must be hashed
+    # at its own path, as the content served for it.
+    downloads = recorded["downloads"]
+    assert len(downloads) >= 2 and {(d["filename"], d["state"]) for d in downloads} == {("report.bin", "completed")}
+    assert len({d["path"] for d in downloads}) == len(downloads), recorded
+    assert sorted(d["sha256"] for d in downloads) == sorted(
+        hashlib.sha256(_report(n)).hexdigest() for n in range(1, len(downloads) + 1)), recorded
     assert [tab["closed_by"] for tab in recorded["closed_tabs"]] == ["unknown"], recorded
     assert [(tab["url"], tab["active"]) for tab in recorded["tabs"]] == [(RECORDED, True)], recorded
     assert [entry["event"] for entry in exited["launches"]] == ["launch", "exit"], exited
@@ -222,6 +231,37 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
     assert events[:3] == [("launch", "boot"), ("exit", None), ("launch", "launch")]
     assert events[3:] in ([("stop", None), ("launch", "server_restart")], [("launch", "server_restart")]), events
     assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_with_dialogs_left_to_the_agent_chromium_shows_one_and_records_the_agents_answer(chromium_desktop):
+    with namespace_routing():
+        deployed = await Env.get(chromium_desktop.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [AGENT_DIALOG]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
+            pending = await _record(deployed, card, lambda r: r["dialogs"])
+            await _keys(deployed, ["Enter"])
+            answered_title = await _chromium_windows(deployed, "accepted")
+            answered = await _record(deployed, card, lambda r: r["dialogs"] and r["dialogs"][0]["answer"])
+        finally:
+            report = await teardown_run(context)
+
+    assert [(d["type"], d["answer"], d["by"]) for d in pending["dialogs"]] == [("confirm", None, None)], pending
+    assert answered_title[0].startswith("accepted")
+    assert [(d["type"], d["message"], d["answer"], d["by"]) for d in answered["dialogs"]] == [
+        ("confirm", "Proceed?", "accepted", "agent")], answered
+    assert not report.failed
+
+
+def _report(n: int) -> bytes:
+    """The content SERVE_RECORDED serves at its nth request for report.bin."""
+    return b"agentenv report %d\n" % n * 64
+
+
+def _hashed(record: dict) -> list[dict]:
+    return [download for download in record["downloads"] if "sha256" in download]
 
 
 async def _record(deployed, card: dict, until) -> dict:
