@@ -1613,11 +1613,16 @@ _STATE_READ_TIMEOUT_S = 60.0
 _TOOLS_PROBE_TIMEOUT_S = 10.0
 
 
+class WebsiteContractError(RuntimeError):
+    """A site breaks ``website/v1`` in a way waiting can't mend, so the deploy refuses it at once."""
+
+
 async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConfig], *,
                              timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
     """Wait until each site is ready, as its card says through ``/svc/<name>/``: by ``website/v1``'s ``ready``, or,
     for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
-    Raises naming each site still not ready, and why, once ``timeout_s`` has passed."""
+    Raises naming each site still not ready, and why, once ``timeout_s`` has passed, and at once, with
+    ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
     deadline = time.monotonic() + timeout_s
     waiting = {wc.environment_name: wc for wc in website_configs}
     why: dict[str, str] = {}
@@ -1644,9 +1649,8 @@ async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool
     ``ready``; with no card or no ``ready`` on it, None once its health path answers 200 and False before."""
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(base_url + WELL_KNOWN_PATH, timeout=10)
-            card = response.json() if response.status_code == 200 else None
-            if isinstance(card, dict) and protocol_v1.find_extension_method(card, EXT_WEBSITE_URI, WEBSITE_READY_OP):
+            card = _card_of(await client.get(base_url + WELL_KNOWN_PATH, timeout=10), base_url)
+            if card is not None and protocol_v1.find_extension_method(card, EXT_WEBSITE_URI, WEBSITE_READY_OP):
                 answer = await protocol_v1.invoke_extension(base_url, card, EXT_WEBSITE_URI, method=WEBSITE_READY_OP,
                                                             timeout=10)
                 if isinstance(answer, dict) and answer.get("ready") is True:
@@ -1657,6 +1661,24 @@ async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool
         except (httpx.HTTPError, ValueError) as e:
             return False, f"{type(e).__name__}: {e}"
     return (None, "") if health.status_code == 200 else (False, f"{health_path} answered {health.status_code}")
+
+
+def _card_of(response: httpx.Response, base_url: str) -> Optional[dict]:
+    """The env card a site answers its card's path with, None when it serves none there (any answer but 200).
+    ``website/v1`` reserves that path for the card, so a 200 that isn't a JSON object, such as a single-page app's
+    ``index.html``, breaks the contract and raises ``WebsiteContractError``."""
+    if response.status_code != 200:
+        return None
+    try:
+        card = response.json()
+    except ValueError:
+        card = None
+    if not isinstance(card, dict):
+        kind = response.headers.get("content-type", "").split(";")[0] or "no content type"
+        raise WebsiteContractError(
+            f"the website at {base_url} answers {WELL_KNOWN_PATH} with {kind}, not an env card; website/v1 reserves "
+            f"that path for the card, so serve the card there or answer 404")
+    return card
 
 
 async def _probe_tools(env_id: str | None, gateway: DeployedGateway) -> None:

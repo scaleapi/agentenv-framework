@@ -2527,3 +2527,36 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
             timeout_s=0, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_site_serving_a_page_at_its_cards_path_is_refused_at_once_for_breaking_the_contract():
+    """website/v1 reserves the card's path, so a 200 page there (a single-page app's index.html) is refused at once,
+    however long the deploy would wait and though its health path answers 200."""
+    asked = []
+
+    def site(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path == "/svc/shop/.well-known/agent-env.json":
+            return httpx.Response(200, text="<!doctype html><title>Shop</title>", headers={"content-type": "text/html"})
+        return httpx.Response(200)
+
+    with _sites(site), pytest.raises(env_gateway_provider.WebsiteContractError,
+                                     match=r"answers /\.well-known/agent-env\.json with text/html, not an env card"):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="s", frontend_image=None, environment_name="shop")],
+            timeout_s=300, poll_s=0)
+    assert asked == ["/svc/shop/.well-known/agent-env.json"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 503])
+async def test_a_site_whose_cards_path_answers_no_card_falls_back_to_its_health_path(status):
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/svc/shop/.well-known/agent-env.json":
+            return httpx.Response(status, text="<html>missing</html>", headers={"content-type": "text/html"})
+        return httpx.Response(200) if request.url.path == "/svc/shop/api/health" else httpx.Response(500)
+
+    with _sites(site):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="s", frontend_image=None, environment_name="shop")], poll_s=0)
