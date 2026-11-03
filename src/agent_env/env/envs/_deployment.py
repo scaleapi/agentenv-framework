@@ -209,8 +209,9 @@ def check_plugin_record(env: Env, deployed: DeployedEnv) -> None:
                                "of its MCP servers and websites")
         return
     if isinstance(env, MultiEnv):
-        names = [child.environment_name for child in [*env.mcp_server_envs, *env.website_envs]]
-        if missing := [name for name in names if deployed.get_child_env_card(name) is None]:
+        names = [(child.environment_name, True) for child in env.mcp_server_envs]
+        names += [(child.environment_name, False) for child in env.website_envs]
+        if missing := [name for name, mcp in names if deployed.get_child_env_card(name, mcp=mcp) is None]:
             raise RuntimeError(f"{returned} whose env card lists no child env named {', '.join(map(repr, missing))}; a MultiEnv's card "
                                "lists each of its MCP servers and websites by environment_name")
         if env.name and deployed.mcp_server_name != env.name:
@@ -220,8 +221,9 @@ def check_plugin_record(env: Env, deployed: DeployedEnv) -> None:
         raise RuntimeError(f"{returned} whose env card is named {deployed.environment_card.get('name')!r}; it must be the env's "
                            f"environment_name {env.environment_name!r}, or list a child env of that name")
     else:
-        names = [env.environment_name]
-    if not_paths := [name for name in names if not deployed.get_child_env_card(name).get("url", RPC_PATH).startswith("/")]:
+        names = [(env.environment_name, None)]
+    if not_paths := [name for name, mcp in names
+                     if not deployed.get_child_env_card(name, mcp=mcp).get("url", RPC_PATH).startswith("/")]:
         raise RuntimeError(f"{returned} whose env card gives {', '.join(map(repr, not_paths))} a url that isn't a path; a child env's "
                            "url is a path under the record's address, such as '/svc/<name>/agentenv'")
 

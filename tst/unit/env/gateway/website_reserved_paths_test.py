@@ -92,7 +92,7 @@ async def test_a_sites_route_refuses_what_its_card_advertises_reading_the_card_o
 
 
 @pytest.mark.asyncio
-async def test_a_card_that_cant_be_read_is_read_again_and_one_that_isnt_served_is_not(monkeypatch):
+async def test_a_card_that_cant_be_read_serves_nothing_until_it_can_and_one_that_isnt_served_reserves_nothing(monkeypatch):
     answers = {"mail": [httpx.Response(503), httpx.Response(200, json=_CARD)], "notes": [httpx.Response(404)]}
     reached = []
 
@@ -107,11 +107,11 @@ async def test_a_card_that_cant_be_read_is_read_again_and_one_that_isnt_served_i
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(_Changelog(), website_urls={"mail": "http://mail", "notes": "http://notes"})
 
-    assert (await _http(gw, "GET", "/website/mail/go"))[0] == 200
+    assert (await _http(gw, "GET", "/website/mail/go"))[0] == 503
     assert (await _http(gw, "GET", "/website/mail/go"))[0] == 404
     assert (await _http(gw, "GET", "/website/notes/go"))[0] == 200
     assert (await _http(gw, "GET", "/website/notes/go"))[0] == 200
-    assert reached == [("mail", WELL_KNOWN_PATH), ("mail", "/go"), ("mail", WELL_KNOWN_PATH),
+    assert reached == [("mail", WELL_KNOWN_PATH), ("mail", WELL_KNOWN_PATH),
                        ("notes", WELL_KNOWN_PATH), ("notes", "/go"), ("notes", "/go")]
 
 

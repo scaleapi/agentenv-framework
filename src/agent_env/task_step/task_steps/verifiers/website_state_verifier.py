@@ -211,11 +211,20 @@ class WebsiteStateVerifierTaskStep(TaskStep):
 
     async def _card_states(self, deployed: Any, card: dict, address: str, wanted: list[tuple[str, str]]) -> dict:
         """Each wanted session's state, by site and sid, as the card's sites give it: ``website/v1``'s ``state``, else,
-        deprecated, ``GET`` of the site's state path."""
+        deprecated, ``GET`` of the site's state path. A site the env definition names that the card doesn't list as a
+        website, one serving no card, is read as a record with no card is (``_definition_states``), deprecated."""
         sites = website_sites(card)
-        sessions: dict[str, dict] = {}
+        listed = {child.name for child in sites}
+        if unlisted := [(site, sid) for site, sid in wanted if site not in listed]:
+            defined = _sites(Env.get(deployed.env_id, deployed.env_version))
+            if missing := sorted({site for site, _ in unlisted} - defined):
+                raise RuntimeError(f"env '{self.env_id}' serves no website {missing[0]!r}; its sites are "
+                                   f"{sorted(listed | defined)}")
+        sessions: dict[str, dict] = await self._definition_states(deployed, unlisted) if unlisted else {}
         async with httpx.AsyncClient() as client:
             for site, sid in wanted:
+                if site not in listed:
+                    continue
                 child = self._site(sites, site)
                 state = await website_state(address, child.card, sid=sid, timeout=GO_TIMEOUT_S,
                                             headers=deployed.control_headers_for(address))
@@ -239,12 +248,13 @@ class WebsiteStateVerifierTaskStep(TaskStep):
         return found[0]
 
     async def _definition_states(self, deployed: Any, wanted: list[tuple[str, str]]) -> dict:
-        """Each wanted session's state for a record with no card to read: each site the env definition names, at the
+        """Each wanted session's state for a site with no card to read: each site the env definition names, at the
         gateway's ``/svc/<name>/go?sid=``, deprecated."""
         sites = _sites(Env.get(deployed.env_id, deployed.env_version))
         gateway_url = gateway_url_of(deployed)
-        logger.warning(f"env '{self.env_id}' has no card to read, so its sites are the ones its definition names, each "
-                       f"read at /svc/<name>{LEGACY_STATE_PATH}?sid=, which is deprecated")
+        logger.warning(f"env '{self.env_id}' has no card listing {sorted({site for site, _ in wanted})}, so they are "
+                       f"the sites its definition names, each read at /svc/<name>{LEGACY_STATE_PATH}?sid=, which is "
+                       "deprecated")
         sessions: dict[str, dict] = {}
         async with httpx.AsyncClient() as client:
             for site, sid in wanted:

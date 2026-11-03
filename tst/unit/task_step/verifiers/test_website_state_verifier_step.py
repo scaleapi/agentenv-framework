@@ -181,7 +181,36 @@ def test_execute_reads_each_site_of_the_card_by_its_state_op_else_its_state_path
     assert len(warned) == 2 and "/grading/state?sid=" in warned[0] and "/go?sid=" in warned[1]
 
 
-def test_execute_refuses_a_site_the_card_doesnt_serve_and_one_it_cant_tell_apart():
+def test_a_site_the_definition_names_that_the_card_doesnt_list_is_read_at_its_svc_go(monkeypatch, caplog):
+    asked = []
+
+    def gateway(request):
+        asked.append((request.url.path, request.url.params["sid"]))
+        site = request.url.path.split("/")[2]
+        return httpx.Response(200, json={"current_state": {"site": site}})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: real_client(transport=httpx.MockTransport(gateway)))
+    monkeypatch.setattr(website_state_verifier, "gateway_url_of", lambda deployed: "http://gateway")
+    monkeypatch.setattr(website_state_verifier, "_sites", lambda env: {"mail", "legacy"})
+    monkeypatch.setattr(website_state_verifier.Env, "get", lambda id, version=None: None)
+    step = WebsiteStateVerifierTaskStep(id="v", version=None, env_id="office", verifier_id="office-check", checks=[
+        {"site": "legacy", "sid": "s1", "path": "site", "op": "eq", "value": "legacy"},
+        {"site": "mail", "sid": "s1", "path": "site", "op": "eq", "value": "mail"}])
+    context = TaskStepContext()
+    context.deployed_envs.append(_deployed())
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(step.execute(context))
+
+    assert asked == [("/svc/legacy/go", "s1"), ("/svc/mail/agentenv/ext/website/state", "s1")]
+    assert [row["result"] for row in context.metadata["verifications"]["office-check"]["results"]] == [True, True]
+    assert any("['legacy']" in r.getMessage() and "deprecated" in r.getMessage() for r in caplog.records)
+
+
+def test_execute_refuses_a_site_the_card_doesnt_serve_and_one_it_cant_tell_apart(monkeypatch):
+    monkeypatch.setattr(website_state_verifier, "_sites", lambda env: {"mail"})
+    monkeypatch.setattr(website_state_verifier.Env, "get", lambda id, version=None: None)
     step = WebsiteStateVerifierTaskStep(id="v", version=None, env_id="office", checks=[
         {"site": "shop", "path": "", "op": "eq"}])
     context = TaskStepContext()

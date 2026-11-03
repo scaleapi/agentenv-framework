@@ -345,7 +345,11 @@ def _first(value: bytes | None) -> str:
 
 
 class _Universe:
-    """Stamps ``X-Universe-Now`` on every answer, and with ``clock_patch`` puts the clock script in its HTML."""
+    """Stamps ``X-Universe-Now`` on every answer, and with ``clock_patch`` puts the clock script in its HTML, holding
+    only the HTML up to its ``<head>`` (at most ``HEAD_SCAN_BYTES``), so a page streamed in chunks reaches the browser
+    as it's sent."""
+
+    HEAD_SCAN_BYTES = 64 * 1024
 
     def __init__(self, app: Any, env: WebsiteEnvironment) -> None:
         self.app, self.env = app, env
@@ -364,16 +368,21 @@ class _Universe:
                 now = clock.now()
                 headers[UNIVERSE_NOW_HEADER] = iso(now)
                 if patch and headers.get("content-type", "").startswith("text/html") and "content-encoding" not in headers:
-                    held.update(start=message, body=[], now=now)
+                    held.update(start=message, body=b"", script=clock_patch_script(now))
                     return
             elif held and message["type"] == "http.response.body":
-                held["body"].append(message.get("body", b""))
-                if message.get("more_body"):
+                held["body"] += message.get("body", b"")
+                more = message.get("more_body", False)
+                if more and not _HEAD.search(held["body"]) and len(held["body"]) < self.HEAD_SCAN_BYTES:
                     return
-                body = _with_script(b"".join(held["body"]), clock_patch_script(held["now"]))
-                MutableHeaders(scope=held["start"])["content-length"] = str(len(body))
-                await send(held["start"])
-                message = {"type": "http.response.body", "body": body}
+                start, script = held.pop("start"), held.pop("script")
+                body = _with_script(held.pop("body"), script)
+                held.clear()
+                headers = MutableHeaders(scope=start)
+                if "content-length" in headers:
+                    headers["content-length"] = str(int(headers["content-length"]) + len(script))
+                await send(start)
+                message = {"type": "http.response.body", "body": body, "more_body": more}
             await send(message)
 
         await self.app(scope, receive, stamped)
