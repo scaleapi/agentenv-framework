@@ -377,8 +377,9 @@ async def test_a_computer_env_with_no_ready_build_is_refused_at_deploy_naming_it
     env = _put(base, driver)
 
     with pytest.raises(DeployRefused, match=r"has no ready build to deploy; its builds are \{'container/amd64': "
-                                            r"'unverified', 'container/arm64': 'failed'\}"):
+                                            r"'unverified', 'container/arm64': 'failed'\}; compose it with: ") as refused:
         await Env.get(env.id).deploy()
+    assert str(refused.value).endswith(f"agent-env env build {env.id}")
 
 
 @pytest.mark.parametrize("changes, problem", [

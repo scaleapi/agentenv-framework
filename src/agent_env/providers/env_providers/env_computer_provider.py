@@ -76,7 +76,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             raise DeployRefused(f"{env.id}: " + "; ".join(problems))
         await env.compose_unstarted(sandbox_provider, params.form)
         if not (builds := env.deployable_builds(params.form)):
-            raise DeployRefused(f"{env.id} has no ready build to deploy; its builds are {env.build_statuses() or 'none yet'}")
+            raise DeployRefused(f"{env.id} has no ready build to deploy; its builds are "
+                                f"{env.build_statuses() or 'none yet'}; compose it with: agent-env env build {env.id}")
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
                                     disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution)
         return await self._run(sandbox_provider, env.id, attempt)
