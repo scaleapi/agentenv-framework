@@ -7,37 +7,79 @@ from __future__ import annotations
 
 import difflib
 import os
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from packaging.utils import canonicalize_name
 
 from agent_env.plugins._bundles import BUNDLES, CORE, InstalledBundle, installed_bundles
 
+from .hub import HubBundle, fetch_bundle, is_hub_reference
 from .materialize import materialize
 from .parse import Bundle, BundleError, BundleKind, parse_bundle
 from .plan import check_bundle, plan_entities
 from .resolve import resolve_bundle
 
-__all__ = ["BUNDLES", "CORE", "InstalledBundle", "checked", "find_bundle", "installed_bundles", "run_name",
-           "write_installed"]
+__all__ = ["BUNDLES", "CORE", "InstalledBundle", "Located", "checked", "find_bundle", "installed_bundles",
+           "locate_bundle", "run_name", "write_installed"]
+
+
+class Located(NamedTuple):
+    """A bundle's folder, the id root of an installed or Hub bundle (a folder's ids come from its path), and what a Hub
+    bundle was downloaded as."""
+
+    root: Path
+    id_root: str | None
+    hub: HubBundle | None
 
 
 def locate_bundle(
-    text: str, installed: Callable[[], tuple[InstalledBundle, ...]] = installed_bundles,
-) -> tuple[Path, str | None]:
-    """The folder ``text`` names, and the id root of an installed bundle's, as ``agent-env run BUNDLE`` reads it: an
-    existing folder wins, and text that starts like a path is always one; anything else names a bundle ``installed``
-    lists. Raises BundleError."""
-    if path_like(text) or os.path.isdir(text):
-        return Path(text), None
+    text: str, installed: Callable[[], tuple[InstalledBundle, ...]] = installed_bundles, *,
+    on_progress: Callable[[str], None] | None = None,
+) -> Located:
+    """The bundle ``text`` names, as ``agent-env run BUNDLE`` reads it: an ``hf://`` reference, fetched first; else a folder,
+    when it starts like a path or exists spelled as written; else a bundle ``installed`` lists. Raises BundleError."""
+    if is_hub_reference(text):
+        hub = fetch_bundle(text, on_progress=on_progress)
+        return Located(hub.root, hub.id_root, hub)
+    if path_like(text) or _spelled_folder(text):
+        return Located(Path(text), None, None)
     found = find_bundle(text, installed())
-    return found.root, found.id_root
+    return Located(found.root, found.id_root, None)
 
 
 def path_like(text: str) -> bool:
     """Text that names a folder even when there is none there."""
     return text.startswith((".", "/", "~"))
+
+
+def _spelled_folder(text: str) -> bool:
+    """Whether ``text`` names a folder each of whose names is spelled as written: on a case-insensitive filesystem
+    ``desktop`` finds ``Desktop``, which isn't the folder meant."""
+    if not os.path.isdir(text):
+        return False
+    above = Path()
+    for part in Path(text).parts:
+        if part not in (".", "..") and not _lists(above, part):
+            return False
+        above /= part
+    return True
+
+
+def _lists(folder: Path, name: str) -> bool:
+    """Whether ``folder`` lists ``name`` as spelled; a folder that can be passed through but not read takes it as
+    written."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return True
+    return _nfc(name) in {_nfc(listed) for listed in names}
+
+
+def _nfc(name: str) -> str:
+    return unicodedata.normalize("NFC", name)
 
 
 def find_bundle(text: str, bundles: tuple[InstalledBundle, ...] | None = None) -> InstalledBundle:

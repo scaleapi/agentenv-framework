@@ -307,7 +307,7 @@ class RegistrationLedger(Ledger):
     pushes_images = True
 
     def __init__(self, store: DocumentStore, plan: Plan, identity: str, commit: str | None, dirty: bool | None):
-        super().__init__(store, plan)
+        super().__init__(lambda _: store, plan)
         self.identity, self.commit, self.dirty = identity, commit, dirty
 
     def _bundle(self, write: Write) -> str:

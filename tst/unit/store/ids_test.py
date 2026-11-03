@@ -106,6 +106,9 @@ def test_a_bare_id_over_200_bytes_encodes_to_a_frozen_segment_that_is_one_path_c
     ("tickets", None, False),
     ("user@example.com", None, False),
     ("@local/~/a", "local", True),
+    ("@hf/acme/ds", "hf", True),
+    ("@hf", "hf", False),
+    ("@huggingface/acme", "huggingface", False),
     ("@local", "local", False),
     ("@acme/tickets", "acme", False),
     ("@", "", False),
@@ -132,6 +135,9 @@ def test_a_malformed_local_id_is_not_encoded_as_one():
     "@local/~/Dropbox (Personal)/triage copy (2)",
     "@local/~/C++/R&D/a,b+c",
     "@local/~/node_modules/@types/x",
+    "@hf/acme/ds",
+    "@hf/Acme-Labs/ds_v1.2/bundles-x/" + "y" * 96,
+    "@hf/" + "x" * 4092,
 ])
 def test_well_formed_local_ids_validate(entity_id):
     validate_local_id(entity_id)
@@ -140,6 +146,9 @@ def test_well_formed_local_ids_validate(entity_id):
 @pytest.mark.parametrize("entity_id, reason", [
     ("@local", "must start with"),
     ("@acme/x", "must start with"),
+    ("@hf", "must start with"),
+    ("@hf/a/../b", "'..'"),
+    ("@hf/" + "x" * 4093, "4097 bytes; the limit is 4096"),
     ("tickets", "must start with"),
     ("@local/", "empty"),
     ("@local//a", "empty"),
@@ -183,6 +192,13 @@ def test_a_derived_id_keeps_its_base_namespace():
     assert derive_id("@local/~/work/triage/tickets", "image") == "@local/~/work/triage/tickets__image"
     assert is_local_id(derive_id("@local/~/a", "files"))
     assert derive_id("tickets", "files") == "tickets__files"
+
+
+def test_an_hf_id_encodes_to_a_local_segment_of_its_own():
+    assert key_segment("@hf/acme/ds/hello") == image_repository("@hf/acme/ds/hello") == "local/hf-acme-ds-hello-" + (
+        hashlib.sha256(b"@hf/acme/ds/hello").hexdigest()[:12])
+    assert key_segment("@hf/acme/ds/hello") != key_segment("@local/hf/acme/ds/hello")
+    assert fs_safe("@hf/acme/ds/hello") == key_segment("@hf/acme/ds/hello").replace("/", "-", 1)
 
 
 def test_authored_cap_leaves_room_for_the_longest_derived_id():

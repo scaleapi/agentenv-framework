@@ -2,8 +2,8 @@
 
 A row per written version records a digest of the write's inputs and one digest per input, so a new
 version can say why it was written ("files changed: server.py"). A row is keyed by the bundle the write comes from, so
-an entity a run pulls in from an installed bundle has one row however many bundles use it. The ledger lives in the ``@local``
-namespace's own store, beside the entities it describes, and is never read through the router, so it
+an entity a run pulls in from an installed bundle has one row however many bundles use it. A row lives in its entity's local
+namespace's own store, ``@local``'s or ``@hf``'s, beside the entity it describes, and is never read through the router, so it
 never reaches a configured store. Reading it never creates the store.
 """
 
@@ -17,7 +17,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agent_env.a2a_agent.store import A2A_AGENTS_COLLECTION
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
@@ -28,6 +28,7 @@ from agent_env.env.store import ENVS_COLLECTION
 from agent_env.eval.store import EVALS_COLLECTION
 from agent_env.store import Filter, Sort
 from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentStore, expecting_version
+from agent_env.store.ids import local_namespace
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
 
@@ -77,7 +78,8 @@ class Check:
 
 
 class Ledger:
-    """One plan's rows in the ``@local`` namespace's store."""
+    """One plan's rows, each in the store ``store_of`` gives for its entity's id: for a run, that id's local
+    namespace's."""
 
     collection = LEDGER_COLLECTION
     # Whether a task or eval is written naming the versions of what it references, so is hashed with them.
@@ -89,13 +91,14 @@ class Ledger:
     # store, rather than written as its build context for each deploy to build.
     pushes_images = False
 
-    def __init__(self, store: DocumentStore, plan: Plan):
-        self._store = store
+    def __init__(self, store_of: Callable[[str], DocumentStore], plan: Plan):
+        self._store_of = store_of
         self._plan = plan
 
     @classmethod
     def for_plan(cls, plan: Plan) -> Ledger:
-        return cls(get_config().local_namespace_document_store(), plan)
+        config = get_config()
+        return cls(lambda entity_id: config.local_namespace_document_store(cast(str, local_namespace(entity_id))), plan)
 
     def check(self, write: Write, needs: Mapping[tuple[str, str], int]) -> Check:
         """Compare ``write`` with the latest version the ledger records for it. ``needs`` holds, by (store, id),
@@ -159,28 +162,29 @@ class Ledger:
         A pending row marks the attempt until it's done, with its version once ``write`` returns. One an
         interrupted run of this bundle left is kept by ``check`` when its version can be, and dropped here."""
         key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle(check.write)}
-        self._store.ensure_index(self.collection, ["store", "id", "status"])
-        while self._store.delete(self.collection, Filter.of(**key, status="pending")):
+        store = self._store_of(check.write.id)
+        store.ensure_index(self.collection, ["store", "id", "status"])
+        while store.delete(self.collection, Filter.of(**key, status="pending")):
             pass
         pending = {**key, "status": "pending", "scheme": SCHEME,
                    "digest": check.digest.value if check.digest else None,
                    "inputs": check.digest.inputs if check.digest else None, "at": _now(), **self.row_fields()}
-        self._store.insert(self.collection, pending)
+        store.insert(self.collection, pending)
         try:
             with expecting_version(check.write.id, check.next_version) if self.strict else nullcontext():
                 version = write()
         except Exception:
             # It wrote no version this run knows of, so the row marks nothing for the next run to keep.
-            self._store.delete(self.collection, Filter.of(**key, status="pending"))
+            store.delete(self.collection, Filter.of(**key, status="pending"))
             raise
         # Stamped before the check below, which can take seconds, so a run interrupted during it leaves the version
         # this attempt wrote, and the next run keeps it rather than writing it again.
-        self._store.replace(self.collection, Filter.of(**key, status="pending"), {**pending, "version": version})
+        store.replace(self.collection, Filter.of(**key, status="pending"), {**pending, "version": version})
         done = {**pending, "status": "done", "version": version, "at": _now()}
         if check.digest is not None and self.digest(check.write, check.needs) != check.digest:
             # A file changed during the write, so what the version holds is unknown: the next run writes it again.
             done.update(digest=None, inputs=None)
-        self._store.replace(self.collection, Filter.of(**key, status="pending"), done, upsert=True)
+        store.replace(self.collection, Filter.of(**key, status="pending"), done, upsert=True)
         return version
 
     def adopt(self, check: Check) -> None:
@@ -188,7 +192,7 @@ class Ledger:
         key = {"store": check.write.kind.store, "id": check.write.id, "bundle": self._bundle(check.write)}
         done = {**key, "status": "done", "scheme": SCHEME, "digest": check.digest.value, "inputs": check.digest.inputs,
                 "version": check.version, "at": _now(), **self.row_fields()}
-        self._store.replace(self.collection, Filter.of(**key, status="pending"), done, upsert=True)
+        self._store_of(check.write.id).replace(self.collection, Filter.of(**key, status="pending"), done, upsert=True)
 
     def row_fields(self) -> dict[str, Any]:
         """What each row records beyond the write: nothing here."""
@@ -197,8 +201,8 @@ class Ledger:
     def _orphan(self, write: Write, stored: int | None, digest: Digest) -> int | None:
         """The version an interrupted run of this bundle wrote and didn't record, when it's still the store's
         latest and was made from what ``write`` is now made from."""
-        pending = self._find(self.collection, Filter.of(store=write.kind.store, id=write.id,
-                                                        bundle=self._bundle(write), status="pending"))
+        pending = self._find(write.id, self.collection, Filter.of(store=write.kind.store, id=write.id,
+                                                                  bundle=self._bundle(write), status="pending"))
         if pending is None or pending.get("version") is None or pending["version"] != stored:
             return None
         return stored if (pending["scheme"], pending["digest"]) == (SCHEME, digest.value) else None
@@ -208,17 +212,18 @@ class Ledger:
         return self._plan.bundle_of(write.source.entry).id_root
 
     def _latest(self, store: str, id: str) -> dict | None:
-        return self._find(self.collection, Filter.of(store=store, id=id, status="done"))
+        return self._find(id, self.collection, Filter.of(store=store, id=id, status="done"))
 
     def _stored_version(self, write: Write) -> int | None:
-        doc = self._find(_COLLECTIONS[write.kind.store], Filter.of(id=write.id))
+        doc = self._find(write.id, _COLLECTIONS[write.kind.store], Filter.of(id=write.id))
         return doc["version"] if doc else None
 
-    def _find(self, collection: str, filter: Filter) -> dict | None:
-        """The highest version matching ``filter``, read without creating a local store."""
-        if isinstance(self._store, LocalSqliteDocumentStore) and not self._store.path.exists():
+    def _find(self, entity_id: str, collection: str, filter: Filter) -> dict | None:
+        """The highest version matching ``filter`` in ``entity_id``'s store, read without creating a local store."""
+        store = self._store_of(entity_id)
+        if isinstance(store, LocalSqliteDocumentStore) and not store.path.exists():
             return None
-        return self._store.find_one(collection, filter, sort=Sort.by("version"))
+        return store.find_one(collection, filter, sort=Sort.by("version"))
 
 
 @contextmanager

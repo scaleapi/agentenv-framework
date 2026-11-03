@@ -62,7 +62,7 @@ from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
 from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS
 from agent_env.store.base import NotFoundError
-from agent_env.store.ids import LOCAL_PREFIX
+from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.task.task import Task
@@ -608,15 +608,15 @@ def _fetch(url: str, dest: Path) -> None:
 
 
 def _output_names(sites: list[RefSite]) -> dict[tuple[EntityKind, str], str]:
-    """The name each output takes: as written, or an ``@local`` id's last segment, numbered when it is taken."""
+    """The name each output takes: as written, or a local id's last segment, numbered when it is taken."""
     written = {_key(site) for site in sites if site.ref.role is RefRole.OUTPUT}
-    taken = {_key(site) for site in sites if _key(site) not in written or not site.value.startswith(LOCAL_PREFIX)}
+    taken = {_key(site) for site in sites if _key(site) not in written or not is_local_id(site.value)}
     names: dict[tuple[EntityKind, str], str] = {}
     for site in sites:
         if site.ref.role is not RefRole.OUTPUT or _key(site) in names:
             continue
         name = site.value
-        if name.startswith(LOCAL_PREFIX):
+        if is_local_id(name):
             base = name = name.rsplit("/", 1)[-1]
             n = 1
             while (site.ref.kind, _nfc(name)) in taken:
