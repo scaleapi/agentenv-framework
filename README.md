@@ -44,6 +44,23 @@ uv sync --extra dev
 source .venv/bin/activate
 ```
 
+## Run a bundle from the Hub
+
+`agent-env run` also takes a bundle published in a [Hugging Face Hub](https://huggingface.co/datasets) dataset:
+
+```bash
+agent-env run hf://<org>/<repo>                     # the main branch
+agent-env run hf://<org>/<repo>@v1.0/bundles/hello  # a tag, branch or commit, and the bundle's folder
+```
+
+The revision resolves to a commit, and only that commit's bundle and the dataset card are downloaded, into
+`$XDG_CACHE_HOME/agentenv/hf/<org>/<repo>/<commit>` (`~/.cache` by default), where a later run of the commit finds
+them. Without a path, the run takes the only bundle under `bundles/`, or the one the card's `agentenv: default` names,
+else the repo's root. It prints the repo, commit and bundle, then runs as a folder does, with ids under
+`@hf/<org>/<repo>`, so a rerun of the same commit reuses what the last one wrote, and records the commit with each run.
+A bundle without a `bundle.toml` needs the plugins the card's `agentenv: bundles: <name>: plugins` lists. A gated or
+private dataset needs `hf auth login` or `HF_TOKEN`.
+
 ## Plugins
 
 A package of your own can add env types, providers, task steps and stores to agent-env, and `agent-env plugin` lists, checks, adds and removes installed plugins. The [plugin docs](https://www.agentenvframework.com/docs/plugins) show how.

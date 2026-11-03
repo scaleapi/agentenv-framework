@@ -133,7 +133,7 @@ def test_hub_ids_and_runs_keep_to_the_hf_namespaces_own_file_inside_the_write_fe
             assert routing.local_run_namespace() == "local"
     with pytest.raises(OutwardReferenceError, match="names a local id"):
         router.insert("tasks", {"id": "t", "version": 1, "steps": [{"env_id": HUB_ENV}]})
-    with pytest.raises(ValueError, match="has to keep its namespace"):
+    with pytest.raises(ValueError, match="has to keep the @hf namespace"):
         router.insert("envs", {"id": f"copy-of-{HUB_ENV}", "version": 1})
 
     assert hub.path.name == "hf.db" and hub.path.parent == local.path.parent

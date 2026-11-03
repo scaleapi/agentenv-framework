@@ -476,10 +476,10 @@ class RoutingDocumentStore(DocumentStore):
         if namespace is not None:
             self.namespaces[namespace].check_id(entity_id)
             return
-        if any(f"@{namespace}/" in entity_id for namespace in self.namespaces):
+        if (inside := next((namespace for namespace in self.namespaces if f"@{namespace}/" in entity_id), None)):
             raise ValueError(
-                f"id {entity_id!r} contains a local id but isn't one: an id derived from a local id "
-                "has to keep its namespace"
+                f"id {entity_id!r} contains an @{inside} id but isn't one: an id derived from an @{inside} id "
+                f"has to keep the @{inside} namespace"
             )
         self.configured.check_id(entity_id)
 

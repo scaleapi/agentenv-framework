@@ -107,6 +107,35 @@ def test_the_shipped_hello_stays_local_when_config_defaults_to_another_provider(
     assert "tasks/hello.json v1: passed (hello: 1)" in _run("hello")
 
 
+def test_a_hub_bundle_runs_by_its_hf_reference_at_a_pinned_commit_and_a_rerun_reuses_its_download(bundle, monkeypatch,
+                                                                                                   tmp_path, quiet_logs):
+    """The fixture is a public dataset holding the hello example under bundles/hello, another bundle that needs a
+    plugin under bundles/v3, and its recorded runs as tables at its root."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    repo, sha = "earakely-scale/agentenv-hf-smoke", "5fbd709207a73e2aeb73a77e272a61003d1be768"
+
+    several = CliRunner().invoke(cli, ["run", f"hf://{repo}@{sha}"])
+    first = _run(f"hf://{repo}@{sha}/bundles/hello")
+    second = _run(f"hf://{repo}@{sha}/bundles/hello")
+
+    assert several.exit_code == 1
+    assert (f"run one of hf://{repo}@{sha}/bundles/hello, hf://{repo}@{sha}/bundles/v3") in several.output
+    for output in (first, second):
+        assert output.startswith(f"{repo} at {sha[:12]}, bundle bundles/hello\n")
+        assert f"From {repo} at {sha[:12]}, bundle bundles/hello\nTasks:\n  tasks/hello.json v1: passed" in output
+    assert "tasks/hello.json: v1, unchanged" in second
+    folder = tmp_path / "cache" / "agentenv" / "hf" / repo / sha
+    assert sorted(path.relative_to(folder).as_posix() for path in folder.rglob("*")
+                  if path.is_file() and path.relative_to(folder).parts[0] != ".cache") == [
+        "README.md", "bundles/hello/README.md", "bundles/hello/artifacts/greeting/check.sh",
+        "bundles/hello/artifacts/greeting/hello.txt", "bundles/hello/tasks/hello.json"]
+    (instance_id,) = re.findall(rf"instance (@hf/{repo}/hello/hello-\S+)", second)
+    with namespace_routing():
+        instance = Task.get_instance(instance_id)
+    assert instance.context["metadata"]["bundle_source"] == {
+        "hub": "hf", "repo": repo, "revision": sha, "sha": sha, "path": "bundles/hello"}
+
+
 def test_a_bundle_runs_from_its_folder_and_a_rerun_writes_only_what_changed(bundle, quiet_logs):
     first = _run(bundle)
     assert "tasks/hello.json v1: passed (hello: 1)" in first

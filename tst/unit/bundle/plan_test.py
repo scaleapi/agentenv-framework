@@ -311,7 +311,7 @@ def test_an_id_under_the_bundles_own_root_that_it_doesnt_write_is_refused_withou
 
 
 def test_planning_a_read_of_another_bundles_local_id_without_namespace_routing_is_refused(make):
-    with pytest.raises(RuntimeError, match="reading an @local id from the store needs namespace routing"):
+    with pytest.raises(RuntimeError, match="reading a local id from the store needs namespace routing"):
         plan_bundle(make(tasks={"t": [deploy("@local/~/other/crm")]}))
 
 

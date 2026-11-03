@@ -17,7 +17,6 @@ from agent_env.bundle import hub as hub_module
 from agent_env.bundle.hub import HubReference, fetch_bundle, parse_reference
 from agent_env.bundle.ledger import LEDGER_COLLECTION
 from agent_env.cli import cli
-from agent_env.config import get_config
 from agent_env.config.runtime import Config
 from agent_env.store import Filter
 from agent_env.store.routing import namespace_routing

@@ -23,7 +23,7 @@ from urllib.parse import unquote
 
 import httpx
 from huggingface_hub import HfApi
-from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
+from huggingface_hub.errors import RepositoryNotFoundError
 from huggingface_hub.repocard import metadata_load
 
 from agent_env.plugins._bundles import ALIASES_FILE
@@ -60,8 +60,8 @@ class HubBundle:
     root: Path
     id_root: str
     source: Mapping[str, str]  # hub, repo, revision, sha, path: what each run's context records
-    plugins: tuple[str, ...] = ()  # the card's, for a bundle without a bundle.toml
-    setup: str | None = None  # the card's command that sets the bundle up, shown when a run fails, never run
+    plugins: tuple[str, ...]  # the card's, for a bundle without a bundle.toml
+    setup: str | None  # the card's command that sets the bundle up, shown when a run fails, never run
 
     def check_plugins(self) -> None:
         """Refuse the run when a plugin the card names isn't installed, naming the command that installs it. Raises
@@ -123,14 +123,13 @@ def cache_root() -> Path:
     return (Path(base) if os.path.isabs(base) else Path.home() / ".cache") / "agentenv" / "hf"
 
 
-def fetch_bundle(text: str, *, api: HfApi | None = None, on_progress: Callable[[str], None] | None = None) -> HubBundle:
+def fetch_bundle(text: str, *, on_progress: Callable[[str], None] | None = None) -> HubBundle:
     """The bundle ``text`` names, downloaded unless this machine has it. ``on_progress`` is given the line that says
     which repo, commit and bundle it is, before anything is downloaded. Raises BundleError."""
     reference = parse_reference(text)
-    api = api or HfApi()
     try:
-        return _fetch(reference, api, on_progress or (lambda line: None))
-    except (HfHubHTTPError, httpx.TransportError) as e:
+        return _fetch(reference, HfApi(), on_progress or (lambda line: None))
+    except httpx.HTTPError as e:
         error = BundleError([f"{text}: {str(e).strip() or type(e).__name__}"])
         if isinstance(e, RepositoryNotFoundError):
             error.add_note("a private or gated repo needs a token with access: log in with `hf auth login`, or set "
@@ -155,6 +154,7 @@ def _fetch(reference: HubReference, api: HfApi, say: Callable[[str], None]) -> H
         commit.save(folder)
     card = _card(folder)
     path = _pick(reference, sha, commit.files, card)
+    id_root = _id_root(reference, path)
     source = {"hub": "hf", "repo": reference.repo, "revision": reference.revision or "main", "sha": sha, "path": path}
     say(describe(source))
     if path not in commit.downloaded:
@@ -165,8 +165,8 @@ def _fetch(reference: HubReference, api: HfApi, say: Callable[[str], None]) -> H
     name = path.rpartition("/")[2] or reference.repo.partition("/")[2]
     needs = (card.get("bundles") or {}).get(name) or {}
     declared = _within(path, BUNDLE_TOML) in commit.files
-    return HubBundle(folder / path, _id_root(reference, path), source,
-                     plugins=() if declared else tuple(needs.get("plugins") or ()), setup=needs.get("setup"))
+    return HubBundle(folder / path, id_root, source, plugins=() if declared else tuple(needs.get("plugins") or ()),
+                     setup=needs.get("setup"))
 
 
 def _card(folder: Path) -> dict[str, Any]:
