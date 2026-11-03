@@ -336,7 +336,7 @@ async def test_a_deploy_composes_its_missing_form_unless_the_runs_fence_would_re
     monkeypatch.setattr(Config, "local_run_refuses_write", lambda self, entity_id: asked.append(entity_id) or refused)
 
     if refused:
-        with pytest.raises(DeployRefused, match=rf"has no ready build to deploy.*agent-env env build {env.id}"):
+        with pytest.raises(DeployRefused, match=rf"has no ready build to deploy.*agent-env env build --id {env.id}"):
             await Env.get(env.id).deploy(env_params={"form": "disk"})
     else:
         await Env.get(env.id).deploy(env_params={"form": "disk"})
@@ -383,6 +383,40 @@ async def test_a_deploy_that_finds_the_disk_building_for_another_deploy_waits_fo
     since = datetime.fromisoformat(Env.get(env.id).metadata["composed"]["disk"]["arm64"]["started_at"]).strftime("%H:%M")
     assert said == [f"{env.id}: waiting for another deploy composing disk/amd64, disk/arm64 (building since {since} UTC)",
                     f"{env.id}: reusing what another deploy composed: disk/amd64 unverified, disk/arm64 ready"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_deploy_holds_the_lock_until_its_compose_ends_so_the_next_deploy_waits_and_boots_it(
+        disk_base, driver, docker, vms, monkeypatch):
+    env = _put(disk_base, driver, composing=Composing.for_run(None))
+    started, waited, said = threading.Event(), threading.Event(), []
+    record_started, built_disk = composer.Record.started, composer._built_disk
+
+    def recorded(self, pairs):
+        record_started(self, pairs)
+        started.set()
+
+    def held(*args):
+        waited.wait(10)
+        return built_disk(*args)
+
+    def told(line):
+        said.append(line)
+        waited.set()
+
+    monkeypatch.setattr(composer.Record, "started", recorded)
+    monkeypatch.setattr(composer, "_built_disk", held)
+    first = asyncio.create_task(Env.get(env.id).deploy(env_params={"form": "disk"}))
+    await asyncio.to_thread(started.wait, 10)
+    first.cancel()
+    with run_progress(told):
+        second = await Env.get(env.id).deploy(env_params={"form": "disk"})
+
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert second.metadata["computer"]["form"] == "disk" and len(vms.created) == 1
+    assert said[0].startswith(f"{env.id}: waiting for another deploy composing disk/amd64, disk/arm64")
+    assert said[-1] == f"{env.id}: reusing what another deploy composed: disk/amd64 unverified, disk/arm64 ready"
 
 
 @pytest.mark.asyncio

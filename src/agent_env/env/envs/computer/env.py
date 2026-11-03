@@ -184,7 +184,8 @@ class ComputerEnv(Env):
 
     async def compose_unstarted(self, sandbox_provider: SandboxProvider, form: Optional[str] = None) -> None:
         """Compose first what a deploy on ``sandbox_provider`` boots that no compose started, once for deploys at once,
-        unless the run's fence would refuse the record; the rules are in ``computers/README.md``."""
+        unless the run's fence would refuse the record (rules in ``computers/README.md``). A cancelled deploy holds the
+        lock until its compose's thread, which no cancel stops, ends, so the next deploy waits for what it builds."""
         if get_config().local_run_refuses_write(self.stored_id):
             return
         if not composer.unstarted_or_building(self, sandbox_provider, form):
@@ -205,7 +206,13 @@ class ComputerEnv(Env):
                 them = "it" if len(pairs) == 1 else "them"
                 say(f"composing {_pairs(pairs)} before this deploy (no compose built {them} for "
                     f"{' or '.join(type(link).__name__ for link in sandbox_provider.links)} yet); later deploys reuse {them}")
-                await asyncio.to_thread(composer.compose, self, pairs, Composing(sandbox_provider, on_progress=progress))
+                composing = asyncio.ensure_future(asyncio.to_thread(
+                    composer.compose, self, pairs, Composing(sandbox_provider, on_progress=progress)))
+                try:
+                    await asyncio.shield(composing)
+                except asyncio.CancelledError:
+                    await asyncio.wait({composing})
+                    raise
             elif awaited:
                 composed = self.metadata["composed"]
                 say("reusing what another deploy composed: " + ", ".join(
