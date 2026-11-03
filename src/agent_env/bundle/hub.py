@@ -21,9 +21,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-import httpx
 from huggingface_hub import HfApi
-from huggingface_hub.errors import RepositoryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 from huggingface_hub.repocard import metadata_load
 
 from agent_env.plugins._bundles import ALIASES_FILE
@@ -129,7 +128,7 @@ def fetch_bundle(text: str, *, on_progress: Callable[[str], None] | None = None)
     reference = parse_reference(text)
     try:
         return _fetch(reference, HfApi(), on_progress or (lambda line: None))
-    except httpx.HTTPError as e:
+    except HfHubHTTPError as e:
         error = BundleError([f"{text}: {str(e).strip() or type(e).__name__}"])
         if isinstance(e, RepositoryNotFoundError):
             error.add_note("a private or gated repo needs a token with access: log in with `hf auth login`, or set "
