@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
@@ -22,7 +23,9 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
 from agent_env.env.gateway.constants import (
     DEFAULT_MCP_SERVER_NAME,
+    EXT_WEBSITE_URI,
     STATE_TOOL_NAME_CLASHES_KEY,
+    WEBSITE_READY_OP,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
     tool_name_clashes_text,
@@ -40,6 +43,7 @@ from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
     AGENT_ENV_WEBSITE_FRONTEND_SUFFIX,
+    AGENT_ENV_WEBSITE_HEALTH_PATH,
     DOCKER_COMPOSE_PATH,
     GATEWAY_APP_DIR,
     GATEWAY_SERVICE_NAME,
@@ -66,6 +70,7 @@ if TYPE_CHECKING:
 
     from agent_env.artifact import DockerImageArtifact
     from agent_env.env.env import DeployedEnv, Env
+    from agent_env.env.envs.website import WebsiteEnv
     from agent_env.providers.env_state import DatabaseStateProvider, EnvStateInstance, LocalPostgresStoreSpec
 
 logger = logging.getLogger(__name__)
@@ -83,6 +88,9 @@ _DOWN_SERVICES_TIMEOUT_S = 60.0
 MCP_HC_RETRIES = 30
 
 MCP_HC_START_PERIOD = "60s"
+
+WEBSITE_READY_TIMEOUT_S = 300.0
+WEBSITE_READY_POLL_S = 2.0
 
 
 @dataclass
@@ -115,11 +123,14 @@ class DeployedGateway:
 
 @dataclass
 class WebsiteConfig:
-    """Configuration for a website (frontend + backend) in a gateway deployment."""
+    """Configuration for a website in a gateway deployment: its server image, which serves the site's pages and API and
+    says when it's ready by its card's ``website/v1`` ``ready`` (``health_path``, deprecated, for a site whose card
+    has none), and a deprecated separate frontend image for a site built on one."""
 
     backend_image: str
-    frontend_image: str
+    frontend_image: str | None
     environment_name: str
+    health_path: str = AGENT_ENV_WEBSITE_HEALTH_PATH
 
 
 @dataclass
@@ -467,6 +478,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if website_configs:
             website_urls = ",".join(
                 f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_FRONTEND_SUFFIX}:80"
+                if wc.frontend_image else
+                f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}:{AGENT_ENV_WEBSITE_BACKEND_PORT}"
                 for wc in website_configs
             )
             gateway_env.append(f"      - WEBSITE_URLS={website_urls}")
@@ -524,7 +537,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
                 "      - PYTHONUNBUFFERED=1",
                 "    healthcheck:",
-                f'      test: ["CMD", "curl", "-f", "http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}/api/health"]',
+                f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'
+                f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
                 "      interval: 10s",
                 "      timeout: 5s",
                 "      start_period: 30s",
@@ -532,6 +546,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "    networks:",
                 "      - env-network",
                 "",
+            ])
+            if not wc.frontend_image:
+                continue
+            lines.extend([
                 f"  {frontend_name}:",
                 f"    image: {wc.frontend_image}",
                 "    depends_on:",
@@ -886,6 +904,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         card = await self._wait_for_tunnel(gateway_url, timeout=120)
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
+        await _wait_for_websites(gateway_url, website_configs or [])
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
         await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)
@@ -1482,6 +1501,14 @@ class _GatewayTopology:
     names_gateway_on_vm: bool  # a MultiEnv's record names its gateway sandbox even on a VM
 
 
+def website_config(env: WebsiteEnv) -> WebsiteConfig:
+    """A website env as the gateway runs it: its server image, any deprecated frontend image, and its health path."""
+    frontend = env.frontend_docker_image_artifact
+    return WebsiteConfig(backend_image=env.server_docker_image_artifact.image_name,
+                         frontend_image=frontend.image_name if frontend else None,
+                         environment_name=env.environment_name, health_path=env.health_path)
+
+
 def _gateway_topology(env: Env) -> _GatewayTopology:
     """What a gateway fronts for env: a MultiEnv's MCP servers and websites (whatever their own env_provider_type) under its
     name, a WebsiteEnv's website, or else the env's one MCP server."""
@@ -1498,12 +1525,9 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
     return _GatewayTopology(
         mcp_servers=[MCPServerConfig(image=s.docker_image_artifact.image_name, environment_name=s.environment_name) for s in servers],
         mcp_server_images=[s.docker_image_artifact for s in servers],
-        website_configs=[
-            WebsiteConfig(backend_image=w.backend_docker_image_artifact.image_name, frontend_image=w.frontend_docker_image_artifact.image_name,
-                          environment_name=w.environment_name)
-            for w in websites
-        ] or None,
-        website_images=[image for w in websites for image in (w.backend_docker_image_artifact, w.frontend_docker_image_artifact)] or None,
+        website_configs=[website_config(w) for w in websites] or None,
+        website_images=[image for w in websites
+                        for image in (w.server_docker_image_artifact, w.frontend_docker_image_artifact) if image] or None,
         mcp_server_name=name,
         names_gateway_on_vm=is_multi,
     )
@@ -1529,7 +1553,7 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
     MCP server's name), or one is a service every gateway deploy runs."""
     names = [c.environment_name for c in [*mcp_servers, *(website_configs or []), *(sidecars or [])]]
     refs = [*images, *(s.image for s in mcp_servers), *(s.image for s in sidecars or []),
-            *(ref for w in website_configs or [] for ref in (w.backend_image, w.frontend_image))]
+            *(ref for w in website_configs or [] for ref in (w.backend_image, w.frontend_image) if ref is not None)]
     problems = [problem for problem in [*map(environment_name_problem, names), *map(image_reference_problem, refs)]
                 if problem]
     services = Counter([*(c.environment_name for c in [*mcp_servers, *(sidecars or [])]),
@@ -1587,6 +1611,74 @@ _STATE_READ_TIMEOUT_S = 60.0
 
 # Cap on the post-readiness tools/list probe; it only logs, so a slow gateway costs deploy time, never the deploy.
 _TOOLS_PROBE_TIMEOUT_S = 10.0
+
+
+class WebsiteContractError(RuntimeError):
+    """A site breaks ``website/v1`` in a way waiting can't mend, so the deploy refuses it at once."""
+
+
+async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConfig], *,
+                             timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
+    """Wait until each site is ready, as its card says through ``/svc/<name>/``: by ``website/v1``'s ``ready``, or,
+    for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
+    Raises naming each site still not ready, and why, once ``timeout_s`` has passed, and at once, with
+    ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
+    deadline = time.monotonic() + timeout_s
+    waiting = {wc.environment_name: wc for wc in website_configs}
+    why: dict[str, str] = {}
+    warned: set[str] = set()
+    while waiting:
+        for name, wc in list(waiting.items()):
+            ready, why[name] = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
+            if ready is None and name not in warned:
+                warned.add(name)
+                logger.warning(f"website {name!r} has no {EXT_WEBSITE_URI} {WEBSITE_READY_OP} on its card, so its "
+                               f"readiness is read at its health path {wc.health_path}, which is deprecated")
+            if ready is not False:
+                del waiting[name]
+        if not waiting:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("websites not ready after %ds: %s" % (
+                timeout_s, "; ".join(f"{name} ({why[name]})" for name in waiting)))
+        await asyncio.sleep(poll_s)
+
+
+async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool], str]:
+    """Whether the site at ``base_url`` is ready and, when not, why: True or False by its card's ``website/v1``
+    ``ready``; with no card or no ``ready`` on it, None once its health path answers 200 and False before."""
+    async with httpx.AsyncClient() as client:
+        try:
+            card = _card_of(await client.get(base_url + WELL_KNOWN_PATH, timeout=10), base_url)
+            if card is not None and protocol_v1.find_extension_method(card, EXT_WEBSITE_URI, WEBSITE_READY_OP):
+                answer = await protocol_v1.invoke_extension(base_url, card, EXT_WEBSITE_URI, method=WEBSITE_READY_OP,
+                                                            timeout=10)
+                if isinstance(answer, dict) and answer.get("ready") is True:
+                    return True, ""
+                problems = answer.get("problems") if isinstance(answer, dict) else None
+                return False, ", ".join(map(str, problems)) if problems else f"{WEBSITE_READY_OP} says not ready"
+            health = await client.get(base_url + health_path, timeout=10)
+        except (httpx.HTTPError, ValueError) as e:
+            return False, f"{type(e).__name__}: {e}"
+    return (None, "") if health.status_code == 200 else (False, f"{health_path} answered {health.status_code}")
+
+
+def _card_of(response: httpx.Response, base_url: str) -> Optional[dict]:
+    """The env card a site answers its card's path with, None when it serves none there (any answer but 200).
+    ``website/v1`` reserves that path for the card, so a 200 that isn't a JSON object, such as a single-page app's
+    ``index.html``, breaks the contract and raises ``WebsiteContractError``."""
+    if response.status_code != 200:
+        return None
+    try:
+        card = response.json()
+    except ValueError:
+        card = None
+    if not isinstance(card, dict):
+        kind = response.headers.get("content-type", "").split(";")[0] or "no content type"
+        raise WebsiteContractError(
+            f"the website at {base_url} answers {WELL_KNOWN_PATH} with {kind}, not an env card; website/v1 reserves "
+            f"that path for the card, so serve the card there or answer 404")
+    return card
 
 
 async def _probe_tools(env_id: str | None, gateway: DeployedGateway) -> None:

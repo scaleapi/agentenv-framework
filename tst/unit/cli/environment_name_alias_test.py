@@ -28,7 +28,6 @@ PUT_COMMANDS = [
         [
             "env", "website", "put", "--id", "x",
             "--backend-dockerfile-github-url", "https://github.com/o/r/tree/main/b/Dockerfile",
-            "--frontend-dockerfile-github-url", "https://github.com/o/r/tree/main/f/Dockerfile",
             "--skip-validation",
         ],
         "agent_env.cli.env.website.WebsiteEnv.put_from_github",

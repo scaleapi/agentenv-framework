@@ -56,7 +56,8 @@ class EntityRef:
     ref, in the same dict, that pins its version. ``beside`` names the keys a toml table holding the
     ref may carry next to it, which its type reads (a computer env's app takes ``install``). ``walk``,
     for a shape a path cannot spell, maps the value at the path's parent to the dicts that hold the
-    last key, each with its path parts.
+    last key, each with its path parts. ``optional``, for an image a toml may leave out, means a
+    folder with no Dockerfile for it builds none.
     Declarations build one with ``EntityRef.env``, ``EntityRef.agent`` or ``EntityRef.artifact``,
     passing the keyword fields."""
 
@@ -69,6 +70,7 @@ class EntityRef:
     env_type: str | None = None
     beside: tuple[str, ...] = ()
     walk: Walker | None = None
+    optional: bool = False
 
     @classmethod
     def env(cls, path: str, **options: Any) -> EntityRef:

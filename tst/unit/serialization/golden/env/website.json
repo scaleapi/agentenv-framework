@@ -11,9 +11,15 @@
     "type": "docker_image",
     "version": 3
   },
+  "health_path": "/api/health",
   "id": "shop-site-env",
   "metadata": {
     "owner": "example-team"
+  },
+  "server_docker_image_artifact": {
+    "id": "shop-backend-image",
+    "type": "docker_image",
+    "version": 3
   },
   "service_name": "shop",
   "type": "website",

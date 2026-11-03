@@ -143,6 +143,18 @@ def test_a_website_builds_dockerfile_backend_and_dockerfile_frontend_and_takes_i
     assert [call["build"][0] for call in builds] == ["Dockerfile.backend", "Dockerfile.frontend"]
 
 
+def test_a_website_with_only_a_server_dockerfile_builds_one_image(bundle_dir, builds):
+    _bundle(bundle_dir, {"envs/mail/Dockerfile.backend": DOCKERFILE, "envs/mail/server.py": CARD.format("mail"),
+                         "envs/mail/env.toml": 'type = "website"\nhealth = "/healthz"\n'}, "mail")
+
+    _run(bundle_dir)
+    env = Env.get(f"{ROOT}/mail")
+
+    assert (env.server_docker_image_artifact.id, env.frontend_docker_image_artifact) == (f"{ROOT}/mail__backend_image", None)
+    assert env.health_path == "/healthz"
+    assert [call["build"][0] for call in builds] == ["Dockerfile.backend"]
+
+
 def test_a_multi_names_bundle_and_store_envs_and_is_rewritten_when_a_child_is(bundle_dir, builds):
     with namespace_routing():
         MCPServerEnv.put(id="inbox", docker_image_artifact=_store_image("inbox-image"), environment_name="inbox")

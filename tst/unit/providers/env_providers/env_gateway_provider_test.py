@@ -2426,3 +2426,137 @@ async def test_a_service_listing_that_stalls_gives_way_to_composes_own_error(mon
 
     assert raised.value is _COMPOSE_ERROR
     assert "Can't list the stack's services: no answer in 0s" in caplog.text
+
+
+def test_a_one_image_site_runs_alone_on_its_port_up_once_it_answers_and_its_route_reaches_it():
+    """A site whose server image serves its pages gets one container: the gateway's /website/<name>/ and /svc/<name>/
+    both reach it, up once it answers its card or, serving none, its declared health path; a site still built on a
+    frontend image keeps both."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[],
+        gateway_image="agent-gateway",
+        website_configs=[WebsiteConfig(backend_image="mail-server", frontend_image=None, environment_name="mail",
+                                       health_path="/healthz"),
+                         WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    assert {"mail-website-backend", "shop-website-backend", "shop-website-frontend"} <= set(services)
+    assert "mail-website-frontend" not in services
+    assert services["mail-website-backend"]["healthcheck"]["test"] == [
+        "CMD-SHELL", "curl -sf -o /dev/null http://localhost:8000/.well-known/agent-env.json"
+                     " || curl -sf -o /dev/null http://localhost:8000/healthz"]
+    assert services["shop-website-backend"]["healthcheck"]["test"][1].endswith("http://localhost:8000/api/health")
+    gateway = dict(item.split("=", 1) for item in services[GATEWAY_SERVICE_NAME]["environment"])
+    assert gateway["WEBSITE_URLS"] == "mail=http://mail-website-backend:8000,shop=http://shop-website-frontend:80"
+    assert gateway["REST_PROXY_URLS"] == "mail=http://mail-website-backend:8000,shop=http://shop-website-backend:8000"
+
+
+def test_a_one_image_website_env_is_fronted_with_only_its_server_image():
+    server = MagicMock(image_name="mail-server")
+    env = WebsiteEnv(id="web-mail", version=1, server_docker_image_artifact=server, environment_name="mail",
+                     health_path="/healthz")
+    topology = env_gateway_provider._gateway_topology(env)
+    assert topology.website_configs == [WebsiteConfig(backend_image="mail-server", frontend_image=None,
+                                                      environment_name="mail", health_path="/healthz")]
+    assert topology.website_images == [server]
+
+
+def _sites(handler):
+    """Route the deploy's site checks to ``handler(request) -> httpx.Response``."""
+    real = httpx.AsyncClient
+    return patch.object(env_gateway_provider.httpx, "AsyncClient",
+                        lambda *a, **k: real(transport=httpx.MockTransport(handler)))
+
+
+_READY_CARD = {"name": "mail", "capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {
+    "health": "/healthz", "methods": {"ready": {"method": "GET", "endpoint": "/agentenv/ext/website/ready"}}}}]}}
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_waits_for_a_site_until_its_cards_ready_says_so_and_never_reads_its_health_path():
+    asked = []
+
+    def site(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path == "/svc/mail/.well-known/agent-env.json":
+            return httpx.Response(200, json=_READY_CARD)
+        if request.url.path == "/svc/mail/agentenv/ext/website/ready":
+            ready = asked.count(request.url.path) >= 2
+            return httpx.Response(200, json={"ready": ready, "problems": [] if ready else ["seeded"]})
+        return httpx.Response(500)
+
+    with _sites(site):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail",
+                                        health_path="/healthz")], poll_s=0)
+    assert asked.count("/svc/mail/agentenv/ext/website/ready") == 2 and "/svc/mail/healthz" not in asked
+
+
+@pytest.mark.asyncio
+async def test_a_site_with_no_ready_on_its_card_is_waited_for_at_its_health_path_with_a_deprecation_warning(caplog):
+    caplog.set_level(logging.WARNING, logger="agent_env.providers.env_providers")
+    health = iter([503, 200])
+
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/svc/shop/.well-known/agent-env.json":
+            return httpx.Response(404)
+        return httpx.Response(next(health)) if request.url.path == "/svc/shop/api/health" else httpx.Response(500)
+
+    with _sites(site):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="s", frontend_image=None, environment_name="shop")], poll_s=0)
+    assert next(health, "done") == "done"
+    assert [r.getMessage() for r in caplog.records].count(
+        "website 'shop' has no urn:agentenv:website/v1 ready on its card, so its readiness is read at its health path "
+        "/api/health, which is deprecated") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=_READY_CARD)
+        return httpx.Response(200, json={"ready": False, "problems": ["seeded"]})
+
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(seeded\)"):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
+            timeout_s=0, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_site_serving_a_page_at_its_cards_path_is_refused_at_once_for_breaking_the_contract():
+    """website/v1 reserves the card's path, so a 200 page there (a single-page app's index.html) is refused at once,
+    however long the deploy would wait and though its health path answers 200."""
+    asked = []
+
+    def site(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path == "/svc/shop/.well-known/agent-env.json":
+            return httpx.Response(200, text="<!doctype html><title>Shop</title>", headers={"content-type": "text/html"})
+        return httpx.Response(200)
+
+    with _sites(site), pytest.raises(env_gateway_provider.WebsiteContractError,
+                                     match=r"answers /\.well-known/agent-env\.json with text/html, not an env card"):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="s", frontend_image=None, environment_name="shop")],
+            timeout_s=300, poll_s=0)
+    assert asked == ["/svc/shop/.well-known/agent-env.json"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 503])
+async def test_a_site_whose_cards_path_answers_no_card_falls_back_to_its_health_path(status):
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/svc/shop/.well-known/agent-env.json":
+            return httpx.Response(status, text="<html>missing</html>", headers={"content-type": "text/html"})
+        return httpx.Response(200) if request.url.path == "/svc/shop/api/health" else httpx.Response(500)
+
+    with _sites(site):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="s", frontend_image=None, environment_name="shop")], poll_s=0)
