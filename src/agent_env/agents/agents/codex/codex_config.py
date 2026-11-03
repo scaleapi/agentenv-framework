@@ -94,6 +94,8 @@ def builtin_tools_overrides(builtin_tools: CodexTools | None) -> list[str]:
 # made from the installed CLI's own catalog each time, so it follows the pinned version.
 CATALOG_WITHOUT_APPLY_PATCH = "model_catalog_without_apply_patch.json"
 _CATALOG_TIMEOUT_S = 60
+# How much of `codex debug models`' stderr a failed catalog read keeps in its error.
+_CATALOG_STDERR_CHARS = 500
 
 
 def removes_apply_patch(builtin_tools: CodexTools | None) -> bool:
@@ -105,7 +107,7 @@ def removes_apply_patch(builtin_tools: CodexTools | None) -> bool:
     return builtin_tools.disable == "*" or "apply_patch" in builtin_tools.disable
 
 
-async def _catalog() -> dict[str, Any]:
+async def _catalog(timeout_s: float) -> dict[str, Any]:
     """The model catalog the CLI uses: the file config.toml's `model_catalog_json` names (relative to CODEX_HOME, as
     the CLI reads it), or else the one the installed CLI ships with, from `codex debug models --bundled`."""
     configured = _read().get("model_catalog_json")
@@ -114,22 +116,27 @@ async def _catalog() -> dict[str, Any]:
     process = await asyncio.create_subprocess_exec(
         "codex", "debug", "models", "--bundled", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), _CATALOG_TIMEOUT_S)
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        raise RuntimeError(f"codex debug models gave no catalog within {_CATALOG_TIMEOUT_S}s") from None
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
+    except (TimeoutError, asyncio.CancelledError) as e:
+        # A turn cancelled or out of time mid-read must not leave the child running.
+        if process.returncode is None:
+            process.kill()
+            await asyncio.shield(process.wait())
+        if isinstance(e, asyncio.CancelledError):
+            raise
+        raise RuntimeError(f"codex debug models gave no catalog within {timeout_s:.0f}s") from None
     if process.returncode != 0:
-        raise RuntimeError(f"codex debug models exited {process.returncode}: {stderr.decode(errors='replace')[-500:]}")
+        tail = stderr.decode(errors="replace")[-_CATALOG_STDERR_CHARS:]
+        raise RuntimeError(f"codex debug models exited {process.returncode}: {tail}")
     return json.loads(stdout)
 
 
-async def catalog_overrides(builtin_tools: CodexTools | None) -> list[str]:
+async def catalog_overrides(builtin_tools: CodexTools | None, timeout_s: float = _CATALOG_TIMEOUT_S) -> list[str]:
     """The `-c` override that points the CLI at a catalog copy without `apply_patch`, when the selection turns it off;
     none otherwise. Raises when the catalog can't be read, so a turn never gets the tool its selection turned off."""
     if not removes_apply_patch(builtin_tools):
         return []
-    catalog = await _catalog()
+    catalog = await _catalog(min(timeout_s, _CATALOG_TIMEOUT_S))
     for model in catalog["models"]:
         model["apply_patch_tool_type"] = None
     path = _config_path().with_name(CATALOG_WITHOUT_APPLY_PATCH)

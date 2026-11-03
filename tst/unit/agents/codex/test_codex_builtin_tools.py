@@ -189,6 +189,80 @@ def test_a_catalog_the_cli_cant_give_fails_the_selection(cli, tmp_path):
         _catalog_overrides({"disable": "*"})
 
 
+def _hanging_cli(tmp_path) -> Path:
+    """Turn the fixture's `codex` into one that records its pid, then never prints a catalog."""
+    pid_file = tmp_path / "codex-pid"
+    (tmp_path / "bin" / "codex").write_text(f"#!/bin/sh\necho $$ > {pid_file}\nexec sleep 60\n")
+    return pid_file
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_a_catalog_read_past_its_time_is_killed_and_fails_the_selection(cli, tmp_path):
+    """The read gets only the time it's given, and its child doesn't outlive it."""
+    pid_file = _hanging_cli(tmp_path)
+    tools = a2a_server.CodexConfig(builtin_tools={"disable": "*"}).builtin_tools
+
+    with pytest.raises(RuntimeError, match="no catalog within 1s"):
+        asyncio.run(codex_config.catalog_overrides(tools, timeout_s=1))
+    assert not _alive(int(pid_file.read_text()))
+
+
+def test_a_cancelled_catalog_read_kills_its_child(cli, tmp_path):
+    pid_file = _hanging_cli(tmp_path)
+    tools = a2a_server.CodexConfig(builtin_tools={"disable": "*"}).builtin_tools
+
+    async def cancel_mid_read():
+        task = asyncio.create_task(codex_config.catalog_overrides(tools))
+        while not pid_file.exists():
+            await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_mid_read())
+    assert not _alive(int(pid_file.read_text()))
+
+
+def test_the_catalog_read_counts_against_the_turns_time_limit(codex, cli, monkeypatch):
+    """The CLI gets what is left of `timeout_seconds` after the catalog read; without a read, all of it, as before."""
+    monkeypatch.setenv("A2A_PORT", "8000")
+    timeouts = []
+    real_catalog_overrides = codex_config.catalog_overrides
+
+    async def slow_catalog_overrides(builtin_tools, timeout_s):
+        overrides = await real_catalog_overrides(builtin_tools, timeout_s)
+        if overrides:
+            await asyncio.sleep(0.5)
+        return overrides
+
+    async def fake_run_codex(**kwargs):
+        timeouts.append(kwargs["timeout_s"])
+        return codex_bridge.CodexResult(response="ok", tool_call_count=0, session_id="t")
+
+    monkeypatch.setattr(codex_config, "catalog_overrides", slow_catalog_overrides)
+    monkeypatch.setattr(a2a_server, "run_codex", fake_run_codex)
+
+    async def exercise():
+        async with codex.app.router.lifespan_context(codex.app), codex.client() as client:
+            await client.post("/ext/agent-config", json={"timeout_seconds": 30})
+            await codex.send(client, "one")
+            await client.post("/ext/agent-config", json={"builtin_tools": {"disable": "*"}})
+            await codex.send(client, "two")
+
+    asyncio.run(exercise())
+
+    without_read, with_read = timeouts
+    assert without_read == 30
+    assert 29 < with_read <= 29.5
+
+
 @pytest.mark.parametrize("selection, match", [
     ({"only": ["shell"]}, "shell"),
     ({"disable": ["tool_search"]}, "tool_search"),
