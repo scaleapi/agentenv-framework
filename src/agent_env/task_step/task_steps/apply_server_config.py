@@ -9,14 +9,16 @@ at their advertised REST endpoint (e.g. ``/agentenv/ext/set_errors``).
 Config lives on the backing server, not on the gateway itself. Each server's card
 comes from the env card stored on the deployed record, whose extension endpoints the
 gateway has already rewritten to its ``/svc/mcp-{service}`` (or a website's ``/svc/{service}``)
-proxy; a record without a stored card reads it live there. The agent never sees the card or these endpoints;
-only this harness step invokes them.
+proxy; a record without a stored card reads it live there. A broadcast reaches each server
+the env card lists, by that server's own card and route, so a website sharing its name with
+an MCP server is reached too (``legacy_protocol.backing_servers``). The agent never sees the
+card or these endpoints; only this harness step invokes them.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import httpx
 from agentenv_protocol import client as protocol_v1
@@ -24,6 +26,9 @@ from agentenv_protocol import client as protocol_v1
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+
+if TYPE_CHECKING:
+    from agent_env.env.legacy_protocol import BackingServer
 
 logger = logging.getLogger(__name__)
 
@@ -131,51 +136,40 @@ class ApplyServerConfigStep(TaskStep):
             tolerate_unadvertised=data.get("tolerate_unadvertised", False),
         )
 
-    def _expand_directives(self, deployed) -> tuple[list[ConfigDirective], set[str], set[int]]:
-        """Expand any broadcast directive (service == ``*``) into one directive
-        per MCP server and website in the env, resolved from the env definition,
-        and return them with the names that are websites, whose cards a live read
-        finds at ``/svc/{name}``, and the positions of the directives a broadcast
-        made for a website. Those are skipped, as under ``tolerate_unadvertised``,
-        when the website has no card or doesn't advertise the URI, so a website
-        the task didn't name never fails it; a directive naming a website, and
-        every MCP server, stays strict. The env's child service names aren't otherwise
-        enumerable here (the deployed card list carries no roster), so we read
-        them from ``Env.get`` — matching how deploy_env / load_artifact resolve
-        the env. A website sharing its name with an MCP server is left to the MCP
-        server, as the stored env card can't tell the two apart. Non-broadcast
-        directives pass through untouched."""
+    async def _expand_directives(self, deployed) -> list[tuple[ConfigDirective, Optional[BackingServer], bool]]:
+        """Each directive with the server it targets and whether it is lenient: a broadcast (service ``*``) expanded
+        into one directive per MCP server and website the env card lists (``legacy_protocol.backing_servers``), each
+        targeting that server by its own card and route. A directive a broadcast made for a website is lenient: it is
+        skipped, as under ``tolerate_unadvertised``, when the website has no card or doesn't advertise the URI, so a
+        website the task didn't name never fails it. A named directive, and every MCP server, stays strict; a named one
+        targets the server of that name, the MCP server when a website shares it, as a MultiEnv's load does, or, without
+        a broadcast to list them, is looked up by name (None)."""
         if not any(d.service == self._BROADCAST for d in self.directives):
-            return self.directives, set(), set()
+            return [(d, None, False) for d in self.directives]
 
         from agent_env.env import legacy_protocol
-        from agent_env.env.env import Env
+        from agent_env.env.env import Env, gateway_url_of
 
-        env = Env.get(deployed.env_id, deployed.env_version)
-        # A single-server env (a bare MCPServerEnv) exposes `environment_name` and no
-        # `mcp_server_envs`; backing_servers falls back to it, as snapshot_env does,
-        # else a broadcast silently matches nothing on single-server envs.
-        servers = legacy_protocol.mcp_wins(legacy_protocol.backing_servers(env))
+        servers = await legacy_protocol.backing_servers(deployed, gateway_url_of(deployed), Env.get(deployed.env_id, deployed.env_version),
+                                                        timeout=self.timeout_seconds)
         # A broadcast that resolves to zero services would apply nothing while the
         # step reports success: the exact silent misconfig this step prevents. Fail
         # loud (tolerate_unadvertised governs advertisement, not missing servers).
         if not servers:
             raise ApplyServerConfigError(
                 f"apply_server_config: broadcast directive matched no MCP servers or websites "
-                f"in env {self.env_id!r} (env exposes neither mcp_server_envs, website_envs nor a "
-                f"environment_name); nothing to apply, likely a task authoring error"
+                f"in env {self.env_id!r} (its card lists no child envs, and its definition names neither "
+                f"mcp_server_envs, website_envs nor an environment_name); nothing to apply, likely a task authoring error"
             )
-        expanded: list[ConfigDirective] = []
-        lenient: set[int] = set()
+        expanded: list[tuple[ConfigDirective, Optional[BackingServer], bool]] = []
         for d in self.directives:
             if d.service != self._BROADCAST:
-                expanded.append(d)
+                named = [s for s in servers if s.environment_name == d.service]
+                expanded.append((d, next((s for s in named if s.mcp), named[0] if named else None), False))
                 continue
             for server in servers:
-                if not server.mcp:
-                    lenient.add(len(expanded))
-                expanded.append(ConfigDirective(service=server.environment_name, uri=d.uri, args=d.args))
-        return expanded, {server.environment_name for server in servers if not server.mcp}, lenient
+                expanded.append((ConfigDirective(service=server.environment_name, uri=d.uri, args=d.args), server, not server.mcp))
+        return expanded
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
@@ -195,7 +189,7 @@ class ApplyServerConfigStep(TaskStep):
         # network), so wrap it to keep the broadcast path's failure contract the
         # same ApplyServerConfigError as the per-directive HTTP calls below.
         try:
-            directives, websites, lenient = self._expand_directives(deployed)
+            directives = await self._expand_directives(deployed)
         except ApplyServerConfigError:
             raise
         except Exception as e:
@@ -210,16 +204,17 @@ class ApplyServerConfigStep(TaskStep):
         # multiple tools) against the same server. A None card marks a child env with no
         # card: a server predating env-card support, one whose card name differs, or one
         # whose card the deploy couldn't read.
-        cards: dict[str, tuple[str, Optional[dict]]] = {}
-        for position, directive in enumerate(directives):
-            tolerate = self.tolerate_unadvertised or position in lenient
+        cards: dict[Any, tuple[Optional[str], Optional[dict]]] = {}
+        for directive, server, lenient in directives:
+            tolerate = self.tolerate_unadvertised or lenient
+            key = directive.service if server is None else server
             try:
-                if directive.service not in cards:
-                    cards[directive.service] = await legacy_protocol.child_env_card(
-                        deployed, gateway_url_of(deployed), directive.service, timeout=self.timeout_seconds,
-                        mcp=directive.service not in websites,
-                    )
-                base_url, card = cards[directive.service]
+                if key not in cards:
+                    cards[key] = (await legacy_protocol.child_env_card(deployed, gateway_url_of(deployed), directive.service,
+                                                                       timeout=self.timeout_seconds)
+                                  if server is None else
+                                  await legacy_protocol.server_card(server, gateway_url_of(deployed), timeout=self.timeout_seconds))
+                base_url, card = cards[key]
                 if card is None:
                     if not tolerate:
                         raise ApplyServerConfigError(

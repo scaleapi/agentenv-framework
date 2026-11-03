@@ -190,6 +190,58 @@ def test_find_child_tolerates_missing_children():
     assert protocol_v1.find_child({"children_environments": None}, "slack") is None
 
 
+_SHARED_NAME = {"name": "gw", "children_environments": [
+    {"name": "mail", "url": "/svc/mcp-mail/agentenv", "capabilities": {"operations": ["data/get"], "extensions": [
+        {"uri": "urn:agentenv:clock/v1"}]}},
+    {"name": "mail", "url": "/svc/mail/agentenv", "capabilities": {"operations": []}},
+    {"name": "docs", "capabilities": {}},
+    "not a card",
+]}
+
+
+def test_children_are_each_nested_card_by_its_name_url_and_card():
+    found = protocol_v1.children(_SHARED_NAME)
+
+    assert [(c.name, c.url) for c in found] == [("mail", "/svc/mcp-mail/agentenv"), ("mail", "/svc/mail/agentenv"), ("docs", None)]
+    assert found[0].card is _SHARED_NAME["children_environments"][0]
+    assert [c.extensions for c in found] == [[{"uri": "urn:agentenv:clock/v1"}], [], []]
+    assert [c.operations for c in found] == [["data/get"], [], None]
+    assert [c.serves("data/get") for c in found] == [True, False, None]
+    assert found[0].find_extension("urn:agentenv:clock/v1") is not None and found[1].find_extension("urn:agentenv:clock/v1") is None
+    assert protocol_v1.children({"name": "leaf"}) == [] and protocol_v1.children({"children_environments": None}) == []
+
+
+def test_a_childs_base_url_is_its_url_without_the_rpc_path_against_the_composed_cards_address():
+    mcp, website, docs = protocol_v1.children(_SHARED_NAME)
+
+    assert mcp.base_url("https://env.example/") == "https://env.example/svc/mcp-mail"
+    assert website.base_url("https://env.example") == "https://env.example/svc/mail"
+    assert docs.base_url("https://env.example") == "https://env.example"
+    assert protocol_v1.ChildEnv("x", "https://x.example/agentenv", {}).base_url("https://env.example") == "https://x.example"
+
+
+def test_child_at_finds_a_child_by_its_url_or_data_plane_route_where_two_share_a_name():
+    assert protocol_v1.child_at(_SHARED_NAME, "/svc/mail").url == "/svc/mail/agentenv"
+    assert protocol_v1.child_at(_SHARED_NAME, "/svc/mcp-mail/").url == "/svc/mcp-mail/agentenv"
+    assert protocol_v1.child_at(_SHARED_NAME, "/svc/mail/agentenv").url == "/svc/mail/agentenv"
+    assert protocol_v1.child_at(_SHARED_NAME, "/svc/docs") is None
+    assert protocol_v1.child_at({"name": "leaf"}, "/svc/mail") is None
+
+
+def test_child_named_refuses_a_name_two_children_share():
+    assert protocol_v1.child_named(_SHARED_NAME, "docs").name == "docs"
+    assert protocol_v1.child_named(_SHARED_NAME, "gmail") is None
+    with pytest.raises(protocol_v1.AmbiguousChildError, match="2 child envs are named 'mail'"):
+        protocol_v1.child_named(_SHARED_NAME, "mail")
+    assert protocol_v1.find_child(_SHARED_NAME, "mail")["url"] == "/svc/mcp-mail/agentenv"
+
+
+def test_serves_is_what_a_card_declares_of_a_method_and_none_when_it_declares_no_operations():
+    assert protocol_v1.serves({"capabilities": {"operations": ["data/get"]}}, "data/get") is True
+    assert protocol_v1.serves({"capabilities": {"operations": ["data/add"]}}, "data/get") is False
+    assert protocol_v1.serves({"capabilities": {}}, "data/get") is None
+
+
 def test_find_extension_ignores_children():
     # set-errors/v1 is advertised only on the children, never at the top level
     assert protocol_v1.find_extension(_CARD_WITH_CHILDREN, "urn:agentenv:set-errors/v1") is None

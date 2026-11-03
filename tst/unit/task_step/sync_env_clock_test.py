@@ -1,11 +1,11 @@
 """Unit tests for SyncEnvClockTaskStep — round-trip + the per-server sync_time fan-out (mocked)."""
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
-from agent_env.env.legacy_protocol import BackingServer
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import sync_env_clock as mod
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep, resolve_virtual_time
@@ -95,7 +95,7 @@ async def test_sync_one_skips_or_raises_for_a_child_env_missing_from_the_stored_
 @pytest.mark.asyncio
 async def test_execute_syncs_each_child_env_through_the_stored_card(monkeypatch):
     sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
-    monkeypatch.setattr(SyncEnvClockTaskStep, "_backing_servers", lambda self, deployed: [BackingServer("email")])
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
     context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]}))])
 
     await _step().execute(context)
@@ -176,21 +176,64 @@ async def test_sync_one_reads_a_websites_card_live_at_its_own_gateway_path(monke
 
 
 @pytest.mark.asyncio
-async def test_execute_reads_a_website_sharing_an_mcp_servers_name_live(monkeypatch):
-    from types import SimpleNamespace
+async def test_execute_syncs_a_website_sharing_an_mcp_servers_name_at_its_own_route(monkeypatch):
+    """The card lists the two as children at distinct urls, so each is synced by its own card, with no card read."""
     from unittest.mock import patch
 
     sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
     env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="email")],
                           website_envs=[SimpleNamespace(environment_name="email")])
-    context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]}))])
+    context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT], "email": [_CLOCK_EXT]}))])
 
     with patch("agent_env.env.env.Env.get", return_value=env):
         await _step().execute(context)
 
     assert [(r.method, str(r.url)) for r in sent][2:] == [
-        ("POST", f"{_CARD}/svc/mcp-email/agentenv/ext/sync_time"), ("GET", "http://gw/svc/email/.well-known/agent-env.json"),
+        ("POST", f"{_CARD}/svc/mcp-email/agentenv/ext/sync_time"), ("POST", f"{_CARD}/svc/email/agentenv/ext/sync_time"),
     ]
+    record = context.metadata["clock_configurations"][0]
+    assert [(s["service"], s.get("website")) for s in record["synced"]] == [("email", None), ("email", True)]
+
+
+@pytest.mark.asyncio
+async def test_execute_without_a_card_url_syncs_the_servers_the_definition_names_read_live(monkeypatch):
+    """An older record kept no card URL, so its servers come from its env definition and each card is read live at
+    its gateway path."""
+    from unittest.mock import patch
+
+    import httpx
+
+    sent, real = [], httpx.AsyncClient
+    cards = {"/svc/mcp-email/.well-known/agent-env.json": {"name": "email", "capabilities": {"extensions": [_CLOCK_EXT]}},
+             "/svc/shop/.well-known/agent-env.json": {"name": "shop", "capabilities": {"extensions": []}}}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        if request.url.path == "/clock/state":
+            return httpx.Response(200, json={"env_get_time_url": CLOCK_URL})
+        return httpx.Response(200, json=cards.get(request.url.path, {}))
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    record = _cardless()
+
+    async def invoke(uri, method, params=None, **kw):
+        return {"env_get_time_url": CLOCK_URL} if method == "state" else {}
+
+    record.invoke = invoke
+    env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="email")],
+                          website_envs=[SimpleNamespace(environment_name="shop")])
+    context = TaskStepContext(deployed_envs=[record])
+
+    with patch("agent_env.env.env.Env.get", return_value=env):
+        await _step().execute(context)
+
+    assert [(r.method, str(r.url)) for r in sent] == [
+        ("GET", "http://gw/svc/mcp-email/.well-known/agent-env.json"), ("POST", "http://gw/svc/mcp-email/agentenv/ext/sync_time"),
+        ("GET", "http://gw/svc/shop/.well-known/agent-env.json"),
+    ]
+    cfg = context.metadata["clock_configurations"][0]
+    assert [s["service"] for s in cfg["synced"]] == ["email"]
+    assert [(s["service"], s["reason"]) for s in cfg["skipped"]] == [("shop", "not_advertised")]
 
 
 @pytest.mark.asyncio
@@ -317,7 +360,7 @@ def test_without_a_zone_virtual_time_is_passed_through_untouched():
 @pytest.mark.asyncio
 async def test_execute_arms_the_gateway_at_the_local_instant_and_tells_every_server_the_zone(monkeypatch):
     sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
-    monkeypatch.setattr(SyncEnvClockTaskStep, "_backing_servers", lambda self, deployed: [BackingServer("email")])
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
     context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_ZONE_EXT]}))])
 
     await _zoned().execute(context)
@@ -332,7 +375,7 @@ async def test_execute_arms_the_gateway_at_the_local_instant_and_tells_every_ser
 @pytest.mark.parametrize("tolerate", [True, False])
 async def test_a_server_that_cannot_take_the_zone_fails_the_step_before_any_sync_is_sent(monkeypatch, tolerate):
     sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
-    monkeypatch.setattr(SyncEnvClockTaskStep, "_backing_servers", lambda self, deployed: [BackingServer("email")])
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
     context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_OLD_EXT]}))])
 
     with pytest.raises(RuntimeError, match="takes no timezone"):
@@ -378,34 +421,19 @@ async def test_a_zoned_step_tells_a_website_that_takes_the_zone_and_fails_on_one
 
 @pytest.mark.asyncio
 async def test_a_website_sharing_an_mcp_servers_name_is_synced_with_the_envs_control_headers(monkeypatch):
-    """Its card is read live, with no record, and its sync_time still carries the env's control token."""
     import dataclasses
-    from types import SimpleNamespace
     from unittest.mock import patch
 
-    import httpx
-
-    sent, real = [], httpx.AsyncClient
-    website_card = {"name": "email", "url": "/agentenv", "capabilities": {"extensions": [_CLOCK_EXT]}}
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        sent.append(request)
-        if request.url.path.endswith("/clock/state"):
-            return httpx.Response(200, json={"env_get_time_url": CLOCK_URL})
-        if request.url.path == "/svc/email/.well-known/agent-env.json":
-            return httpx.Response(200, json=website_card)
-        return httpx.Response(200, json={})
-
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
     env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="email")],
                           website_envs=[SimpleNamespace(environment_name="email")])
-    record = dataclasses.replace(_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]})), control_token="ctl")
+    record = dataclasses.replace(_carded(await _composed_card({"mcp-email": [_CLOCK_EXT], "email": [_CLOCK_EXT]})), control_token="ctl")
     context = TaskStepContext(deployed_envs=[record])
 
     with patch("agent_env.env.env.Env.get", return_value=env):
         await _step().execute(context)
 
-    website_sync = [r for r in sent if str(r.url) == "http://gw/svc/email/agentenv/ext/sync_time"]
+    website_sync = [r for r in sent if str(r.url) == f"{_CARD}/svc/email/agentenv/ext/sync_time"]
     assert len(website_sync) == 1
     assert {k: website_sync[0].headers.get(k) for k in record.control_headers} == record.control_headers
     assert [s["service"] for s in context.metadata["clock_configurations"][0]["synced"]] == ["email", "email"]
