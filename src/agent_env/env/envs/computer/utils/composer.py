@@ -152,12 +152,15 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
             if status not in BUILT or (status == "unverified" and boot.native_links(provider, arch, form))]
 
 
-def unstarted(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[tuple[str, str]]:
+def unstarted(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None, *,
+              building: bool = False) -> list[tuple[str, str]]:
     """The pairs a deploy on ``sandbox_provider`` boots, of ``form`` when it names one (``booted_forms``), that no
-    compose has started, as a run that composed for another sandbox leaves them."""
+    compose has started, as a run that composed for another sandbox leaves them; and with ``building``, those a compose
+    is building too."""
     composed = env.metadata.get("composed", {})
     return [(name, arch) for name in booted_forms(env, sandbox_provider, form)
-            for arch in gate.arches(env.computer, env.driver, env.composed_apps()) if arch not in composed.get(name, {})]
+            for arch in gate.arches(env.computer, env.driver, env.composed_apps())
+            if arch not in composed.get(name, {}) or (building and composed[name][arch].get("status") == "building")]
 
 
 def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[str]:

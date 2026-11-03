@@ -8,6 +8,7 @@ a VM, its settings in its seed, and a reset boots it afresh. Docker and the regi
 import asyncio
 import base64
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -292,6 +293,37 @@ async def test_deploys_of_a_disk_no_compose_started_compose_it_once_first_reusin
                   if build["context"] != "tools") == ["base-disk-amd64", "base-disk-arm64", "disk-amd64", "disk-arm64"]
     assert stored.computer_artifact().forms.disk is not None and len(vms.created) == 3
     assert all(record.metadata["computer"]["image"] == disks["arm64"]["image"] for record in deployed)
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_that_finds_the_disk_building_for_another_deploy_waits_for_it_and_boots_it(disk_base, driver,
+                                                                                                 docker, vms,
+                                                                                                 monkeypatch):
+    env = _put(disk_base, driver, composing=Composing(booted_only=True))
+    started, loaded = threading.Event(), threading.Event()
+    record_started, built_disk = composer.Record.started, composer._built_disk
+
+    def recorded(self, pairs):
+        record_started(self, pairs)
+        started.set()
+
+    def held(*args):
+        loaded.wait(10)
+        return built_disk(*args)
+
+    monkeypatch.setattr(composer.Record, "started", recorded)
+    monkeypatch.setattr(composer, "_built_disk", held)
+
+    async def later():
+        await asyncio.to_thread(started.wait, 10)
+        second = Env.get(env.id)
+        loaded.set()
+        assert second.metadata["composed"]["disk"]["arm64"]["status"] == "building"
+        return await second.deploy(env_params={"form": "disk"})
+
+    first, second = await asyncio.gather(Env.get(env.id).deploy(env_params={"form": "disk"}), later())
+
+    assert first.metadata["computer"]["form"] == second.metadata["computer"]["form"] == "disk" and len(vms.created) == 2
 
 
 @pytest.mark.asyncio

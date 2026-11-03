@@ -177,8 +177,9 @@ class ComputerEnv(Env):
     async def compose_unstarted(self, sandbox_provider: SandboxProvider, form: Optional[str] = None) -> None:
         """Compose first the pairs a deploy on ``sandbox_provider`` boots, of ``form`` when it names one, that no compose
         has started (``composer.unstarted``), as a run that composed for another sandbox leaves them; deploys of the env
-        at once, in this process or another, compose them once, each after the one composing."""
-        if not composer.unstarted(self, sandbox_provider, form):
+        at once, in this process or another, compose them once, each after the one composing, a deploy that finds them
+        building included."""
+        if not composer.unstarted(self, sandbox_provider, form, building=True):
             return
         async with awaiting_lock(f"computer-compose:{self.stored_id}:{self.version}"):
             self.metadata = (await asyncio.to_thread(Env.get, self.stored_id, self.version)).metadata
