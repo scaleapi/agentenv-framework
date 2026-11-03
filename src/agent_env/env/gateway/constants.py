@@ -79,6 +79,9 @@ EXT_STEP_URI = "urn:agentenv:step/v1"
 EXT_STATE_URI = "urn:agentenv:state/v1"
 EXT_CHANGES_URI = "urn:agentenv:changes/v1"
 EXT_NOTIFICATIONS_URI = "urn:agentenv:notifications/v1"
+# A site's server card: its "ready" operation says whether the site is usable, as computer-app/v1's does of an app.
+EXT_WEBSITE_URI = "urn:agentenv:website/v1"
+WEBSITE_READY_OP = "ready"
 
 # Rows per GET /changes page: the default, and the most a client may ask for.
 CHANGES_PAGE_DEFAULT = 1000
