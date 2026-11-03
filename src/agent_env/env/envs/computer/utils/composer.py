@@ -70,7 +70,7 @@ KEY_LABEL = "dev.agentenv.computer-key"
 # What a build installed and whether it was emulated, kept on its image for an env that reuses it.
 INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
 #: How often a compose says a pair is still at a stage, which can take most of an hour under emulation.
-_HEARTBEAT_S = 600
+HEARTBEAT_S = 600
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
@@ -688,7 +688,7 @@ def _digest(folder: Path) -> str:
 
 class _Progress:
     """What a compose reports as it goes, to ``on_progress`` and the log: a line as each pair reaches a stage, one each
-    ``_HEARTBEAT_S`` a stage goes on, and how each pair ended, with the time since the compose began."""
+    ``HEARTBEAT_S`` a stage goes on, and how each pair ended, with the time since the compose began."""
 
     def __init__(self, env: ComputerEnv, on_progress: Callable[[str], None] | None):
         self.env, self.on_progress, self.lock = env, on_progress, threading.Lock()
@@ -723,20 +723,20 @@ class _Progress:
         status = f"failed at {result['stage']}" if result["status"] == "failed" else result["status"]
         reason = f": {result['reason']}" if result.get("reason") else ""
         self.say(f"{pair}: {'reused, ' if result.get('reused') else ''}{status}{reason} "
-                 f"({_took(time.monotonic() - self.began)})", failed=result["status"] == "failed")
+                 f"({took(time.monotonic() - self.began)})", failed=result["status"] == "failed")
 
     def _beat(self) -> None:
-        while not self.stopped.wait(_HEARTBEAT_S / 10):
+        while not self.stopped.wait(HEARTBEAT_S / 10):
             now = time.monotonic()
             with self.lock:
                 due = [(pair, stage, since) for pair, (stage, since, said) in self.stages.items()
-                       if now - said >= _HEARTBEAT_S]
+                       if now - said >= HEARTBEAT_S]
                 for pair, stage, since in due:
                     self.stages[pair] = (stage, since, now)
             for pair, stage, since in due:
-                self.say(f"{pair}: still {stage} ({_took(now - since)})")
+                self.say(f"{pair}: still {stage} ({took(now - since)})")
 
 
-def _took(seconds: float) -> str:
+def took(seconds: float) -> str:
     minutes, seconds = divmod(round(seconds), 60)
     return f"{minutes} min {seconds} s" if minutes else f"{seconds} s"

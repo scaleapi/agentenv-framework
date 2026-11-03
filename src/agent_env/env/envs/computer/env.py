@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import posixpath
+from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import METHOD_ADD, RPC_PATH
@@ -33,6 +35,7 @@ from agent_env.env.store import get_env_store
 from agent_env.store.ids import is_local_id
 from agent_env.store.local_state import awaiting_lock
 from agent_env.store.routing import in_local_run
+from agent_env.task.progress import current_progress
 from agent_env.providers.env_providers.env_computer_provider import end_recordings
 from agent_env.utils.paths import validate_relative_filename
 
@@ -181,15 +184,33 @@ class ComputerEnv(Env):
         has started (``composer.unstarted``), as a run that composed for another sandbox leaves them; deploys of the env
         at once, in this process or another, compose them once, each after the one composing, a deploy that finds them
         building included. A local run composes none for an env the configured stores hold: its record is a write the
-        run's fence refuses, so the deploy refuses for want of a ready build instead."""
+        run's fence refuses, so the deploy refuses for want of a ready build instead. What it does, and what a deploy
+        waiting for another says it waits for, goes to the log and, in a run, to the run's progress."""
         if in_local_run() and not is_local_id(self.stored_id):
             return
         if not composer.unstarted(self, sandbox_provider, form, building=True):
             return
-        async with awaiting_lock(f"computer-compose:{self.stored_id}:{self.version}"):
+        say, progress = _telling(self.id, current_progress())
+        awaited: dict[tuple[str, str], str | None] = {}
+
+        async def waiting(seconds: float) -> None:
+            self.metadata = (await asyncio.to_thread(Env.get, self.stored_id, self.version)).metadata
+            composed = self.metadata.get("composed", {})
+            awaited.update({(name, arch): composed[name][arch].get("started_at") for name, arch in composer.unstarted(
+                self, sandbox_provider, form, building=True) if arch in composed.get(name, {})})
+            say(_waiting(awaited, seconds))
+
+        async with awaiting_lock(f"computer-compose:{self.stored_id}:{self.version}", waiting, composer.HEARTBEAT_S):
             self.metadata = (await asyncio.to_thread(Env.get, self.stored_id, self.version)).metadata
             if pairs := composer.unstarted(self, sandbox_provider, form):
-                await asyncio.to_thread(composer.compose, self, pairs, Composing(sandbox_provider))
+                them = "it" if len(pairs) == 1 else "them"
+                say(f"composing {_pairs(pairs)} before this deploy (no compose built {them} for "
+                    f"{' or '.join(type(link).__name__ for link in sandbox_provider.links)} yet); later deploys reuse {them}")
+                await asyncio.to_thread(composer.compose, self, pairs, Composing(sandbox_provider, on_progress=progress))
+            elif awaited:
+                composed = self.metadata["composed"]
+                say("reusing what another deploy composed: " + ", ".join(
+                    f"{name}/{arch} {composed[name][arch]['status']}" for name, arch in awaited))
 
     def deployable_builds(self, form: Optional[str] = None) -> list[tuple[str, str, dict]]:
         """Each build a deploy may boot, as (form, arch, record), in the base's order of forms and of arches; only
@@ -382,3 +403,29 @@ def _listed_apps(refs: list, ctx: AuthoringContext) -> tuple[list[ComputerAppEnv
 
 def _not_an_app(env: Env) -> str | None:
     return f"{env.id} is a {env.type} env, not a {APP_TYPE} env" if env.type != APP_TYPE else None
+
+
+def _telling(env_id: str, progress: Optional[Callable[[str], None]]) -> tuple[
+        Callable[[str], None], Optional[Callable[[str], None]]]:
+    """What a deploy that composes says, to the log and the run's ``progress`` when there's one, after the env's id;
+    and the progress alone, for the compose, which logs its own lines."""
+    told = None if progress is None else (lambda line: progress(f"{env_id}: {line}"))
+
+    def say(line: str) -> None:
+        logger.info(f"{env_id}: {line}")
+        if told is not None:
+            told(line)
+
+    return say, told
+
+
+def _pairs(pairs: list[tuple[str, str]]) -> str:
+    return ", ".join(f"{name}/{arch}" for name, arch in pairs)
+
+
+def _waiting(awaited: dict[tuple[str, str], str | None], seconds: float) -> str:
+    """What a deploy waiting for another's compose of ``awaited``, by when each started, says after ``seconds``."""
+    since = min((at for at in awaited.values() if at), default=None)
+    building = f"building since {datetime.fromisoformat(since).strftime('%H:%M')} UTC" if since else "building"
+    so_far = f", {composer.took(seconds)} so far" if seconds >= 1 else ""
+    return f"waiting for another deploy composing {_pairs(list(awaited)) or 'it'} ({building}{so_far})"

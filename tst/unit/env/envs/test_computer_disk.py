@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -27,7 +28,10 @@ from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
+from agent_env.task.progress import run_progress
+from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.unit.env.envs._computer import DISK_FORM, _base, _put, disk_layer
 from tst.unit.env.envs.test_computer_env import DRIVER_CARD
@@ -317,8 +321,9 @@ async def test_a_local_run_refuses_a_registered_envs_form_no_compose_started_rat
 async def test_a_deploy_that_finds_the_disk_building_for_another_deploy_waits_for_it_and_boots_it(disk_base, driver,
                                                                                                  docker, vms,
                                                                                                  monkeypatch):
+    """Saying what it waits for, from when, and then that it reuses what the other built."""
     env = _put(disk_base, driver, composing=Composing(booted_only=True))
-    started, loaded = threading.Event(), threading.Event()
+    started, waited, said = threading.Event(), threading.Event(), []
     record_started, built_disk = composer.Record.started, composer._built_disk
 
     def recorded(self, pairs):
@@ -326,8 +331,12 @@ async def test_a_deploy_that_finds_the_disk_building_for_another_deploy_waits_fo
         started.set()
 
     def held(*args):
-        loaded.wait(10)
+        waited.wait(10)
         return built_disk(*args)
+
+    def told(line):
+        said.append(line)
+        waited.set()
 
     monkeypatch.setattr(composer.Record, "started", recorded)
     monkeypatch.setattr(composer, "_built_disk", held)
@@ -335,13 +344,36 @@ async def test_a_deploy_that_finds_the_disk_building_for_another_deploy_waits_fo
     async def later():
         await asyncio.to_thread(started.wait, 10)
         second = Env.get(env.id)
-        loaded.set()
         assert second.metadata["composed"]["disk"]["arm64"]["status"] == "building"
-        return await second.deploy(env_params={"form": "disk"})
+        with run_progress(told):
+            return await second.deploy(env_params={"form": "disk"})
 
     first, second = await asyncio.gather(Env.get(env.id).deploy(env_params={"form": "disk"}), later())
 
     assert first.metadata["computer"]["form"] == second.metadata["computer"]["form"] == "disk" and len(vms.created) == 2
+    since = datetime.fromisoformat(Env.get(env.id).metadata["composed"]["disk"]["arm64"]["started_at"]).strftime("%H:%M")
+    assert said == [f"{env.id}: waiting for another deploy composing disk/amd64, disk/arm64 (building since {since} UTC)",
+                    f"{env.id}: reusing what another deploy composed: disk/amd64 unverified, disk/arm64 ready"]
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_that_composes_first_tells_the_run_why_and_each_stage_as_it_goes(disk_base, driver, docker,
+                                                                                       vms):
+    """Through the task's scheduling and the threads the compose runs in, to the run's progress."""
+    env = _put(disk_base, driver, composing=Composing(booted_only=True))
+    said = []
+    task = Task(id="@local/~/kit/t", version=None, steps=[
+        DeployEnvTaskStep(id="env", version=None, env_id=env.id, env_params={"form": "disk"})])
+
+    with run_progress(said.append):
+        context = await task.run(context=TaskStepContext())
+
+    assert context.deployed_envs[0].metadata["computer"]["form"] == "disk"
+    assert said[:2] == [f"{env.id}: composing disk/amd64, disk/arm64 before this deploy (no compose built them for "
+                        "LocalSandboxProvider yet); later deploys reuse them",
+                        f"{env.id}: composing disk/amd64, disk/arm64 on LocalSandboxProvider"]
+    assert any(line.startswith(f"{env.id}: disk/arm64: ready (") for line in said)
+    assert any(line.startswith(f"{env.id}: disk/amd64: making the disk") for line in said)
 
 
 @pytest.mark.asyncio

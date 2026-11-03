@@ -23,7 +23,9 @@ KVM probes it. A deploy boots it with `env_params = { form = "disk" }`.
 A put, `env build` and the release compose every form; a run composes only the forms its sandbox's deploys boot: on each
 link of a chain, the first form it boots natively, so local Docker composes containers, and a sandbox that boots only
 disks composes disks, with the containers they're made from. A deploy that boots a form no compose has started, a disk
-named by `env_params` included, composes it first, reusing what's built, as every build is reused by its key.
+named by `env_params` included, composes it first, reusing what's built, as every build is reused by its key. In
+`agent-env run` it says why and each stage as it goes, and a deploy waiting for another's compose says what it
+waits for and since when.
 
 Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAME>`, read as it starts:
 

@@ -34,7 +34,7 @@ from tst.unit.env.envs._computer import _base, _put, FakeVm, FakeVmProvider, sav
 def test_a_stage_that_goes_on_is_said_to_go_on_and_a_failed_pair_says_why(base, driver, docker, monkeypatch):
     docker.fail["linux/amd64"] = "#7 ERROR: pip install failed"
     build = docker.build_image
-    monkeypatch.setattr(composer, "_HEARTBEAT_S", 0.1)
+    monkeypatch.setattr(composer, "HEARTBEAT_S", 0.1)
     monkeypatch.setattr(builder, "build_image", lambda *args, **kwargs: (time.sleep(0.5), build(*args, **kwargs))[1])
     told = []
 

@@ -33,6 +33,9 @@ def test_the_desktops_disk_is_composed_by_the_first_deploy_that_boots_it_then_pr
     ran = CliRunner().invoke(cli, ["run", str(BUNDLE), "--task", "probe"])
 
     assert ran.exit_code == 0, ran.output
+    assert f"[tasks/probe.json] {DESKTOP}: composing disk/amd64, disk/arm64 before this deploy (no compose built them" in (
+        ran.output)
+    assert f"{DESKTOP}: disk/{arch}: making the disk" in ran.output and f"{DESKTOP}: disk/{arch}: ready (" in ran.output
     context = run_context(ran.output)
     verifications = context["metadata"]["verifications"]
     assert all(result["result"] for step in ("probe", "again") for result in verifications[step]["results"])

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
@@ -72,20 +73,28 @@ def holding_locks(ids: Iterable[str], on_wait: Callable[[], None] | None = None)
 
 
 @asynccontextmanager
-async def awaiting_lock(id: str) -> AsyncIterator[None]:
+async def awaiting_lock(id: str, waiting: Callable[[float], Awaitable[None]] | None = None,
+                        every_s: float | None = None) -> AsyncIterator[None]:
     """``holding_locks`` for one id, waited for on the event loop: tried again every ``_LOCK_POLL_S`` while another
-    holder has it, so no thread is held waiting, which the holder may need to finish and release it."""
+    holder has it, so no thread is held waiting, which the holder may need to finish and release it. ``waiting`` is
+    awaited with the seconds waited so far once it finds the lock held, and again every ``every_s`` until it's free."""
     if fcntl is None:
         yield
         return
     ensure_state_dir(state_root() / "locks")
     fd = os.open(_lock_path(id), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
+        began = said = None
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
+                now = time.monotonic()
+                began = began if began is not None else now
+                if waiting is not None and (said is None or (every_s is not None and now - said >= every_s)):
+                    said = now
+                    await waiting(now - began)
                 await asyncio.sleep(_LOCK_POLL_S)
         yield
     finally:
