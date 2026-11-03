@@ -2,7 +2,7 @@
 # launch: boot /disk/disk.img, a Linux computer's disk form, under QEMU until it powers off, on a copy-on-write overlay
 # so the disk stays as it is: with KVM when /dev/kvm is here and the disk is this machine's arch, else with TCG, from
 # UEFI firmware. The guest's console is this container's output.
-#   VM_ENV_<NAME>  the computer's environment, which goes in its NoCloud seed (CIDATA; see seed) as NAME
+#   VM_ENV_<NAME>  the computer's variable NAME, its value base64'd, for its NoCloud seed (CIDATA; see seed)
 #   VM_PORTS       guest TCP ports, each forwarded from the same port here
 #   VM_ARCH        the disk's arch, amd64 or arm64; this machine's by default
 #   VM_CPUS, VM_MEMORY_MB   its size: 2 and 4096 by default

@@ -3,6 +3,7 @@ installed, else built here from its folder) with the disk copied in, as an image
 run with /dev/kvm."""
 
 import asyncio
+import base64
 import hashlib
 import math
 import os
@@ -15,7 +16,7 @@ from agent_env.providers.sandbox_providers.host_images import host_platform, pre
 from agent_env.utils.docker.build import build_image
 
 KVM = "/dev/kvm"
-#: How the launcher takes the computer's environment, each variable under this prefix (see its launch script).
+#: How the launcher takes the computer's environment, each variable under this prefix, base64'd (see its launch script).
 ENV_PREFIX = "VM_ENV_"
 
 
@@ -34,9 +35,11 @@ async def machine_image(disk: str) -> str:
 
 
 def launcher_args(ports: list[int], env: dict[str, str], cpu: float, memory: int) -> list[str]:
-    """The ``docker run`` arguments that size the launcher's VM, forward ``ports`` and hand it ``env``."""
+    """The ``docker run`` arguments that size the launcher's VM, forward ``ports`` and hand it ``env``, each value
+    base64'd, so one of several lines reaches the computer whole."""
     variables = {"VM_PORTS": " ".join(map(str, ports)), "VM_CPUS": str(max(1, math.ceil(cpu))),
-                 "VM_MEMORY_MB": str(memory), **{f"{ENV_PREFIX}{name}": value for name, value in env.items()}}
+                 "VM_MEMORY_MB": str(memory),
+                 **{f"{ENV_PREFIX}{name}": base64.b64encode(value.encode()).decode() for name, value in env.items()}}
     return ["--device", KVM, *(arg for name, value in variables.items() for arg in ("-e", f"{name}={value}"))]
 
 

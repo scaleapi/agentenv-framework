@@ -114,36 +114,66 @@ def test_the_platform_check_starts_the_base_or_the_image_the_shipped_bases_build
 
 def test_a_resolve_copies_its_inputs_into_the_resolvers_container_and_its_outputs_out_with_no_bind_mount(
         tmp_path, monkeypatch):
-    work = tmp_path / "work"
-    (work / builder.CONTEXT / "driver").mkdir(parents=True)
-    (work / builder.CONTEXT / "driver" / "requirements.txt").write_text("mss\n")
-    ran = []
+    ran, timeouts = [], []
 
     def docker(command, **kwargs):
         ran.append(command)
-        if command[1] == "create":
-            return subprocess.CompletedProcess(command, 0, "c1\n", "")
-        if command[1] == "cp" and command[2] == "c1:/out/.":
+        timeouts.append(kwargs.get("timeout"))
+        if command[1] == "cp" and command[3] == str(tmp_path / "work" / builder.RESOLVED / "out"):
             (Path(command[3]) / "result.json").write_text(json.dumps({"apt": [], "wheels": {"driver": []}}))
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(builder.subprocess, "run", docker)
-    monkeypatch.setattr(builder, "docker_login", lambda auth: None)
-    local = builder.LocalBuilder("LocalSandboxProvider", work, SimpleNamespace(
-        image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/arm64")
+    work, local = _resolving(tmp_path, monkeypatch, docker)
 
     result = local.resolve({"apt": [], "python": []}, "base@sha256:" + "b" * 64, "amd64", 60)
 
-    out = str(work / builder.RESOLVED / "out")
-    assert result == {"apt": [], "wheels": {"driver": []}}
+    out, container = str(work / builder.RESOLVED / "out"), ran[0][3]
+    assert result == {"apt": [], "wheels": {"driver": []}} and container.startswith("agentenv-resolve-")
     assert ran == [
-        ["docker", "create", "--platform", "linux/amd64", "--user", "root", "--entrypoint", "python3",
-         "base@sha256:" + "b" * 64, "/out/resolve.py", "/out/request.json", "/out"],
-        ["docker", "cp", f"{work / builder.CONTEXT}/.", "c1:/ctx"], ["docker", "cp", f"{out}/.", "c1:/out"],
-        ["docker", "start", "--attach", "c1"], ["docker", "cp", "c1:/out/.", out], ["docker", "rm", "--force", "c1"]]
+        ["docker", "create", "--name", container, "--platform", "linux/amd64", "--user", "root", "--entrypoint",
+         "python3", "base@sha256:" + "b" * 64, "/out/resolve.py", "/out/request.json", "/out"],
+        ["docker", "cp", f"{work / builder.CONTEXT}/.", f"{container}:/ctx"],
+        ["docker", "cp", f"{out}/.", f"{container}:/out"], ["docker", "start", "--attach", container],
+        ["docker", "cp", f"{container}:/out/.", out], ["docker", "rm", "--force", container]]
+    assert all(0 < timeout <= 60 for timeout in timeouts[:-1]) and timeouts == sorted(timeouts[:-1], reverse=True) + [None]
     assert not [arg for command in ran for arg in command if arg in ("-v", "--volume", "--mount")]
     assert json.loads((work / builder.RESOLVED / "out" / "request.json").read_text())["owner"] == [os.getuid(),
                                                                                                    os.getgid()]
+
+
+@pytest.mark.parametrize("stalls", ["create", "start"])
+def test_one_deadline_bounds_a_resolve_from_its_containers_pull_to_its_output_and_its_container_goes(
+        tmp_path, monkeypatch, stalls):
+    """A pull that stalls, as a registry can, ends at the resolve's deadline as one that runs too long does."""
+    now, ran = [0.0], []
+
+    def docker(command, **kwargs):
+        ran.append(command)
+        if command[1] == stalls:
+            now[0] += kwargs["timeout"]
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="Pulling from acme/base")
+        now[0] += 1
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(builder.time, "monotonic", lambda: now[0])
+    _, local = _resolving(tmp_path, monkeypatch, docker)
+
+    with pytest.raises(builder.ResolveError, match="resolving took over 60 s") as failed:
+        local.resolve({"apt": [], "python": []}, "base", "amd64", 60)
+
+    assert now[0] == 60 and ran[-1] == ["docker", "rm", "--force", ran[0][3]]
+    assert failed.value.log == "Pulling from acme/base"
+
+
+def _resolving(tmp_path, monkeypatch, docker):
+    """A builder of this machine's Docker in ``tmp_path``, its build context a driver's, ``docker`` its subprocess.run."""
+    work = tmp_path / "work"
+    (work / builder.CONTEXT / "driver").mkdir(parents=True)
+    (work / builder.CONTEXT / "driver" / "requirements.txt").write_text("mss\n")
+    monkeypatch.setattr(builder.subprocess, "run", docker)
+    monkeypatch.setattr(builder, "docker_login", lambda auth: None)
+    return work, builder.LocalBuilder("LocalSandboxProvider", work, SimpleNamespace(
+        image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1"), "linux/arm64")
 
 
 def test_the_packages_a_build_installed_are_read_from_its_image_without_running_it(monkeypatch):

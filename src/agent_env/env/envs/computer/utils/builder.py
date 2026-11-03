@@ -17,6 +17,7 @@ import shlex
 import shutil
 import subprocess
 import tarfile
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -284,19 +285,19 @@ class LocalBuilder(Builder):
         out.mkdir(parents=True)
         (out / "request.json").write_text(json.dumps({**request, "owner": [os.getuid(), os.getgid()]}))
         shutil.copy(RESOLVER, out / "resolve.py")
-        container = _docker("create", "--platform", f"linux/{arch}", "--user", "root", "--entrypoint", "python3", source,
-                            "/out/resolve.py", "/out/request.json", "/out").strip()
+        container, deadline = f"agentenv-resolve-{uuid.uuid4().hex[:12]}", time.monotonic() + timeout
         try:
-            _docker("cp", f"{self.work / CONTEXT}/.", f"{container}:/ctx")
-            _docker("cp", f"{out}/.", f"{container}:/out")
-            try:
-                ran = subprocess.run(["docker", "start", "--attach", container], capture_output=True, text=True,
-                                     timeout=timeout)
-            except subprocess.TimeoutExpired as e:
-                raise ResolveError(f"resolving took over {timeout} s", str(e.stdout or "")) from None
+            _docker("create", "--name", container, "--platform", f"linux/{arch}", "--user", "root", "--entrypoint",
+                    "python3", source, "/out/resolve.py", "/out/request.json", "/out", deadline=deadline)
+            _docker("cp", f"{self.work / CONTEXT}/.", f"{container}:/ctx", deadline=deadline)
+            _docker("cp", f"{out}/.", f"{container}:/out", deadline=deadline)
+            ran = subprocess.run(["docker", "start", "--attach", container], capture_output=True, text=True,
+                                 timeout=max(deadline - time.monotonic(), 0))
             if ran.returncode != 0:
                 raise ResolveError("resolving the packages failed", ran.stdout + ran.stderr)
-            _docker("cp", f"{container}:/out/.", str(out))
+            _docker("cp", f"{container}:/out/.", str(out), deadline=deadline)
+        except subprocess.TimeoutExpired as e:
+            raise ResolveError(f"resolving took over {timeout} s", str(e.stdout or "")) from None
         finally:
             subprocess.run(["docker", "rm", "--force", container], capture_output=True)
         return json.loads((out / "result.json").read_text())
@@ -590,9 +591,10 @@ def _packages(listed: bytes) -> dict[str, str]:
     return {package["name"]: package["version"] for package in json.loads(listed)}
 
 
-def _docker(*args: str) -> str:
-    """What ``docker`` printed for ``args``; a failure raises, with what it said."""
-    ran = subprocess.run(["docker", *args], capture_output=True, text=True)
+def _docker(*args: str, deadline: float) -> str:
+    """What ``docker`` printed for ``args``, by the ``time.monotonic()`` ``deadline``; a failure raises, with what it
+    said, and running past the deadline raises TimeoutExpired."""
+    ran = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=max(deadline - time.monotonic(), 0))
     if ran.returncode != 0:
         raise RuntimeError(f"docker {args[0]} failed: {ran.stderr.strip()}")
     return ran.stdout

@@ -45,15 +45,19 @@ def test_image_env_writes_an_images_start_a_line_a_value_root_and_slash_when_it_
     assert _decoded(plain) == [("argv", "sh"), ("user", "root"), ("workdir", "/")]
 
 
-def test_the_seed_holds_each_vm_env_variable_by_its_name_and_nothing_else(tmp_path):
-    environment = {"PATH": os.environ["PATH"], "VM_ENV_AGENTENV_SETTING_RESOLUTION": "1280x800",
-                   "VM_ENV_AGENTENV_CONTROL_TOKEN": TRICKY, "VM_ENV_EMPTY": "", "VM_PORTS": "18765", "HOME": "/root"}
+def test_the_seed_holds_each_variable_the_launcher_is_handed_by_its_name_whatever_its_value_holds(tmp_path):
+    """A value of several lines, a certificate's say, reaches it whole, and one holding a line that looks like another
+    variable makes none."""
+    certificate = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+    forged = "first line\nVM_ENV_FAKE=1"
 
-    subprocess.run(["sh", str(DISK / "launcher" / "seed"), str(tmp_path)], env=environment, check=True)
+    _seed(tmp_path, {"AGENTENV_SETTING_RESOLUTION": "1280x800", "AGENTENV_CONTROL_TOKEN": TRICKY, "EMPTY": "",
+                     "AGENTENV_SETTING_CA": certificate, "AGENTENV_SETTING_NOTE": forged})
 
     user_data, meta_data = (tmp_path / "user-data").read_text(), (tmp_path / "meta-data").read_text()
     assert user_data.splitlines()[0] == "#agentenv-environment"
-    assert _decoded(user_data) == [("AGENTENV_CONTROL_TOKEN", TRICKY), ("AGENTENV_SETTING_RESOLUTION", "1280x800"),
+    assert _decoded(user_data) == [("AGENTENV_CONTROL_TOKEN", TRICKY), ("AGENTENV_SETTING_CA", certificate),
+                                   ("AGENTENV_SETTING_NOTE", forged), ("AGENTENV_SETTING_RESOLUTION", "1280x800"),
                                    ("EMPTY", "")]
     assert meta_data.endswith("\nlocal-hostname: computer\n") and meta_data.startswith("instance-id: ")
 
@@ -66,8 +70,7 @@ def test_the_inits_decoder_keeps_every_byte_of_a_start_and_a_seed_trailing_newli
     config.write_text(json.dumps({"Cmd": values, "User": "user\n"}))
     start = subprocess.run(["python3", str(DISK / "tools" / "image-env"), str(config)], capture_output=True, text=True,
                            check=True).stdout
-    subprocess.run(["sh", str(DISK / "launcher" / "seed"), str(tmp_path)], check=True, env={
-        "PATH": os.environ["PATH"], **{f"VM_ENV_V{i}": value for i, value in enumerate(values)}})
+    _seed(tmp_path, {f"V{i}": value for i, value in enumerate([*values, "a\nVM_ENV_FAKE=1\n"])})
     seed = (tmp_path / "user-data").read_text()
 
     def decoded(text: str) -> list[str]:
@@ -75,14 +78,22 @@ def test_the_inits_decoder_keeps_every_byte_of_a_start_and_a_seed_trailing_newli
                                           for line in text.splitlines() if line and not line.startswith("#"))
         return subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=True).stdout.split("\0")[:-1]
 
-    assert decoded(start) == [*values, "user\n", "/"] and decoded(seed) == values
+    assert decoded(start) == [*values, "user\n", "/"] and decoded(seed) == [*values, "a\nVM_ENV_FAKE=1\n"]
 
 
 def test_the_launcher_gets_kvm_the_vms_ports_and_size_and_its_environment_under_its_prefix():
     args = local_disk.launcher_args([18765, 5900], {"ENVIRONMENT_NAME": "desk", "A": "b c"}, 1.5, 4096)
 
     assert args == ["--device", "/dev/kvm", "-e", "VM_PORTS=18765 5900", "-e", "VM_CPUS=2", "-e", "VM_MEMORY_MB=4096",
-                    "-e", "VM_ENV_ENVIRONMENT_NAME=desk", "-e", "VM_ENV_A=b c"]
+                    "-e", "VM_ENV_ENVIRONMENT_NAME=ZGVzaw==", "-e", "VM_ENV_A=YiBj"]
+
+
+def _seed(folder, env: dict[str, str]) -> None:
+    """The seed of ``env`` in ``folder``, as the launcher makes it from what the local provider hands it."""
+    args = local_disk.launcher_args([18765], env, 2, 4096)
+    handed = dict(arg.split("=", 1) for flag, arg in zip(args, args[1:]) if flag == "-e")
+    subprocess.run(["sh", str(DISK / "launcher" / "seed"), str(folder)], check=True,
+                   env={"PATH": os.environ["PATH"], "HOME": "/root", **handed})
 
 
 @pytest.fixture
@@ -114,7 +125,7 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
                      "-p", "127.0.0.1:20001:18765", *local_disk.launcher_args([18765], {"ENVIRONMENT_NAME": "desk"},
                                                                                2, 4096), "agentenv-vm:0123")
     assert removed == f"docker rm -f {sandbox.container_name} > /dev/null"
-    assert second[-2:] == ("VM_ENV_ENVIRONMENT_NAME=again", "agentenv-vm:0123") and "VM_CPUS=2" in second
+    assert second[-2:] == ("VM_ENV_ENVIRONMENT_NAME=YWdhaW4=", "agentenv-vm:0123") and "VM_CPUS=2" in second
     LocalSandbox.pull_images.assert_awaited_with(["localhost:5000/disk@sha256:" + "a" * 64])
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"} and rebuilt.owns_container
 
