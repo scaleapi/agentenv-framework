@@ -1,0 +1,52 @@
+#!/bin/sh
+# disk ARCH ROOTFS ESP OUT SIZE_GB: a Linux computer's disk form, written to OUT as qcow2: a GPT disk of an EFI system
+# partition and an ext4 root filesystem made from the folder ROOTFS, ownership kept. ESP is a folder holding either a
+# disk form's image, disk/disk.img, whose EFI system partition and size the disk keeps byte for byte, or a UKI, which a
+# new EFI system partition holds on a disk of SIZE_GB. Nothing is mounted or booted, so it runs unprivileged, on any
+# architecture, for either.
+set -eu
+arch=$1 rootfs=$2 esp=$3 out=$4 size_gb=$5
+case "$arch" in
+    amd64) uki=BOOTX64.EFI roottype=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709 ;;
+    arm64) uki=BOOTAA64.EFI roottype=B921B045-1DF0-41C3-AF44-4C6F280D3FAE ;;
+    *) echo "disk: no architecture $arch" >&2; exit 2 ;;
+esac
+esptype=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+sector=512                          # bytes a disk sector holds, as sfdisk counts them
+mib=$((1024 * 1024 / sector))       # sectors in a MiB, the alignment partitions start on
+esp_mib=64                          # a new EFI system partition's size
+backup_gpt=$mib                     # sectors kept free at the disk's end, for the backup GPT
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$(dirname "$out")"
+if [ -f "$esp/disk/disk.img" ]; then
+    qemu-img convert -O raw "$esp/disk/disk.img" "$work/base.raw"
+    size=$(stat -c %s "$work/base.raw")
+    partition=$(sfdisk -d "$work/base.raw" | grep -i "type=$esptype")
+    esp_start=$(echo "$partition" | sed -n 's/.*start= *\([0-9]*\).*/\1/p')
+    esp_sectors=$(echo "$partition" | sed -n 's/.*size= *\([0-9]*\).*/\1/p')
+    [ -n "$esp_start" ] && [ -n "$esp_sectors" ] || { echo "disk: $esp/disk/disk.img has no EFI system partition" >&2; exit 1; }
+    dd if="$work/base.raw" of="$work/esp.img" bs=$sector skip="$esp_start" count="$esp_sectors" status=none
+    rm "$work/base.raw"
+elif [ -f "$esp/$uki" ]; then
+    [ -n "$size_gb" ] || { echo "disk: a new disk needs its size, SIZE_GB" >&2; exit 2; }
+    size=$((size_gb * 1024 * mib * sector)) esp_start=$mib esp_sectors=$((esp_mib * mib))
+    mkfs.vfat -C -n ESP "$work/esp.img" $((esp_sectors * sector / 1024)) >/dev/null
+    mmd -i "$work/esp.img" ::/EFI ::/EFI/BOOT
+    mcopy -i "$work/esp.img" "$esp/$uki" "::/EFI/BOOT/$uki"
+else
+    echo "disk: $esp holds neither disk/disk.img nor $uki" >&2
+    exit 1
+fi
+root_start=$(((esp_start + esp_sectors + mib - 1) / mib * mib))
+root_sectors=$((size / sector - root_start - backup_gpt))
+mkfs.ext4 -q -F -L agentenv-root -E root_owner=0:0 -d "$rootfs" "$work/root.img" "$((root_sectors * sector / 1024))k"
+truncate -s "$size" "$work/disk.raw"
+sfdisk -q "$work/disk.raw" <<PARTITIONS
+label: gpt
+start=$esp_start, size=$esp_sectors, type=$esptype, name="ESP"
+start=$root_start, size=$root_sectors, type=$roottype, name="agentenv-root"
+PARTITIONS
+dd if="$work/esp.img" of="$work/disk.raw" bs=$sector seek="$esp_start" conv=notrunc status=none
+dd if="$work/root.img" of="$work/disk.raw" bs=1M seek=$((root_start / mib)) conv=notrunc,sparse status=none
+qemu-img convert -O qcow2 "$work/disk.raw" "$out"

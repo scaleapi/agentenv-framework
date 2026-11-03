@@ -73,6 +73,7 @@ from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card
 from .triggers import TriggerEngine, TriggerError
+from .notifications import CHECK_TOOL_NAMES, NotificationError, Notifications, build_check_tools
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,7 @@ class Gateway:
                 )
             )
         self._clock = Clock()
+        self._notifications = Notifications(lambda: self._clock)
         self._env_get_time_url_cache: str | None = None
         self._install_role_filters()
 
@@ -314,6 +316,61 @@ class Gateway:
                 st["env_get_time_url"] = await self._env_get_time_url()
             return self._json_response(st, 200)
 
+        async def _notifications_write(request: Request, method) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            try:
+                return self._json_response(method(body), 200)
+            except NotificationError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+
+        @self._mcp.custom_route("/notifications/config", methods=["POST"])
+        async def notifications_config(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            # A config that names roles registers the tools, so the backing servers' tools must be known (or a later
+            # discovery would replace ours unseen) and none may have their names. One that turns checks off
+            # (roles: [], the default) registers nothing, so neither can block it.
+            if not (isinstance(body, dict) and body.get("roles", []) == []):
+                try:
+                    await self._ensure_tools_discovered()
+                except Exception as e:
+                    return self._json_response(
+                        {"ok": False, "error": f"tool discovery has not completed ({type(e).__name__}); retry"}, 503)
+                taken = sorted(set(CHECK_TOOL_NAMES) & set(self._tool_server_urls))
+                if taken:
+                    return self._json_response(
+                        {"ok": False, "error": f"{taken} already registered by a backing server"}, 409)
+            try:
+                state = self._notifications.configure(body)
+            except NotificationError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+            if self._notifications.enabled:
+                self._register_check_tools()
+            else:
+                self._unregister_check_tools()
+            return self._json_response(state, 200)
+
+        @self._mcp.custom_route("/notifications/state", methods=["GET"])
+        async def notifications_state(request: Request) -> Response:
+            try:  # ?to=<role> for one recipient's; every recipient's without it
+                return self._json_response(self._notifications.state(request.query_params.get("to")), 200)
+            except NotificationError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+
+        @self._mcp.custom_route("/notifications/take", methods=["POST"])
+        async def notifications_take(request: Request) -> Response:
+            return await _notifications_write(request, self._notifications.take)
+
+        @self._mcp.custom_route("/notifications/clear", methods=["POST"])
+        async def notifications_clear(request: Request) -> Response:
+            self._unregister_check_tools()
+            return self._json_response(self._notifications.clear(), 200)
+
         @self._mcp.custom_route("/trajectory", methods=["GET"])
         async def env_trajectory(request: Request) -> Response:
             return self._serve_trajectory()
@@ -425,7 +482,10 @@ class Gateway:
 
     def _is_disabled(self, role: str, name: str) -> bool:
         """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False.
-        A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden."""
+        A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden.
+        The scheduled-check tools exist only for the roles the notifications config names, whatever the rules say."""
+        if name in CHECK_TOOL_NAMES and name not in self._tool_server_urls and role not in self._notifications.roles:
+            return True
         hidden = name in self._hidden_by_default
         for r in (role, WILDCARD):
             rules = self._role_rules.get(r, {})
@@ -901,9 +961,11 @@ class Gateway:
                 raise
             logger.info(f"Found {len(tools_result.tools)} tool(s) from {server.name}")
             listed.append((server, tools_result.tools))
-        # get_time is left out: a backing server's tool of that name wins, and the clock refuses to arm over it
+        # get_time and the scheduled-check tools are left out: a backing server's tool of that name wins, and the
+        # clock and the checks refuse to turn on over it
         sources: dict[str, list[str]] = {
-            tool.name: ["gateway"] for tool in self._server_tools.get("gateway", []) if tool.name != GET_TIME_TOOL_NAME}
+            tool.name: ["gateway"] for tool in self._server_tools.get("gateway", [])
+            if tool.name != GET_TIME_TOOL_NAME and tool.name not in CHECK_TOOL_NAMES}
         for server, tools in listed:
             for tool in tools:
                 sources.setdefault(tool.name, []).append(server.name)
@@ -923,6 +985,8 @@ class Gateway:
         self._tools_discovered = True
         if self._mirror_get_time_descriptor():
             logger.info(f"Re-mirrored '{GET_TIME_TOOL_NAME}' descriptor after tool discovery")
+        if self._mirror_check_descriptors():
+            logger.info("Re-mirrored the scheduled-check tool descriptors after tool discovery")
         # list_website_urls sits in _server_tools from construction, so a memo may predate the backing tools
         self._trigger_engine.invalidate_readonly_cache()
 
@@ -1083,7 +1147,12 @@ class Gateway:
         })
         try:
             async with self._tool_call_guard():
-                result = await tool.run(arguments)
+                # bound as the MCP path binds it, so a tool that acts for its caller (schedule_check) reads the role
+                token = Caller(role=role, session=Caller.current().session).bind()
+                try:
+                    result = await tool.run(arguments)
+                finally:
+                    Caller.reset(token)
                 changelog_id = self._query_changelog_id()
             if isinstance(result, CallToolResult):
                 response_data = result.model_dump(mode="json", exclude_none=True)
@@ -1142,6 +1211,48 @@ class Gateway:
             return
         del tools[GET_TIME_TOOL_NAME]
         remaining = [t for t in self._server_tools.get("gateway", []) if t.name != GET_TIME_TOOL_NAME]
+        if remaining:
+            self._server_tools["gateway"] = remaining
+        else:
+            self._server_tools.pop("gateway", None)
+        self._trigger_engine.invalidate_readonly_cache()
+
+    def _register_check_tools(self) -> None:
+        """Expose schedule_check and its siblings when a config names roles, rebuilt on each config so their
+        descriptions carry its max_active and min_interval."""
+        self._unregister_check_tools()
+        tools = self._mcp._tool_manager._tools
+        for tool in build_check_tools(self._notifications, self._create_arg_model_from_schema):
+            if tool.name not in self._tool_server_urls:
+                tools[tool.name] = tool
+        if self._mirror_check_descriptors():
+            self._trigger_engine.invalidate_readonly_cache()
+
+    def _mirror_check_descriptors(self) -> bool:
+        """Mirror the registered scheduled-check tools into `_server_tools`, as `_mirror_get_time_descriptor` does for
+        get_time. Returns whether it appended."""
+        if not self._tools_discovered or not self._notifications.enabled:
+            return False
+        mirrored = self._server_tools.setdefault("gateway", [])
+        present = {t.name for t in mirrored}
+        added = False
+        for name in CHECK_TOOL_NAMES:
+            tool = self._mcp._tool_manager._tools.get(name)
+            if tool is None or name in present or name in self._tool_server_urls:
+                continue
+            mirrored.append(MCPTool(name=tool.name, description=tool.description,
+                                    inputSchema=tool.parameters, annotations=tool.annotations))
+            added = True
+        return added
+
+    def _unregister_check_tools(self) -> None:
+        """Remove them when a task turns scheduled checks off or clears (idempotent); a backing server's are left."""
+        tools = self._mcp._tool_manager._tools
+        for name in CHECK_TOOL_NAMES:
+            if name not in self._tool_server_urls:
+                tools.pop(name, None)
+        remaining = [t for t in self._server_tools.get("gateway", []) if t.name not in CHECK_TOOL_NAMES
+                     or t.name in self._tool_server_urls]
         if remaining:
             self._server_tools["gateway"] = remaining
         else:

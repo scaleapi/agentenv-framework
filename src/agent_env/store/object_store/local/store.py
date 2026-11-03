@@ -182,6 +182,8 @@ class LocalFilesystemObjectStore(ObjectStore):
     def get_object_key(self, object_url: str) -> str:
         if not object_url.startswith("file://"):
             raise ValueError(f"{object_url!r} is not a file:// url of this store.")
+        if ".." in object_url[len("file://"):].split("/"):
+            raise ValueError(f"{object_url!r} has a '..' path segment.")
         root = self._root.resolve()
         try:
             path = Path(object_url[len("file://"):]).resolve()
@@ -248,6 +250,10 @@ class LocalFilesystemObjectStore(ObjectStore):
         return key
 
     def _resolve(self, key: str) -> Path:
+        """``key``'s path under the root. A ``..`` segment is refused, not resolved: it would carry a key built from a
+        name into a key under another prefix, where a cloud store would keep it as written."""
+        if ".." in key.split("/"):
+            raise ValueError(f"Key {key!r} has a '..' path segment.")
         root = self._root.resolve()
         resolved = (self._root / key).resolve()
         if not resolved.is_relative_to(root):

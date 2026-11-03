@@ -5,6 +5,7 @@ mapped ones, a sandbox rebuilt from its id keeps that map, and a build uses this
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import types
 from unittest.mock import AsyncMock
 
@@ -24,6 +25,7 @@ from agent_env.task_step.task_steps.run_docker_container import RunDockerContain
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import (
     RunContainerUnitTestsVerifierTaskStep,
 )
+from tst.util.exec_scripts import run_with_stubs
 
 SANDBOX_ID = "local-ab12cd34"
 HOST_PORT = 50123
@@ -113,6 +115,26 @@ async def test_a_tag_and_a_container_network_named_by_the_step_are_the_sandboxs_
     [run] = [s for s in sandbox.scripts if "docker run -d" in s]
     assert f"-t mine:1.0-{SANDBOX_ID} " in build and f"mine:1.0-{SANDBOX_ID}" in run
     assert f"--network container:worker-{SANDBOX_ID} " in run
+
+
+@pytest.mark.asyncio
+async def test_a_dockerfile_path_and_container_name_holding_shell_syntax_run_nothing_when_reported(
+    tmp_path, monkeypatch,
+):
+    sandbox = _RecordingSandbox(tmp_path)
+    context = _on(monkeypatch, sandbox)
+    monkeypatch.setattr(RunDockerContainerTaskStep, "_stage_from_universe", AsyncMock())
+
+    await RunDockerContainerTaskStep(
+        id="box", version=None, sandbox_name="h", docker_context_artifact_id="u", docker_context_artifact_version=1,
+        dockerfile_path="missing'; touch pwned; #", container_name="c';touch pwned;'", ready_command="true",
+    ).execute(context)
+
+    reports = [s for s in sandbox.scripts if s.startswith("test -f ") or "failed readiness check" in s]
+    for script in reports:
+        with pytest.raises(subprocess.CalledProcessError):
+            run_with_stubs(script, tmp_path, "seq", "docker")
+    assert len(reports) == 2 and not (tmp_path / "pwned").exists()
 
 
 @pytest.mark.asyncio

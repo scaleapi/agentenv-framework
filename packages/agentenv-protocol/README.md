@@ -227,6 +227,23 @@ async def display_get(self) -> dict: ...
 async def display_set(self, width: int, height: int) -> dict: ...
 ```
 
+### Framework-only routes and the control token
+
+Everything an environment serves but its MCP endpoint and its card is agent-env's own: the data
+plane, every `@extension` route and the tool-access routes. When agent-env deploys an environment
+that takes one, it boots it with a per-deploy token in `AGENTENV_CONTROL_TOKEN`
+(`CONTROL_TOKEN_ENV`), and the SDK then refuses a call to those routes that doesn't carry it as
+`Authorization: Bearer <token>`, answering 401 with the code `unauthorized` before the route runs.
+The MCP endpoint and the card stay open, so an agent reaches the environment's tools as before and
+nothing else. Without the variable, as when the environment runs on its own, every route is open.
+`control_guard()` wraps a route an environment adds itself the same way, as a computer driver does
+its `/svc/<app>/` routes.
+
+On the client side each call takes `headers`, and `client.control_headers(token)` builds them.
+Code that names none runs under `client.authorized({env_url: client.control_headers(token)})`:
+within it, a call to an address under `env_url` sends those headers. agent-env runs every task
+step, a verifier's `verify` included, under such a grant for each environment it deployed.
+
 ### Tool access without a gateway
 
 An environment agents reach directly, with no gateway in front, can enforce per-role tool access
@@ -239,6 +256,69 @@ paths (`POST /tools/disable`, `POST /tools/enable`) with its bodies (`{role, too
 at the gateway.
 
 Where the binding lives depends on the app. On mcp's own FastMCP it wraps the tool manager's dispatch; on the standalone `fastmcp` package it joins the app's middleware chain as the outermost layer, so a handler's own middleware runs under it too. An app with neither seam mounts unbound, with a warning, unless a tool declares a `ToolContext` parameter or the handler defines `on_tool_call`: then the mount is refused rather than serving an empty caller.
+
+### Tools served on another server's behalf
+
+An environment can serve tools another server defines, each with that server's own schema:
+`forwarded_tools()` returns `ForwardedTool(tool, call, annotations, output_schema)` entries, where
+`tool` is an `EnvironmentTool` carrying the other server's `inputSchema`, and `call` takes the
+call's arguments as keywords, untouched, and returns that server's `CallToolResult`, which reaches
+the caller as it is. An `output_schema` is listed as the tool's `outputSchema` and isn't checked
+here, so `call` answers every result, its errors too, in a shape that schema admits. They're listed
+on the card beside the `@tool` methods, chosen by `served_tools` and under tool access like them;
+one named like another tool is refused. They need mcp's FastMCP. The cua-driver driver serves
+cua-driver's own tools this way.
+
+### Resources
+
+Mark a method that serves MCP resources with `@resource`; an env may mark several, and each read
+calls the method, which returns text or bytes. The URI decides what's served:
+
+```python
+@environment_card(name="orders")
+class Orders(AgentEnvEnvironment):
+    @resource("docs://orders/refund-policy", mime_type="text/markdown")
+    def refund_policy(self) -> str:
+        """When a refund is allowed and who approves it."""
+        return POLICY.read_text()
+
+    @resource("orders://{order_id}")
+    async def order(self, order_id: str) -> str:
+        return json.dumps(await self.db.order(order_id))
+
+    @resource("skill://upstream/{file}", listed=lambda env: UPSTREAM["resources"])
+    async def upstream_file(self, file: str) -> str:
+        return await read_upstream(f"skill://upstream/{file}")
+```
+
+- A fixed URI is one resource. Its name defaults to the method's name and its description to the
+  docstring.
+- A template such as `orders://{order_id}` is an MCP resource template; the method takes its parts.
+- A template with `listed` serves the resources `listed` returns, each as MCP lists one (`uri`,
+  `name`, `description`, `mimeType`), and only those. Each is read through the method with its
+  URI's parts. That's how an env serves another server's resources from a list: the cua-driver
+  driver serves cua-driver's skill files this way.
+
+A URI served twice, a listed URI that doesn't match its template, and a method that doesn't take
+exactly the template's parts are refused. Resources need mcp's FastMCP.
+
+### Instructions at connect
+
+An MCP server may answer `initialize` with `instructions`: how to use it, which a client may put in
+the agent's context, as Claude Code does. Mark the plain method that returns them with
+`@server_instructions`:
+
+```python
+@environment_card(name="orders")
+class Orders(AgentEnvEnvironment):
+    @server_instructions
+    def how_to(self) -> str:
+        return "Look an order up with get_order before refunding it; refunds can't be undone."
+```
+
+They're read once, when the SDK builds the app (`create_app`, `serve`, `create_fastmcp_app`), and
+every session gets the same text. An env has at most one such method. An app you build yourself
+and pass to `mount` keeps its own instructions: set them when you construct it.
 
 ### Getting part of the data
 
@@ -262,9 +342,11 @@ def guide(self):
 The card then declares `urn:agentenv:skill/v1` (`SKILL_EXTENSION_URI`), whose `get {name}`
 answers `{name, description, skill_md}`, the shape `skill-config/v1` takes, with the frontmatter
 written under the name the caller gives; a name that isn't lowercase letters, digits and single
-hyphens, up to 64, is refused `invalid_argument`. agent-env's `add_skills` step installs it on
-an agent through `env_ids`, named after the env's environment name; for an env behind a gateway,
-whose card nests its servers' cards, it installs each server's skill under that server's name.
+hyphens, up to 64, is refused `invalid_argument`. A skill with other files beside its SKILL.md
+returns them as a third value, `{relative path: text}`, and `get` answers them as `files`.
+agent-env's `add_skills` step installs it on an agent through `env_ids`, named after the env's
+environment name, a skill with files as a bundle of them; for an env behind a gateway, whose card
+nests its servers' cards, it installs each server's skill under that server's name.
 
 ### Uploading an export through a grant
 
@@ -426,10 +508,12 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
   the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
-  class's `notes`, markdown for what its card can't say.
+  class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
+  its own returns it from `bundled_skill()` (its description, body and other files), and the
+  computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
-  capture, plus the driver's own `ready_checks()`; tools refuse `device_unavailable` until they
-  pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
+  own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
   descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
   request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
   with `recording`, `computer-recording/v1` (below).
@@ -438,8 +522,8 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   or a `transfers.ReadObject` read grant under the marker's `read`, and writes them atomically.
   `data/get` returns the files under the `paths` it's given, relative to the home, or under the
   card's `default_data_paths` (`Desktop`, `Documents`, `Downloads`) when it's given none, inline or
-  uploaded under a `write_namespace` grant. An environment whose `@get_data` hook takes no `paths`
-  refuses them.
+  uploaded under a `write_namespace` grant, leaving out the paths its apps keep their data in. An
+  environment whose `@get_data` hook takes no `paths` refuses them.
 - **The card** (the name from `ENVIRONMENT_NAME`, then `@computer_driver`'s), and per-role tool
   access (`tool_access` is on).
 
@@ -521,7 +605,10 @@ report = await run_probe("http://localhost:18765", "full")   # a ProbeReport
 failed = [c for c in report.checks if c.status == "failed"]
 ```
 
-The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach the driver.
+The CLI exits 0 when no check failed, 1 when one did and 2 when it can't reach the driver. A
+driver booted with a control token is probed with it: `--token`, by default
+`$AGENTENV_CONTROL_TOKEN`, or `run_probe(..., token=...)`. Given one, the probe also checks that
+`computer-ready`'s status refuses a call without it and with a wrong one.
 
 | Level | Checks | Needs on the computer |
 |---|---|---|
@@ -541,44 +628,182 @@ and gives it back.
 
 A computer app is software an agent uses on a computer, beside the driver: a desktop app, a service
 or both. Write one as a `ComputerAppEnvironment` subclass from `agentenv_protocol.computer`, an
-`AgentEnvEnvironment` whose class also says what it is to a computer. It needs only the plain
-package: `agentenv_protocol.computer` imports what a driver needs (mcp, uvicorn, Pillow, PyAV) only
-when a driver's names are used.
+`AgentEnvEnvironment` whose class also says what it is to a computer. Writing one and reading what
+it declares need only the plain package: `agentenv_protocol.computer` imports what a driver needs
+(mcp, uvicorn, Pillow, PyAV) only when a driver's names are used. On a computer it runs as its own
+server, which needs the `app` extra (below).
 
 ```python
 from pydantic import BaseModel, SecretStr
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Linux, Service, computer_app
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Packages, Service, computer_app,
+                                        install_step, linux)
+
+class LinuxSettings(BaseModel):
+    font: str = "DejaVu Sans"
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+@linux(packages=Packages(apt=["thunderbird"]), python="requirements.txt",
+       services=[Service(name="imap", command="venv/bin/python imap.py")],
+       launch=Launch(command=["thunderbird"], window={"class": "thunderbird"}), settings=LinuxSettings)
 class MailApp(ComputerAppEnvironment):
-    linux = Linux(python="requirements.txt", services=[Service(name="imap", command="venv/bin/python imap.py")])
-    launch = Launch(command=["thunderbird"], window={"class": "thunderbird"})
     skill = "skill.md"
 
     class Settings(BaseModel):
         signature: str = ""
         password: SecretStr = SecretStr("")
+
+    class BuildSettings(BaseModel):
+        locale: str = "en_US"
+
+    @install_step(scope="session")
+    def profile(self) -> None: ...
 ```
 
 - **`@computer_app`** names the platforms the app supports, as a driver names them, and the
   `permissions` it needs of the computer. Its env.toml names the rest: the app itself
-  (`environment_name`) and the `computer` and `driver` it deploys alone on.
-- **`linux = Linux(...)`** is how a Linux computer installs it: `files`, a folder of the app's
-  copied under its prefix; `python`, a requirements file there installed into a venv beside them;
-  `services`, programs the computer's init runs from the prefix as the session user.
-- **`launch = Launch(...)`** says how it starts in the desktop session, with it (`at="boot"`) or when
-  the agent opens it (`"demand"`), and `ready=Ready(...)` when it's ready; `@ready_check` marks a
-  method for readiness that needs logic, and `@install_step(scope=...)` one a computer runs as it
-  installs the app.
-- **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both;
-  its data hooks are the usual `@add_data`, `@get_data` and `@reset_data`.
-- **`Settings`** is typed; a computer hands each app the values a deploy gives it, as one JSON value
-  in `APP_SETTINGS_ENV` (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads
-  its own, by `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+  (`environment_name`), the `computer` and `driver` it deploys alone on, `build_settings`, its
+  build settings' values (`build_settings = { locale = "fr_FR" }`), and `[settings]`, defaults for its
+  `Settings` each deploy starts from.
+- **`@linux(...)`** is how a Linux computer installs it, `Linux`'s fields: `files`, a folder of the app's
+  copied under its prefix, which holds the class's file; `packages`, the OS's, as apt takes them
+  (`Packages(apt=["name", "name=version", "name/suite"])`); `python`, a requirements file there,
+  installed into the venv every app gets beside them; `sources`, extra apt repositories
+  (`AptSource`, with a key file in the folder); `downloads`, files fetched by URL and checked by
+  sha256 (`Download`); `run`, scripts of the folder run as root or the session user (`RunScript`);
+  `services`, programs the computer's init runs from the prefix as the session user; and `ports`,
+  those it listens on. Packages, requirements and downloads are resolved and fetched once, when the
+  computer env is put, and every build installs only those stored files, with the network closed.
+  Each value is checked as the class is defined: a URL, a sha256, a path that stays in the folder.
+  Installs are exact: apt installs each package without its recommends, and the venv gets exactly
+  the wheels resolved for it (`pip install --no-deps`). A requirements file lists everything itself,
+  since its lock covers that file alone: a line including another file (`-r`, `-c`), an editable
+  install (`-e`), a local path or a local folder of wheels is refused at put.
+- **Each OS has its own decorator,** and what differs by OS goes in it: `launch=` always; and
+  optionally `skill=`, a file used instead of the class's, and `settings=` and `build_settings=`,
+  models whose fields add to the class's `Settings` and `BuildSettings` on that OS. What's on the
+  class applies to every OS. `@install(os_type, spec, launch=..., ...)` is the generic form, for an
+  OS type a plugin adds, with that OS type's own install model as `spec`; `@linux(...)` is
+  `@install("linux", Linux(...), ...)`. On the computer the class reads what's declared for the OS
+  it runs on (`platform.detect()`).
+- **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
+  the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
+  launch: a window matching `launch.window` by its class, instance or title, a port answering on
+  loopback, or a command exiting 0. `env` sets variables in the app's environment, over its server's. `@ready_check` marks a method for readiness that needs logic (a
+  sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
+  app, after its run scripts, offline and without the class's `__init__`. Each runs on every OS the
+  app installs on, or on those its `os=` names (`@install_step(os="linux")`, `@ready_check(os=[...])`);
+  naming one the app declares no install for is refused when the class is read. A step reads
+  `self.build_settings`; a deploy's `self.settings` aren't known at build, and reading one raises
+  `AttributeError` (`python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>`).
+- **Its skill** is a file of its folder (`skill = "skill.md"`) or an `@agent_skill` method, not both.
+- **Its data** is under the `paths` its OS's decorator names, relative to the session user's home,
+  none inside another (`@linux(..., paths=["Mail", ".config/mail/accounts.json"])`), or what its own
+  `@add_data`, `@get_data` and `@reset_data` hooks serve instead (below).
+- **`Settings`** is typed. Its values come from the app env's `[settings]`, then the computer env's
+  `settings` beside the app in its `apps` (`apps = [{ env = "mail", settings = { signature = "-- Ada" } }]`),
+  then the deploy's `env_params` `app_settings`, each over the one before by top-level field (a table
+  or list is replaced whole). Each is checked at put; a required one may be left to the deploy, which
+  checks them merged. A computer hands each app its values as one JSON value in `APP_SETTINGS_ENV`
+  (`AGENTENV_APP_SETTINGS`, the apps' values by name), and the base class reads its own, by
+  `ENVIRONMENT_NAME`, as `self.settings`. A `SecretStr` field is a secret.
+- **`BuildSettings`** is typed too: values the app's env fixes in its computer's image, which only
+  another image changes, so a deploy can't give one. The composer writes them to
+  `.agentenv/build_settings.json` in the app's folder, and the base class reads them, over the
+  defaults, as `self.build_settings`, in its install steps and on the computer alike. None is a
+  secret, since the image keeps them; `declaration()` refuses a `SecretStr` one.
+
+On a computer each app is its own server: `python -m agentenv_protocol.computer.serve_app
+<file>:<Class>`, a program the computer's init runs from the app's folder in the app's venv, which
+has the `app` extra (`agentenv-framework-protocol[app]`: mcp and uvicorn). It serves the class's
+card and tools on the Unix socket `.agentenv/server.sock` in that folder, with `computer-app/v1`:
+the app's `launch` as its params, and the methods `launch` (POST), which starts the app in the
+desktop session, and `ready` (GET: an `AppReadiness` of `ready`, `problems`, `launched`, `waited_s`
+and `timeout_s`), which runs the app's readiness checks then, at once, each within 10 s. A server
+that can't start, or whose start in the session fails (adding the launcher, say), writes why to
+`.agentenv/server.failure` in the folder and exits, and the driver reports that in its place. Once
+the X display is up, when `DISPLAY` names one, the server adds the app's launcher to the session user's
+menu, which runs `python -m agentenv_protocol.computer.launch <folder>` to ask the server, so the
+server starts every copy of the app, and launches a `boot` app, once per boot. An app that runs with
+no desktop, a website browser alone, gets no launcher. The driver finds each app by the socket in its
+folder: the computer is ready once every app's server answers and each `boot` app, and each app with
+no launch, says it's ready; a `demand` app counts once something launches it. What the server does
+in the session (`agentenv_protocol.computer.session`) is Linux's.
+
+The server serves the app's data plane and its skill. With `paths` alone, `data/add` writes the files
+it's given under them and refuses any other path, or one a link leads out of them; `data/get`
+returns the files there, a file tree; and `data/reset` puts them back as the server found them when
+it first started on this boot, which is the app as installed. Hooks serve what they mark instead.
+A hook's `data/add` parts come as they were sent, inline or as a read grant, and
+`part_bytes(part)` returns a part's bytes either way. Either way the base class takes data calls and
+launches one at a time, runs a load and a reset with the app stopped and relaunches it after,
+follows a failed load with a reset, and fails a call that runs past `data_timeout_s` (300 s); a sync
+hook runs in a thread, which the reset and relaunch after it wait for. The driver fronts its apps:
+its card lists each one's card as a child environment, rooted at `/svc/<app>/`, where it forwards
+requests to the app's server.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
 JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
+
+### Website browsers
+
+`agentenv_protocol.website_browser.WebsiteBrowserEnvironment` is the computer app class for a Chromium
+website browser, run inside a computer or alone. A subclass declares its build as any app does, its
+`Launch` running the browser itself. It sets `version`, its build, and `policy_dir`, where that build
+reads managed policies; `policies` adds its own over agentenv's, and `profile` is its profile folder
+under the session user's home (`.config/chromium` by default), whose contents from its install steps
+are the profile's template. The base class adds:
+
+- **Its settings**, `BrowserSettings`, which a subclass's `Settings` extends: `start_urls`, opened in
+  tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`), headless
+  the first from its command line and the rest over its pipe, since headless Chromium takes one; `window`,
+  1280 × 800, alone only; `locale`; `time_zone`, set as `TZ` in its launch's `env`; `geolocation` and
+  `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`; and `dialogs`, who
+  answers a page's JavaScript dialogs: `agent` (the default), or agentenv, accepting (`accept`, a `prompt()`
+  with its default text) or dismissing (`dismiss`) each. Either way agentenv leaves a page that asks before
+  it's left (`beforeunload`), so none of its answers blocks a navigation.
+- **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile, its
+  HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
+  `--no-default-browser-check`, `--lang` and, when `/dev/shm` holds under 1 GiB (Docker gives 64 MiB),
+  `--disable-dev-shm-usage`, so it keeps its shared memory in files. With
+  `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
+  Alone it bypasses nothing, loopback included; in a computer it bypasses loopback (`127.0.0.1`,
+  `[::1]`, `localhost`), so the apps beside it stay reachable while `*.localhost` names still go
+  through. Alone (`AGENTENV_BROWSER_ALONE=1`) it also takes `--window-size` and `--headless=new`,
+  except on the open web (`AGENTENV_BROWSER_OPEN_WEB=1`), and refuses to start with no proxy.
+  `declaration()` refuses a subclass whose command carries any of these, or `--remote-allow-origins`, or
+  any other way to open a debugging port.
+- **Before each launch** it empties its cache, so no launch inherits another's, and writes the deploy's
+  prompt answers into its profile's `Default/Preferences` (`profile.default_content_setting_values`,
+  `2` to deny, left out to ask), which it reads as it starts.
+- **Alone, no desktop**: its launch matches and waits on no window, its server adds no launcher and,
+  without `DISPLAY`, waits for no display, and its ready checks say when it's ready.
+- **`write_policies`**, an install step that writes agentenv's unattended-use policies (`POLICIES`)
+  and the subclass's to `agentenv.json` in `policy_dir`.
+- **A debugging pipe, not a port.** Its server launches it with a new pipe's ends as its fds 3 and 4
+  (`session.launch`'s `fds`, moved into place by `computer/_with_fds.py`, run alone with `-I -S`) and keeps the
+  other ends as `self.devtools`, a `DevToolsPipe`: `await self.devtools.call(method, params)` returns
+  the result or raises `DevToolsError`, and `ConnectionError` with no browser connected. No port
+  listens and no `DevToolsActivePort` is written, so nothing else in the computer can reach it over
+  CDP. Since only the server that launched it holds the pipe, a server that restarts stops it and
+  launches it again, and a launch while it runs, from its menu launcher say, opens another window over
+  the pipe rather than a second copy, which would hand its window to the first and exit. The ready check
+  `devtools_answers` asks `Browser.getVersion` over the pipe.
+- **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
+  to every page with flattened sessions and keeps a record, `since` its server started: open tabs in
+  opened order, the one whose page has focus `active`; `closed_tabs`, each with `closed_at` and
+  `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
+  ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
+  and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.
+  `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
+- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
+  `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
+  launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
+  and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.
+  Nothing relaunches a browser that exits on its own: in a computer the agent can, and alone it's an infra
+  failure, its ready check false.
+- **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
+  `~/Downloads`, folders it makes.
 
 ## A2A agent framework
 
@@ -694,7 +919,7 @@ protocol. `TaskRequest` and `TaskResult` are framework boundary types; the
 executor maps them to and from the wire-level `a2a.types.Task` lifecycle.
 
 `TaskRequest` is a frozen record whose nested JSON values are detached copies.
-Its `config`, `mcp_servers`, `skills`, `metadata`, and inbound `DataPart.data`
+Its `config`, `mcp_servers`, `cdp_endpoints`, `skills`, `metadata`, and inbound `DataPart.data`
 retain their declared `dict`/`list` types, so normal Pydantic serialization,
 copying, and `json.dumps(...)` work. `TaskRequest.trajectory` is the exception:
 it is the task's live trajectory log, described below. Within `tasks.v1`, new
@@ -848,6 +1073,23 @@ class MyAgentConfig(AgentConfig):
     provider_token: WriteOnly[str | None] = None
 ```
 
+An agent that can turn its own tools off, such as its shell, file or web tools, takes `builtin_tools`, typed
+`BuiltinTools` over a `Literal` of its tools' names, so its card's schema names them. A task selects them on
+`deploy_agent`: `{"disable": "*"}` turns them all off, `{"disable": [...]}` the ones named, and `{"only": [...]}` keeps
+the ones named; the agent applies `request.config.builtin_tools` to its runtime. The MCP tools AgentEnv gives it are not
+its own and stay. A selection for an agent whose config has
+no `builtin_tools`, or that names a tool its schema doesn't, is refused before the deploy sends it anything.
+
+```python
+from typing import Literal
+
+from agentenv_protocol.a2a_agent import AgentConfig, BuiltinTools
+
+
+class MyAgentConfig(AgentConfig):
+    builtin_tools: BuiltinTools[Literal["shell", "read_file", "web_fetch"]] | None = None
+```
+
 `output_format` is author-owned in v1 rather than a field on the base
 `AgentConfig`. An agent that supports structured output must declare the field
 on its config subclass, apply it to its model or runtime, and return the value
@@ -995,6 +1237,20 @@ discovery, `name` so the caller can choose the server alias the harness prefixes
 tools with (agent-env relays the env card's name: the MultiEnv's declared name, else
 `env` + 4 random digits, giving e.g. `mcp__env4821__<tool>`); when absent the agent mints
 `mcp_<8 hex>`.
+
+`CDP_CONFIG_V1` gives an agent the CDP endpoints it drives itself. `add` takes
+`name`, `http_url` (`http` or `https`, for clients that discover through
+`/json/version`) and `ws_url` (`ws` or `wss`, for clients that connect
+directly), with optional `headers` and `metadata`; adding a name again replaces
+it. `GET /ext/cdp-config` returns `{"cdp_endpoints": {name: {"has_headers",
+"metadata"}}}`: neither the URLs nor the header values, since either can carry
+the endpoint's credential. `DELETE /ext/cdp-config` with `{"name"}` removes one;
+removing a name that isn't there is not an error. Every task's
+`TaskRequest.cdp_endpoints` holds them in full. `TaskRequest.cdp_endpoint(name=None)`
+returns the named endpoint, or the only one, and otherwise fails the task as an
+`infra_error` with `cdp.no_endpoint` (none, or none by that name) or
+`cdp.ambiguous` (several and no name). It fails the task by raising, so call it
+before any handler of your own that catches every exception.
 
 `PEER_AGENTS_V1` lets an agent delegate to the other agents in its task. AgentEnv
 sets the routing table with `POST /ext/peer-agents` (`{"peers": [{"name", "url",

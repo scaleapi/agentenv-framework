@@ -1,6 +1,7 @@
 """TRL's GRPOTrainer trains a step through ``agent_env.training.trl`` on CPU, against the OpenEnv server ``build_app``
 makes over the Episode API's fake steps. TRL marks ``environment_factory`` experimental, so this pins what the helper
-relies on: TRL resets an environment with its row, calls its tools, reads ``get_reward``, and trains on the rewards.
+relies on: TRL shows the model each tool as its env publishes it, resets an environment with its row, calls its tools,
+reads ``get_reward``, and trains on the rewards.
 As in TRL's own environment tests, a tiny model's ``generate`` is stood in for. CI runs it against TRL 1.16, the oldest
 that trains on CPU, and the latest; AsyncGRPO needs a vLLM server, so it isn't covered here."""
 
@@ -8,7 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tst.unit.training.trl_test import PLAYED
+from tst.unit.training.tools_test import tools_in
+from tst.unit.training.trl_test import PLAYED, SHOWN, STACK
 from tst.util.capabilities import TRL, missing_capability_reason
 
 torch = pytest.importorskip("torch", reason=missing_capability_reason(TRL))
@@ -19,9 +21,10 @@ ADD = '<tool_call>\n{"name": "add_item", "arguments": {"item": "crate"}}\n</tool
 END = '<tool_call>\n{"name": "end_turn", "arguments": {"response": "Added a crate."}}\n</tool_call>'
 
 
-def test_grpotrainer_trains_a_step_on_a_served_bundle_and_scores_every_rollout(served, teardowns, tmp_path,
+def test_grpotrainer_trains_a_step_on_a_served_bundle_and_scores_every_rollout(served, teardowns, tools, tmp_path,
                                                                                  monkeypatch):
     monkeypatch.setenv("TRL_EXPERIMENTAL_SILENCE", "1")
+    tools("add_item", STACK)
     env = served({"a": PLAYED, "b": PLAYED})
     rewards = []
 
@@ -36,10 +39,12 @@ def test_grpotrainer_trains_a_step_on_a_served_bundle_and_scores_every_rollout(s
         use_cpu=True))
     before = {name: param.clone() for name, param in trainer.model.named_parameters()}
 
-    with patch.object(trainer.model, "generate", side_effect=_Policy(trainer.processing_class)):
+    policy = _Policy(trainer.processing_class)
+    with patch.object(trainer.model, "generate", side_effect=policy):
         trainer.train()
 
     [logged] = [row for row in trainer.state.log_history if "tools/call_frequency" in row]
+    assert tools_in(policy.prompt) == SHOWN
     assert sorted(rewards) == [0.0, 0.0, 1.0, 1.0]
     assert (logged["tools/call_frequency"], logged["tools/failure_frequency"], logged["rewards/Recorded/mean"]) == (
         pytest.approx(1.0), 0.0, pytest.approx(0.5))
@@ -50,14 +55,16 @@ def test_grpotrainer_trains_a_step_on_a_served_bundle_and_scores_every_rollout(s
 
 class _Policy:
     """Stands in for ``generate``: of each group, the first rollout adds a crate, then ends its turn, then stops, and the
-    second answers without a tool, so its turn is ended empty and scores 0."""
+    second answers without a tool, so its turn is ended empty and scores 0. ``prompt`` is the first it was given."""
 
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.calls = 0
+        self.prompt = None
 
     def __call__(self, input_ids, **_):
         self.calls += 1
+        self.prompt = self.prompt or self.tokenizer.decode(input_ids[0])
         if self.calls == 1:
             texts = [ADD if row % 2 == 0 else "I won't." for row in range(len(input_ids))]
         else:

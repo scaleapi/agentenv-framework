@@ -18,7 +18,7 @@ from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.sandbox import CURL_RETRY_FLAGS, VmSandbox
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
-from tst.util.exec_scripts import script_run
+from tst.util.exec_scripts import run_with_stubs, script_run
 
 CHECK = FileArtifact(
     id="check", version=2, description="checker", filename="check.py",
@@ -226,6 +226,23 @@ async def test_into_an_agent_installed_into_a_container(monkeypatch, load):
 async def test_into_an_agent_installed_on_the_vm_host(monkeypatch, load, onto_the_host):
     assert await _load_into_agent(monkeypatch, None, on_host=True, **load) == [
         "mkdir -p /tmp/file_artifacts", onto_the_host]
+
+
+@pytest.mark.asyncio
+async def test_a_cli_whose_names_hold_shell_syntax_is_made_executable_as_it_is(monkeypatch, tmp_path):
+    entrypoint = "bin/x;touch pwned;"
+    tool = SimpleNamespace(id="tool", version=1, command_name="t$(touch pwned)", entrypoint=entrypoint,
+                           get_cli_files=lambda: SimpleNamespace(get_file_artifacts=lambda: {entrypoint: CHECK}))
+    sandbox = _Vm()
+    monkeypatch.setattr(sandbox_provider, "get_agent_sandbox_provider", _provider(sandbox))
+
+    path = await A2AAgent.install_cli(SimpleNamespace(sandbox_type=None, sandbox_id="sb-agent"), tool, "https://gateway",
+                                      "task")
+
+    chmod = next(script for script in sandbox.scripts if " chmod +x " in script)
+    assert run_with_stubs(chmod, tmp_path, "docker")["docker"] == [["exec", "-u", "0", "task", "chmod", "+x", path]]
+    assert path == "/opt/cli/t$(touch pwned)/bin/x;touch pwned;"
+    assert not (tmp_path / "pwned").exists()
 
 
 @pytest.mark.asyncio

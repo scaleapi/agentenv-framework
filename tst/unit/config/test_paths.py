@@ -1,10 +1,10 @@
-"""The per-user state root: XDG first, then the platform default."""
+"""The per-user state and cache roots: XDG first, then the platform default."""
 
 import sys
 
 import pytest
 
-from agent_env.config.paths import state_root
+from agent_env.config.paths import cache_root, state_root
 
 
 @pytest.fixture
@@ -34,6 +34,15 @@ def test_windows_uses_local_app_data_unless_xdg_state_home_is_set(home, tmp_path
     assert state_root() == tmp_path / "xdg" / "agent-env"
 
 
+@pytest.mark.parametrize("value", ["", "relative/cache"])
+def test_the_cache_root_is_an_absolute_xdg_cache_homes_else_the_home_default(home, tmp_path, monkeypatch, value):
+    monkeypatch.setenv("XDG_CACHE_HOME", value)
+    assert cache_root() == home / ".cache" / "agentenv"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert cache_root() == tmp_path / "xdg" / "agentenv"
+
+
 def test_resolving_creates_nothing(home):
     state_root()
+    cache_root()
     assert not home.exists()

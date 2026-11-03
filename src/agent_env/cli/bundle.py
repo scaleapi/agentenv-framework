@@ -29,8 +29,12 @@ def bundle():
               type=click.Choice([scope.value for scope in FieldScope if scope is not FieldScope.TASK]),
               help="Keep the fields of this scope as stored, and leave in the store what the folder can't hold, for a "
                    "folder run against the same store. Repeatable.")
+@click.option("--image-ref", "image_refs", multiple=True, metavar="ID=REF",
+              help="Write the stored image ID as the registry image REF, which a run pulls, with its build context "
+                   "beside it. A tag is pinned to the digest its registry serves now; a digest is written as given. "
+                   "Repeatable.")
 def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | None,
-         include_scopes: tuple[str, ...]):
+         include_scopes: tuple[str, ...], image_refs: tuple[str, ...]):
     """Write a stored task, or an eval and its tasks, as a bundle at FOLDER, which must be new or empty.
 
     Each task is written as the store holds it, and every env, agent and artifact it uses is written into a folder of
@@ -42,11 +46,16 @@ def init(folder: Path, task_id: str | None, eval_id: str | None, version: int | 
     import that fails writes nothing."""
     if (task_id is None) == (eval_id is None):
         raise click.UsageError("give one of --from-task or --from-eval")
+    if bad := [given for given in image_refs if "=" not in given]:
+        raise click.UsageError(f"--image-ref takes ID=REF, not {bad[0]!r}")
     scopes = [FieldScope(scope) for scope in include_scopes]
+    refs = dict(given.split("=", 1) for given in image_refs)
     with interruptible():
-        imported = (import_task(task_id, folder, version=version, include_scopes=scopes, progress=click.echo)
+        imported = (import_task(task_id, folder, version=version, include_scopes=scopes, image_refs=refs,
+                                progress=click.echo)
                     if task_id is not None
-                    else import_eval(eval_id, folder, version=version, include_scopes=scopes, progress=click.echo))
+                    else import_eval(eval_id, folder, version=version, include_scopes=scopes, image_refs=refs,
+                                     progress=click.echo))
     _report(imported, folder)
 
 
@@ -75,8 +84,14 @@ def _report(imported: BundleImport, folder: Path) -> None:
               help="What each entry's registry id opens with; by default the folder's name and a dash.")
 @click.option("--dry-run", is_flag=True, help="Check everything and say what would be written; write nothing.")
 @click.option("--yes", is_flag=True, help="Write to a store other than this machine's own without asking.")
+@click.option("--sandbox", default=None,
+              help="The sandbox provider the bundle's computer envs compose on, by default the env's; comma-separated "
+                   "for a chain, each arch going to the first link that runs it natively.")
+@click.option("--no-emulate", is_flag=True,
+              help="Skip, rather than emulate, an arch no link of the sandbox provider runs natively; a later register "
+                   "or env build builds it.")
 def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefix: str | None,
-             dry_run: bool, yes: bool):
+             dry_run: bool, yes: bool, sandbox: str | None, no_emulate: bool):
     """Write the bundle at FOLDER into the configured stores under registry ids, so whatever runs the stores' tasks
     runs what the folder runs.
 
@@ -93,7 +108,7 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
     with no bundle.toml that uses plugin packages is given one. An id the store holds already takes a new version,
     whoever wrote it. A store other than this machine's is written only after you confirm, or with --yes. Registering
     again writes only what changed since."""
-    options = {"tasks": tasks, "evals": evals, "prefix": prefix}
+    options = {"tasks": tasks, "evals": evals, "prefix": prefix, "sandbox": sandbox, "emulate": not no_emulate}
     click.echo(f"Registering {folder} into:")
     for line in describe_target():
         click.echo(f"  {line}")
@@ -113,7 +128,7 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
     if dry_run:
         click.echo("Nothing was written: --dry-run.")
         return
-    if all(done.reused for done in planned.materialization.writes):
+    if all(done.reused for done in planned.materialization.writes) and not planned.materialization.composing:
         click.echo("Nothing to write: every version is registered already.")
         return
     if planned.shared and not yes:

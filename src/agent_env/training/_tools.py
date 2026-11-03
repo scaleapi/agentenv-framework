@@ -1,6 +1,6 @@
 """Python methods for an env's tools, typed and documented from each tool's JSON Schema the way transformers'
-``get_json_schema`` reads a function, which is how TRL shows a model an environment's tools. Built without generating
-source; a method calls its instance's ``_call(name, arguments)``."""
+``get_json_schema`` reads a function, which is how TRL finds an environment's tools, and the ``SchemaTool`` each one
+reaches the model as. Built without generating source; a method calls its instance's ``_call(name, arguments)``."""
 
 from __future__ import annotations
 
@@ -47,11 +47,30 @@ def tool_method(tool: Mapping[str, Any]) -> Callable[..., str]:
         return self._call(name, arguments)
 
     method.__name__ = method.__qualname__ = name
-    method.__doc__ = (tool.get("description") or f"Call the {name} tool.") + (
+    method.__doc__ = _summary(tool) + (
         "\n\nArgs:\n" + "\n".join(described) if described else "")
     method.__annotations__ = annotations
     method.__signature__ = inspect.Signature(parameters, return_annotation=str)
     return method
+
+
+class SchemaTool(dict):
+    """A tool as both its env's JSON Schema, which transformers renders as given, and the callable TRL calls: a method's
+    type hints have no nested types. TRL lists the methods on the class and takes the tools from the instance, which
+    sets one over each; a tool has no docstring, so ``get_json_schema`` refuses it rather than make up a schema."""
+
+    def __init__(self, tool: Mapping[str, Any], call: Callable[..., str]):
+        super().__init__(type="function", function={
+            "name": tool["name"], "description": _summary(tool), "parameters": tool["input_schema"]})
+        self.__name__, self.__doc__ = tool["name"], None
+        self._function = call
+
+    def __call__(self, **arguments: Any) -> str:
+        return self._function(**arguments)
+
+
+def _summary(tool: Mapping[str, Any]) -> str:
+    return tool.get("description") or f"Call the {tool['name']} tool."
 
 
 def _callable_name(name: str) -> bool:

@@ -1,6 +1,7 @@
-"""``add_skills`` ``env_ids``: each env's skill, or each of its child envs' behind a gateway, written under that card's
-environment name, installed on the agent and recorded in the run; refused for an env the run didn't deploy or bind to
-the agent, or that serves no skill."""
+"""``add_skills`` ``env_ids``: each env's skill and each of its child envs' (a gateway's servers, a computer's apps) its
+name reaches, written under that card's environment name, installed on the agent and recorded in the run, a skill with
+files beside its SKILL.md sent as a stored bundle; refused for an env the run didn't deploy or bind to the agent, or
+that serves no skill."""
 
 import hashlib
 from types import SimpleNamespace
@@ -34,7 +35,7 @@ def agent(monkeypatch):
     """The agent's skill registrations and the env calls the step made."""
     made = SimpleNamespace(calls=[], register=AsyncMock(return_value={"ok": True}))
 
-    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None):
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
         made.calls.append((base_url, card["name"], uri, method, params))
         return {"name": params["name"], "description": "How to use this env", "skill_md": f"---\nname: {params['name']}\n"}
 
@@ -65,6 +66,36 @@ async def test_each_envs_skill_is_installed_under_its_environment_name_and_recor
 
 
 @pytest.mark.asyncio
+async def test_a_skill_with_files_is_stored_once_and_installed_as_a_bundle(agent, local_stores, monkeypatch):
+    files = {"LINUX.md": "# Linux\n", "WORKFLOW.md": "# Workflow\n"}
+
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
+        return {"name": params["name"], "description": "Drive the desktop", "skill_md": "# Skill\n", "files": files}
+
+    monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
+    await _step("shop").execute(_context(_env()))
+    await _step("shop").execute(_context(_env()))
+
+    (first, again) = [call.kwargs for call in agent.register.await_args_list]
+    store = local_stores.get_object_store()
+    assert first == again and set(first) == {"name", "description", "object_url"}
+    assert sorted(store.get_object_key(url).rpartition("/")[2] for url in store.list_at(first["object_url"])) == [
+        "LINUX.md", "SKILL.md", "WORKFLOW.md"]
+
+
+@pytest.mark.asyncio
+async def test_a_skill_file_whose_path_leaves_its_folder_is_refused_before_anything_is_stored(agent, local_stores,
+                                                                                             monkeypatch):
+    async def invoke(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
+        return {"name": params["name"], "description": "d", "skill_md": "# Skill\n", "files": {"../../victim": "x"}}
+
+    monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
+    with pytest.raises(ValueError, match="must stay inside its folder, not \\['../../victim'\\]"):
+        await _step("shop").execute(_context(_env()))
+    assert local_stores.get_object_store().list("") == [] and not agent.register.await_args_list
+
+
+@pytest.mark.asyncio
 async def test_an_env_behind_a_gateway_installs_each_child_envs_skill_under_the_childs_name(agent):
     gateway = _env("office", name="office", extensions=(), children=(("mail", (_SKILL,)), ("Chat Room", (_SKILL,)),
                                                                      ("calendar", ())))
@@ -75,6 +106,20 @@ async def test_an_env_behind_a_gateway_installs_each_child_envs_skill_under_the_
     assert [(card, params["name"]) for _, card, *_, params in agent.calls] == [
         ("mail", "mail"), ("Chat Room", f"chat-room-{digest}")]
     assert set(context.metadata[ENV_SKILLS_KEY]["solver"]["office"]) == {"mail", f"chat-room-{digest}"}
+
+
+@pytest.mark.asyncio
+async def test_a_computer_installs_its_own_skill_then_each_apps_and_an_app_alone_the_computers_its_name_reaches(agent):
+    desk = _env("desk", name="desktop", children=(("mail", (_SKILL,)), ("notes", ())))
+    alone = _env("mail-alone", name="mail", children=(("mail", (_SKILL,)),))
+    for computer in (desk, alone):
+        computer.environment_card["capabilities"]["operations"] = ["data/add", "data/get"]
+
+    context = await _step("desk", "mail-alone").execute(_context(desk, alone, bound=("desk", "mail-alone")))
+
+    assert [(base_url, card) for base_url, card, *_ in agent.calls] == [
+        ("http://desk", "desktop"), ("http://desk", "mail"), ("http://mail-alone", "mail")]
+    assert set(context.metadata[ENV_SKILLS_KEY]["solver"]["mail-alone"]) == {"mail"}
 
 
 @pytest.mark.asyncio

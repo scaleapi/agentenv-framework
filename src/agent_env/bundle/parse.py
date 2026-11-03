@@ -26,7 +26,8 @@ from packaging.requirements import InvalidRequirement, Requirement
 from agent_env.bundle._fs import Unreadable, fold, home, on_disk, read_regular, show, with_article
 from agent_env.entity.refs import EntityKind
 from agent_env.plugins._bundles import AGENT_ALIASES, ALIASES_FILE, ARTIFACT_ALIASES, ENV_ALIASES, read_aliases
-from agent_env.store.ids import LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, validate_local_id
+from agent_env.store.ids import (HF_NAMESPACE, HF_PREFIX, LOCAL_PREFIX, MAX_AUTHORED_LOCAL_ID_BYTES, is_local_id,
+                                 local_namespace, validate_local_id)
 from agent_env.utils.paths import LEAVINGS, os_reason
 
 BUNDLE_TOML = "bundle.toml"
@@ -115,7 +116,8 @@ def is_ignored(name: str) -> bool:
 
 def parse_bundle(root: Path, *, id_root: str | None = None, name: str | None = None) -> Bundle:
     """Parse the bundle at ``root``. An entry-point bundle passes its ``@local/<dist>/<name>``
-    root and name; otherwise both come from the folder's canonical path. Raises BundleError."""
+    root and name, and a bundle downloaded from the Hugging Face Hub its ``@hf/<org>/<repo>[/<name>]`` root;
+    otherwise both come from the folder's canonical path. Raises BundleError."""
     return _Parser(_canonical(Path(root)), id_root, name).parse()
 
 
@@ -199,35 +201,10 @@ class _Parser:
         version, not by URL; None when it has no bundle.toml."""
         if self.bundle_toml is None:
             return None
-        try:
-            data = tomllib.loads(self.bundle_toml.read_text(encoding="utf-8"))
-        except OSError as e:
-            self._problem(self.bundle_toml, f"can't be read: {os_reason(e)}")
-            return ()
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-            self._problem(self.bundle_toml, f"isn't valid TOML: {e}")
-            return ()
-        for key in sorted(data.keys() - {"requires"}):
-            self._problem(self.bundle_toml, f"{key!r} isn't a key it takes; it takes requires")
-        requires = data.get("requires", [])
-        if not isinstance(requires, list) or not all(isinstance(line, str) for line in requires):
-            self._problem(self.bundle_toml, 'requires must be a list of pip requirements, such as '
-                          '["agentenv-browser>=1.2"]')
-            return ()
-        for line in requires:
-            if not line.isprintable():
-                self._problem(self.bundle_toml, f"requires: {line!r} holds a character that can't be printed, so it "
-                              "can't be shown as written before it's installed")
-                continue
-            try:
-                requirement = Requirement(line)
-            except InvalidRequirement as e:
-                self._problem(self.bundle_toml, f"requires: {line!r} isn't a pip requirement: {e}")
-                continue
-            if requirement.url:
-                self._problem(self.bundle_toml, f"requires: {line!r} names a URL; name the package and the versions "
-                              "it needs, which install from wherever whoever runs the bundle installs from")
-        return tuple(requires)
+        requires, problems = read_requires(self.bundle_toml)
+        for problem in problems:
+            self._problem(self.bundle_toml, problem)
+        return requires
 
     def _derive_id_root(self) -> str:
         id_root, problems = _id_root(self.root)
@@ -472,9 +449,13 @@ class _Parser:
         return entity_id
 
     def _check_declared(self, entity_id: Any, where: Path, *, what: str = "id", artifact: bool = False) -> None:
-        if not isinstance(entity_id, str) or not entity_id.startswith(LOCAL_PREFIX):
-            self._skip(where, f"{what} {_brief(entity_id)}: ids declared in a bundle must start with "
-                       f"{LOCAL_PREFIX!r}, since a bare id names an entity in a shared store")
+        if not isinstance(entity_id, str) or not is_local_id(entity_id):
+            self._skip(where, f"{what} {_brief(entity_id)}: ids declared in this bundle must start with "
+                       f"{self._declarable()}, since a bare id names an entity in a shared store")
+        if foreign_hub_id(entity_id, self.id_root):
+            self._skip(where, f"{what} {_brief(entity_id)}: an {HF_PREFIX!r} id names an entity of a bundle run from "
+                       "the Hugging Face Hub, so a bundle declares one only under its own id root, which "
+                       "agent-env run hf:// gives it")
         size = _size(entity_id)
         if size > MAX_AUTHORED_LOCAL_ID_BYTES:
             limit = MAX_AUTHORED_LOCAL_ID_BYTES
@@ -487,6 +468,11 @@ class _Parser:
             self._skip(where, f"{what} {_brief(entity_id)} must be NFC-normalized")
         if artifact and "__" in entity_id.rsplit("/", 1)[1]:
             self._skip(where, f'{what} {_brief(entity_id)}: "__" is reserved for derived artifact ids')
+
+    def _declarable(self) -> str:
+        """What an id this bundle declares may start with: ``@local/``, and for a Hub bundle its own root."""
+        own = f" or {self.id_root + '/'!r}" if local_namespace(self.id_root) == HF_NAMESPACE else ""
+        return f"{LOCAL_PREFIX!r}{own}"
 
     # Across entities
 
@@ -613,6 +599,44 @@ class _Parser:
         if text.startswith(self.root_text + os.sep):
             text = text[len(self.root_text) + 1:]
         return show(text)
+
+
+def read_requires(path: Path) -> tuple[tuple[str, ...], list[str]]:
+    """The plugin packages the bundle.toml at ``path`` requires, and each problem with it: a requirement must name a
+    package by name and version, not by URL."""
+    problems = []
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        return (), [f"can't be read: {os_reason(e)}"]
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        return (), [f"isn't valid TOML: {e}"]
+    for key in sorted(data.keys() - {"requires"}):
+        problems.append(f"{key!r} isn't a key it takes; it takes requires")
+    requires = data.get("requires", [])
+    if not isinstance(requires, list) or not all(isinstance(line, str) for line in requires):
+        return (), [*problems, 'requires must be a list of pip requirements, such as ["agentenv-browser>=1.2"]']
+    for line in requires:
+        if not line.isprintable():
+            problems.append(f"requires: {line!r} holds a character that can't be printed, so it can't be shown as "
+                            "written before it's installed")
+            continue
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement as e:
+            problems.append(f"requires: {line!r} isn't a pip requirement: {e}")
+            continue
+        if requirement.url:
+            problems.append(f"requires: {line!r} names a URL; name the package and the versions it needs, which "
+                            "install from wherever whoever runs the bundle installs from")
+    return tuple(requires), problems
+
+
+def foreign_hub_id(entity_id: str, id_root: str) -> bool:
+    """Whether ``entity_id`` is an ``@hf`` id outside ``id_root``. Only ``agent-env run hf://`` roots a bundle in the
+    ``@hf`` namespace, so an id there says the entity came from the Hub; a bundle may declare one only under its own
+    root."""
+    return local_namespace(entity_id) == HF_NAMESPACE and entity_id != id_root and not entity_id.startswith(f"{id_root}/")
 
 
 def root_problems(root: Path) -> list[str]:

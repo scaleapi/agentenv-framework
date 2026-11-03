@@ -37,6 +37,8 @@ from tst.store import conformance
 
 LOCAL_TASK = "@local/~/bundle/tasks/t"
 LOCAL_ENV = "@local/~/bundle/envs/e"
+HUB_TASK = "@hf/acme/ds/hello/t"
+HUB_ENV = "@hf/acme/ds/hello/e"
 # Building a store from a config table isn't a call on a store, so a wrapper has nothing to route.
 _NOT_ROUTED = {"from_config"}
 
@@ -110,6 +112,37 @@ def test_outside_a_run_a_record_owned_by_an_local_entity_is_local(stores):
 
     assert _ids(local, "runs", "run_id") == {"local-1"}
     assert _ids(configured, "runs", "run_id") == {"local-2"}
+
+
+def test_hub_ids_and_runs_keep_to_the_hf_namespaces_own_file_inside_the_write_fence(stores):
+    router, configured, local = stores
+    hub = router.namespaces["hf"]
+    router.insert("envs", {"id": HUB_ENV, "version": 1})
+    router.insert("envs", {"id": LOCAL_ENV, "version": 1})
+    router.insert("runs", {"run_id": "hub-1", "task_id": HUB_TASK})
+    configured.insert("artifacts", {"id": "shared", "version": 1})
+    with run_scope(HUB_TASK):
+        router.insert("env_instances", {"instance_id": "rocket-1a2b", "env_id": "rocket"})
+        with pytest.raises(LocalRunWriteError, match="an @hf task run writes only to the local stores"):
+            router.insert("artifacts", {"id": "cli-rocket", "version": 1})
+        with pytest.raises(LocalRunWriteError):
+            router.update("artifacts", Filter.of(id="shared", version=1), UpdateSpec(set={"x": 1}))
+        with run_scope("registry-task"):
+            assert routing.local_run_namespace() == "hf"
+        with run_scope(LOCAL_TASK):
+            assert routing.local_run_namespace() == "local"
+    with pytest.raises(OutwardReferenceError, match="names a local id"):
+        router.insert("tasks", {"id": "t", "version": 1, "steps": [{"env_id": HUB_ENV}]})
+    with pytest.raises(ValueError, match="has to keep the @hf namespace"):
+        router.insert("envs", {"id": f"copy-of-{HUB_ENV}", "version": 1})
+
+    assert hub.path.name == "hf.db" and hub.path.parent == local.path.parent
+    assert _ids(hub, "envs") == {HUB_ENV} and _ids(local, "envs") == {LOCAL_ENV}
+    assert _ids(hub, "runs", "run_id") == {"hub-1"}
+    assert _ids(hub, "env_instances", "instance_id") == {"rocket-1a2b"}
+    assert _ids(router, "envs") == {HUB_ENV, LOCAL_ENV}
+    assert router.find_one("envs", Filter.of(id=HUB_ENV))["id"] == HUB_ENV
+    assert configured.count("env_instances", Filter()) == 0 and _ids(configured, "artifacts") == {"shared"}
 
 
 def test_a_run_started_inside_an_local_run_stays_local(cli_routing):
@@ -282,6 +315,7 @@ def test_objects_route_by_their_entity_and_by_url(object_stores):
     assert config.get_object_store() is configured
     assert local is not configured and local.root == state_root() / "object_store"
     assert config.get_object_store_for("rocket") is configured
+    assert config.get_object_store_for(HUB_ENV) is local
 
     assert config.get_object_store_at(local.object_url("k")) is local
     assert config.get_object_store_at(configured.object_url("k")) is configured
@@ -339,6 +373,20 @@ def test_an_local_run_refuses_a_bare_artifact_before_any_upload(object_stores):
     with run_scope(LOCAL_TASK):
         with pytest.raises(LocalRunWriteError, match="'cli-rocket'"):
             get_artifact_store().next_version("cli-rocket")
+
+
+def test_a_local_run_refuses_a_bare_ids_write_only_where_a_configured_store_isnt_the_per_user_one(object_stores):
+    """The one rule the fence and a deploy that would compose a registered env both ask (``local_run_refuses_write``)."""
+    config = get_config()
+    with run_scope(LOCAL_TASK):
+        assert config.local_run_refuses_write("rocket") and not config.local_run_refuses_write(LOCAL_ENV)
+    assert not config.local_run_refuses_write("rocket")
+
+    local = {kind: get_config()._local_store(kind) for kind in ("document", "object")}
+    configure(document_store=local["document"], object_store=local["object"])
+    with run_scope(LOCAL_TASK):
+        assert not get_config().local_run_refuses_write("rocket")
+        get_config().check_local_run_write("rocket")
 
 
 def test_what_default_local_use_left_behind_stays_out_of_routed_reads(stores):
@@ -495,9 +543,10 @@ def test_latest_version_lookup_uses_the_routed_namespace(stores):
     assert versioned.get(local_id)["version"] == 3
 
 
-def test_the_local_namespace_file_cant_be_the_configured_store(tmp_path, cli_routing):
-    configure(document_store=LocalSqliteDocumentStore(str(state_root() / "document_store" / "local.db")))
-    with pytest.raises(ConfigError, match="kept for @local documents"):
+@pytest.mark.parametrize("namespace", ["local", "hf"])
+def test_a_local_namespace_file_cant_be_the_configured_store(tmp_path, cli_routing, namespace):
+    configure(document_store=LocalSqliteDocumentStore(str(state_root() / "document_store" / f"{namespace}.db")))
+    with pytest.raises(ConfigError, match=f"kept for @{namespace} documents"):
         get_config().get_document_store()
 
 

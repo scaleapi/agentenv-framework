@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
+import logging
 import os
 import platform
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -24,6 +26,7 @@ from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from agent_env.a2a_agent import a2a_agent as a2a_agent_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from tst.unit.store.fakes import FakeObjectStore
+from tst.util.exec_scripts import run_with_stubs
 
 
 def _image(tar_gz_object_url: str | None, image_name: str = "img:1") -> DockerImageArtifact:
@@ -847,6 +850,28 @@ async def test_exec_leaves_a_script_for_another_program_alone(spawned):
     assert spawned == [("docker", "exec", "c", "bash", "-c", "cat /app/x")]
 
 
+@pytest.mark.asyncio
+async def test_a_secret_reaches_a_folder_only_its_owner_opens_on_no_command_line_or_log(monkeypatch, caplog, tmp_path):
+    sandbox = LocalSandbox(work_dir=tmp_path)
+    argvs: list[tuple[str, ...]] = []
+    spawn = ls.asyncio.create_subprocess_exec
+
+    async def recording_spawn(*argv, **kwargs):
+        argvs.append(argv)
+        return await spawn(*argv, **kwargs)
+
+    monkeypatch.setattr(ls.asyncio, "create_subprocess_exec", recording_spawn)
+    caplog.set_level(logging.DEBUG, logger=ls.__name__)
+
+    async with sandbox.secret_dir() as secrets:
+        await sandbox.write_secret_file(b"ghs_s3cret", f"{secrets}/token")
+        assert Path(secrets, "token").read_bytes() == b"ghs_s3cret"
+        assert stat.S_IMODE(os.stat(secrets).st_mode) == 0o700
+
+    assert not Path(secrets).exists()
+    assert argvs and not any("ghs_s3cret" in arg for argv in argvs for arg in argv)
+    assert "LocalSandbox exec" in caplog.text and "ghs_s3cret" not in caplog.text
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command", [
@@ -1290,6 +1315,20 @@ async def test_an_agent_placed_on_a_local_vm_sandbox_maps_the_host_alias(tmp_pat
     await agent._run_container("img:v1", 8000, {"K": "v"})
 
     assert "--add-host host.docker.internal:host-gateway" in sandbox.scripts[0]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_env_var_whose_name_holds_shell_syntax_reaches_docker_as_it_is(tmp_path, monkeypatch):
+    monkeypatch.setattr(a2a_agent_module, "local_grant_trust", lambda: None)
+    sandbox = _RecordingLocalSandbox(work_dir=tmp_path / "work")
+    agent = A2AAgent.__new__(A2AAgent)
+    agent._sandbox = sandbox
+
+    await agent._run_container("img:v1", 8000, {"$(touch pwned)": "x';touch pwned;'"})
+
+    docker, = run_with_stubs(sandbox.scripts[0], tmp_path, "docker", "sleep")["docker"]
+    assert "$(touch pwned)=x';touch pwned;'" in docker and docker[-1] == "img:v1"
+    assert not (tmp_path / "pwned").exists()
 
 
 async def _no_sleep(_seconds):

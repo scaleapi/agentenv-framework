@@ -46,7 +46,8 @@ from agent_env.env.bootstrap import (
     env_images,
     infra_to_set_up,
     needs_docker,
-    put_command,
+    put_hint,
+    ships,
     stores_are_local,
 )
 from agent_env.env.env import Env
@@ -79,7 +80,7 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVer
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, docker_plugin_missing, docker_unreachable
 
 from .parse import BundleError, BundleKind
-from .plan import AgentOverride, Plan
+from .plan import AgentOverride, NotInStore, Plan, solver_steps
 from .resolve import BuiltImage, Reference, ReferencedImage, ResolvedEntry, build_step, played_deploys
 
 _SHOWN = 3
@@ -95,13 +96,16 @@ class Preflight:
     built_here: frozenset[str] = frozenset()  # the ids of the images the bundle builds that a deploy here runs
 
 
-def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None, *, played: bool = False) -> Preflight:
+def preflight_run(plan: Plan, tasks: Iterable[ResolvedEntry], sandbox: str | None, *, played: bool = False,
+                  solver_endpoint: bool = False) -> Preflight:
     """Check where each of ``tasks`` deploys, with ``sandbox`` overriding every deploy's provider, and name the infra
-    envs the run builds; ``played`` skips each task's played agent's deploys (``played_deploys``). Raises BundleError
-    listing every problem found. Reads the store but writes nothing."""
+    envs the run builds; ``played`` skips each task's played agent's deploys (``played_deploys``), and with
+    ``solver_endpoint`` the caller gives the solver's deploys (``solver_steps``) their model endpoint. Raises
+    BundleError listing every problem found. Reads the store but writes nothing."""
     walk = _Walk(plan, sandbox)
     for task in tasks:
-        walk.task(task, skip=played_deploys(task) if played else frozenset())
+        walk.task(task, skip=played_deploys(task) if played else frozenset(),
+                  given=frozenset(solver_steps(task.config)) if solver_endpoint else frozenset())
     return walk.finish()
 
 
@@ -129,6 +133,7 @@ class _Walk:
         self.plan, self.sandbox = plan, sandbox
         self.problems: dict[str, dict[str, None]] = {}  # each deploy's problem, and the deploys it's found at
         self.run_problems: list[str] = []  # the run's as a whole
+        self.missing: list[tuple[str, str]] = []  # each agent the deploys need that the store doesn't hold
         self.infra: set[str] = set()  # the infra kinds a deploy on the local provider needs
         self.docker_users: list[str] = []
         self.compose_users: list[str] = []  # gateway deploys whose stack runs on this machine
@@ -147,7 +152,7 @@ class _Walk:
         # Each deploy of an image the bundle builds: (where, what, its provider's links, the images it accepts on each)
         self.uses: dict[str, list[tuple[str, str, list[SandboxProvider], Callable[[SandboxProvider], Accepts]]]] = {}
 
-    def task(self, task: ResolvedEntry, skip: frozenset[str]) -> None:
+    def task(self, task: ResolvedEntry, skip: frozenset[str], given: frozenset[str] = frozenset()) -> None:
         steps = [build_step(config) for config in task.config]
         sandboxes = {step.sandbox_name: step for step in steps if isinstance(step, DeploySandboxTaskStep)}
         solver = self.plan.agent.steps.get(task.entry.id, ()) if self.plan.agent else ()
@@ -160,7 +165,7 @@ class _Walk:
                 if isinstance(step, DeployEnvTaskStep):
                     self._env(where, step)
                 elif isinstance(step, DeployAgentTaskStep):
-                    self._agent(where, step, sandboxes, override)
+                    self._agent(where, step, sandboxes, override, endpoint_given=step.id in given)
                 elif isinstance(step, DeploySandboxTaskStep):
                     self._sandbox(where, step)
                 elif isinstance(step, RubricsVerifierTaskStep):
@@ -199,7 +204,7 @@ class _Walk:
             more = f" (and {len(others)} more deploy{'s' if len(others) > 1 else ''})" if others else ""
             problems.append(f"{first}{more}: {problem}")
         if problems:
-            raise BundleError(problems)
+            raise NotInStore(problems, self.missing) if self.missing else BundleError(problems)
         return Preflight(frozenset(self.infra), tuple(infra), built_here)
 
     # Deploys, each resolving its provider as its step does when it runs
@@ -288,7 +293,7 @@ class _Walk:
         return version if version is not None else self.plan.store_latest.get((kind, entity_id))
 
     def _agent(self, where: str, step: DeployAgentTaskStep, sandboxes: dict[str, DeploySandboxTaskStep],
-               override: AgentOverride | None = None) -> None:
+               override: AgentOverride | None = None, endpoint_given: bool = False) -> None:
         """Check a deploy of the step's agent, or of ``override``, the agent ``--agent`` names for the solver."""
         accepts: Callable[[SandboxProvider], Accepts] = A2AAgent.accepts
         if step.sandbox_name:
@@ -302,7 +307,8 @@ class _Walk:
             accepts = functools.partial(A2AAgent.accepts, sandbox_mode=linked.sandbox_mode)  # the VM loads its image
         else:
             provider = _provider(self.sandbox or step.sandbox_type, get_agent_sandbox_provider)
-        given = frozenset({*step.env_vars, *([ENV_BASE_URL] if step.litellm_base_url else [])})
+        given = frozenset({*step.env_vars, *([ENV_BASE_URL] if step.litellm_base_url else []),
+                           *(_MODEL_VARS if endpoint_given else ())})
         agent_id, version = ((override.agent_id, override.version) if override is not None
                              else (step.a2a_agent_id, step.a2a_agent_version))
         self._agent_deploy(where, provider, agent_id, version, "names no agent", accepts, given=given)
@@ -429,16 +435,21 @@ class _Walk:
     def _remote_infra(self, link: SandboxProvider, kinds: set[str]) -> list[str]:
         """Why ``link``, a provider not on this machine, can't run the infra envs of ``kinds``. One the run sets up, in
         local stores, isn't checked: it's written anew, pulled from its registry or built, with its build context."""
-        set_up = {setup.kind for setup in infra_to_set_up(kinds)} if stores_are_local() else set()
+        local = stores_are_local()
+        # A website browser agent-env doesn't ship is never set up; missing from local stores, finish() reports it.
+        shipped = {kind for kind in kinds if ships(kind, default_env_id(kind))}
+        set_up = {setup.kind for setup in infra_to_set_up(shipped)} if local else set()
         found = []
         for kind in sorted(kinds - set_up):
             env_id = default_env_id(kind)
             try:
                 env = Env.get(env_id)
             except NotFoundError:
+                if local and kind not in shipped:
+                    continue
                 found.append(f"deploys on the {_shown(link)} sandbox provider, which needs the {kind} env {env_id!r}, "
                              f"and the store doesn't hold it; agent-env builds infra envs only into local stores, so put "
-                             f"it with `{put_command(kind)}`")
+                             f"it with {put_hint(kind)}")
                 continue
             accepts = EnvironmentGatewayProvider.accepts(link)
             found += [refusal for image in env_images(env)
@@ -492,6 +503,7 @@ class _Walk:
             A2AAgent.get(agent_id)
             return
         except NotFoundError:
+            self.missing.append((EntityKind.AGENT.value, agent_id))
             problem = (f"there is no agent {agent_id!r} in the store; register one under that id, or point "
                        "[agents] default_a2a_agent_id at an agent that is")
         except (ValueError, KeyError, TypeError) as e:

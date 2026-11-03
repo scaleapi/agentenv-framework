@@ -25,6 +25,15 @@ def validate_relative_filename(filename: str) -> None:
         raise ValueError(f"Filename {filename!r} must not contain '..' segments")
 
 
+def validate_file_path(path: str) -> None:
+    """Reject anything but plain file names joined by ``/``: an env stages each file of a loaded environment at host and
+    container paths built from its path."""
+    for name in path.split("/"):
+        if name in ("", ".", "..") or "\\" in name or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise ValueError(f"Artifact file path {path!r} must be plain file names joined by '/', with no '.', '..', "
+                             "'\\' or control characters")
+
+
 def validate_file_name(filename: str) -> None:
     """Reject anything but one plain file name: an env stages a loaded artifact at host and container paths built from it."""
     if filename in ("", ".", "..") or "/" in filename or "\\" in filename or any(ord(c) < 32 or ord(c) == 127 for c in filename):

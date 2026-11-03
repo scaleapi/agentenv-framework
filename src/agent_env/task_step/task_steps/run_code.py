@@ -5,7 +5,9 @@ The result is stored at ``context.metadata["script_results"][result_id]``.
 A script run for an env also gets ``input["env"] = {"id", "url", "mcp_url"}``: the env's
 address, where its card is at ``/.well-known/agent-env.json``, and its MCP endpoint, as the script
 reaches them: on the env's host as that host does (``Sandbox.url_on_host``), since a host can't
-always call its own public URL; inside a computer, the driver on loopback.
+always call its own public URL; inside a computer, the driver on loopback, with the ``headers`` that
+carry the computer's control token to its framework-only routes. A script run in an agent's sandbox
+never gets the token.
 
 ``script_artifact_id`` is either a single-file ``FileArtifact`` or a
 ``FileArtifactUniverse`` whose ``.py`` members are staged side by side so the entry

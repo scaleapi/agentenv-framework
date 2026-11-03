@@ -13,8 +13,9 @@ from agent_env.cli import cli, submitted_runs
 from agent_env.cli.task import _checks
 from agent_env.config import get_config
 from agent_env.env import MCPServerEnv
+from agent_env.env.envs.website import WebsiteEnv
 from agent_env.entity.refs import EntityKind
-from agent_env.env.bootstrap import GATEWAY, SERVICE_DB
+from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, WEBSITE_BROWSER
 from agent_env.env.store import ENVS_COLLECTION
 from agent_env.plugins import _requirements
 from agent_env.store.document_store import UnknownDocumentTypeError
@@ -158,6 +159,28 @@ def test_the_infra_envs_its_deploys_run_on_are_set_up_in_local_stores_but_for_th
     _checks.runnable_task("t", None, {"user_overrides": overrides}, say=print)
 
     assert set_up == ([(kinds, True)] if kinds else [])
+
+
+@pytest.mark.parametrize("overrides, kinds", [
+    ({}, {GATEWAY, SERVICE_DB, WEBSITE_BROWSER}),
+    ({"website_browser_env_id": "mine"}, {GATEWAY, SERVICE_DB}),
+], ids=["local", "own-browser"])
+def test_a_website_deploy_sets_up_the_browser_too_unless_the_run_names_its_own(stores, monkeypatch, overrides, kinds):
+    with namespace_routing():
+        backend, frontend = (get_artifact_store().put_document(DockerImageArtifact(
+            id=f"shop-{part}", description=part, image_name=f"shop-{part}:latest", tar_gz_s3_url=None, platform=None))
+            for part in ("backend", "frontend"))
+        WebsiteEnv.put(id="shop", backend_docker_image_artifact=backend, frontend_docker_image_artifact=frontend,
+                       environment_name="shop")
+    _stored([{"id": "env", "type": "deploy_env", "env_id": "shop"}])
+    set_up = []
+    monkeypatch.setattr(_checks, "stores_are_local", lambda: True)
+    monkeypatch.setattr(_checks, "ensure_default_envs",
+                        lambda kinds, say, missing_only: set_up.append((set(kinds), missing_only)))
+
+    _checks.runnable_task("t", None, {"user_overrides": overrides}, say=print)
+
+    assert set_up == [(kinds, True)]
 
 
 def _mcp_env(id):

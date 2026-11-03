@@ -1,13 +1,16 @@
 """deploy_agent delivers the step's role to the agent, or fails the step before any request reaches it; it never
-records a role the agent did not get."""
+records a role the agent did not get. Its selection of the agent's own tools goes the same way: refused before any
+request by an agent whose agent-config doesn't take it or names no such tool."""
 
 import json
 import logging
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from agentenv_protocol.a2a_agent import AgentConfig, BuiltinTools
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.env.env import DeployedGatewayEnv
@@ -44,6 +47,14 @@ HEADERS_MCP = _mcp_config({"required": ["url"], "optional": ["headers", "name"]}
 LEGACY_MCP = _mcp_config({"required": ["url"]})
 ROLE_CONFIG = _agent_config(["name", "description", "role"])
 ROLELESS_CONFIG = _agent_config(["name", "description"])
+
+
+class _ToolConfig(AgentConfig):
+    builtin_tools: BuiltinTools[Literal["Bash", "Read"]] | None = None
+
+
+TOOLS_CONFIG = _agent_config(["name", "description", "builtin_tools"])
+TOOLS_CONFIG["params"]["methods"]["set"]["request"]["schema"] = _ToolConfig.model_json_schema()
 
 
 @pytest.mark.asyncio
@@ -184,6 +195,36 @@ async def test_the_role_is_also_the_generated_clis_role(wiring):
 async def test_an_explicit_cli_role_env_var_is_kept(wiring):
     await wiring.deploy(_card(HEADERS_MCP), role="executor", env_vars={ROLE_ENV_VAR: "cli"})
     assert wiring.env_vars == {ROLE_ENV_VAR: "cli"}
+
+
+@pytest.mark.asyncio
+async def test_a_selection_of_the_agents_own_tools_is_sent_once_with_its_identity(wiring):
+    context = await wiring.deploy(_card(HEADERS_MCP, TOOLS_CONFIG), role=None, builtin_tools={"disable": "*"})
+
+    assert wiring.bodies("/ext/agent-config") == [{"name": "solver", "builtin_tools": {"disable": "*"}}]
+    assert len(context.deployed_agents) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card, refusal", [
+    (_card(HEADERS_MCP, ROLE_CONFIG), "takes no 'builtin_tools'"),
+    (_card(HEADERS_MCP), "takes no 'builtin_tools'"),
+    (_card(HEADERS_MCP, TOOLS_CONFIG), "'Glob' is not one of"),
+], ids=["config-without-it", "no-agent-config", "unknown-tool"])
+async def test_a_selection_the_agent_cannot_take_fails_before_any_request(wiring, card, refusal):
+    with pytest.raises(RuntimeError, match=refusal):
+        await wiring.deploy(card, role=None, builtin_tools={"only": ["Read", "Glob"]})
+
+    assert wiring.requests == []
+    assert wiring.agent.close.await_count == 1
+
+
+def test_a_selection_takes_exactly_one_of_disable_and_only():
+    for selection in ({}, {"disable": "*", "only": ["Read"]}, {"enable": ["Read"]}):
+        with pytest.raises(ValueError):
+            DeployAgentTaskStep(id="ag", version=None, builtin_tools=selection)
+    step = DeployAgentTaskStep(id="ag", version=None, builtin_tools={"disable": ["Bash"]})
+    assert DeployAgentTaskStep.from_dict({**step.to_dict(), "version": 1}).builtin_tools == {"disable": ["Bash"]}
 
 
 class _Wiring:

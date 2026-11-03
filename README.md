@@ -44,6 +44,36 @@ uv sync --extra dev
 source .venv/bin/activate
 ```
 
+## Run a bundle from the Hub
+
+`agent-env run` also takes a bundle published in a [Hugging Face Hub](https://huggingface.co/datasets) dataset:
+
+```bash
+agent-env run hf://<org>/<repo>                     # the main branch
+agent-env run hf://<org>/<repo>@v1.0/bundles/hello  # a tag, branch or commit, and the bundle's folder
+```
+
+The revision (a branch, tag or commit, percent-encoded when it holds a `/`; the main branch by default) resolves to a
+commit, and only that commit's bundle and the dataset card are downloaded, into
+`$XDG_CACHE_HOME/agentenv/hf/<org>/<repo>/<commit>` (`~/.cache` by default), where a later run of the commit finds
+them. Without a path, the run takes the only bundle under `bundles/`, or the one the card's `agentenv: default` names,
+else the repo's root when it has a kind folder (`envs/`, `tasks/`, ...). It prints the repo, commit and bundle, then
+runs as a folder does, with ids under `@hf/<org>/<repo>/<name>`, so a rerun of the same commit reuses what the last one
+wrote, and records the commit with each run. A bundle's `<name>` is its folder under `bundles/`, or its path for a folder
+elsewhere; the root's ids are `@hf/<org>/<repo>`, and its name is the repo's. The card says what each bundle needs:
+
+```yaml
+agentenv:
+  default: hello                            # the bundle a run without a path takes, of several under bundles/
+  bundles:
+    hello:                                  # the bundle's <name>, or the repo's name for the root
+      plugins: ["agentenv-example>=1.2"]    # what a bundle without a bundle.toml requires
+      setup: agent-env example setup        # shown when a missing plugin, agent, env or artifact stops a run
+```
+
+Each run checks the bundle's `bundle.toml`, else the card's plugins, the first one before the bundle is downloaded; the
+`setup` command is never run. A gated or private dataset needs `hf auth login` or `HF_TOKEN`.
+
 ## Plugins
 
 A package of your own can add env types, providers, task steps and stores to agent-env, and `agent-env plugin` lists, checks, adds and removes installed plugins. The [plugin docs](https://www.agentenvframework.com/docs/plugins) show how.

@@ -14,7 +14,7 @@ from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.store import ImageStore, RegistryAuth, set_object_store
 from agent_env.config import get_config, reset_config
 from tst.unit.store.fakes import ConfiguredObjectStore
-from tst.util.exec_scripts import script_run
+from tst.util.exec_scripts import run_with_stubs, script_run
 
 
 def _image(tar_gz_object_url: str | None, image_name: str = "img:1") -> DockerImageArtifact:
@@ -131,11 +131,23 @@ async def test_a_load_of_tarballs_runs_the_script_it_always_has(signing_store):
 
     flags = "--retry 5 --retry-all-errors --retry-delay 1"
     assert sandbox.scripts == [
-        f'(curl -fsSL {flags} "https://signed/a.tar.gz" -o /tmp/_docker_image_vm-test_0.tar.gz '
+        f"(curl -fsSL {flags} https://signed/a.tar.gz -o /tmp/_docker_image_vm-test_0.tar.gz "
         "&& gunzip -c /tmp/_docker_image_vm-test_0.tar.gz | docker load && rm -f /tmp/_docker_image_vm-test_0.tar.gz) & "
-        f'(curl -fsSL {flags} "https://signed/b.tar.gz" -o /tmp/_docker_image_vm-test_1.tar.gz '
+        f"(curl -fsSL {flags} https://signed/b.tar.gz -o /tmp/_docker_image_vm-test_1.tar.gz "
         "&& gunzip -c /tmp/_docker_image_vm-test_1.tar.gz | docker load && rm -f /tmp/_docker_image_vm-test_1.tar.gz) & wait"
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_signed_url_with_shell_syntax_reaches_curl_as_it_is(signing_store, tmp_path):
+    name = "a$(touch pwned)`touch pwned`;touch pwned;&.tar.gz"
+    sandbox = _RecordingVmSandbox(images_stdout="a\n")
+
+    await sandbox.load_docker_images([_image(f"s3://bucket/{name}", "a:1")])
+
+    curl, = run_with_stubs(sandbox.scripts[0], tmp_path, "curl", "gunzip", "docker")["curl"]
+    assert curl[-3:] == [f"https://signed/{name}", "-o", "/tmp/_docker_image_vm-test_0.tar.gz"]
+    assert not (tmp_path / "pwned").exists()
 
 
 class _Registry(ImageStore):
@@ -159,15 +171,59 @@ PRIVATE = "registry.example/team/app@sha256:" + "0" * 64
 PUBLIC = "ghcr.io/team/tool:v1"
 
 
+class _StdinVm(_RecordingVmSandbox):
+    """Takes stdin on exec, as the local and Modal VM sandboxes do."""
+
+    def __init__(self):
+        super().__init__()
+        self.stdin: dict[str, bytes] = {}
+
+    async def exec_with_output(self, *args):
+        if args[:4] == ("sudo", "bash", "-c", "mktemp -d"):
+            self.scripts.append("mktemp -d")
+            return 0, "/tmp/tmp.Xq3\n", ""
+        return await super().exec_with_output(*args)
+
+    async def _exec_with_stdin(self, script, stdin):
+        self.stdin[script] = b"".join([piece async for piece in stdin])
+        return 0, "", ""
+
+
 @pytest.mark.asyncio
 async def test_an_image_with_no_tarball_is_pulled_after_logging_in_to_the_registry_the_store_holds(registry):
-    sandbox = _RecordingVmSandbox()
+    sandbox = _StdinVm()
 
     await sandbox.load_docker_images([_image(None, PRIVATE), _image(None, PUBLIC), _image(None, PRIVATE)])
 
-    login, *pulls = sandbox.scripts
-    assert login == "echo token | docker login --username user --password-stdin registry.example"
-    assert sorted(pulls) == sorted([f"docker pull {PRIVATE}", f"docker pull {PUBLIC}"])
+    *login, pull, other_pull = sandbox.scripts
+    assert login == [
+        "mktemp -d",
+        "docker login --username user --password-stdin registry.example < /tmp/tmp.Xq3/password",
+        "rm -rf /tmp/tmp.Xq3",
+    ]
+    assert sandbox.stdin == {"cat > /tmp/tmp.Xq3/password": b"token"}
+    assert sorted([pull, other_pull]) == sorted([f"docker pull {PRIVATE}", f"docker pull {PUBLIC}"])
+
+
+class _FileApiVm(_RecordingVmSandbox):
+    """Writes VM files through its own API, as sail_vm, daytona, tensorlake and vercel do."""
+
+    def __init__(self):
+        super().__init__()
+        self.written: dict[str, bytes] = {}
+
+    async def _write_bytes_to_vm_path(self, data, vm_path):
+        self.written[vm_path] = data
+
+
+@pytest.mark.asyncio
+async def test_a_secret_goes_through_the_file_api_of_a_sandbox_that_takes_no_stdin():
+    sandbox = _FileApiVm()
+
+    await sandbox.write_secret_file(b"token", "/tmp/tmp.Xq3/password")
+
+    assert sandbox.written == {"/tmp/tmp.Xq3/password": b"token"}
+    assert not any("token" in script for script in sandbox.scripts)
 
 
 @pytest.mark.asyncio
@@ -177,7 +233,7 @@ async def test_tarballs_are_loaded_and_the_rest_pulled(signing_store, registry):
     await sandbox.load_docker_images([_image(None, PUBLIC), _image("s3://bucket/a.tar.gz", "a:1")])
 
     load, pull = sandbox.scripts
-    assert '"https://signed/a.tar.gz"' in load and PUBLIC not in load
+    assert " https://signed/a.tar.gz " in load and PUBLIC not in load
     assert pull == f"docker pull {PUBLIC}"
 
 
@@ -972,7 +1028,7 @@ async def test_tarballs_are_loaded_registry_images_pulled_and_contexts_built(sig
     await sandbox.load_docker_images([_image("s3://bucket/a.tar.gz", "a:1"), _image(None, PUBLIC),
                                       _context_image("c", "sha256:" + "3" * 64)])
 
-    assert '"https://signed/a.tar.gz"' in sandbox.scripts[0]
+    assert " https://signed/a.tar.gz " in sandbox.scripts[0]
     assert sandbox.scripts[1] == f"docker pull {PUBLIC}"
     assert not any("local/c-0123456789ab" in script for script in sandbox.scripts if script.startswith("docker pull"))
     assert sandbox.scripts[-2].endswith("-t local/c-0123456789ab:v1 .")

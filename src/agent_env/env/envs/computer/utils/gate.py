@@ -3,9 +3,13 @@ each other and against what the env declares, and every mismatch is named."""
 
 from __future__ import annotations
 
+import itertools
+import re
 from collections.abc import Sequence
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
+from agentenv_protocol.computer.apps import APPS
 from agentenv_protocol.computer.platform import Platform, supported
 from jsonschema import Draft202012Validator
 
@@ -22,14 +26,11 @@ if TYPE_CHECKING:
 MAX_SIDE = 32767
 
 
-def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, apps: list, display: Any, network: Any,
-          computer_settings: Any) -> tuple[dict[str, SettingValue], list[str]]:
-    """The env's values of the base's settings, and every way ``base``, ``driver`` and what the env declares don't
-    compose."""
-    problems = []
-    if apps:
-        problems.append("apps: computer app envs aren't supported yet")
-    problems += _platform(base, driver)
+def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, environment_name: str, apps: list, display: Any,
+          network: Any, computer_settings: Any) -> tuple[dict[str, SettingValue], list[str]]:
+    """The env's values of the base's settings, and every way ``base``, ``driver`` and what the env declares, named
+    ``environment_name``, don't compose."""
+    problems = _platform(base, driver) + _apps(base, driver, apps, environment_name)
     problems += _image(base)
     problems += _display(base, display, computer_settings)
     problems += _network(network)
@@ -51,30 +52,102 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
     return [arch for arch in base.arch if arch in matching]
 
 
-def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv) -> list[str]:
-    """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``: a platform it doesn't support, no
-    architecture in common, or no install for the base's OS."""
+def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
+    """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
+    doesn't support, no architecture in common, no install for the base's OS, or a port the driver listens on too."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
-        return [f"app: {app.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
+        return [f"{at}: {app.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
                 f"{os.display}); it supports {named or 'none'}"]
     problems = []
     if not arches(base, driver, [app]):
-        problems.append(f"app: no architecture {base.id}, {driver.id} and {app.id} all run")
+        problems.append(f"{at}: no architecture {base.id}, {driver.id} and {app.id} all run")
     if os.type not in app.install:
-        problems.append(f"app: {app.id} declares no install for {os.type}")
+        problems.append(f"{at}: {app.id} declares no install for {os.type}")
+    elif taken := sorted(set(_ports(app, os.type)) & set(_driver_ports(driver, os.type))):
+        problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
     return problems
 
 
-def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str) -> list[str]:
-    """The problems with ``values``, of ``app``'s settings by name, each named from ``at``: a setting it doesn't declare,
-    a secret's given as anything but a bare reference (or null, where it's optional), a required one missing, and what
-    the schema of its ``Settings`` refuses of the rest. A secret's reference never meets the constraints on its value,
-    and its value never reaches a message."""
-    schema, secrets = app.declaration.settings, app.secret_settings()
-    properties, required = schema.get("properties", {}), schema.get("required", [])
-    problems = [f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]
+def folder_name(name: str, fallback: str) -> str:
+    """``name``'s last part, lowercased, as a slug: the name of a folder a part is installed in."""
+    return re.sub(r"[^a-z0-9-]+", "-", name.rsplit("/", 1)[-1].lower()).strip("-") or fallback
+
+
+def app_folder(app: ComputerAppEnv) -> str:
+    """The name of the folder ``app`` is installed in, under ``APPS``, and of its programs: its environment name's, the
+    one name a computer knows it by."""
+    return folder_name(app.environment_name, "app")
+
+
+def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[ComputerAppEnv],
+          environment_name: str) -> list[str]:
+    """Every way ``apps`` don't fit together on ``base`` and ``driver`` in a computer env named ``environment_name``:
+    each one's own (``check_app``), no architecture they all run, one listed twice, one named as the computer is, two
+    under one environment name, in one folder, with one program name or listening on one port, each pair of apps named
+    for the first they'd share, and two keeping their data in one path or one inside the other."""
+    problems = [problem for i, app in enumerate(apps) for problem in check_app(base, driver, app, f"apps[{i}]")]
+    if not problems and apps and not arches(base, driver, apps):
+        problems.append(f"apps: no architecture {base.id}, {driver.id} and every app all run")
+    ids = [app.id for app in apps]
+    problems += [f"apps: {app_id} is listed twice" for app_id in sorted({i for i in ids if ids.count(i) > 1})]
+    distinct, named = list({app.id: app for app in apps}.values()), set()
+    problems += [f"apps: {app.id} is named {environment_name!r}, as the computer env is, which names the computer's "
+                 "own files" for app in distinct if app.environment_name == environment_name]
+    for kind, keys in (("environment name", lambda app: [app.environment_name]),
+                       ("folder", lambda app: [f"{APPS}/{app_folder(app)}"]),
+                       ("program", lambda app: programs(app, base.os.type)),
+                       ("port", lambda app: _ports(app, base.os.type))):
+        claims: dict[object, list[str]] = {}
+        for app in distinct:
+            for key in keys(app):
+                claims.setdefault(key, []).append(app.id)
+        for key, owners in claims.items():
+            if len(owners) > 1 and frozenset(owners) not in named:
+                named.add(frozenset(owners))
+                problems.append(f"apps: {' and '.join(owners)} would share the {kind} {key!r}")
+    owned = [(app, PurePosixPath(path)) for app in distinct for path in _paths(app, base.os.type)]
+    problems += [f"apps: {one.id} keeps its data in {str(a)!r} and {other.id} in {str(b)!r}, so they'd share it"
+                 for (one, a), (other, b) in itertools.combinations(owned, 2)
+                 if one is not other and (a.is_relative_to(b) or b.is_relative_to(a))]
+    return problems
+
+
+def programs(app: ComputerAppEnv, os_type: str) -> list[str]:
+    """The names of the supervisord programs ``app`` runs on ``os_type``: its own server's, then its services'."""
+    server = f"app-{app_folder(app)}"
+    install = app.install.get(os_type)
+    return [server, *(f"{server}-{service.name}" for service in (install.services if install is not None else []))]
+
+
+def _paths(app: ComputerAppEnv, os_type: str) -> list[str]:
+    declared = app.declaration.os.get(os_type)
+    return list(declared.paths or []) if declared is not None else []
+
+
+def _ports(app: ComputerAppEnv, os_type: str) -> list[int]:
+    install = app.install.get(os_type)
+    return list(install.ports or []) if install is not None else []
+
+
+def _driver_ports(driver: ComputerDriverEnv, os_type: str) -> list[int]:
+    install = driver.install.get(os_type)
+    return [driver.port, *(install.ports or [] if install is not None else [])]
+
+
+def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str, os_type: str | None,
+                       partial: bool = False) -> list[str]:
+    """The problems with ``values``, of ``app``'s settings on ``os_type`` by name, each named from ``at``: a setting it
+    doesn't declare, a secret's given as anything but a bare reference (or null, where it's optional), a required one
+    missing unless ``values`` are ``partial``, defaults a deploy completes, and what the schema of its ``Settings``
+    refuses of the rest. A secret's reference never meets the constraints on its value, and its value never reaches a
+    message."""
+    schema, secrets = app.settings_schema(os_type), app.secret_settings(os_type)
+    properties, required = schema.get("properties", {}), [] if partial else schema.get("required", [])
+    build = (app.build_settings_schema(os_type) or {}).get("properties", {})
+    problems = [f"{at}.{name} is one of {app.id}'s build settings, which only another image changes" if name in build
+                else f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]
     problems += [f"{at}.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME reference "
                  "with no ?default, not its value" for name in values if name in secrets
                  and not (_names_a_secret(values[name]) or values[name] is None and _optional(properties[name]))]
@@ -83,6 +156,17 @@ def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str) -> 
              "required": [name for name in required if name not in secrets]}
     return problems + [f"{'.'.join([at, *map(str, error.absolute_path)])}: {error.message}" for error in
                        Draft202012Validator(plain).iter_errors({k: v for k, v in values.items() if k not in secrets})]
+
+
+def check_app_build_settings(app: ComputerAppEnv, values: dict[str, Any], at: str, os_type: str | None) -> list[str]:
+    """The problems with ``values``, of ``app``'s build settings on ``os_type`` by name, each named from ``at``: a
+    setting it doesn't declare as one, a required one missing, and what the schema of its ``BuildSettings`` refuses of
+    the rest. With no OS type, its class's."""
+    schema = app.build_settings_schema(os_type) or {"type": "object", "properties": {}}
+    problems = [f"{at}.{name}: {app.id} declares no build setting {name!r}" for name in values
+                if name not in schema["properties"]]
+    return problems + [f"{'.'.join([at, *map(str, error.absolute_path)])}: {error.message}"
+                       for error in Draft202012Validator(schema).iter_errors(values)]
 
 
 def _optional(setting: dict) -> bool:

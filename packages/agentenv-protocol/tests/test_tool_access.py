@@ -14,6 +14,7 @@ fastmcp = pytest.importorskip("fastmcp")
 from mcp import ClientSession  # noqa: E402
 from mcp.client import streamable_http as _streamable_http  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.types import CallToolResult, TextContent  # noqa: E402
 
 from agentenv_protocol import (  # noqa: E402
     ROLE_HEADER,
@@ -21,6 +22,8 @@ from agentenv_protocol import (  # noqa: E402
     AgentEnvEnvironment,
     AgentEnvFastMCPApplication,
     EnvironmentCard,
+    EnvironmentTool,
+    ForwardedTool,
     environment_card,
     tool,
 )
@@ -50,10 +53,10 @@ class _Env(AgentEnvEnvironment):
 
 
 @contextlib.asynccontextmanager
-async def _served():
-    """The env on mcp's FastMCP over streamable HTTP, and a way to open a session as a role."""
+async def _served(env: AgentEnvEnvironment | None = None):
+    """``env``, by default an ``_Env``, on mcp's FastMCP over streamable HTTP, and a way to open a session as a role."""
     app = FastMCP("desk", json_response=True)
-    _Env().mount(app)
+    (env or _Env()).mount(app)
     asgi = app.streamable_http_app()
 
     @contextlib.asynccontextmanager
@@ -116,6 +119,25 @@ async def test_roles_see_and_call_only_what_their_rules_allow():
     assert refused.structuredContent["applied"] == "no" and not allowed.isError
     assert not forwarded.isError and forwarded.content[0].text == "grade", "a gateway-stamped role wins over the header"
     assert grader_tools == ["grade", "read", "write"] and default_tools == ["read", "write"]
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_tool_is_listed_and_refused_by_role_like_any_tool():
+    class Forwarding(_Env):
+        def forwarded_tools(self):
+            async def click(**arguments):
+                return CallToolResult(content=[TextContent(type="text", text="clicked")])
+            return [ForwardedTool(EnvironmentTool(name="click", inputSchema={"type": "object"}), click)]
+
+    with anyio.fail_after(30):
+        async with _served(Forwarding()) as (rest, session):
+            await rest.post("/tools/disable", json={"role": "agent", "tools": ["click"]})
+            async with session() as anyone:
+                listed, called = await _names(anyone), await anyone.call_tool("click", {})
+            async with session("agent") as agent:
+                agent_tools, refused = await _names(agent), await agent.call_tool("click", {})
+    assert listed == ["click", "read", "write"] and called.content[0].text == "clicked"
+    assert agent_tools == ["read", "write"] and refused.isError
 
 
 @pytest.mark.asyncio

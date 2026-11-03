@@ -280,7 +280,7 @@ _FILE_SECTIONS: tuple[FileSection, ...] = (
     FileSection("sandbox", ("sandbox",), "providers.sandbox_providers.sandbox_provider",
                 {"default": None, "agent_default": None, "attribution": None, "providers": Named(_SEAM)}),
     FileSection("state", ("state",), "providers.env_state.env_state_provider", {"providers": Named(_SEAM)}),
-    FileSection("envs", ("envs",), "env.registry", {"impls": None}),
+    FileSection("envs", ("envs",), "env.registry", {"impls": None, **_resolved_keys("envs")}),
     FileSection("artifacts", ("artifacts",), "artifact.registry", {"impls": None, "type_aliases": None}),
     FileSection("task_steps", ("task_steps",), "task_step.registry", {"impls": None}),
     FileSection("explorer", ("explorer",), "explorer.app",

@@ -90,7 +90,11 @@ class SandboxProvider(ABC):
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        env: Optional[dict[str, str]] = None,
     ) -> VmSandbox:
+        """A VM. A provider whose ``disk_image_platforms`` names a platform boots a computer's disk form, ``image``, an
+        image holding ``computer.DISK_FILE``, for it, its ``env`` in the disk's NoCloud seed; such a sandbox has no exec
+        channel."""
         raise NotImplementedError(f"{type(self).__name__} does not support create_vm")
 
     async def create_container(
@@ -153,6 +157,11 @@ class SandboxProvider(ABC):
                                       "in place")
         await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} > /dev/null")
         await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+
+    async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
+        """Boot the disk create_vm booted on ``sandbox`` afresh, from ``image`` with ``env``, reached on its ports as
+        before: the sandbox, its id and its URLs stay."""
+        raise NotImplementedError(f"{type(self).__name__} can't boot a disk afresh in place")
 
     async def prepare_image(self, image: DockerImageArtifact, *, attribution: Optional[Attribution] = None) -> None:
         """Get ready to run ``image`` by its name, before create_sandbox or create_container is asked for it and outside
@@ -317,6 +326,11 @@ class SandboxProvider(ABC):
         return frozenset({DEFAULT_BUILD_PLATFORM})
 
     @classmethod
+    def disk_image_platforms(cls) -> frozenset[str]:
+        """The platforms whose disk images (a computer's disk form) its create_vm boots without emulation: none here."""
+        return frozenset()
+
+    @classmethod
     def effective_network_policy(cls, policy: Optional[NetworkPolicy]) -> NetworkPolicy:
         """``policy`` with the platform's own hosts unioned in; identity unless it allowlists."""
         if policy is None:
@@ -341,6 +355,7 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "boxd": "agent_env.providers.sandbox_providers.boxd.provider:BoxdSandboxProvider",
     "daytona": "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
     "boat": "agent_env.providers.sandbox_providers.boat.provider:BoatSandboxProvider",
+    "coreweave": "agent_env.providers.sandbox_providers.coreweave.provider:CoreWeaveSandboxProvider",
     "local": "agent_env.providers.sandbox_providers.local_docker.provider:LocalSandboxProvider",
 }
 

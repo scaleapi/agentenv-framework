@@ -116,25 +116,8 @@ def test_service_db_put_explicit_id_wins_and_skips_the_config_read():
     get_config.assert_not_called()
 
 
-def test_website_browser_put_falls_back_to_the_config_default():
-    from agent_env.cli.env.website_browser import website_browser
-
-    cfg = _config(default_website_browser_env_id="wb-from-config")
-    with patch("agent_env.config.get_config", return_value=cfg), \
-         patch("agent_env.env.bootstrap.DockerImageArtifact") as artifact, \
-         patch("agent_env.env.bootstrap.build_image"):
-        artifact.put.side_effect = RuntimeError("stop once the id is recorded")
-        res = CliRunner().invoke(website_browser, ["put"])
-
-    assert artifact.put.call_args.kwargs["id"] == "wb-from-config__env_image"
-    assert res.exit_code != 0
-
-
 def test_help_text_names_the_config_key_for_each_lazy_default():
     from agent_env.cli.env.service_db import service_db
-    from agent_env.cli.env.website_browser import website_browser
 
     runner = CliRunner()
     assert "default_service_db_env_id" in runner.invoke(service_db, ["put", "--help"]).output
-    assert "default_website_browser_env_id" in runner.invoke(
-        website_browser, ["put", "--help"]).output

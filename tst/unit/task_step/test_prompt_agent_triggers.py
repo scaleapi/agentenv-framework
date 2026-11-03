@@ -47,7 +47,7 @@ def _resp(status: int, body: dict, method: str = "GET") -> httpx.Response:
 async def test_snapshot_shape_multi_env():
     sent = []
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         sent.append((url, params, timeout))
         return _resp(200, {"triggers": [{"id": "v6-rate", "status": "fired"},
                                         {"id": "v6-accept", "status": "armed"}]})
@@ -63,7 +63,7 @@ async def test_snapshot_shape_multi_env():
 
 @pytest.mark.asyncio
 async def test_an_env_whose_card_offers_no_triggers_state_reads_as_empty_with_no_request():
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         raise AssertionError("no request for an env whose card offers no triggers state")
 
     ctx = _ctx(_env("env-x", "http://gw-x", EXT_CLOCK_URI))
@@ -75,7 +75,7 @@ async def test_an_env_whose_card_offers_no_triggers_state_reads_as_empty_with_no
 
 @pytest.mark.asyncio
 async def test_a_404_from_an_advertised_triggers_state_fails_closed():
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         return _resp(404, {})
 
     ctx = _ctx(_env("env-x", "http://gw-x"))
@@ -87,7 +87,7 @@ async def test_a_404_from_an_advertised_triggers_state_fails_closed():
 
 @pytest.mark.asyncio
 async def test_fail_closed_raises_on_persistent_error():
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         raise httpx.ConnectError("gateway down")
 
     ctx = _ctx(_env("env-x", "http://gw-x"))
@@ -101,7 +101,7 @@ async def test_fail_closed_raises_on_persistent_error():
 async def test_retries_then_succeeds():
     calls = {"n": 0}
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise httpx.ConnectError("transient")
@@ -119,7 +119,7 @@ async def test_retries_then_succeeds():
 async def test_triggers_state_is_read_at_the_stored_cards_address():
     sent = []
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         sent.append(url)
         return _resp(200, {"triggers": []})
 
@@ -220,7 +220,7 @@ def _patched_store(store=None, *, key_prefix=""):
 async def test_capture_uploads_state_and_records_summary():
     calls = {"n": 0}
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         if url.endswith("/clock/state"):
             return _resp(200, _CLOCK)
         calls["n"] += 1
@@ -256,7 +256,7 @@ async def test_capture_uploads_state_and_records_summary():
 
 @pytest.mark.asyncio
 async def test_capture_is_kept_under_the_fixture_prefix():
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         return _resp(200, _CLOCK if url.endswith("/clock/state") else _STATE)
 
     ctx = TaskStepContext(
@@ -274,7 +274,7 @@ async def test_capture_is_kept_under_the_fixture_prefix():
 @pytest.mark.asyncio
 async def test_capture_records_clock_context_and_per_trigger_detail():
     """A recurrence reads "armed" forever, so only fire_count shows it fired."""
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         return _resp(200, _CLOCK if url.endswith("/clock/state") else _CLOCK_STATE)
 
     ctx = TaskStepContext(
@@ -313,7 +313,7 @@ async def test_capture_distinguishes_a_failed_coupling_from_one_that_never_fired
          "failure_count": 2, "last_failure_at": "2026-06-01T12:00:00Z"},
     ]}
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         return _resp(200, _CLOCK if url.endswith("/clock/state") else failed)
 
     ctx = TaskStepContext(
@@ -343,7 +343,7 @@ async def test_capture_does_not_wait_on_a_firing_recurring_clock_trigger():
          "status": "firing", "fire_count": 3, "next_mark": "2026-06-03T00:00:00Z"}]}
     calls = {"n": 0}
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         if url.endswith("/clock/state"):
             return _resp(200, _CLOCK)
         calls["n"] += 1
@@ -366,7 +366,7 @@ async def test_capture_does_not_wait_on_a_firing_recurring_clock_trigger():
 @pytest.mark.asyncio
 async def test_capture_tolerates_a_gateway_without_clock_state():
     """An unreachable clock state: capture still succeeds, clock recorded as None."""
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         if url.endswith("/clock/state"):
             raise httpx.ConnectError("no clock route")
         return _resp(200, _STATE)
@@ -397,7 +397,7 @@ async def test_capture_tolerates_a_gateway_without_clock_state():
 async def test_capture_records_no_clock_with_no_request_when_the_card_offers_no_clock_state():
     sent = []
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         sent.append(url)
         return _resp(200, _STATE)
 
@@ -419,7 +419,7 @@ async def test_capture_records_no_clock_with_no_request_when_the_card_offers_no_
 async def test_capture_reads_triggers_and_clock_at_the_stored_cards_address():
     sent = []
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         sent.append((url, timeout))
         return _resp(200, _CLOCK if url.endswith("/clock/state") else _STATE)
 
@@ -488,7 +488,7 @@ def test_settle_poll_does_not_wait_out_a_delay_or_working_hours():
 async def test_capture_noop_without_registrations():
     calls = {"n": 0}
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         calls["n"] += 1
         return _resp(200, _STATE)
 
@@ -502,7 +502,7 @@ async def test_capture_noop_without_registrations():
 
 @pytest.mark.asyncio
 async def test_capture_fail_open_records_error():
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         raise httpx.ConnectError("gateway gone")
 
     ctx = TaskStepContext(
@@ -526,7 +526,7 @@ async def test_capture_grace_polls_until_settled():
     responses = [firing, _STATE]
     calls = {"n": 0}
 
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         if url.endswith("/clock/state"):
             return _resp(200, _CLOCK)
         body = responses[min(calls["n"], len(responses) - 1)]
@@ -572,7 +572,7 @@ async def test_capture_budget_bounds_total_time():
 
 @pytest.mark.asyncio
 async def test_capture_put_failure_keeps_inline_summary():
-    async def fake_get(self, url, timeout, params=None):
+    async def fake_get(self, url, timeout, params=None, headers=None):
         return _resp(200, _STATE)
 
     class _FailingStore(_FakeStore):

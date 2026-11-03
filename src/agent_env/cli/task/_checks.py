@@ -13,8 +13,8 @@ from agent_env.artifact.artifact import Artifact
 from agent_env.bundle.preflight import stored_infra
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.entity.refs import EntityKind, RefRole, ref_sites
-from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE
-from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, ensure_default_envs, stores_are_local
+from agent_env.config.runtime import GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBSITE_BROWSER_OVERRIDE
+from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, WEBSITE_BROWSER, ensure_default_envs, stores_are_local
 from agent_env.env.env import Env
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.base import NotFoundError
@@ -32,7 +32,7 @@ def runnable_task(task_id: str, version: int | None, metadata: Mapping[str, Any]
     """The stored task ``task_id`` at ``version``, or its latest, once what it requires is installed and every env and
     artifact type the steps a run with ``metadata`` runs read loads here. With local stores, the infra envs those steps
     deploy on that the store doesn't hold are set up, but for one the run is given its own of (``gateway_env_id``,
-    ``service_db_env_id``); one it holds is left as it is, for ``agent-env up`` or ``run`` to rebuild. Raises
+    ``service_db_env_id``, ``website_browser_env_id``); one it holds is left as it is, for ``agent-env up`` or ``run`` to rebuild. Raises
     UnmetRequirements naming the command that installs what it requires, or a ClickException for a type nothing here
     registers."""
     try:
@@ -51,7 +51,8 @@ def runnable_task(task_id: str, version: int | None, metadata: Mapping[str, Any]
         raise UnmetRequirements(problems, unmet)
     if problems:
         raise click.ClickException("\n".join(problems))
-    given = {kind for kind, key in ((GATEWAY, GATEWAY_OVERRIDE), (SERVICE_DB, SERVICE_DB_OVERRIDE)) if overrides.get(key)}
+    given = {kind for kind, key in ((GATEWAY, GATEWAY_OVERRIDE), (SERVICE_DB, SERVICE_DB_OVERRIDE),
+                                    (WEBSITE_BROWSER, WEBSITE_BROWSER_OVERRIDE)) if overrides.get(key)}
     if stores_are_local() and (kinds := stored_infra(steps, overrides) - given):
         ensure_default_envs(kinds, say=say, missing_only=True)
     return task

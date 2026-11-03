@@ -8,6 +8,7 @@ layer works; the full task-DAG no-infra e2e stays gated on images/secrets/seedin
 """
 
 import gzip
+import hashlib
 import io
 import re
 from pathlib import Path
@@ -68,6 +69,36 @@ def test_file_artifact_put_existing(local_stores, tmp_path):
     fa = FileArtifact.put_existing(id="existing", description="d", object_url=written_url)
     assert fa.filename == "exists.txt"
     assert FileArtifact.get("existing").load() == b"already-here"
+
+
+@pytest.mark.parametrize("put", [
+    lambda src, url: FileArtifact.put(id="script", description="d", file_path=src),
+    lambda src, url: FileArtifact.put_bytes(id="script", description="d", filename="verify.py", content=b"def verify(): ..."),
+    lambda src, url: FileArtifact.put_at(id="script", description="d", file_path=src, object_url=url),
+], ids=["put", "put_bytes", "put_at"])
+def test_a_file_artifact_whose_bytes_are_replaced_after_its_put_refuses_to_load(local_stores, tmp_path, put):
+    """Its document records the SHA-256 of the bytes it was put with, so a later write to its object, which the
+    document doesn't see, can't pass as the file."""
+    store = local_stores.get_object_store()
+    fa = put(_write(tmp_path, "verify.py", b"def verify(): ..."), store.object_url("artifacts/file/script/1/verify.py"))
+    assert FileArtifact.get("script").sha256 == hashlib.sha256(b"def verify(): ...").hexdigest()
+    assert FileArtifact.get("script").load() == b"def verify(): ..."
+
+    store.put(store.get_object_key(fa.object_url), b"replaced", allow_overwrite=True)
+
+    with pytest.raises(ValueError, match="no longer holds the bytes file artifact script v1 was put with"):
+        FileArtifact.get("script").load()
+
+
+def test_a_file_artifact_that_records_no_hash_loads_what_its_object_holds(local_stores, tmp_path):
+    """One put before artifacts recorded a hash, or registered by put_existing, which has no bytes to hash."""
+    store = local_stores.get_object_store()
+    written_url = store.put_file("artifacts/file/existing/1/exists.txt", _write(tmp_path, "exists.txt", b"first"))
+    assert FileArtifact.put_existing(id="existing", description="d", object_url=written_url).sha256 is None
+
+    store.put("artifacts/file/existing/1/exists.txt", b"second", allow_overwrite=True)
+
+    assert FileArtifact.get("existing").load() == b"second"
 
 
 @pytest.mark.parametrize("url,refusal", [

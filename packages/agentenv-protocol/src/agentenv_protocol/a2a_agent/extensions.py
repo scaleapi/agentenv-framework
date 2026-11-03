@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -19,6 +20,7 @@ from pydantic import (
     PositiveInt,
     StrictInt,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -50,13 +52,52 @@ class ExtensionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-_SkillName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]
+_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+_SkillName = Annotated[str, Field(pattern=_NAME_PATTERN)]
+_CdpEndpointName = Annotated[str, Field(pattern=_NAME_PATTERN)]
 
 
 class McpAddRequest(ExtensionRequest):
     url: str
     headers: dict[str, str] | None = None
     name: str | None = None
+
+
+def _absolute_url(url: str, schemes: tuple[str, ...]) -> str:
+    """``url``, once it names one of ``schemes``, a host and, if it has one, a valid port."""
+    parts = urlsplit(url)
+    try:
+        valid = parts.scheme in schemes and bool(parts.hostname) and (parts.port is None or parts.port >= 0)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(f"must be an absolute {' or '.join(schemes)} URL with a host and a valid port")
+    return url
+
+
+class CdpAddRequest(ExtensionRequest):
+    """A CDP endpoint: ``http_url`` for clients that discover through ``/json/version``, ``ws_url`` for clients
+    that connect to the browser directly."""
+
+    name: _CdpEndpointName
+    http_url: str
+    ws_url: str
+    headers: dict[str, str] | None = None
+    metadata: dict[str, Any] | None = None
+
+    @field_validator("http_url")
+    @classmethod
+    def _http_url(cls, url: str) -> str:
+        return _absolute_url(url, ("http", "https"))
+
+    @field_validator("ws_url")
+    @classmethod
+    def _ws_url(cls, url: str) -> str:
+        return _absolute_url(url, ("ws", "wss"))
+
+
+class CdpRemoveRequest(ExtensionRequest):
+    name: _CdpEndpointName
 
 
 class InlineSkillRequest(ExtensionRequest):
@@ -1101,6 +1142,31 @@ MCP_CONFIG_V1 = ExtensionDefinition(
     },
 )
 
+CDP_CONFIG_V1 = ExtensionDefinition(
+    uri="urn:agentenv:cdp-config/v1",
+    description="Register CDP endpoints the agent drives itself.",
+    endpoint="/ext/cdp-config",
+    core_operations={
+        "add": _op(
+            "add",
+            "POST",
+            "/ext/cdp-config",
+            SDK,
+            request_model=CdpAddRequest,
+        ),
+        "list": _op(
+            "list", "GET", "/ext/cdp-config", SDK, response_required=("cdp_endpoints",)
+        ),
+        "remove": _op(
+            "remove",
+            "DELETE",
+            "/ext/cdp-config",
+            SDK,
+            request_model=CdpRemoveRequest,
+        ),
+    },
+)
+
 SKILL_CONFIG_V1 = ExtensionDefinition(
     uri="urn:agentenv:skill-config/v1",
     description="Register skills made available to the agent.",
@@ -1319,6 +1385,7 @@ STANDARD_EXTENSIONS: Mapping[str, ExtensionDefinition] = MappingProxyType(
         for extension in (
             AGENT_CONFIG_V1,
             MCP_CONFIG_V1,
+            CDP_CONFIG_V1,
             SKILL_CONFIG_V1,
             TRAJECTORY_V1,
             SNAPSHOT_V1,

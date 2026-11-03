@@ -18,7 +18,7 @@ from agent_env.artifact.artifacts import docker_image as docker_image_module
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, BundleKind, dry_run_bundle, run_bundle
-from agent_env.bundle.run import _write_bundle
+from agent_env.bundle.run import _write_bundle, prepare_bundle
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import get_config
@@ -797,6 +797,19 @@ def test_missing_infra_in_stores_that_arent_local_is_refused_naming_its_put_comm
     ]
 
 
+def test_a_missing_browser_agent_env_doesnt_ship_is_reported_once_for_a_deploy_on_another_provider(bundle_dir,
+                                                                                                    monkeypatch):
+    with namespace_routing():
+        WebsiteEnv.put(id="shop", backend_docker_image_artifact=_image("shop-back", REMOTE),
+                       frontend_docker_image_artifact=_image("shop-front", REMOTE), environment_name="shop")
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "shop"}])
+    monkeypatch.setattr(get_config(), "default_website_browser_env_id", "browseruse-mcp")
+
+    problems = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="modal_vm"))
+    assert [problem for problem in problems if "browseruse-mcp" in problem] == [next(
+        problem for problem in problems if problem.startswith("the website-browser env 'browseruse-mcp' isn't in the store"))]
+
+
 def test_a_gateway_deploy_on_another_provider_has_its_missing_infra_built_in_local_stores(bundle_dir, monkeypatch):
     """Built for this machine, with the build context a VM of another platform builds it from."""
     _env("crm", REMOTE)
@@ -1163,12 +1176,18 @@ def test_an_agent_or_agent_judge_needs_a_model_endpoint_unless_its_step_gives_on
              "judge_a2a_agent_id": "solver", "criteria": [{"id": "c1", "description": "done"}]}
     direct = {**judge, "id": "direct", "use_agent_judge": False}
     given = {**AGENT, "env_vars": {"LITELLM_API_KEY": "sk-1"}, "litellm_base_url": "http://models:4000"}
-    _task(bundle_dir, [AGENT, judge], name="judged")
+    asks = {"id": "ask", "type": "prompt_agent", "prompt_id": "agent", "prompt": "go", "depends_on": ["agent"]}
+    _task(bundle_dir, [AGENT, asks, judge], name="judged")
     _task(bundle_dir, [given, direct], name="given")
 
     assert _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local")) == [
         "tasks/judged.json: step 'agent', tasks/judged.json: step 'judge' deploy an agent that calls the model endpoint, "
         "and no model endpoint is set: set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"]
+    with namespace_routing():  # a trainer gives the solver its endpoint, and the judge still needs the configured one
+        trained = lambda: prepare_bundle(bundle_dir, tasks=["judged"], sandbox="local", solver_endpoint=True)  # noqa: E731
+        assert _problems(trained) == [
+            "tasks/judged.json: step 'judge' deploys an agent that calls the model endpoint, and no model endpoint is "
+            "set: set LITELLM_BASE_URL, or [model] base_url in .agentenv/config.toml"]
     assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["given"], sandbox="local").runs] == ["given"]
     monkeypatch.setenv("LITELLM_BASE_URL", "http://models:4000")
     [problem] = _problems(lambda: dry_run_bundle(bundle_dir, sandbox="local"))

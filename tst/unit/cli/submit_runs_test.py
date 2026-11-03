@@ -92,12 +92,13 @@ def test_a_context_json_is_stored_as_an_instance_the_runner_continues(monkeypatc
     saved.write_text(json.dumps(TaskStepContext(metadata={"seeded": "yes"}).to_dict()))
 
     result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--context-json", str(saved), "--start-step", "1",
-                     "--gateway-env-id", "gw-run", "--output-dir", str(tmp_path))
+                     "--gateway-env-id", "gw-run", "--website-browser-env-id", "wb-run", "--output-dir", str(tmp_path))
 
     assert result.exit_code == 0, result.output
     [call], [context] = task.calls, task.contexts
     assert call["start_step"] == 1 and context.metadata["seeded"] == "yes"
     assert context.metadata["user_overrides"]["gateway_env_id"] == "gw-run"
+    assert context.metadata["user_overrides"]["website_browser_env_id"] == "wb-run"
     assert call["instance_id"] == run_store.list_runs(task_id="t")[0].instance_id
 
 

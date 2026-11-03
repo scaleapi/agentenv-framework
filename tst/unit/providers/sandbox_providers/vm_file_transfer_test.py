@@ -11,6 +11,7 @@ import pytest
 from agent_env.providers.sandbox_providers import sandbox as sandbox_module
 from agent_env.providers.sandbox_providers.sandbox import read_vm_file, upload_vm_file
 from agent_env.store.object_store.local import LocalFilesystemObjectStore
+from tst.util.exec_scripts import run_with_stubs
 
 
 class _ShellVm:
@@ -104,7 +105,19 @@ async def test_a_store_that_signs_uploads_is_uploaded_to_by_the_vm(tmp_path):
 
     await upload_vm_file(vm, "/tmp/image.tar.gz", _SigningStore(), "s3://bucket/builds/image.tar.gz")
 
-    assert vm.scripts == ['curl -fsSL -X PUT --upload-file /tmp/image.tar.gz "https://put.example/image.tar.gz?sig=1"']
+    assert vm.scripts == ["curl -fsSL -X PUT --upload-file /tmp/image.tar.gz 'https://put.example/image.tar.gz?sig=1'"]
+
+
+@pytest.mark.asyncio
+async def test_a_presigned_url_with_shell_syntax_reaches_curl_as_it_is(tmp_path):
+    vm = _RecordingVm()
+    name = "a$(touch pwned)`touch pwned`;touch pwned"
+
+    await upload_vm_file(vm, "/tmp/image.tar.gz", _SigningStore(), f"s3://bucket/builds/{name}")
+
+    curl, = run_with_stubs(vm.scripts[0], tmp_path, "curl")["curl"]
+    assert curl[-1] == f"https://put.example/{name}?sig=1"
+    assert not (tmp_path / "pwned").exists()
 
 
 @pytest.mark.asyncio

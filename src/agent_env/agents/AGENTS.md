@@ -46,8 +46,8 @@ agent-env speaks A2A JSON-RPC to `/a2a`: `message/send` for each prompt, then `t
 terminal state, `completed`, `failed` or `canceled`. Your `run()` is one turn.
 
 - **In:** `TaskRequest` carries `task_id`, `context_id`, `parts` (`TextPart`, `FilePart` by `bytes` or `uri`,
-  `DataPart`), `config` (your typed config, as it stood when the task was created), `mcp_servers`, `skills`,
-  `metadata`, `session_ref`, `workspace` and `trajectory`.
+  `DataPart`), `config` (your typed config, as it stood when the task was created), `mcp_servers`,
+  `cdp_endpoints`, `skills`, `metadata`, `session_ref`, `workspace` and `trajectory`.
 - **Out:** a `TaskResult` from `TaskResult.text(...)`, `TaskResult.failure(code, message)` or `TaskResult.builder()`.
   Its parts become the task's status message, with `usage` as a data part; a failure adds
   `{error_type, error_code, error_message}`. A success needs at least one part, and `builder().failed(...)` adds no
@@ -116,6 +116,17 @@ agent-env registers each env's MCP server as `{url, name, headers}`. The SDK imp
 `request.mcp_servers` to the runtime every turn, keeping the names and passing the headers through.
 
 Reference: `enable(MCP_CONFIG_V1, ...)`, and `claude_bridge.py` where it builds `--mcp-config`.
+
+### `cdp-config/v1`, `/ext/cdp-config`
+
+For an agent that drives a browser itself. A browser reaches the agent as an endpoint `{name, http_url, ws_url,
+headers?, metadata?}` sent to `add`, and adding a name again replaces it; nothing in agent-env sends one yet (the
+`browser_connect_cdp` task step will). The SDK implements `add`, `list` and `remove`, and passes the endpoints in
+`request.cdp_endpoints` every turn. Take yours with `request.cdp_endpoint()`, or `request.cdp_endpoint(name)` when
+the task gives several, and connect afresh each turn, since an address can change between turns. With no endpoint, or
+several and no name, it fails the turn as an `infra_error` (`cdp.no_endpoint`, `cdp.ambiguous`), so the agent never
+falls back to a browser of its own. It fails the turn by raising, so call it before any handler of yours that catches
+every exception.
 
 ### `trajectory/v1`, `/ext/trajectory`
 

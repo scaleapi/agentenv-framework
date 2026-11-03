@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 from agent_env.store.base import ConcurrentModificationError
-from agent_env.store.ids import is_local_id
+from agent_env.store.ids import local_namespace
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +404,8 @@ class DocumentStore(ABC):
 
     def check_id(self, entity_id: str) -> None:
         """Raise ValueError unless an entity with ``entity_id`` may be written here. No store takes an id
-        opening with the reserved ``@`` but the ``@local`` namespace's own, which takes only ``@local`` ids."""
+        opening with the reserved ``@`` but a local namespace's own, ``@local``'s or ``@hf``'s, which takes only its
+        own ids."""
         reject_reserved_id(entity_id)
 
 
@@ -413,15 +414,15 @@ RESERVED_ID_PREFIX = "@"
 
 def reject_reserved_id(entity_id: object) -> None:
     """Refuse an id claiming the ``@`` prefix, which opens a registry-qualified
-    ``@namespace/id``. Only the ``@local`` namespace's store holds such ids, its own.
+    ``@namespace/id``. Only a local namespace's store, ``@local``'s or ``@hf``'s, holds such ids, its own.
 
     Reserved while agent-env is still private: once third parties have created ids, taking
     the prefix back stops being free.
     """
-    if isinstance(entity_id, str) and is_local_id(entity_id):
+    if isinstance(entity_id, str) and (namespace := local_namespace(entity_id)) is not None:
         raise ValueError(
-            f"id {entity_id!r} is an @local id, which only the @local namespace's store holds; "
-            "the agent-env CLI writes @local ids there"
+            f"id {entity_id!r} is an @{namespace} id, which only the @{namespace} namespace's store holds; "
+            f"the agent-env CLI writes @{namespace} ids there"
         )
     if isinstance(entity_id, str) and entity_id.startswith(RESERVED_ID_PREFIX):
         raise ValueError(

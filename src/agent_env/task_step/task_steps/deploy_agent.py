@@ -8,11 +8,15 @@ from typing import ClassVar, Optional
 
 import httpx
 from agentenv_protocol.a2a_agent import (
+    AGENT_CONFIG_V1,
+    BuiltinTools,
     NamespaceChangelogEnableResponse,
     ObjectChangelogApplyResponse,
     ObjectSnapshotLoadResponse,
     card_request_accepts,
 )
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import best_match
 
 from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.object_transfer import (
@@ -146,6 +150,21 @@ def _skill_fields(skill: dict) -> dict:
     }
 
 
+
+def _check_builtin_tools(agent_config: dict | None, agent_name: str, selection: dict) -> None:
+    """Refuse a selection of the agent's own tools that its card's agent-config extension can't take: it has no
+    ``builtin_tools``, or its schema doesn't name a tool the selection does."""
+    request = ((agent_config or {}).get("params") or {}).get("methods", {}).get("set", {}).get("request", {})
+    if "builtin_tools" not in request.get("supported", []):
+        raise RuntimeError(f"Agent '{agent_name}' cannot have its own tools selected: its card's "
+                           f"{AGENT_CONFIG_V1.uri} takes no 'builtin_tools'")
+    schema = request.get("schema") or {}
+    field = (schema.get("properties") or {}).get("builtin_tools")
+    if field is not None:
+        error = best_match(Draft202012Validator({**field, "$defs": schema.get("$defs", {})}).iter_errors(selection))
+        if error is not None:
+            raise RuntimeError(f"Agent '{agent_name}' can't take builtin_tools {selection}: {error.message}")
+
 class DeployAgentTaskStep(TaskStep):
     type: ClassVar[str] = "deploy_agent"
     entity_refs = (
@@ -186,6 +205,7 @@ class DeployAgentTaskStep(TaskStep):
         agent_snapshot_target_context_id: Optional[str] = None,
         network_policy: Optional[dict] = None,
         role: Optional[str] = None,
+        builtin_tools: Optional[dict] = None,
         enable_agent_changelog: bool = False,
         agent_changelog_toolcall_position_exclusive: Optional[int] = None,
         sandbox_name: Optional[str] = None,
@@ -217,6 +237,8 @@ class DeployAgentTaskStep(TaskStep):
         self.metadata = metadata or {}
         self.network_policy = NetworkPolicy.from_dict(network_policy).to_dict() if network_policy else None
         self.role = role or None
+        self.builtin_tools = (None if builtin_tools is None
+                              else BuiltinTools[str].model_validate(builtin_tools).model_dump(exclude_none=True))
         self.enable_agent_changelog = enable_agent_changelog
         self.agent_changelog_object_url = agent_changelog_object_url
         self.agent_changelog_toolcall_position_exclusive = agent_changelog_toolcall_position_exclusive
@@ -254,6 +276,7 @@ class DeployAgentTaskStep(TaskStep):
         base["metadata"] = self.metadata
         base["network_policy"] = self.network_policy
         base["role"] = self.role
+        base["builtin_tools"] = self.builtin_tools
         base["enable_agent_changelog"] = self.enable_agent_changelog
         base["agent_changelog_object_url"] = self.agent_changelog_object_url
         base["agent_changelog_toolcall_position_exclusive"] = self.agent_changelog_toolcall_position_exclusive
@@ -286,6 +309,7 @@ class DeployAgentTaskStep(TaskStep):
             metadata=dict(data.get("metadata") or {}),
             network_policy=data.get("network_policy"),
             role=data.get("role"),
+            builtin_tools=data.get("builtin_tools"),
             enable_agent_changelog=data.get("enable_agent_changelog", False),
             agent_changelog_object_url=data.get("agent_changelog_object_url"),
             agent_changelog_toolcall_position_exclusive=data.get("agent_changelog_toolcall_position_exclusive"),
@@ -365,13 +389,7 @@ class DeployAgentTaskStep(TaskStep):
         requested_disk = user_overrides.get("agent_disk_size_gb") or self.disk_size_gb
         min_disk = agent.metadata.get("min_disk_size_gb")
         agent_disk_size_gb = max(requested_disk or 0, min_disk or 0) or None
-        env_vars = dict(self.env_vars) if self.env_vars else {}
-        override_litellm_key = user_overrides.get("litellm_api_key")
-        if override_litellm_key:
-            env_vars["LITELLM_API_KEY"] = config.resolve_reference(override_litellm_key)
-        resolved_litellm_base_url = user_overrides.get("litellm_base_url") or self.litellm_base_url
-        if resolved_litellm_base_url:
-            env_vars["LITELLM_BASE_URL"] = resolved_litellm_base_url
+        env_vars = {**(self.env_vars or {}), **self._model_endpoint(context)}
         if self.role is not None:
             env_vars.setdefault(ROLE_ENV_VAR, self.role)  # the generated MCP CLI sends its role from here
 
@@ -423,6 +441,11 @@ class DeployAgentTaskStep(TaskStep):
             identity_payload["description"] = self.agent_description
         if self.role is not None:
             identity_payload["role"] = self.role
+        if self.builtin_tools is not None:
+            # Before the first request to the agent, so an agent that would keep its own tools never runs the task.
+            _check_builtin_tools(A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG), self.agent_name,
+                                 self.builtin_tools)
+            identity_payload["builtin_tools"] = self.builtin_tools
         identity = A2AAgent.negotiate_agent_config(card, identity_payload)
         if self.role is not None:
             carried_by = [via for via, carried in (
@@ -508,6 +531,18 @@ class DeployAgentTaskStep(TaskStep):
             env_ids=list(self.env_ids),
         ))
         return context
+
+    def _model_endpoint(self, context: TaskStepContext) -> dict[str, str]:
+        """The agent's ``LITELLM_API_KEY`` and ``LITELLM_BASE_URL`` in this run: this step's ``step_params`` over the
+        run-wide overrides, so a trainer can point the solver alone at its own endpoint, and the base URL over the
+        step's."""
+        overrides = {**context.metadata.get("user_overrides", {}), **self.step_param_overrides(context)}
+        endpoint = {}
+        if overrides.get("litellm_api_key"):
+            endpoint["LITELLM_API_KEY"] = get_config().resolve_reference(overrides["litellm_api_key"])
+        if base_url := overrides.get("litellm_base_url") or self.litellm_base_url:
+            endpoint["LITELLM_BASE_URL"] = base_url
+        return endpoint
 
     def _resolved_ttl_seconds(self, context: TaskStepContext) -> int:
         override = context.metadata.get("user_overrides", {}).get("ttl_seconds")

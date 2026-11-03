@@ -79,6 +79,10 @@ _HUMAN_A2A_CONFIG_KEY = "default_human_a2a_url"
 _AGENTS_CONFIG_SECTION = "agents"
 _AGENTS_CONFIG_KEY = "default_a2a_agent_id"
 _DEFAULT_A2A_AGENT_ID = "@local/agentenv-framework/agents/claude-code"  # the agents bundle's Claude Code
+_ENVS_CONFIG_SECTION = "envs"
+# The infra envs a deploy runs on, which [envs] can name, each by its built-in id.
+_DEFAULT_ENV_IDS = {"default_gateway_env_id": "default", "default_service_db_env_id": "default-db",
+                    "default_website_browser_env_id": "playwright-mcp"}
 
 
 def _validated_human_a2a_url(value: object, source: str) -> str:
@@ -91,6 +95,12 @@ def _validated_human_a2a_url(value: object, source: str) -> str:
 def _validated_a2a_agent_id(value: object, source: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{source} must be a non-empty string A2A agent id, got {value!r}")
+    return value
+
+
+def _validated_env_id(value: object, source: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{source} must be a non-empty string env id, got {value!r}")
     return value
 
 
@@ -145,6 +155,9 @@ RESOLVED_KEYS: tuple[ResolvedKey, ...] = (
                 env_var="AGENT_ENV_HUMAN_A2A_URL", field="default_human_a2a_url"),
     ResolvedKey(("agents", "default_a2a_agent_id"), field="default_a2a_agent_id",
                 default=_DEFAULT_A2A_AGENT_ID, default_label="built-in default in config.runtime"),
+    *(ResolvedKey((_ENVS_CONFIG_SECTION, name), field=name, default=env_id,
+                  default_label="built-in default in config.runtime")
+      for name, env_id in _DEFAULT_ENV_IDS.items()),
 )
 _KEY_BY_NAME = {key.name: key for key in RESOLVED_KEYS}
 
@@ -186,6 +199,24 @@ class PluginFailures:
         return {group: dict(failures) for group, failures in groups.items() if failures}
 
 
+class _DefaultEnvId:
+    """One of Config's default infra env ids, a dataclass field: an id set in code, by ``Config(...)``,
+    ``configure()`` or assignment, beats ``[envs]`` in config.toml, which beats the built-in id. None unsets it."""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __get__(self, config: Optional["Config"], owner: Optional[type] = None) -> Any:
+        # On the class, the field's default: nothing set in code.
+        return None if config is None else config.get_default_env_id(self.name)
+
+    def __set__(self, config: "Config", value: Optional[str]) -> None:
+        if value is None:
+            config._env_ids_in_code.pop(self.name, None)
+        else:
+            config._env_ids_in_code[self.name] = value
+
+
 # Identity, not field equality: a Config owns a document, so two are interchangeable only if
 # they are the same object. Field equality called two on different config files equal.
 @dataclass(eq=False)
@@ -198,9 +229,11 @@ class Config:
     agent_sandbox_mode: str = field(
         default_factory=lambda: os.getenv("AGENT_SANDBOX_MODE") or _default_sandbox_mode()
     )
-    default_gateway_env_id: str = "default"
-    default_service_db_env_id: str = "default-db"
-    default_website_browser_env_id: str = "website-browser"
+    # The default infra env ids set in code, which the three fields below write and read through.
+    _env_ids_in_code: dict[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
+    default_gateway_env_id: Optional[str] = _DefaultEnvId()  # type: ignore[assignment]
+    default_service_db_env_id: Optional[str] = _DefaultEnvId()  # type: ignore[assignment]
+    default_website_browser_env_id: Optional[str] = _DefaultEnvId()  # type: ignore[assignment]
     default_a2a_agent_id: Optional[str] = None
     modal_default_region: str = field(
         default_factory=lambda: os.getenv("AGENT_ENV_MODAL_REGION", "us-east-1")
@@ -208,6 +241,7 @@ class Config:
     default_human_a2a_url: Optional[str] = None
 
     _secret: Optional[Mapping[str, Any]] = field(default=None, repr=False, compare=False)
+
     _snapshot: Optional[config_snapshot.Snapshot] = field(default=None, repr=False, compare=False)
     _snapshot_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
     _document_store: Optional["DocumentStore"] = field(default=None, repr=False, compare=False)
@@ -384,6 +418,21 @@ class Config:
             return _validated_human_a2a_url(resolved, key.file_label)
         raise ConfigError(f"No human-A2A URL configured: set [{_HUMAN_A2A_CONFIG_SECTION}] {_HUMAN_A2A_CONFIG_KEY} or AGENT_ENV_HUMAN_A2A_URL")
 
+    def get_default_env_id(self, name: str) -> str:
+        """The default infra env id ``name`` (``default_gateway_env_id``, ``default_service_db_env_id`` or
+        ``default_website_browser_env_id``): one set in code > ``[envs] <name>`` in config.toml > the built-in id."""
+        key = _KEY_BY_NAME[f"{_ENVS_CONFIG_SECTION}.{name}"]
+        for layer in self.key_candidates(key):
+            if layer.kind == KIND_INSTALLED:
+                return _validated_env_id(layer.raw, key.field)
+            if layer.kind == KIND_DEFAULT:
+                return layer.raw
+            # Only here, where the file is what we are about to take, does a broken file matter.
+            self.section(_ENVS_CONFIG_SECTION)
+            resolved = config_loader.interpolate(layer.raw, secret_resolver=self._resolve_secret)
+            return _validated_env_id(resolved, key.file_label)
+        return _DEFAULT_ENV_IDS[name]
+
     def get_default_a2a_agent_id(self) -> str:
         """The agent a ``deploy_agent`` step without an id deploys:
         ``configure(default_a2a_agent_id=...)`` > ``[agents] default_a2a_agent_id`` > the agents bundle's Claude Code."""
@@ -451,7 +500,7 @@ class Config:
     def get_document_store(self) -> "DocumentStore":
         """The control-plane document store (cached): an explicitly-set backend, else the one from
         ``AGENT_ENV_DOCUMENT_STORE`` / config.toml (``local`` → SQLite default). With namespace
-        routing on, ``@local`` documents and ``@local`` runs' records go to the ``@local`` namespace's
+        routing on, a local namespace's documents and its runs' records go to that namespace's
         own local store (``agent_env.store.routing``)."""
         from agent_env.store import routing
 
@@ -508,7 +557,8 @@ class Config:
             if override is not None:
                 candidates.append(Layer(KIND_ENV, f"${key.env_var}", override))
         if key.field is not None:
-            installed = getattr(self, key.field, None)
+            installed = (self._env_ids_in_code.get(key.field) if key.field in _DEFAULT_ENV_IDS
+                         else getattr(self, key.field, None))
             if installed is not None:
                 candidates.append(Layer(KIND_INSTALLED, f"configure({key.field}=...)", installed))
         from_file = self.file_candidate(key.toml_path)
@@ -579,14 +629,14 @@ class Config:
     def _local_document_store_path(self) -> str:
         return str(state_root() / "document_store" / "documents.db")
 
-    def local_namespace_document_store(self) -> "LocalSqliteDocumentStore":
-        """The ``@local`` namespace's own document store, whether or not routing is on. Records about
-        ``@local`` entities, like the bundle ledger, live beside them here and never reach a configured
-        store. Building it creates nothing; its first write creates the file."""
-        return self._local_store("document")
+    def local_namespace_document_store(self, namespace: str = "local") -> "LocalSqliteDocumentStore":
+        """A local namespace's own document store, ``@local``'s unless ``namespace`` names another, whether or not
+        routing is on. Records about its entities, like the bundle ledger, live beside them here and never reach a
+        configured store. Building it creates nothing; its first write creates the file."""
+        return self._local_store("document", namespace)
 
-    def _local_namespace_document_store_path(self) -> str:
-        return str(state_root() / "document_store" / "local.db")
+    def _local_namespace_document_store_path(self, namespace: str = "local") -> str:
+        return str(state_root() / "document_store" / f"{namespace}.db")
 
     def _document(self) -> config_snapshot.Snapshot:
         """The document this Config reads, resolved on first use and kept.
@@ -667,22 +717,27 @@ class Config:
             return
         store = routing.object_store_holding(object_url, configured, local)
         if is_local_id(entity_id) and store is not local:
-            raise ValueError(f"{entity_id!r} is an @local id, so its objects go to the local object store, not {object_url!r}")
+            raise ValueError(f"{entity_id!r} is a local id, so its objects go to the local object store, not {object_url!r}")
         if not is_local_id(entity_id) and store is local:
-            raise ValueError(f"{entity_id!r} is not an @local id, so its objects go to the configured object store, not {object_url!r}")
+            raise ValueError(f"{entity_id!r} is not a local id, so its objects go to the configured object store, not {object_url!r}")
         if store is configured:
             routing.refuse_in_local_run(f"a write to {object_url!r}")
 
     def check_local_run_write(self, entity_id: str) -> None:
-        """Refuse writing bare-id ``entity_id`` while an ``@local`` task runs where a configured store
-        isn't the per-user one: the write would land in a shared store."""
+        """Refuse writing ``entity_id`` where ``local_run_refuses_write`` says so."""
+        from agent_env.store import routing
+
+        if self.local_run_refuses_write(entity_id):
+            routing.refuse_in_local_run(f"writing {entity_id!r}")
+
+    def local_run_refuses_write(self, entity_id: str) -> bool:
+        """Whether writing bare-id ``entity_id`` now is refused: an ``@local`` task runs where a configured store isn't
+        the per-user one, so the write would land in a shared store."""
         from agent_env.store import routing
         from agent_env.store.ids import is_local_id
 
-        if not routing.in_local_run() or is_local_id(entity_id):
-            return
-        if any(self._namespace_stores(kind)[1] is not None for kind in ("document", "object", "image")):
-            routing.refuse_in_local_run(f"writing {entity_id!r}")
+        return routing.in_local_run() and not is_local_id(entity_id) and any(
+            self._namespace_stores(kind)[1] is not None for kind in ("document", "object", "image"))
 
     def _configured_object_store(self) -> ObjectStore:
         if self._object_store is None:
@@ -782,27 +837,33 @@ class Config:
             "hosted registry (and unset AGENT_ENV_IMAGE_STORE, which overrides it)"
         )
 
-    def _local_store(self, kind: str) -> Any:
-        """The store of ``kind`` the ``@local`` namespace lives in. Documents get a file of their own
-        beside the default local store's, so neither ever holds the other's documents; objects and
+    def _local_store(self, kind: str, namespace: str = "local") -> Any:
+        """The store of ``kind`` the local ``namespace`` lives in. Each namespace's documents get a file of their own
+        beside the default local store's, so none ever holds another's documents; objects and
         images use the per-user object store and local registry, whose urls and repositories already
         say whose they are."""
         from agent_env.store.document_store import DocumentStore
         from agent_env.store.image_store import ImageStore
         from agent_env.store.object_store import ObjectStore
 
+        key = f"document:{namespace}" if kind == "document" else kind
         with self._routing_lock:
-            if kind not in self._local_stores:
+            if key not in self._local_stores:
                 if kind == "document":
                     section, abc = {
                         "impl": "agent_env.store.routing:LocalNamespaceDocumentStore",
-                        "config": {"path": self._local_namespace_document_store_path()},
+                        "config": {"path": self._local_namespace_document_store_path(namespace), "namespace": namespace},
                     }, DocumentStore
                 else:
                     alias, abc = {"object": (self._object_alias, ObjectStore), "image": (self._image_alias, ImageStore)}[kind]
                     section = alias(_STORE_BACKEND_LOCAL)
-                self._local_stores[kind] = config_loader.build_store(section, abc, secret_resolver=self._resolve_secret)
-            return self._local_stores[kind]
+                self._local_stores[key] = config_loader.build_store(section, abc, secret_resolver=self._resolve_secret)
+            return self._local_stores[key]
+
+    def _namespace_document_stores(self) -> dict[str, Any]:
+        from agent_env.store.ids import LOCAL_NAMESPACES
+
+        return {namespace: self._local_store("document", namespace) for namespace in LOCAL_NAMESPACES}
 
     def _namespace_stores(self, kind: str) -> tuple[Any, Any]:
         """The configured store of ``kind`` and, under namespace routing, the ``@local`` namespace's
@@ -832,7 +893,8 @@ class Config:
 
         local = self._local_store(kind)
         if kind == "document":
-            same = isinstance(configured, LocalSqliteDocumentStore) and configured.path.resolve() == local.path.resolve()
+            same = isinstance(configured, LocalSqliteDocumentStore) and configured.path.resolve() in {
+                store.path.resolve() for store in self._namespace_document_stores().values()}
         elif kind == "object":
             same = isinstance(configured, LocalFilesystemObjectStore) and configured.root.resolve() == local.root.resolve()
         else:
@@ -843,22 +905,21 @@ class Config:
 
     def _routed(self, kind: str, configured: Any) -> Any:
         """``configured`` wrapped by namespace routing, or ``configured`` itself when it already is
-        the ``@local`` namespace's store."""
+        the local namespaces' store."""
         from agent_env.store import routing
 
         local = self._separate_local_store(kind, configured)
         if local is None:
             if kind == "document":
-                raise ConfigError(
-                    f"{self._local_namespace_document_store_path()} is kept for @local documents; "
-                    "point [stores.document] somewhere else"
-                )
+                namespace, kept = next((namespace, store) for namespace, store in self._namespace_document_stores().items()
+                                       if store.path.resolve() == configured.path.resolve())
+                raise ConfigError(f"{kept.path} is kept for @{namespace} documents; point [stores.document] somewhere else")
             return configured
         with self._routing_lock:
             routed = self._routed_stores.get(kind)
             if routed is None or routed.configured is not configured:
                 if kind == "document":
-                    routed = routing.RoutingDocumentStore(configured, local, local.path)
+                    routed = routing.RoutingDocumentStore(configured, self._namespace_document_stores())
                 elif kind == "object":
                     routed = routing.LocalRunObjectStore(configured, local)
                 else:
@@ -967,6 +1028,9 @@ def configure(
     *,
     default_human_a2a_url: Optional[str] = None,
     default_a2a_agent_id: Optional[str] = None,
+    default_gateway_env_id: Optional[str] = None,
+    default_service_db_env_id: Optional[str] = None,
+    default_website_browser_env_id: Optional[str] = None,
     document_store: Optional[DocumentStore] = None,
     image_store: Optional[ImageStore] = None,
     object_store: Optional[ObjectStore] = None,
@@ -977,7 +1041,9 @@ def configure(
     Pass ``document_store`` / ``image_store`` / ``object_store`` / ``secret_store`` to install explicit backends on the new config.
 
     ``default_human_a2a_url`` overrides config.toml ``[conversations]`` but not
-    ``AGENT_ENV_HUMAN_A2A_URL``. ``default_a2a_agent_id`` overrides config.toml ``[agents]``.
+    ``AGENT_ENV_HUMAN_A2A_URL``. ``default_a2a_agent_id`` overrides config.toml ``[agents]``, and
+    ``default_gateway_env_id``, ``default_service_db_env_id`` and ``default_website_browser_env_id`` override
+    ``[envs]``.
 
     Select the stage *before* calling this, by pointing ``AGENT_ENV_CONFIG`` at a per-stage
     config file (a plugin can do this for you, for instance from a CLI root option it registers).
@@ -989,7 +1055,9 @@ def configure(
     if default_a2a_agent_id is not None:
         overrides["default_a2a_agent_id"] = default_a2a_agent_id
     config_path = config_loader.discover_config_path()
-    _config = Config(**overrides)
+    _config = Config(**overrides, default_gateway_env_id=default_gateway_env_id,
+                     default_service_db_env_id=default_service_db_env_id,
+                     default_website_browser_env_id=default_website_browser_env_id)
     if document_store is not None:
         _config.set_document_store(document_store)
     if image_store is not None:
@@ -1032,16 +1100,18 @@ def get_runner():
 
 
 _RUN_ENV_IDS: ContextVar[Mapping[str, str]] = ContextVar("agent_env_run_env_ids", default={})
-# The user_overrides keys naming the gateway and service-db envs a run deploys on, over the configured defaults.
+# The user_overrides keys naming the gateway, service-db and website browser envs a run deploys on, over the
+# configured defaults.
 GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE = "gateway_env_id", "service_db_env_id"
+WEBSITE_BROWSER_OVERRIDE = "website_browser_env_id"
+_RUN_ENV_ID_KEYS = (GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE, WEBSITE_BROWSER_OVERRIDE)
 
 
 @contextlib.contextmanager
 def run_env_ids(user_overrides: Mapping[str, Any]) -> Iterator[None]:
-    """Within a run, the ``gateway_env_id`` and ``service_db_env_id`` its ``user_overrides`` name win over the
-    configured defaults, in whichever process runs it."""
-    token = _RUN_ENV_IDS.set(
-        {key: user_overrides[key] for key in (GATEWAY_OVERRIDE, SERVICE_DB_OVERRIDE) if user_overrides.get(key)})
+    """Within a run, the ``gateway_env_id``, ``service_db_env_id`` and ``website_browser_env_id`` its
+    ``user_overrides`` name win over the configured defaults, in whichever process runs it."""
+    token = _RUN_ENV_IDS.set({key: user_overrides[key] for key in _RUN_ENV_ID_KEYS if user_overrides.get(key)})
     try:
         yield
     finally:
@@ -1056,6 +1126,12 @@ def gateway_env_id(config: Config) -> str:
 def service_db_env_id(config: Config) -> str:
     """The service-db env a deploy uses: the run's override, else ``config.default_service_db_env_id``."""
     return _RUN_ENV_IDS.get().get(SERVICE_DB_OVERRIDE) or config.default_service_db_env_id
+
+
+def website_browser_env_id(config: Config) -> str:
+    """The website browser env a deploy with websites adds: the run's override, else
+    ``config.default_website_browser_env_id``."""
+    return _RUN_ENV_IDS.get().get(WEBSITE_BROWSER_OVERRIDE) or config.default_website_browser_env_id
 
 
 def get_config() -> Config:

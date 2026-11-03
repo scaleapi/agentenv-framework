@@ -11,7 +11,8 @@ from click.testing import CliRunner
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.cli.up import _bootstrap_envs, up
-from agent_env.env import GatewayEnv
+from agent_env.config import get_config
+from agent_env.env import GatewayEnv, MCPServerEnv
 from agent_env.env import bootstrap
 from agent_env.env.bootstrap import GATEWAY, SERVICE_DB, WEBSITE_BROWSER, InfraError, ensure_default_envs
 from agent_env.env.env import Env
@@ -21,7 +22,7 @@ from agent_env.store.base import ConcurrentModificationError
 _DIGEST = "sha256:" + "5" * 64
 _INFRA_PUTS = pytest.mark.parametrize("kind, put", [
     (GATEWAY, bootstrap.put_gateway_env), (SERVICE_DB, bootstrap.put_service_db_env),
-    (WEBSITE_BROWSER, bootstrap.put_website_browser_env),
+    (WEBSITE_BROWSER, bootstrap.put_playwright_mcp_env),
 ], ids=[GATEWAY, SERVICE_DB, WEBSITE_BROWSER])
 
 
@@ -86,10 +87,10 @@ def test_missing_infra_is_built_for_this_host_in_order_and_once(puts):
 
     builds = ensure_default_envs([WEBSITE_BROWSER, GATEWAY, SERVICE_DB], say=said.append)
 
-    assert puts == [(SERVICE_DB, "default-db", None), (GATEWAY, "default", None), (WEBSITE_BROWSER, "website-browser", None)]
+    assert puts == [(SERVICE_DB, "default-db", None), (GATEWAY, "default", None), (WEBSITE_BROWSER, "playwright-mcp", None)]
     assert [str(build) for build in builds] == [
         "service-db env 'default-db' (missing)", "gateway env 'default' (missing)",
-        "website-browser env 'website-browser' (missing)"]
+        "website-browser env 'playwright-mcp' (missing)"]
     assert said[0] == "service-db env 'default-db' (missing): building, which can take minutes"
     assert ensure_default_envs([GATEWAY, SERVICE_DB]) == []
     assert len(puts) == 3
@@ -142,8 +143,8 @@ def test_infra_that_records_no_shipped_dockerfile_is_left_as_it_is(puts):
 
 def test_an_env_built_from_someone_elses_dockerfile_is_theirs_to_rebuild(puts, published):
     artifact = get_artifact_store().put_document(DockerImageArtifact(
-        id="website-browser__env_image", description="b", image_name="b:v1", tar_gz_s3_url="file:///b.tar.gz"))
-    GatewayEnv.put(id="website-browser", docker_image_artifact=artifact,
+        id="playwright-mcp__env_image", description="b", image_name="b:v1", tar_gz_s3_url="file:///b.tar.gz"))
+    GatewayEnv.put(id="playwright-mcp", docker_image_artifact=artifact,
                    metadata={"dockerfile_path": "/home/me/my-browser/Dockerfile", bootstrap.BUILD_INPUTS_KEY: "theirs"})
     published.add(WEBSITE_BROWSER)
 
@@ -164,6 +165,39 @@ def test_nothing_is_built_without_docker(puts, monkeypatch):
         ensure_default_envs([GATEWAY, SERVICE_DB])
 
     assert e.value.problems == ["building the service-db, gateway env needs docker, and docker isn't on PATH"]
+    assert puts == []
+
+
+@pytest.mark.parametrize("published_digest, source", [
+    ("sha256:" + "5" * 64, "--image-ref " + bootstrap._PUBLISHED[bootstrap.PLAYWRIGHT_MCP_DOCKERFILE].ref()),
+    (None, f"--dockerfile {bootstrap.PLAYWRIGHT_MCP_DOCKERFILE}"),
+], ids=["published", "unpublished"])
+def test_the_website_browser_is_put_with_mcp_server_put_over_the_published_image_when_there_is_one(
+        local_stores, monkeypatch, published_digest, source):
+    monkeypatch.setattr(bootstrap, "published_digest", lambda image: published_digest)
+
+    assert bootstrap.put_hint(WEBSITE_BROWSER) == (
+        f"`agent-env env mcp-server put --id playwright-mcp --environment-name playwright-mcp {source}`")
+    assert bootstrap.put_hint(GATEWAY) == "`agent-env env gateway put --id default`"
+
+
+def test_a_browser_agent_env_doesnt_ship_is_never_set_up_and_its_hint_is_generic(puts, monkeypatch):
+    monkeypatch.setattr(bootstrap, "published_digest", lambda image: None)
+    monkeypatch.setattr(get_config(), "default_website_browser_env_id", "browseruse-mcp")
+
+    with pytest.raises(InfraError) as e:
+        ensure_default_envs([WEBSITE_BROWSER, GATEWAY])
+    assert e.value.problems == [
+        "the website-browser env 'browseruse-mcp' isn't in the store, and agent-env sets up only the website browser "
+        "it ships, 'playwright-mcp'; put it with `agent-env env mcp-server put --id browseruse-mcp --environment-name "
+        "<its name> --image-ref <its image>`, as for the browser agent-env ships: `--environment-name playwright-mcp "
+        f"--dockerfile {bootstrap.PLAYWRIGHT_MCP_DOCKERFILE}`"]
+    assert puts == []
+
+    MCPServerEnv.put(id="browseruse-mcp", environment_name="browseruse-mcp", docker_image_artifact=get_artifact_store(
+        ).put_document(DockerImageArtifact(id="browseruse-mcp__env_image", description="b", image_name="b:v1",
+                                           tar_gz_s3_url="file:///b.tar.gz")))
+    assert ensure_default_envs([WEBSITE_BROWSER]) == []
     assert puts == []
 
 
@@ -348,8 +382,8 @@ def test_up_reports_infra_it_cant_build_as_one_line(puts, monkeypatch):
 
 def test_the_website_browser_runs_playwrights_chromium_which_is_built_for_amd64_and_arm64():
     """Chrome has no Linux arm64 build, so a browser built for an Apple Silicon host couldn't install it."""
-    assert "npx playwright install chromium" in bootstrap.WEBSITE_BROWSER_DOCKERFILE.read_text()
-    assert "--browser chromium" in (bootstrap.WEBSITE_BROWSER_CONTEXT / "entrypoint.sh").read_text()
+    assert "npx playwright install chromium" in bootstrap.PLAYWRIGHT_MCP_DOCKERFILE.read_text()
+    assert "--browser chromium" in (bootstrap.PLAYWRIGHT_MCP_CONTEXT / "entrypoint.sh").read_text()
 
 
 def test_a_put_records_what_the_env_was_built_from_whatever_metadata_it_was_given(local_stores, monkeypatch):
@@ -357,8 +391,8 @@ def test_a_put_records_what_the_env_was_built_from_whatever_metadata_it_was_give
     monkeypatch.setattr(bootstrap.DockerImageArtifact, "put", lambda id, **kwargs: get_artifact_store().put_document(
         DockerImageArtifact(id=id, description="b", image_name=kwargs["image_name"], tar_gz_s3_url="file:///b.tar.gz")))
 
-    env = bootstrap.put_website_browser_env("website-browser", platform=None,
-                                            metadata={bootstrap.BUILD_INPUTS_KEY: "mine", "owner": "me"})
+    env = bootstrap.put_playwright_mcp_env("playwright-mcp", platform=None,
+                                           metadata={bootstrap.BUILD_INPUTS_KEY: "mine", "owner": "me"})
 
     assert env.metadata[bootstrap.BUILD_INPUTS_KEY] == bootstrap.build_inputs_digest(WEBSITE_BROWSER)
     assert env.metadata["owner"] == "me"

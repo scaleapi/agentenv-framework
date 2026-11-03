@@ -1,0 +1,6 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desk",
+   "env_params": {"app_settings": {"notes": {"signature": "-- Ada", "token": "env:NOTES_TOKEN"},
+                                   "clock": {"zone": "Europe/Paris"}}}},
+  {"id": "together", "type": "run_code", "env_id": "desk", "script_artifact_id": "check_desk"}
+]

@@ -150,6 +150,6 @@ async def test_an_output_format_is_asked_for_and_checked(monkeypatch, fake_herme
 
 
 def test_the_event_pipe_is_not_left_open_in_the_server(fake_hermes, folders):
-    before = len(os.listdir("/proc/self/fd"))
+    before = len(os.listdir("/dev/fd"))
     asyncio.run(hermes_bridge.run_hermes(prompt="go", context_id="ctx-f", workspace=str(folders)))
-    assert len(os.listdir("/proc/self/fd")) == before
+    assert len(os.listdir("/dev/fd")) == before

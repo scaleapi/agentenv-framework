@@ -113,6 +113,23 @@ async def test_a_record_without_a_card_offers_nothing(sent):
     assert sent == []
 
 
+@pytest.mark.asyncio
+async def test_a_record_with_a_control_token_sends_it_on_each_extension_call_only_to_its_address_and_keeps_it(
+        composed, sent):
+    deployed = _record(composed)
+    deployed.control_token = "t0ken"
+    env = deployed.environment_url
+
+    await deployed.invoke(EXT_STEP_URI, "step", {"action": "list_tools"})
+
+    assert [request.headers.get("authorization") for request in sent] == ["Bearer t0ken"]
+    assert [deployed.control_headers_for(url) for url in (env, f"{env}/svc/clock/agentenv", f"{env}0/x",
+                                                          "https://override/trajectory")] == [
+        {"Authorization": "Bearer t0ken"}] * 2 + [{}] * 2
+    assert DeployedEnv.from_dict(dataclasses.asdict(deployed)).control_token == "t0ken"
+    assert _record(composed).control_headers == {} and _record(composed).control_headers_for(env) == {}
+
+
 def test_child_env_cards_come_from_the_card_by_name(composed):
     deployed = _record(composed)
     assert deployed.get_child_env_card("slack")["url"] == "/svc/mcp-slack/agentenv"
@@ -120,9 +137,14 @@ def test_child_env_cards_come_from_the_card_by_name(composed):
     assert _record({**composed, "name": "slack", "children_environments": []}).get_child_env_card("slack") is None  # composed, not a leaf
 
 
-def test_a_leaf_card_is_its_own_only_child_env():
+def test_a_leaf_card_is_its_own_only_child_env_and_a_composed_one_with_a_data_plane_is_the_one_its_name_reaches():
     assert _record(_LEAF).get_child_env_card("notes") is _LEAF
     assert _record(_LEAF).get_child_env_card("slack") is None
+    mail = {"name": "mail", "url": "/svc/mail/agentenv"}
+    desk = {"name": "desk", "capabilities": {"operations": ["data/get"]}, "children_environments": [mail]}
+    assert _record(desk).get_child_env_card("desk") is desk and _record(desk).get_child_env_card("mail") is mail
+    alone = {**desk, "children_environments": [{**mail, "name": "desk"}]}
+    assert _record(alone).get_child_env_card("desk") is alone
 
 
 @pytest.mark.asyncio

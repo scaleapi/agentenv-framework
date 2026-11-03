@@ -1,21 +1,39 @@
-"""What an image a registry serves holds, read without pulling it: the image manifest each Linux architecture runs, and
-an image's os-release, from the lowest layer that holds it."""
+"""What an image a registry serves holds, read without pulling it: the image manifest each Linux architecture runs, an
+image's config, its os-release, from the lowest layer that holds it, and a disk form's disk, from the start of its
+layer."""
 
 from __future__ import annotations
 
+import io
 import json
+import struct
 import tarfile
 import tempfile
+import zlib
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
-from agent_env.store.image_store.registry_api import pin_digest, read_blob, read_manifest
+from agent_env.store.image_store.registry_api import pin_digest, read_blob, read_blob_start, read_manifest
 
 _INDEX_TYPES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
 # os-release(5): /etc/os-release first, else /usr/lib/os-release; on Ubuntu the first links to the second.
 _OS_RELEASE = ("etc/os-release", "usr/lib/os-release")
 # tarfile reads zstd from Python 3.14.
 _READS_ZSTD = "zst" in tarfile.TarFile.OPEN_METH
+# How much of a disk layer is read: its tar headers and the disk's own header lie well within it, compressed.
+_DISK_START = 1 << 16
+_QCOW2 = b"QFI\xfb"
+
+
+@dataclass(frozen=True)
+class DiskLayer:
+    """What the start of a disk form's layer shows: the first file in it, its owner, and the virtual size of the disk
+    it holds, a qcow2's from its header, a raw one's its own."""
+
+    path: str
+    uid: int
+    virtual_size: int
 
 
 class UnreadableLayerError(ValueError):
@@ -43,6 +61,13 @@ def platform_manifests(ref: str, auth: RegistryAuth | None) -> tuple[str, dict[s
 def labels(ref: str, arch: str, auth: RegistryAuth | None) -> dict[str, str]:
     """The labels of ``ref``'s image for ``arch``, read from its config, an index's or a single image's. Raises
     ValueError when it has none for ``arch``, or as ``read_manifest`` does."""
+    return image_config(ref, arch, auth).get("Labels") or {}
+
+
+def image_config(ref: str, arch: str, auth: RegistryAuth | None) -> dict:
+    """The ``config`` object of ``ref``'s image config for ``arch`` (its environment, entrypoint, command, user, working
+    folder and labels), an index's or a single image's. Raises ValueError when it has none for ``arch``, or as
+    ``read_manifest`` does."""
     pinned, manifests = platform_manifests(ref, auth)
     if arch not in manifests:
         raise ValueError(f"{ref} has no linux/{arch} image")
@@ -54,7 +79,28 @@ def labels(ref: str, arch: str, auth: RegistryAuth | None) -> dict[str, str]:
             config = json.loads(path.read_text())
         except OSError as e:
             raise ValueError(f"its config {manifest['config']['digest']} couldn't be read: {e}") from e
-    return (config.get("config") or {}).get("Labels") or {}
+    return config.get("config") or {}
+
+
+def disk_layer(ref: str, digest: str, auth: RegistryAuth | None) -> DiskLayer:
+    """The disk the image manifest ``digest`` in ``ref``'s repository holds, a disk form's, read from the start of its
+    one layer. Raises ValueError when it has another number of layers or its start isn't a disk's,
+    UnreadableLayerError when this Python can't decompress it."""
+    layers = read_manifest(f"{ref.partition('@')[0]}@{digest}", auth).get("layers") or []
+    if len(layers) != 1:
+        raise ValueError(f"it has {len(layers)} layers, not the one a disk's image has")
+    if layers[0].get("mediaType", "").endswith("+zstd"):
+        raise UnreadableLayerError(f"its layer {layers[0]['digest']} is zstd-compressed, which this reads no part of")
+    start = read_blob_start(ref, layers[0]["digest"], auth, _DISK_START)
+    data = zlib.decompressobj(zlib.MAX_WBITS | 32).decompress(start) if start[:2] == b"\x1f\x8b" else start
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r|") as tar:
+            member = next(member for member in tar if member.isfile())
+            head = tar.extractfile(member).read(32)
+    except (tarfile.TarError, StopIteration, OSError, EOFError) as e:
+        raise ValueError(f"the start of its layer {layers[0]['digest']} holds no file: {type(e).__name__}: {e}") from e
+    size = struct.unpack(">Q", head[24:32])[0] if head[:4] == _QCOW2 and len(head) == 32 else member.size
+    return DiskLayer(member.name.removeprefix("./"), member.uid, size)
 
 
 def os_release(ref: str, digest: str, auth: RegistryAuth | None) -> dict[str, str]:

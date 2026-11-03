@@ -21,8 +21,8 @@ MISSING_CAPABILITY_PREFIX = "agentenv-capability-missing: "
 MODEL_ENDPOINT = "model_endpoint_configured"
 
 #: The remote sandbox providers (``modal``, ``modal_vm``, ``e2b``, ``sail_vm``, ``tensorlake``, ``tenki``,
-#: ``vercel``, ``boxd``, ``daytona``, ``boat``) need credentials the resolved config may not carry; the local default
-#: never does.
+#: ``vercel``, ``boxd``, ``coreweave``, ``daytona``, ``boat``) need credentials the resolved config may not carry; the
+#: local default never does.
 REMOTE_SANDBOX = "remote_sandbox"
 
 #: The A2A agent a ``deploy_agent`` step without an id resolves to (``default_a2a_agent_id``); the
@@ -37,9 +37,37 @@ MCP_SERVER_SOURCES = "mcp_server_sources"
 #: tier's CI job installs them.
 TRL = "trl_installed"
 
+#: The NeMo Gym tier (``tst/nemo_gym``) runs the resources server in-process; nemo-gym needs Python 3.13.14 or later and
+#: isn't in the dev extra, and only that tier's CI job installs it.
+NEMO_GYM = "nemo_gym_installed"
+
+#: The verifiers tier (``tst/verifiers``) runs ``vf-eval`` from verifiers' own venv, since verifiers pins mcp 2 and the
+#: framework mcp 1; only that tier's CI job installs it and puts ``vf-eval`` on PATH.
+VERIFIERS = "verifiers_installed"
+
+#: The verl tier (``tst/verl``) runs ``AgentEnvAgentLoop`` on verl itself; verl and torch aren't in the dev extra, and
+#: only that tier's CI job installs them.
+VERL = "verl_installed"
+
+#: The SkyRL tier (``tst/skyrl``) runs ``AgentEnvGenerator`` and ``AgentEnvTextEnv`` on SkyRL itself; SkyRL, skyrl-gym
+#: and torch aren't in the dev extra, and only that tier's CI job installs them.
+SKYRL = "skyrl_installed"
+
+#: The Miles tier (``tst/miles``) plays rows through Miles' own rollout; Miles, its test fixtures and CPU torch aren't in
+#: the dev extra, and only that tier's CI job puts a Miles checkout on PYTHONPATH and installs its requirements.
+MILES = "miles_installed"
+
+#: The slime tier (``tst/slime``) plays rows through slime's own OpenAI adapter with slime's own arguments; slime, its
+#: SGLang and Megatron-LM and CPU torch aren't in the dev extra, and only that tier's CI job installs them.
+SLIME = "slime_installed"
+
 #: ``collect_artifacts`` sizes a file with ``stat -c %s``, which only GNU stat takes (macOS ships BSD stat),
 #: so collecting off a local sandbox needs GNU stat first on PATH.
 GNU_STAT = "gnu_stat"
+
+#: Booting a computer's disk form on local Docker needs KVM: /dev/kvm on this host, which Docker passes to the launcher.
+#: Docker Desktop on a Mac has none, nor has a host without nested virtualization.
+KVM = "kvm"
 
 
 def missing_capability_reason(capability: str) -> str:
@@ -82,17 +110,17 @@ def skip_without_model_endpoint() -> pytest.MarkDecorator:
 
 def remote_sandbox_is_available(provider: str) -> bool:
     """Whether the resolved config can build the ``modal`` / ``modal_vm`` / ``e2b`` / ``sail_vm`` /
-    ``tensorlake`` / ``tenki`` / ``vercel`` / ``boxd`` / ``daytona`` / ``boat`` sandbox provider, credentials included.
+    ``tensorlake`` / ``tenki`` / ``vercel`` / ``boxd`` / ``coreweave`` / ``daytona`` / ``boat`` sandbox provider, credentials included.
 
     Modal: any failure to resolve the credentials answers False. E2B, Sail, Tensorlake, Tenki, Vercel, boxd,
-    Daytona and boat: building the provider resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references;
+    CoreWeave, Daytona and boat: building the provider resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references;
     only a ``ConfigError`` (absent or incomplete config, or the provider's extra not installed) answers
     False, any other failure answers True and lets the test fail on the real problem, as
     ``model_endpoint_is_configured`` does. Vercel, which builds without credentials, also needs them in
     its config or the environment."""
-    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "daytona", "boat"):
+    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat"):
         raise ValueError(f"unknown remote sandbox provider {provider!r}")
-    if provider in ("e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "daytona", "boat"):
+    if provider in ("e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat"):
         from agent_env.config.errors import ConfigError
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 
@@ -174,3 +202,15 @@ def skip_without_gnu_stat() -> pytest.MarkDecorator:
         not gnu_stat_is_available(),
         reason=missing_capability_reason(GNU_STAT),
     )
+
+
+def kvm_is_available() -> bool:
+    """Whether the local sandbox provider boots disks here: this host's /dev/kvm, readable and writable."""
+    from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+
+    return bool(LocalSandboxProvider.disk_image_platforms())
+
+
+def skip_without_kvm() -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for tests that boot a computer's disk form on local Docker."""
+    return pytest.mark.skipif(not kvm_is_available(), reason=missing_capability_reason(KVM))

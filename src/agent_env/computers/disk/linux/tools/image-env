@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""image-env CONFIG: the start of a container image, as the disk form's init reads it from /etc/agentenv/vm/image.env,
+from CONFIG, the ``config`` object of the image's OCI config (``docker image inspect``'s ``Config`` has the same keys):
+a line for each variable and argument, then its user and working folder, each value base64'd so any bytes survive."""
+
+import base64
+import json
+import sys
+
+
+def lines(config: dict) -> list[str]:
+    return [*(f"env={_encoded(variable)}" for variable in config.get("Env") or ()),
+            *(f"argv={_encoded(arg)}" for arg in [*(config.get("Entrypoint") or ()), *(config.get("Cmd") or ())]),
+            f"user={_encoded(config.get('User') or 'root')}", f"workdir={_encoded(config.get('WorkingDir') or '/')}"]
+
+
+def _encoded(value: str) -> str:
+    return base64.b64encode(value.encode()).decode()
+
+
+if __name__ == "__main__":
+    with open(sys.argv[1]) as file:
+        print("\n".join(lines(json.load(file))))

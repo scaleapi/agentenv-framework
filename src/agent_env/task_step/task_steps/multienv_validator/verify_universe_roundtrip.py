@@ -113,8 +113,12 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
         await env.load_environment_universe_artifact(universe)
         originals = {}
         for sa in environment_artifacts:
+            files = await asyncio.to_thread(sa.get_file_artifacts)
+            if len(files) > 1:
+                logger.info(f"{sa.environment_name}: {len(files)} files, not one JSON state; will only compare export1 vs export2")
+                continue
             try:
-                data = await asyncio.to_thread(lambda sa=sa: sa.get_file_artifact().load())
+                data = await asyncio.to_thread(next(iter(files.values())).load)
                 originals[sa.environment_name] = normalize(json.loads(data))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 logger.info(f"{sa.environment_name}: non-JSON artifact, will only compare export1 vs export2")
@@ -180,7 +184,8 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
 
         Faithfulness (this validator measures lossiness, so the bundle must not transform data):
         - ``original/<svc>.json`` references the universe's EXISTING per-service FileArtifacts
-          (verbatim bytes — what compare_dicts loaded), no re-serialization.
+          (verbatim bytes — what compare_dicts loaded), no re-serialization; a service of several
+          files has each at ``original/<svc>/<path>``.
         - ``export_1/<svc>.json`` references the FileArtifacts the export1 universe was built from
           (the exact bytes the programmatic verdict used).
         - ``export_2/<svc>.json`` is materialized fresh (export2 is not otherwise persisted), dumped
@@ -193,7 +198,11 @@ class VerifyUniverseLoadExportRoundtripStep(TaskStep):
         with artifact_write_lock(prefix):
             file_artifacts: dict[str, Any] = {}
             for sa in original_environment_artifacts:
-                file_artifacts[f"original/{sa.environment_name}.json"] = sa.get_file_artifact()
+                files = sa.get_file_artifacts()
+                if len(files) == 1:
+                    file_artifacts[f"original/{sa.environment_name}.json"] = next(iter(files.values()))
+                else:
+                    file_artifacts.update({f"original/{sa.environment_name}/{path}": file for path, file in files.items()})
             for sa in exported_universe.get_environment_artifacts():
                 file_artifacts[f"export_1/{sa.environment_name}.json"] = sa.get_file_artifact()
             for name, data in export2_raw.items():

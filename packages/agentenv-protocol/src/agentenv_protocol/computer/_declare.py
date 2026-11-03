@@ -14,6 +14,8 @@ import sys
 import types
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from .app import AppDeclaration, ComputerAppEnvironment
 from .card import COMPUTER
 from .driver import ComputerDriverEnvironment, DriverDeclaration, DriverPlatform
@@ -95,6 +97,11 @@ def main(argv: list[str]) -> int:
     try:
         with contextlib.redirect_stdout(sys.stderr):
             declared = declare(Path(folder), file, name)
+    except ValidationError as e:
+        print("ValueError: " + "; ".join(f"{'.'.join([e.title, *map(str, error['loc'])])}: "
+                                         f"{error['msg'].removeprefix('Value error, ')}" for error in e.errors()),
+              file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"{type(e).__name__}: {e}", file=sys.stderr)
         return 1

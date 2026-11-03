@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, Union
 
 from a2a.types import TaskStatusUpdateEvent
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +127,26 @@ class AgentConfig(BaseModel):
     timeout_seconds: int = 600
 
 
+ToolName = TypeVar("ToolName", bound=str)
+
+
+class BuiltinTools(BaseModel, Generic[ToolName]):
+    """Which of an agent's own tools it may use, as a task selects them: ``disable`` turns off the ones it names, or
+    all of them with ``"*"``; ``only`` keeps the ones it names. An agent's config takes it as
+    ``builtin_tools: BuiltinTools[<a Literal of its tools>] | None``, so its card's agent-config schema names them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disable: Literal["*"] | list[ToolName] | None = None
+    only: list[ToolName] | None = None
+
+    @model_validator(mode="after")
+    def _one_of(self) -> BuiltinTools:
+        if (self.disable is None) == (self.only is None):
+            raise ValueError("builtin_tools takes exactly one of disable and only")
+        return self
+
+
 ConfigT = TypeVar("ConfigT", bound=AgentConfig)
 
 
@@ -197,6 +217,7 @@ class TaskRequest(Generic[ConfigT]):
     parts: tuple[TaskPart, ...]
     config: ConfigT
     mcp_servers: Mapping[str, Any] = field(default_factory=dict)
+    cdp_endpoints: Mapping[str, Any] = field(default_factory=dict)
     skills: tuple[Mapping[str, Any], ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
     session_ref: str | None = None
@@ -213,10 +234,30 @@ class TaskRequest(Generic[ConfigT]):
         # JSON-native types declared by the config model and request contract.
         object.__setattr__(self, "config", self.config.model_copy(deep=True))
         object.__setattr__(self, "mcp_servers", _copy_json_value(self.mcp_servers))
+        object.__setattr__(self, "cdp_endpoints", _copy_json_value(self.cdp_endpoints))
         object.__setattr__(
             self, "skills", tuple(_copy_json_value(skill) for skill in self.skills)
         )
         object.__setattr__(self, "metadata", _copy_json_value(self.metadata))
+
+    def cdp_endpoint(self, name: str | None = None) -> Mapping[str, Any]:
+        """The CDP endpoint named ``name``, or the turn's only one. Anything else fails the turn, so an agent
+        never falls back to a browser of its own."""
+        if name is not None:
+            if name in self.cdp_endpoints:
+                return self.cdp_endpoints[name]
+            raise _TaskFailed(
+                "cdp.no_endpoint", f"the task gave no browser named {name!r}", error_type="infra_error"
+            )
+        if len(self.cdp_endpoints) == 1:
+            return next(iter(self.cdp_endpoints.values()))
+        if not self.cdp_endpoints:
+            raise _TaskFailed("cdp.no_endpoint", "the task gave no browser", error_type="infra_error")
+        raise _TaskFailed(
+            "cdp.ambiguous",
+            f"the task gave several browsers; name one of {', '.join(sorted(self.cdp_endpoints))}",
+            error_type="infra_error",
+        )
 
 
 class TaskOutcome(str, Enum):
@@ -233,6 +274,20 @@ class TaskError:
     def __post_init__(self) -> None:
         if self.error_type not in {"agent_error", "infra_error"}:
             raise ValueError("error_type must be 'agent_error' or 'infra_error'")
+
+
+class _TaskFailed(Exception):
+    """Ends the turn as ``TaskResult.failure(code, message, error_type=error_type)``; ``cdp_endpoint`` raises it."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        error_type: Literal["agent_error", "infra_error"] = "agent_error",
+    ) -> None:
+        super().__init__(message)
+        self.error = TaskError(code=code, message=message, error_type=error_type)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -25,6 +25,7 @@ from openenv.core.env_server.mcp_types import (
 )
 from openenv.core.env_server.types import Observation, State
 
+from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.task import EpisodeError, EpisodeSpec, Task
 from agent_env.task.episode import Episode, Turn
 from agent_env.task.episode.rules import DEPLOYS, works_in_sandbox
@@ -75,7 +76,7 @@ class ServedTask:
                                  if hasattr(step, "env_version") and step.env_id in envs},
                        access=[{"env": step.env_id, "action": step.action, "tools": step.tools}
                                for step in self.task.steps
-                               if step.type == "modify_env_tool_access" and step.role == role],
+                               if step.type == "modify_env_tool_access" and step.role == (role or DEFAULT_ROLE)],
                        bash=works_in_sandbox(self.task.steps, agent))
 
 
@@ -253,7 +254,7 @@ class AgentEnvEnvironment(Environment):
                     await self._open(turn)
                     return CallToolObservation(tool_name=name, done=False, reward=None, result={
                         "prompt": turn.prompt, "system_prompt": turn.system_prompt})
-                scores = await self._episode.result()
+                scores = await self._episode.result(teardown=False)
         except Exception as e:
             if deadline.expired():
                 observation = await self._end_with_error(f"{name} didn't finish within {timeout_s:g}s, and the episode "
@@ -261,7 +262,7 @@ class AgentEnvEnvironment(Environment):
             else:
                 observation = await self._end_with_error(e)
             return CallToolObservation(tool_name=name, done=True, reward=None, metadata=observation.metadata)
-        await self._abandon("the episode ended")
+        await self._abandon("the episode ended", wait=False)
         return CallToolObservation(tool_name=name, done=True, **self._scored(scores))
 
     def _scored(self, scores: dict[str, float]) -> dict[str, Any]:

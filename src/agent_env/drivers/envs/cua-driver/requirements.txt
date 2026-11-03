@@ -1,0 +1,5 @@
+# What a composed computer installs into the driver's venv. A release pins agentenv-framework-protocol to the version
+# it ships, which serves the driver with agentenv_protocol.computer.serve. cua-driver's wheel carries its executable for
+# each arch, whose sha256 the driver checks.
+agentenv-framework-protocol[computer]>=0.1.381
+cua-driver==0.38.0

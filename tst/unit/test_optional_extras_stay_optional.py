@@ -26,11 +26,16 @@ class Refuse(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Refuse())
 """
 
-# Not core: the Sail and Smol providers and the OpenEnv server need their optional extras, and the gateway runs only
-# in its container image, and the code runner is a script that reads its arguments on import.
+# Not core: the Sail and Smol providers, the OpenEnv server, NeMo Gym's resources server and the verl, SkyRL, Miles and
+# slime helpers, with the chat rows and episode the last two share, need their optional extras (and the verl agent loop
+# verl itself, the SkyRL env and generator SkyRL, the slime generate function slime), and the gateway runs only in its
+# container image, and the code runner is a script that reads its arguments on import.
 _NOT_CORE = (
     "agent_env.providers.sandbox_providers.sail_vm", "agent_env.providers.sandbox_providers.smol_vm",
-    "agent_env.openenv", "agent_env.env.gateway", "agent_env.task_step.task_steps.run_code_runner",
+    "agent_env.openenv", "agent_env.training.nemo_gym", "agent_env.training.verl", "agent_env.training.skyrl",
+    "agent_env.training.harness", "agent_env.training.miles", "agent_env.training.slime", "agent_env.training._chat",
+    "agent_env.env.gateway",
+    "agent_env.task_step.task_steps.run_code_runner",
 )
 
 _IMPORT_CORE = _BLOCKING + """
@@ -168,11 +173,21 @@ def _run(script: str, blocked: list[str], *args: str) -> str:
     return done.stdout.strip()
 
 
-@pytest.mark.parametrize("extra", sorted(_optional_requirements()))
+#: Extras every distribution of which another extra installs too, so blocking what only they install blocks nothing:
+#: verl's and SkyRL's pyarrow comes with trl's datasets. The test without any extra covers them.
+_COVERED = {"verl": "trl", "skyrl": "trl", "harness": "openenv", "miles": "openenv", "slime": "openenv"}
+
+
+@pytest.mark.parametrize("extra", sorted(set(_optional_requirements()) - set(_COVERED)))
 def test_core_and_every_store_module_import_without_the_extra(extra):
     blocked = _only_in(extra)
     assert blocked, f"the {extra!r} extra installs nothing core lacks, so this test proves nothing"
     assert json.loads(_run(_IMPORT_CORE, blocked, json.dumps(_NOT_CORE))) == []
+
+
+@pytest.mark.parametrize(("extra", "cover"), sorted(_COVERED.items()))
+def test_a_covered_extra_installs_nothing_its_cover_doesnt(extra, cover):
+    assert _closure(frozenset({extra})) <= _closure(frozenset({cover}))
 
 
 def test_core_and_every_store_module_import_without_any_extra():
@@ -217,6 +232,11 @@ def test_core_and_every_store_module_import_without_any_extra():
             "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
         ),
         (
+            "coreweave",
+            "agent_env.providers.sandbox_providers.coreweave.provider:CoreWeaveSandboxProvider",
+            "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
+        ),
+        (
             "daytona",
             "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
             "agent_env.providers.sandbox_providers.sandbox_provider:SandboxProvider",
@@ -227,7 +247,7 @@ def test_core_and_every_store_module_import_without_any_extra():
         ),
     ],
     ids=["gcs", "secret-manager", "s3", "s3-reexport", "secrets-manager-reexport", "dynamodb", "dynamodb-reexport", "tensorlake",
-         "tenki", "boxd", "daytona", "smol"],
+         "tenki", "boxd", "coreweave", "daytona", "smol"],
 )
 def test_an_impl_without_its_extra_names_the_extra_to_install(extra, impl, base):
     message = _run(_LOAD_IMPL, _only_in(extra), impl, base)

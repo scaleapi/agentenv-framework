@@ -1,7 +1,7 @@
 """``AgentEnv`` on the OpenEnv server ``build_app`` makes, served on loopback over the Episode API's fake steps and
 used as TRL's trainers use it: the dataset and the environment classes, rollouts reset, stepped and scored on a reused
-environment, the turns a model leaves open, episodes left unscored, a server at capacity or missing, tasks with other
-tools, and a bundle served by ``AgentEnv.local`` whose episodes end at close and at exit."""
+environment, the turns a model leaves open, episodes left unscored, a server at capacity, missing or restarting, tasks
+with other tools, and a bundle served by ``AgentEnv.local`` whose episodes end at close and at exit."""
 
 import asyncio
 import inspect
@@ -15,42 +15,34 @@ from agentenv_protocol import EnvironmentTool, ToolResult
 from agentenv_protocol.a2a_agent import proxy as proxy_module
 
 from agent_env.config.runtime import Config
-from agent_env.openenv.app import _app, _score_at
-from agent_env.openenv.environment import AgentEnvEnvironment, Served, ServedTask
-from agent_env.task import EpisodeSpec, Task
+from agent_env.openenv.environment import AgentEnvEnvironment
 from agent_env.task_step.task_step import TaskStep
-from agent_env.training import trl
-from agent_env.training.trl import ENDED, FAILED, AgentEnv
+from agent_env.training import _openenv, trl
+from agent_env.training._openenv import ENDED, FAILED, on_session_loop
+from agent_env.training.trl import AgentEnv
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
 from tst.unit.task.episode.run_test import ALICE, ITEMS, PANTRY, PANTRY_MCP, REPLIES, TURN, _tool_sessions
+from tst.unit.training.tools_test import called_by_qwen3, shown_to_qwen3
 
 PLAYED = [ITEMS, ALICE, TURN, REPLIES]
 SYSTEM = {"role": "system", "content": "You keep the items."}
 
 
 @pytest.fixture
-def served(teardowns, tools):
-    """Serves ``tasks`` by name, every one in the split ``all`` and those ``splits`` name in theirs, as ``build_app``
-    serves a bundle's; closed after the test."""
+def served(serve):
+    """``serve``'s tasks as an ``AgentEnv``, whose close stops their server; closed after the test."""
     opened = []
 
-    def serve(tasks, splits=None, max_concurrent_envs=8, **kwargs):
-        by_name = {}
-        for name, steps in tasks.items():
-            task = Task.from_dict({"id": name, "version": 1, "steps": steps})
-            by_name[name] = ServedTask(task, name, EpisodeSpec.from_task(task), _score_at("replies"))
-        named = {split: tuple(by_name[name] for name in names) for split, names in (splits or {}).items()}
-        server = trl._Server(_app(Served(splits={"all": tuple(by_name.values()), **named}, sandbox=None), "dock",
-                                  max_concurrent_envs))
-        env = AgentEnv(server.url, **kwargs)
-        env._server = server
-        opened.append(env)
-        return env
+    def env(tasks, splits=None, max_concurrent_envs=8, **kwargs):
+        server = serve(tasks, splits, max_concurrent_envs)
+        opened.append(AgentEnv(server.url, **kwargs))
+        opened[-1]._server = server
+        return opened[-1]
 
-    yield serve
-    for env in opened:
-        env.close()
+    yield env
+    for each in opened:
+        each.close()
 
 
 def _tools(environment):
@@ -84,6 +76,7 @@ def test_a_rollout_plays_its_rows_task_and_an_environment_plays_one_after_anothe
     environment.reset(**row)
     assert environment.get_reward() == 0.0
     assert environment.get_reward() is None
+    env.close()
     assert len(teardowns.finished) == 3
 
 
@@ -226,18 +219,52 @@ def test_a_session_refused_after_one_was_dropped_leaves_only_that_rollout_unscor
     first.reset(**env.dataset[0])
     first.end_turn(response="Added a crate.")
     assert first.get_reward() == 1.0
-    trl._on_loop(first._close(), 30)
+    on_session_loop(first._close(), 30)
 
     second.reset(**env.dataset[0])
     with caplog.at_level(logging.WARNING, logger=trl.__name__):
         first.reset(**env.dataset[0])
         assert first.get_reward() is None
-    trl._on_loop(second._close(), 30)
+    on_session_loop(second._close(), 30)
     first.reset(**env.dataset[0])
     first.end_turn(response="Added a crate.")
 
     assert first.get_reward() == 1.0
     assert "its session was dropped, and the server stayed at its limit of 1 sessions for 4s after" in caplog.text
+
+
+def test_a_session_dropped_by_a_restarting_server_opens_again_once_it_is_back(served, monkeypatch):
+    env = served({"a": PLAYED})
+    environment = env.factory()
+    environment.reset(**env.dataset[0])
+    environment.end_turn(response="Added a crate.")
+    assert environment.get_reward() == 1.0
+    on_session_loop(environment._close(), 30)
+    opened, refusals = _openenv.opened, []
+
+    async def restarting(url, timeout, *, token=None):
+        if len(refusals) < 3:
+            refusals.append(url)
+            refused = ConnectionError(f"Failed to connect to {url}/ws")
+            refused.__cause__ = ConnectionRefusedError(111, "Connection refused")
+            raise ConnectionError(f"couldn't open a session on the server at {url}") from refused
+        return await opened(url, timeout, token=token)
+
+    on_loop, budgets = trl.on_session_loop, []
+
+    def budgeted(coroutine, timeout):
+        budgets.append(timeout)
+        return on_loop(coroutine, timeout)
+
+    monkeypatch.setattr(_openenv, "opened", restarting)
+    monkeypatch.setattr(_openenv, "REOPEN_SECONDS", 0.01)
+    monkeypatch.setattr(trl, "on_session_loop", budgeted)
+    environment.reset(**env.dataset[0])
+    environment.end_turn(response="Added a crate.")
+
+    shared = environment._shared
+    assert (environment.get_reward(), len(refusals)) == (1.0, 3)
+    assert budgets[1] > shared.reset_timeout + shared.reset_timeout + max(shared.reset_timeout, shared.tool_timeout)
 
 
 def test_a_rollout_whose_tools_arent_its_classs_stops_training(served, monkeypatch):
@@ -324,6 +351,59 @@ def test_tasks_whose_agent_gets_other_tools_take_trls_multi_environment_mode(ser
     assert pantry.take_item() == f"take_item on {PANTRY_MCP}"
     pantry.end_turn(response="Took one.")
     assert pantry.get_reward() == 1.0
+
+
+STACK = EnvironmentTool(name="stack_crates", description="Stack crates on a pallet.", inputSchema={
+    "type": "object", "required": ["pallet", "crates"], "properties": {
+        "pallet": {"type": "string", "enum": ["north", "south"]},
+        "crates": {"type": "array", "description": "bottom crate first", "items": {
+            "type": "object", "required": ["kind"], "properties": {
+                "kind": {"type": "string", "description": "what the crate holds"},
+                "size": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}}}}}})
+#: What TRL shows the model of the tools ``add_item`` and ``STACK``: each as its env publishes it, and ``end_turn`` as
+#: TRL has shown it since the factory's first release, its method's schema.
+SHOWN = [
+    {"type": "function", "function": {"name": "add_item", "description": "add_item.", "parameters": {"type": "object"}}},
+    {"type": "function", "function": {
+        "name": "end_turn",
+        "description": "End your turn with your reply. The episode goes on to your next turn, or ends and is scored.",
+        "parameters": {"type": "object", "properties": {
+            "response": {"type": "string", "nullable": True, "description": "Your reply."}}},
+        "return": {"type": "string"}}},
+    {"type": "function", "function": {"name": "stack_crates", "description": "Stack crates on a pallet.",
+                                      "parameters": STACK.inputSchema}}]
+
+
+def test_trl_shows_the_model_each_tool_as_its_env_publishes_it_and_end_turn_as_before_and_calls_them(served, tools):
+    tools("add_item", STACK)
+    env = served({"a": PLAYED})
+    environment = env.factory()
+    fetched = [getattr(environment, name) for name in _tools(env.factory) if name not in ("reset", "get_reward")]
+
+    assert shown_to_qwen3(fetched) == SHOWN
+    from_the_class = env.factory.stack_crates.__get__(environment)
+    assert shown_to_qwen3([from_the_class])[0]["function"]["parameters"]["properties"]["crates"]["items"] == {
+        "type": "object"}
+    environment.reset(**env.dataset[0])
+    crates = [{"kind": "apples", "size": [1, 1, 0.5]}]
+    calls = called_by_qwen3(fetched, {"name": "stack_crates", "arguments": {"pallet": "north", "crates": crates}},
+                            {"name": "end_turn", "arguments": {"response": "Added a crate."}})
+    by_name = {tool.__name__: tool for tool in fetched}
+
+    assert [by_name[call["function"]["name"]](**call["function"]["arguments"]) for call in calls] == [
+        f"stack_crates {{'pallet': 'north', 'crates': {crates}}}", ENDED]
+    assert environment.get_reward() == 1.0
+
+
+def test_a_transformers_that_renders_a_tool_other_than_as_its_schema_stops_the_factory(served, tools, monkeypatch):
+    tools(STACK)
+    env = served({"a": PLAYED})
+    monkeypatch.setattr(trl, "render_jinja_template", lambda conversations, tools, chat_template: (
+        [json.dumps([{**tool, "function": {**tool["function"], "parameters": {"type": "object"}}} for tool in tools])],
+        []))
+
+    with pytest.raises(RuntimeError, match=r"renders the tools \['stack_crates'\] other than as their env's"):
+        env.factory  # noqa: B018
 
 
 def test_a_tool_trl_cant_call_is_refused_with_how_to_fix_it(served, tools):

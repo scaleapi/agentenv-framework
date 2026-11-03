@@ -58,6 +58,13 @@ def test_removed_flag_is_gone_and_replacement_survives(path, removed, replacemen
     assert replacement in opts, f"replacement {replacement!r} went missing with it"
 
 
+def test_the_website_browser_has_no_put_command_of_its_own():
+    """It's an MCP server env, which `env mcp-server put` writes, and the remote-store hint names that."""
+    env = cli.commands["env"].commands
+    assert "website-browser" not in env and "playwright-mcp" not in env
+    assert "mcp-server" in env
+
+
 def test_no_deprecated_command_is_registered_anywhere():
     """Catches a legacy spelling registered under a name this module does not enumerate."""
 

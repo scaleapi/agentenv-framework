@@ -127,8 +127,8 @@ def test_the_plugin_report_counts_the_bundles_agent_env_ships(monkeypatch, quiet
     assert result.exit_code == 0, result.output
     (core,) = json.loads(result.stdout)["plugins"]
     assert [(c["group"], c["name"], c["status"]) for c in core["contributions"]] == [
-        (BUNDLES, "agents", "active"), (BUNDLES, "computers", "active"), (BUNDLES, "desktop", "active"),
-        (BUNDLES, "drivers", "active"),
+        (BUNDLES, "advance-to-next-event", "active"), (BUNDLES, "agents", "active"), (BUNDLES, "browsers", "active"),
+        (BUNDLES, "computers", "active"), (BUNDLES, "desktop", "active"), (BUNDLES, "drivers", "active"),
         (BUNDLES, "echo-mcp", "active"), (BUNDLES, "hello", "active"), (BUNDLES, "mail-mcp", "active"),
         (BUNDLES, "next-env-event", "active")]
     assert "\n  agent-env itself\n" in shown and "requires:" not in shown
@@ -281,11 +281,11 @@ def test_the_cli_says_so_when_no_bundles_are_installed_and_needs_a_bundle_for_it
 
     assert CliRunner().invoke(cli, ["run"]).output == "No bundles are installed. agent-env run PATH runs a folder.\n"
     for option in (["--task", "t"], ["--keep"], ["--dry-run"], ["--user-model", "m"], ["--judge-model", "m"],
-                   ["--agent", "pi"]):
+                   ["--agent", "pi"], ["--no-emulate"]):
         usage = CliRunner().invoke(cli, ["run", *option])
         assert usage.exit_code == 2
-        assert ("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep and --dry-run need a "
-                "BUNDLE to run") in " ".join(usage.output.split())
+        assert ("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep, --dry-run and "
+                "--no-emulate need a BUNDLE to run") in " ".join(usage.output.split())
 
 
 def test_the_cli_runs_an_installed_bundle_by_name_with_ids_rooted_at_its_package(site, monkeypatch, quiet_logs,
@@ -318,9 +318,9 @@ def test_a_folder_wins_over_an_installed_name_and_a_folder_that_isnt_a_bundle_na
     _registered(monkeypatch, _ep("hello", "demo_bundles"))
     monkeypatch.chdir(tmp_path)
     (tmp_path / "hello").mkdir()
-    assert locate_bundle("hello") == (Path("hello"), None)
-    assert locate_bundle("./elsewhere") == (Path("./elsewhere"), None)
-    assert locate_bundle("demo-bundles/hello") == (site / "demo_bundles" / "hello", "@local/demo-bundles/hello")
+    assert locate_bundle("hello") == (Path("hello"), None, None)
+    assert locate_bundle("./elsewhere") == (Path("./elsewhere"), None, None)
+    assert locate_bundle("demo-bundles/hello") == (site / "demo_bundles" / "hello", "@local/demo-bundles/hello", None)
 
     result = CliRunner().invoke(cli, ["run", "hello"])
 
@@ -328,6 +328,29 @@ def test_a_folder_wins_over_an_installed_name_and_a_folder_that_isnt_a_bundle_na
     assert "not a bundle" in result.output
     assert "an installed bundle is also named 'hello': run it with agent-env run demo-bundles/hello" in result.output
     assert CliRunner().invoke(cli, ["run", "demo-bundles/hello"]).exit_code == 0
+
+
+def test_a_folder_wins_only_when_spelled_as_written_so_desktop_isnt_a_case_insensitive_desktop_folder(
+        site, monkeypatch, tmp_path):
+    _package(site, "demo_bundles", ["desktop"])
+    _registered(monkeypatch, _ep("desktop", "demo_bundles"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Desktop").mkdir()
+    (tmp_path / "demo-bundles" / "Desktop").mkdir(parents=True)
+    exact = os.path.isdir
+    monkeypatch.setattr(os.path, "isdir", lambda path: exact(path) or exact(str(path).replace("desktop", "Desktop")))
+
+    assert locate_bundle("desktop").root == site / "demo_bundles" / "desktop"
+    assert locate_bundle("demo-bundles/desktop").root == site / "demo_bundles" / "desktop"
+    assert locate_bundle("Desktop") == (Path("Desktop"), None, None)
+    assert locate_bundle("demo-bundles/Desktop") == (Path("demo-bundles/Desktop"), None, None)
+    listed = os.listdir
+    monkeypatch.setattr(os, "listdir", lambda path: _refused() if Path(path) == Path("demo-bundles") else listed(path))
+    assert locate_bundle("demo-bundles/Desktop").root == Path("demo-bundles/Desktop")
+
+
+def _refused():
+    raise PermissionError("a folder that can be passed through but not listed")
 
 
 def test_the_cli_reports_installed_metadata_it_cant_read(monkeypatch):

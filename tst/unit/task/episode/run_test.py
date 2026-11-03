@@ -198,8 +198,8 @@ async def _until(holds):
 
 
 @pytest.mark.asyncio
-async def test_the_run_waits_at_an_outside_turn_and_carries_on_once_it_ends(teardowns):
-    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+async def test_the_run_waits_at_an_outside_turn_and_carries_on_as_soon_as_it_ends(teardowns):
+    episode = await _spec(ITEMS, ALICE, {**TURN, "poll_interval_seconds": 30}, REPLIES).start()
     assert Task.get_instance(episode.id).status == "running"
 
     turn = await episode.next_turn()
@@ -207,8 +207,10 @@ async def test_the_run_waits_at_an_outside_turn_and_carries_on_once_it_ends(tear
         "alice", "turn", "Add a crate.", "You keep the items.")
     assert not episode.finished
 
+    ending = time.monotonic()
     await turn.end("Added a crate.")
     assert await episode.result() == {"replies": 1.0}
+    assert time.monotonic() - ending < 2
     assert episode.finished
     assert await episode.next_turn() is None
     assert teardowns.finished == [episode.id]
@@ -471,11 +473,13 @@ async def test_a_turn_waiting_when_the_episode_is_abandoned_is_never_handed_out(
 
 
 @pytest.mark.asyncio
-async def test_abandoning_during_teardown_waits_for_it_and_leaves_the_runs_outcome(teardowns):
+async def test_during_teardown_the_scores_are_ready_and_abandoning_waits_for_it_leaving_the_runs_outcome(teardowns):
     teardowns.hold = asyncio.Event()
     episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
     await (await episode.next_turn()).end("done")
+    assert await episode.result(teardown=False) == {"replies": 1.0}
     await _until(lambda: teardowns.started)
+    assert not episode.finished
 
     abandoning = asyncio.create_task(episode.abandon("too late"))
     await asyncio.sleep(0.05)

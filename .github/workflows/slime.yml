@@ -1,0 +1,81 @@
+name: slime contract
+
+# agent_env.training.slime on slime itself (tst/slime): the helper's generate function plays rows the writer wrote
+# through slime's own OpenAI adapter, with slime's own arguments, in front of a stand-in for SGLang's /generate, and
+# slime's dynamic-sampling filter decides each group; on slime 540ea91 and on its main branch. slime isn't on PyPI: its
+# checkout is installed with its requirements over the dev environment, torch the CPU build, and SGLang's and
+# Megatron-LM's checkouts go on PYTHONPATH, at the SGLang tag and the Megatron-LM commit slime's Dockerfile builds on,
+# with the transformers that SGLang tag pins. It runs on pull requests that touch the helper, the OpenEnv server it plays
+# or the tier, weekly, and on demand; it isn't a required check.
+
+on:
+  pull_request:
+    paths:
+      - "src/agent_env/training/**"
+      - "src/agent_env/openenv/**"
+      - "tst/slime/**"
+      - "tst/unit/training/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/slime.yml"
+  schedule:
+    - cron: "41 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: slime-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  generate:
+    name: generate (slime ${{ matrix.slime }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        slime: ["540ea919e45b8b929198abce008a103be9cfc779", "main"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install from uv.lock with the slime extra
+        run: |
+          python -m pip install --quiet -r .github/ci-requirements.txt
+          uv sync --locked --extra dev --extra slime --python "$(command -v python)"
+      - name: Check out slime, SGLang and Megatron-LM
+        env:
+          SLIME_REF: ${{ matrix.slime }}
+        run: |
+          checkout() { git init --quiet "$RUNNER_TEMP/$1" && git -C "$RUNNER_TEMP/$1" fetch --quiet --depth 1 "$2" "$3" \
+            && git -C "$RUNNER_TEMP/$1" checkout --quiet FETCH_HEAD && echo "$1 $3 $(git -C "$RUNNER_TEMP/$1" rev-parse HEAD)"; }
+          checkout slime https://github.com/THUDM/slime "$SLIME_REF"
+          sglang=$(grep -oP '^ARG SGLANG_IMAGE_TAG=\K\S+' "$RUNNER_TEMP/slime/docker/Dockerfile" | sed -E 's/-cu[0-9]+$//')
+          megatron=$(grep -oP '^ARG MEGATRON_COMMIT=\K\S+' "$RUNNER_TEMP/slime/docker/Dockerfile")
+          checkout sglang https://github.com/sgl-project/sglang "$sglang"
+          checkout Megatron-LM https://github.com/NVIDIA/Megatron-LM "$megatron"
+          echo "PYTHONPATH=$RUNNER_TEMP/sglang/python:$RUNNER_TEMP/Megatron-LM" >> "$GITHUB_ENV"
+      - name: Install slime, its requirements and CPU torch
+        # mcp stays below 2, as the framework pins it; the rest beyond slime's requirements are what SGLang's tool-call
+        # parser and slime's argument parser import on CPU.
+        run: |
+          echo 'mcp>=1.25,<2' > "$RUNNER_TEMP/constraints.txt"
+          transformers=$(grep -oP '"\Ktransformers==[^"]+' "$RUNNER_TEMP/sglang/python/pyproject.toml" | head -1)
+          uv pip install --python .venv/bin/python -e "$RUNNER_TEMP/slime" --no-deps
+          uv pip install --python .venv/bin/python -r "$RUNNER_TEMP/slime/requirements.txt" torch "$transformers" \
+            pybase64 triton msgspec pyzmq IPython partial-json-parser xgrammar sentencepiece \
+            -c "$RUNNER_TEMP/constraints.txt" \
+            --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+          .venv/bin/python -c "from importlib.metadata import version; print('torch', version('torch'), 'transformers', version('transformers'), 'mcp', version('mcp'))"
+      - name: slime tier
+        run: .venv/bin/python -m pytest tst/slime -rA --timeout=900 --junitxml=junit-slime.xml
+      - name: No skips
+        if: always()
+        run: .venv/bin/python .github/scripts/check_skip_policy.py junit-slime.xml

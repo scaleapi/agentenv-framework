@@ -13,7 +13,7 @@ pytest.importorskip("PIL")
 
 from computer_fake import FakeDriver, MinimalDriver, http_client  # noqa: E402
 
-from agentenv_protocol.computer import ComputerSettings, ExecResult, linux, run_in_session, set_display  # noqa: E402
+from agentenv_protocol.computer import ComputerSettings, ExecResult, _linux, run_in_session, set_display  # noqa: E402
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the Linux defaults need a POSIX host")
 
@@ -159,14 +159,14 @@ async def test_a_drivers_own_run_in_session_is_capped_and_checked():
 
 @pytest.mark.asyncio
 async def test_a_background_apps_output_is_drained_after_the_call_returns(monkeypatch):
-    monkeypatch.setattr(linux, "DRAIN_S", 0.1)
+    monkeypatch.setattr(_linux, "DRAIN_S", 0.1)
     async with http_client(FakeDriver()) as http:
         r = await http.post("/agentenv/ext/computer-exec/run", json=_run(
             argv=["sh", "-c", "echo now; (sleep 0.4; echo later) &"]))
-        draining = len(linux._draining)
+        draining = len(_linux._draining)
 
         async def drained():
-            while linux._draining:
+            while _linux._draining:
                 await asyncio.sleep(0.05)
 
         await asyncio.wait_for(drained(), timeout=10)

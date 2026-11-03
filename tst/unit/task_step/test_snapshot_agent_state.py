@@ -167,7 +167,7 @@ async def test_capture_reads_child_envs_on_the_stored_card_and_takes_legacy_for_
 
     got, legacy = [], []
 
-    async def _get_data(base, timeout=30):
+    async def _get_data(base, timeout=30, headers=None):
         got.append(base)
         return GetDataResponse(parts=[DataPart(data={"rows": 1})])
 
@@ -200,7 +200,7 @@ async def test_a_service_that_exports_a_file_bundle_is_captured_from_its_export_
     monkeypatch.setattr(artifact_mod, "EnvironmentUniverseArtifact", type("U", (), {"get": staticmethod(lambda _id: _StubUniverse())}))
     monkeypatch.setattr(config_mod, "get_config", lambda: type("Cfg", (), {"get_object_store_at": lambda self, object_url: store})())
 
-    async def _get_data(base, timeout=30):
+    async def _get_data(base, timeout=30, headers=None):
         if base.endswith("/mcp-calendar"):
             return GetDataResponse(parts=[uploaded_file_part("calendar.zip", name="calendar.zip", mime_type="application/zip")])
         return GetDataResponse(parts=[DataPart(data={"contacts": 4})])

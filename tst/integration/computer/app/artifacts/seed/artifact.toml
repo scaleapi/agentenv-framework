@@ -1,0 +1,2 @@
+type = "environment_universe"
+environment_artifacts = ["desk_seed", "notes_seed"]

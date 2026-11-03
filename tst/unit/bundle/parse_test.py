@@ -532,6 +532,20 @@ class TestDeclaredIds:
         root = build(tmp_path / "b", {"envs/t/env.toml": f"id = {declared}\n"})
         assert message in problems(root)[0]
 
+    def test_an_hf_id_is_declared_only_under_a_hub_bundles_own_root(self, tmp_path):
+        root = build(tmp_path / "b", {"envs/t/env.toml": 'id = "@hf/acme/ds/x/tickets"\n',
+                                      "envs/u/env.toml": 'id = "@local/acme/u"\n'})
+        hub = parse_bundle(root, id_root="@hf/acme/ds/x")
+        assert [entry.id for entry in hub.entries] == ["@hf/acme/ds/x/tickets", "@local/acme/u"]
+        for refused_in in ({}, {"id_root": "@hf/acme/ds/y"}, {"id_root": "@local/acme/ds/x"}):
+            (problem,) = problems(root, **refused_in)
+            assert problem.startswith("envs/t/env.toml: id '@hf/acme/ds/x/tickets': an '@hf/' id names an entity of "
+                                      "a bundle run from the Hugging Face Hub")
+        assert parse_bundle(build(tmp_path / "c", {"envs/t/Dockerfile": ""}),
+                            id_root="@hf/acme/ds").entries[0].id == "@hf/acme/ds/t"
+        bare = build(tmp_path / "d", {"envs/t/env.toml": 'id = "bare"\n'})
+        assert "must start with '@local/' or '@hf/acme/ds/x/'" in problems(bare, id_root="@hf/acme/ds/x")[0]
+
     def test_artifact_leaf_may_not_contain_double_underscore(self, tmp_path):
         root = build(tmp_path / "b", {
             "artifacts/x/artifact.toml": 'id = "@local/b/pdf__files"\n', "artifacts/x/a": "",

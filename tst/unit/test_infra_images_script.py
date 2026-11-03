@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tomllib
 
 import pytest
 
@@ -50,19 +51,29 @@ def test_plan_lists_every_image_with_its_checkout_paths_and_tag(script, monkeypa
                           "context": "src/agent_env/env/gateway"}
 
 
-def test_plan_only_lists_the_infra_images_or_the_agents_images(script, monkeypatch, capsys):
-    """The release builds the infra images before it publishes the protocol, and the images that install it, the
-    bundles' and the website browser's, after."""
+def test_plan_only_lists_the_infra_images_the_agents_images_or_the_disk_forms(script, monkeypatch, capsys):
+    """The release builds the infra images before it publishes the protocol, the images that install it, the bundles'
+    and the Playwright MCP browser's, after, and the disk forms over their base computers' published images."""
     planned = {}
-    for only in ("infra", "agents"):
+    for only in ("infra", "agents", "disks"):
         assert _run(script, monkeypatch, "plan", "--only", only) == 0
-        planned[only] = [entry["name"] for entry in json.loads(capsys.readouterr().out)]
+        planned[only] = json.loads(capsys.readouterr().out)
 
     bundles = [image.name for image in BUNDLE_IMAGES]
-    after = [*bundles, "agentenv-website-browser"]  # the browser's recorder installs the protocol too
-    assert planned == {"infra": [image.name for image in bootstrap.PUBLISHED_IMAGES if image.name not in after],
-                       "agents": after}
-    assert "agentenv-gateway" in planned["infra"] and bundles == [
+    after = [*bundles, "agentenv-playwright-mcp"]  # the browser's recorder installs the protocol too
+    disks = ["agentenv-ubuntu-24.04-disk"]
+    names = {only: [entry["name"] for entry in entries] for only, entries in planned.items()}
+    assert names == {"infra": [image.name for image in bootstrap.PUBLISHED_IMAGES if image.name not in after + disks],
+                     "agents": after, "disks": disks}
+    assert "agentenv-disk-tools" in names["infra"] and "agentenv-qemu-launcher" in names["infra"]
+    (disk,) = planned["disks"]
+    base = next(image for image in BUNDLE_IMAGES if image.name == "agentenv-ubuntu-24.04")
+    assert disk["args"] == {"ROOTFS": base.ref(), "TOOLS": next(image.ref() for image in bootstrap.PUBLISHED_IMAGES
+                                                                if image.name == "agentenv-disk-tools"),
+                            "SIZE_GB": str(tomllib.loads(base.dockerfile.with_name("artifact.toml").read_text())[
+                                "forms"]["disk"]["min_disk_gb"])}
+    assert "args" not in planned["infra"][0]
+    assert "agentenv-gateway" in names["infra"] and bundles == [
         "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-hermes", "agentenv-letta-code",
         "agentenv-opencode", "agentenv-openhands", "agentenv-pi", "agentenv-proxy", "agentenv-pydantic-ai",
         "agentenv-mail-mcp", "agentenv-ubuntu-24.04"]
