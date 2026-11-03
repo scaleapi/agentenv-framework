@@ -783,7 +783,9 @@ are the profile's template. The base class adds:
   the result or raises `DevToolsError`, and `ConnectionError` with no browser connected. No port
   listens and no `DevToolsActivePort` is written, so nothing else in the computer can reach it over
   CDP. Since only the server that launched it holds the pipe, a server that restarts stops it and
-  launches it again. The ready check `devtools_answers` asks `Browser.getVersion` over the pipe.
+  launches it again, and a launch while it runs, from its menu launcher say, opens another window over
+  the pipe rather than a second copy, which would hand its window to the first and exit. The ready check
+  `devtools_answers` asks `Browser.getVersion` over the pipe.
 - **`browser/v1`** on its card, params only: `chromium` (its `version`), `clock: "real"` and, alone,
   `window`.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in

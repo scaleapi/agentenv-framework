@@ -166,17 +166,17 @@ async def _browser_process(deployed, other_than: int | None = None) -> dict:
     raise TimeoutError(f"no Chromium on --remote-debugging-pipe other than {other_than}: {found}")
 
 
-async def _app(deployed, path: str) -> dict:
+async def _app(deployed, path: str, app: str = "browser") -> dict:
     async with httpx.AsyncClient(timeout=30) as http:
-        response = await http.get(f"{deployed.environment_url}/svc/browser{path}", headers=deployed.control_headers)
+        response = await http.get(f"{deployed.environment_url}/svc/{app}{path}", headers=deployed.control_headers)
     response.raise_for_status()
     return response.json()
 
 
-async def _ready(deployed, card: dict) -> dict:
+async def _ready(deployed, card: dict, app: str = "browser") -> dict:
     """The app's readiness once it says it's ready, or as it last said within a minute."""
     for _ in range(60):
-        readiness = await _app(deployed, apps.endpoint(card, "ready"))
+        readiness = await _app(deployed, apps.endpoint(card, "ready"), app)
         if readiness["ready"]:
             return readiness
         await asyncio.sleep(1)

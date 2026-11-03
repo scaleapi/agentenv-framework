@@ -1,8 +1,9 @@
 """WebsiteBrowserEnvironment: a website browser as a computer app, run inside a computer or alone. A subclass says how
 its build installs and starts; this class adds what agentenv owns, the same in both: its flags after the subclass's
 command, the unattended-use policies, a CDP connection over the browser's debugging pipe, the settings every browser
-takes, a fresh cache and the deploy's prompt answers at every launch, its skill and ``browser/v1`` on its card. Whether it runs alone, on the open web and through which site proxy
-come from variables agentenv sets, never from its settings."""
+takes, a fresh cache and the deploy's prompt answers at every launch, another window for a launch while it runs, its
+skill and ``browser/v1`` on its card. Whether it runs alone, on the open web and through which site proxy come from
+variables agentenv sets, never from its settings."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +13,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -287,6 +288,14 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def _relaunch_on_start(self) -> bool:
         return True
+
+    def _launch_running(self) -> Callable[[], Awaitable[None]]:
+        return self._open_window
+
+    async def _open_window(self) -> None:
+        """Another window, which a launch of the browser while it runs opens over its pipe: a second copy would only
+        hand its window to the first and exit, taking its new pipe with it."""
+        await self.devtools.call("Target.createTarget", {"url": "about:blank", "newWindow": True})
 
     @install_step(scope="system")
     def write_policies(self) -> None:

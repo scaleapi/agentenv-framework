@@ -3,7 +3,8 @@ machine's arch ready with it; deployed on two start_urls, it shows one Chromium 
 sign-in or permission window beside it, and the second a tab away, which an agent reaches with Control+Tab; its managed
 policies are where Chrome for Testing reads them; and a reset of its data clears its profile and opens it again. As a
 website browser it runs Chrome itself with agentenv's flags on its debugging pipe, keeps its shared memory in files on
-Docker's 64 MiB /dev/shm, and answers location prompts and leaves notification ones to ask as the deploy says; and the
+Docker's 64 MiB /dev/shm, answers location prompts and leaves notification ones to ask as the deploy says, and its menu
+launcher, run while it runs, opens another window of it with no second copy, its cache kept and it still ready; and the
 desktop that gives it French defaults deploys with them, a deploy's time zone over them, each recorded. Needs Docker and
 the local registry on localhost:5000."""
 
@@ -19,7 +20,8 @@ from mcp.client.streamable_http import streamablehttp_client
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.env import Env
-from tst.integration.computer.website_browser_test import _browser_process, _keys
+from agentenv_protocol.types import WELL_KNOWN_PATH
+from tst.integration.computer.website_browser_test import _app, _browser_process, _keys, _ready
 from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
@@ -31,6 +33,9 @@ ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64
 ALPHA = "data:text/html,<title>Alpha page</title><h1>Alpha</h1>"
 BRAVO = "data:text/html,<title>Bravo page</title><h1>Bravo</h1>"
 LOOPBACK = "http://127.0.0.1:8766/"
+# What chromium's menu launcher runs.
+LAUNCHER = ("/opt/agentenv/apps/chromium/venv/bin/python -m agentenv_protocol.computer.launch "
+            "/opt/agentenv/apps/chromium")
 # Serves, on loopback for the seconds it's given, a page whose title is its location and notification permissions.
 SERVE_PERMISSIONS = """import http.server, sys, threading, time
 class Page(http.server.BaseHTTPRequestHandler):
@@ -88,7 +93,8 @@ async def test_a_deploy_opens_its_start_urls_unprompted_and_a_reset_clears_its_p
 
 
 @pytest.mark.asyncio
-async def test_it_runs_chrome_itself_on_its_pipe_and_answers_prompts_as_the_deploy_says(chromium_desktop):
+async def test_it_runs_chrome_itself_on_its_pipe_answers_prompts_as_the_deploy_says_and_a_launch_opens_a_window(
+        chromium_desktop):
     settings = {"start_urls": [LOOPBACK], "notifications": "ask"}
     with namespace_routing():
         deployed = await Env.get(chromium_desktop.id).deploy(env_params={"app_settings": {"chromium": settings}})
@@ -101,6 +107,13 @@ async def test_it_runs_chrome_itself_on_its_pipe_and_answers_prompts_as_the_depl
             await _keys(deployed, ["F5"])
             permissions = await _chromium_windows(deployed, "denied")
             await serving
+            await inside.run(deployed, ["sh", "-c", "mkdir -p ~/.cache/chromium && touch ~/.cache/chromium/kept"],
+                             timeout_s=30)
+            launched = await inside.run(deployed, ["sh", "-c", LAUNCHER], timeout_s=60)
+            windows = await _chromium_windows(deployed, "denied", count=2)
+            after = await _browser_process(deployed)
+            kept = await inside.run(deployed, ["sh", "-c", "test -e ~/.cache/chromium/kept"], timeout_s=30)
+            readiness = await _ready(deployed, await _app(deployed, WELL_KNOWN_PATH, "chromium"), "chromium")
         finally:
             report = await teardown_run(context)
 
@@ -111,6 +124,8 @@ async def test_it_runs_chrome_itself_on_its_pipe_and_answers_prompts_as_the_depl
                           "--disable-dev-shm-usage"] and argv[10:] == [LOOPBACK]
     assert browser["listening"] == 0
     assert permissions == ["denied prompt - Google Chrome for Testing"]
+    assert launched["exit_code"] == 0 and len(windows) == 2 and after["pid"] == browser["pid"]
+    assert kept["exit_code"] == 0 and readiness["ready"] is True, readiness
     recorded = deployed.metadata["computer"]["app_settings"]["chromium"]
     assert (recorded["geolocation"], recorded["notifications"], recorded["start_urls"]) == ("deny", "ask", [LOOPBACK])
     assert not report.failed
@@ -136,7 +151,8 @@ async def test_a_desktop_that_gives_it_defaults_deploys_with_them_and_a_deploys_
 
 async def _tab_to(deployed, title: str):
     """Control+Tab pressed as an agent presses it, again while the window still shows the tab before, which a press
-    can reach before the next tab opens; the last press's result and the window titles once one starts with ``title``."""
+    can reach before the next tab opens; the last press's result, and the window titles once one starts with
+    ``title``."""
     async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -149,13 +165,13 @@ async def _tab_to(deployed, title: str):
                         raise
 
 
-async def _chromium_windows(deployed, title: str, seconds: int = 60) -> list[str]:
-    """The titles of the computer's Chromium windows once one of them starts with ``title``."""
+async def _chromium_windows(deployed, title: str, seconds: int = 60, count: int = 1) -> list[str]:
+    """The titles of the computer's Chromium windows once there are ``count`` and one starts with ``title``."""
     for _ in range(seconds):
         listed = (await inside.run(deployed, ["sh", "-c", WINDOWS], timeout_s=30))["stdout"]
         classes = re.findall(r'WM_CLASS\(STRING\) = .*"([^"]*)"\n_NET_WM_NAME\(UTF8_STRING\) = "(.*)"', listed)
         titles = [name for cls, name in classes if cls == "Chromium"]
-        if any(name.startswith(title) for name in titles):
+        if any(name.startswith(title) for name in titles) and len(titles) >= count:
             return titles
         await asyncio.sleep(1)
     raise TimeoutError(f"no Chromium window titled {title!r}: {listed}")

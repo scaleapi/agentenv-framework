@@ -24,8 +24,9 @@ from agentenv_protocol.website_browser import (ALONE_BYPASS, ALONE_ENV, BROWSER,
 PROXY = "http://127.0.0.1:3128"
 OWNED = ["--user-data-dir", "--disk-cache-dir", "--remote-debugging-pipe", "--no-first-run",
          "--no-default-browser-check", "--lang=en-US"]
-# A browser that answers CDP on its debugging pipe, fds 3 and 4, as a Chromium does: Browser.getVersion with its product,
-# Target.createTarget by writing the tab's URL to tabs.txt beside it, anything else with an error.
+# A browser that answers CDP on its debugging pipe, fds 3 and 4, as a Chromium does: Browser.getVersion with its
+# product, Target.createTarget by writing the tab's URL to tabs.txt beside it, a new window's after "window ", anything
+# else with an error.
 FAKE_BROWSER = """import json, os
 buffer = b""
 while chunk := os.read(3, 65536):
@@ -35,9 +36,9 @@ while chunk := os.read(3, 65536):
         message = json.loads(raw)
         if message["method"] == "Browser.getVersion":
             answer = {"result": {"product": "Fake/1"}}
-        elif message["method"] == "Target.createTarget" and message["params"]["background"]:
+        elif message["method"] == "Target.createTarget":
             with open("tabs.txt", "a") as tabs:
-                tabs.write(message["params"]["url"] + "\\n")
+                tabs.write(("window " if message["params"].get("newWindow") else "") + message["params"]["url"] + "\\n")
             answer = {"result": {"targetId": message["params"]["url"]}}
         else:
             answer = {"error": {"code": -32601, "message": "unknown method"}}
@@ -282,6 +283,26 @@ async def test_each_launch_gets_a_new_pipe_its_server_talks_cdp_over_and_its_rea
 
 
 @pytest.mark.asyncio
+async def test_a_launch_while_it_runs_opens_a_window_over_its_pipe_and_starts_no_second_copy(monkeypatch, tmp_path,
+                                                                                             browser_home):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
+    browser = FakeBrowser()
+    runtime = browser._computer_app
+
+    first = await runtime.launch_app()
+    (browser_home / ".cache/chromium").mkdir(parents=True, exist_ok=True)
+    (browser_home / ".cache/chromium/kept").touch()
+    second = await runtime.launch_app()
+    answers = await browser.devtools_answers()
+    await runtime.stop_app()
+    browser.devtools.close()
+
+    assert second == first and answers is True and (browser_home / ".cache/chromium/kept").exists()
+    assert (tmp_path / "tabs.txt").read_text().splitlines() == ["window about:blank"]
+
+
+@pytest.mark.asyncio
 async def test_headless_it_opens_one_start_tab_from_its_command_line_and_the_rest_over_its_pipe(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
@@ -395,6 +416,7 @@ def test_an_app_that_isnt_a_browser_launches_and_declares_as_before():
     stored = Mail.declaration().model_dump(mode="json", exclude_none=True)
 
     assert mail.launch is Mail._installs["linux"].launch and mail._computer_app.desktop is True
+    assert mail._computer_app.launch_running is None
     assert stored["os"]["linux"]["launch"] == {"at": "boot", "command": ["mail"], "window": {"class": "Mail"},
                                                "ready": {"window": True, "timeout_s": 60.0}}
 
