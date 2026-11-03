@@ -35,11 +35,12 @@ def _permission(selection: dict | None, servers: dict | None = None) -> dict:
 @pytest.fixture
 def spawned(monkeypatch):
     """Every spawn's argv and environment, each answered by a CLI that finishes its turn."""
-    calls: list[tuple[list[str], dict]] = []
+    calls: list[tuple[list[str], dict, FakeCLI]] = []
 
     async def _exec(*cmd, **kwargs):
-        calls.append((list(cmd), kwargs["env"]))
-        return FakeCLI(json.dumps(_STOP).encode() + b"\n")
+        cli = FakeCLI(json.dumps(_STOP).encode() + b"\n")
+        calls.append((list(cmd), kwargs["env"], cli))
+        return cli
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
     monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {"XDG_DATA_HOME": "/ctx/share"})
@@ -47,7 +48,8 @@ def spawned(monkeypatch):
 
 
 def test_no_selection_leaves_the_config_and_argv_as_they_were(monkeypatch, spawned):
-    """The whole config and argv of a turn without a selection, as origin/main builds them."""
+    """The whole config and argv of a turn without a selection, as origin/main builds them, except that the prompt
+    goes on stdin rather than as the positional message."""
     monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
     monkeypatch.delenv("LITELLM_EXTRA_HEADERS", raising=False)
 
@@ -55,9 +57,10 @@ def test_no_selection_leaves_the_config_and_argv_as_they_were(monkeypatch, spawn
         prompt="go", context_id="ctx", session_id="ses_0", model="m", mcp_servers={"env": {"url": "https://gw/mcp"}},
         effort="high", attachment_paths=["/w/a.png"], workspace="/w"))
 
-    ((argv, env),) = spawned
-    assert argv == ["opencode", "run", "--format", "json", "--model", "litellm/m", "--dir", "/w", "-s", "ses_0", "go",
+    ((argv, env, cli),) = spawned
+    assert argv == ["opencode", "run", "--format", "json", "--model", "litellm/m", "--dir", "/w", "-s", "ses_0",
                     "--file", "/w/a.png"]
+    assert cli.stdin.data == b"go"
     assert env["OPENCODE_CONFIG_CONTENT"] == json.dumps({
         "$schema": "https://opencode.ai/config.json",
         "provider": {"litellm": {
@@ -98,9 +101,10 @@ def test_the_selection_reaches_the_cli(spawned):
 
     asyncio.run(opencode_bridge.run_opencode(prompt="go", context_id="ctx", builtin_tools=tools))
 
-    ((argv, env),) = spawned
+    ((argv, env, cli),) = spawned
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny", **_CHECKS, "question": "deny"}
-    assert argv[-1] == "go"
+    assert "go" not in argv
+    assert cli.stdin.data == b"go"
 
 
 def test_turns_get_the_selection_the_agent_config_set(monkeypatch, oc):
