@@ -23,7 +23,7 @@ from tst.unit.task.episode.run_test import (
     TURN,
     _tool_sessions,
 )
-from tst.unit.training.nemo_gym_test import PLAYED
+from tst.unit.training._support import PLAYED
 
 ADD_ITEM = {"type": "function", "function": {"name": "add_item", "description": "add_item.",
                                              "parameters": {"type": "object"}}}

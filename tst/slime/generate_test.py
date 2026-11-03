@@ -14,31 +14,24 @@ from starlette.routing import Route
 
 from agent_env.training._chat import write_rows
 from agent_env.training._openenv import Server
-from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
-from tst.unit.training.nemo_gym_test import PLAYED
+from tst.unit.training._support import ADDS_A_CRATE, FAILS_AFTER_THE_TURN, PLAYED
 from tst.util.capabilities import SLIME, missing_capability_reason
 
 slime_generate = pytest.importorskip("agent_env.training.slime.generate", reason=missing_capability_reason(SLIME),
                                      exc_type=ImportError)
 arguments = pytest.importorskip("slime.utils.arguments", reason=missing_capability_reason(SLIME))
 filters = pytest.importorskip("slime.rollout.filter_hub.base_types", reason=missing_capability_reason(SLIME))
-misc = pytest.importorskip("slime.utils.misc", reason=missing_capability_reason(SLIME))
 types = pytest.importorskip("slime.utils.types", reason=missing_capability_reason(SLIME))
 transformers = pytest.importorskip("transformers", reason=missing_capability_reason(SLIME))
 
 CHECKPOINT = "Qwen/Qwen3-0.6B"
-ADDS_A_CRATE = '<tool_call>\n{"name": "add_item", "arguments": {"item": "crate"}}\n</tool_call><|im_end|>'
-FAILS_AFTER_THE_TURN = [ITEMS, ALICE, TURN, {"id": "crane", "type": "episode_test_env", "env_id": "crane", "fail": True},
-                        REPLIES]
 SAMPLING = {"temperature": 1.0, "top_p": 1.0, "max_new_tokens": 256}
 
 
 @pytest.fixture(autouse=True)
 def fresh_adapter(monkeypatch):
     """Each test's own adapter, in front of its own stand-in SGLang: the module keeps one per process."""
-    monkeypatch.delitem(misc.SingletonMeta._instances, slime_generate._Adapter, raising=False)
-    yield
-    misc.SingletonMeta._instances.pop(slime_generate._Adapter, None)
+    monkeypatch.setattr(slime_generate._Adapter, "served", None)
 
 
 @pytest.fixture
@@ -54,7 +47,7 @@ def model():
         if "<tool_response>" in prompt and server.stall:
             server.stalled.set()
             await asyncio.sleep(server.stall)
-        ids = tokenizer.encode("Added a crate.<|im_end|>" if "<tool_response>" in prompt else ADDS_A_CRATE,
+        ids = tokenizer.encode(f"{'Added a crate.' if '<tool_response>' in prompt else ADDS_A_CRATE}<|im_end|>",
                                add_special_tokens=False)
         return JSONResponse({"meta_info": {"output_token_logprobs": [[-0.01, each] for each in ids],
                                            "finish_reason": {"type": "stop"}}})
@@ -90,7 +83,7 @@ def test_an_eval_gives_slime_one_sample_per_episode_so_its_mean_is_over_episodes
 
     assert (sample.reward, sample.status, sample.loss_mask) == (1.0, types.Sample.Status.COMPLETED, [0])
     assert sample.metadata["agentenv_scores"] == {"replies": 1.0}
-    assert slime_generate._Adapter(args).adapter.store == {}
+    assert slime_generate._Adapter.of(args).adapter.store == {}
 
 
 def test_a_rollout_slime_cancels_drops_its_session_and_closes_its_episode(serve, model, tmp_path, teardowns):
@@ -111,7 +104,7 @@ def test_a_rollout_slime_cancels_drops_its_session_and_closes_its_episode(serve,
     server.stop()
 
     assert slime_generate.generate.abort_mode == "request"
-    assert slime_generate._Adapter(args).adapter.store == {}
+    assert slime_generate._Adapter.of(args).adapter.store == {}
     assert len(teardowns.finished) == 2
 
 

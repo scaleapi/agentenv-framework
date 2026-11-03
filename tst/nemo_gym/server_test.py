@@ -25,7 +25,8 @@ from agent_env.training.nemo_gym.prepare import write_server
 from tst.unit.bundle._support import layout
 from tst.unit.openenv.environment_test import AGAIN
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
-from tst.unit.training.nemo_gym_test import ADD_ITEM, FUNCTION_END_TURN, PLAYED, STYLE
+from tst.unit.training._support import PLAYED
+from tst.unit.training.nemo_gym_test import ADD_ITEM, FUNCTION_END_TURN, STYLE
 from tst.util.capabilities import NEMO_GYM, missing_capability_reason
 
 server = pytest.importorskip("agent_env.training.nemo_gym.server", reason=missing_capability_reason(NEMO_GYM),

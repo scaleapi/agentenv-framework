@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any
+from typing import Any, ClassVar
 
 from slime.agent.adapters import OpenAIAdapter
 from slime.agent.aiohttp_threaded import run_app_in_thread
-from slime.utils.misc import SingletonMeta
-from slime.utils.processing_utils import load_tokenizer
 from slime.utils.types import Sample
+from transformers import AutoTokenizer
 
 from agent_env.training._chat import keep_scored_groups, play
 
@@ -27,7 +26,7 @@ async def generate(args: Any, sample: Sample, sampling_params: dict[str, Any], e
     one sample per episode, carrying only the reward, so slime's eval reward is a mean over episodes, not turns. An
     episode with no recorded turn comes back as a single aborted sample, which ``keep_scored_groups`` leaves out with its
     group. slime cancels a rollout it no longer needs (``abort_mode``): its session is dropped and its episode closed."""
-    adapter = _Adapter(args)
+    adapter = _Adapter.of(args)
     sid = uuid.uuid4().hex
     adapter.adapter.open_session(
         sid, sampling_defaults=sampling_params, max_context_tokens=args.rollout_max_context_len or 0,
@@ -58,19 +57,27 @@ def _bare(sample: Sample, played: dict[str, Any], status: Sample.Status) -> list
     return [sample]
 
 
-class _Adapter(metaclass=SingletonMeta):
+class _Adapter:
     """The rollout process's OpenAI adapter, in front of its SGLang router, reading the model's tool calls with
-    ``--sglang-tool-call-parser``."""
+    ``--sglang-tool-call-parser``; made for the process's first sample."""
+
+    served: ClassVar[_Adapter | None] = None
+
+    @classmethod
+    def of(cls, args: Any) -> _Adapter:
+        if cls.served is None:
+            cls.served = cls(args)
+        return cls.served
 
     def __init__(self, args: Any):
         if not args.sglang_tool_call_parser:
             raise ValueError("slime's OpenAI adapter reads the model's tool calls with --sglang-tool-call-parser; pass "
                              "the parser for the model's chat template, qwen25 for Qwen2.5 and Qwen3")
         self.adapter = OpenAIAdapter(
-            tokenizer=load_tokenizer(args.hf_checkpoint, trust_remote_code=True),
+            tokenizer=AutoTokenizer.from_pretrained(args.hf_checkpoint, trust_remote_code=True),
             sglang_url=f"http://{args.sglang_router_ip}:{args.sglang_router_port}",
             tool_parser=args.sglang_tool_call_parser, reasoning_parser=args.sglang_reasoning_parser,
             rollout_args=args)
-        served = run_app_in_thread(self.adapter.app, host="127.0.0.1", thread_name="agentenv-adapter",
-                                   runner_kwargs={"handler_cancellation": True})
-        self.url = f"http://127.0.0.1:{served.port}"
+        app = run_app_in_thread(self.adapter.app, host="127.0.0.1", thread_name="agentenv-adapter",
+                                runner_kwargs={"handler_cancellation": True})
+        self.url = f"http://127.0.0.1:{app.port}"
