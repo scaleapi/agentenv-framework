@@ -1367,3 +1367,177 @@ def _fake_aws(monkeypatch):
 
     store = _SharingS3Store(client=object(), bucket="bucket")
     monkeypatch.setattr(snapshot_mod, "get_config", lambda: type("Cfg", (), {"get_object_store": lambda self: store})())
+
+
+# ── websites ─────────────────────────────────────────────────────────────────
+
+def _multi_env(mcp_names, website_names):
+    return SimpleNamespace(id="env-1", version=3, mcp_server_envs=[_FakeServiceEnv(n) for n in mcp_names],
+                           website_envs=[_FakeServiceEnv(n) for n in website_names])
+
+
+def test_enumerate_includes_websites_and_leaves_a_shared_name_to_the_mcp_server():
+    servers = SnapshotEnvTaskStep._enumerate_servers(_multi_env(["slack", "gmail"], ["shop", "slack"]))
+    assert [(s.environment_name, s.mcp) for s in servers] == [("slack", True), ("gmail", True), ("shop", False)]
+
+
+def test_enumerate_a_single_website_env_and_a_multi_env_of_websites_only():
+    from agent_env.env.envs.website import WebsiteEnv
+
+    site = WebsiteEnv(id="site-env", version=1, environment_name="shop")
+    assert [(s.environment_name, s.mcp) for s in SnapshotEnvTaskStep._enumerate_servers(site)] == [("shop", False)]
+    assert SnapshotEnvTaskStep._enumerate_environments(_multi_env([], ["shop"])) == ["shop"]
+
+
+@pytest.mark.asyncio
+async def test_export_of_a_website_reads_its_data_plane_from_the_stored_card(monkeypatch, tmp_path):
+    record = _carded(await _card({"mcp-slack": [], "shop": []}))
+    sent = _mock_http(monkeypatch, rpc_result={"parts": [{"kind": "data", "data": {"orders": 2}}]})
+
+    out = str(tmp_path / "export-tmp")
+    suffix = await SnapshotEnvTaskStep._export_environment_to_file("https://gw-1", "shop", out, 30, record, mcp=False)
+
+    assert suffix == ".json"
+    assert [(r.method, str(r.url)) for r in sent] == [("POST", f"{_CARD}/svc/shop/agentenv")]
+    with open(out) as f:
+        assert json.load(f) == {"orders": 2}
+
+
+@pytest.mark.asyncio
+async def test_export_of_a_website_without_a_stored_card_probes_its_own_gateway_path(monkeypatch, tmp_path):
+    import dataclasses
+
+    record = dataclasses.replace(_carded({}), environment_card=None)
+    sent = _mock_http(monkeypatch, rpc_result={"parts": [{"kind": "data", "data": {"orders": 2}}]},
+                      body=b'{"name": "shop", "url": "/agentenv"}')
+
+    suffix = await SnapshotEnvTaskStep._export_environment_to_file("https://gw-1", "shop", str(tmp_path / "out"), 30, record, mcp=False)
+
+    assert suffix == ".json"
+    assert [(r.method, str(r.url)) for r in sent] == [
+        ("GET", "https://gw-1/svc/shop/.well-known/agent-env.json"),
+        ("GET", "https://gw-1/svc/shop/.well-known/agent-env.json"),
+        ("POST", "https://gw-1/svc/shop/agentenv"),
+    ]
+
+
+def _serve_website_card(monkeypatch, card_response):
+    """A gateway whose website ``shop`` answers its card read with ``card_response`` (a response or an exception to
+    raise) and whose MCP server ``slack`` serves a v1 data plane; returns the requests sent."""
+    import httpx
+
+    sent, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        if request.url.path == f"/svc/shop{WELL_KNOWN_PATH}":
+            if isinstance(card_response, Exception):
+                raise card_response
+            return card_response
+        if request.url.path.endswith("/agentenv"):
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "data", "data": {}}]}})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    return sent
+
+
+def _card_read_failures():
+    import httpx
+
+    return [httpx.Response(500, json={}), httpx.Response(503, json={}), httpx.ReadTimeout("card read timed out"),
+            httpx.ConnectError("connection refused")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card_response", _card_read_failures(), ids=["500", "503", "timeout", "connect-error"])
+async def test_export_of_a_website_whose_card_read_fails_raises_rather_than_skipping_it(monkeypatch, tmp_path, card_response):
+    """Without a stored card, a website card read that fails is no proof the website serves no data plane."""
+    import httpx
+
+    sent = _serve_website_card(monkeypatch, card_response)
+
+    with pytest.raises(httpx.HTTPError):
+        await SnapshotEnvTaskStep._export_environment_to_file("https://gw-1", "shop", str(tmp_path / "out"), 30, mcp=False)
+    assert [str(r.url) for r in sent] == [f"https://gw-1/svc/shop{WELL_KNOWN_PATH}"]
+
+
+@pytest.mark.asyncio
+async def test_export_of_a_website_without_a_card_is_skipped(monkeypatch, tmp_path):
+    import httpx
+
+    sent = _serve_website_card(monkeypatch, httpx.Response(404, json={}))
+
+    assert await SnapshotEnvTaskStep._export_environment_to_file("https://gw-1", "shop", str(tmp_path / "out"), 30, mcp=False) is None
+    assert [str(r.url) for r in sent] == [f"https://gw-1/svc/shop{WELL_KNOWN_PATH}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card_response", _card_read_failures(), ids=["500", "503", "timeout", "connect-error"])
+async def test_core_fails_a_snapshot_whose_website_card_cannot_be_read(monkeypatch, card_response):
+    """Another server exporting does not let the snapshot through without a website it could not check."""
+    real_export = SnapshotEnvTaskStep.__dict__["_export_environment_to_file"]
+    _install_core_artifact_fakes(monkeypatch, EnvironmentUniverseArtifact)
+    monkeypatch.setattr(SnapshotEnvTaskStep, "_export_environment_to_file", real_export)
+    _serve_website_card(monkeypatch, card_response)
+
+    with pytest.raises(RuntimeError, match=r"1/2 services were not exported \(missing=\['shop'\]\)"):
+        await SnapshotEnvTaskStep.snapshot_env_state(
+            env=_multi_env(["slack"], ["shop"]), gateway_url="https://gw-1", snapshot_id="snap-x",
+        )
+
+
+@pytest.mark.asyncio
+async def test_export_of_a_website_serving_no_data_plane_exports_nothing_and_sends_nothing(monkeypatch, tmp_path):
+    record = _carded(await _card({"mcp-slack": []}))
+    sent = _mock_http(monkeypatch)
+
+    assert await SnapshotEnvTaskStep._export_environment_to_file("https://gw-1", "shop", str(tmp_path / "out"), 30, record, mcp=False) is None
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_core_snapshots_websites_through_their_data_plane_and_leaves_out_those_without_one(monkeypatch):
+    calls = []
+
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, data_get_params=None, **website):
+        calls.append((name, website))
+        if name == "legacy-site":
+            return None
+        with open(tmp_path, "w") as f:
+            json.dump({"ok": name}, f)
+        return ".json"
+
+    universe_puts = {}
+
+    class _FakeUniverse:
+        id = "snap-x"
+        version = 1
+
+        @staticmethod
+        def put(id, *, environment_artifacts, metadata=None):
+            universe_puts["names"] = [sa.environment_name for sa in environment_artifacts]
+            return _FakeUniverse()
+
+    _install_core_artifact_fakes(monkeypatch, _FakeUniverse)
+    monkeypatch.setattr(SnapshotEnvTaskStep, "_export_environment_to_file", staticmethod(fake_export))
+
+    result = await SnapshotEnvTaskStep.snapshot_env_state(
+        env=_multi_env(["slack"], ["shop", "slack", "legacy-site"]), gateway_url="https://gw", snapshot_id="snap-x",
+    )
+
+    assert sorted(calls) == [("legacy-site", {"mcp": False}), ("shop", {"mcp": False}), ("slack", {})]
+    assert universe_puts["names"] == ["slack", "shop"]
+    assert result.environments_snapshotted == ["slack", "shop"] and result.total == 3
+
+
+@pytest.mark.asyncio
+async def test_core_raises_when_no_service_exported_state(monkeypatch):
+    async def fake_export(gateway_url, name, tmp_path, timeout, deployed=None, **website):
+        return None
+
+    _install_core_artifact_fakes(monkeypatch, EnvironmentUniverseArtifact)
+    monkeypatch.setattr(SnapshotEnvTaskStep, "_export_environment_to_file", staticmethod(fake_export))
+
+    with pytest.raises(RuntimeError, match=r"exported no state: its websites \['shop'\] serve no v1 data plane"):
+        await SnapshotEnvTaskStep.snapshot_env_state(env=_multi_env([], ["shop"]), gateway_url="https://gw", snapshot_id="snap-x")

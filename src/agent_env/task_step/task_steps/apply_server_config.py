@@ -1,15 +1,15 @@
 """Task step that applies a task's behavior config to deployed servers.
 
 At setup (after the env is deployed + universe loaded, before the agent runs)
-this step invokes each backing MCP server's ``set_*`` config extensions over the
-gateway. Extensions are advertised on the server's ``EnvironmentCard`` (served at
+this step invokes each backing MCP server's or website's ``set_*`` config extensions
+over the gateway. Extensions are advertised on the server's ``EnvironmentCard`` (served at
 ``/.well-known/agent-env.json``) under ``capabilities.extensions[]`` and invoked
 at their advertised REST endpoint (e.g. ``/agentenv/ext/set_errors``).
 
 Config lives on the backing server, not on the gateway itself. Each server's card
 comes from the env card stored on the deployed record, whose extension endpoints the
-gateway has already rewritten to its ``/svc/mcp-{service}`` proxy; a record without a
-stored card reads it live there. The agent never sees the card or these endpoints;
+gateway has already rewritten to its ``/svc/mcp-{service}`` (or a website's ``/svc/{service}``)
+proxy; a record without a stored card reads it live there. The agent never sees the card or these endpoints;
 only this harness step invokes them.
 """
 
@@ -76,7 +76,7 @@ class ApplyServerConfigStep(TaskStep):
     entity_refs = (EntityRef.env("env_id"),)
 
     # A directive whose ``service`` is this sentinel is a broadcast: at execution
-    # it expands to one directive per MCP server in the env (same uri + args).
+    # it expands to one directive per MCP server and website in the env (same uri + args).
     # Lets a caller apply an env-wide config (e.g. set_acting_user across every
     # server) without enumerating services itself. Pairs naturally with
     # ``tolerate_unadvertised`` so servers that don't opt in are simply skipped.
@@ -131,44 +131,51 @@ class ApplyServerConfigStep(TaskStep):
             tolerate_unadvertised=data.get("tolerate_unadvertised", False),
         )
 
-    def _expand_directives(self, deployed) -> list[ConfigDirective]:
+    def _expand_directives(self, deployed) -> tuple[list[ConfigDirective], set[str], set[int]]:
         """Expand any broadcast directive (service == ``*``) into one directive
-        per MCP server in the env, resolved from the env definition. The env's
-        child service names aren't otherwise enumerable here (the deployed card
-        list carries no roster), so we read them from ``Env.get`` — matching how
-        deploy_env / load_artifact resolve the env. Non-broadcast directives
-        pass through untouched."""
+        per MCP server and website in the env, resolved from the env definition,
+        and return them with the names that are websites, whose cards a live read
+        finds at ``/svc/{name}``, and the positions of the directives a broadcast
+        made for a website. Those are skipped, as under ``tolerate_unadvertised``,
+        when the website has no card or doesn't advertise the URI, so a website
+        the task didn't name never fails it; a directive naming a website, and
+        every MCP server, stays strict. The env's child service names aren't otherwise
+        enumerable here (the deployed card list carries no roster), so we read
+        them from ``Env.get`` — matching how deploy_env / load_artifact resolve
+        the env. A website sharing its name with an MCP server is left to the MCP
+        server, as the stored env card can't tell the two apart. Non-broadcast
+        directives pass through untouched."""
         if not any(d.service == self._BROADCAST for d in self.directives):
-            return self.directives
+            return self.directives, set(), set()
 
+        from agent_env.env import legacy_protocol
         from agent_env.env.env import Env
 
         env = Env.get(deployed.env_id, deployed.env_version)
-        environment_names = [
-            e.environment_name for e in (getattr(env, "mcp_server_envs", None) or [])
-        ]
         # A single-server env (a bare MCPServerEnv) exposes `environment_name` and no
-        # `mcp_server_envs`; mirror snapshot_env / exporter enumeration and fall
-        # back to it, else a broadcast silently matches nothing on single-server envs.
-        if not environment_names and getattr(env, "environment_name", None):
-            environment_names = [env.environment_name]
+        # `mcp_server_envs`; backing_servers falls back to it, as snapshot_env does,
+        # else a broadcast silently matches nothing on single-server envs.
+        servers = legacy_protocol.mcp_wins(legacy_protocol.backing_servers(env))
         # A broadcast that resolves to zero services would apply nothing while the
         # step reports success: the exact silent misconfig this step prevents. Fail
         # loud (tolerate_unadvertised governs advertisement, not missing servers).
-        if not environment_names:
+        if not servers:
             raise ApplyServerConfigError(
-                f"apply_server_config: broadcast directive matched no MCP servers "
-                f"in env {self.env_id!r} (env exposes neither mcp_server_envs nor a "
+                f"apply_server_config: broadcast directive matched no MCP servers or websites "
+                f"in env {self.env_id!r} (env exposes neither mcp_server_envs, website_envs nor a "
                 f"environment_name); nothing to apply, likely a task authoring error"
             )
         expanded: list[ConfigDirective] = []
+        lenient: set[int] = set()
         for d in self.directives:
             if d.service != self._BROADCAST:
                 expanded.append(d)
                 continue
-            for svc in environment_names:
-                expanded.append(ConfigDirective(service=svc, uri=d.uri, args=d.args))
-        return expanded
+            for server in servers:
+                if not server.mcp:
+                    lenient.add(len(expanded))
+                expanded.append(ConfigDirective(service=server.environment_name, uri=d.uri, args=d.args))
+        return expanded, {server.environment_name for server in servers if not server.mcp}, lenient
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
@@ -180,7 +187,7 @@ class ApplyServerConfigStep(TaskStep):
         # actually armed with — a partial apply must not look like a no-op.
         changes = context.metadata.setdefault("server_config_changes", [])
         # Directives skipped because the target server doesn't advertise the
-        # extension (only when tolerate_unadvertised). Kept separate from
+        # extension (when tolerate_unadvertised, or for a website a broadcast reached). Kept separate from
         # `changes` so the audit trail never shows a skip as an applied change.
         skipped = context.metadata.setdefault("server_config_skipped", [])
         # Expand broadcast (service="*") directives to one-per-env-service.
@@ -188,7 +195,7 @@ class ApplyServerConfigStep(TaskStep):
         # network), so wrap it to keep the broadcast path's failure contract the
         # same ApplyServerConfigError as the per-directive HTTP calls below.
         try:
-            directives = self._expand_directives(deployed)
+            directives, websites, lenient = self._expand_directives(deployed)
         except ApplyServerConfigError:
             raise
         except Exception as e:
@@ -204,15 +211,17 @@ class ApplyServerConfigStep(TaskStep):
         # card: a server predating env-card support, one whose card name differs, or one
         # whose card the deploy couldn't read.
         cards: dict[str, tuple[str, Optional[dict]]] = {}
-        for directive in directives:
+        for position, directive in enumerate(directives):
+            tolerate = self.tolerate_unadvertised or position in lenient
             try:
                 if directive.service not in cards:
                     cards[directive.service] = await legacy_protocol.child_env_card(
-                        deployed, gateway_url_of(deployed), directive.service, timeout=self.timeout_seconds
+                        deployed, gateway_url_of(deployed), directive.service, timeout=self.timeout_seconds,
+                        mcp=directive.service not in websites,
                     )
                 base_url, card = cards[directive.service]
                 if card is None:
-                    if not self.tolerate_unadvertised:
+                    if not tolerate:
                         raise ApplyServerConfigError(
                             f"Service {directive.service!r} has no env card (env={self.env_id}), so {directive.uri!r} "
                             f"can't be applied: it serves none, its card isn't named {directive.service!r}, or the deploy couldn't read it"
@@ -220,7 +229,7 @@ class ApplyServerConfigStep(TaskStep):
                     logger.warning(
                         f"apply_server_config: service {directive.service!r} serves no "
                         f"environment card (env={self.env_id}); skipping {directive.uri!r} "
-                        f"(tolerate_unadvertised)"
+                        f"({'tolerate_unadvertised' if self.tolerate_unadvertised else 'broadcast to a website'})"
                     )
                     skipped.append({
                         "step_id": self.id,
@@ -233,11 +242,11 @@ class ApplyServerConfigStep(TaskStep):
                     continue
                 ext = protocol_v1.find_extension(card, directive.uri)
                 if ext is None:
-                    if self.tolerate_unadvertised:
+                    if tolerate:
                         logger.warning(
                             f"apply_server_config: {directive.uri!r} not advertised on "
                             f"service {directive.service!r} (env={self.env_id}); skipping "
-                            f"(tolerate_unadvertised)"
+                            f"({'tolerate_unadvertised' if self.tolerate_unadvertised else 'broadcast to a website'})"
                         )
                         skipped.append({
                             "step_id": self.id,

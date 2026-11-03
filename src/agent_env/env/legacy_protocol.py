@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 from agentenv_protocol import RPC_PATH, DataPart, client as protocol_v1
@@ -33,20 +34,62 @@ def environment_base_url(gateway_url: Optional[str], environment_name: str, mcp:
     return f"{gateway_url}/svc/{prefix}{environment_name}"
 
 
+@dataclass(frozen=True)
+class BackingServer:
+    """A server behind an env's gateway, by its environment_name: an MCP server, at ``/svc/mcp-{name}``, or a website,
+    at ``/svc/{name}``."""
+
+    environment_name: str
+    mcp: bool = True
+
+
+def backing_servers(env: Any) -> list[BackingServer]:
+    """The servers behind env's gateway: a MultiEnv's MCP servers then its websites, a WebsiteEnv's website, or else
+    the env's one MCP server; empty for an env with none."""
+    from agent_env.env.envs.website import WebsiteEnv
+
+    if isinstance(env, WebsiteEnv):
+        return [BackingServer(env.environment_name, mcp=False)]
+    servers = [BackingServer(e.environment_name) for e in getattr(env, "mcp_server_envs", None) or []]
+    servers += [BackingServer(e.environment_name, mcp=False) for e in getattr(env, "website_envs", None) or []]
+    if not servers and getattr(env, "environment_name", None):
+        servers = [BackingServer(env.environment_name)]
+    return servers
+
+
+def shared_names(servers: list[BackingServer]) -> set[str]:
+    """The environment_names an MCP server and a website in ``servers`` share, which a stored env card can't tell apart."""
+    return {s.environment_name for s in servers if s.mcp} & {s.environment_name for s in servers if not s.mcp}
+
+
+def mcp_wins(servers: list[BackingServer]) -> list[BackingServer]:
+    """``servers`` without each website that shares its environment_name with an MCP server, as a MultiEnv routes an
+    artifact of that name to the MCP server."""
+    shared = shared_names(servers)
+    return [s for s in servers if s.mcp or s.environment_name not in shared]
+
+
 async def v1_base_url(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str, mcp: bool = True) -> Optional[str]:
-    """A child env's v1 data-plane base from the stored env card, or None for legacy; without a stored card, the live probe decides."""
+    """A child env's v1 data-plane base from the stored env card, or None for legacy; without a stored card, the live probe
+    decides. A website's probe is a card read that is None only on a 404 and raises on any other failure, so a website whose
+    card could not be read is never taken for one serving no data plane."""
     if deployed is None or not deployed.environment_card:
         base_url = environment_base_url(gateway_url, environment_name, mcp=mcp)
+        if not mcp:
+            _, card = await child_env_card(None, gateway_url, environment_name, mcp=False)
+            return base_url if card is not None else None
         return base_url if await protocol_v1.supports_v1(base_url) else None
     child = deployed.get_child_env_card(environment_name)
     return deployed.environment_url + child.get("url", RPC_PATH).removesuffix(RPC_PATH) if child else None
 
 
 
-async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str, timeout: int = 10) -> tuple[str, Optional[dict]]:
-    """An MCP child env's card and the base its endpoints resolve against: from the stored env card, or without one a live read (None on 404)."""
+async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str, timeout: int = 10,
+                         mcp: bool = True) -> tuple[str, Optional[dict]]:
+    """A child env's card and the base its endpoints resolve against: from the stored env card, or without one a live read
+    at the MCP server's gateway path, or with ``mcp=False`` the website's (None on 404)."""
     if deployed is None or not deployed.environment_card:
-        base_url = environment_base_url((gateway_url or "").rstrip("/"), environment_name)
+        base_url = environment_base_url((gateway_url or "").rstrip("/"), environment_name, mcp=mcp)
         try:
             return base_url, await protocol_v1.get_card(base_url, timeout=timeout)
         except httpx.HTTPStatusError as e:

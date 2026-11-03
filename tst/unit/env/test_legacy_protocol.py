@@ -177,3 +177,22 @@ async def test_a_v1_services_state_is_the_data_it_answers_with_else_its_export_s
 
     assert await legacy_protocol.service_state(None, "http://gw", "slack") == state
     assert ("GET /svc/mcp-slack/export-state" in asked) is reads_export_state
+
+
+def test_backing_servers_are_an_envs_mcp_servers_then_its_websites():
+    from types import SimpleNamespace
+
+    from agent_env.env.envs.website import WebsiteEnv
+    from agent_env.env.legacy_protocol import BackingServer
+
+    named = lambda *names: [SimpleNamespace(environment_name=n) for n in names]
+    multi = SimpleNamespace(mcp_server_envs=named("slack", "email"), website_envs=named("shop", "slack"))
+
+    assert legacy_protocol.backing_servers(multi) == [BackingServer("slack"), BackingServer("email"),
+                                                      BackingServer("shop", mcp=False), BackingServer("slack", mcp=False)]
+    assert legacy_protocol.shared_names(legacy_protocol.backing_servers(multi)) == {"slack"}
+    assert legacy_protocol.mcp_wins(legacy_protocol.backing_servers(multi)) == [
+        BackingServer("slack"), BackingServer("email"), BackingServer("shop", mcp=False)]
+    assert legacy_protocol.backing_servers(WebsiteEnv(id="w", version=1, environment_name="shop")) == [BackingServer("shop", mcp=False)]
+    assert legacy_protocol.backing_servers(SimpleNamespace(environment_name="notes")) == [BackingServer("notes")]
+    assert legacy_protocol.backing_servers(SimpleNamespace()) == []

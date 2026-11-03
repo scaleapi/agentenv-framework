@@ -2466,6 +2466,18 @@ def test_a_one_image_website_env_is_fronted_with_only_its_server_image():
     assert topology.website_images == [server]
 
 
+def test_a_websites_server_reaches_the_gateways_clock_at_the_url_the_gateway_hands_it():
+    """sync_env_clock hands each server http://gateway:<MCP_PORT>/clock/time: the gateway's compose service is that host,
+    listening on that port, on the one network the website's server is on."""
+    from agent_env.env.gateway.constants import GATEWAY_COMPOSE_HOST
+
+    services = yaml.safe_load(_render([], [WebsiteConfig(backend_image="shop-be", frontend_image=None, environment_name="shop")]))["services"]
+    gateway, site = services[GATEWAY_COMPOSE_HOST], services["shop-website-backend"]
+
+    assert "MCP_PORT=18765" in gateway["environment"]
+    assert gateway["networks"] == site["networks"] == ["env-network"]
+
+
 def _sites(handler):
     """Route the deploy's site checks to ``handler(request) -> httpx.Response``."""
     real = httpx.AsyncClient
