@@ -4,6 +4,7 @@ its key; probed where a provider boots disks natively, else left unverified for 
 probe; and written as the computer's disk form. A deploy that names the disk form boots it in a VM, its settings in its
 seed, and a reset boots it afresh. Docker and the registry are faked."""
 
+import asyncio
 import base64
 import json
 from types import SimpleNamespace
@@ -192,6 +193,42 @@ async def test_an_arch_whose_disk_built_deploys_it_though_the_computer_has_no_di
 
     assert env.computer_artifact().forms.disk is None and env.metadata["composed"]["disk"]["arm64"]["status"] == "ready"
     assert deployed.metadata["computer"]["form"] == "disk" and len(vms.created) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True], ids=["ready", "failed"])
+async def test_first_deploys_of_an_unverified_disk_at_once_share_one_probe_and_its_recorded_result(
+        disk_base, driver, docker, vms, monkeypatch, fails):
+    monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset())
+    env = _put(disk_base, driver)
+    monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset({"linux/arm64"}))
+    probe, first_boot, waited = docker.probe, env_computer_provider.probe_first_boot, []
+
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(0.3)
+        return await probe(*args, **kwargs)
+
+    async def counted(*args):
+        waited.append(args[1:3])
+        return await first_boot(*args)
+
+    monkeypatch.setattr(composer, "_probe", slow)
+    monkeypatch.setattr(env_computer_provider, "probe_first_boot", counted)
+    if fails:
+        docker.probe_fails["arm64"] = "the click never landed"
+
+    deployed = await asyncio.gather(*(Env.get(env.id).deploy(env_params={"form": "disk"}) for _ in range(3)),
+                                    return_exceptions=True)
+
+    assert waited == [("disk", "arm64")] * 3 and len([probed for probed in docker.probed if probed[0] == "disk"]) == 1
+    recorded = Env.get(env.id).metadata["composed"]["disk"]["arm64"]
+    if fails:
+        assert recorded["status"] == "failed" and vms.created == []
+        assert {str(failure) for failure in deployed} == {
+            f"{env.id}'s disk/arm64 failed its probe on its first boot: {recorded['reason']}"}
+    else:
+        assert recorded["status"] == "ready" and len(vms.created) == 3
+        assert all(record.metadata["computer"]["form"] == "disk" for record in deployed)
 
 
 @pytest.mark.asyncio

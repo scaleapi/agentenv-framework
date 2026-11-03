@@ -27,7 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer import apps as installed_apps
@@ -47,6 +47,7 @@ from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_dis
 from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.base import ConcurrentModificationError
 from agent_env.store.ids import derive_id
+from agent_env.store.local_state import holding_locks
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, write_index
@@ -179,10 +180,32 @@ def _composed_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDri
 
 async def probe_first_boot(env: ComputerEnv, form: str, arch: str, sandbox_provider: SandboxProvider) -> dict:
     """Gate 3 for a build its compose couldn't probe, on its first boot on ``sandbox_provider``, which boots it
-    natively: the result, recorded."""
-    result = await _checked([sandbox_provider], env, env.driver, form, arch, env.metadata["composed"][form][arch])
-    await asyncio.to_thread(_Record(env).finished, form, arch, result)
-    return result
+    natively: the result, recorded. Deploys of one build at once, in this process or another, probe it once: each
+    waits for the one probing, then takes the result it recorded."""
+    image = env.metadata["composed"][form][arch]["image"]
+    async with _holding(f"computer-first-boot:{env.stored_id}:{form}:{arch}:{image}"):
+        recorded = (await asyncio.to_thread(Env.get, env.stored_id, env.version)).metadata["composed"][form][arch]
+        if recorded["image"] == image and recorded["status"] != "unverified":
+            return recorded
+        result = await _checked([sandbox_provider], env, env.driver, form, arch, recorded)
+        await asyncio.to_thread(_Record(env).finished, form, arch, result)
+        return result
+
+
+@contextlib.asynccontextmanager
+async def _holding(lock: str) -> AsyncIterator[None]:
+    """``holding_locks`` for ``lock``, taken off the event loop; a cancelled wait releases the lock once it's taken."""
+    held = contextlib.ExitStack()
+    taking = asyncio.ensure_future(asyncio.to_thread(held.enter_context, holding_locks([lock])))
+    try:
+        await asyncio.shield(taking)
+    except asyncio.CancelledError:
+        taking.add_done_callback(lambda _: held.close())
+        raise
+    try:
+        yield
+    finally:
+        held.close()
 
 
 def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,
