@@ -17,9 +17,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from starlette.testclient import TestClient
 import pytest
 import uvicorn
 import yaml
+from agentenv_protocol.website import WebsiteReadiness
 from mcp.server.fastmcp import FastMCP
 from pytest_socket import enable_socket
 
@@ -2539,6 +2541,59 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
             timeout_s=0, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so():
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=_READY_CARD)
+        return httpx.Response(200, json={"ready": "yes"})
+
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(ValidationError: "):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
+            timeout_s=0, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_reads_a_sites_readiness_through_the_protocols_website_readiness():
+    asked = []
+
+    async def readiness(base_url, card, **kwargs):
+        asked.append((base_url, card["name"]))
+        return WebsiteReadiness(ready=False, problems=["a", "b"])
+
+    def site(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_READY_CARD)
+
+    with _sites(site), patch.object(env_gateway_provider, "website_readiness", readiness):
+        assert await env_gateway_provider._website_ready("http://gw/svc/mail", "/healthz") == (False, "a, b")
+    assert asked == [("http://gw/svc/mail", "mail")]
+
+
+def test_the_website_v1_ready_a_deploy_reads_is_the_one_the_sdk_serves_and_the_gateways_mirror_names(tmp_path):
+    """The deploy reads the protocol's own URI and op; the gateway container, which has no agentenv_protocol, keeps a
+    mirror of them in its constants, which must stay equal to the protocol's."""
+    from agentenv_protocol import client as protocol_v1
+    from agentenv_protocol import website as protocol_website
+    from agentenv_protocol.website import WebsiteEnvironment, website
+
+    from agent_env.env.gateway import constants as gateway_constants
+
+    (tmp_path / "index.html").write_text("<html></html>")
+
+    @website(domains=["x.test"], static=str(tmp_path))
+    class Site(WebsiteEnvironment):
+        pass
+
+    card = TestClient(Site().create_app()).get("/.well-known/agent-env.json").json()
+    assert (gateway_constants.EXT_WEBSITE_URI, gateway_constants.WEBSITE_READY_OP) == (
+        protocol_website.WEBSITE_EXTENSION_URI, protocol_website.WEBSITE_READY_OP)
+    assert (env_gateway_provider.WEBSITE_EXTENSION_URI, env_gateway_provider.WEBSITE_READY_OP) == (
+        protocol_website.WEBSITE_EXTENSION_URI, protocol_website.WEBSITE_READY_OP)
+    assert protocol_v1.find_extension_method(card, protocol_website.WEBSITE_EXTENSION_URI,
+                                             protocol_website.WEBSITE_READY_OP) is not None
 
 
 @pytest.mark.asyncio

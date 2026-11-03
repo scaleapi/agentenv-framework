@@ -415,6 +415,13 @@ async def test_a_mutating_request_that_wrote_nothing_is_not_logged(monkeypatch):
     assert [e for e in _trajectory()[before:] if e["event_type"] == "http_request"] == []
 
 
+def _site(handler):
+    """A website upstream answering with ``handler``, and serving no card: the gateway reads a site's card once for the
+    paths it reserves, which writes nothing."""
+    return httpx.MockTransport(lambda request: httpx.Response(404) if request.url.path == "/.well-known/agent-env.json"
+                               else handler(request))
+
+
 MIRROR = {"id": "mirror", "barrier": {"at": "provoking_call"}, "actions": [{"type": "tool", "tool": TOOL.name, "args": {}}],
           "when": {"type": "website", "app": "mail", "method": "POST", "path": {"equals": "/api/drafts"}}}
 
@@ -432,7 +439,7 @@ async def test_a_website_write_held_by_its_trigger_s_barrier_does_not_claim_the_
         changelog.write("drafts", "d1")
         return httpx.Response(201, headers={"content-length": "12"}, content=body())
 
-    transport = httpx.MockTransport(website)
+    transport = _site(website)
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
     gw._trigger_engine.register({"triggers": [MIRROR]})
@@ -458,7 +465,7 @@ async def test_a_sized_website_write_no_barrier_holds_still_streams(monkeypatch)
         changelog.write("drafts", "d1")
         yield b"b" * 1024
 
-    transport = httpx.MockTransport(lambda request: httpx.Response(201, headers={"content-length": "2048"}, content=body()))
+    transport = _site(lambda request: httpx.Response(201, headers={"content-length": "2048"}, content=body()))
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
     gw._trigger_engine.register({"triggers": [MIRROR]})
@@ -499,7 +506,7 @@ async def test_a_website_write_no_barrier_holds_provokes_its_triggers_once_its_b
         changelog.write("drafts", "d1")
         yield b"b"
 
-    transport = httpx.MockTransport(lambda request: httpx.Response(201, content=body()))
+    transport = _site(lambda request: httpx.Response(201, content=body()))
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
     gw._trigger_engine.register({"triggers": [{**MIRROR, "barrier": None}]})
@@ -526,7 +533,7 @@ async def test_a_website_write_still_streaming_under_a_barrier_keeps_its_window_
         changelog.write("drafts", "d1")
         yield b"b"
 
-    transport = httpx.MockTransport(lambda request: httpx.Response(201, content=body()))
+    transport = _site(lambda request: httpx.Response(201, content=body()))
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
     gw._trigger_engine.register({"triggers": [MIRROR]})

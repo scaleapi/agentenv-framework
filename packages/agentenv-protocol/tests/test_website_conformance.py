@@ -1,0 +1,265 @@
+"""The website/v1 conformance checker against an SDK site, a hand-written server that meets the contract, and servers
+that don't."""
+
+from __future__ import annotations
+
+import datetime
+from pathlib import Path
+
+import pytest
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from agentenv_protocol.website import WebsiteEnvironment, api, website
+from agentenv_protocol.website import conformance
+from agentenv_protocol.website.clock import UNIVERSE_NOW_HEADER, iso
+
+CHECKS = ["card", "any_host", "health", "universe_now", "data_plane", "clock", "forwarded", "cookies"]
+
+
+def statuses(results: list[conformance.Result]) -> dict[str, str]:
+    return {r.name: r.status for r in results}
+
+
+@pytest.fixture
+def notes(tmp_path: Path) -> WebsiteEnvironment:
+    (tmp_path / "index.html").write_text("<html><head></head><body>hi</body></html>")
+
+    @website(domains=["notes.example"], static=str(tmp_path))
+    class Notes(WebsiteEnvironment):
+        @api.get("/api/notes")
+        def notes(self) -> list:
+            return self.store["notes"]
+
+    env = Notes()
+    env.store.load({"current_user": "ann", "notes": [{"id": 1, "text": "hello"}]})
+    env.store.mark_initial()
+    return env
+
+
+@pytest.fixture
+def sdk_site(notes: WebsiteEnvironment) -> TestClient:
+    return TestClient(notes.create_app())
+
+
+def test_an_sdk_site_passes_every_check(sdk_site: TestClient) -> None:
+    results = conformance.check("http://testserver", client=sdk_site)
+    assert [r.name for r in results] == CHECKS
+    assert all(r.status == "passed" for r in results), results
+    assert sdk_site.post("/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/get"}).json()["result"][
+        "parts"][0]["data"] == {"current_user": "ann", "notes": [{"id": 1, "text": "hello"}]}
+
+
+def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock: bool = True,
+                 leak_redirect: bool = False, stamp_rpc: bool = True, reset_keeps: bool = False,
+                 get_fails_after_reset: bool = False, rpc_reply: tuple[int, dict] | None = None,
+                 ready_answer: object = None, rpc_path: str | None = None, state_path: str | None = None,
+                 changed: bool = False) -> Starlette:
+    """A server written without the SDK: the contract by hand, optionally broken. Its state is its ``state.data``; with
+    ``ready_answer`` its card advertises ``website/v1``'s ``ready``, which answers it. With ``rpc_path`` its card's
+    ``url`` names its data plane there, not at ``/agentenv``, and with ``state_path`` its ``params.state.path`` names
+    where it serves its state, which shows changes since the initial state when ``changed``."""
+    state = {"items": ["a"], "url": None, "at": None, "reset": False}
+
+    def now() -> datetime.datetime:
+        return state["at"] or datetime.datetime.now(datetime.timezone.utc)
+
+    def stamp(response: Response) -> Response:
+        response.headers[UNIVERSE_NOW_HEADER] = iso(now())
+        return response
+
+    async def page(request: Request) -> Response:
+        host = request.headers["host"] if leak_host else request.headers.get("x-forwarded-host", request.headers["host"])
+        response = stamp(HTMLResponse(f'<html><a href="https://{host}/x">x</a></html>'))
+        response.set_cookie("s", "1", domain="example.com" if domain_cookie else None)
+        return response
+
+    async def health(request: Request) -> Response:
+        return stamp(JSONResponse({"ok": True}))
+
+    async def ready(request: Request) -> Response:
+        return stamp(JSONResponse(ready_answer))
+
+    async def items(request: Request) -> Response:
+        return stamp(JSONResponse(state["items"]))
+
+    async def items_slash(request: Request) -> Response:
+        host = request.headers["host"] if leak_redirect else request.headers.get("x-forwarded-host", request.headers["host"])
+        return stamp(Response(status_code=307, headers={"Location": f"https://{host}/items"}))
+
+    async def card(request: Request) -> Response:
+        extensions = [{"uri": "urn:agentenv:website/v1",
+                       "params": {"domains": ["h.example"], "health": "/healthz",
+                                  "routes": [{"method": "GET", "path": "/items", "name": "items"}]}}]
+        if ready_answer is not None:
+            extensions[0]["params"]["methods"] = {"ready": {"method": "GET", "endpoint": "/ready"}}
+        if state_path is not None:
+            extensions[0]["params"]["state"] = {"path": state_path}
+        if clock:
+            extensions.append({"uri": "urn:agentenv:clock/v1", "params": {
+                "endpoint": "/agentenv/ext/sync_time", "methods": {"sync_time": {"method": "POST"}}}})
+        return stamp(JSONResponse({"name": "hand", **({"url": rpc_path} if rpc_path else {}),
+                                   "capabilities": {"extensions": extensions,
+                                                    "operations": ["data/reset", "data/add", "data/get"]}}))
+
+    async def site_state(request: Request) -> Response:
+        return JSONResponse({"state_diff": {"items": {"added": ["b"]}} if changed else {}})
+
+    async def rpc(request: Request) -> Response:
+        body = await request.json()
+        method = body["method"]
+        if rpc_reply is not None:
+            return stamp(JSONResponse(rpc_reply[1], status_code=rpc_reply[0]))
+        if method == "data/reset":
+            state["reset"] = True
+            if not reset_keeps:
+                state["items"] = []
+        elif method == "data/add":
+            state["reset"] = False
+            added = [item for part in body["params"]["parts"] for item in part["data"]["items"]]
+            state["items"] = added if reset_keeps else state["items"] + added
+        if method == "data/get" and get_fails_after_reset and state["reset"]:
+            answer = {"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32603, "message": "down"}}
+        else:
+            result = {"parts": [{"kind": "data", "data": {"items": state["items"]}}]} if method == "data/get" else {}
+            answer = {"jsonrpc": "2.0", "id": body["id"], "result": result}
+        return stamp(JSONResponse(answer)) if stamp_rpc else JSONResponse(answer)
+
+    async def sync_time(request: Request) -> Response:
+        import httpx
+
+        url = (await request.json())["env_get_time_url"]
+        async with httpx.AsyncClient() as client:
+            virtual = (await client.get(url)).json()["virtual_time"]
+        state["at"] = datetime.datetime.fromisoformat(virtual.replace("Z", "+00:00"))
+        return stamp(JSONResponse({"gateway_virtual_time": virtual}))
+
+    app = Starlette(routes=[Route("/", page), Route("/healthz", health), Route("/ready", ready), Route("/items", items),
+                            Route("/items/", items_slash),
+                            Route("/.well-known/agent-env.json", card), Route(rpc_path or "/agentenv", rpc, methods=["POST"]),
+                            Route("/agentenv/ext/sync_time", sync_time, methods=["POST"]),
+                            *([Route(state_path, site_state)] if state_path else [])])
+    app.state.data = state
+    return app
+
+
+def test_a_handwritten_server_meeting_the_contract_passes() -> None:
+    results = conformance.check("http://testserver", client=TestClient(_handwritten()))
+    assert statuses(results) == dict.fromkeys(CHECKS, "passed"), results
+
+
+@pytest.mark.parametrize(("answer", "status", "detail"), [
+    ({"ready": True, "problems": [], "since": "boot"}, "passed", "website/v1 ready says it is ready"),
+    ({"ready": False, "problems": ["seeded", "indexed"]}, "failed", "website/v1 ready says it is not ready: seeded, indexed"),
+    ({"ready": False}, "failed", "website/v1 ready says it is not ready: no problem named"),
+])
+def test_health_reads_the_cards_ready_as_a_website_readiness(answer: dict, status: str, detail: str) -> None:
+    results = {r.name: r for r in conformance.check("http://testserver", client=TestClient(_handwritten(ready_answer=answer)))}
+    assert (results["health"].status, results["health"].detail) == (status, detail)
+
+
+@pytest.mark.parametrize(("answer", "why"), [
+    ({"ok": True}, "ready: Field required"),
+    ({"ready": "soon", "problems": []}, "ready: Input should be a valid boolean"),
+    ({"ready": False, "problems": "seeded"}, "problems: Input should be a valid list"),
+    (["ready"], "the answer: Input should be a valid dictionary or instance of WebsiteReadiness"),
+])
+def test_an_answer_to_ready_that_isnt_a_website_readiness_fails_health_saying_why(answer: object, why: str) -> None:
+    health = next(r for r in conformance.check("http://testserver", client=TestClient(_handwritten(ready_answer=answer)))
+                  if r.name == "health")
+    assert health.status == "failed"
+    assert health.detail.startswith(f"website/v1 ready answered {answer!r}, not a WebsiteReadiness: ") and why in health.detail
+
+
+def test_a_server_breaking_the_contract_fails_those_checks() -> None:
+    results = statuses(conformance.check("http://testserver",
+                                         client=TestClient(_handwritten(leak_host=True, domain_cookie=True, clock=False))))
+    assert results["forwarded"] == results["cookies"] == results["clock"] == "failed"
+    assert results["card"] == results["health"] == results["data_plane"] == "passed"
+
+
+def test_the_forwarded_check_follows_no_redirect_and_reads_its_location(sdk_site: TestClient) -> None:
+    forwarded = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["forwarded"]
+    assert forwarded.status == "passed" and "/api/notes/" in forwarded.detail
+    leaked = {r.name: r for r in conformance.check("http://testserver",
+                                                    client=TestClient(_handwritten(leak_redirect=True)))}["forwarded"]
+    assert leaked.status == "failed" and "Location of /items/" in leaked.detail
+
+
+def test_universe_now_is_checked_on_the_answers_of_every_check() -> None:
+    result = {r.name: r for r in conformance.check("http://testserver",
+                                                   client=TestClient(_handwritten(stamp_rpc=False)))}["universe_now"]
+    assert result.status == "failed" and "/agentenv" in result.detail
+
+
+def test_a_reset_that_clears_nothing_fails_the_data_plane_and_leaves_the_data() -> None:
+    app = _handwritten(reset_keeps=True)
+    result = {r.name: r for r in conformance.check("http://testserver", client=TestClient(app))}["data_plane"]
+    assert result.status == "failed" and "data/reset" in result.detail
+    assert app.state.data["items"] == ["a"]
+
+
+def test_the_data_is_added_back_when_a_step_after_the_reset_fails() -> None:
+    app = _handwritten(get_fails_after_reset=True)
+    result = {r.name: r for r in conformance.check("http://testserver", client=TestClient(app))}["data_plane"]
+    assert result.status == "failed" and "down" in result.detail
+    assert app.state.data["items"] == ["a"]
+
+
+@pytest.mark.parametrize("reply", [(500, {}), (200, {}), (500, {"jsonrpc": "2.0", "id": "x", "result": {}})])
+def test_a_data_request_without_a_2xx_json_rpc_result_fails_the_data_plane(reply: tuple[int, dict]) -> None:
+    app = _handwritten(rpc_reply=reply)
+    result = {r.name: r for r in conformance.check("http://testserver", client=TestClient(app))}["data_plane"]
+    assert result.status == "failed" and "no JSON-RPC result" in result.detail
+
+
+def test_an_sdk_site_keeps_its_initial_state_and_one_changed_since_skips_the_round_trip(
+        notes: WebsiteEnvironment, sdk_site: TestClient) -> None:
+    before = sdk_site.get("/go").json()
+    conformance.check("http://testserver", client=sdk_site)
+    assert sdk_site.get("/go").json() == before
+    notes.store.insert("notes", {"text": "new"})
+    changed = sdk_site.get("/go").json()
+    assert changed["state_diff"]
+    result = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"]
+    assert result.status == "skipped" and "website/v1 state shows changes" in result.detail
+    assert sdk_site.get("/go").json() == changed
+
+
+def test_the_data_plane_is_reached_at_the_cards_url() -> None:
+    app = _handwritten(rpc_path="/rpc")
+    result = {r.name: r for r in conformance.check("http://testserver", client=TestClient(app))}["data_plane"]
+    assert result.status == "passed", result
+    assert app.state.data["items"] == ["a"]
+
+
+@pytest.mark.parametrize(("changed", "status"), [(True, "skipped"), (False, "passed")])
+def test_a_card_without_state_is_read_at_the_state_path_it_names(changed: bool, status: str) -> None:
+    app = _handwritten(state_path="/grading/state", changed=changed)
+    result = {r.name: r for r in conformance.check("http://testserver", client=TestClient(app))}["data_plane"]
+    assert result.status == status, result
+    assert ("/grading/state shows changes" in result.detail) is changed
+
+
+def test_a_server_with_no_card_health_or_header_fails_them() -> None:
+    bare = Starlette(routes=[Route("/", lambda request: JSONResponse({"not": "html"}))])
+    results = statuses(conformance.check("http://testserver", client=TestClient(bare)))
+    assert results["card"] == results["any_host"] == results["health"] == results["universe_now"] == "failed"
+    assert results["data_plane"] == results["clock"] == "failed"
+    assert results["cookies"] == "skipped"
+
+
+def test_main_prints_each_check_and_exits_by_outcome(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(conformance, "check", lambda url, **options: [conformance.Result("card", "passed"),
+                                                                       conformance.Result("clock", "failed", "late")])
+    assert conformance.main(["http://site"]) == 1
+    printed = capsys.readouterr().out
+    assert "PASS card" in printed and "FAIL clock: late" in printed
+
+
+def test_main_exits_2_when_the_server_cannot_be_reached(capsys) -> None:
+    assert conformance.main(["http://127.0.0.1:9", "--timeout", "2"]) == 2
+    assert "couldn't reach" in capsys.readouterr().err

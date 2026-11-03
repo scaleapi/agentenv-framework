@@ -278,3 +278,18 @@ async def test_a_record_whose_card_cant_be_read_falls_back_to_its_definition_log
     assert [r.getMessage().split(",")[0] for r in caplog.records] == [
         "env 'e': its record has no card URL", "env 'e': its card at http://gw could not be read (ConnectError)",
         "env 'e': it has no record"]
+
+
+@pytest.mark.asyncio
+async def test_a_stored_cards_website_and_mcp_server_sharing_a_name_are_each_reached_by_kind():
+    site = {"name": "mail", "url": "/svc/mail/agentenv",
+            "capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {}}]}}
+    server = {"name": "mail", "url": "/svc/mcp-mail/agentenv"}
+    deployed = DeployedSandboxEnv(
+        env_id="office", env_version=1, sandbox_id="sb-1", environment_card_url=f"http://gw:18765{WELL_KNOWN_PATH}",
+        environment_card={"name": "office", "children_environments": [site, server]})
+
+    assert await legacy_protocol.v1_base_url(deployed, None, "mail", mcp=False) == "http://gw:18765/svc/mail"
+    assert await legacy_protocol.v1_base_url(deployed, None, "mail", mcp=True) == "http://gw:18765/svc/mcp-mail"
+    assert (await legacy_protocol.child_env_card(deployed, None, "mail", mcp=False))[1] is site
+    assert (await legacy_protocol.child_env_card(deployed, None, "mail", mcp=True))[1] is server

@@ -342,7 +342,7 @@ async def test_the_proxy_hands_the_engine_the_role_path_status_and_args_of_each_
         ("default", "mail", "POST", "/api/batch", 200, {"op": "send"}),
         ("default", "mail", "PUT", "/api/drafts/a/b", 200, {}),
     ]
-    assert [r.content for r in website.requests][2:4] == [b'{"to": "dana@example.com", "draft": "0"}',
+    assert [r.content for r in website.requests if r.url.path != "/.well-known/agent-env.json"][2:4] == [b'{"to": "dana@example.com", "draft": "0"}',
                                                           b"subject=Hi+there&to=dana%40example.com"]
 
 
