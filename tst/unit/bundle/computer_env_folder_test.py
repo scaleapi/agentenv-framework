@@ -145,6 +145,17 @@ def test_the_env_alone_is_planned_whatever_the_bundles_tasks_would_deploy(tmp_pa
     assert f"{resolved.bundle.id_root}/desktop" in {write.id for write in plan.writes}
 
 
+def test_an_apps_settings_beside_it_are_stored_as_the_computer_envs_defaults_for_it(tmp_path, composed):
+    with_settings = WITH_APPS.replace('install = "build"', 'install = "build", settings = { signature = "-- Ada" }')
+    plan = _plan(_bundle(tmp_path / "desk", with_settings, APPS))
+
+    materialize(plan, build_here=local_builds(plan))
+
+    env = Env.get(f"{plan.bundle.bundle.id_root}/desktop")
+    assert env.app_settings == {"mail": {"signature": "-- Ada"}}
+    assert env.app_defaults() == {"notes": {}, "mail": {"signature": "-- Ada"}}
+
+
 def test_a_computer_env_folder_names_its_apps_in_order_each_written_before_it(tmp_path, composed):
     plan = _plan(_bundle(tmp_path / "desk", WITH_APPS, APPS))
 
@@ -193,7 +204,12 @@ def test_a_universe_loaded_into_a_computer_env_seeds_its_files_and_each_of_its_a
     (WITH_APPS.replace('["notes", ', '["notes", "notes", '), "apps: @local/~/desk/notes is listed twice"),
     (WITH_APPS.replace('install = "build"', 'mode = "build"'), 'apps[1].env: expected an id or { env = "<id>", version = '
      '<n> }, the version optional'),
-], ids=["no-computer", "no-driver", "unknown-key", "display", "boot", "twice", "key-beside"])
+    (WITH_APPS.replace('install = "build"', 'settings = "dark"'), "apps[1]: settings must be a table of the app's "
+     "setting values, not 'dark'"),
+    (WITH_APPS.replace('install = "build"', 'settings = { colour = "blue" }'), "apps.mail.settings.colour: "
+     "@local/~/desk/mail declares no setting 'colour'"),
+], ids=["no-computer", "no-driver", "unknown-key", "display", "boot", "twice", "key-beside", "settings-type",
+        "setting"])
 def test_a_computer_env_folder_that_declares_what_cant_compose_is_refused_naming_the_folder(tmp_path, composed, toml,
                                                                                             problem):
     with pytest.raises(BundleError) as refused:

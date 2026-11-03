@@ -325,11 +325,12 @@ MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/pyt
 
 
 def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
-         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", paths=None, **changes):
+         extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", paths=None, defaults=None,
+         **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
     them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
     its build settings, ``linux_settings``, that of its settings on Linux, ``name``, its id's last part and its
-    environment name, and ``paths``, where it keeps its data on Linux."""
+    environment name, ``paths``, where it keeps its data on Linux, and ``defaults``, its env's ``[settings]``."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
@@ -347,4 +348,5 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
                 "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
     return ComputerAppEnv.put(**{"id": f"@local/~/kit/{name}", "environment_name": name, "module": "app.py:Mail",
                                  "files": files, "declaration": declaration, "computer": base, "driver": driver,
-                                 "compose": compose, **changes})
+                                 "compose": compose, **({"settings": defaults} if defaults is not None else {}),
+                                 **changes})

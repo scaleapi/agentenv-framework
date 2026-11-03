@@ -26,7 +26,7 @@ TEMPLATE = "agentenv-template.txt"
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
 @linux(packages=Packages(apt=PACKAGES), downloads=DOWNLOADS, paths=[PROFILE],
-       launch=Launch(command=["chromium/chrome/chrome", "--no-sandbox", "--disable-dev-shm-usage", "--class=Chromium"],
+       launch=Launch(command=["chromium/chrome/chrome", "--no-sandbox", "--class=Chromium"],
                      window={"class": "Chromium"}, ready=Ready(window=True)))
 class FixtureBrowser(WebsiteBrowserEnvironment):
     version = VERSION

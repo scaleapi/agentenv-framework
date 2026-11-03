@@ -1,22 +1,27 @@
 """WebsiteBrowserEnvironment: a website browser as a computer app, run inside a computer or alone. A subclass says how
 its build installs and starts; this class adds what agentenv owns, the same in both: its flags after the subclass's
 command, the unattended-use policies, a CDP connection over the browser's debugging pipe, the settings every browser
-takes, its skill and ``browser/v1`` on its card. Whether it runs alone, on the open web and through which site proxy
-come from variables agentenv sets, never from its settings."""
+takes, a fresh cache and the deploy's prompt answers at every launch, another window for a launch while it runs, its
+skill and ``browser/v1`` on its card. Whether it runs alone, on the open web and through which site proxy come from
+variables agentenv sets, never from its settings."""
 from __future__ import annotations
 
 import asyncio
 import itertools
 import json
+import logging
 import os
+import shutil
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 from .agent_env_environment import agent_skill
 from .computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from .types import EnvironmentExtension
+
+logger = logging.getLogger(__name__)
 
 ALONE_ENV = "AGENTENV_BROWSER_ALONE"
 OPEN_WEB_ENV = "AGENTENV_BROWSER_OPEN_WEB"
@@ -25,7 +30,12 @@ BROWSER = "urn:agentenv:browser/v1"
 #: The flags agentenv sets, by prefix, which a subclass's command may not carry: among them every way to open a debugging
 #: port, since the browser is reached only over its pipe.
 OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins", "--proxy-", "--no-proxy-server",
-               "--headless", "--window-size", "--lang", "--force-webrtc-ip-handling-policy")
+               "--headless", "--window-size", "--lang", "--force-webrtc-ip-handling-policy", "--disk-cache-dir",
+               "--disable-dev-shm-usage")
+#: Below this much /dev/shm, as Docker's 64 MiB default, the browser keeps its shared memory in files instead.
+SHM_MIN_BYTES = 1 << 30
+#: Chromium's content setting that denies a permission without a prompt.
+BLOCK = 2
 #: Alone, loopback goes through the proxy too. In a computer, the apps on loopback beside it stay reachable; ``<-loopback>``
 #: removes Chromium's own rule, so ``*.localhost`` names still don't.
 ALONE_BYPASS = "<-loopback>"
@@ -147,6 +157,9 @@ class BrowserSettings(BaseModel):
     locale: str = "en-US"
     #: The IANA time zone its pages see.
     time_zone: str = "UTC"
+    #: Whether a page asking for the location, or to show notifications, is denied without a prompt or asks.
+    geolocation: Literal["deny", "ask"] = "deny"
+    notifications: Literal["deny", "ask"] = "deny"
 
     @field_validator("start_urls")
     @classmethod
@@ -189,12 +202,20 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     def profile_dir(self) -> Path:
         return Path.home() / self.profile
 
+    def cache_dir(self) -> Path:
+        """Its HTTP cache, kept out of its profile, which holds only its data."""
+        return Path.home() / ".cache" / Path(self.profile).name
+
     def agentenv_flags(self) -> list[str]:
         """The flags agentenv owns. A browser alone goes out only through its site proxy, so it won't launch without
         one; in a computer it goes through one when the computer has one, loopback aside."""
         settings, alone, proxy = self.settings, _alone(), os.environ.get(SITE_PROXY_ENV)
-        flags = [f"--user-data-dir={self.profile_dir()}", "--remote-debugging-pipe", "--no-first-run",
-                 "--no-default-browser-check", f"--lang={settings.locale}"]
+        flags = [f"--user-data-dir={self.profile_dir()}", f"--disk-cache-dir={self.cache_dir()}",
+                 "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", f"--lang={settings.locale}"]
+        if (shm := _shm_bytes()) < SHM_MIN_BYTES:
+            logger.info(f"/dev/shm holds {shm // 2**20} MiB, under {SHM_MIN_BYTES // 2**20} MiB: the browser keeps its "
+                        "shared memory in files")
+            flags.append("--disable-dev-shm-usage")
         if proxy:
             flags += [f"--proxy-server={proxy}", f"--proxy-bypass-list={ALONE_BYPASS if alone else COMPUTER_BYPASS}",
                       "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
@@ -228,8 +249,11 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return self.settings.start_urls[:1] if _headless() else self.settings.start_urls
 
     async def _launch_fds(self) -> dict[int, int]:
-        """A new debugging pipe for this launch: the browser's ends as its fds 3 and 4, this server's ends its CDP
-        connection, over which the start tabs its command line can't open are opened."""
+        """Before each launch, an empty cache and the deploy's prompt answers in its profile; and a new debugging pipe:
+        the browser's ends as its fds 3 and 4, this server's ends its CDP connection, over which the start tabs its
+        command line can't open are opened."""
+        shutil.rmtree(self.cache_dir(), ignore_errors=True)
+        self._write_prompt_answers()
         to_browser_read, to_browser_write = os.pipe()
         from_browser_read, from_browser_write = os.pipe()
         await self.devtools.connect(to_browser_write, from_browser_read)
@@ -239,6 +263,24 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
             self._start_tabs.add_done_callback(lambda done: done.cancelled() or done.exception())
         return {PIPE_IN: to_browser_read, PIPE_OUT: from_browser_write}
 
+    def _write_prompt_answers(self) -> None:
+        """Its profile's preferences, which it reads as it starts, denying location and notification prompts or
+        leaving them to ask, as the deploy's settings say."""
+        preferences = self.profile_dir() / "Default" / "Preferences"
+        try:
+            current = json.loads(preferences.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            current = {}
+        current = current if isinstance(current, dict) else {}
+        defaults = current.setdefault("profile", {}).setdefault("default_content_setting_values", {})
+        for name in ("geolocation", "notifications"):
+            if getattr(self.settings, name) == "deny":
+                defaults[name] = BLOCK
+            else:
+                defaults.pop(name, None)
+        preferences.parent.mkdir(parents=True, exist_ok=True)
+        preferences.write_text(json.dumps(current), encoding="utf-8")
+
     async def _open_tabs(self, urls: list[str]) -> None:
         """Each of ``urls`` in a tab behind the active one, in order."""
         for url in urls:
@@ -246,6 +288,14 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def _relaunch_on_start(self) -> bool:
         return True
+
+    def _launch_running(self) -> Callable[[], Awaitable[None]]:
+        return self._open_window
+
+    async def _open_window(self) -> None:
+        """Another window, which a launch of the browser while it runs opens over its pipe: a second copy would only
+        hand its window to the first and exit, taking its new pipe with it."""
+        await self.devtools.call("Target.createTarget", {"url": "about:blank", "newWindow": True})
 
     @install_step(scope="system")
     def write_policies(self) -> None:
@@ -284,6 +334,14 @@ def _alone() -> bool:
 
 def _open_web() -> bool:
     return os.environ.get(OPEN_WEB_ENV) == "1"
+
+
+def _shm_bytes(path: str = "/dev/shm") -> int:
+    try:
+        stats = os.statvfs(path)
+    except OSError:
+        return 0
+    return stats.f_frsize * stats.f_blocks
 
 
 def _headless() -> bool:

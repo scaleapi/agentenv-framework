@@ -136,13 +136,15 @@ def _driver_ports(driver: ComputerDriverEnv, os_type: str) -> list[int]:
     return [driver.port, *(install.ports or [] if install is not None else [])]
 
 
-def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str, os_type: str) -> list[str]:
+def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str, os_type: str | None,
+                       partial: bool = False) -> list[str]:
     """The problems with ``values``, of ``app``'s settings on ``os_type`` by name, each named from ``at``: a setting it
     doesn't declare, a secret's given as anything but a bare reference (or null, where it's optional), a required one
-    missing, and what the schema of its ``Settings`` refuses of the rest. A secret's reference never meets the
-    constraints on its value, and its value never reaches a message."""
+    missing unless ``values`` are ``partial``, defaults a deploy completes, and what the schema of its ``Settings``
+    refuses of the rest. A secret's reference never meets the constraints on its value, and its value never reaches a
+    message."""
     schema, secrets = app.settings_schema(os_type), app.secret_settings(os_type)
-    properties, required = schema.get("properties", {}), schema.get("required", [])
+    properties, required = schema.get("properties", {}), [] if partial else schema.get("required", [])
     build = (app.build_settings_schema(os_type) or {}).get("properties", {})
     problems = [f"{at}.{name} is one of {app.id}'s build settings, which only another image changes" if name in build
                 else f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]

@@ -84,6 +84,15 @@ def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str,
         for name, value in values.items()} for app, values in given})}
 
 
+def recorded_app_settings(apps: list[ComputerAppEnv], app_settings: dict[str, dict],
+                          os_type: str) -> dict[str, dict[str, Any]]:
+    """The values ``app_settings`` hands each of ``apps`` on a computer of ``os_type``, by its name, as a record keeps
+    them, a secret's withheld; its class's defaults fill in the rest."""
+    return {app.environment_name: {name: WITHHELD if name in app.secret_settings(os_type) else value
+                                   for name, value in values.items()}
+            for app in apps if (values := app_settings.get(app.environment_name))}
+
+
 def recorded_settings(computer: ComputerArtifact, values: dict[str, Any]) -> dict[str, Any]:
     """The deploy-phase settings a boot applies as a record keeps them, a secret's and a generated one's withheld."""
     return {name: WITHHELD if setting.secret or setting.generate else values.get(name, setting.default)
