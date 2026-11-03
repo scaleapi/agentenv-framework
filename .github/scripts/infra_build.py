@@ -5,13 +5,18 @@ images agent-env ships before it's built, pushed or recorded.
 
 ``check ENTRY`` fails unless ENTRY, a JSON object as ``infra_images.py plan`` lists an image, names an image agent-env
 ships, with its Dockerfile, context, repository and a source tag, and for a disk form, the build args naming its base
-computer's image and the disk tools by their repositories and source tags. ``exists REF`` exits 0 when the registry has
-REF, 1 when it says it doesn't, and 2 when it can't tell. ``config IMAGE`` prints the config object of IMAGE's OCI
-config, base64'd, as a disk form's build takes its base's. ``smoke NAME IMAGE`` checks that IMAGE, a local build of
-NAME, runs: a disk form boots to its desktop in the QEMU launcher built here as ``agentenv-qemu-launcher``.
-``verify-record PATH`` fails unless PATH records each image agent-env ships once, with the digest the registry serves
-under its tag now. ``retry COMMAND...`` runs COMMAND, again while a registry rate-limits it or PyPI doesn't serve
-yet the agentenv-framework-protocol an agent image's build installs.
+computer's image and the disk tools by their repositories and source tags, and its size. ``exists REF`` exits 0 when
+the registry has REF, 1 when it says it doesn't, and 2 when it can't tell. ``wanted ENTRY`` checks ENTRY, signs in to
+GHCR and writes ``build=true`` to the step's output when the registry lacks its tag, ``build=false`` when it has it.
+``build ENTRY ARCH`` checks ENTRY and builds it for linux/ARCH as its tag with ``-ARCH`` after it; a disk form from its
+base computer's image of ARCH, which it pulls, with that image's config. ``config IMAGE`` prints the config object of
+IMAGE's OCI config, base64'd, as a disk form's build takes its base's. ``smoke NAME IMAGE`` checks that IMAGE, a local
+build of NAME, runs: a disk form boots in the QEMU launcher image ``--launcher`` names until every program its base's
+supervisord.conf declares runs. ``publish MISSING`` signs in to GHCR and tags the two platform builds of each entry of
+MISSING, a JSON list, as one multi-platform image under its tag, once the entry is checked, unless the registry has
+that tag. ``verify-record PATH`` fails unless PATH records each image agent-env ships once, with the digest the
+registry serves under its tag now. ``retry COMMAND...`` runs COMMAND, again while a registry rate-limits it or PyPI
+doesn't serve yet the agentenv-framework-protocol an agent image's build installs.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import platform
 import posixpath
 import re
@@ -64,7 +70,9 @@ _HEALTH_POLL_SECONDS = 2
 _LOG_TAIL_LINES = 30  # of a container that never turned healthy, in the error
 # How long a disk form may take to boot to its desktop: seconds with KVM, minutes under TCG.
 _BOOTED_WITHIN_SECONDS = 900
-_BOOTED = re.compile(r"success: (xvfb|dbus|desktop) entered RUNNING")
+# What supervisord prints on a disk form's console as each program starts.
+_RUNNING = re.compile(r"success: (\S+) entered RUNNING")
+_PROGRAM = re.compile(r"^\[program:([^\]]+)\]", re.MULTILINE)
 _PRINTED_CHARS = 200  # of what docker printed in place of a manifest, in the error
 # What a registry answers when it rate-limits a request: ECR Public's 429, and the toomanyrequests error code GHCR and
 # Docker Hub send.
@@ -123,10 +131,16 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check").add_argument("entry")
     commands.add_parser("exists").add_argument("ref")
+    commands.add_parser("wanted").add_argument("entry")
+    build = commands.add_parser("build")
+    build.add_argument("entry")
+    build.add_argument("arch", choices=("amd64", "arm64"))
     commands.add_parser("config").add_argument("image")
     smoke = commands.add_parser("smoke")
     smoke.add_argument("name", choices=sorted(IMAGES))
     smoke.add_argument("image")
+    smoke.add_argument("--launcher")
+    commands.add_parser("publish").add_argument("missing")
     commands.add_parser("verify-record").add_argument("path", type=Path)
     commands.add_parser("retry").add_argument("argv", nargs=argparse.REMAINDER, metavar="COMMAND")
     args = parser.parse_args()
@@ -134,15 +148,96 @@ def main() -> int:
         return _tried_again(lambda: _streamed(args.argv)).returncode
     if args.command == "exists":
         return _exists(args.ref)
+    if args.command == "wanted":
+        return _wanted(args.entry)
+    if args.command == "build":
+        return _build(args.entry, args.arch)
     if args.command == "config":
         print(_config(args.image))
         return 0
     if args.command == "smoke":
-        return _smoke(args.name, args.image)
+        if args.name in DISK_ARGS and args.launcher is None:
+            parser.error(f"{args.name} is booted in a QEMU launcher, which --launcher names")
+        return _smoke(args.name, args.image, args.launcher)
+    if args.command == "publish":
+        return _publish(args.missing)
     problems = _check(args.entry) if args.command == "check" else _verify_record(args.path)
     for problem in problems:
         print(f"::error::{problem}")
     return 1 if problems else 0
+
+
+def _wanted(entry: str) -> int:
+    if not _checked(entry):
+        return 1
+    _sign_in()
+    ref = _ref(json.loads(entry))
+    if (code := _exists(ref)) == 2:
+        return 1
+    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+        output.write(f"build={'true' if code == 1 else 'false'}\n")
+    if code == 0:
+        print(f"{ref} is published already, so it isn't built again")
+    return 0
+
+
+def _build(entry: str, arch: str) -> int:
+    """Build ENTRY for linux/``arch``, with no provenance attestation, which would show in the multi-platform image as an
+    unknown platform."""
+    if not _checked(entry):
+        return 1
+    image, target, build_args = json.loads(entry), f"linux/{arch}", []
+    if image["name"] in DISK_ARGS:
+        args, rootfs = image["args"], f"{image['args']['ROOTFS']}-{arch}"
+        if code := _tried_again(lambda: _streamed(["docker", "pull", "--platform", target, rootfs])).returncode:
+            return code
+        for arg, value in {"ROOTFS": rootfs, "TOOLS": args["TOOLS"], "SIZE_GB": args["SIZE_GB"],
+                           "ROOTFS_CONFIG": _config(rootfs)}.items():
+            build_args += ["--build-arg", f"{arg}={value}"]
+    command = ["docker", "build", "--platform", target, "--provenance=false", "-f", image["dockerfile"],
+               "-t", f"{_ref(image)}-{arch}", *build_args,
+               "--label", f"org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
+               "--label", f"org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
+               "--label", f"io.agentenv.source-tag={image['tag']}", image["context"]]
+    return _tried_again(lambda: _streamed(command)).returncode
+
+
+def _publish(missing: str) -> int:
+    _sign_in()
+    for image in json.loads(missing):
+        if not _checked(json.dumps(image)):
+            return 1
+        ref = _ref(image)
+        if (code := _exists(ref)) == 0:
+            print(f"{ref} is published already, so it's left as it is")
+            continue
+        if code != 1:
+            return 1
+        created = _tried_again(lambda: _streamed([
+            "docker", "buildx", "imagetools", "create", "-t", ref,
+            "--annotation", f"index:org.opencontainers.image.source=https://github.com/{os.environ['GITHUB_REPOSITORY']}",
+            "--annotation", f"index:org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
+            f"{ref}-amd64", f"{ref}-arm64"]))
+        if created.returncode:
+            return created.returncode
+    return 0
+
+
+def _checked(entry: str) -> bool:
+    problems = _check(entry)
+    for problem in problems:
+        print(f"::error::{problem}")
+    return not problems
+
+
+def _ref(image: dict) -> str:
+    return f"{image['repository']}:{image['tag']}"
+
+
+def _sign_in() -> None:
+    """Sign in to GHCR with the job's token, as the workflow's actor."""
+    subprocess.run(["docker", "login", "ghcr.io", "--username", os.environ["GITHUB_ACTOR"], "--password-stdin"],
+                   input=os.environ["GHCR_TOKEN"], text=True, check=True)
 
 
 def _check(entry: str) -> list[str]:
@@ -288,11 +383,11 @@ def _config(image: str) -> str:
     return base64.b64encode(inspected.stdout.strip().encode()).decode()
 
 
-def _smoke(name: str, image: str) -> int:
+def _smoke(name: str, image: str, launcher: str | None) -> int:
     if name == "agentenv-service-db":
         return _healthy(image)
     if name in DISK_ARGS:
-        return _boots(image)
+        return _boots(name, image, launcher)
     command = [part.replace("{image}", image) for part in _SMOKES[name]]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
@@ -300,15 +395,16 @@ def _smoke(name: str, image: str) -> int:
     return result.returncode
 
 
-def _boots(image: str) -> int:
-    """Boot ``image``, a disk form, in the launcher built here, with KVM where it can, and wait for its desktop's
-    programs to run, which its console shows."""
+def _boots(name: str, image: str, launcher: str) -> int:
+    """Boot ``image``, a build of the disk form ``name``, in ``launcher``, with KVM where it can, and wait for every
+    program its base computer's supervisord.conf declares to run, which its console shows."""
+    programs = set(_PROGRAM.findall((REPO / Path(IMAGES[DISK_ARGS[name]["ROOTFS"]]).with_name("supervisord.conf"))
+                                    .read_text()))
     arch = subprocess.run(["docker", "image", "inspect", "--format", "{{.Architecture}}", image], capture_output=True,
                           text=True, check=True).stdout.strip()
     machine = f"{image}-machine"
     subprocess.run(["docker", "build", "-q", "-t", machine, "-"], text=True, check=True, capture_output=True,
-                   input=f"FROM --platform=linux/{arch} {image} AS disk\nFROM agentenv-qemu-launcher\n"
-                         "COPY --from=disk /disk/ /disk/\n")
+                   input=f"FROM --platform=linux/{arch} {image} AS disk\nFROM {launcher}\nCOPY --from=disk /disk/ /disk/\n")
     kvm = ["--device", "/dev/kvm"] if Path("/dev/kvm").exists() else []
     container = subprocess.run(["docker", "run", "-d", *kvm, "-e", f"VM_ARCH={arch}", machine], capture_output=True,
                                text=True, check=True).stdout.strip()
@@ -317,7 +413,7 @@ def _boots(image: str) -> int:
         while time.monotonic() < deadline:
             logs = subprocess.run(["docker", "logs", container], capture_output=True, text=True, errors="replace")
             logs = logs.stdout + logs.stderr
-            if len(set(_BOOTED.findall(logs))) == 3:
+            if programs <= set(_RUNNING.findall(logs)):
                 native = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine()) == arch
                 print(f"{image} booted to its desktop {'with KVM' if kvm and native else 'under TCG'}")
                 return 0

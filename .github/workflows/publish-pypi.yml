@@ -120,11 +120,8 @@ jobs:
       ENTRY: ${{ toJSON(matrix.image) }}
       NAME: ${{ matrix.image.name }}
       DOCKERFILE: ${{ matrix.image.dockerfile }}
-      CONTEXT: ${{ matrix.image.context }}
-      TAG: ${{ matrix.image.tag }}
-      REF: ${{ matrix.image.repository }}:${{ matrix.image.tag }}
+      ARCH: ${{ matrix.arch }}
       BUILT: ${{ matrix.image.repository }}:${{ matrix.image.tag }}-${{ matrix.arch }}
-      PLATFORM: linux/${{ matrix.arch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -135,28 +132,13 @@ jobs:
         id: wanted
         env:
           GHCR_TOKEN: ${{ github.token }}
-        run: |
-          python3 .github/scripts/infra_build.py check "$ENTRY"
-          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          code=0
-          python3 .github/scripts/infra_build.py exists "$REF" || code=$?
-          case "$code" in
-            0) echo "build=false" >> "$GITHUB_OUTPUT"; echo "$REF is published already, so it isn't built again" ;;
-            1) echo "build=true" >> "$GITHUB_OUTPUT" ;;
-            *) exit 1 ;;
-          esac
+        run: python3 .github/scripts/infra_build.py wanted "$ENTRY"
       - name: Pull its base images from mirror.gcr.io, as public.ecr.aws can rate-limit a runner for hours
         if: steps.wanted.outputs.build == 'true'
         run: python3 .github/scripts/mirror_base_images.py "$DOCKERFILE"
       - name: Build
         if: steps.wanted.outputs.build == 'true'
-        run: |
-          # No provenance attestation, which would show in the multi-platform image as an unknown platform.
-          python3 .github/scripts/infra_build.py retry \
-            docker build --platform "$PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$BUILT" \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "io.agentenv.source-tag=${TAG}" "$CONTEXT"
+        run: python3 .github/scripts/infra_build.py build "$ENTRY" "$ARCH"
       - name: Check that it runs
         if: steps.wanted.outputs.build == 'true'
         run: python3 .github/scripts/infra_build.py smoke "$NAME" "$BUILT"
@@ -184,23 +166,7 @@ jobs:
       - name: Tag each image's platform builds as one multi-platform image under its source tag
         env:
           GHCR_TOKEN: ${{ github.token }}
-        run: |
-          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          jq -c '.[]' <<< "$MISSING" | while read -r entry; do
-            python3 .github/scripts/infra_build.py check "$entry"
-            ref=$(jq -r '"\(.repository):\(.tag)"' <<< "$entry")
-            code=0
-            python3 .github/scripts/infra_build.py exists "$ref" || code=$?
-            if [ "$code" = 0 ]; then
-              echo "$ref is published already, so it's left as it is"
-              continue
-            fi
-            [ "$code" = 1 ] || exit 1
-            python3 .github/scripts/infra_build.py retry docker buildx imagetools create -t "$ref" \
-              --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-              --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
-              "${ref}-amd64" "${ref}-arm64"
-          done
+        run: python3 .github/scripts/infra_build.py publish "$MISSING"
 
   # When images are published, the protocol waits for the infra images, so a failed infra image job sends neither
   # package to PyPI. A failed agent image job, which runs after it, keeps agentenv-framework off PyPI.
@@ -265,11 +231,8 @@ jobs:
       ENTRY: ${{ toJSON(matrix.image) }}
       NAME: ${{ matrix.image.name }}
       DOCKERFILE: ${{ matrix.image.dockerfile }}
-      CONTEXT: ${{ matrix.image.context }}
-      TAG: ${{ matrix.image.tag }}
-      REF: ${{ matrix.image.repository }}:${{ matrix.image.tag }}
+      ARCH: ${{ matrix.arch }}
       BUILT: ${{ matrix.image.repository }}:${{ matrix.image.tag }}-${{ matrix.arch }}
-      PLATFORM: linux/${{ matrix.arch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -280,28 +243,13 @@ jobs:
         id: wanted
         env:
           GHCR_TOKEN: ${{ github.token }}
-        run: |
-          python3 .github/scripts/infra_build.py check "$ENTRY"
-          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          code=0
-          python3 .github/scripts/infra_build.py exists "$REF" || code=$?
-          case "$code" in
-            0) echo "build=false" >> "$GITHUB_OUTPUT"; echo "$REF is published already, so it isn't built again" ;;
-            1) echo "build=true" >> "$GITHUB_OUTPUT" ;;
-            *) exit 1 ;;
-          esac
+        run: python3 .github/scripts/infra_build.py wanted "$ENTRY"
       - name: Pull its base images from mirror.gcr.io, as public.ecr.aws can rate-limit a runner for hours
         if: steps.wanted.outputs.build == 'true'
         run: python3 .github/scripts/mirror_base_images.py "$DOCKERFILE"
       - name: Build
         if: steps.wanted.outputs.build == 'true'
-        run: |
-          # No provenance attestation, which would show in the multi-platform image as an unknown platform.
-          python3 .github/scripts/infra_build.py retry \
-            docker build --platform "$PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$BUILT" \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "io.agentenv.source-tag=${TAG}" "$CONTEXT"
+        run: python3 .github/scripts/infra_build.py build "$ENTRY" "$ARCH"
       - name: Check that it runs
         if: steps.wanted.outputs.build == 'true'
         run: python3 .github/scripts/infra_build.py smoke "$NAME" "$BUILT"
@@ -329,23 +277,7 @@ jobs:
       - name: Tag each image's platform builds as one multi-platform image under its source tag
         env:
           GHCR_TOKEN: ${{ github.token }}
-        run: |
-          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          jq -c '.[]' <<< "$MISSING" | while read -r entry; do
-            python3 .github/scripts/infra_build.py check "$entry"
-            ref=$(jq -r '"\(.repository):\(.tag)"' <<< "$entry")
-            code=0
-            python3 .github/scripts/infra_build.py exists "$ref" || code=$?
-            if [ "$code" = 0 ]; then
-              echo "$ref is published already, so it's left as it is"
-              continue
-            fi
-            [ "$code" = 1 ] || exit 1
-            python3 .github/scripts/infra_build.py retry docker buildx imagetools create -t "$ref" \
-              --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-              --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
-              "${ref}-amd64" "${ref}-arm64"
-          done
+        run: python3 .github/scripts/infra_build.py publish "$MISSING"
 
   # Each base computer's disk form whose tag the registry lacks, built on a runner of each platform from the base's
   # published image of that platform and the published disk tools, booted with the QEMU launcher built from this
@@ -372,13 +304,8 @@ jobs:
       ENTRY: ${{ toJSON(matrix.image) }}
       NAME: ${{ matrix.image.name }}
       DOCKERFILE: ${{ matrix.image.dockerfile }}
-      CONTEXT: ${{ matrix.image.context }}
-      TAG: ${{ matrix.image.tag }}
-      REF: ${{ matrix.image.repository }}:${{ matrix.image.tag }}
+      ARCH: ${{ matrix.arch }}
       BUILT: ${{ matrix.image.repository }}:${{ matrix.image.tag }}-${{ matrix.arch }}
-      ROOTFS: ${{ matrix.image.args.ROOTFS }}-${{ matrix.arch }}
-      TOOLS: ${{ matrix.image.args.TOOLS }}
-      PLATFORM: linux/${{ matrix.arch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -389,16 +316,7 @@ jobs:
         id: wanted
         env:
           GHCR_TOKEN: ${{ github.token }}
-        run: |
-          python3 .github/scripts/infra_build.py check "$ENTRY"
-          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          code=0
-          python3 .github/scripts/infra_build.py exists "$REF" || code=$?
-          case "$code" in
-            0) echo "build=false" >> "$GITHUB_OUTPUT"; echo "$REF is published already, so it isn't built again" ;;
-            1) echo "build=true" >> "$GITHUB_OUTPUT" ;;
-            *) exit 1 ;;
-          esac
+        run: python3 .github/scripts/infra_build.py wanted "$ENTRY"
       - name: Pull its base images, and the launcher's, from mirror.gcr.io, as public.ecr.aws can rate-limit a runner
         if: steps.wanted.outputs.build == 'true'
         run: python3 .github/scripts/mirror_base_images.py "$DOCKERFILE" src/agent_env/computers/disk/linux/launcher/Dockerfile
@@ -410,21 +328,13 @@ jobs:
           fi
       - name: Build
         if: steps.wanted.outputs.build == 'true'
-        run: |
-          python3 .github/scripts/infra_build.py retry docker pull --platform "$PLATFORM" "$ROOTFS"
-          config=$(python3 .github/scripts/infra_build.py config "$ROOTFS")
-          # No provenance attestation, which would show in the multi-platform image as an unknown platform.
-          python3 .github/scripts/infra_build.py retry \
-            docker build --platform "$PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$BUILT" \
-            --build-arg "ROOTFS=$ROOTFS" --build-arg "TOOLS=$TOOLS" --build-arg "ROOTFS_CONFIG=$config" \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "io.agentenv.source-tag=${TAG}" "$CONTEXT"
-      - name: Check that it runs
+        run: python3 .github/scripts/infra_build.py build "$ENTRY" "$ARCH"
+      - name: Build the QEMU launcher from this checkout, to boot it in
         if: steps.wanted.outputs.build == 'true'
-        run: |
-          docker build -q -t agentenv-qemu-launcher src/agent_env/computers/disk/linux/launcher
-          python3 .github/scripts/infra_build.py smoke "$NAME" "$BUILT"
+        run: docker build -q -t agentenv-qemu-launcher src/agent_env/computers/disk/linux/launcher
+      - name: Check that it boots
+        if: steps.wanted.outputs.build == 'true'
+        run: python3 .github/scripts/infra_build.py smoke "$NAME" "$BUILT" --launcher agentenv-qemu-launcher
       - name: Push it under its tag and platform
         if: steps.wanted.outputs.build == 'true'
         run: python3 .github/scripts/infra_build.py retry docker push "$BUILT"
@@ -448,23 +358,7 @@ jobs:
       - name: Tag each image's platform builds as one multi-platform image under its source tag
         env:
           GHCR_TOKEN: ${{ github.token }}
-        run: |
-          echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          jq -c '.[]' <<< "$MISSING" | while read -r entry; do
-            python3 .github/scripts/infra_build.py check "$entry"
-            ref=$(jq -r '"\(.repository):\(.tag)"' <<< "$entry")
-            code=0
-            python3 .github/scripts/infra_build.py exists "$ref" || code=$?
-            if [ "$code" = 0 ]; then
-              echo "$ref is published already, so it's left as it is"
-              continue
-            fi
-            [ "$code" = 1 ] || exit 1
-            python3 .github/scripts/infra_build.py retry docker buildx imagetools create -t "$ref" \
-              --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-              --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
-              "${ref}-amd64" "${ref}-arm64"
-          done
+        run: python3 .github/scripts/infra_build.py publish "$MISSING"
 
   # The digest the registry serves under every image's tag, for the wheel and the release notes, which the framework
   # job checks against the registry before the wheel carries it; and a warning for each image an anonymous pull, as an
