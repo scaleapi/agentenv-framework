@@ -39,7 +39,13 @@ from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
-from agent_env.providers.sandbox_providers.local_docker.disk import kvm_platforms, launcher_args, machine_image
+from agent_env.providers.sandbox_providers.local_docker.disk import (
+    RESET,
+    kvm_platforms,
+    launcher_args,
+    machine_image,
+    reset_input,
+)
 from agent_env.providers.sandbox_providers.local_docker.relay import relay_image
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
@@ -712,8 +718,8 @@ class LocalSandboxProvider(SandboxProvider):
         return sandbox
 
     async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
-        await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} > /dev/null")
-        await self._boot_disk(sandbox, image=image, env=env)
+        """The launcher in the sandbox's container booting its disk afresh with ``env``."""
+        await asyncio.to_thread(_docker, "exec", "-i", sandbox.container_name, *RESET, input=reset_input(env))
 
     async def _boot_disk(self, sandbox: LocalSandbox, *, image: str, env: dict[str, str]) -> None:
         """The launcher booting ``image`` as the sandbox's container, its ports published as a container's are."""
@@ -946,9 +952,9 @@ def _host_ips() -> tuple[str, ...]:
     return ("127.0.0.1", _docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"))
 
 
-def _docker(*args: str) -> str:
-    """A docker CLI query's output. A failure raises, so the cache above never keeps it."""
-    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=_DOCKER_QUERY_SECONDS)
+def _docker(*args: str, input: str | None = None) -> str:
+    """A docker CLI query's output, ``input`` on its stdin. A failure raises, so the cache above never keeps it."""
+    run = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=_DOCKER_QUERY_SECONDS, input=input)
     if run.returncode:
         raise RuntimeError(f"docker {' '.join(args)} failed: {run.stderr.strip()}")
     return run.stdout.strip()

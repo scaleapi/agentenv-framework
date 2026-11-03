@@ -82,17 +82,19 @@ _SHOWN = 10
 class Composing:
     """How a put composes a computer env: on ``sandbox_provider``, by default the env's; emulating an arch no link runs
     natively unless ``emulate`` is False; each pair's stages told to ``on_progress``; the forms of the base, or for a
-    run (``for_run``) those its deploys on the provider boot (``forms_of``)."""
+    run (``for_run``) those its deploys boot (``forms_of``) on ``deploys_on``, by default the provider it composes on."""
 
     sandbox_provider: SandboxProvider | None = None
     emulate: bool = True
     on_progress: Callable[[str], None] | None = None
     forms_of: Literal["base", "deploys"] = "base"
+    deploys_on: SandboxProvider | None = None
 
     @classmethod
     def for_run(cls, sandbox_provider: SandboxProvider | None, emulate: bool = True) -> Composing:
-        """How a run composes: on ``sandbox_provider``, by default the env's, the forms its deploys there boot."""
-        return cls(sandbox_provider, emulate, forms_of="deploys")
+        """How a run whose deploys are on ``sandbox_provider``, by default the env's, composes: on the env's, this
+        machine unless the config names another, the forms its deploys boot."""
+        return cls(None, emulate, forms_of="deploys", deploys_on=sandbox_provider)
 
     def provider(self) -> SandboxProvider:
         """``sandbox_provider``, else the env's default, looked up by each compose that needs it, once: a run with no
@@ -103,7 +105,7 @@ class Composing:
 
     def forms(self, env: ComputerEnv, provider: SandboxProvider) -> list[str]:
         """The forms of ``env``'s base this compose on ``provider``, its ``provider()``, builds."""
-        return gate.forms(env.computer) if self.forms_of == "base" else booted_forms(env, provider)
+        return gate.forms(env.computer) if self.forms_of == "base" else booted_forms(env, self.deploys_on or provider)
 
 
 def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, composing: Composing = Composing()) -> None:

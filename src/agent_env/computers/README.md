@@ -18,13 +18,24 @@ Composing a computer env makes each arch's disk from its composed container, the
 `mkfs.ext4 -d` by the disk tools (`disk/linux/tools/`) on the builder's own platform and the base disk's EFI system
 partition kept, so nothing is emulated or privileged. A disk boots where `/dev/kvm` is, in the QEMU launcher
 (`disk/linux/launcher/`): gate 3 probes it there, and elsewhere it stays `unverified` until a deploy's first boot with
-KVM probes it. A deploy boots it with `env_params = { form = "disk" }`.
+KVM probes it. A deploy boots it with `env_params = { form = "disk" }`. The launcher serves each of the computer's ports
+through socat, whose listen backlog takes a burst of connections, in front of QEMU's own forward, whose backlog is 1, and
+a reset boots the disk afresh on a new overlay in the same launcher, at the same URLs. It boots on local Docker where
+Docker can pass it `/dev/kvm`, and on `modal_vm`, amd64 only, whose sandbox runs the launcher as its image under nested
+virtualization: the provider exports the disk from the image store with this machine's Docker, compressed, once for each
+composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal uploads once for each
+content and the launcher expands onto the sandbox's disk. Such a sandbox is ended once it has been idle, with no
+connection open, for the provider's `idle_timeout`, 30 minutes unless its config sets another, as a running QEMU isn't
+activity. A gate 3 probe that ends with the connection to the driver dropped, refused or timed out runs again on a fresh
+boot, up to three in all, and the record keeps each attempt; one with a failed check is recorded as it is.
 
 A put, `env build` and the release compose every form; a run composes only the forms its sandbox's deploys boot: on each
 link of a chain, the first form it boots natively, as a deploy picks, so local Docker composes containers, and a sandbox
-that boots only disks composes disks. A compose of a disk also composes the container it's made from, unless that's
-built. A deploy that boots a form no compose has started, a disk named by `env_params` included, composes it first,
-reusing what's built, as every build is reused by its key; deploys of one env at once compose it once, the others
+that boots only disks composes disks. A run composes them on the env's default provider, this machine unless the config
+names another, never on the sandbox it deploys on. A compose of a disk also composes the container it's made from,
+unless that's built. A deploy that boots a form no compose has started, a disk named by `env_params` included, composes
+it first on that same provider, saying which, reusing what's built, as every build is reused by its key; deploys of one
+env at once compose it once, the others
 waiting for it, a deploy that finds it building included. In `agent-env run` it says why and each stage as it goes, and
 a deploy waiting for another's compose says what it waits for and since when. A local run doesn't compose a registered
 env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the

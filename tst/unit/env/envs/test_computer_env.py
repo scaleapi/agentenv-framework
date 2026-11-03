@@ -329,6 +329,32 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
         "failed", "probe", f"the probe didn't finish within {probing._PROBE_TIMEOUT_S} s")
 
 
+def test_a_probe_ended_by_a_dropped_connection_runs_again_on_a_fresh_boot_and_one_with_a_failed_check_doesnt(
+        base, driver, docker):
+    """The record keeps every attempt; a build whose every probe drops its connection fails at the probe."""
+    docker.probe_drops["arm64"] = 1
+    retried = Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]
+    probes = len(docker.probed)
+    docker.probe_fails["arm64"] = "the click never landed"
+    strict = Env.get(_put(base, driver, id="@local/~/kit/strict", environment_name="strict").id).metadata[
+        "composed"]["container"]["arm64"]
+    strict_probes = len(docker.probed) - probes
+    docker.probe_fails.clear()
+    docker.probe_drops["arm64"] = probing._PROBE_ATTEMPTS
+    dropped = Env.get(_put(base, driver, id="@local/~/kit/dropped", environment_name="dropped").id).metadata[
+        "composed"]["container"]["arm64"]
+
+    assert retried["status"] == "ready" and [a["status"] for a in retried["attempts"]] == ["dropped", "ready"]
+    assert retried["attempts"][0]["reason"] == "RemoteProtocolError: Server disconnected without sending a response."
+    assert retried["attempts"][1]["probe"] == retried["probe"] and probes == 2
+    assert (strict["status"], strict_probes, "attempts" in strict) == ("failed", 1, False)
+    assert (dropped["status"], dropped["stage"]) == ("failed", "probe")
+    assert [a["status"] for a in dropped["attempts"]] == ["dropped"] * probing._PROBE_ATTEMPTS
+    assert dropped["reason"] == (f"each of its {probing._PROBE_ATTEMPTS} probes, each on a fresh boot, ended on a "
+                                 "transport error talking to its driver, the last RemoteProtocolError: Server "
+                                 "disconnected without sending a response.")
+
+
 @pytest.mark.parametrize("result, stored, replaces", [
     ({"status": "unverified"}, {"status": "ready"}, False),
     ({"status": "failed", "stage": "build"}, {"status": "unverified"}, False),

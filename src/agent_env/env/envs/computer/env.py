@@ -184,6 +184,7 @@ class ComputerEnv(Env):
 
     async def compose_unstarted(self, sandbox_provider: SandboxProvider, form: Optional[str] = None) -> None:
         """Compose first what a deploy on ``sandbox_provider`` boots that no compose started, once for deploys at once,
+        on the env's default sandbox provider, this machine unless the config names another, never on the deploy's,
         unless the run's fence would refuse the record (rules in ``computers/README.md``). A cancelled deploy holds the
         lock until its compose's thread, which no cancel stops, ends, so the next deploy waits for what it builds."""
         if get_config().local_run_refuses_write(self.stored_id):
@@ -204,10 +205,11 @@ class ComputerEnv(Env):
             self.metadata = (await asyncio.to_thread(Env.get, self.stored_id, self.version)).metadata
             if pairs := composer.unstarted(self, sandbox_provider, form):
                 them = "it" if len(pairs) == 1 else "them"
-                say(f"composing {_pairs(pairs)} before this deploy (no compose built {them} for "
+                on = Composing(on_progress=progress)
+                say(f"composing {_pairs(pairs)} before this deploy on "
+                    f"{' or '.join(type(link).__name__ for link in on.provider().links)} (no compose built {them} for "
                     f"{' or '.join(type(link).__name__ for link in sandbox_provider.links)} yet); later deploys reuse {them}")
-                composing = asyncio.ensure_future(asyncio.to_thread(
-                    composer.compose, self, pairs, Composing(sandbox_provider, on_progress=progress)))
+                composing = asyncio.ensure_future(asyncio.to_thread(composer.compose, self, pairs, on))
                 try:
                     await asyncio.shield(composing)
                 except asyncio.CancelledError:

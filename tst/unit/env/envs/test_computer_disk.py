@@ -448,11 +448,30 @@ async def test_a_deploy_that_composes_first_tells_the_run_why_and_each_stage_as_
         context = await task.run(context=TaskStepContext())
 
     assert context.deployed_envs[0].metadata["computer"]["form"] == "disk"
-    assert said[:2] == [f"{env.id}: composing disk/amd64, disk/arm64 before this deploy (no compose built them for "
-                        "LocalSandboxProvider yet); later deploys reuse them",
+    assert said[:2] == [f"{env.id}: composing disk/amd64, disk/arm64 before this deploy on LocalSandboxProvider (no "
+                        "compose built them for LocalSandboxProvider yet); later deploys reuse them",
                         f"{env.id}: composing disk/amd64, disk/arm64 on LocalSandboxProvider"]
     assert any(line.startswith(f"{env.id}: disk/arm64: ready (") for line in said)
     assert any(line.startswith(f"{env.id}: disk/amd64: making the disk") for line in said)
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_on_a_sandbox_that_boots_only_disks_composes_them_on_this_machine_and_says_so(disk_base, driver,
+                                                                                                    docker,
+                                                                                                    monkeypatch):
+    """Never on the deploy's own sandbox: the env's default provider, this machine's Docker, builds them."""
+    env = _put(disk_base, driver, compose=False)
+    composed, said = [], []
+    monkeypatch.setattr(composer, "compose", lambda env, pairs, composing: composed.append((pairs, composing)))
+
+    with run_progress(said.append):
+        await Env.get(env.id).compose_unstarted(_link(disks=["amd64"]))
+
+    ((pairs, composing),) = composed
+    assert pairs == [("disk", "amd64"), ("disk", "arm64")]
+    assert isinstance(composing.provider(), local_sandbox.LocalSandboxProvider)
+    assert said == [f"{env.id}: composing disk/amd64, disk/arm64 before this deploy on LocalSandboxProvider (no compose "
+                    "built them for SimpleNamespace yet); later deploys reuse them"]
 
 
 @pytest.mark.asyncio

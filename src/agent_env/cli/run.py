@@ -44,15 +44,15 @@ _DRY_RUN = "Dry run: nothing is written or run."
               help="The agent the solver runs as, whatever the tasks name: an alias such as pi, an agent of this "
                    "bundle or an installed one, or the store's.")
 @click.option("--sandbox", default=None,
-              help="The sandbox provider computer envs compose on and envs, agents, sandboxes and the judge deploy "
-                   "on; comma-separated for a fallback chain.")
+              help="The sandbox provider envs, agents, sandboxes and the judge deploy on, which picks the forms "
+                   "computer envs compose on this machine; comma-separated for a fallback chain.")
 @click.option("--keep", is_flag=True,
               help="Keep the sandboxes up after the runs, print their endpoints, and tear them down on Ctrl-C.")
 @click.option("--dry-run", is_flag=True,
               help="Check the bundle as the run does and show what it would write and run; write and run nothing.")
 @click.option("--no-emulate", is_flag=True,
-              help="Skip, rather than emulate, a computer env's arch no link of the sandbox provider runs natively; "
-                   "a later run or env build builds it.")
+              help="Skip, rather than emulate, a computer env's arch the provider it composes on doesn't run "
+                   "natively; a later run or env build builds it.")
 @click.pass_context
 def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: tuple[str, ...], model: str | None,
         user_model: str | None, judge_model: str | None, agent: str | None, sandbox: str | None, keep: bool,

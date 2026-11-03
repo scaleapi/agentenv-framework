@@ -224,9 +224,10 @@ def run_bundle(
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
     user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
-    tasks as written; ``sandbox`` is the provider that computer envs compose on and that envs,
-    agents, sandboxes and the judge deploy on; a computer env composing there emulates an arch no link runs natively
-    unless ``emulate`` is False, which leaves it skipped. ``on_progress`` is given a line of text
+    tasks as written; ``sandbox`` is the provider that envs, agents, sandboxes and the judge deploy on, whose deploys
+    pick the forms a computer env composes, on the env's default provider, this machine unless the config names
+    another; that compose emulates an arch no link of it runs natively unless ``emulate`` is False, which leaves it
+    skipped. ``on_progress`` is given a line of text
     at each write and step. ``id_root`` roots the ids of a bundle an installed package provides
     (``InstalledBundle.id_root``) or one downloaded from the Hub (``HubBundle.id_root``); a folder's ids otherwise come
     from its path. ``source`` says where a Hub bundle came from (``HubBundle.source``), which each run's context
@@ -406,8 +407,9 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
 
 
 def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
-    """How a run composes its computer envs: on the provider ``sandbox`` names, emulating unless ``emulate`` is False,
-    only the forms its deploys there boot. Raises ValueError when ``sandbox`` names no provider."""
+    """How a run composes its computer envs: on the env's default provider, emulating unless ``emulate`` is False, only
+    the forms its deploys on the provider ``sandbox`` names boot. Raises ValueError when ``sandbox`` names no
+    provider."""
     return Composing.for_run(build_sandbox_provider(sandbox) if sandbox else None, emulate)
 
 

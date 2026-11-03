@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+import httpx
 from agentenv_protocol.computer.conformance import run_probe
 
 from agent_env.artifact.artifacts.file import FileArtifact
@@ -26,6 +27,9 @@ if TYPE_CHECKING:
 _PROBE_TTL_S = 1800
 #: How long the probe at full may take on a computer that booted: about ten seconds on a healthy one.
 _PROBE_TIMEOUT_S = 120
+#: How many probes, each on a fresh boot, a build gets when each ends with the connection to its driver dropped, refused
+#: or timed out, which says nothing of the build, before the last one's result is recorded.
+_PROBE_ATTEMPTS = 3
 
 
 async def probe_first_boot(env: ComputerEnv, form: str, arch: str, sandbox_provider: SandboxProvider) -> dict:
@@ -45,13 +49,26 @@ async def probe_first_boot(env: ComputerEnv, form: str, arch: str, sandbox_provi
 async def checked(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str,
                   result: dict) -> dict:
     """The build of ``result`` booted on the first of ``links`` that boots it and probed at ``full``: ready, with the
-    driver's card, or failed at the probe; each with a summary of the probe and its report stored."""
-    try:
-        report, card, provider = await _probe(links, env, driver, result["image"], form)
-    except TimeoutError:
-        return failed(env, form, arch, "probe", result["key"], f"the probe didn't finish within {_PROBE_TIMEOUT_S} s")
-    except Exception as e:
-        return failed(env, form, arch, "probe", result["key"], f"it didn't boot: {e}")
+    driver's card, or failed at the probe; each with a summary of the probe and its report stored. A probe that ended
+    on a transport error talking to the driver runs again on a fresh boot first, up to ``_PROBE_ATTEMPTS`` in all, the
+    record then keeping each attempt; one with a failed check is recorded at once."""
+    attempts: list[dict] = []
+    while True:
+        try:
+            report, card, provider = await _probe(links, env, driver, result["image"], form)
+            break
+        except TimeoutError:
+            return _attempted(attempts, failed(env, form, arch, "probe", result["key"],
+                                               f"the probe didn't finish within {_PROBE_TIMEOUT_S} s"))
+        except Exception as e:
+            if not _dropped(e):
+                return _attempted(attempts, failed(env, form, arch, "probe", result["key"], f"it didn't boot: {e}"))
+            attempts.append({"status": "dropped", "reason": _transport_errors(e), "dropped_at": now()})
+            if len(attempts) == _PROBE_ATTEMPTS:
+                return {**failed(env, form, arch, "probe", result["key"],
+                                 f"each of its {_PROBE_ATTEMPTS} probes, each on a fresh boot, ended on a transport "
+                                 f"error talking to its driver, the last {attempts[-1]['reason']}"),
+                        "attempts": attempts}
     stored = FileArtifact.put_bytes(derive_id(env.stored_id, f"probe_report_{form}_{arch}"), description=(
         f"the {form}/{arch} probe of {env.stored_id} v{env.version}"), filename="probe.json",
         content=report.model_dump_json(indent=1).encode(), content_type="application/json")
@@ -60,9 +77,31 @@ async def checked(links: list[SandboxProvider], env: ComputerEnv, driver: Comput
              "probed_at": now()}
     if not report.passed:
         failing = "; ".join(f"{c.check} {c.name}: {c.detail}" for c in report.checks if c.status == "failed")
-        return {**result, "status": "failed", "stage": "probe", "reason": f"the probe failed: {failing}",
-                "failed_at": now(), "probe": probe}
-    return {**result, "status": "ready", "card": card, "probe": probe}
+        return _attempted(attempts, {**result, "status": "failed", "stage": "probe",
+                                     "reason": f"the probe failed: {failing}", "failed_at": now(), "probe": probe})
+    return _attempted(attempts, {**result, "status": "ready", "card": card, "probe": probe})
+
+
+def _dropped(error: BaseException) -> bool:
+    """Whether ``error`` is only the connection to the driver dropping, refused or timing out, as httpx raises it, alone
+    or from a task group."""
+    if isinstance(error, BaseExceptionGroup):
+        return all(_dropped(e) for e in error.exceptions)
+    return isinstance(error, httpx.TransportError)
+
+
+def _transport_errors(error: BaseException) -> str:
+    if isinstance(error, BaseExceptionGroup):
+        return "; ".join(dict.fromkeys(_transport_errors(e) for e in error.exceptions))
+    return f"{type(error).__name__}: {error}"
+
+
+def _attempted(attempts: list[dict], result: dict) -> dict:
+    """``result``, with the attempts before it and itself when it was rerun."""
+    if not attempts:
+        return result
+    last = {key: result[key] for key in ("status", "reason", "failed_at", "probe") if key in result}
+    return {**result, "attempts": [*attempts, last]}
 
 
 async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, image: str,
