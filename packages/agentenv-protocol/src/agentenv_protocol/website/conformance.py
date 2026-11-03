@@ -130,12 +130,19 @@ class _Checker:
             return (("passed" if response.status_code == 200 else "failed"),
                     f"{health} answered {response.status_code}; the card has no website/v1 ready, so the health path "
                     "was read, which is deprecated")
-        answer = self._seen(self.client.request(ready.get("method", "GET"), self.base_url + ready["endpoint"])).json()
+        response = self._seen(self.client.request(ready.get("method", "GET"), self.base_url + ready["endpoint"]))
+        try:
+            answer = response.json()
+        except ValueError:
+            return "failed", f"website/v1 ready answered {response.status_code} with no JSON: {response.text[:200]!r}"
         try:
             readiness = WebsiteReadiness.model_validate(answer)
         except ValidationError as e:
             return "failed", (f"website/v1 ready answered {answer!r}, not a WebsiteReadiness: "
                               f"{'; '.join(_field_error(error) for error in e.errors())}")
+        if not response.is_success:
+            return "failed", (f"website/v1 ready answered {response.status_code}: "
+                              f"{', '.join(readiness.problems) or 'no problem named'}")
         if readiness.ready:
             return "passed", "website/v1 ready says it is ready"
         return "failed", f"website/v1 ready says it is not ready: {', '.join(readiness.problems) or 'no problem named'}"

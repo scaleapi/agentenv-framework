@@ -632,7 +632,10 @@ class Gateway:
         A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), its
         state's among them, are never reached through its route, so an agent browsing the site can't read what grades
         it; agentenv reaches them through /svc/<name>/."""
-        if reserved_site_request(request, await self._site_reserved_paths(request.path_params["service_name"])):
+        reserved = await self._site_reserved_paths(request.path_params["service_name"])
+        if reserved is None:
+            return self._json_response({"error": "website card unavailable"}, 503)
+        if reserved_site_request(request, reserved):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
@@ -665,10 +668,11 @@ class Gateway:
         """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
         return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
 
-    async def _site_reserved_paths(self, app: str) -> frozenset[str]:
+    async def _site_reserved_paths(self, app: str) -> frozenset[str] | None:
         """The paths ``app``'s card advertises for agentenv (``site_reserved_paths``), read once from its server, the one
-        its /svc/ route reaches (else the one its website route does), and kept; none for a site serving no card, one whose card path answers a 4xx or what isn't a JSON
-        object, and none, read again next time, while its card can't be read, unreachable or answering a 5xx."""
+        its /svc/ route reaches (else the one its website route does), and kept; none for a site serving no card, one
+        whose card path answers a 4xx or what isn't a JSON object, and None, read again next time, while its card can't
+        be read, unreachable or answering a 5xx, so its route serves nothing until it knows what to refuse."""
         if app in self._site_reserved:
             return self._site_reserved[app]
         base_url = self.rest_proxy_urls.get(app) or self.website_urls.get(app)
@@ -680,9 +684,9 @@ class Gateway:
             if response.status_code >= 500:
                 response.raise_for_status()
         except Exception as e:
-            logger.warning(f"website {app}: its card could not be read ({type(e).__name__}: {e}), so only its data plane "
-                           "and card paths are reserved on its route for now")
-            return frozenset()
+            logger.warning(f"website {app}: its card could not be read ({type(e).__name__}: {e}), so its route answers "
+                           "503 until it can be")
+            return None
         try:
             card = response.json() if response.is_success else None
         except ValueError:

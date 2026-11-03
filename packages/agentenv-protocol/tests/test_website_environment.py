@@ -403,6 +403,50 @@ def test_clock_patch_puts_the_clock_script_in_html_only(dist: Path, gateway_cloc
     assert "<script>" not in TestClient(site(dist)().create_app()).get("/").text
 
 
+def test_clock_patch_streams_a_streamed_page_holding_only_what_comes_before_its_head(dist: Path) -> None:
+    from starlette.responses import StreamingResponse
+
+    later = asyncio.Event()
+
+    async def chunks():
+        yield b"<html><he"
+        yield b"ad><title>t</title>"
+        await later.wait()
+        yield b"<body>late</body></html>"
+
+    async def page(request):
+        return StreamingResponse(chunks(), media_type="text/html")
+
+    class Streams(site(dist, clock_patch=True)):
+        app = Starlette(routes=[Route("/live", page)])
+
+    app = Streams().create_app()
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        await later.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+        if message.get("body", b"").endswith(b"<title>t</title>"):
+            later.set()
+
+    async def run() -> None:
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+                 "path": "/live", "raw_path": b"/live", "root_path": "", "query_string": b"", "headers": [],
+                 "client": ("t", 1), "server": ("t", 80)}
+        await asyncio.wait_for(app(scope, receive, send), 5)
+
+    asyncio.run(run())
+    bodies = [m for m in sent if m["type"] == "http.response.body" and m.get("body")]
+    first = bodies[0]["body"]
+    assert first.startswith(b"<html><head><script>") and first.endswith(b"<title>t</title>") and bodies[0]["more_body"]
+    assert b"".join(m["body"] for m in bodies).endswith(b"<body>late</body></html>")
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert b"content-length" not in dict(start["headers"])
+
+
 NODE_DATE_CHECKS = """globalThis.window = globalThis;
 eval(require("fs").readFileSync(0, "utf8").replace(/<\\/?script>/g, ""));
 class Later extends Date {}

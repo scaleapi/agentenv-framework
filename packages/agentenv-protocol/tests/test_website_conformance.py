@@ -56,10 +56,10 @@ def test_an_sdk_site_passes_every_check(sdk_site: TestClient) -> None:
 def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock: bool = True,
                  leak_redirect: bool = False, stamp_rpc: bool = True, reset_keeps: bool = False,
                  get_fails_after_reset: bool = False, rpc_reply: tuple[int, dict] | None = None,
-                 ready_answer: object = None, rpc_path: str | None = None, state_path: str | None = None,
-                 changed: bool = False) -> Starlette:
+                 ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None,
+                 state_path: str | None = None, changed: bool = False) -> Starlette:
     """A server written without the SDK: the contract by hand, optionally broken. Its state is its ``state.data``; with
-    ``ready_answer`` its card advertises ``website/v1``'s ``ready``, which answers it. With ``rpc_path`` its card's
+    ``ready_answer`` its card advertises ``website/v1``'s ``ready``, which answers it with ``ready_status``. With ``rpc_path`` its card's
     ``url`` names its data plane there, not at ``/agentenv``, and with ``state_path`` its ``params.state.path`` names
     where it serves its state, which shows changes since the initial state when ``changed``."""
     state = {"items": ["a"], "url": None, "at": None, "reset": False}
@@ -81,7 +81,7 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
         return stamp(JSONResponse({"ok": True}))
 
     async def ready(request: Request) -> Response:
-        return stamp(JSONResponse(ready_answer))
+        return stamp(JSONResponse(ready_answer, status_code=ready_status))
 
     async def items(request: Request) -> Response:
         return stamp(JSONResponse(state["items"]))
@@ -159,6 +159,16 @@ def test_a_handwritten_server_meeting_the_contract_passes() -> None:
 def test_health_reads_the_cards_ready_as_a_website_readiness(answer: dict, status: str, detail: str) -> None:
     results = {r.name: r for r in conformance.check("http://testserver", client=TestClient(_handwritten(ready_answer=answer)))}
     assert (results["health"].status, results["health"].detail) == (status, detail)
+
+
+@pytest.mark.parametrize(("answer", "detail"), [
+    ({"ready": True, "problems": []}, "website/v1 ready answered 503: no problem named"),
+    ({"ready": False, "problems": ["seeding"]}, "website/v1 ready answered 503: seeding"),
+])
+def test_ready_answering_an_http_error_fails_health_whatever_its_body_says(answer: dict, detail: str) -> None:
+    client = TestClient(_handwritten(ready_answer=answer, ready_status=503))
+    health = next(r for r in conformance.check("http://testserver", client=client) if r.name == "health")
+    assert (health.status, health.detail) == ("failed", detail)
 
 
 @pytest.mark.parametrize(("answer", "why"), [
