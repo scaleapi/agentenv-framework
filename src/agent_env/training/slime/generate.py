@@ -11,8 +11,8 @@ from typing import Any, ClassVar
 
 from slime.agent.adapters import OpenAIAdapter
 from slime.agent.aiohttp_threaded import run_app_in_thread
+from slime.utils.processing_utils import load_tokenizer
 from slime.utils.types import Sample
-from transformers import AutoTokenizer
 
 from agent_env.training._chat import keep_scored_groups, play
 
@@ -74,7 +74,7 @@ class _Adapter:
             raise ValueError("slime's OpenAI adapter reads the model's tool calls with --sglang-tool-call-parser; pass "
                              "the parser for the model's chat template, qwen25 for Qwen2.5 and Qwen3")
         self.adapter = OpenAIAdapter(
-            tokenizer=AutoTokenizer.from_pretrained(args.hf_checkpoint, trust_remote_code=True),
+            tokenizer=load_tokenizer(args.hf_checkpoint, trust_remote_code=True),
             sglang_url=f"http://{args.sglang_router_ip}:{args.sglang_router_port}",
             tool_parser=args.sglang_tool_call_parser, reasoning_parser=args.sglang_reasoning_parser,
             rollout_args=args)
