@@ -86,21 +86,24 @@ async def test_a_driver_given_a_control_token_passes_with_it_and_refuses_calls_w
 
 
 class StaleFrame(FixtureDriver):
-    """Its first capture after a click is from before the click, as when an app records a click before it repaints."""
+    """Its first ``stale`` captures after a click are from before the click, as when an app records a click before it
+    repaints."""
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, stale: int = 1, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.before_click = None
+        self.stale, self.left, self.before_click = stale, 0, None
 
     @click
     async def click_at(self, x, y, button, count, modifiers):
-        self.before_click = self.screen.image.copy()
+        self.before_click, self.left = self.screen.image.copy(), self.stale
         return await super().click_at(x, y, button, count, modifiers)
 
     @capture
     async def grab(self):
-        stale, self.before_click = self.before_click, None
-        return self.screen.image.copy() if stale is None else stale
+        if not self.left:
+            return self.screen.image.copy()
+        self.left -= 1
+        return self.before_click.copy()
 
 
 @pytest.mark.asyncio
@@ -109,6 +112,14 @@ class StaleFrame(FixtureDriver):
 async def test_a_driver_whose_default_space_is_norm_or_whose_first_frame_after_a_click_is_stale_passes_at_full(driver):
     report = await _probe(driver())
     assert report.passed, _failed(report)
+
+
+@pytest.mark.asyncio
+async def test_frames_that_never_show_a_click_the_fixture_saw_fail_p4_with_the_last_pixel(monkeypatch):
+    monkeypatch.setattr(checks, "SETTLE_S", 0.5)
+    report = await _probe(StaleFrame(stale=10**6))
+    failed = next(c for c in report.checks if c.name == "a click in frame space hits its cell, and a frame shows it")
+    assert (failed.status, failed.detail) == ("failed", "no frame within 0.5 s shows it: the last shows (255, 255, 255)")
 
 
 @pytest.mark.asyncio
