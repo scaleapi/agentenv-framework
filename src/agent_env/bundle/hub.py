@@ -25,6 +25,7 @@ from huggingface_hub import HfApi
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 from huggingface_hub.repocard import metadata_load
 
+from agent_env.config.paths import cache_root
 from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import HF_PREFIX, validate_local_id
@@ -121,13 +122,6 @@ def parse_reference(text: str) -> HubReference:
     return HubReference(f"{org}/{name}", unquote(revision) or None, "/".join(parts) or None)
 
 
-def cache_root() -> Path:
-    """Where downloaded commits are kept: ``$XDG_CACHE_HOME/agentenv/hf`` when that is an absolute path, else
-    ``~/.cache/agentenv/hf``."""
-    base = os.environ.get("XDG_CACHE_HOME", "")
-    return (Path(base) if os.path.isabs(base) else Path.home() / ".cache") / "agentenv" / "hf"
-
-
 def fetch_bundle(text: str, *, on_progress: Callable[[str], None] | None = None) -> HubBundle:
     """The bundle ``text`` names, downloaded unless this machine has it. ``on_progress`` is given the line that says
     which repo, commit and bundle it is, before anything is downloaded. Raises BundleError."""
@@ -150,7 +144,7 @@ def describe(source: Mapping[str, str]) -> str:
 def _fetch(reference: HubReference, api: HfApi, say: Callable[[str], None]) -> HubBundle:
     sha = reference.revision if reference.revision and _SHA.fullmatch(reference.revision) else api.repo_info(
         reference.repo, repo_type="dataset", revision=reference.revision).sha
-    folder = cache_root() / reference.repo / sha
+    folder = cache_root() / "hf" / reference.repo / sha
     with holding_locks([f"{SCHEME}{reference.repo}@{sha}"]):
         commit = _Commit.read(folder)
         if commit is None:

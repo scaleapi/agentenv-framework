@@ -18,6 +18,7 @@ from agent_env.bundle.hub import HubReference, fetch_bundle, parse_reference
 from agent_env.bundle.ledger import LEDGER_COLLECTION
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli import cli
+from agent_env.config.paths import cache_root
 from agent_env.config.runtime import Config
 from agent_env.openenv import build_app
 from agent_env.store import Filter
@@ -279,7 +280,7 @@ def test_a_bundle_without_a_bundle_toml_needs_the_plugins_its_card_names_before_
     refused = CliRunner().invoke(cli, ["run", "hf://me/ds"])
     calls = list(hub.calls)
     hub.layout({"bundles/hello/bundle.toml": "requires = []\n"})
-    shutil.rmtree(hub_module.cache_root())
+    shutil.rmtree(cache_root())
     declared = CliRunner().invoke(cli, ["run", "hf://me/ds"])
 
     assert refused.exit_code == 1
@@ -347,7 +348,7 @@ def test_the_cards_setup_command_is_shown_only_when_setting_up_could_fix_the_run
 
     mixed = CliRunner().invoke(cli, ["run", "hf://me/ds"])
     hub.layout({"bundles/hello/tasks/t.json": json.dumps([other])})
-    shutil.rmtree(hub_module.cache_root())
+    shutil.rmtree(cache_root())
     neither = CliRunner().invoke(cli, ["run", "hf://me/ds"])
 
     assert mixed.exit_code == neither.exit_code == 1
