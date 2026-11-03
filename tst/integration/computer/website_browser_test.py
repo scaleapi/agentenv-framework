@@ -74,6 +74,8 @@ for proc in glob.glob("/proc/[0-9]*"):
 argv = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\\0", b" ").decode().split()
 print(json.dumps({"pid": pid, "argv": argv, "listening": len(listening & sockets)}))
 """
+#: How long apart the key chords a test presses into Chromium are.
+KEY_GAP_S = 2.0
 # Each window the window manager manages, its class and its title.
 WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); do '
            'xprop -id "$w" WM_CLASS _NET_WM_NAME; done')
@@ -148,13 +150,29 @@ async def _window_titled(deployed, title: str) -> str:
 
 
 async def _keys(deployed, *chords: list[str]) -> None:
-    """Each chord pressed through the computer's own tools, as an agent presses it."""
+    """Each chord pressed through the computer's own tools, as an agent presses it, ``KEY_GAP_S`` apart, after a click
+    into the middle of Chromium's window, which a window opened with no input may need before it has the keyboard."""
+    x, y = await _window_center(deployed)
     async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
+            await session.call_tool("computer_screenshot", {})
+            clicked = await session.call_tool("computer_click", {"x": x, "y": y})
+            assert not clicked.isError, clicked
             for keys in chords:
                 pressed = await session.call_tool("computer_key", {"keys": keys})
                 assert not pressed.isError, pressed
+                await asyncio.sleep(KEY_GAP_S)
+
+
+async def _window_center(deployed) -> tuple[int, int]:
+    """The middle of Chromium's largest window, in screen pixels."""
+    tree = (await inside.run(deployed, ["xwininfo", "-root", "-tree"], timeout_s=30))["stdout"]
+    windows = [(int(w) * int(h), int(x) + int(w) // 2, int(y) + int(h) // 2) for w, h, x, y in re.findall(
+        r'\("[^"]*" "Chromium"\)\s+(\d+)x(\d+)\+-?\d+\+-?\d+\s+\+(-?\d+)\+(-?\d+)', tree)]
+    assert windows, tree
+    _, x, y = max(windows)
+    return x, y
 
 
 async def _browser_process(deployed, other_than: int | None = None) -> dict:
