@@ -37,6 +37,7 @@ from agentenv_protocol.website import clock as clock_module
 from agentenv_protocol.website.clock import parse_time
 
 RPC = "/agentenv"
+COOKIE = "agentenv_session_Shop"
 
 
 def rpc(client: TestClient, method: str, params: dict | None = None) -> dict:
@@ -238,6 +239,39 @@ def test_a_sites_data_is_read_through_the_data_plane_alone(client: TestClient) -
     assert "state" not in website_params and "state" not in website_params.get("methods", {})
 
 
+def test_each_sid_keeps_a_state_of_its_own_started_from_the_initial_state(client: TestClient,
+                                                                          shop: WebsiteEnvironment) -> None:
+    client.post("/api/orders", json={"sku": "mug"})
+    assert TestClient(shop.asgi).get("/go", params={"sid": "task-7"}).json() == {
+        "initial_state": SEED, "current_state": SEED, "state_diff": {}, "changed_sessions": []}
+    page = client.get("/", params={"sid": "task-7"})
+    assert page.headers["set-cookie"].startswith("agentenv_sid_Shop=task-7;")
+    assert "set-cookie" not in client.get("/", params={"sid": "task-7"}).headers
+    client.post("/api/orders", json={"sku": "pen"})
+    client.post("/api/orders", params={"sid": "other"}, json={"sku": "cup"})
+    added = {sid: [o.get("sku") for d in [client.get("/go", params={"sid": sid}).json()["state_diff"]]
+                   for o in d.get("orders", {}).get("added", [])] for sid in ("default", "task-7", "other")}
+    assert added == {"default": ["mug"], "task-7": ["pen"], "other": ["cup"]}
+    assert client.get("/go").json()["state_diff"]["orders"]["added"][0]["sku"] == "cup"
+    client.get("/", params={"sid": "default"})
+    assert client.get("/go").json()["state_diff"]["orders"]["added"][0]["sku"] == "mug"
+    assert rpc(client, "data/get")["parts"][0]["data"]["orders"][-1]["sku"] == "mug"
+    assert sorted(shop._store.sessions()) == ["other", "task-7"]
+    assert sorted(client.get("/go").json()["changed_sessions"]) == ["other", "task-7"]
+    rpc(client, "data/reset")
+    assert shop._store.sessions() == [] and client.get("/go", params={"sid": "task-7"}).json()["current_state"] == {}
+
+
+def test_a_session_id_is_sanitised_as_cua_gym_sites_do() -> None:
+    from agentenv_protocol.website.store import session_id
+
+    assert [session_id(v) for v in (None, "", "default", "../a b", "x" * 200)] == [None, None, None, "ab", "x" * 128]
+    store = Collections({"items": [{"id": 1}]})
+    store.session("s")["items"].append({"id": 2})
+    assert store.session("default") is store and store.export() == {"items": [{"id": 1}]}
+    assert store.session("s").diff() == {"items": {"added": [{"id": 2}], "removed": [], "changed": []}}
+
+
 def test_broad_routes_leave_the_built_in_ones_answering_their_paths(dist: Path) -> None:
     class Broad(site(dist)):
         @api.get("/{slug}")
@@ -291,7 +325,7 @@ def test_the_acting_user_is_signed_in_until_a_session_says_else(client: TestClie
     first = client.get("/api/session")
     assert first.json() == {"user": "alice", "role": "default", "signed_in": True}
     cookie = first.headers["set-cookie"]
-    assert cookie.startswith(f"{SESSION_COOKIE}=") and "domain" not in cookie.lower() and "httponly" in cookie.lower()
+    assert cookie.startswith(f"{COOKIE}=") and "domain" not in cookie.lower() and "httponly" in cookie.lower()
     client.post("/api/sign-in", json={"user": "bob"})
     assert client.get("/api/orders").json() == [{"id": 1, "user": "bob"}]
     assert client.get("/api/session").json()["user"] == "bob"
@@ -299,7 +333,7 @@ def test_the_acting_user_is_signed_in_until_a_session_says_else(client: TestClie
     assert client.get("/api/session").json()["user"] is None
     # The jar holds the site's signed-out cookie under its own domain; a second cookie of the name would race it.
     client.cookies.clear()
-    client.cookies.set(SESSION_COOKIE, "forged.signature")
+    client.cookies.set(COOKIE, "forged.signature")
     assert client.get("/api/session").json()["user"] == "alice"
 
 
@@ -317,11 +351,65 @@ def test_the_session_operation_mints_cookies_for_a_user_or_signed_out(shop: Webs
     minted = client.post("/agentenv/ext/website/session", json={"user": "bob"}).json()
     assert minted["user"] == "bob" and minted["expires_at"].endswith("Z")
     (cookie,) = minted["cookies"]
-    assert cookie["name"] == SESSION_COOKIE and "domain" not in cookie and cookie["path"] == "/"
-    browser = TestClient(shop.asgi, cookies={SESSION_COOKIE: cookie["value"]})
+    assert cookie["name"] == COOKIE and "domain" not in cookie and cookie["path"] == "/"
+    browser = TestClient(shop.asgi, cookies={COOKIE: cookie["value"]})
     assert browser.get("/api/session").json()["user"] == "bob"
     signed_out = client.post("/agentenv/ext/website/session", json={}).json()["cookies"][0]["value"]
-    assert TestClient(shop.asgi, cookies={SESSION_COOKIE: signed_out}).get("/api/session").json()["user"] is None
+    assert TestClient(shop.asgi, cookies={COOKIE: signed_out}).get("/api/session").json()["user"] is None
+
+
+def test_each_site_keeps_its_own_session_cookie_and_reads_the_legacy_one(dist: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT_NAME", "shop a/1")
+    first = site(dist)()
+    monkeypatch.setenv("ENVIRONMENT_NAME", "shop-b")
+    second = site(dist)()
+    for env in (first, second):
+        env.store.load(SEED)
+    named = "agentenv_session_shop_a_1~030f5785d67a"
+    assert (first.session_cookie, second.session_cookie) == (named, "agentenv_session_shop-b")
+    browser = TestClient(first.create_app())
+    browser.post("/api/sign-in", json={"user": "bob"})
+    other = TestClient(second.create_app(), cookies=browser.cookies)
+    other.post("/api/sign-in", json={"user": "alice"})
+    assert set(other.cookies.keys()) == {named, "agentenv_session_shop-b"}
+    assert TestClient(first.asgi, cookies=other.cookies).get("/api/session").json()["user"] == "bob"
+    card = browser.get("/.well-known/agent-env.json").json()
+    assert _extension(card, WEBSITE_EXTENSION_URI)["params"]["session_cookie"] == named
+    legacy = first._session_signer().encode("bob")[0]
+    assert TestClient(first.asgi, cookies={SESSION_COOKIE: legacy}).get("/api/orders").json() == [{"id": 1, "user": "bob"}]
+
+
+def test_no_site_s_session_choice_is_another_site_s_sign_in(dist: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT_NAME", "notes")
+    notes = site(dist)()
+    monkeypatch.setenv("ENVIRONMENT_NAME", "notes_sid")
+    notes_sid = site(dist)()
+    browser = TestClient(notes.create_app())
+    browser.post("/api/orders", params={"sid": "task-1"}, json={"sku": "mug"})
+    other = TestClient(notes_sid.create_app(), cookies=browser.cookies)
+    other.post("/api/sign-in", json={"user": "bob"})
+    back = TestClient(notes.asgi, cookies=other.cookies)
+    assert [o["sku"] for o in back.get("/go").json()["current_state"]["orders"]] == ["mug"]
+    assert TestClient(notes_sid.asgi, cookies=back.cookies).get("/api/session").json()["user"] == "bob"
+
+
+def test_sites_whose_names_spell_alike_keep_their_own_cookies(dist: Path, monkeypatch) -> None:
+    apps = []
+    for name in ("shop a/1", "shop_a_1"):
+        monkeypatch.setenv("ENVIRONMENT_NAME", name)
+        env = site(dist)()
+        env.store.load(SEED)
+        apps.append(env.create_app())
+    browser = TestClient(apps[0])
+    browser.post("/api/sign-in", json={"user": "bob"})
+    browser.get("/", params={"sid": "task-1"})
+    other = TestClient(apps[1], cookies=browser.cookies)
+    other.post("/api/sign-in", json={"user": "alice"})
+    other.get("/", params={"sid": "task-2"})
+    assert len(other.cookies.keys()) == 4
+    back = TestClient(apps[0], cookies=other.cookies)
+    assert back.get("/api/session").json()["user"] == "bob"
+    assert back.cookies.get("agentenv_sid_shop_a_1~030f5785d67a") == "task-1"
 
 
 def test_every_answer_carries_the_universe_time(client: TestClient) -> None:
@@ -335,13 +423,16 @@ def test_every_answer_carries_the_universe_time(client: TestClient) -> None:
 class _Clock:
     """A gateway-shaped /clock/time whose time a test sets."""
 
-    def __init__(self, virtual: str) -> None:
-        self.virtual = virtual
+    def __init__(self, virtual: str, rate: object = None) -> None:
+        self.virtual, self.rate = virtual, rate
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                body = json.dumps({"virtual_time": outer.virtual}).encode()
+                answer = {"virtual_time": outer.virtual}
+                if outer.rate is not None:
+                    answer["virtual_seconds_per_real_second"] = outer.rate
+                body = json.dumps(answer).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -544,8 +635,8 @@ async def _clock_rates(monkeypatch) -> None:
 
     real, virtual = [0.0], [datetime.datetime(2031, 1, 1, tzinfo=datetime.timezone.utc)]
 
-    async def read(url: str) -> datetime.datetime:
-        return virtual[0]
+    async def read(url: str) -> tuple[datetime.datetime, None]:
+        return virtual[0], None
 
     monkeypatch.setattr(clock_module.time, "monotonic", lambda: real[0])
     monkeypatch.setattr(clock_module, "_read", read)
@@ -573,6 +664,39 @@ async def _clock_rates(monkeypatch) -> None:
     assert clock._rate == 100.0 and clock.now() == virtual[0]
 
 
+def test_the_clock_extrapolates_at_the_rate_the_clock_answers_with(monkeypatch) -> None:
+    asyncio.run(_answered_rates(monkeypatch))
+
+
+async def _answered_rates(monkeypatch) -> None:
+    from agentenv_protocol.website import UniverseClock
+
+    gateway = _Clock("2031-01-01T00:00:00Z", rate=60)
+    try:
+        assert await clock_module._read(gateway.url) == (parse_time("2031-01-01T00:00:00Z"), 60.0)
+        for unusable in ("fast", True, -1, float("inf")):
+            gateway.rate = unusable
+            assert (await clock_module._read(gateway.url))[1] is None
+    finally:
+        gateway.close()
+    real, answers = [0.0], [(parse_time("2031-01-01T00:00:00Z"), 60.0)]
+
+    async def read(url: str) -> tuple[datetime.datetime, float | None]:
+        return answers[0]
+
+    monkeypatch.setattr(clock_module.time, "monotonic", lambda: real[0])
+    monkeypatch.setattr(clock_module, "_read", read)
+    clock = UniverseClock()
+    await clock.sync("http://gateway/clock/time")
+    real[0] += 0.5
+    assert clock._rate == 60.0 and clock.now() == answers[0][0] + datetime.timedelta(seconds=30)
+    real[0] += 0.5
+    answers[0] = (parse_time("2031-02-01T00:00:00Z"), 0.0)
+    await clock.refresh()
+    real[0] += 10
+    assert clock._rate == 0.0 and clock.now() == answers[0][0]
+
+
 def test_a_refresh_of_the_old_clock_never_overwrites_a_sync_to_a_new_one(monkeypatch) -> None:
     asyncio.run(_refresh_during_sync(monkeypatch))
 
@@ -583,12 +707,12 @@ async def _refresh_during_sync(monkeypatch) -> None:
     old, new = (datetime.datetime(year, 1, 1, tzinfo=datetime.timezone.utc) for year in (2031, 2040))
     release, held = asyncio.Event(), []
 
-    async def read(url: str) -> datetime.datetime:
+    async def read(url: str) -> tuple[datetime.datetime, None]:
         if url == "http://old/clock/time":
             if held:
                 await release.wait()
-            return old
-        return new
+            return old, None
+        return new, None
 
     monkeypatch.setattr(clock_module, "_read", read)
     monkeypatch.setattr(clock_module, "REFRESH_S", 0.0)

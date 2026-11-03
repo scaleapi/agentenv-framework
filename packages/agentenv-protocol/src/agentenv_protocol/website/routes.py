@@ -26,7 +26,7 @@ from ..agent_env_environment import _coerce_scalar, _maybe_await, _schema_for_an
 from ..tool_context import DEFAULT_ROLE, caller_from_request
 from ..types import RPC_PATH, WELL_KNOWN_PATH
 from .errors import ApiError, BadRequest, Forbidden
-from .session import SESSION_COOKIE, SessionSigner
+from .session import SessionSigner
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ class ApiContext:
     def apply(self, response: Response) -> Response:
         for value, expires in self._set_cookie:
             at = datetime.datetime.fromtimestamp(expires, datetime.timezone.utc)
-            response.set_cookie(SESSION_COOKIE, value, expires=at, path="/", httponly=True, samesite="lax")
+            response.set_cookie(self._signer.cookie_name, value, expires=at, path="/", httponly=True, samesite="lax")
         return response
 
 

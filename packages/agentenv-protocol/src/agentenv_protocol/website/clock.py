@@ -1,8 +1,9 @@
 """The universe's clock as a site reads it: ``clock/v1``'s ``sync_time`` hands the server the gateway's ``/clock/time``
 URL, as it hands it to MCP servers, and the site's time then follows that clock's ``{"virtual_time": <RFC3339>}``,
-read at most once a second and extrapolated between reads. The rate it extrapolates at is one two successive intervals
-between reads agreed on, so a clock set or advanced between two reads is taken for a jump, not a speed; until two agree
-it is real time's. An unsynced site reads wall time. Every answer of a site carries the time it answered at as ``X-Universe-Now``,
+read at most once a second and extrapolated between reads. The rate it extrapolates at is the one the clock answers
+with, ``virtual_seconds_per_real_second``, as the gateway's does; for a clock that answers none, it is one two
+successive intervals between reads agreed on, so a clock set or advanced between two reads is taken for a jump, not a
+speed, and until two agree it is real time's. An unsynced site reads wall time. Every answer of a site carries the time it answered at as ``X-Universe-Now``,
 RFC3339 in UTC. ``sync_time`` may also name the universe's time zone, an IANA name, which the clock keeps for the site
 to show local times in; the time itself stays UTC."""
 from __future__ import annotations
@@ -11,6 +12,7 @@ import asyncio
 import datetime
 import json
 import logging
+import math
 import time
 
 import httpx
@@ -60,8 +62,8 @@ class UniverseClock:
         can't be read, keeping the clock and zone it followed. It waits for a refresh reading the clock it followed,
         so that read never lands on the new clock."""
         async with self._reading():
-            virtual = await _read(url)
-            self.url, self._virtual, self._rate, self._measured = url, virtual, 1.0, None
+            virtual, rate = await _read(url)
+            self.url, self._virtual, self._rate, self._measured = url, virtual, 1.0 if rate is None else rate, None
             self.timezone = timezone
             self._read_at = self._tried_at = time.monotonic()
             return virtual
@@ -76,12 +78,14 @@ class UniverseClock:
                 return
             self._tried_at = started
             try:
-                virtual = await _read(self.url)
+                virtual, rate = await _read(self.url)
             except Exception as e:
                 logger.debug("reading the universe's clock at %s failed: %r", self.url, e)
                 return
             read_at = time.monotonic()
-            if self._virtual is not None and read_at > self._read_at:
+            if rate is not None:
+                self._rate = rate
+            elif self._virtual is not None and read_at > self._read_at:
                 measured = max(0.0, (virtual - self._virtual).total_seconds() / (read_at - self._read_at))
                 if self._measured is not None and abs(measured - self._measured) <= RATE_AGREEMENT * max(measured, self._measured, 1.0):
                     self._rate = measured
@@ -94,11 +98,15 @@ class UniverseClock:
         return self._lock
 
 
-async def _read(url: str) -> datetime.datetime:
+async def _read(url: str) -> tuple[datetime.datetime, float | None]:
+    """The clock's time, and the rate it says it runs at: None when it says none, or none that is a finite rate."""
     async with httpx.AsyncClient() as client:
         response = await client.get(url, timeout=READ_TIMEOUT_S)
         response.raise_for_status()
-        return parse_time(response.json()["virtual_time"])
+        body = response.json()
+        rate = body.get("virtual_seconds_per_real_second")
+        ok = isinstance(rate, (int, float)) and not isinstance(rate, bool) and math.isfinite(rate) and rate >= 0
+        return parse_time(body["virtual_time"]), float(rate) if ok else None
 
 
 def clock_patch_script(now: datetime.datetime) -> bytes:

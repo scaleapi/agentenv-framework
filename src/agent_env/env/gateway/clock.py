@@ -217,11 +217,13 @@ class Clock:
             return _advance(self._t0, elapsed - self._lived + self._ahead)
 
     def read(self) -> dict:
-        """The frozen consumer contract: {"virtual_time": "<RFC3339>"} — pure read, never advances."""
-        current = self.now()
-        if current is None:
-            raise ClockError("clock is not armed")
-        return {"virtual_time": _iso(current)}
+        """The frozen consumer contract: {"virtual_time": "<RFC3339>"} — pure read, never advances — plus the rate it
+        runs at, "virtual_seconds_per_real_second", so a reader extrapolates between reads without guessing it."""
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                raise ClockError("clock is not armed")
+            current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+            return {"virtual_time": _iso(current), "virtual_seconds_per_real_second": self._rate}
 
     def state(self) -> dict:
         with self._lock:

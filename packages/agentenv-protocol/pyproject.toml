@@ -49,6 +49,12 @@ computer = [
     "Pillow>=10.4",
     "uvicorn>=0.30",
 ]
+# A website whose state is an MCP server's database: @website(models=<SQLAlchemy models>) and self.db, on a
+# postgresql:// DATABASE_URL through psycopg 3, SQLAlchemy 2.1's driver for it.
+db = [
+    "sqlalchemy>=2.1",
+    "psycopg[binary]>=3.1",
+]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
     "python-multipart>=0.0.13",
@@ -59,6 +65,7 @@ dev = [
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path
     "Pillow>=10.4",  # the computer extra's frame crops and encodings
     "av>=17",  # the computer extra's encoder, and the tests' decoder
+    "sqlalchemy>=2.1",  # the db extra's models= site, tested on sqlite
 ]
 [project.urls]
 Homepage = "https://www.agentenvframework.com"

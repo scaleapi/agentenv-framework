@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -17,7 +18,7 @@ from agentenv_protocol.website import WebsiteEnvironment, api, website
 from agentenv_protocol.website import conformance
 from agentenv_protocol.website.clock import UNIVERSE_NOW_HEADER, iso
 
-CHECKS = ["card", "any_host", "health", "universe_now", "data_plane", "clock", "forwarded", "cookies"]
+CHECKS = ["card", "any_host", "health", "universe_now", "reserved_paths", "data_plane", "clock", "forwarded", "cookies"]
 
 
 def statuses(results: list[conformance.Result]) -> dict[str, str]:
@@ -36,6 +37,7 @@ def notes(tmp_path: Path) -> WebsiteEnvironment:
 
     env = Notes()
     env.store.load({"current_user": "ann", "notes": [{"id": 1, "text": "hello"}]})
+    env.store.mark_initial()
     return env
 
 
@@ -56,10 +58,12 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
                  clock_ops_first: tuple[str, ...] = (),
                  leak_redirect: bool = False, stamp_rpc: bool = True, reset_keeps: bool = False,
                  get_fails_after_reset: bool = False, rpc_reply: tuple[int, dict] | None = None,
-                 ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None) -> Starlette:
+                 ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None,
+                 state_path: str | None = None, changed: bool = False) -> Starlette:
     """A server written without the SDK: the contract by hand, optionally broken. Its state is its ``state.data``; with
     ``ready_answer`` its card advertises ``website/v1``'s ``ready``, which answers it with ``ready_status``. With ``rpc_path`` its card's
-    ``url`` names its data plane there, not at ``/agentenv``."""
+    ``url`` names its data plane there, not at ``/agentenv``, and with ``state_path`` its ``params.state.path`` names
+    where it serves its state, which shows changes since the initial state when ``changed``."""
     state = {"items": ["a"], "url": None, "at": None, "reset": False}
 
     def now() -> datetime.datetime:
@@ -94,6 +98,8 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
                                   "routes": [{"method": "GET", "path": "/items", "name": "items"}]}}]
         if ready_answer is not None:
             extensions[0]["params"]["methods"] = {"ready": {"method": "GET", "endpoint": "/ready"}}
+        if state_path is not None:
+            extensions[0]["params"]["state"] = {"path": state_path}
         if clock:
             extensions.append({"uri": "urn:agentenv:clock/v1", "params": {
                 "endpoint": "/agentenv/ext/sync_time", "methods": {
@@ -102,6 +108,9 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
         return stamp(JSONResponse({"name": "hand", **({"url": rpc_path} if rpc_path else {}),
                                    "capabilities": {"extensions": extensions,
                                                     "operations": ["data/reset", "data/add", "data/get"]}}))
+
+    async def site_state(request: Request) -> Response:
+        return JSONResponse({"state_diff": {"items": {"added": ["b"]}} if changed else {}})
 
     async def rpc(request: Request) -> Response:
         body = await request.json()
@@ -132,10 +141,15 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
         state["at"] = datetime.datetime.fromisoformat(virtual.replace("Z", "+00:00"))
         return stamp(JSONResponse({"gateway_virtual_time": virtual}))
 
+    async def unrouted(request: Request, exc: Exception) -> Response:
+        return stamp(JSONResponse({"error": "not found"}, status_code=getattr(exc, "status_code", 404)))
+
     app = Starlette(routes=[Route("/", page), Route("/healthz", health), Route("/ready", ready), Route("/items", items),
                             Route("/items/", items_slash),
                             Route("/.well-known/agent-env.json", card), Route(rpc_path or "/agentenv", rpc, methods=["POST"]),
-                            Route("/agentenv/ext/sync_time", sync_time, methods=["POST"])])
+                            Route("/agentenv/ext/sync_time", sync_time, methods=["POST"]),
+                            *([Route(state_path, site_state)] if state_path else [])],
+                    exception_handlers={404: unrouted, 405: unrouted})
     app.state.data = state
     return app
 
@@ -181,7 +195,7 @@ def test_an_answer_to_ready_that_isnt_a_website_readiness_fails_health_saying_wh
 def test_a_server_breaking_the_contract_fails_those_checks() -> None:
     results = statuses(conformance.check("http://testserver",
                                          client=TestClient(_handwritten(leak_host=True, domain_cookie=True, clock=False))))
-    assert results["forwarded"] == results["cookies"] == results["clock"] == "failed"
+    assert results["forwarded"] == results["cookies"] == results["clock"] == "warning"
     assert results["card"] == results["health"] == results["data_plane"] == "passed"
 
 
@@ -190,13 +204,13 @@ def test_the_forwarded_check_follows_no_redirect_and_reads_its_location(sdk_site
     assert forwarded.status == "passed" and "/api/notes/" in forwarded.detail
     leaked = {r.name: r for r in conformance.check("http://testserver",
                                                     client=TestClient(_handwritten(leak_redirect=True)))}["forwarded"]
-    assert leaked.status == "failed" and "Location of /items/" in leaked.detail
+    assert leaked.status == "warning" and "Location of /items/" in leaked.detail
 
 
 def test_universe_now_is_checked_on_the_answers_of_every_check() -> None:
     result = {r.name: r for r in conformance.check("http://testserver",
                                                    client=TestClient(_handwritten(stamp_rpc=False)))}["universe_now"]
-    assert result.status == "failed" and "/agentenv" in result.detail
+    assert result.status == "warning" and "/agentenv" in result.detail
 
 
 def test_a_reset_that_clears_nothing_fails_the_data_plane_and_leaves_the_data() -> None:
@@ -220,14 +234,28 @@ def test_a_data_request_without_a_2xx_json_rpc_result_fails_the_data_plane(reply
     assert result.status == "failed" and "no JSON-RPC result" in result.detail
 
 
-def test_an_sdk_sites_data_round_trips_and_is_left_as_the_check_found_it_changed_or_not(
+def test_an_sdk_site_keeps_its_initial_state_and_one_changed_since_skips_the_round_trip(
         notes: WebsiteEnvironment, sdk_site: TestClient) -> None:
-    for _ in range(2):
-        before = notes.store.export()
-        result = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"]
-        assert result.status == "passed", result
-        assert notes.store.export() == before
-        notes.store.insert("notes", {"text": "new"})
+    before = sdk_site.get("/go").json()
+    conformance.check("http://testserver", client=sdk_site)
+    assert sdk_site.get("/go").json() == before
+    notes.store.insert("notes", {"text": "new"})
+    changed = sdk_site.get("/go").json()
+    assert changed["state_diff"]
+    result = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"]
+    assert result.status == "skipped" and "website/v1 state shows changes" in result.detail
+    assert sdk_site.get("/go").json() == changed
+
+
+def test_a_named_session_with_changes_skips_the_round_trip_and_keeps_its_state(
+        notes: WebsiteEnvironment, sdk_site: TestClient) -> None:
+    sdk_site.get("/api/notes", params={"sid": "task-1"})
+    assert {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"].status == "passed"
+    notes.store.session("task-2")["notes"].append({"id": 2, "text": "draft"})
+    result = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"]
+    assert result.status == "skipped" and "named sessions" in result.detail
+    assert sdk_site.get("/go", params={"sid": "task-2"}).json()["state_diff"]["notes"]["added"] == [
+        {"id": 2, "text": "draft"}]
 
 
 def test_the_data_plane_is_reached_at_the_cards_url() -> None:
@@ -243,22 +271,82 @@ def test_the_clock_check_calls_sync_time_whichever_operation_the_card_lists_firs
     assert results["clock"] == "passed", results
 
 
-def test_a_server_with_no_card_health_or_header_fails_them() -> None:
+@pytest.mark.parametrize(("changed", "status"), [(True, "skipped"), (False, "passed")])
+def test_a_card_without_state_is_read_at_the_state_path_it_names(changed: bool, status: str) -> None:
+    app = _handwritten(state_path="/grading/state", changed=changed)
+    result = {r.name: r for r in conformance.check("http://testserver", client=TestClient(app))}["data_plane"]
+    assert result.status == status, result
+    assert ("/grading/state shows changes" in result.detail) is changed
+
+
+def test_a_server_with_no_card_health_or_header_fails_the_contract_and_warns_of_the_rest() -> None:
     bare = Starlette(routes=[Route("/", lambda request: JSONResponse({"not": "html"}))])
-    results = statuses(conformance.check("http://testserver", client=TestClient(bare)))
-    assert results["card"] == results["any_host"] == results["health"] == results["universe_now"] == "failed"
-    assert results["data_plane"] == results["clock"] == "failed"
-    assert results["cookies"] == "skipped"
+    results = conformance.check("http://testserver", client=TestClient(bare))
+    assert statuses(results) == {"card": "warning", "any_host": "failed", "health": "failed", "universe_now": "warning",
+                                 "reserved_paths": "passed", "data_plane": "skipped", "clock": "warning",
+                                 "forwarded": "passed", "cookies": "skipped"}
+    assert [r.name for r in results if r.required] == ["any_host", "health", "reserved_paths", "data_plane"]
+
+
+def test_a_bare_server_meeting_only_the_contract_passes_with_warnings() -> None:
+    async def page(request: Request) -> Response:
+        return HTMLResponse("<html>hi</html>")
+
+    bare = Starlette(routes=[Route("/", page), Route("/api/health", lambda request: JSONResponse({"ok": True}))])
+    results = conformance.check("http://testserver", client=TestClient(bare))
+    assert not any(r.fails() for r in results) and any(r.fails(strict=True) for r in results)
+    assert {r.name for r in results if r.status == "warning"} == {"card", "universe_now", "clock"}
+
+
+def test_a_spa_fallback_that_serves_the_reserved_paths_fails() -> None:
+    async def page(request: Request) -> Response:
+        return HTMLResponse("<html>app</html>")
+
+    spa = Starlette(routes=[Route("/{path:path}", page)])
+    reserved = {r.name: r for r in conformance.check("http://testserver", client=TestClient(spa))}["reserved_paths"]
+    assert reserved.status == "failed" and reserved.detail.startswith("/agentenv answered a page")
+
+
+@pytest.mark.parametrize("exact", ["/agentenv", "/.well-known/agent-env.json"])
+def test_a_page_at_a_reserved_path_itself_fails(exact: str) -> None:
+    async def page(request: Request) -> Response:
+        return HTMLResponse("<html>app</html>")
+
+    server = Starlette(routes=[Route("/", page), Route(exact, page)])
+    reserved = {r.name: r for r in conformance.check("http://testserver", client=TestClient(server))}["reserved_paths"]
+    assert reserved.status == "failed" and reserved.detail.startswith(f"{exact} answered a page")
 
 
 def test_main_prints_each_check_and_exits_by_outcome(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(conformance, "check", lambda url, **options: [conformance.Result("card", "passed"),
-                                                                       conformance.Result("clock", "failed", "late")])
-    assert conformance.main(["http://site"]) == 1
+    results = [conformance.Result("health", "passed"), conformance.Result("clock", "warning", "late", required=False)]
+    monkeypatch.setattr(conformance, "check", lambda url, **options: results)
+    assert conformance.main(["http://site"]) == 0
     printed = capsys.readouterr().out
-    assert "PASS card" in printed and "FAIL clock: late" in printed
+    assert "PASS health (required)" in printed and "WARN clock (recommended): late" in printed
+    assert "1 passed, 0 failed, 1 warning(s), 0 skipped" in printed
+    assert conformance.main(["http://site", "--strict"]) == 1
+    results.append(conformance.Result("any_host", "failed", "json"))
+    assert conformance.main(["http://site"]) == 1
+    assert "FAIL any_host (required): json" in capsys.readouterr().out
 
 
 def test_main_exits_2_when_the_server_cannot_be_reached(capsys) -> None:
     assert conformance.main(["http://127.0.0.1:9", "--timeout", "2"]) == 2
     assert "couldn't reach" in capsys.readouterr().err
+
+
+def test_the_cookie_check_holds_the_session_path_to_the_cookie_the_card_names(sdk_site: TestClient) -> None:
+    card = sdk_site.get("/.well-known/agent-env.json").json()
+    for extension in card["capabilities"]["extensions"]:
+        if extension["uri"] == "urn:agentenv:website/v1":
+            extension["params"]["session_cookie"] = "agentenv_session_other"
+    real = sdk_site.get
+
+    def get(url, **kwargs):
+        if url.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=card, request=httpx.Request("GET", url))
+        return real(url, **kwargs)
+
+    sdk_site.get = get
+    cookies = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["cookies"]
+    assert cookies.status == "warning" and "not the card's agentenv_session_other" in cookies.detail

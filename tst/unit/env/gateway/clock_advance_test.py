@@ -165,3 +165,22 @@ def test_route_refuses_a_backwards_advance(gateway):
     gateway._clock.set_time("2026-01-04T08:00:00Z", rate=0)
     resp = _put(gateway, "/clock/advance", {"virtual_time": T0})
     assert resp.status_code == 400 and "only moves forward" in resp.json()["error"]
+
+
+def _get(gw: Gateway, path: str) -> httpx.Response:
+    async def _do() -> httpx.Response:
+        transport = httpx.ASGITransport(app=gw._mcp.streamable_http_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            return await client.get(path)
+
+    return asyncio.run(_do())
+
+
+def test_clock_time_answers_the_rate_beside_the_time(gateway):
+    assert _get(gateway, "/clock/time").status_code == 404
+    gateway._clock.set_time(T0, rate=60)
+    gateway._clock._now.tick(2)
+    assert _get(gateway, "/clock/time").json() == {"virtual_time": "2026-01-01T00:02:00Z",
+                                                   "virtual_seconds_per_real_second": 60.0}
+    gateway._clock.advance("2026-01-02T00:00:00Z")
+    assert _get(gateway, "/clock/time").json()["virtual_seconds_per_real_second"] == 60.0

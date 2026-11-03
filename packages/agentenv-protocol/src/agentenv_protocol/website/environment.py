@@ -2,12 +2,23 @@
 plain HTTP on ``PORT`` for any host name: its ``@api`` routes, its static folder at ``/`` with ``index.html`` for the
 pages a single-page app routes itself, its health path, and the data plane and card the base class serves. Every answer
 carries ``X-Universe-Now``, the universe's time, which ``self.now()`` reads and ``clock/v1``'s ``sync_time`` ties to
-the gateway's virtual clock. Without data hooks of its own a site keeps its data in ``self.store``, which the data
-plane loads, exports and resets: ``data/get`` is how agentenv reads what a task left a site with.
+the gateway's virtual clock. Without data hooks of its own a site keeps its state in ``self.store``, or with
+``@website(models=...)`` in an MCP server's database, which ``self.db`` opens sessions of (``website.database``).
 
-One route is built in, replaced by a site's own ``@api`` route at its very path and answering before one whose path
-parameters would also match it: ``/api/session``, which a frontend calls to learn who is signed in, signing the acting
-user in when nobody is (GET), or to sign out (DELETE)."""
+A store-backed site keeps a state per session, the CUA-Gym convention the website state verifier reads: a request's
+session is its ``?sid=``, else the one its browser last named, which the site keeps in the ``agentenv_sid_<name>``
+cookie, else the default one. ``self.store`` is the request's session's store, each session started as a copy of the
+initial state; the default session, ``sid=default``, is the state the data plane loads, exports and resets, and the
+one a browser that names no session uses, so a site browsed without ``sid`` works as it did before sessions.
+
+Two routes are built in, each replaced by a site's own ``@api`` route at its very path and answering before one whose
+path parameters would also match it: ``/api/session``, which a frontend calls to learn who is signed in, signing the
+acting user in when nobody is (GET), or to sign out (DELETE); and, for a store-backed site, ``/go?sid=``, that
+session's ``{initial_state, current_state, state_diff}`` at the path ``website/v1``'s ``params.state.path`` names,
+which a reader of a card without ``state`` falls back to, with the site's ``changed_sessions``, the named sessions whose
+state changed, which data/reset would drop; a session no request has used yet answers the initial state, unchanged. A
+store-backed site answers ``website/v1``'s ``state``, of the session its ``sid`` names, with the same ``WebsiteState``,
+among agentenv's own routes, which is how the website state verifier reads it."""
 from __future__ import annotations
 
 import inspect
@@ -27,6 +38,7 @@ from starlette._utils import get_route_path
 from starlette.routing import Route
 
 from ..agent_env_environment import (
+    _CARD_CONFIG_ATTR,
     _OP_ATTR,
     AgentEnvEnvironment,
     AgentEnvStarletteApplication,
@@ -37,17 +49,20 @@ from ..agent_env_environment import (
     get_data,
     reset_data,
 )
-from ..types import DataPart
+from ..types import DataPart, EnvironmentExtension
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, UniverseClock, clock_patch_script, iso
+from .database import ModelState, Sessions, Tables, is_hooks, metadata_of
 from .errors import NotFound
 from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 from .routes import (ApiContext, ApiRoute, endpoint, error_response, forwarded_prefix, openapi, openapi_path, request_role,
                      reserved_path, routes_of)
-from .session import SESSION_COOKIE, SessionSigner, expires_at
-from .store import Collections
+from .session import SessionSigner, expires_at, session_cookie_name, sid_cookie_name
+from .state import WEBSITE_STATE_OP, WebsiteState
+from .store import DEFAULT_SID, Collections, active_sid, session_id
 
 DEFAULT_HEALTH_PATH = "/api/health"
 SESSION_PATH = "/api/session"
+STATE_PATH = "/go"
 _WEBSITE_ATTR = "_aee_website"
 _READY_ATTR = "_aee_website_ready"
 _DEFAULT_HOOK_ATTR = "_aee_default_store_hook"
@@ -57,27 +72,36 @@ _HEAD = re.compile(rb"<head[^>]*>", re.IGNORECASE)
 
 class WebsiteDeclaration(NamedTuple):
     """What ``@website`` declares: the site's domains, its static folder and seed data file (relative to the class's
-    file), its health path, and whether its HTML pages read the universe's time."""
+    file), its health path, whether its HTML pages read the universe's time, and the models whose database keeps its
+    state instead of the default store."""
 
     domains: tuple[str, ...] = ()
     static: Optional[str] = None
     health: str = DEFAULT_HEALTH_PATH
     clock_patch: bool = False
     data: Optional[str] = None
+    models: Any = None
 
 
 def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = (), static: str | None = None,
-            health: str = DEFAULT_HEALTH_PATH, clock_patch: bool = False, data: str | None = None) -> Any:
-    """Declare a WebsiteEnvironment's site. ``data`` names a JSON file the default store starts with."""
+            health: str = DEFAULT_HEALTH_PATH, clock_patch: bool = False, data: str | None = None,
+            models: Any = None) -> Any:
+    """Declare a WebsiteEnvironment's site. ``data`` names a JSON file the default store starts with; ``models``
+    keeps the site's state in a database instead, an MCP server's (see ``website.database``), and the site's
+    data plane and ``/go`` are that database's."""
     if _cls is not None:
         raise TypeError("use @website(...) with parentheses")
     if not health.startswith("/") or health == "/" or reserved_path(health):
         raise ValueError(f"health is a path of its own under '/', not {health!r}")
+    if models is not None and data is not None:
+        raise ValueError("data= seeds the default store; a site of models= is seeded through data/add")
+    if models is not None and not is_hooks(models):
+        metadata_of(models)
 
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, WebsiteEnvironment)):
             raise TypeError(f"@website declares a WebsiteEnvironment subclass, not {cls!r}")
-        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, health, clock_patch, data))
+        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, health, clock_patch, data, models))
         _check_health(cls)
         return cls
 
@@ -98,6 +122,17 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     app: ClassVar[Any] = None
     asgi: Any = None
+    db: Any = None
+    _store: Collections
+
+    @property
+    def store(self) -> Collections:
+        """The state store of the request's session: the default session's outside a request."""
+        return self._store.session(active_sid.get())
+
+    @store.setter
+    def store(self, value: Collections) -> None:
+        self._store = value
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -113,8 +148,14 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         self.store = Collections()
         if declaration.data is not None:
             self.store.load(json.loads(self._site_path(declaration.data).read_text(encoding="utf-8")))
+            self.store.mark_initial()
         self.clock = UniverseClock()
-        self._signer = SessionSigner()
+        self._signer = SessionSigner(cookie_name=session_cookie_name(self.environment_name()))
+        models = declaration.models
+        self._tables = (None if models is None or is_hooks(models)
+                        else Tables(metadata_of(models), lambda: self.database_url))
+        self._models = None if models is None else ModelState(models if self._tables is None else self._tables)
+        self.db = Sessions(self._tables) if self._tables is not None else None
 
     @classmethod
     def declaration(cls) -> WebsiteDeclaration:
@@ -123,6 +164,17 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     @classmethod
     def routes(cls) -> list[ApiRoute]:
         return routes_of(cls)
+
+    def environment_name(self) -> str:
+        """The site's name, as its card names it: ``ENVIRONMENT_NAME``, else the card's declared name, else the
+        class's."""
+        declared = (getattr(self, _CARD_CONFIG_ATTR, None) or {}).get("name")
+        return os.environ.get("ENVIRONMENT_NAME") or declared or type(self).__name__
+
+    @property
+    def session_cookie(self) -> str:
+        """The name of the site's session cookie, ``agentenv_session_<environment_name>``."""
+        return self._session_signer().cookie_name
 
     @property
     def database_url(self) -> str | None:
@@ -145,12 +197,15 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         return self._clock().timezone
 
     def acting_user(self) -> str | None:
-        """Who a browser with no session is signed in as: the store's ``current_user`` unless a site says else."""
+        """Who a browser with no session is signed in as: the store's ``current_user``, or the one a models site's data
+        named, unless a site says else."""
+        if getattr(self, "_models", None) is not None:
+            return self._models.current_user
         return self.store.current_user if hasattr(self, "store") else None
 
     def context(self, request: Request) -> ApiContext:
         """The ``ApiContext`` of ``request``, for a mounted ``app``'s routes as for ``@api`` ones."""
-        session = self._session_signer().decode(request.cookies.get(SESSION_COOKIE))
+        session = self._session_signer().read(request.cookies)
         user = session["user"] if session is not None else self.acting_user()
         return ApiContext(request, user, request_role(request), session, self._session_signer())
 
@@ -162,11 +217,14 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         api_routes = self.routes()
         taken = {openapi_path(r.path) for r in api_routes}
         root = self._site_path(declaration.static) if declaration.static is not None else None
-        asgi = Starlette(middleware=[Middleware(_Forwarded), Middleware(_Universe, env=self)])
+        asgi = Starlette(middleware=[Middleware(_Forwarded), Middleware(_Universe, env=self),
+                                     Middleware(_Session, cookie=sid_cookie_name(self.environment_name()))])
         AgentEnvStarletteApplication(self._build_card(), self).add_routes_to_app(asgi)
         asgi.router.routes.append(Route(declaration.health, self._health, methods=["GET"]))
         if SESSION_PATH not in taken:
             asgi.router.routes.append(Route(SESSION_PATH, self._session, methods=["GET", "DELETE"]))
+        if self._serves_state_path():
+            asgi.router.routes.append(Route(STATE_PATH, self._state, methods=["GET"]))
         asgi.router.routes.extend(Route(r.path, _unreserved(endpoint(getattr(self, r.fn.__name__), r, self.context)),
                                         methods=[r.method]) for r in api_routes)
         asgi.router.default = _Fallback(root, type(self).app)
@@ -190,9 +248,17 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         if uri == WEBSITE_EXTENSION_URI:
             declaration = self.declaration()
             return {"domains": list(declaration.domains), "health": declaration.health,
-                    "routes": [r.advertised() for r in self.routes()], "session_cookie": SESSION_COOKIE,
-                    "session_path": SESSION_PATH}
+                    "routes": [r.advertised() for r in self.routes()], "session_cookie": self.session_cookie,
+                    "session_path": SESSION_PATH, **({"state": {"path": STATE_PATH}} if self._serves_state_path() else {})}
         return super().extension_params(uri)
+
+    def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
+        """The extensions the base class serves, ``website/v1``'s ``state`` only for a store-backed site: one with data
+        hooks of its own keeps its state where ``self.store`` can't see it."""
+        served = super().served_extensions(extensions)
+        if self.uses_store:
+            return served
+        return [_without_method(e, WEBSITE_STATE_OP) if e.uri == WEBSITE_EXTENSION_URI else e for e in served]
 
     @extension(CLOCK_EXTENSION_URI, description="Sync this site to the gateway's virtual clock.")
     async def sync_time(self, env_get_time_url: str, timezone: Optional[str] = None) -> dict:
@@ -204,8 +270,9 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @extension(WEBSITE_EXTENSION_URI, op="openapi", method="GET", description=(
         "A site's server: domains, its health path and its @api routes by name; openapi returns the OpenAPI document "
-        "of its routes, ready whether the site is usable now and why not, and session the cookies a browser adds to "
-        "start signed in as user, or signed out without one."))
+        "of its routes, ready whether the site is usable now and why not, state the task state it is in (its "
+        "initial and current state and their diff), and session the cookies a browser adds to start signed in as user, "
+        "or signed out without one."))
     async def _website_openapi(self) -> dict:
         name = self._application.environment_card.name if self._application is not None else type(self).__name__
         return openapi(name, self.routes())
@@ -217,6 +284,16 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         problems = await self._not_ready()
         return WebsiteReadiness(ready=not problems, problems=problems).model_dump()
 
+    @extension(WEBSITE_EXTENSION_URI, op=WEBSITE_STATE_OP, method="GET")
+    async def _website_state(self, sid: Optional[str] = None) -> dict:
+        """The site's task state, a ``WebsiteState``: its state when the task started, now, and what changed between
+        them, of session ``sid``'s store (the default session's without one), with the site's ``changed_sessions`` as
+        ``/go`` names them, or of a models site's database, which keeps one."""
+        if self._models is not None:
+            return WebsiteState.model_validate(await self._models.state()).model_dump()
+        return {**WebsiteState.model_validate(self._store.session(sid).state()).model_dump(),
+                "changed_sessions": self._store.changed_sessions()}
+
     @extension(WEBSITE_EXTENSION_URI, op="session")
     async def _website_session(self, user: Optional[str] = None) -> dict:
         cookie = self._session_signer().cookie(user)
@@ -224,15 +301,20 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @reset_data
     async def _store_reset(self) -> None:
-        self.store.reset()
+        if self._models is not None:
+            return await self._models.reset()
+        self._store.reset()
 
     @add_data
     async def _store_add(self, parts: list) -> None:
-        self.store.load_parts(parts)
+        if self._models is not None:
+            return await self._models.load_parts(parts)
+        self._store.load_parts(parts)
+        self._store.mark_initial()
 
     @get_data
     async def _store_get(self) -> list:
-        return [DataPart(data=self.store.export())]
+        return [DataPart(data=await self._models.export() if self._models is not None else self._store.export())]
 
     async def _not_ready(self) -> list[str]:
         return [check.__name__ for check, _marker in _marked_members(self, _READY_ATTR) if not await _ready(check)]
@@ -252,6 +334,15 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         return context.apply(JSONResponse({"user": context.user, "role": context.role,
                                            "signed_in": context.user is not None}))
 
+    def _serves_state_path(self) -> bool:
+        """Whether the site serves its state at ``STATE_PATH``: it is store-backed and no ``@api`` route takes the path."""
+        return self.uses_store and STATE_PATH not in {openapi_path(r.path) for r in self.routes()}
+
+    async def _state(self, request: Request) -> Response:
+        if self._models is not None:
+            return JSONResponse(await self._models.state())
+        return JSONResponse({**self.store.state(), "changed_sessions": self._store.changed_sessions()})
+
     def _clock(self) -> UniverseClock:
         if not hasattr(self, "clock"):
             raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")
@@ -270,6 +361,12 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
 for _hook in _DEFAULT_HOOKS.values():
     setattr(getattr(WebsiteEnvironment, _hook), _DEFAULT_HOOK_ATTR, True)
+
+
+def _without_method(extension: EnvironmentExtension, method: str) -> EnvironmentExtension:
+    params = dict(extension.params or {})
+    params["methods"] = {name: entry for name, entry in (params.get("methods") or {}).items() if name != method}
+    return extension.model_copy(update={"params": params})
 
 
 async def _ready(check: Any) -> bool:
@@ -317,6 +414,34 @@ class _Forwarded:
 
 def _first(value: bytes | None) -> str:
     return value.decode("latin-1").split(",")[0].strip() if value else ""
+
+
+class _Session:
+    """Runs the request in its session (``active_sid``): its ``sid`` query parameter's, else its ``cookie``'s; an
+    answer to a request naming a session other than its cookie's sets the cookie, so a page opened at ``?sid=`` keeps
+    its session for the requests it makes after."""
+
+    def __init__(self, app: Any, cookie: str) -> None:
+        self.app, self.cookie = app, cookie
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        request = Request(scope)
+        named, kept = request.query_params.get("sid"), request.cookies.get(self.cookie)
+        sid = session_id(named if named is not None else kept)
+
+        async def remembered(message: dict) -> None:
+            if message["type"] == "http.response.start" and named is not None and session_id(kept) != sid:
+                MutableHeaders(scope=message).append(
+                    "set-cookie", f"{self.cookie}={sid or DEFAULT_SID}; Path=/; HttpOnly; SameSite=Lax")
+            await send(message)
+
+        token = active_sid.set(sid)
+        try:
+            await self.app(scope, receive, remembered)
+        finally:
+            active_sid.reset(token)
 
 
 class _Universe:

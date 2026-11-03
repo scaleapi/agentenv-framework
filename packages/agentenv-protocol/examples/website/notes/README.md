@@ -24,12 +24,14 @@ them. The page shows the universe's time.
   on only beside a role it verified with the same key, so a page cannot claim `admin` through it. Any other deploy sets
   no key, and its gateway passes on whatever role a browser sends; with no `WEBSITE_ROLE_KEY` set, every caller is
   `default` and the route is closed.
-- **Users.** `ApiContext.user` is the user in the signed session cookie. With no cookie, it is the acting user (the
+- **Users.** `ApiContext.user` is the user in the signed session cookie, `agentenv_session_notes` (the site's own, so
+  it doesn't collide with another site's under the same gateway host; the card names it). With no cookie, it is the acting user (the
   store's `current_user`), and `GET /api/session` signs that user in. `POST /api/sign-in` switches to another seeded
   user. A user's notes are invisible to every other user, and another user's note answers 404.
 - **State.** The site writes no data hooks, so it uses the default store. `data/add` loads the seed (as a data part, or
-  as a file part by bytes or `file://`), `data/get` exports it, and `data/reset` empties it. `data/get` is how
-  agentenv reads what a task left the site with.
+  as a file part by bytes or `file://`), `data/get` exports it, `data/reset` empties it, and `/go` returns
+  `{initial_state, current_state, state_diff}`. A page opened at `?sid=<session>` keeps a state of its own, started
+  from the seed, which `/go?sid=<session>` reports; without `sid` it is the default session, the data plane's.
 - **Time.** Notes are stamped with `self.now()`, which follows the gateway's clock once `clock/v1`'s `sync_time` names
   it. The frontend reads `X-Universe-Now` from every API response into `universeNow()` and shows it in the header.
   It uses this helper rather than `clock_patch=True`, so the page works the same against a server written without the
@@ -66,11 +68,13 @@ The build context is the repo root, because the image installs the protocol pack
 ```bash
 docker build -f packages/agentenv-protocol/examples/website/notes/Dockerfile -t notes-site .
 docker run -d --name notes-site -p 18080:8000 notes-site
-python -m agentenv_protocol.website.conformance http://localhost:18080 --clock-host host.docker.internal
+python -m agentenv_protocol.website.conformance http://localhost:18080 --clock-host host.docker.internal --strict
 curl -s http://localhost:18080/api/notes
 ```
 
-Use `--clock-host` so the container can reach the checker's clock. The clock check leaves the server following a
+Use `--clock-host` so the container can reach the checker's clock. `--strict` fails on a recommended check's warning
+too (the card, `X-Universe-Now`, the clock, forwarded headers, cookies); without it only the contract's required checks
+fail the run, and Notes passes every check either way. The clock check leaves the server following a
 clock that is gone once the check ends: later timestamps start from 2031 until the server is synced again, so restart
 the container before using it.
 

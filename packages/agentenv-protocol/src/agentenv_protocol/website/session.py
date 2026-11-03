@@ -1,6 +1,8 @@
 """A site's signed session cookie: who the browser is signed in as, or that it signed out, signed with HMAC-SHA256
 under ``WEBSITE_SESSION_SECRET``, or a secret of the process's own when that isn't set. The cookie names no domain,
-so it holds under whatever host the site is reached at."""
+so it holds under whatever host the site is reached at, and its name is the site's own, ``agentenv_session_<name>``, so
+two sites a browser reaches under one gateway host (``/website/a/``, ``/website/b/``) keep a session each; a site still
+reads the shared ``agentenv_session`` of older sites, for one release."""
 from __future__ import annotations
 
 import base64
@@ -10,19 +12,46 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 
 SESSION_COOKIE = "agentenv_session"
+SID_COOKIE = "agentenv_sid"
 SECRET_ENV = "WEBSITE_SESSION_SECRET"
 SESSION_TTL_S = 7 * 24 * 3600
 SECRET_BYTES = 32
+_NOT_TOKEN = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _cookie_suffix(environment_name: str) -> str:
+    """The part of a site's cookie names that is its own: the name itself when a cookie name can hold each of its
+    characters, else the name with each such character made ``_`` and ``~`` and a hash of the whole name appended. No
+    name kept as itself holds a ``~``, so two distinct names never make one suffix."""
+    if not _NOT_TOKEN.search(environment_name):
+        return environment_name
+    digest = hashlib.sha256(environment_name.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"{_NOT_TOKEN.sub('_', environment_name)}~{digest}"
+
+
+def session_cookie_name(environment_name: str | None) -> str:
+    """The session cookie of the site named ``environment_name``: ``agentenv_session_<name>``, a name a cookie name
+    can't hold spelled as ``_cookie_suffix`` spells it; the shared ``agentenv_session`` for a site with no name."""
+    return f"{SESSION_COOKIE}_{_cookie_suffix(environment_name)}" if environment_name else SESSION_COOKIE
+
+
+def sid_cookie_name(environment_name: str | None) -> str:
+    """The cookie in which the site named ``environment_name`` keeps the store session its browser last named:
+    ``agentenv_sid_<name>``, made as ``session_cookie_name`` makes its name, ``agentenv_sid`` for a site with no name.
+    Its prefix is no session cookie's, so no site's store-selection cookie is another site's session cookie."""
+    return f"{SID_COOKIE}_{_cookie_suffix(environment_name)}" if environment_name else SID_COOKIE
 
 
 class SessionSigner:
-    def __init__(self, secret: str | bytes | None = None) -> None:
+    def __init__(self, secret: str | bytes | None = None, cookie_name: str = SESSION_COOKIE) -> None:
         secret = secret if secret is not None else os.environ.get(SECRET_ENV)
         self._key = (secret.encode() if isinstance(secret, str) else secret) or secrets.token_bytes(SECRET_BYTES)
+        self.cookie_name = cookie_name
 
     def encode(self, user: str | None, ttl_s: int = SESSION_TTL_S) -> tuple[str, int]:
         """The cookie value for ``user`` signed in, or signed out when None, and when it expires, in epoch
@@ -45,11 +74,18 @@ class SessionSigner:
             return None
         return {"user": data.get("u")}
 
+    def read(self, cookies: dict) -> dict | None:
+        """The session of a request's ``cookies``: its own cookie's, else the shared legacy cookie's."""
+        session = self.decode(cookies.get(self.cookie_name))
+        if session is None and self.cookie_name != SESSION_COOKIE:
+            session = self.decode(cookies.get(SESSION_COOKIE))
+        return session
+
     def cookie(self, user: str | None, ttl_s: int = SESSION_TTL_S) -> dict:
         """The cookie a browser sets to be signed in as ``user``, as a browser automation adds one; its domain is
         left to whoever adds it."""
         value, expires = self.encode(user, ttl_s)
-        return {"name": SESSION_COOKIE, "value": value, "path": "/", "expires": expires, "httpOnly": True,
+        return {"name": self.cookie_name, "value": value, "path": "/", "expires": expires, "httpOnly": True,
                 "sameSite": "Lax"}
 
     def _sign(self, payload: str) -> str:
