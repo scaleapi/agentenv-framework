@@ -31,6 +31,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.store import record_task_cancelled
 from agent_env.task.interrupts import Interrupts
+from agent_env.utils.progress import run_progress
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import TeardownReport, teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
@@ -405,9 +406,9 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
 
 
 def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
-    """How a run composes its computer envs: on the provider ``sandbox`` names, and emulating unless ``emulate`` is
-    False. Raises ValueError when ``sandbox`` names no provider."""
-    return Composing(build_sandbox_provider(sandbox) if sandbox else None, emulate)
+    """How a run composes its computer envs: on the provider ``sandbox`` names, emulating unless ``emulate`` is False,
+    only the forms its deploys there boot. Raises ValueError when ``sandbox`` names no provider."""
+    return Composing.for_run(build_sandbox_provider(sandbox) if sandbox else None, emulate)
 
 
 def planned_tasks(root: Path | str, *, tasks: Sequence[str] = (), evals: Sequence[str] = (),
@@ -522,13 +523,14 @@ async def _run_all(
         error, cancelled = None, False
         try:
             try:
-                await task.run(
-                    on_step_start=lambda i, total, step, _: say(f"{tag} step {i + 1}/{total} {step.id} ({step.type})"),
-                    on_step_complete=lambda i, total, step, _, seconds: say(
-                        f"{tag} step {i + 1}/{total} {step.id} done in {seconds:.1f}s"),
-                    agent_model=model,
-                    context=context,
-                )
+                with run_progress(lambda line: say(f"{tag} {line}")):
+                    await task.run(
+                        on_step_start=lambda i, total, step, _: say(f"{tag} step {i + 1}/{total} {step.id} ({step.type})"),
+                        on_step_complete=lambda i, total, step, _, seconds: say(
+                            f"{tag} step {i + 1}/{total} {step.id} done in {seconds:.1f}s"),
+                        agent_model=model,
+                        context=context,
+                    )
             except Exception as e:
                 error = e
             except asyncio.CancelledError:

@@ -20,6 +20,16 @@ partition kept, so nothing is emulated or privileged. A disk boots where `/dev/k
 (`disk/linux/launcher/`): gate 3 probes it there, and elsewhere it stays `unverified` until a deploy's first boot with
 KVM probes it. A deploy boots it with `env_params = { form = "disk" }`.
 
+A put, `env build` and the release compose every form; a run composes only the forms its sandbox's deploys boot: on each
+link of a chain, the first form it boots natively, as a deploy picks, so local Docker composes containers, and a sandbox
+that boots only disks composes disks. A compose of a disk also composes the container it's made from, unless that's
+built. A deploy that boots a form no compose has started, a disk named by `env_params` included, composes it first,
+reusing what's built, as every build is reused by its key; deploys of one env at once compose it once, the others
+waiting for it, a deploy that finds it building included. In `agent-env run` it says why and each stage as it goes, and
+a deploy waiting for another's compose says what it waits for and since when. A local run doesn't compose a registered
+env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the
+deploy refuses for want of a ready build and names `agent-env env build`.
+
 Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAME>`, read as it starts:
 
 | Setting | Default | What it does |

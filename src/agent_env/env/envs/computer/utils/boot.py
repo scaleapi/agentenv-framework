@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -54,6 +55,12 @@ def native_links(sandbox_provider: SandboxProvider, arch: str, form: str = "cont
     container, or boot its disk, natively."""
     return [link for link in sandbox_provider.links if f"linux/{arch}" in (
         link.disk_image_platforms() if form == "disk" else link.native_platforms())]
+
+
+def first_native(link: SandboxProvider, pairs: Iterable[tuple[str, str]]) -> tuple[str, str] | None:
+    """The first of ``pairs``, forms and arches in the base's order, that ``link`` boots natively: the one a deploy on it
+    boots, and so the one a run composes for it."""
+    return next(((form, arch) for form, arch in pairs if native_links(link, arch, form)), None)
 
 
 def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, environment_name: str,

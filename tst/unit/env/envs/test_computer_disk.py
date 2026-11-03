@@ -1,12 +1,15 @@
 """Computer envs of a base with a disk form: each arch's disk is made from its built container, on the base's disk or on
 one made from the base's container and the boot recipe, by a build that runs on the builder's own platform; reused by
 its key; probed where a provider boots disks natively, else left unverified for a deploy's first boot with KVM to
-probe; and written as the computer's disk form. A deploy that names the disk form boots it in a VM, its settings in its
-seed, and a reset boots it afresh. Docker and the registry are faked."""
+probe; and written as the computer's disk form. A put composes every form and a run only those its sandbox's deploys
+boot, and a deploy composes first what it boots that no compose started. A deploy that names the disk form boots it in
+a VM, its settings in its seed, and a reset boots it afresh. Docker and the registry are faked."""
 
 import asyncio
 import base64
 import json
+import threading
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,12 +20,19 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env import Env
+from agent_env.config.runtime import Config
 from agent_env.env.envs.computer.utils import boot, composer, probing
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.published_images import DISK
+from agent_env import providers
 from agent_env.providers.env_providers import env_computer_provider
+from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
+from agent_env.utils.progress import run_progress
+from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.unit.env.envs._computer import DISK_FORM, _base, _put, disk_layer
 from tst.unit.env.envs.test_computer_env import DRIVER_CARD
@@ -140,6 +150,81 @@ def test_a_disk_is_probed_on_a_provider_that_boots_its_arch_natively(disk_base, 
     assert env.computer_artifact().metadata["validated_boot"]["disk"] == {"arm64": disks["arm64"]["probe"]}
 
 
+def _link(containers=(), disks=()):
+    """A sandbox provider that runs containers of ``containers`` and boots disks of ``disks`` natively."""
+    link = SimpleNamespace(native_platforms=lambda: frozenset(f"linux/{arch}" for arch in containers),
+                           disk_image_platforms=lambda: frozenset(f"linux/{arch}" for arch in disks))
+    link.links = (link,)
+    return link
+
+
+_SANDBOXES = {"local": [_link(["arm64"])], "local-with-kvm": [_link(["arm64"], ["arm64"])],
+              "vm": [_link(disks=["amd64"])], "chain": [_link(["arm64"]), _link(disks=["amd64"])],
+              "chain-of-containers": [_link(["arm64"]), _link(["amd64"])], "none-native": [_link(["riscv64"], ["riscv64"])]}
+
+
+@pytest.mark.parametrize("sandbox, form, forms", [
+    ("local", None, ["container"]), ("local-with-kvm", None, ["container"]), ("local-with-kvm", "disk", ["disk"]),
+    ("vm", None, ["disk"]), ("chain", None, ["container", "disk"]), ("chain-of-containers", None, ["container"]),
+    ("none-native", None, []),
+])
+def test_the_forms_composed_for_a_sandbox_are_those_its_deploys_boot(disk_base, driver, docker, sandbox, form, forms):
+    """On each link the first form it boots natively, as a deploy picks, unless the deploy names one."""
+    env = _put(disk_base, driver, compose=False)
+
+    assert composer.booted_forms(env, SimpleNamespace(links=tuple(_SANDBOXES[sandbox])), form) == forms
+
+
+@pytest.mark.parametrize("sandbox", ["local", "vm", "chain"])
+def test_what_a_run_composes_is_what_each_link_of_its_sandbox_then_boots(disk_base, driver, docker, sandbox):
+    """Whatever the deploy's link, its pick of the run's builds is of a form the run composed, and each form the run
+    composed is one a link picks: the two share ``boot.first_native``."""
+    env = _put(disk_base, driver, compose=False)
+    links = _SANDBOXES[sandbox]
+    sandbox = SimpleNamespace(links=tuple(links))
+    composed = composer.pending(env, forms=Composing.for_run(sandbox).forms(env, sandbox))
+    with_containers = composer._with_containers(env, composed)
+
+    picked = {boot.first_native(link, with_containers) for link in links}
+
+    assert None not in picked and {form for form, _ in picked} == {form for form, _ in composed}
+
+
+def test_a_runs_compose_looks_up_the_default_sandbox_once_and_only_when_a_computer_env_needs_it(disk_base, driver,
+                                                                                                docker, monkeypatch):
+    """So a run of a bundle with no computer env never builds a default provider it may not load."""
+    looked_up = []
+    monkeypatch.setattr(providers, "get_env_sandbox_provider", lambda: looked_up.append(1) or (
+        local_sandbox.LocalSandboxProvider()))
+    composing = Composing.for_run(None)
+    assert looked_up == []
+    env = _put(disk_base, driver, compose=False)
+
+    assert composing.forms(env, composing.provider()) == ["container"] and looked_up == [1]
+
+
+def test_a_compose_of_disks_alone_builds_the_containers_they_are_made_of_rather_than_skip_them(disk_base, driver,
+                                                                                               docker):
+    env = Env.get(_put(disk_base, driver, compose=False).id)
+
+    composer.compose(env, [("disk", "arm64")])
+
+    composed = Env.get(env.id).metadata["composed"]
+    assert composed["container"]["arm64"]["status"] == "ready" and composed["disk"]["arm64"]["status"] == "unverified"
+    assert set(composed["container"]) == set(composed["disk"]) == {"arm64"}
+
+
+def test_a_put_composes_every_form_and_a_run_only_those_its_sandboxs_deploys_boot(disk_base, driver, docker):
+    put = Env.get(_put(disk_base, driver).id)
+    run = Env.get(_put(disk_base, driver, id="@local/~/kit/run", environment_name="run",
+                       composing=Composing.for_run(None)).id)
+
+    assert set(put.metadata["composed"]) == {"container", "disk"} and put.computer_artifact().forms.disk is not None
+    assert set(run.metadata["composed"]) == {"container"} and run.computer_artifact().forms.disk is None
+    composing = Composing.for_run(None)
+    assert composer.pending(run, forms=composing.forms(run, composing.provider())) == [] and composer.current(run)
+
+
 @pytest.fixture
 def vms(monkeypatch):
     """The VMs a deploy's boots of a disk ask the local provider for, each serving the desktop driver's card."""
@@ -235,6 +320,139 @@ async def test_first_deploys_of_an_unverified_disk_at_once_share_one_probe_and_i
     else:
         assert recorded["status"] == "ready" and len(vms.created) == 3
         assert all(record.metadata["computer"]["form"] == "disk" for record in deployed)
+
+
+@pytest.mark.asyncio
+async def test_deploys_of_a_disk_no_compose_started_compose_it_once_first_reusing_the_containers(disk_base, driver,
+                                                                                                docker, vms):
+    """As a run that composed for local Docker, which boots containers, leaves an env a later deploy boots as a disk."""
+    env = _put(disk_base, driver, composing=Composing.for_run(None))
+    containers, built = Env.get(env.id).metadata["composed"]["container"], len(docker.builds)
+
+    deployed = await asyncio.gather(*(Env.get(env.id).deploy(env_params={"form": "disk"}) for _ in range(3)))
+
+    stored = Env.get(env.id)
+    disks = stored.metadata["composed"]["disk"]
+    assert {arch: r["status"] for arch, r in disks.items()} == {"amd64": "unverified", "arm64": "ready"}
+    assert stored.metadata["composed"]["container"] == containers and len(docker.builds) == built
+    assert sorted(build["tag"].split(":")[1].split("-", 1)[1] for build in docker.disk_builds
+                  if build["context"] != "tools") == ["base-disk-amd64", "base-disk-arm64", "disk-amd64", "disk-arm64"]
+    assert stored.computer_artifact().forms.disk is not None and len(vms.created) == 3
+    assert all(record.metadata["computer"]["image"] == disks["arm64"]["image"] for record in deployed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refused", [True, False], ids=["shared-store", "per-user-store"])
+async def test_a_deploy_composes_its_missing_form_unless_the_runs_fence_would_refuse_the_record(disk_base, driver,
+                                                                                                docker, vms,
+                                                                                                monkeypatch, refused):
+    """Where a configured store isn't the per-user one, a local run refuses writing a registered env's record."""
+    env = _put(disk_base, driver, composing=Composing.for_run(None))
+    builds, asked = len(docker.disk_builds), []
+    monkeypatch.setattr(Config, "local_run_refuses_write", lambda self, entity_id: asked.append(entity_id) or refused)
+
+    if refused:
+        with pytest.raises(DeployRefused, match=rf"has no ready build to deploy.*agent-env env build --id {env.id}"):
+            await Env.get(env.id).deploy(env_params={"form": "disk"})
+    else:
+        await Env.get(env.id).deploy(env_params={"form": "disk"})
+
+    assert asked[0] == env.id
+    assert ("disk" in Env.get(env.id).metadata["composed"]) is (len(docker.disk_builds) > builds) is (not refused)
+    assert len(vms.created) == (not refused)
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_that_finds_the_disk_building_for_another_deploy_waits_for_it_and_boots_it(disk_base, driver,
+                                                                                                 docker, vms,
+                                                                                                 monkeypatch):
+    """Saying what it waits for, from when, and then that it reuses what the other built."""
+    env = _put(disk_base, driver, composing=Composing.for_run(None))
+    started, waited, said = threading.Event(), threading.Event(), []
+    record_started, built_disk = composer.Record.started, composer._built_disk
+
+    def recorded(self, pairs):
+        record_started(self, pairs)
+        started.set()
+
+    def held(*args):
+        waited.wait(10)
+        return built_disk(*args)
+
+    def told(line):
+        said.append(line)
+        waited.set()
+
+    monkeypatch.setattr(composer.Record, "started", recorded)
+    monkeypatch.setattr(composer, "_built_disk", held)
+
+    async def later():
+        await asyncio.to_thread(started.wait, 10)
+        second = Env.get(env.id)
+        assert second.metadata["composed"]["disk"]["arm64"]["status"] == "building"
+        with run_progress(told):
+            return await second.deploy(env_params={"form": "disk"})
+
+    first, second = await asyncio.gather(Env.get(env.id).deploy(env_params={"form": "disk"}), later())
+
+    assert first.metadata["computer"]["form"] == second.metadata["computer"]["form"] == "disk" and len(vms.created) == 2
+    since = datetime.fromisoformat(Env.get(env.id).metadata["composed"]["disk"]["arm64"]["started_at"]).strftime("%H:%M")
+    assert said == [f"{env.id}: waiting for another deploy composing disk/amd64, disk/arm64 (building since {since} UTC)",
+                    f"{env.id}: reusing what another deploy composed: disk/amd64 unverified, disk/arm64 ready"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_deploy_holds_the_lock_until_its_compose_ends_so_the_next_deploy_waits_and_boots_it(
+        disk_base, driver, docker, vms, monkeypatch):
+    env = _put(disk_base, driver, composing=Composing.for_run(None))
+    started, waited, said = threading.Event(), threading.Event(), []
+    record_started, built_disk = composer.Record.started, composer._built_disk
+
+    def recorded(self, pairs):
+        record_started(self, pairs)
+        started.set()
+
+    def held(*args):
+        waited.wait(10)
+        return built_disk(*args)
+
+    def told(line):
+        said.append(line)
+        waited.set()
+
+    monkeypatch.setattr(composer.Record, "started", recorded)
+    monkeypatch.setattr(composer, "_built_disk", held)
+    first = asyncio.create_task(Env.get(env.id).deploy(env_params={"form": "disk"}))
+    await asyncio.to_thread(started.wait, 10)
+    first.cancel()
+    with run_progress(told):
+        second = await Env.get(env.id).deploy(env_params={"form": "disk"})
+
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert second.metadata["computer"]["form"] == "disk" and len(vms.created) == 1
+    assert said[0].startswith(f"{env.id}: waiting for another deploy composing disk/amd64, disk/arm64")
+    assert said[-1] == f"{env.id}: reusing what another deploy composed: disk/amd64 unverified, disk/arm64 ready"
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_that_composes_first_tells_the_run_why_and_each_stage_as_it_goes(disk_base, driver, docker,
+                                                                                       vms):
+    """Through the task's scheduling and the threads the compose runs in, to the run's progress."""
+    env = _put(disk_base, driver, composing=Composing.for_run(None))
+    said = []
+    task = Task(id="@local/~/kit/t", version=None, steps=[
+        DeployEnvTaskStep(id="env", version=None, env_id=env.id, env_params={"form": "disk"})])
+
+    with run_progress(said.append):
+        context = await task.run(context=TaskStepContext())
+
+    assert context.deployed_envs[0].metadata["computer"]["form"] == "disk"
+    assert said[:2] == [f"{env.id}: composing disk/amd64, disk/arm64 before this deploy (no compose built them for "
+                        "LocalSandboxProvider yet); later deploys reuse them",
+                        f"{env.id}: composing disk/amd64, disk/arm64 on LocalSandboxProvider"]
+    assert any(line.startswith(f"{env.id}: disk/arm64: ready (") for line in said)
+    assert any(line.startswith(f"{env.id}: disk/amd64: making the disk") for line in said)
 
 
 @pytest.mark.asyncio

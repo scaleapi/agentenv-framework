@@ -26,7 +26,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from agentenv_protocol.computer import apps as installed_apps
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
@@ -70,7 +70,7 @@ KEY_LABEL = "dev.agentenv.computer-key"
 # What a build installed and whether it was emulated, kept on its image for an env that reuses it.
 INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
 #: How often a compose says a pair is still at a stage, which can take most of an hour under emulation.
-_HEARTBEAT_S = 600
+HEARTBEAT_S = 600
 _PROTOCOL = "agentenv-framework-protocol"
 # What building the protocol from its source reads, beside src/.
 _PROTOCOL_FILES = ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
@@ -80,27 +80,41 @@ _SHOWN = 10
 
 @dataclass(frozen=True)
 class Composing:
-    """How a put composes a computer env: on ``sandbox_provider``, by default the env's; emulating an arch no link of
-    it runs natively unless ``emulate`` is False, which leaves the arch skipped for a later compose; each pair's
-    stages told to ``on_progress``, a line at a time."""
+    """How a put composes a computer env: on ``sandbox_provider``, by default the env's; emulating an arch no link runs
+    natively unless ``emulate`` is False; each pair's stages told to ``on_progress``; the forms of the base, or for a
+    run (``for_run``) those its deploys on the provider boot (``forms_of``)."""
 
     sandbox_provider: SandboxProvider | None = None
     emulate: bool = True
     on_progress: Callable[[str], None] | None = None
+    forms_of: Literal["base", "deploys"] = "base"
+
+    @classmethod
+    def for_run(cls, sandbox_provider: SandboxProvider | None, emulate: bool = True) -> Composing:
+        """How a run composes: on ``sandbox_provider``, by default the env's, the forms its deploys there boot."""
+        return cls(sandbox_provider, emulate, forms_of="deploys")
+
+    def provider(self) -> SandboxProvider:
+        """``sandbox_provider``, else the env's default, looked up by each compose that needs it, once: a run with no
+        computer env never builds a default it may not load."""
+        from agent_env.providers import get_env_sandbox_provider
+
+        return self.sandbox_provider or get_env_sandbox_provider()
+
+    def forms(self, env: ComputerEnv, provider: SandboxProvider) -> list[str]:
+        """The forms of ``env``'s base this compose on ``provider``, its ``provider()``, builds."""
+        return gate.forms(env.computer) if self.forms_of == "base" else booted_forms(env, provider)
 
 
 def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, composing: Composing = Composing()) -> None:
-    """Build each of ``pairs``, by default each form the base has in each arch the env composes, in parallel, as
-    ``composing`` says, and probe each one its provider runs natively (gate 3), recording each as it starts and
-    finishes, then write the env's computer over every pair built so far. Each pair's stages and how it ended go to the
-    log too (``_Progress``)."""
-    from agent_env.providers import get_env_sandbox_provider
-
-    base, driver = env.computer, env.driver
-    provider = composing.sandbox_provider or get_env_sandbox_provider()
+    """Build each of ``pairs``, by default each of ``composing``'s forms in each arch the env composes, and the container
+    each disk among them is made from unless it's built, in parallel, as ``composing`` says, and probe each one its
+    provider runs natively (gate 3), recording each as it starts and finishes, then write the env's computer over every
+    pair built so far. Each pair's stages and how it ended go to the log too (``_Progress``)."""
+    base, driver, provider = env.computer, env.driver, composing.provider()
     builds = builder.Builds(provider, env.stored_id, REPOSITORY, composing.emulate)
-    pairs = pairs if pairs is not None else [(form, arch) for form in gate.forms(base)
-                                             for arch in gate.arches(base, driver, env.composed_apps())]
+    pairs = _with_containers(env, pairs if pairs is not None else [
+        (form, arch) for form in composing.forms(env, provider) for arch in env.composed_arches()])
     record = Record(env)
     record.started(pairs)
     with _Progress(env, composing.on_progress) as progress, ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
@@ -127,17 +141,57 @@ def current(env: ComputerEnv) -> bool:
         "disks", {}) == record.built("disk")
 
 
-def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None) -> list[tuple[str, str]]:
-    """The forms and arches of ``env`` left to compose: never started, failed, left building by a put that stopped, or
-    built but unprobed though ``sandbox_provider``, by default the env's, runs the arch natively."""
+def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
+            forms: list[str] | None = None) -> list[tuple[str, str]]:
+    """The pairs of ``forms``, by default every form of the base, left to compose in ``env``: never started, failed,
+    left building by a put that stopped, or built but unprobed though ``sandbox_provider``, by default the env's, runs
+    the arch natively."""
     from agent_env.providers import get_env_sandbox_provider
 
-    composed, provider = env.metadata.get("composed", {}), sandbox_provider or get_env_sandbox_provider()
-    statuses = {(form, arch): composed.get(form, {}).get(arch, {}).get("status")
-                for form in gate.forms(env.computer)
-                for arch in gate.arches(env.computer, env.driver, env.composed_apps())}
-    return [(form, arch) for (form, arch), status in statuses.items()
-            if status not in BUILT or (status == "unverified" and boot.native_links(provider, arch, form))]
+    provider = sandbox_provider or get_env_sandbox_provider()
+
+    def left(form: str, arch: str, record: dict | None) -> bool:
+        status = (record or {}).get("status")
+        return status not in BUILT or (status == "unverified" and bool(boot.native_links(provider, arch, form)))
+
+    return _pairs(env, gate.forms(env.computer) if forms is None else forms, left)
+
+
+def unstarted(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[tuple[str, str]]:
+    """The pairs a deploy on ``sandbox_provider`` boots that no compose has started, as a run for another sandbox
+    leaves them."""
+    return _pairs(env, booted_forms(env, sandbox_provider, form), lambda form, arch, record: record is None)
+
+
+def unstarted_or_building(env: ComputerEnv, sandbox_provider: SandboxProvider,
+                          form: str | None = None) -> list[tuple[str, str]]:
+    """Those, and the ones a compose is building now, which a deploy waits for."""
+    return _pairs(env, booted_forms(env, sandbox_provider, form),
+                  lambda form, arch, record: record is None or record.get("status") == "building")
+
+
+def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[str]:
+    """The forms deploys on ``sandbox_provider`` boot, ``form``'s when a deploy names it, in the base's order: on each
+    link, the one ``boot.first_native`` picks, as the deploy does."""
+    forms = gate.forms(env.computer)
+    booted = {picked[0] for link in sandbox_provider.links if (picked := boot.first_native(
+        link, [(name, arch) for name in ([form] if form else forms) for arch in env.composed_arches()]))}
+    return [name for name in forms if name in booted]
+
+
+def _pairs(env: ComputerEnv, forms: list[str], left: Callable[[str, str, dict | None], bool]) -> list[tuple[str, str]]:
+    """The pairs of ``forms`` in the arches the env composes whose record, None when there's none, is ``left``."""
+    composed = env.metadata.get("composed", {})
+    return [(form, arch) for form in forms for arch in env.composed_arches()
+            if left(form, arch, composed.get(form, {}).get(arch))]
+
+
+def _with_containers(env: ComputerEnv, pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """``pairs`` and the container each disk among them is made from, unless it's built, in the base's order."""
+    containers = env.metadata.get("composed", {}).get("container", {})
+    wanted = {*pairs, *(("container", arch) for form, arch in pairs if form == "disk"
+                        and containers.get(arch, {}).get("status") not in BUILT)}
+    return [(form, arch) for form in gate.forms(env.computer) for arch in env.composed_arches() if (form, arch) in wanted]
 
 
 def _composed(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, form: str, arch: str,
@@ -652,7 +706,7 @@ def _digest(folder: Path) -> str:
 
 class _Progress:
     """What a compose reports as it goes, to ``on_progress`` and the log: a line as each pair reaches a stage, one each
-    ``_HEARTBEAT_S`` a stage goes on, and how each pair ended, with the time since the compose began."""
+    ``HEARTBEAT_S`` a stage goes on, and how each pair ended, with the time since the compose began."""
 
     def __init__(self, env: ComputerEnv, on_progress: Callable[[str], None] | None):
         self.env, self.on_progress, self.lock = env, on_progress, threading.Lock()
@@ -687,20 +741,20 @@ class _Progress:
         status = f"failed at {result['stage']}" if result["status"] == "failed" else result["status"]
         reason = f": {result['reason']}" if result.get("reason") else ""
         self.say(f"{pair}: {'reused, ' if result.get('reused') else ''}{status}{reason} "
-                 f"({_took(time.monotonic() - self.began)})", failed=result["status"] == "failed")
+                 f"({took(time.monotonic() - self.began)})", failed=result["status"] == "failed")
 
     def _beat(self) -> None:
-        while not self.stopped.wait(_HEARTBEAT_S / 10):
+        while not self.stopped.wait(HEARTBEAT_S / 10):
             now = time.monotonic()
             with self.lock:
                 due = [(pair, stage, since) for pair, (stage, since, said) in self.stages.items()
-                       if now - said >= _HEARTBEAT_S]
+                       if now - said >= HEARTBEAT_S]
                 for pair, stage, since in due:
                     self.stages[pair] = (stage, since, now)
             for pair, stage, since in due:
-                self.say(f"{pair}: still {stage} ({_took(now - since)})")
+                self.say(f"{pair}: still {stage} ({took(now - since)})")
 
 
-def _took(seconds: float) -> str:
+def took(seconds: float) -> str:
     minutes, seconds = divmod(round(seconds), 60)
     return f"{minutes} min {seconds} s" if minutes else f"{seconds} s"
