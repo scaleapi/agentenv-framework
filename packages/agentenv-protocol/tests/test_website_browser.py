@@ -542,6 +542,30 @@ async def test_its_control_records_a_completed_download_with_its_size_and_sha256
 
 
 @pytest.mark.asyncio
+async def test_downloads_of_one_name_chrome_gives_no_path_for_are_each_hashed_at_the_file_it_saved(tmp_path):
+    devtools = StubDevTools()
+    control = BrowserControl(devtools, tmp_path, "agent")
+    (tmp_path / "report.bin").write_bytes(b"older, from before")
+    os.utime(tmp_path / "report.bin", (0, 0))
+
+    contents = {"g1": b"the first report", "g2": b"the second, longer report"}
+    for guid, saved_as in (("g1", "report (1).bin"), ("g2", "report (2).bin")):
+        devtools.send("Browser.downloadWillBegin", {"guid": guid, "url": "https://a.test/report.bin",
+                                                    "suggestedFilename": "report.bin"})
+        (tmp_path / saved_as).write_bytes(contents[guid])
+        devtools.send("Browser.downloadProgress", {"guid": guid, "state": "completed",
+                                                   "receivedBytes": len(contents[guid])})
+    for _ in range(int(WAIT_S / POLL_S)):
+        if all("sha256" in download for download in control.downloads.values()):
+            break
+        await asyncio.sleep(POLL_S)
+
+    assert [(d["path"], d["sha256"]) for d in control.downloads.values()] == [
+        (str(tmp_path / name), hashlib.sha256(contents[guid]).hexdigest())
+        for guid, name in (("g1", "report (1).bin"), ("g2", "report (2).bin"))]
+
+
+@pytest.mark.asyncio
 async def test_its_control_says_the_tab_whose_page_has_focus_is_active_else_the_first_visible_one(tmp_path):
     states = {"s-a": ["hidden", False], "s-b": ["visible", False], "s-c": ["visible", True]}
     devtools = StubDevTools({"Runtime.evaluate": lambda params, session: {"result": {"value": states[session]}}})

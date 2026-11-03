@@ -13,7 +13,9 @@ import itertools
 import json
 import logging
 import os
+import re
 import shutil
+import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +48,8 @@ AGENTENV, UNKNOWN, EXIT, STOP = "agentenv", "unknown", "exit", "stop"
 ACTIVE_CHECK_TIMEOUT_S = 2.0
 #: How much of a download each read hashes.
 HASH_CHUNK_BYTES = 1 << 20
+#: How much earlier than a download's start a file it was saved as may say it was written, for clocks' rounding.
+CLOCK_SLACK_S = 1.0
 #: Who answered a dialog when agentenv didn't.
 AGENT = "agent"
 #: The targets agentenv's connection follows.
@@ -200,6 +204,7 @@ class BrowserControl:
         self._open_dialogs: dict[str, dict] = {}
         self._answering: set[str] = set()
         self._tasks: set[asyncio.Future] = set()
+        self._began: dict[str, float] = {}
         devtools.listen(self._event)
 
     async def attach(self) -> None:
@@ -321,20 +326,45 @@ class BrowserControl:
         self.downloads[params["guid"]] = {"guid": params["guid"], "url": params.get("url", ""),
                                           "filename": params.get("suggestedFilename", ""), "state": "inProgress",
                                           "started_at": _now()}
+        self._began[params["guid"]] = time.time()
 
     def _on_Browser_downloadProgress(self, params: dict, session: Optional[str]) -> None:
         if (download := self.downloads.get(params["guid"])) is None:
             return
         download["state"] = params["state"]
         if params["state"] == "completed":
-            path = params.get("filePath") or str(self.downloads_dir / download["filename"])
-            self._spawn(self._hashed(download, Path(path)))
+            path = Path(params["filePath"]) if params.get("filePath") else self._saved_as(download, params)
+            if path is None:
+                download["ended_at"] = _now()
+                return
+            download["path"] = str(path)
+            self._spawn(self._hashed(download, path))
         elif params["state"] == "canceled":
             download["ended_at"] = _now()
 
+    def _saved_as(self, download: dict, progress: dict) -> Optional[Path]:
+        """Where Chrome saved a completed download it gives no path for: of the files in ``downloads_dir`` named as it
+        names a download of its suggested name (``report.bin``, ``report (1).bin``, ...), the newest written since the
+        download began that no other download in the record holds, of the size it received when one is; none when
+        nothing is."""
+        name = download["filename"]
+        stem, ext = os.path.splitext(name)
+        named = re.compile(re.escape(stem) + r"( \(\d+\))?" + re.escape(ext))
+        held = {other.get("path") for other in self.downloads.values() if other is not download}
+        began, size = self._began.get(download["guid"], 0.0) - CLOCK_SLACK_S, progress.get("receivedBytes")
+        candidates = []
+        for path in self.downloads_dir.iterdir() if self.downloads_dir.is_dir() else ():
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if named.fullmatch(path.name) and str(path) not in held and stat.st_mtime >= began:
+                candidates.append((size is not None and stat.st_size == size, stat.st_mtime, path))
+        return max(candidates)[2] if candidates else None
+
     async def _hashed(self, download: dict, path: Path) -> None:
         size, sha256 = await asyncio.to_thread(_size_and_sha256, path)
-        download.update(path=str(path), size=size, sha256=sha256, ended_at=_now())
+        download.update(size=size, sha256=sha256, ended_at=_now())
 
     def _spawn(self, work: Awaitable) -> None:
         task = asyncio.ensure_future(work)
