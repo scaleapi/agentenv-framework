@@ -181,6 +181,20 @@ async def test_a_deploy_of_the_disk_form_boots_it_in_a_vm_with_its_settings_and_
 
 
 @pytest.mark.asyncio
+async def test_an_arch_whose_disk_built_deploys_it_though_the_computer_has_no_disk_form_without_the_other(
+        disk_base, driver, docker, vms, monkeypatch):
+    built = composer._built_disk
+    monkeypatch.setattr(composer, "_built_disk", lambda env, base, arch, *rest: (
+        {"status": "failed", "stage": "build", "reason": "boom"} if arch == "amd64" else built(env, base, arch, *rest)))
+    env = Env.get(_put(disk_base, driver).id)
+
+    deployed = await env.deploy(env_params={"form": "disk"})
+
+    assert env.computer_artifact().forms.disk is None and env.metadata["composed"]["disk"]["arm64"]["status"] == "ready"
+    assert deployed.metadata["computer"]["form"] == "disk" and len(vms.created) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_deploy_of_a_disk_bigger_than_the_disk_is_refused_rather_than_booted_smaller(disk_base, driver, docker,
                                                                                             vms):
     env = _put(disk_base, driver)
