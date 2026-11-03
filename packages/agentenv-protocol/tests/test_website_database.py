@@ -110,6 +110,25 @@ def test_rows_that_leave_an_optional_column_out_load_as_given_in_either_order(di
         assert rpc(client, "data/get")["parts"][0]["data"]["notes"] == [{"parent_id": None, **row} for row in seed]
 
 
+def test_an_export_with_a_computed_column_loads_back_as_the_database_computes_it(dist: Path, database: str) -> None:
+    class Priced(DeclarativeBase):
+        pass
+
+    class Item(Priced):
+        __tablename__ = "items"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        price: Mapped[int] = mapped_column(Integer)
+        doubled: Mapped[int] = mapped_column(Integer, sqlalchemy.Computed("price * 2"))
+
+    client = TestClient(helpdesk(dist, Priced)().create_app())
+    rpc(client, "data/add", {"parts": [{"kind": "data", "data": {"items": [{"id": 1, "price": 3}]}}]})
+    exported = rpc(client, "data/get")["parts"][0]["data"]
+    assert exported == {"items": [{"id": 1, "price": 3, "doubled": 6}]}
+    rpc(client, "data/reset")
+    rpc(client, "data/add", {"parts": [{"kind": "data", "data": exported}]})
+    assert rpc(client, "data/get")["parts"][0]["data"] == exported
+
+
 def test_a_row_the_gui_adds_is_the_mcp_servers_and_go_reports_it(dist: Path, database: str) -> None:
     env = helpdesk(dist, Base)()
     client = TestClient(env.create_app())

@@ -114,7 +114,8 @@ class Tables:
     def load(self, data: dict) -> None:
         """Insert ``data``'s rows, each table's after the tables it refers to, in their order, each run of rows that name
         the same columns as one insert (one insert takes its columns from its first row, so a row that leaves an
-        optional column out goes in its own); refuses a name that is no table."""
+        optional column out goes in its own), leaving out each computed column, which the database works out itself, so
+        what ``export`` gave loads back; refuses a name that is no table."""
         tables = {table.name: table for table in self.metadata.sorted_tables}
         unknown = sorted(set(data) - set(tables))
         if unknown:
@@ -146,9 +147,13 @@ _PARSERS: dict = {datetime.datetime: datetime.datetime.fromisoformat, datetime.d
 
 
 def _row(table: Any, row: dict) -> dict:
-    """``row`` with each JSON string a date, time, decimal or UUID column holds parsed to that type."""
+    """``row`` without its computed columns' values, and with each JSON string a date, time, decimal or UUID column
+    holds parsed to that type."""
     parsed = dict(row)
     for column in table.columns:
+        if column.computed is not None:
+            parsed.pop(column.name, None)
+            continue
         value = parsed.get(column.name)
         if isinstance(value, str):
             kind = _python_type(column)
