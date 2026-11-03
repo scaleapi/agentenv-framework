@@ -235,6 +235,8 @@ class CodexConfig(AgentConfig):
     project_id: str | None = None
     task_id: str | None = None
     timeout_seconds: int = 1800
+    # Which of the CLI's own tools it may use. With any selection, the MCP tools agent-env gives it stay.
+    builtin_tools: codex_config.CodexTools | None = None
 
 
 @asynccontextmanager
@@ -679,7 +681,8 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             project_id=cfg.project_id,
                             task_id=cfg.task_id,
                             event_callback=_record_event,
-                            config_overrides=codex_config.role_overrides(request.mcp_servers, cfg.role),
+                            config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
+                                              *codex_config.builtin_tools_overrides(cfg.builtin_tools)],
                         )
                 except Exception as e:
                     logger.error(f"codex CLI invocation raised: {e}", exc_info=True)

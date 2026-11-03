@@ -105,7 +105,7 @@ def test_request_and_response_contracts(codex):
     methods = {uri: ext["params"].get("methods", {}) for uri, ext in _extensions(codex).items()}
     config = methods["urn:agentenv:agent-config/v1"]
     assert config["set"]["request"]["supported"] == [
-        "description", "effort", "model", "name", "output_format", "project_id",
+        "builtin_tools", "description", "effort", "model", "name", "output_format", "project_id",
         "role", "system_prompt", "task_id", "timeout_seconds",
     ]
     assert set(config["set"]["request"]["schema"]["properties"]) == set(config["set"]["request"]["supported"])

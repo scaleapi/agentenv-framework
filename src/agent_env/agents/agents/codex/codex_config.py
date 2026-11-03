@@ -14,9 +14,10 @@ import stat
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomli_w
+from pydantic import BaseModel, ConfigDict, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,62 @@ _ROLE_VARIABLE = "AGENTENV_ROLE"
 # Codex hands a stdio MCP server only a few of its own variables; these tell mcp-remote, a Node client, which
 # certificates to trust.
 _TRUST_ENV = ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE")
+
+# The CLI version CodexTool names the tools of; a test holds it to package.json's @openai/codex.
+TOOLS_CLI_VERSION = "0.147.0"
+# The CLI's own tools, by the names its model sees, that a `-c` override turns off. Some only go together, as one
+# setting turns them on: the shell's two, the six collaboration tools `multi_agent_v2` brings, and the three goal tools.
+# Left out: `apply_patch`, which a model's catalog entry turns on and no setting turns off, and the MCP tools
+# (`tool_search`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`) that come with MCP servers.
+CodexTool = Literal["create_goal", "exec_command", "followup_task", "get_goal", "interrupt_agent", "list_agents",
+                    "request_user_input", "send_message", "spawn_agent", "update_goal", "update_plan", "view_image",
+                    "wait_agent", "web_search", "write_stdin"]
+# Each setting that turns some of the CLI's tools off: those tools, and the `-c` overrides that turn them off. Turning
+# off `multi_agent_v2` alone would bring back the v1 collaboration tools behind `tool_search`, so both go.
+_TOOL_SWITCHES: tuple[tuple[frozenset[str], tuple[str, ...]], ...] = (
+    (frozenset({"exec_command", "write_stdin"}), ("features.shell_tool=false",)),
+    (frozenset({"update_plan"}), ("tools.update_plan.enabled=false",)),
+    (frozenset({"request_user_input"}), ("tools.experimental_request_user_input.enabled=false",)),
+    (frozenset({"view_image"}), ("features.view_image=false",)),
+    (frozenset({"followup_task", "interrupt_agent", "list_agents", "send_message", "spawn_agent", "wait_agent"}),
+     ("features.multi_agent_v2=false", "features.multi_agent=false")),
+    (frozenset({"create_goal", "get_goal", "update_goal"}), ("features.goals=false",)),
+    (frozenset({"web_search"}), ('web_search="disabled"',)),
+)
+
+
+class CodexTools(BaseModel):
+    """The protocol's ``BuiltinTools[CodexTool]``, which the image's protocol floor doesn't have yet: the same fields
+    and checks, so the card's schema is the same. A list must name all the tools of a setting or none of them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disable: Literal["*"] | list[CodexTool] | None = None
+    only: list[CodexTool] | None = None
+
+    @model_validator(mode="after")
+    def _one_of(self) -> CodexTools:
+        if (self.disable is None) == (self.only is None):
+            raise ValueError("builtin_tools takes exactly one of disable and only")
+        named = set(self.only if self.only is not None else [] if self.disable == "*" else self.disable)
+        for tools, _ in _TOOL_SWITCHES:
+            if named & tools and not tools <= named:
+                raise ValueError(f"codex turns {', '.join(sorted(tools))} on and off together: name all or none")
+        return self
+
+
+def builtin_tools_overrides(builtin_tools: CodexTools | None) -> list[str]:
+    """The `-c` overrides that turn off the CLI's own tools a selection doesn't keep; none without one. The MCP
+    tools agent-env gives the agent stay with any selection."""
+    if builtin_tools is None:
+        return []
+    if builtin_tools.only is not None:
+        off = [tools for tools, _ in _TOOL_SWITCHES if not tools <= set(builtin_tools.only)]
+    elif builtin_tools.disable == "*":
+        off = [tools for tools, _ in _TOOL_SWITCHES]
+    else:
+        off = [tools for tools, _ in _TOOL_SWITCHES if tools <= set(builtin_tools.disable)]
+    return [override for tools, overrides in _TOOL_SWITCHES if tools in off for override in overrides]
 
 
 def _config_path() -> Path:
