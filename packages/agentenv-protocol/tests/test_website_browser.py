@@ -468,7 +468,7 @@ def _page(target, url="about:blank", title=""):
 async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_leaves_out_its_hidden_pages(tmp_path):
     devtools = StubDevTools({"Target.createTarget": {"targetId": "hidden"},
                              "Target.attachToTarget": {"sessionId": "s-hidden"}})
-    control = BrowserControl(devtools, tmp_path, "agent")
+    control = BrowserControl(devtools, "agent")
     await control.attach()
 
     for target in ("a", "b", "c"):
@@ -489,6 +489,7 @@ async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_
     assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs][-1] == ("a", "stop")
     assert [call[0] for call in devtools.calls[:3]] == ["Target.setDiscoverTargets", "Target.setAutoAttach",
                                                         "Browser.setDownloadBehavior"]
+    assert devtools.calls[2][1] == {"behavior": "default", "eventsEnabled": True}
 
 
 @pytest.mark.asyncio
@@ -501,7 +502,7 @@ async def test_its_control_records_tabs_in_opened_order_and_who_closed_each_and_
 async def test_its_control_answers_a_dialog_on_its_pages_session_as_its_setting_says_and_records_who_did(
         tmp_path, dialogs, kind, sent, answer, by):
     devtools = StubDevTools()
-    control = BrowserControl(devtools, tmp_path, dialogs)
+    control = BrowserControl(devtools, dialogs)
     devtools.send("Target.targetCreated", _page("a"))
     devtools.send("Target.attachedToTarget", {"sessionId": "s-a", **_page("a")})
 
@@ -522,14 +523,15 @@ async def test_its_control_answers_a_dialog_on_its_pages_session_as_its_setting_
 @pytest.mark.asyncio
 async def test_its_control_records_a_completed_download_with_its_size_and_sha256(tmp_path):
     devtools = StubDevTools()
-    control = BrowserControl(devtools, tmp_path, "agent")
+    control = BrowserControl(devtools, "agent")
     (tmp_path / "report.pdf").write_bytes(b"%PDF-1.7 report")
 
     devtools.send("Browser.downloadWillBegin", {"guid": "g", "url": "https://a.test/report.pdf",
                                                 "suggestedFilename": "report.pdf"})
     devtools.send("Browser.downloadProgress", {"guid": "g", "state": "inProgress", "receivedBytes": 3})
     in_progress = dict(control.downloads["g"])
-    devtools.send("Browser.downloadProgress", {"guid": "g", "state": "completed"})
+    devtools.send("Browser.downloadProgress", {"guid": "g", "state": "completed",
+                                               "filePath": str(tmp_path / "report.pdf")})
     for _ in range(int(WAIT_S / POLL_S)):
         if "sha256" in control.downloads["g"]:
             break
@@ -542,34 +544,10 @@ async def test_its_control_records_a_completed_download_with_its_size_and_sha256
 
 
 @pytest.mark.asyncio
-async def test_downloads_of_one_name_chrome_gives_no_path_for_are_each_hashed_at_the_file_it_saved(tmp_path):
-    devtools = StubDevTools()
-    control = BrowserControl(devtools, tmp_path, "agent")
-    (tmp_path / "report.bin").write_bytes(b"older, from before")
-    os.utime(tmp_path / "report.bin", (0, 0))
-
-    contents = {"g1": b"the first report", "g2": b"the second, longer report"}
-    for guid, saved_as in (("g1", "report (1).bin"), ("g2", "report (2).bin")):
-        devtools.send("Browser.downloadWillBegin", {"guid": guid, "url": "https://a.test/report.bin",
-                                                    "suggestedFilename": "report.bin"})
-        (tmp_path / saved_as).write_bytes(contents[guid])
-        devtools.send("Browser.downloadProgress", {"guid": guid, "state": "completed",
-                                                   "receivedBytes": len(contents[guid])})
-    for _ in range(int(WAIT_S / POLL_S)):
-        if all("sha256" in download for download in control.downloads.values()):
-            break
-        await asyncio.sleep(POLL_S)
-
-    assert [(d["path"], d["sha256"]) for d in control.downloads.values()] == [
-        (str(tmp_path / name), hashlib.sha256(contents[guid]).hexdigest())
-        for guid, name in (("g1", "report (1).bin"), ("g2", "report (2).bin"))]
-
-
-@pytest.mark.asyncio
 async def test_its_control_says_the_tab_whose_page_has_focus_is_active_else_the_first_visible_one(tmp_path):
     states = {"s-a": ["hidden", False], "s-b": ["visible", False], "s-c": ["visible", True]}
     devtools = StubDevTools({"Runtime.evaluate": lambda params, session: {"result": {"value": states[session]}}})
-    control = BrowserControl(devtools, tmp_path, "agent")
+    control = BrowserControl(devtools, "agent")
     for target in ("a", "b", "c"):
         devtools.send("Target.targetCreated", _page(target))
         devtools.send("Target.attachedToTarget", {"sessionId": f"s-{target}", **_page(target)})

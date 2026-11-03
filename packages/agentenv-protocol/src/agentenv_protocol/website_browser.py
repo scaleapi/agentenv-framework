@@ -13,9 +13,7 @@ import itertools
 import json
 import logging
 import os
-import re
 import shutil
-import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,8 +46,7 @@ AGENTENV, UNKNOWN, EXIT, STOP = "agentenv", "unknown", "exit", "stop"
 ACTIVE_CHECK_TIMEOUT_S = 2.0
 #: How much of a download each read hashes.
 HASH_CHUNK_BYTES = 1 << 20
-#: How much earlier than a download's start a file it was saved as may say it was written, for clocks' rounding.
-CLOCK_SLACK_S = 1.0
+
 #: Who answered a dialog when agentenv didn't.
 AGENT = "agent"
 #: The targets agentenv's connection follows.
@@ -190,8 +187,8 @@ class BrowserControl:
     ``dialogs`` says to: always leaving a page that asks before it's left, so no answer of agentenv's blocks a
     navigation."""
 
-    def __init__(self, devtools: DevToolsPipe, downloads: Path, dialogs: str) -> None:
-        self.devtools, self.downloads_dir, self.dialogs = devtools, downloads, dialogs
+    def __init__(self, devtools: DevToolsPipe, dialogs: str) -> None:
+        self.devtools, self.dialogs = devtools, dialogs
         #: When this record starts: a server that restarts starts another.
         self.since = _now()
         self.tabs: dict[str, dict] = {}
@@ -204,18 +201,17 @@ class BrowserControl:
         self._open_dialogs: dict[str, dict] = {}
         self._answering: set[str] = set()
         self._tasks: set[asyncio.Future] = set()
-        self._began: dict[str, float] = {}
         devtools.listen(self._event)
 
     async def attach(self) -> None:
-        """Follow a browser just launched: any tabs the one before left open closed by its server's stop, and every
-        page this one has or opens attached, its downloads going to ``downloads_dir`` with their events."""
+        """Follow a browser just launched: any tabs the one before left open closed by its server's stop, every page
+        this one has or opens attached, and its downloads reported, which go where its own policies say, as Chrome
+        downloads unattended: into ``~/Downloads``, a name downloaded again kept beside the first."""
         self.ended(STOP)
         await self.devtools.call("Target.setDiscoverTargets", {"discover": True, "filter": PAGES})
         await self.devtools.call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": False,
                                                           "flatten": True, "filter": PAGES})
-        await self.devtools.call("Browser.setDownloadBehavior", {"behavior": "allow", "eventsEnabled": True,
-                                                                 "downloadPath": str(self.downloads_dir)})
+        await self.devtools.call("Browser.setDownloadBehavior", {"behavior": "default", "eventsEnabled": True})
 
     def ended(self, how: str) -> None:
         """The browser is gone, ``how`` it ended: its open tabs are closed by that, and its sessions with them."""
@@ -326,41 +322,19 @@ class BrowserControl:
         self.downloads[params["guid"]] = {"guid": params["guid"], "url": params.get("url", ""),
                                           "filename": params.get("suggestedFilename", ""), "state": "inProgress",
                                           "started_at": _now()}
-        self._began[params["guid"]] = time.time()
 
     def _on_Browser_downloadProgress(self, params: dict, session: Optional[str]) -> None:
         if (download := self.downloads.get(params["guid"])) is None:
             return
         download["state"] = params["state"]
         if params["state"] == "completed":
-            path = Path(params["filePath"]) if params.get("filePath") else self._saved_as(download, params)
-            if path is None:
+            if not params.get("filePath"):
                 download["ended_at"] = _now()
                 return
-            download["path"] = str(path)
-            self._spawn(self._hashed(download, path))
+            download["path"] = params["filePath"]
+            self._spawn(self._hashed(download, Path(params["filePath"])))
         elif params["state"] == "canceled":
             download["ended_at"] = _now()
-
-    def _saved_as(self, download: dict, progress: dict) -> Optional[Path]:
-        """Where Chrome saved a completed download it gives no path for: of the files in ``downloads_dir`` named as it
-        names a download of its suggested name (``report.bin``, ``report (1).bin``, ...), the newest written since the
-        download began that no other download in the record holds, of the size it received when one is; none when
-        nothing is."""
-        name = download["filename"]
-        stem, ext = os.path.splitext(name)
-        named = re.compile(re.escape(stem) + r"( \(\d+\))?" + re.escape(ext))
-        held = {other.get("path") for other in self.downloads.values() if other is not download}
-        began, size = self._began.get(download["guid"], 0.0) - CLOCK_SLACK_S, progress.get("receivedBytes")
-        candidates = []
-        for path in self.downloads_dir.iterdir() if self.downloads_dir.is_dir() else ():
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if named.fullmatch(path.name) and str(path) not in held and stat.st_mtime >= began:
-                candidates.append((size is not None and stat.st_size == size, stat.st_mtime, path))
-        return max(candidates)[2] if candidates else None
 
     async def _hashed(self, download: dict, path: Path) -> None:
         size, sha256 = await asyncio.to_thread(_size_and_sha256, path)
@@ -440,7 +414,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         for folder in (UPLOADS, DOWNLOADS):
             (Path.home() / folder).mkdir(exist_ok=True)
         #: agentenv's control of it over that connection, and the record it keeps.
-        self.control = BrowserControl(self.devtools, Path.home() / DOWNLOADS, self.settings.dialogs)
+        self.control = BrowserControl(self.devtools, self.settings.dialogs)
         self.devtools.on_close(self._pipe_closed)
 
     @classmethod
