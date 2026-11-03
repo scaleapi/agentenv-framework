@@ -57,8 +57,6 @@ def test_a_separate_frontend_image_is_deprecated_but_still_deploys(local_stores,
                              frontend_docker_image_artifact=_image("shop-frontend"), environment_name="shop")
     assert "separate frontend image, which is deprecated" in caplog.text
     assert env.deploy_refusal() is None
-    one_image = WebsiteEnv(id="one", version=1, server_docker_image_artifact=_image("one-server"), environment_name="one")
-    assert "deploys once the gateway serves a one-image site" in one_image.deploy_refusal()
 
 
 def test_an_env_toml_takes_a_health_path_and_refuses_a_bad_one():

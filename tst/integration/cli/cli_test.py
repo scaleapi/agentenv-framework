@@ -157,11 +157,11 @@ class TestCliValidation:
         assert result.exit_code != 0
         assert 'At least one' in result.output
 
-    def test_website_put_missing_backend_dockerfile(self):
+    def test_website_put_without_a_server_image_source(self):
         runner = CliRunner()
         result = runner.invoke(cli, ['env', 'website', 'put', '--id', 'test'])
         assert result.exit_code != 0
-        assert 'Missing option' in result.output or '--backend-dockerfile' in result.output
+        assert 'exactly one of --server-dockerfile, --server-dockerfile-github-url and --server-image-ref is required' in result.output
 
 
 @pytest.mark.integration
