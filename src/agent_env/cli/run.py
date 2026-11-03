@@ -13,7 +13,7 @@ import click
 
 from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun,
                               dry_run_bundle, run_bundle)
-from agent_env.bundle.hub import SOURCE_KEY, describe
+from agent_env.bundle.hub import SOURCE_KEY, HubSource
 from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
                                         path_like, run_name)
 from agent_env.bundle.plan import NotInStore
@@ -208,7 +208,7 @@ def _count(entries, kind: BundleKind, noun: str) -> str:
 def _summarize(result: BundleRun, verbose: bool) -> None:
     click.echo()
     if source := next((run.context.metadata.get(SOURCE_KEY) for run in result.runs), None):
-        click.echo(f"From {describe(source)}")
+        click.echo(f"From {HubSource.from_metadata(source).describe()}")
     click.echo("Tasks:")
     for run in result.runs:
         click.echo(click.style(f"  {_described(result, run)}", fg=_COLORS[run.outcome]))

@@ -54,25 +54,47 @@ class HubReference:
 
 
 @dataclass(frozen=True)
+class HubSource:
+    """Where a Hub bundle came from: its repo, the revision named (``main`` by default), its commit, and its folder in
+    the repo, ``""`` for the root. Each run's context records it under ``SOURCE_KEY``."""
+
+    repo: str
+    revision: str
+    sha: str
+    path: str
+
+    @classmethod
+    def from_metadata(cls, data: Mapping[str, str]) -> HubSource:
+        return cls(data["repo"], data["revision"], data["sha"], data["path"])
+
+    def to_metadata(self) -> dict[str, str]:
+        return {"hub": "hf", "repo": self.repo, "revision": self.revision, "sha": self.sha, "path": self.path}
+
+    def describe(self) -> str:
+        """As a run prints it: ``<org>/<repo> at <sha12>, bundle <path>``."""
+        return f"{self.repo} at {self.sha[:12]}, bundle {self.path or 'at its root'}"
+
+
+@dataclass(frozen=True)
 class HubBundle:
     """A bundle downloaded from the Hub: its folder, the id root it runs under, where it came from, and what the repo's
     card says it needs."""
 
     root: Path
     id_root: str
-    source: Mapping[str, str]  # hub, repo, revision, sha, path: what each run's context records
+    source: HubSource
     plugins: tuple[str, ...]  # the card's, for a bundle without a bundle.toml
     setup: str | None  # the card's command that sets the bundle up, shown when setting up could fix a run, never run
 
     @property
     def setup_note(self) -> str | None:
         """What a run refused for something setting the bundle up provides ends with: the card's command for it."""
-        return f"{self.source['repo']}'s card sets this bundle up with: {self.setup}" if self.setup else None
+        return f"{self.source.repo}'s card sets this bundle up with: {self.setup}" if self.setup else None
 
     def check_plugins(self) -> None:
         """Refuse the run when a plugin the card names isn't installed, naming the command that installs it. Raises
         UnmetRequirements."""
-        problems, unmet = unmet_problems(self.plugins, f"{self.source['repo']}'s card")
+        problems, unmet = unmet_problems(self.plugins, f"{self.source.repo}'s card")
         if problems:
             raise UnmetRequirements(problems, unmet) if unmet else BundleError(problems)
 
@@ -136,11 +158,6 @@ def fetch_bundle(text: str, *, on_progress: Callable[[str], None] | None = None)
         raise error from e
 
 
-def describe(source: Mapping[str, str]) -> str:
-    """Where a bundle came from, as a run prints it: ``<org>/<repo> at <sha12>, bundle <path>``."""
-    return f"{source['repo']} at {source['sha'][:12]}, bundle {source['path'] or 'at its root'}"
-
-
 def _fetch(reference: HubReference, api: HfApi, say: Callable[[str], None]) -> HubBundle:
     sha = reference.revision if reference.revision and _SHA.fullmatch(reference.revision) else api.repo_info(
         reference.repo, repo_type="dataset", revision=reference.revision).sha
@@ -156,11 +173,10 @@ def _fetch(reference: HubReference, api: HfApi, say: Callable[[str], None]) -> H
         path = _pick(reference, sha, commit.files, card)
         id_root = _id_root(reference, path)
         plugins, setup = _needs(reference.repo, card, path.rpartition("/")[2] or reference.repo.partition("/")[2])
-        source = {"hub": "hf", "repo": reference.repo, "revision": reference.revision or "main", "sha": sha,
-                  "path": path}
+        source = HubSource(reference.repo, reference.revision or "main", sha, path)
         declared = _within(path, BUNDLE_TOML) in commit.files
         hub = HubBundle(folder / path, id_root, source, plugins=() if declared else plugins, setup=setup)
-        say(describe(source))
+        say(source.describe())
         if path not in commit.downloaded:
             if declared:
                 api.hf_hub_download(reference.repo, _within(path, BUNDLE_TOML), repo_type="dataset", revision=sha,
@@ -183,7 +199,7 @@ def _refuse_unmet(hub: HubBundle, declared: bool) -> None:
             raise BundleError([f"{BUNDLE_TOML}: {problem}" for problem in refused])
         problems, unmet = unmet_problems(requires, BUNDLE_TOML)
     else:
-        problems, unmet = unmet_problems(hub.plugins, f"{hub.source['repo']}'s card")
+        problems, unmet = unmet_problems(hub.plugins, f"{hub.source.repo}'s card")
     if not problems:
         return
     if not unmet:

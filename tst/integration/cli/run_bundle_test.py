@@ -21,6 +21,7 @@ from click.testing import CliRunner
 import agent_env
 from agent_env.artifact import FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
+from agent_env.bundle.hub import HubSource
 from agent_env.bundle.installed import find_bundle
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
@@ -132,8 +133,7 @@ def test_a_hub_bundle_runs_by_its_hf_reference_at_a_pinned_commit_and_a_rerun_re
     (instance_id,) = re.findall(rf"instance (@hf/{repo}/hello/hello-\S+)", second)
     with namespace_routing():
         instance = Task.get_instance(instance_id)
-    assert instance.context["metadata"]["bundle_source"] == {
-        "hub": "hf", "repo": repo, "revision": sha, "sha": sha, "path": "bundles/hello"}
+    assert instance.context["metadata"]["bundle_source"] == HubSource(repo, sha, sha, "bundles/hello").to_metadata()
 
 
 def test_a_bundle_runs_from_its_folder_and_a_rerun_writes_only_what_changed(bundle, quiet_logs):

@@ -14,7 +14,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 
 from agent_env.bundle import BundleError
 from agent_env.bundle import hub as hub_module
-from agent_env.bundle.hub import HubReference, fetch_bundle, parse_reference
+from agent_env.bundle.hub import HubReference, HubSource, fetch_bundle, parse_reference
 from agent_env.bundle.ledger import LEDGER_COLLECTION
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli import cli
@@ -28,7 +28,7 @@ from agent_env.task_step.task_step import TaskStep
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 TASK = json.dumps([{"id": "check", "type": "noop_hub_test"}])
-SOURCE = {"hub": "hf", "repo": "me/ds", "revision": "main", "sha": SHA, "path": "bundles/hello"}
+SOURCE = HubSource("me/ds", "main", SHA, "bundles/hello")
 
 
 class _Noop(TaskStep):
@@ -180,8 +180,8 @@ def test_several_bundles_need_a_path_or_the_cards_default(hub, tmp_path):
     assert caught.value.problems == (
         "me/ds at 0123456789ab holds several bundles under bundles/ and its card names no default (agentenv: "
         "default); run one of hf://me/ds@v1/bundles/a, hf://me/ds@v1/bundles/b",)
-    assert (named.source["path"], named.id_root) == ("bundles/a", "@hf/me/ds/a")
-    assert (by_default.source["path"], by_default.id_root) == ("bundles/b", "@hf/me/ds/b")
+    assert (named.source.path, named.id_root) == ("bundles/a", "@hf/me/ds/a")
+    assert (by_default.source.path, by_default.id_root) == ("bundles/b", "@hf/me/ds/b")
 
 
 def test_a_path_names_any_bundle_folder_and_its_ids_follow_it(hub):
@@ -191,7 +191,7 @@ def test_a_path_names_any_bundle_folder_and_its_ids_follow_it(hub):
     with pytest.raises(BundleError) as caught:
         fetch_bundle("hf://me/ds/suites")
 
-    assert (fetched.id_root, fetched.source["path"]) == ("@hf/me/ds/suites/hello", "suites/hello")
+    assert (fetched.id_root, fetched.source.path) == ("@hf/me/ds/suites/hello", "suites/hello")
     assert caught.value.problems == ("me/ds at 0123456789ab: suites/ isn't a bundle: it has none of envs/, agents/, "
                                      "artifacts/, skills/, tasks/, evals/",)
 
@@ -201,7 +201,7 @@ def test_the_root_is_the_bundle_when_nothing_is_under_bundles_and_its_other_fold
 
     fetched = fetch_bundle("hf://me/ds")
 
-    assert (fetched.root, fetched.id_root, fetched.source["path"]) == (_commit(tmp_path), "@hf/me/ds", "")
+    assert (fetched.root, fetched.id_root, fetched.source.path) == (_commit(tmp_path), "@hf/me/ds", "")
     assert _downloaded(tmp_path) == ["bundle.toml", "tasks/t.json"]
 
 
@@ -227,7 +227,7 @@ def test_a_commit_already_downloaded_is_reused_and_a_pinned_one_needs_no_network
     other = fetch_bundle(f"hf://me/ds@{SHA}/bundles/b")
 
     assert first.root == again.root == by_branch.root
-    assert again.source["revision"] == SHA and by_branch.source["revision"] == "main"
+    assert again.source.revision == SHA and by_branch.source.revision == "main"
     assert reused == ["repo_info"]
     assert hub.calls == ["snapshot_download bundles/b/*"]
     assert other.root.parent == first.root.parent
@@ -254,7 +254,9 @@ def test_a_hub_bundle_runs_under_its_hf_id_root_and_each_run_records_where_it_ca
     assert "tasks/t.json: v1, unchanged" in second.output
     with namespace_routing():
         runs = task_instances("@hf/me/ds/hello/t")
-    assert [(run.task_version, run.context["metadata"]["bundle_source"]) for run in runs] == [(1, SOURCE)] * 2
+    assert [(run.task_version, run.context["metadata"]["bundle_source"]) for run in runs] == [
+        (1, {"hub": "hf", "repo": "me/ds", "revision": "main", "sha": SHA, "path": "bundles/hello"})] * 2
+    assert HubSource.from_metadata(runs[0].context["metadata"]["bundle_source"]) == SOURCE
     rows = local_stores.local_namespace_document_store("hf").query(LEDGER_COLLECTION, Filter())
     assert {row["id"] for row in rows} == {"@hf/me/ds/hello/t"}
     assert not local_stores.local_namespace_document_store().path.exists()
