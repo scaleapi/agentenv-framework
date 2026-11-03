@@ -299,6 +299,16 @@ def test_an_extends_cycle_is_refused(tmp_path: Path) -> None:
     assert "is a cycle" in problems(tmp_path / "a.toml")[0]
 
 
+@pytest.mark.parametrize(("files", "problem"), [
+    ({"s.toml": 'extends = "base.toml"\nuses = 1\n', "base.toml": '[[uses]]\nspec = "c.toml"\n'}, "uses: "),
+    ({"s.toml": 'extends = "base/base.toml"\n', "base/base.toml": "[data]\ncollections = [1]\n"}, "data.collections: "),
+], ids=["uses", "collections"])
+def test_an_extends_whose_fields_have_the_wrong_type_is_refused_naming_them(tmp_path: Path, files: dict,
+                                                                           problem: str) -> None:
+    found = problems(write(tmp_path, files))
+    assert any(problem in p for p in found), found
+
+
 def test_overlay_merges_over_a_loaded_spec_as_extends_does(tmp_path: Path) -> None:
     spec = load(write(tmp_path, {"shop.toml": BASE}))
     changed = spec.overlay({"users": {"acting_user": "ben"}, "routes": {"ops": {"refund": {"roles": []}}}})
@@ -607,6 +617,20 @@ def test_from_environment_takes_any_url_path_a_route_serves() -> None:
     assert TestClient(Chat().create_app()).get("/api/users/@me").json() == {"id": "me"}
 
 
+def test_from_environment_keeps_any_name_an_api_route_takes() -> None:
+    @environment_card(name="shop")
+    @website(domains=["shop.test"])
+    class Shop(WebsiteEnvironment):
+        @api.get("/api/items", name="items:list")
+        def items(self) -> list:
+            return []
+
+    assert list(from_environment(Shop).route_table()) == ["items:list"]
+    assert [r["name"] for r in website_params(card_of(TestClient(Shop().create_app())))["routes"]] == ["items:list"]
+    assert "routes.ops: route names ['items:list'] aren't names" in problems(
+        {"routes": {"ops": {"items:list": "GET /api/items"}}}, Path.cwd())[0]
+
+
 def test_a_class_declared_from_a_spec_must_serve_what_it_declares(tmp_path: Path) -> None:
     path = write(tmp_path, {"site.toml": '[site]\nname = "wiki"\ndomains = ["wiki.test"]\n[source]\nsdk = "m:Wiki"\n'
                                          '[routes.ops]\npages = "GET /api/pages"\nedit = "PUT /api/pages/{id}"\n'
@@ -715,6 +739,21 @@ def test_the_conformance_check_fails_a_server_that_does_not_serve_its_spec(notes
     assert results["spec_routes"].status == "failed"
     assert results["spec_routes"].detail == ("all_notes: nothing is at GET /api/notes/all; "
                                              "archive: nothing is at POST /api/archive")
+
+
+def test_the_spec_check_fails_a_cookie_sign_in_when_the_spec_signs_nobody_in() -> None:
+    @environment_card(name="shop")
+    @website(domains=["shop.test"])
+    class Shop(WebsiteEnvironment):
+        pass
+
+    spec = from_environment(Shop).overlay({"users": {"sign_in": "none"}})
+    results = {r.name: r for r in conformance.check("http://testserver", client=TestClient(Shop().create_app()),
+                                                    spec=spec)}
+    assert results["spec"].status == "failed"
+    assert "the card's session_cookie is 'agentenv_session_shop', a cookie sign-in, and the spec's sign-in is none" \
+        in results["spec"].detail
+    assert "the card's session_path is" in results["spec"].detail
 
 
 def test_the_spec_check_fails_a_card_with_another_session_path_or_without_a_declared_state(

@@ -29,7 +29,8 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, ValidationInfo, field_validator,
+                      model_validator)
 
 from ...agent_env_environment import _CARD_CONFIG_ATTR
 from ...client import find_extension
@@ -287,7 +288,9 @@ class Routes(_Section):
 
     @field_validator("ops")
     @classmethod
-    def _names(cls, ops: dict[str, Route]) -> dict[str, Route]:
+    def _names(cls, ops: dict[str, Route], info: ValidationInfo) -> dict[str, Route]:
+        if (info.context or {}).get("declared_routes"):
+            return ops
         if bad := sorted(name for name in ops if not _NAME.fullmatch(name)):
             raise ValueError(f"route names {bad} aren't names")
         return ops
@@ -442,9 +445,10 @@ def load(path: str | Path) -> WebsiteSpec:
     return _load(Path(path).resolve(), ())
 
 
-def resolve(raw: dict, base_dir: str | Path, *, origin: str = "spec") -> WebsiteSpec:
-    """The spec ``raw`` declares, paths in it relative to ``base_dir``, resolved as ``load`` resolves a file's."""
-    return _resolve(copy.deepcopy(raw), Path(base_dir).resolve(), origin, ())
+def resolve(raw: dict, base_dir: str | Path, *, origin: str = "spec", declared_routes: bool = False) -> WebsiteSpec:
+    """The spec ``raw`` declares, paths in it relative to ``base_dir``, resolved as ``load`` resolves a file's. With
+    ``declared_routes``, its routes are the ones a class's ``@api`` decorators declare, named as they take any name."""
+    return _resolve(copy.deepcopy(raw), Path(base_dir).resolve(), origin, (), declared_routes=declared_routes)
 
 
 def _load(path: Path, stack: tuple[Path, ...]) -> WebsiteSpec:
@@ -462,7 +466,8 @@ def _read(path: Path) -> dict:
         raise SpecError([f"{path}: isn't TOML: {e}"]) from None
 
 
-def _resolve(raw: dict, base_dir: Path, origin: str, stack: tuple[Path, ...]) -> WebsiteSpec:
+def _resolve(raw: dict, base_dir: Path, origin: str, stack: tuple[Path, ...], *,
+             declared_routes: bool = False) -> WebsiteSpec:
     """The spec ``raw`` declares, resolved. A spec that uses components has its acting user checked only once their
     personas are merged into its own, since the acting user may be one only a component declares."""
     raw = _extended(raw, base_dir, origin, stack)
@@ -472,7 +477,7 @@ def _resolve(raw: dict, base_dir: Path, origin: str, stack: tuple[Path, ...]) ->
     imported = _imported(raw, base_dir, removed, problems)
     users = raw.get("users")
     spec = _validated({**raw, "users": {k: v for k, v in users.items() if k != "acting_user"}}
-                      if raw.get("uses") and isinstance(users, dict) else raw, origin)
+                      if raw.get("uses") and isinstance(users, dict) else raw, origin, declared_routes=declared_routes)
     spec._base_dir = base_dir
     ops = dict(imported)
     for name, route in spec.routes.ops.items():
@@ -493,7 +498,7 @@ def _resolve(raw: dict, base_dir: Path, origin: str, stack: tuple[Path, ...]) ->
     raw.pop("uses", None)
     if problems:
         raise SpecError(f"{origin}: {p}" for p in problems)
-    resolved = _validated(raw, origin)
+    resolved = _validated(raw, origin, declared_routes=declared_routes)
     resolved._base_dir, resolved._components, resolved._declared = base_dir, tuple(components), declared
     problems = _check(resolved)
     if problems:
@@ -540,9 +545,9 @@ def _removals(raw: dict) -> set[str]:
     return removed
 
 
-def _validated(raw: dict, origin: str) -> WebsiteSpec:
+def _validated(raw: dict, origin: str, *, declared_routes: bool = False) -> WebsiteSpec:
     try:
-        return WebsiteSpec.model_validate(raw)
+        return WebsiteSpec.model_validate(raw, context={"declared_routes": declared_routes})
     except ValidationError as e:
         raise SpecError(f"{origin}: {_where(err['loc'])}: {_why(err)}" for err in e.errors()) from None
 
@@ -574,7 +579,7 @@ def _merge(base: Any, over: Any, at: tuple[str, ...] = ()) -> Any:
             merged[key] = False
         elif value is False and at in _REMOVABLE:
             merged.pop(key, None)
-        elif key == "uses" and not at:
+        elif key == "uses" and not at and isinstance(value, list) and isinstance(merged.get("uses", []), list):
             kept = {_use_id(u): u for u in merged.get("uses", [])}
             kept.update({_use_id(u): copy.deepcopy(u) for u in value})
             merged["uses"] = list(kept.values())
@@ -611,10 +616,12 @@ def _rebased(raw: dict, from_dir: Path, to_dir: Path) -> dict:
     data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
     if isinstance(data.get("seed"), (str, list)):
         data["seed"] = moved(data["seed"]) if isinstance(data["seed"], str) else [moved(s) for s in data["seed"]]
-    for collection in (data.get("collections") or {}).values():
+    collections = data.get("collections")
+    for collection in collections.values() if isinstance(collections, dict) else ():
         if isinstance(collection, dict) and "schema" in collection:
             collection["schema"] = moved(collection["schema"])
-    for use in raw.get("uses") or []:
+    uses = raw.get("uses")
+    for use in uses if isinstance(uses, list) else ():
         if isinstance(use, dict) and "spec" in use:
             use["spec"] = moved(use["spec"])
     return raw
@@ -867,7 +874,7 @@ def from_environment(cls: type) -> WebsiteSpec:
     raw.pop("roles", None)
     raw["state"] = {"read": "go"} if cls._store_get is not None or serves_go else {"read": "data_plane"}
     raw["clock"] = {"follow": "date_patch" if declaration.clock_patch else "header"}
-    return resolve(raw, base.base_dir if base is not None else site_file, origin=cls.__qualname__)
+    return resolve(raw, base.base_dir if base is not None else site_file, origin=cls.__qualname__, declared_routes=True)
 
 
 def _seed_user(paths: Iterable[str | Path]) -> Optional[str]:

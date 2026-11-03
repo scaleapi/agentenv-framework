@@ -286,8 +286,8 @@ class _Checker:
 
 
     def _spec_card(self, card: dict, site: dict) -> tuple[Status, str]:
-        """The card's name, domains, health path, routes and session cookie and path against the spec's, and its
-        state and clock when the spec declares them."""
+        """The card's name, domains, health path, routes and session cookie and path against the spec's, none of the
+        latter for a spec that doesn't sign in by cookie, and its state and clock when the spec declares them."""
         spec, declared = self.spec, self.spec.to_card_extension()
         problems = []
         if spec.site.name is not None and card.get("name") != spec.site.name:
@@ -308,6 +308,11 @@ class _Checker:
         for key in ("session_cookie", "session_path", "state", "clock"):
             if key in declared and site.get(key) != declared[key]:
                 problems.append(f"the card's {key} is {site.get(key)!r}, the spec's {declared[key]!r}")
+        if spec.users.sign_in != "cookie":
+            for key in ("session_cookie", "session_path"):
+                if site.get(key) is not None:
+                    problems.append(f"the card's {key} is {site[key]!r}, a cookie sign-in, and the spec's sign-in "
+                                    f"is {spec.users.sign_in}")
         if problems:
             return "failed", "; ".join(problems)
         return "passed", f"name, {len(declared['domains'])} domain(s), health and {len(declared['routes'])} route(s) match"
