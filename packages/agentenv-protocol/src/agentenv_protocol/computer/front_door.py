@@ -111,7 +111,7 @@ class Program:
         self.process.terminate()
         try:
             await asyncio.wait_for(self.process.wait(), STOP_TIMEOUT_S)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self.process.kill()
             await self.process.wait()
 
@@ -211,7 +211,11 @@ class FrontDoor:
 
 
 def _forwarded(headers: Any) -> list[tuple[str, str]]:
-    return [(name, value) for name, value in headers if name.lower() not in UNFORWARDED]
+    """``headers`` but those of one hop: the standard ones, the control token's and any its ``Connection`` names."""
+    headers = list(headers)
+    named = {token.strip().lower() for name, value in headers if name.lower() == "connection"
+             for token in value.split(",")}
+    return [(name, value) for name, value in headers if name.lower() not in UNFORWARDED | named]
 
 
 def _launch_log(folder: Path) -> list[dict]:

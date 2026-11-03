@@ -337,8 +337,26 @@ import agentenv_protocol.computer.front_door
     assert done.returncode == 0, done.stderr
 
 
-def test_it_sends_on_no_hop_or_token_header():
+def test_it_sends_on_no_hop_or_token_header_nor_one_its_connection_header_names():
     headers = [("authorization", "Bearer x"), ("Host", "a"), ("content-type", "application/json"),
-               ("Transfer-Encoding", "chunked"), ("x-forwarded-host", "b"), ("Connection", "close")]
+               ("Transfer-Encoding", "chunked"), ("x-forwarded-host", "b"), ("Connection", "close, X-Internal"),
+               ("x-internal", "1"), ("x-kept", "2")]
 
-    assert front_door._forwarded(headers) == [("content-type", "application/json"), ("x-forwarded-host", "b")]
+    assert front_door._forwarded(headers) == [("content-type", "application/json"), ("x-forwarded-host", "b"),
+                                              ("x-kept", "2")]
+
+
+@pytest.mark.asyncio
+async def test_a_program_that_wont_stop_is_killed_once_its_stop_runs_out(monkeypatch, tmp_path):
+    monkeypatch.setattr(front_door, "STOP_TIMEOUT_S", 0.5)
+    stubborn = front_door.Program("stubborn", [sys.executable, "-c", (
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open('up', 'w').close(); "
+        "time.sleep(60)")], tmp_path)
+    running = asyncio.ensure_future(stubborn.run())
+    deadline = time.monotonic() + WAIT_S
+    while not (tmp_path / "up").exists() and time.monotonic() < deadline:
+        await asyncio.sleep(POLL_S)
+    await stubborn.stop()
+    await asyncio.wait_for(running, WAIT_S)
+
+    assert stubborn.process.returncode == -signal.SIGKILL
