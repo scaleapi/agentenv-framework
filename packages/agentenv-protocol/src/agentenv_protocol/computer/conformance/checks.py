@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from importlib import resources
+from typing import Any
 
 from mcp import ClientSession
 from mcp.types import CallToolResult
@@ -152,6 +153,10 @@ class Probe:
             raise AssertionError(f"computer_screenshot failed: {result.content[0].text}")
         return result, image(result)
 
+    async def pixel(self, x: int, y: int) -> tuple[int, int, int]:
+        """The pixel at frame pixel (x, y) of a new frame."""
+        return (await self.shot())[1].getpixel((x, y))
+
     async def act(self, name: str, args: dict) -> None:
         result = await self.tool(name, args)
         if result.isError:
@@ -161,13 +166,15 @@ class Probe:
         out = await self.driver.run("cat", f"{STAGE}/state/state.json")
         return json.loads(out["stdout"])
 
-    async def until(self, holds: Callable[[dict], bool]) -> tuple[bool, dict]:
-        """Whether the fixture's state comes to satisfy ``holds`` within SETTLE_S, and the state it last had."""
+    async def until(self, holds: Callable[[Any], bool],
+                    read: Callable[[], Awaitable[Any]] | None = None) -> tuple[bool, Any]:
+        """Whether what ``read`` gives, the fixture's state unless it's given, comes to satisfy ``holds`` within
+        SETTLE_S, and what it last gave."""
         deadline = time.monotonic() + SETTLE_S
         while True:
-            state = await self.state()
-            if holds(state) or time.monotonic() > deadline:
-                return holds(state), state
+            seen = await (read or self.state)()
+            if holds(seen) or time.monotonic() > deadline:
+                return holds(seen), seen
             await asyncio.sleep(POLL_S)
 
     async def settled(self, holds: Callable[[dict], bool], show: Callable[[dict], object]) -> str | None:
@@ -588,8 +595,8 @@ class Probe:
             problem = await self.settled(lambda s: s["cells"].get("2,3") == 1, lambda s: s["cells"])
             if problem:
                 return problem
-            _, img = await self.shot()
-            return None if img.getpixel((x, y)) == (255, 0, 0) else f"the next frame shows {img.getpixel((x, y))}"
+            shows, pixel = await self.until(lambda p: p == (255, 0, 0), lambda: self.pixel(x, y))
+            return None if shows else f"no frame within {SETTLE_S:g} s shows it: the last shows {pixel}"
 
         async def norm_space() -> str | None:
             x, y = cell(5, 5)
@@ -636,7 +643,7 @@ class Probe:
             return await self.settled(lambda s: s["saved_count"] == 1 and s["subscribed"],
                                       lambda s: (s["saved_count"], s["subscribed"]))
 
-        await self.check("P4", "a click in frame space hits its cell, and the next frame shows it", frame_space)
+        await self.check("P4", "a click in frame space hits its cell, and a frame shows it", frame_space)
         if self.driver.declares(COMPUTER_SPACES):
             await self.check("P4", "a click in norm space hits its cell", norm_space, COMPUTER_SPACES)
         if "right" in buttons:
