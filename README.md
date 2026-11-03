@@ -58,8 +58,9 @@ The revision resolves to a commit, and only that commit's bundle and the dataset
 them. Without a path, the run takes the only bundle under `bundles/`, or the one the card's `agentenv: default` names,
 else the repo's root. It prints the repo, commit and bundle, then runs as a folder does, with ids under
 `@hf/<org>/<repo>`, so a rerun of the same commit reuses what the last one wrote, and records the commit with each run.
-A bundle without a `bundle.toml` needs the plugins the card's `agentenv: bundles: <name>: plugins` lists. A gated or
-private dataset needs `hf auth login` or `HF_TOKEN`.
+A bundle without a `bundle.toml` needs the plugins the card's `agentenv: bundles: <name>: plugins` lists; either is
+checked before the bundle is downloaded, and a run refused for a missing plugin, agent, env or artifact names the
+card's `setup` command. A gated or private dataset needs `hf auth login` or `HF_TOKEN`.
 
 ## Plugins
 

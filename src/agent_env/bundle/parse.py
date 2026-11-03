@@ -201,35 +201,10 @@ class _Parser:
         version, not by URL; None when it has no bundle.toml."""
         if self.bundle_toml is None:
             return None
-        try:
-            data = tomllib.loads(self.bundle_toml.read_text(encoding="utf-8"))
-        except OSError as e:
-            self._problem(self.bundle_toml, f"can't be read: {os_reason(e)}")
-            return ()
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-            self._problem(self.bundle_toml, f"isn't valid TOML: {e}")
-            return ()
-        for key in sorted(data.keys() - {"requires"}):
-            self._problem(self.bundle_toml, f"{key!r} isn't a key it takes; it takes requires")
-        requires = data.get("requires", [])
-        if not isinstance(requires, list) or not all(isinstance(line, str) for line in requires):
-            self._problem(self.bundle_toml, 'requires must be a list of pip requirements, such as '
-                          '["agentenv-browser>=1.2"]')
-            return ()
-        for line in requires:
-            if not line.isprintable():
-                self._problem(self.bundle_toml, f"requires: {line!r} holds a character that can't be printed, so it "
-                              "can't be shown as written before it's installed")
-                continue
-            try:
-                requirement = Requirement(line)
-            except InvalidRequirement as e:
-                self._problem(self.bundle_toml, f"requires: {line!r} isn't a pip requirement: {e}")
-                continue
-            if requirement.url:
-                self._problem(self.bundle_toml, f"requires: {line!r} names a URL; name the package and the versions "
-                              "it needs, which install from wherever whoever runs the bundle installs from")
-        return tuple(requires)
+        requires, problems = read_requires(self.bundle_toml)
+        for problem in problems:
+            self._problem(self.bundle_toml, problem)
+        return requires
 
     def _derive_id_root(self) -> str:
         id_root, problems = _id_root(self.root)
@@ -619,6 +594,37 @@ class _Parser:
         if text.startswith(self.root_text + os.sep):
             text = text[len(self.root_text) + 1:]
         return show(text)
+
+
+def read_requires(path: Path) -> tuple[tuple[str, ...], list[str]]:
+    """The plugin packages the bundle.toml at ``path`` requires, and each problem with it: a requirement must name a
+    package by name and version, not by URL."""
+    problems = []
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        return (), [f"can't be read: {os_reason(e)}"]
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        return (), [f"isn't valid TOML: {e}"]
+    for key in sorted(data.keys() - {"requires"}):
+        problems.append(f"{key!r} isn't a key it takes; it takes requires")
+    requires = data.get("requires", [])
+    if not isinstance(requires, list) or not all(isinstance(line, str) for line in requires):
+        return (), [*problems, 'requires must be a list of pip requirements, such as ["agentenv-browser>=1.2"]']
+    for line in requires:
+        if not line.isprintable():
+            problems.append(f"requires: {line!r} holds a character that can't be printed, so it can't be shown as "
+                            "written before it's installed")
+            continue
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement as e:
+            problems.append(f"requires: {line!r} isn't a pip requirement: {e}")
+            continue
+        if requirement.url:
+            problems.append(f"requires: {line!r} names a URL; name the package and the versions it needs, which "
+                            "install from wherever whoever runs the bundle installs from")
+    return tuple(requires), problems
 
 
 def foreign_hub_id(entity_id: str, id_root: str) -> bool:

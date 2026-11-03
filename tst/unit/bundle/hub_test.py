@@ -271,20 +271,44 @@ def test_a_dry_run_downloads_and_checks_but_runs_and_writes_nothing(hub, local_s
     assert not local_stores.local_namespace_document_store("hf").path.exists()
 
 
-def test_a_bundle_without_a_bundle_toml_needs_the_plugins_its_card_names(hub, local_stores, quiet_logs):
+def test_a_bundle_without_a_bundle_toml_needs_the_plugins_its_card_names_before_it_is_downloaded(hub, local_stores,
+                                                                                               quiet_logs):
     hub.layout({"bundles/hello/tasks/t.json": TASK})
-    hub.card({"bundles": {"hello": {"plugins": ["agentenv-not-installed>=1"]}}})
+    hub.card({"bundles": {"hello": {"plugins": ["agentenv-not-installed>=1"], "setup": "agent-env demo setup"}}})
 
     refused = CliRunner().invoke(cli, ["run", "hf://me/ds"])
+    calls = list(hub.calls)
     hub.layout({"bundles/hello/bundle.toml": "requires = []\n"})
     shutil.rmtree(hub_module.cache_root())
     declared = CliRunner().invoke(cli, ["run", "hf://me/ds"])
 
     assert refused.exit_code == 1
     assert ("me/ds's card: requires 'agentenv-not-installed>=1', which isn't installed; install it with: agent-env "
-            "plugin add 'agentenv-not-installed>=1'") in refused.output
-    assert "Tasks:" not in refused.output
+            "plugin add 'agentenv-not-installed>=1'\nme/ds's card sets this bundle up with: agent-env demo setup") in (
+        refused.output)
+    assert calls == ["repo_info", "list_repo_files", "hf_hub_download README.md"]
     assert declared.exit_code == 0, declared.output
+
+
+@pytest.mark.parametrize("requires, problem, noted", [
+    ('["agentenv-not-installed>=1"]', "bundle.toml: requires 'agentenv-not-installed>=1', which isn't installed; "
+     "install it with: agent-env plugin add 'agentenv-not-installed>=1'", True),
+    ('["agentenv-x @ git+https://example.invalid/x"]', "bundle.toml: requires: 'agentenv-x @ "
+     "git+https://example.invalid/x' names a URL; name the package and the versions it needs, which install from "
+     "wherever whoever runs the bundle installs from", False),
+])
+def test_a_bundle_toml_is_downloaded_alone_and_checked_as_a_folders_is_before_the_rest(hub, requires, problem, noted):
+    hub.layout({"bundles/hello/tasks/t.json": TASK, "bundles/hello/bundle.toml": f"requires = {requires}\n"})
+    hub.card({"bundles": {"hello": {"plugins": ["agentenv-the-card-names"], "setup": "agent-env demo setup"}}})
+
+    with pytest.raises(BundleError) as caught:
+        fetch_bundle("hf://me/ds")
+
+    assert caught.value.problems == (problem,)
+    assert getattr(caught.value, "__notes__", []) == (["me/ds's card sets this bundle up with: agent-env demo setup"]
+                                                      if noted else [])
+    assert hub.calls == ["repo_info", "list_repo_files", "hf_hub_download README.md",
+                         "hf_hub_download bundles/hello/bundle.toml"]
 
 
 @pytest.mark.parametrize("bundles, problem", [
@@ -304,19 +328,31 @@ def test_a_card_that_says_what_a_bundle_needs_in_the_wrong_shape_is_refused(hub,
     assert caught.value.problems == (problem,)
 
 
-def test_an_openenv_server_of_a_hub_bundle_needs_the_plugins_its_card_names_too(hub):
+def test_an_openenv_server_of_a_hub_bundle_needs_the_plugins_its_card_names_before_it_is_downloaded_too(hub):
     hub.layout({"bundles/hello/tasks/t.json": TASK})
     hub.card({"bundles": {"hello": {"plugins": ["agentenv-not-installed>=1"]}}})
 
     with pytest.raises(UnmetRequirements, match="agent-env plugin add 'agentenv-not-installed>=1'"):
         build_app("hf://me/ds")
 
+    assert hub.calls == ["repo_info", "list_repo_files", "hf_hub_download README.md"]
 
-def test_a_failed_run_shows_the_cards_setup_command_and_never_runs_it(hub, local_stores, quiet_logs):
-    hub.layout({"bundles/hello/tasks/t.json": json.dumps([{"id": "x", "type": "a_step_only_setup_registers"}])})
+
+def test_the_cards_setup_command_is_shown_only_when_setting_up_could_fix_the_run(hub, local_stores, quiet_logs):
+    note = "me/ds's card sets this bundle up with: agent-env demo setup"
+    gap = {"id": "deploy", "type": "deploy_env", "env_id": "env-setup-writes"}
+    other = {"id": "other", "type": "deploy_env", "env_id": "@hf/me/ds/hello/missing"}
     hub.card({"bundles": {"hello": {"setup": "agent-env demo setup"}}})
+    hub.layout({"bundles/hello/tasks/t.json": json.dumps([gap, other])})
 
-    result = CliRunner().invoke(cli, ["run", "hf://me/ds"])
+    mixed = CliRunner().invoke(cli, ["run", "hf://me/ds"])
+    hub.layout({"bundles/hello/tasks/t.json": json.dumps([other])})
+    shutil.rmtree(hub_module.cache_root())
+    neither = CliRunner().invoke(cli, ["run", "hf://me/ds"])
 
-    assert result.exit_code == 1
-    assert "me/ds's card sets this bundle up with: agent-env demo setup" in result.output
+    assert mixed.exit_code == neither.exit_code == 1
+    assert "step 'deploy': env_id: there is no env 'env-setup-writes' in the store" in mixed.output
+    assert "step 'other': env_id: '@hf/me/ds/hello/missing' isn't in this bundle" in mixed.output
+    assert note in mixed.output
+    assert "step 'other': env_id: '@hf/me/ds/hello/missing' isn't in this bundle" in neither.output
+    assert note not in neither.output

@@ -19,7 +19,7 @@ from __future__ import annotations
 import copy
 import heapq
 import unicodedata
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -104,6 +104,17 @@ _ENV_FROM_TOMLS = (Env, MCPServerEnv, WebsiteEnv, MultiEnv, ComputerDriverEnv, C
 _ENV_FROM_FOLDERS = (ComputerDriverEnv, ComputerAppEnv)
 
 _NOTHING_TO_RUN = "this bundle has no tasks or evals to run"
+# The kinds whose absence from the store is a gap whatever sets the bundle up can fill.
+_SET_UP = (EntityKind.ENV, EntityKind.AGENT, EntityKind.ARTIFACT)
+
+
+class NotInStore(BundleError):
+    """A plan whose references name agents, envs or artifacts the store doesn't hold, with every other problem found;
+    ``missing`` are those, as (kind, id)."""
+
+    def __init__(self, problems: Iterable[str], missing: Iterable[tuple[str, str]]):
+        super().__init__(problems)
+        self.missing = tuple(missing)
 
 
 @dataclass(frozen=True)
@@ -248,6 +259,7 @@ class _Planner:
         self.others: tuple[InstalledBundle, ...] | None = None  # the installed bundles but this one, once listed
         self.pullable: dict[str, _Pullable | str] = {}  # each installed bundle read, by id root, or why it can't be
         self.unpulled: dict[tuple[EntityKind, str, int | None], str] = {}  # why an installed bundle's id isn't pulled
+        self.missing: dict[tuple[str, str], None] = {}  # each agent, env and artifact the store doesn't hold, as read
         # By kind: its installed aliases, once a plan reads them; each of them the plan names, by alias; and the store's
         # latest version of each alias's id, as read.
         self.alias_tables: dict[EntityKind, InstalledAliases] = {}
@@ -402,6 +414,7 @@ class _Planner:
         try:
             STORE_GETTERS[EntityKind.AGENT](ref.id, None)
         except NotFoundError:
+            self.missing[EntityKind.AGENT.value, ref.id] = None
             hint = table.hint(ref.id) if (table := self.alias_tables.get(EntityKind.AGENT)) is not None else ""
             return f"there is no agent {ref.id!r} in this bundle, an installed bundle or the store{hint}"
         except (ValueError, KeyError, TypeError) as e:
@@ -548,7 +561,7 @@ class _Planner:
         self._check_environment_names(closure, store_latest)
         self._check_loaded_environments(closure, store_latest)
         if self.problems:
-            raise BundleError(self.problems)
+            raise NotInStore(self.problems, self.missing) if self.missing else BundleError(self.problems)
         writes = self._ordered(closure)
         return Plan(self.resolved, writes, tuple(selected_tasks), tuple(selected_evals), store_refs, store_latest,
                     dict(self.origins), self._published(writes),
@@ -697,10 +710,12 @@ class _Planner:
     def _check_store_refs(
         self, closure: set[_Key], *, stores: bool = True
     ) -> tuple[tuple[Reference, ...], dict[tuple[EntityKind, str], int]]:
-        """Check each store id the closure references; without ``stores``, only what needs no store read."""
+        """Check each store id the closure references; without ``stores``, only what needs no store read. An agent, env
+        or artifact the store doesn't hold is one problem, at the first of the places that use it."""
         read: dict[tuple[EntityKind, str, int | None], Any] = {}
         checked: dict[tuple[EntityKind, str, int | None], Reference] = {}
         latest: dict[tuple[EntityKind, str], int] = {}
+        gaps: dict[str, list[str]] = {}  # each problem of a missing agent, env or artifact, with where it's used
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BundleImage):
@@ -708,15 +723,24 @@ class _Planner:
             for ref in source.references:
                 if ref.local is not None:
                     continue
+                where = f"{self._path(source.entry)}: {ref.where}"
                 problem = self.unpulled.get((ref.kind, ref.id, ref.version)) or self._bundle_ref_problem(ref)
                 if problem is None and stores:
                     problem = self._store_ref_problem(ref, read)
+                    if problem and ref.kind in _SET_UP and read[ref.kind, ref.id, ref.version] is None:
+                        self.missing[ref.kind.value, ref.id] = None
+                        gaps.setdefault(problem, []).append(where)
+                        continue
                 if problem:
-                    self.problems.append(f"{self._path(source.entry)}: {ref.where}: {problem}")
+                    self.problems.append(f"{where}: {problem}")
                 elif stores:
                     checked.setdefault((ref.kind, ref.id, ref.version), ref)
                     if ref.version is None:
                         latest[ref.kind, ref.id] = read[ref.kind, ref.id, None].version
+        for problem, wheres in gaps.items():
+            first, *others = wheres
+            more = f" (and {len(others)} more use{'s' if len(others) > 1 else ''})" if others else ""
+            self.problems.append(f"{first}{more}: {problem}")
         return tuple(checked.values()), latest
 
     def _bundle_ref_problem(self, ref: Reference) -> str | None:
