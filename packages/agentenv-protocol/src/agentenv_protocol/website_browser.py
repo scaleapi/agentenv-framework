@@ -260,12 +260,25 @@ class BrowserControl:
         return visible
 
     async def record(self) -> dict:
-        """The record ``since`` it started: open ``tabs``, each with whether it's ``active``, ``closed_tabs``,
-        ``downloads`` and ``dialogs``."""
+        """The record ``since`` it started: open ``tabs``, each with its URL and title now and whether it's ``active``,
+        ``closed_tabs``, ``downloads`` and ``dialogs``."""
+        await self._refresh()
         active = await self.active_tab()
         return {"since": self.since, "tabs": [{**tab, "active": tab["id"] == active} for tab in self.tabs.values()],
                 "closed_tabs": list(self.closed_tabs), "downloads": list(self.downloads.values()),
                 "dialogs": list(self.dialog_log)}
+
+    async def _refresh(self, target: Optional[str] = None) -> None:
+        """The URL and title of the tab ``target``, or of every open tab, as the browser has them now: it sends no
+        event when a page's title changes."""
+        try:
+            infos = (await self.devtools.call("Target.getTargets", {"filter": PAGES},
+                                              timeout_s=ACTIVE_CHECK_TIMEOUT_S))["targetInfos"]
+        except (ConnectionError, DevToolsError, asyncio.TimeoutError, KeyError):
+            return
+        for info in infos:
+            if target in (None, info["targetId"]) and (tab := self.tabs.get(info["targetId"])) is not None:
+                tab.update(url=info.get("url", tab["url"]), title=info.get("title", tab["title"]))
 
     def _event(self, message: dict) -> None:
         handler = getattr(self, "_on_" + message.get("method", "").replace(".", "_"), None)
@@ -295,9 +308,15 @@ class BrowserControl:
         if params["targetInfo"].get("type") == "page":
             self._sessions[params["sessionId"]] = params["targetInfo"]["targetId"]
             self._spawn(self.devtools.call("Page.enable", session_id=params["sessionId"]))
+            # A page attached as it opens, a popup say, waits for this before it navigates.
+            self._spawn(self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=params["sessionId"]))
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
         self._sessions.pop(params["sessionId"], None)
+
+    def _on_Page_loadEventFired(self, params: dict, session: Optional[str]) -> None:
+        if (target := self._sessions.get(session)) is not None:
+            self._spawn(self._refresh(target))
 
     def _on_Page_javascriptDialogOpening(self, params: dict, session: Optional[str]) -> None:
         dialog = {"tab": self._sessions.get(session), "type": params.get("type"), "message": params.get("message", ""),

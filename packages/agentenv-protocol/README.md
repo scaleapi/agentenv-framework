@@ -790,8 +790,10 @@ are the profile's template. The base class adds:
   the pipe rather than a second copy, which would hand its window to the first and exit. The ready check
   `devtools_answers` asks `Browser.getVersion` over the pipe.
 - **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
-  to every page with flattened sessions and keeps a record, `since` its server started: open tabs in
-  opened order, the one whose page has focus `active`; `closed_tabs`, each with `closed_at` and
+  to every page with flattened sessions, telling each page it attached to as it opened, a popup say, to run, and keeps a
+  record, `since` its server started: open tabs in opened order, each with its URL and title as the browser has them
+  when the record is read (Chrome sends no event for a title), the one whose page has focus `active`; `closed_tabs`,
+  each as of its page's last load, with `closed_at` and
   `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
   ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
   and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.

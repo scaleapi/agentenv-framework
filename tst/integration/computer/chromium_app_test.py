@@ -59,6 +59,27 @@ server = http.server.ThreadingHTTPServer(("127.0.0.1", 8766), Page)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 time.sleep(float(sys.argv[1]))
 """
+POPPING = "http://127.0.0.1:8768/"
+# Serves, on loopback for the seconds it's given, a page that opens /popped in a popup once, when Enter is pressed.
+SERVE_POPPING = """import http.server, sys, threading, time
+class Page(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/popped":
+            body = b"<title>Popped page</title><h1>Popped</h1>"
+        else:
+            body = (b"<title>Opener page</title><script>onkeydown = e => { if (e.key === 'Enter' && !window.opened) "
+                    b"window.opened = window.open('/popped'); };</script>")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 8768), Page)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+time.sleep(float(sys.argv[1]))
+"""
 RECORDED = "http://127.0.0.1:8767/"
 # Serves, on loopback for the seconds it's given, a page that asks to confirm and then downloads report.bin, whose
 # content differs at each request: the nth is _report(n).
@@ -181,6 +202,32 @@ async def test_a_desktop_that_gives_it_defaults_deploys_with_them_and_a_deploys_
     recorded = deployed.metadata["computer"]["app_settings"]["chromium"]
     assert (recorded["locale"], recorded["time_zone"]) == ("fr-FR", "Asia/Tokyo")
     assert deployed.metadata["computer"]["env_params"] == {"app_settings": {"chromium": {"time_zone": "Asia/Tokyo"}}}
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_a_popup_a_page_opens_loads_with_its_control_attached(chromium_desktop):
+    with namespace_routing():
+        deployed = await Env.get(chromium_desktop.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [POPPING]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_POPPING, "60"],
+                                                       timeout_s=90))
+            await asyncio.sleep(SERVE_START_S)
+            await _keys(deployed, ["F5"])
+            await _chromium_windows(deployed, "Opener page")
+            await _keys(deployed, ["Enter"])
+            popped = await _record(deployed, card, lambda r: any(tab["title"] == "Popped page" for tab in r["tabs"]))
+            windows = await _chromium_windows(deployed, "Popped page")
+            serving.cancel()
+        finally:
+            report = await teardown_run(context)
+
+    assert [(tab["url"], tab["title"]) for tab in popped["tabs"]] == [
+        (POPPING, "Opener page"), (f"{POPPING}popped", "Popped page")], popped
+    assert any(title.startswith("Popped page") for title in windows), windows
     assert not report.failed
 
 
