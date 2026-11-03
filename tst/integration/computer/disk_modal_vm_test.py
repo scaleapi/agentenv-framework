@@ -16,7 +16,6 @@ from tst.util.capabilities import skip_without_remote_sandbox
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_remote_sandbox("modal_vm")]
 
 BUNDLE = Path(__file__).parent / "disk"
-DESKTOP = "@local/agentenv-framework/desktop/desktop"
 
 
 def test_the_desktops_disk_is_carried_to_a_modal_vm_once_then_booted_probed_and_reset_in_place_there(state,
@@ -30,8 +29,9 @@ def test_the_desktops_disk_is_carried_to_a_modal_vm_once_then_booted_probed_and_
     again = CliRunner().invoke(cli, ["run", str(BUNDLE), "--task", "probe", "--sandbox", "modal_vm"])
 
     assert again.exit_code == 0, again.output
-    assert f"{DESKTOP}: disk/amd64: making the disk with this machine's Docker" in first.output
-    assert "composing" not in again.output and "making the disk" not in again.output
+    assert any("composing" in line and "disk/amd64" in line and line.endswith(" on LocalSandboxProvider")
+               for line in first.output.splitlines())
+    assert "composing" not in again.output
     assert list(exported.parent.glob("*.img.zst")) == [exported] and exported.stat().st_mtime_ns == made
     for ran in (first, again):
         context = run_context(ran.output)
