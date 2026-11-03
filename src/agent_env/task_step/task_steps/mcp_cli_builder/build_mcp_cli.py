@@ -17,7 +17,7 @@ from agentenv_protocol import client as protocol_v1
 from agent_env.artifact import CliArtifact
 from agent_env.artifact.store import artifact_write_lock
 from agent_env.env import Env
-from agent_env.env.env import require_gateway_url
+from agent_env.env.env import require_gateway_url, website_child
 from agent_env.store.ids import derive_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef, RefRole
@@ -40,11 +40,12 @@ async def _resolve_manifest_endpoint(gateway_url: str, environment_name: str) ->
         logger.debug("env card for %r unavailable (%s); constructing the manifest path", environment_name, e)
         return None
 
-    child = protocol_v1.find_child(card, environment_name)
-    if child is None:
-        logger.debug("env card has no child named %r; constructing the manifest path", environment_name)
+    found = [child for child in protocol_v1.children(card) if child.name == environment_name and not website_child(child)]
+    if len(found) != 1:
+        logger.debug("env card has %s MCP server child named %r; constructing the manifest path",
+                     len(found) or "no", environment_name)
         return None
-    return protocol_v1.extension_params(child, GET_INTERFACES_EXTENSION_URI).get("endpoint")
+    return protocol_v1.extension_params(found[0].card, GET_INTERFACES_EXTENSION_URI).get("endpoint")
 
 
 async def fetch_interface_manifest(

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
-from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.website import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, website_readiness
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
@@ -23,9 +23,7 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
 from agent_env.env.gateway.constants import (
     DEFAULT_MCP_SERVER_NAME,
-    EXT_WEBSITE_URI,
     STATE_TOOL_NAME_CLASHES_KEY,
-    WEBSITE_READY_OP,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
     tool_name_clashes_text,
@@ -1632,7 +1630,7 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
             ready, why[name] = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
             if ready is None and name not in warned:
                 warned.add(name)
-                logger.warning(f"website {name!r} has no {EXT_WEBSITE_URI} {WEBSITE_READY_OP} on its card, so its "
+                logger.warning(f"website {name!r} has no {WEBSITE_EXTENSION_URI} {WEBSITE_READY_OP} on its card, so its "
                                f"readiness is read at its health path {wc.health_path}, which is deprecated")
             if ready is not False:
                 del waiting[name]
@@ -1645,18 +1643,17 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
 
 
 async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool], str]:
-    """Whether the site at ``base_url`` is ready and, when not, why: True or False by its card's ``website/v1``
-    ``ready``; with no card or no ``ready`` on it, None once its health path answers 200 and False before."""
+    """Whether the site at ``base_url`` is ready and, when not, why: True or False by the ``WebsiteReadiness`` its
+    card's ``website/v1`` ``ready`` answers, as the protocol's ``website_readiness`` reads it, an answer that isn't one
+    False; with no card or no ``ready`` on it, None once its health path answers 200 and False before."""
     async with httpx.AsyncClient() as client:
         try:
             card = _card_of(await client.get(base_url + WELL_KNOWN_PATH, timeout=10), base_url)
-            if card is not None and protocol_v1.find_extension_method(card, EXT_WEBSITE_URI, WEBSITE_READY_OP):
-                answer = await protocol_v1.invoke_extension(base_url, card, EXT_WEBSITE_URI, method=WEBSITE_READY_OP,
-                                                            timeout=10)
-                if isinstance(answer, dict) and answer.get("ready") is True:
+            readiness = None if card is None else await website_readiness(base_url, card, timeout=10)
+            if readiness is not None:
+                if readiness.ready:
                     return True, ""
-                problems = answer.get("problems") if isinstance(answer, dict) else None
-                return False, ", ".join(map(str, problems)) if problems else f"{WEBSITE_READY_OP} says not ready"
+                return False, ", ".join(readiness.problems) or f"{WEBSITE_READY_OP} says not ready"
             health = await client.get(base_url + health_path, timeout=10)
         except (httpx.HTTPError, ValueError) as e:
             return False, f"{type(e).__name__}: {e}"

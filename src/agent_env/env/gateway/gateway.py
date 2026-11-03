@@ -49,6 +49,7 @@ from .constants import (
     CHILD_DISCOVERY_TIMEOUT_S,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
+    EXT_WEBSITE_URI,
     GATEWAY_COMPOSE_HOST,
     GATEWAY_EXTENSIONS,
     GATEWAY_TRAJECTORY_FILE,
@@ -72,7 +73,7 @@ from .changes import ChangeAttribution
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
-from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card, upstream_url
+from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, operations, rewrite_child_card, upstream_url
 from .triggers import TriggerEngine, TriggerError
 from .notifications import CHECK_TOOL_NAMES, NotificationError, Notifications, build_check_tools
 
@@ -126,6 +127,7 @@ class Gateway:
         self.internal_mcp_servers = internal_mcp_servers
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
+        self._site_reserved: dict[str, frozenset[str]] = {}
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._db_conn: psycopg2.extensions.connection | None = None
@@ -627,9 +629,10 @@ class Gateway:
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
-        A site's data plane and card are never reached through its route, so an agent browsing the site can't read
-        what grades it; agentenv reaches them through /svc/<name>/."""
-        if reserved_site_request(request):
+        A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), its
+        state's among them, are never reached through its route, so an agent browsing the site can't read what grades
+        it; agentenv reaches them through /svc/<name>/."""
+        if reserved_site_request(request, await self._site_reserved_paths(request.path_params["service_name"])):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
@@ -661,6 +664,31 @@ class Gateway:
     def _request_role(request: Request) -> str:
         """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
         return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+
+    async def _site_reserved_paths(self, app: str) -> frozenset[str]:
+        """The paths ``app``'s card advertises for agentenv (``site_reserved_paths``), read once from its server, the one
+        its /svc/ route reaches (else the one its website route does), and kept; none for a site serving no card, one whose card path answers a 4xx or what isn't a JSON
+        object, and none, read again next time, while its card can't be read, unreachable or answering a 5xx."""
+        if app in self._site_reserved:
+            return self._site_reserved[app]
+        base_url = self.rest_proxy_urls.get(app) or self.website_urls.get(app)
+        if base_url is None:
+            return frozenset()
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=CARD_FETCH_TIMEOUT_S)
+            if response.status_code >= 500:
+                response.raise_for_status()
+        except Exception as e:
+            logger.warning(f"website {app}: its card could not be read ({type(e).__name__}: {e}), so only its data plane "
+                           "and card paths are reserved on its route for now")
+            return frozenset()
+        try:
+            card = response.json() if response.is_success else None
+        except ValueError:
+            card = None
+        self._site_reserved[app] = site_reserved_paths(card) if isinstance(card, dict) else frozenset()
+        return self._site_reserved[app]
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website
@@ -1507,21 +1535,44 @@ def _call_never_reached_child(exc: BaseException) -> bool:
     return isinstance(exc, McpError) and exc.error.code == 32600
 
 
-def reserved_site_path(path: str) -> bool:
-    """Whether ``path``, as a site's server would route it, is its data plane or its env card."""
-    normalized = posixpath.normpath("/" + path.lstrip("/"))
-    return normalized == RPC_PATH or normalized.startswith(RPC_PATH + "/") or normalized == WELL_KNOWN_PATH
+def _normalized(path: str) -> str:
+    return posixpath.normpath("/" + path.lstrip("/"))
 
 
-def reserved_site_request(request: Request) -> bool:
-    """Whether a request on a site's route reaches its data plane or env card: by the path as routed here, or by the
-    one its server receives, which is the raw path forwarded, its dot segments removed by httpx and then decoded. The
-    two differ when an encoded slash sits beside a dot segment (``public%2Fx/../agentenv``). A request-target the proxy
-    can't build a URL for isn't reserved here: ``forward()`` refuses it."""
-    if reserved_site_path("/" + request.path_params.get("path", "")):
+def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> bool:
+    """Whether ``path``, as a site's server would route it, is its data plane or its env card, or one of the paths
+    ``reserved`` names (``site_reserved_paths``), or under one."""
+    normalized = _normalized(path)
+    return normalized == WELL_KNOWN_PATH or any(normalized == base or normalized.startswith(base.rstrip("/") + "/")
+                                                for base in (RPC_PATH, *reserved))
+
+
+def site_reserved_paths(card: dict) -> frozenset[str]:
+    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, every extension's
+    endpoint and each of its methods', and ``website/v1``'s ``params.state.path``, where it serves its state; each one
+    a path of its own, not the site's root."""
+    paths = [card.get("url")]
+    for ext in (card.get("capabilities") or {}).get("extensions") or []:
+        params = ext.get("params") if isinstance(ext, dict) else None
+        if not isinstance(params, dict):
+            continue
+        paths += [endpoint for *_, endpoint in operations(params)]
+        paths.append(params.get("endpoint"))
+        state = params.get("state") if ext.get("uri") == EXT_WEBSITE_URI else None
+        paths.append(state.get("path") if isinstance(state, dict) else None)
+    return frozenset(_normalized(p) for p in paths if isinstance(p, str) and p.startswith("/") and _normalized(p) != "/")
+
+
+def reserved_site_request(request: Request, reserved: frozenset[str] = frozenset()) -> bool:
+    """Whether a request on a site's route reaches its data plane or env card, or one of the paths ``reserved`` names
+    (``site_reserved_paths``): by the path as routed here, or by the one its server receives, which is the raw path
+    forwarded, its dot segments removed by httpx and then decoded. The two differ when an encoded slash sits beside a
+    dot segment (``public%2Fx/../agentenv``). A request-target the proxy can't build a URL for isn't reserved here:
+    ``forward()`` refuses it."""
+    if reserved_site_path("/" + request.path_params.get("path", ""), reserved):
         return True
     try:
         sent = httpx.URL(upstream_url("http://site", request)).path
     except (ValueError, httpx.InvalidURL):
         return False
-    return reserved_site_path(sent)
+    return reserved_site_path(sent, reserved)

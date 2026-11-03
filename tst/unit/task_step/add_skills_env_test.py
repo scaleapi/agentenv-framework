@@ -109,6 +109,17 @@ async def test_an_env_behind_a_gateway_installs_each_child_envs_skill_under_the_
 
 
 @pytest.mark.asyncio
+async def test_a_child_env_serving_a_skill_is_asked_by_its_own_card_though_another_child_shares_its_name(agent):
+    gateway = _env("office", name="office", extensions=(), children=(("mail", ()), ("mail", (_SKILL,))))
+    gateway.environment_card["children_environments"][1]["url"] = "/svc/mcp-mail/agentenv"
+
+    context = await _step("office").execute(_context(gateway, bound=("office",)))
+
+    assert [(card, params["name"]) for _, card, *_, params in agent.calls] == [("mail", "mail")]
+    assert set(context.metadata[ENV_SKILLS_KEY]["solver"]["office"]) == {"mail"}
+
+
+@pytest.mark.asyncio
 async def test_a_computer_installs_its_own_skill_then_each_apps_and_an_app_alone_the_computers_its_name_reaches(agent):
     desk = _env("desk", name="desktop", children=(("mail", (_SKILL,)), ("notes", ())))
     alone = _env("mail-alone", name="mail", children=(("mail", (_SKILL,)),))

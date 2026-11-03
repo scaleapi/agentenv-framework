@@ -14,9 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
-from agentenv_protocol import METHOD_GET, RPC_PATH, DataPart, client as protocol_v1
-
-from agent_env.env.gateway.constants import EXT_WEBSITE_URI
+from agentenv_protocol import METHOD_GET, DataPart, client as protocol_v1
 
 if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv
@@ -86,9 +84,9 @@ def card_servers(card: dict, address: str) -> list[BackingServer]:
 
 
 def _listed(child: protocol_v1.ChildEnv, address: str) -> BackingServer:
-    route, url = f"/svc/{child.name}", (child.url or "").rstrip("/")
-    website = child.find_extension(EXT_WEBSITE_URI) is not None or url == route or url.startswith(f"{route}/")
-    return BackingServer(child.name, mcp=not website, child=child, address=address)
+    from agent_env.env.env import website_child
+
+    return BackingServer(child.name, mcp=not website_child(child), child=child, address=address)
 
 
 async def backing_servers(deployed: Optional[DeployedEnv], gateway_url: Optional[str], env: Any,
@@ -143,7 +141,8 @@ async def server_v1_base_url(server: BackingServer, gateway_url: Optional[str]) 
 
 
 async def v1_base_url(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str, mcp: bool = True) -> Optional[str]:
-    """A child env's v1 data-plane base from the stored env card, or None for legacy; without a stored card, the live probe
+    """A child env's v1 data-plane base from the stored env card, the MCP server's or with ``mcp=False`` the website's
+    of that name, or None for legacy; without a stored card, the live probe
     decides. A website's probe is a card read that is None only on a 404 and raises on any other failure, so a website whose
     card could not be read is never taken for one serving no data plane."""
     if deployed is None or not deployed.environment_card:
@@ -152,14 +151,15 @@ async def v1_base_url(deployed: Optional[DeployedEnv], gateway_url: Optional[str
             _, card = await child_env_card(None, gateway_url, environment_name, mcp=False)
             return base_url if card is not None else None
         return base_url if await protocol_v1.supports_v1(base_url) else None
-    child = deployed.get_child_env_card(environment_name)
-    return deployed.environment_url + child.get("url", RPC_PATH).removesuffix(RPC_PATH) if child else None
+    child = deployed.child_env(environment_name, mcp=mcp)
+    return child.base_url(deployed.environment_url) if child is not None else None
 
 
 
 async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str, timeout: int = 10,
                          mcp: bool = True) -> tuple[str, Optional[dict]]:
-    """A child env's card and the base its endpoints resolve against: from the stored env card, or without one a live read
+    """A child env's card and the base its endpoints resolve against: from the stored env card, the MCP server's or
+    with ``mcp=False`` the website's of that name, or without one a live read
     at the MCP server's gateway path, or with ``mcp=False`` the website's (None on 404)."""
     if deployed is None or not deployed.environment_card:
         base_url = environment_base_url((gateway_url or "").rstrip("/"), environment_name, mcp=mcp)
@@ -169,7 +169,7 @@ async def child_env_card(deployed: Optional[DeployedEnv], gateway_url: Optional[
             if e.response.status_code == 404:
                 return base_url, None
             raise
-    return deployed.environment_url, deployed.get_child_env_card(environment_name)
+    return deployed.environment_url, deployed.get_child_env_card(environment_name, mcp=mcp)
 
 async def reset_via_rest(
     base_url: str,

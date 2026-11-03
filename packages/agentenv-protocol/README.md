@@ -430,6 +430,33 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
 - **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
   `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
 
+## Website readiness
+
+`agentenv_protocol.website` is the one definition of whether a website env is healthy. A site's card advertises
+`urn:agentenv:website/v1`'s `ready` (`WEBSITE_READY_OP`), a GET answering a `WebsiteReadiness`: `ready`, a boolean,
+and `problems`, the names of what keeps it from being ready (a `WebsiteEnvironment`'s are its `@ready_check` methods
+not yet true). The model is strict about those two (`"yes"` is no `ready`) and ignores fields it doesn't know, so a
+reader keeps reading a newer site. Everything that judges a site reads it through these helpers: agent-env's deploy,
+`DeployedEnv.readiness()`, and the conformance checker's `health`, which fails an answer that isn't a
+`WebsiteReadiness`.
+
+```python
+from agentenv_protocol.website import env_readiness, website_readiness
+
+site = await website_readiness(base_url, card)   # WebsiteReadiness, or None for a card without ready
+env = await env_readiness(gateway_url, env_card)  # WebsiteReadiness of every site of the env
+print(env.ready, env.problems)                    # False ['shop: seeded']
+```
+
+- **One site:** `website_readiness(base_url, card, *, timeout=READY_TIMEOUT_S, headers=None)` asks the site as its card
+  advertises `ready`. It raises httpx's error when the site can't be reached, `ExtensionCallError` for a non-2xx
+  answer and `ValueError` (pydantic's `ValidationError`) for an answer that isn't a `WebsiteReadiness`.
+- **An env:** `env_readiness(base_url, card, ...)` asks, at once, the card itself when it advertises `ready` (a single
+  site's card), and every child under a composed card's `children_environments` that does, its endpoints rooted at
+  `base_url` as a gateway's are. A child's problems are prefixed with its name (`shop: seeded`); one that can't be
+  asked, or answers no `WebsiteReadiness`, is a problem itself. A card or child without `ready`, an MCP server's or an
+  older site's, isn't counted, so an env with no site serving it is ready with no problems.
+
 ## Computer drivers
 
 A computer driver is what runs inside a computer an agent uses through screenshots and input. Write

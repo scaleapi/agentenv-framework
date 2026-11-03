@@ -1,12 +1,15 @@
-"""The website state verifier: each check reads one value of one session of one site, as the site's /go?sid= reports it
-through the gateway, and compares it; the step is refused at put for an op it doesn't know, and for a site the env
-version it pins doesn't serve."""
+"""The website state verifier: each check reads one value of one session of one site, as the site's card's website/v1
+state reports it (deprecated, its state path's or /go?sid='s for a card without it, and the gateway's /svc/<name>/go
+for a record with no card), and compares it; the step is refused at put for an op it doesn't know, and for a site the
+env version it pins doesn't serve."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from agentenv_protocol.website import WEBSITE_EXTENSION_URI
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
@@ -102,7 +105,7 @@ def test_put_refuses_a_check_of_a_site_the_pinned_env_version_doesnt_serve(local
     assert WebsiteStateVerifierTaskStep(id="x", version=None, env_id="missing", checks=[]).preflight() == []
 
 
-def test_execute_reads_each_sites_go_through_the_gateway_and_scores_the_checks(monkeypatch):
+def test_a_record_with_no_card_reads_each_sites_go_through_the_gateway_and_scores_the_checks(monkeypatch):
     by_site = {"mail": APPS["mail"], "calendar": {"s1": {"current_state": {"events": [1, 2]}}}}
     asked = []
 
@@ -123,10 +126,71 @@ def test_execute_reads_each_sites_go_through_the_gateway_and_scores_the_checks(m
         {"site": "mail", "sid": "s1", "path": "drafts", "op": "eq", "value": 0, "reduce": "len"},
         {"site": "calendar", "sid": "s1", "path": "events", "op": "eq", "value": 2, "reduce": "len"}])
     context = TaskStepContext()
-    context.deployed_envs.append(SimpleNamespace(env_id="office", env_version=1))
+    context.deployed_envs.append(SimpleNamespace(env_id="office", env_version=1, environment_url=None))
 
     asyncio.run(step.execute(context))
 
     assert asked == [("/svc/calendar/go", "s1"), ("/svc/mail/go", "s1")]
     verification = context.metadata["verifications"]["office-check"]
     assert [row["result"] for row in verification["results"]] == [True, False, True]
+
+
+def _site_card(name, *, state=True, state_path=None):
+    params = {"methods": {"state": {"method": "GET", "endpoint": f"/svc/{name}/agentenv/ext/website/state"}} if state else {}}
+    if state_path is not None:
+        params["state"] = {"path": state_path}
+    return {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {"extensions": [
+        {"uri": WEBSITE_EXTENSION_URI, "params": params}]}}
+
+
+_GATEWAY_CARD = {"name": "office", "url": "/agentenv", "children_environments": [
+    {"name": "mail", "url": "/svc/mcp-mail/agentenv", "capabilities": {"extensions": []}},
+    _site_card("mail"), _site_card("calendar", state=False, state_path="/grading/state"), _site_card("notes", state=False)]}
+
+
+def _deployed(card=_GATEWAY_CARD):
+    return SimpleNamespace(env_id="office", env_version=1, environment_url="http://gateway", environment_card=card,
+                           control_headers_for=lambda url: {"Authorization": "Bearer t0ken"} if url == "http://gateway" else {})
+
+
+def test_execute_reads_each_site_of_the_card_by_its_state_op_else_its_state_path_and_scores_the_checks(monkeypatch, caplog):
+    by_site = {"mail": APPS["mail"], "calendar": {"s1": {"current_state": {"events": [1, 2]}}},
+               "notes": {"s1": {"current_state": {"notes": []}}}}
+    asked = []
+
+    def gateway(request):
+        asked.append((request.url.path, request.url.params["sid"], request.headers.get("authorization")))
+        return httpx.Response(200, json=by_site[request.url.path.split("/")[2]][request.url.params["sid"]])
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: real_client(transport=httpx.MockTransport(gateway)))
+    step = WebsiteStateVerifierTaskStep(id="v", version=None, env_id="office", verifier_id="office-check", checks=[
+        {"site": "mail", "sid": "s1", "path": "inbox.0.read", "op": "eq", "value": True},
+        {"site": "calendar", "sid": "s1", "path": "events", "op": "eq", "value": 2, "reduce": "len"},
+        {"site": "notes", "sid": "s1", "path": "notes", "op": "eq", "value": []}])
+    context = TaskStepContext()
+    context.deployed_envs.append(_deployed())
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(step.execute(context))
+
+    assert asked == [("/svc/calendar/grading/state", "s1", None), ("/svc/mail/agentenv/ext/website/state", "s1", "Bearer t0ken"),
+                     ("/svc/notes/go", "s1", None)]
+    assert [row["result"] for row in context.metadata["verifications"]["office-check"]["results"]] == [True, True, True]
+    warned = [r.getMessage() for r in caplog.records if "deprecated" in r.getMessage()]
+    assert len(warned) == 2 and "/grading/state?sid=" in warned[0] and "/go?sid=" in warned[1]
+
+
+def test_execute_refuses_a_site_the_card_doesnt_serve_and_one_it_cant_tell_apart():
+    step = WebsiteStateVerifierTaskStep(id="v", version=None, env_id="office", checks=[
+        {"site": "shop", "path": "", "op": "eq"}])
+    context = TaskStepContext()
+    context.deployed_envs.append(_deployed())
+    with pytest.raises(RuntimeError, match=r"serves no website 'shop'; its sites are \['calendar', 'mail', 'notes'\]"):
+        asyncio.run(step.execute(context))
+    twice = {**_GATEWAY_CARD, "children_environments": [_site_card("mail"), {**_site_card("mail"), "url": "/svc/mail2/agentenv"}]}
+    context.deployed_envs[0] = _deployed(twice)
+    step = WebsiteStateVerifierTaskStep(id="v", version=None, env_id="office", checks=[
+        {"site": "mail", "path": "", "op": "eq"}])
+    with pytest.raises(RuntimeError, match="2 websites named 'mail'"):
+        asyncio.run(step.execute(context))
