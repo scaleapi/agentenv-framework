@@ -31,7 +31,7 @@ def docker(local_stores, cli_routing, monkeypatch):
     monkeypatch.setattr(builder, "host_platform", lambda: "linux/arm64")
     monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/arm64")
     monkeypatch.setattr(composer, "_probe", fake.probe)
-    monkeypatch.setattr(builder, "_emulated_platforms", lambda: {"linux/arm64", *fake.emulates})
+    monkeypatch.setattr(builder, "_runs_here", lambda platform, image: platform in {"linux/arm64", *fake.emulates})
     monkeypatch.setattr(builder.LocalBuilder, "installed", lambda self, tag, prefix: {"mss": "10.1.0"})
     monkeypatch.setattr(builder.LocalBuilder, "image_config", lambda on, tag: fake.image_config(tag))
     monkeypatch.setattr(composer, "_protocol_source", lambda: None)

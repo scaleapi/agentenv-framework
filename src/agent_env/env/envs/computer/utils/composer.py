@@ -261,7 +261,7 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
 
             def on() -> builder.Builder:
                 if not held:
-                    link = builds.link(platform)
+                    link = builds.link(platform, base.image())
                     native = platform in link.native_platforms()
                     progress.at(pair, "starting its builder", f"building natively {builder.where(link)}" if native else
                                 f"building emulated, which is slow, {builder.where(link)}; "
@@ -351,7 +351,7 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
             if (pinned := _served(ref, store)) is not None:
                 progress.at(pair, "reusing", "reusing the disk of the same key, made earlier")
                 return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": _now()}
-            link = builds.link(platform)
+            link = builds.link(platform, base.image())
             progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
             on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
             on.login(store.auth(container["image"]))

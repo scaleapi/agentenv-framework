@@ -39,7 +39,7 @@ mtype -i esp.img ::/EFI/BOOT/$1 > uki
 debugfs -R "cat /etc/agentenv/vm/image.env" root.img > image.env 2>/dev/null
 debugfs -R "stat /bin/busybox" root.img 2>/dev/null | head -1 > busybox
 sha256sum esp.img root.img > sums
-rm disk.raw esp.img root.img
+rm disk.img disk.raw esp.img root.img
 """
 
 
@@ -114,8 +114,14 @@ def _read(tools: str, image: str, folder: Path, arch: str) -> dict:
     with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as tar:
         (member,) = tar.getmembers()
         (folder / "disk.img").write_bytes(tar.extractfile(member).read())
-    subprocess.run(["docker", "run", "--rm", "--platform", host_platform(), "-v", f"{folder}:/work", "--entrypoint", "sh",
-                    tools, "-c", _READ, "read", UKI[arch]], check=True, capture_output=True)
+    reader = subprocess.run(["docker", "create", "--platform", host_platform(), "--entrypoint", "sh", tools, "-c", _READ,
+                             "read", UKI[arch]], capture_output=True, text=True, check=True).stdout.strip()
+    try:
+        for command in (["cp", f"{folder}/.", f"{reader}:/work"], ["start", "--attach", reader],
+                        ["cp", f"{reader}:/work/.", str(folder)]):
+            subprocess.run(["docker", *command], check=True, capture_output=True)
+    finally:
+        subprocess.run(["docker", "rm", "--force", reader], capture_output=True)
     start = [(key, base64.b64decode(value).decode()) for line in (folder / "image.env").read_text().splitlines()
              for key, _, value in [line.partition("=")]]
     return {"file": (member.name, member.uid, member.gid), "start": start, "uki": (folder / "uki").read_text(),

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import io
 import json
@@ -52,6 +53,10 @@ IN_VM = Path(__file__).with_name("builder_in_vm.sh")
 #: since the stores keep no file modes.
 RUN_ONLY = (b"#!", b"\x7fELF")
 EXECUTABLE = 0o755
+#: What shows whether this machine's Docker runs a platform, for a base that's only a build context: the image the shipped
+#: Linux bases build from, which their build pulls for the platform anyway.
+PLATFORM_CHECK = ("public.ecr.aws/docker/library/ubuntu:24.04"
+                  "@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c")
 #: What registers QEMU in a builder VM's kernel, for a platform no link runs natively: Docker Hub's image through
 #: Google's mirror of it, which doesn't limit anonymous pulls by IP as Docker Hub does.
 BINFMT = ("mirror.gcr.io/tonistiigi/binfmt:qemu-v9.2.2"
@@ -165,9 +170,9 @@ class Builds:
         self.provider, self.emulate = provider, emulate
         self._refused = [(link, _refused(link, store_id, repository)) for link in provider.links]
 
-    def link(self, platform: str) -> SandboxProvider:
-        """The link that builds ``platform``. Raises Unbuildable, or Skipped when only emulation would build it and the
-        put turned emulation off."""
+    def link(self, platform: str, base: DockerImageArtifact) -> SandboxProvider:
+        """The link that builds ``platform`` ``FROM`` ``base``. Raises Unbuildable, or Skipped when only emulation would
+        build it and the put turned emulation off."""
         links = [link for link, problem in self._refused if problem is None]
         if native := [link for link in links if platform in link.native_platforms()]:
             return native[0]
@@ -178,7 +183,7 @@ class Builds:
             raise Skipped("emulation is off, and " + "; ".join(
                 f"{type(link).__name__} doesn't run {platform} natively" for link, _ in self._refused))
         for link in links:
-            if not _docker_here(link) or platform in _emulated_platforms():
+            if not _docker_here(link) or _runs_here(platform, _platform_check(base)):
                 return link
         unemulated = f"this machine can't build {platform}: its Docker has no emulation for it"
         raise Unbuildable("; ".join(problem or unemulated for _, problem in self._refused))
@@ -236,14 +241,24 @@ def _docker_here(link: SandboxProvider) -> bool:
     return link.ON_THIS_MACHINE and link.REACHES_HOST_AT is None
 
 
-def _emulated_platforms() -> set[str]:
-    """The platforms this machine's Docker builds, its own and those it emulates."""
-    inspected = subprocess.run(["docker", "buildx", "inspect", "--bootstrap"], capture_output=True, text=True)
-    platforms = set()
-    for line in inspected.stdout.splitlines():
-        if line.strip().startswith("Platforms:"):
-            platforms |= {item.strip().rstrip("*") for item in line.split(":", 1)[1].split(",")}
-    return platforms
+@functools.cache
+def _runs_here(platform: str, image: str) -> bool:
+    """Whether this machine's Docker runs ``platform``'s programs, natively or emulated, as a container of ``image`` for
+    it shows: what its builder lists can leave out a platform it runs, as colima's does Rosetta's linux/amd64."""
+    try:
+        return subprocess.run(["docker", "run", "--rm", "--platform", platform, "--entrypoint", "true", image],
+                              capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _platform_check(base: DockerImageArtifact) -> str:
+    """The image ``_runs_here`` starts for a build ``FROM`` ``base``, one the build pulls anyway: ``base`` when it's a
+    registry's, signed in to it, else ``PLATFORM_CHECK``."""
+    if not names_registry(base.image_name):
+        return PLATFORM_CHECK
+    docker_login(get_config().get_image_store().auth(base.pinned_name))
+    return base.pinned_name
 
 
 def _resolver(source: str, arch: str, context: str, out: str) -> list[str]:
@@ -262,17 +277,28 @@ class LocalBuilder(Builder):
             build_for(base, platform)
 
     def resolve(self, request: dict, source: str, arch: str, timeout: int) -> dict:
+        """With the build context and what the resolver reads copied into its container, and what it wrote copied out,
+        rather than bind-mounted: a Docker in a VM, as on a Mac, mounts only the folders the VM shares, colima's only the
+        home, and keeps no owner on them."""
         out = self.work / RESOLVED / "out"
         out.mkdir(parents=True)
         (out / "request.json").write_text(json.dumps({**request, "owner": [os.getuid(), os.getgid()]}))
         shutil.copy(RESOLVER, out / "resolve.py")
+        container = _docker("create", "--platform", f"linux/{arch}", "--user", "root", "--entrypoint", "python3", source,
+                            "/out/resolve.py", "/out/request.json", "/out").strip()
         try:
-            ran = subprocess.run(_resolver(source, arch, str(self.work / CONTEXT), str(out)), capture_output=True,
-                                 text=True, timeout=timeout)
-        except subprocess.TimeoutExpired as e:
-            raise ResolveError(f"resolving took over {timeout} s", str(e.stdout or "")) from None
-        if ran.returncode != 0:
-            raise ResolveError("resolving the packages failed", ran.stdout + ran.stderr)
+            _docker("cp", f"{self.work / CONTEXT}/.", f"{container}:/ctx")
+            _docker("cp", f"{out}/.", f"{container}:/out")
+            try:
+                ran = subprocess.run(["docker", "start", "--attach", container], capture_output=True, text=True,
+                                     timeout=timeout)
+            except subprocess.TimeoutExpired as e:
+                raise ResolveError(f"resolving took over {timeout} s", str(e.stdout or "")) from None
+            if ran.returncode != 0:
+                raise ResolveError("resolving the packages failed", ran.stdout + ran.stderr)
+            _docker("cp", f"{container}:/out/.", str(out))
+        finally:
+            subprocess.run(["docker", "rm", "--force", container], capture_output=True)
         return json.loads((out / "result.json").read_text())
 
     def download(self, url: str, sha256: str, path: str) -> None:
@@ -562,6 +588,14 @@ def _inline(context: Path, skip: set[str]) -> bytes:
 
 def _packages(listed: bytes) -> dict[str, str]:
     return {package["name"]: package["version"] for package in json.loads(listed)}
+
+
+def _docker(*args: str) -> str:
+    """What ``docker`` printed for ``args``; a failure raises, with what it said."""
+    ran = subprocess.run(["docker", *args], capture_output=True, text=True)
+    if ran.returncode != 0:
+        raise RuntimeError(f"docker {args[0]} failed: {ran.stderr.strip()}")
+    return ran.stdout
 
 
 def save_image(tag: str, path: Path) -> None:
