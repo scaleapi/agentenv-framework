@@ -210,10 +210,13 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
             report = await teardown_run(context)
 
     assert accepted[0].startswith("accepted")
-    assert [(d["type"], d["message"], d["answer"], d["by"]) for d in recorded["dialogs"]] == [
-        ("confirm", "Proceed?", "accepted", "agentenv")], recorded
-    assert [(d["filename"], d["state"], d["size"], d["sha256"]) for d in recorded["downloads"]] == [
-        ("report.bin", "completed", len(b"agentenv report\n" * 64), REPORT_SHA256)], recorded
+    # Chrome reloads its error page for the start tab once the page's server is up, and F5 reloads it too, so the page
+    # may run more than once; each run's dialog and download must be recorded alike.
+    assert recorded["dialogs"] and {(d["type"], d["message"], d["answer"], d["by"]) for d in recorded["dialogs"]} == {
+        ("confirm", "Proceed?", "accepted", "agentenv")}, recorded
+    assert recorded["downloads"] and {(d["filename"], d["state"], d["size"], d["sha256"])
+                                      for d in recorded["downloads"]} == {
+        ("report.bin", "completed", len(b"agentenv report\n" * 64), REPORT_SHA256)}, recorded
     assert [tab["closed_by"] for tab in recorded["closed_tabs"]] == ["browser"], recorded
     assert [(tab["url"], tab["active"]) for tab in recorded["tabs"]] == [(RECORDED, True)], recorded
     assert [entry["event"] for entry in exited["launches"]] == ["launch", "exit"], exited
