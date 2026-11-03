@@ -5,7 +5,9 @@ pinned when the computer is written and read back from its registry to check it 
 
 from __future__ import annotations
 
+import functools
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
@@ -23,9 +25,10 @@ from pydantic import (
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.ref import ArtifactRef
+from agent_env.config import get_config
 from agent_env.entity.refs import EntityRef
 from agent_env.store.base import NotFoundError
-from agent_env.store.image_store.oci_registry_credentials import names_registry
+from agent_env.store.image_store.oci_registry_credentials import RegistryAuth, names_registry
 from agent_env.store.image_store.image_contents import UnreadableLayerError, disk_layer, os_release, platform_manifests
 
 if TYPE_CHECKING:
@@ -191,13 +194,14 @@ class ComputerArtifact(Artifact):
 
         computer = cls(**fields)
         image, disk = computer.image(), computer.forms.disk
-        checks = {"container": _inspect_container(image, computer.arch, computer.os) if inspect
-                  else _unread(computer.arch, "inspection was skipped")}
+        checks = {"container": _inspect(image, computer.arch, functools.partial(_read_container, computer.os))
+                  if inspect else _unread(computer.arch, "inspection was skipped")}
         if disk is not None and disk.image is None:
             checks["disk"] = _unread(computer.arch, "it's made from the container form when composed")
         elif disk is not None:
-            checks["disk"] = (_inspect_disk(computer.disk_image(), computer.arch, disk.min_disk_gb) if inspect
-                              else _unread(computer.arch, "inspection was skipped"))
+            checks["disk"] = (_inspect(computer.disk_image(), computer.arch,
+                                       functools.partial(_read_disk, disk.min_disk_gb))
+                              if inspect else _unread(computer.arch, "inspection was skipped"))
         problems = [f"forms.{form} ({arch}): {check.problem}"
                     for form, by_arch in checks.items() for arch, check in by_arch.items() if check.status == "failed"]
         if problems:
@@ -240,9 +244,11 @@ class ComputerArtifact(Artifact):
             raise ValueError(f"computer {self.id!r}: forms.{form}.image: {e}") from e
 
 
-def _inspect_container(image: DockerImageArtifact, arches: list[str], os: LinuxOS) -> dict[str, ImageCheck]:
-    from agent_env.config import get_config
-
+def _inspect(image: DockerImageArtifact, arches: list[str],
+             read: Callable[[str, str, RegistryAuth | None], ImageCheck]) -> dict[str, ImageCheck]:
+    """Each arch's image of a form, ``read`` from its registry without pulling it: failed when the registry serves none
+    for an arch or ``read`` refuses it, uninspected when this Python can't read its layers, so its first boot checks
+    it."""
     if not names_registry(image.image_name):
         how = "only its build context is stored" if image.context_only else "it's stored under a tag no registry serves"
         return _unread(arches, f"{how}, so its first boot checks it")
@@ -259,58 +265,42 @@ def _inspect_container(image: DockerImageArtifact, arches: list[str], os: LinuxO
             checks[arch] = ImageCheck(status="failed", image=ref, problem=f"it has no linux/{arch} image, only {served}")
             continue
         try:
-            release = os_release(ref, digest, auth)
+            checks[arch] = read(ref, digest, auth)
         except UnreadableLayerError as e:
             checks[arch] = ImageCheck(status="uninspected", image=ref, manifest=digest,
                                       reason=f"{e}, so its first boot checks it")
-            continue
-        except ValueError as e:
-            checks[arch] = ImageCheck(status="failed", image=ref, manifest=digest,
-                                      problem=f"its os-release couldn't be read: {e}")
-            continue
-        expected = {"ID": os.distribution, "VERSION_ID": None if os.version == "rolling" else os.version}
-        problems = [f"os-release has {key}={release.get(key)!r}, not {want!r}" for key, want in expected.items()
-                    if release.get(key) != want]
-        checks[arch] = ImageCheck(status="failed" if problems else "passed", image=ref, manifest=digest,
-                                  os_release={key: release[key] for key in expected if key in release},
-                                  problem="; ".join(problems) or None)
-    return checks
-
-
-def _inspect_disk(image: DockerImageArtifact, arches: list[str], min_disk_gb: int) -> dict[str, ImageCheck]:
-    """Each arch's disk image read from the start of its one layer: its file, its owner and its virtual size."""
-    from agent_env.config import get_config
-
-    if not names_registry(image.image_name):
-        return _unread(arches, "it's stored under a tag no registry serves, so its first boot checks it")
-    ref = image.pinned_name
-    auth = get_config().get_image_store().auth(ref)
-    try:
-        ref, manifests = platform_manifests(ref, auth)
-    except ValueError as e:
-        return {arch: ImageCheck(status="failed", image=ref, problem=str(e)) for arch in arches}
-    checks = {}
-    for arch in arches:
-        if (digest := manifests.get(arch)) is None:
-            checks[arch] = ImageCheck(status="failed", image=ref, problem=f"it has no linux/{arch} image")
-            continue
-        try:
-            found = disk_layer(ref, digest, auth)
-        except UnreadableLayerError as e:
-            checks[arch] = ImageCheck(status="uninspected", image=ref, manifest=digest,
-                                      reason=f"{e}, so its first boot checks it")
-            continue
         except ValueError as e:
             checks[arch] = ImageCheck(status="failed", image=ref, manifest=digest, problem=str(e))
-            continue
-        problems = [problem for problem, wrong in (
-            (f"its first file is {found.path}, not {DISK_FILE}", found.path != DISK_FILE),
-            (f"{found.path} is owned by uid {found.uid}, not {DISK_OWNER}", found.uid != DISK_OWNER),
-            (f"its virtual size is {found.virtual_size / 2**30:.1f} GiB, under min_disk_gb ({min_disk_gb})",
-             found.virtual_size < min_disk_gb * 2**30)) if wrong]
-        checks[arch] = ImageCheck(status="failed" if problems else "passed", image=ref, manifest=digest,
-                                  problem="; ".join(problems) or None)
     return checks
+
+
+def _read_container(os: LinuxOS, ref: str, digest: str, auth: RegistryAuth | None) -> ImageCheck:
+    """The container form's image manifest ``digest``, by its os-release against ``os``."""
+    try:
+        release = os_release(ref, digest, auth)
+    except UnreadableLayerError:
+        raise
+    except ValueError as e:
+        raise ValueError(f"its os-release couldn't be read: {e}") from e
+    expected = {"ID": os.distribution, "VERSION_ID": None if os.version == "rolling" else os.version}
+    problems = [f"os-release has {key}={release.get(key)!r}, not {want!r}" for key, want in expected.items()
+                if release.get(key) != want]
+    return ImageCheck(status="failed" if problems else "passed", image=ref, manifest=digest,
+                      os_release={key: release[key] for key in expected if key in release},
+                      problem="; ".join(problems) or None)
+
+
+def _read_disk(min_disk_gb: int, ref: str, digest: str, auth: RegistryAuth | None) -> ImageCheck:
+    """The disk form's image manifest ``digest``, by the start of its one layer: its file, its owner and its virtual
+    size."""
+    found = disk_layer(ref, digest, auth)
+    problems = [problem for problem, wrong in (
+        (f"its first file is {found.path}, not {DISK_FILE}", found.path != DISK_FILE),
+        (f"{found.path} is owned by uid {found.uid}, not {DISK_OWNER}", found.uid != DISK_OWNER),
+        (f"its virtual size is {found.virtual_size / 2**30:.1f} GiB, under min_disk_gb ({min_disk_gb})",
+         found.virtual_size < min_disk_gb * 2**30)) if wrong]
+    return ImageCheck(status="failed" if problems else "passed", image=ref, manifest=digest,
+                      problem="; ".join(problems) or None)
 
 
 def _unread(arches: list[str], why: str) -> dict[str, ImageCheck]:
