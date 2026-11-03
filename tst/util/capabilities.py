@@ -53,6 +53,10 @@ VERL = "verl_installed"
 #: and torch aren't in the dev extra, and only that tier's CI job installs them.
 SKYRL = "skyrl_installed"
 
+#: The Miles tier (``tst/miles``) plays rows through Miles' own rollout; Miles, its test fixtures and CPU torch aren't in
+#: the dev extra, and only that tier's CI job puts a Miles checkout on PYTHONPATH and installs its requirements.
+MILES = "miles_installed"
+
 #: ``collect_artifacts`` sizes a file with ``stat -c %s``, which only GNU stat takes (macOS ships BSD stat),
 #: so collecting off a local sandbox needs GNU stat first on PATH.
 GNU_STAT = "gnu_stat"

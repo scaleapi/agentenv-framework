@@ -92,6 +92,11 @@ skyrl = [
     "pyarrow>=19",
     "transformers>=5",
 ]
+# agent_env.training.miles: Miles' trainers on a bundle served as an OpenEnv env; installed into Miles' own environment,
+# whose Miles, SGLang and torch are the trainer's to pin. It needs nothing beyond the openenv extra.
+miles = [
+    "agentenv-framework[openenv]",
+]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
     "boto3>=1.35.0",

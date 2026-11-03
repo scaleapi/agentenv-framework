@@ -32,7 +32,7 @@ sys.meta_path.insert(0, Refuse())
 _NOT_CORE = (
     "agent_env.providers.sandbox_providers.sail_vm", "agent_env.providers.sandbox_providers.smol_vm",
     "agent_env.openenv", "agent_env.training.nemo_gym", "agent_env.training.verl", "agent_env.training.skyrl",
-    "agent_env.training.harness",
+    "agent_env.training.harness", "agent_env.training.miles",
     "agent_env.env.gateway",
     "agent_env.task_step.task_steps.run_code_runner",
 )
@@ -174,7 +174,7 @@ def _run(script: str, blocked: list[str], *args: str) -> str:
 
 #: Extras every distribution of which another extra installs too, so blocking what only they install blocks nothing:
 #: verl's and SkyRL's pyarrow comes with trl's datasets. The test without any extra covers them.
-_COVERED = {"verl": "trl", "skyrl": "trl", "harness": "openenv"}
+_COVERED = {"verl": "trl", "skyrl": "trl", "harness": "openenv", "miles": "openenv"}
 
 
 @pytest.mark.parametrize("extra", sorted(set(_optional_requirements()) - set(_COVERED)))
