@@ -724,15 +724,20 @@ class Config:
             routing.refuse_in_local_run(f"a write to {object_url!r}")
 
     def check_local_run_write(self, entity_id: str) -> None:
-        """Refuse writing bare-id ``entity_id`` while an ``@local`` task runs where a configured store
-        isn't the per-user one: the write would land in a shared store."""
+        """Refuse writing ``entity_id`` where ``local_run_refuses_write`` says so."""
+        from agent_env.store import routing
+
+        if self.local_run_refuses_write(entity_id):
+            routing.refuse_in_local_run(f"writing {entity_id!r}")
+
+    def local_run_refuses_write(self, entity_id: str) -> bool:
+        """Whether writing bare-id ``entity_id`` now is refused: an ``@local`` task runs where a configured store isn't
+        the per-user one, so the write would land in a shared store."""
         from agent_env.store import routing
         from agent_env.store.ids import is_local_id
 
-        if not routing.in_local_run() or is_local_id(entity_id):
-            return
-        if any(self._namespace_stores(kind)[1] is not None for kind in ("document", "object", "image")):
-            routing.refuse_in_local_run(f"writing {entity_id!r}")
+        return routing.in_local_run() and not is_local_id(entity_id) and any(
+            self._namespace_stores(kind)[1] is not None for kind in ("document", "object", "image"))
 
     def _configured_object_store(self) -> ObjectStore:
         if self._object_store is None:

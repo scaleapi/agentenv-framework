@@ -375,6 +375,19 @@ def test_an_local_run_refuses_a_bare_artifact_before_any_upload(object_stores):
             get_artifact_store().next_version("cli-rocket")
 
 
+def test_a_local_run_refuses_a_bare_ids_write_only_where_a_configured_store_isnt_the_per_user_one(object_stores):
+    """The one rule the fence and a deploy that would compose a registered env both ask (``local_run_refuses_write``)."""
+    config = get_config()
+    with run_scope(LOCAL_TASK):
+        assert config.local_run_refuses_write("rocket") and not config.local_run_refuses_write(LOCAL_ENV)
+    assert not config.local_run_refuses_write("rocket")
+
+    configure(object_store=LocalFilesystemObjectStore(str(state_root() / "object_store")))
+    with run_scope(LOCAL_TASK):
+        assert not get_config().local_run_refuses_write("rocket")
+        get_config().check_local_run_write("rocket")
+
+
 def test_what_default_local_use_left_behind_stays_out_of_routed_reads(stores):
     router, configured, _ = stores
     leftovers = LocalSqliteDocumentStore(str(state_root() / "document_store" / "documents.db"))
