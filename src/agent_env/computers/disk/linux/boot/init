@@ -9,6 +9,8 @@ mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 log() { echo "agentenv-init: $*" > /dev/console; }
 fail() { log "$*"; sleep 2; poweroff -f; }
+# decode VALUE: VALUE's base64 decoded into $decoded, its trailing newlines kept, which $(...) alone would drop.
+decode() { decoded=$(echo "$1" | base64 -d; echo .); decoded=${decoded%.}; }
 while read -r module; do insmod "$module" 2>/dev/null; done < /modules.order
 root=""
 for _ in $(seq 200); do root=$(findfs LABEL=agentenv-root 2>/dev/null) && break; sleep 0.05; done
@@ -28,17 +30,18 @@ set --
 while read -r line; do
     key=${line%%=*} value=${line#*=}
     case "$key" in
-        env) export "$(echo "$value" | base64 -d)" ;;
-        argv) set -- "$@" "$(echo "$value" | base64 -d)" ;;
-        user) user=$(echo "$value" | base64 -d) ;;
-        workdir) workdir=$(echo "$value" | base64 -d) ;;
+        env) decode "$value"; export "$decoded" ;;
+        argv) decode "$value"; set -- "$@" "$decoded" ;;
+        user) decode "$value"; user=$decoded ;;
+        workdir) decode "$value"; workdir=$decoded ;;
     esac
 done < "$config"
 if [ -f /seed/user-data ]; then
     while read -r line; do
         key=${line%%=*} value=${line#*=}
         case "$key" in ''|\#*) continue ;; esac
-        export "$key=$(echo "$value" | base64 -d)"
+        decode "$value"
+        export "$key=$decoded"
     done < /seed/user-data
 fi
 hostname=$( [ -f /seed/meta-data ] && sed -n 's/^local-hostname: *//p' /seed/meta-data)

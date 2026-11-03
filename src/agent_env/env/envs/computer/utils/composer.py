@@ -355,6 +355,8 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
             progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
             on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
             on.login(store.auth(container["image"]))
+            if base_disk is not None:
+                on.login(get_config().get_image_store().auth(base_disk))
             if (tools := published_pinned(DISK_TOOLS_IMAGE)) is None:
                 tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
                 on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
@@ -392,8 +394,8 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
 
 def _base_disk(base: ComputerArtifact, arch: str) -> tuple[str | None, str]:
     """The base's disk for ``arch``, pinned to its digest, and its part of a disk's key: the base's disk form's image,
-    or the one published for the base's container sources; else None, and the base's container, which a disk is made
-    from with the boot recipe, the key's recipe."""
+    or the one published for the base's container sources; else None, and the base's container and disk size, which a
+    disk is made from with the boot recipe, the key's recipe."""
     if (image := base.disk_image()) is not None:
         store = get_config().get_image_store()
         pinned = image.pinned_name if "@" in image.pinned_name else pin_digest(image.pinned_name,
@@ -401,7 +403,7 @@ def _base_disk(base: ComputerArtifact, arch: str) -> tuple[str | None, str]:
         return pinned, pinned
     if (published := published_disk(base.image().source_digest or "")) is not None:
         return published, published
-    return None, f"made from {_base(base, arch)[1]}"
+    return None, f"made from {_base(base, arch)[1]} at {base.forms.disk.min_disk_gb} GB"
 
 
 def _config(on: builder.Builder, image: str, arch: str) -> dict:

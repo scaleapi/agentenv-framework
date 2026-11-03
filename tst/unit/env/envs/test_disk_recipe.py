@@ -2,10 +2,13 @@
 the deploy's environment (the launcher's NoCloud seed), each a line per value base64'd so any bytes survive; and the
 local provider booting a disk in the launcher, with KVM and the VM's ports, settings and size."""
 
+import asyncio
 import base64
 import json
 import os
+import re
 import subprocess
+import threading
 from unittest.mock import AsyncMock
 
 import pytest
@@ -55,6 +58,26 @@ def test_the_seed_holds_each_vm_env_variable_by_its_name_and_nothing_else(tmp_pa
     assert meta_data.endswith("\nlocal-hostname: computer\n") and meta_data.startswith("instance-id: ")
 
 
+def test_the_inits_decoder_keeps_every_byte_of_a_start_and_a_seed_trailing_newlines_included(tmp_path):
+    """As a container runtime would: $(...) alone drops a value's trailing newlines."""
+    decoder = re.search(r"^decode\(\) .*$", (DISK / "boot" / "init").read_text(), re.MULTILINE).group(0)
+    values = ["plain", "ends with a newline\n", "\n", f"{TRICKY}\n\n"]
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"Cmd": values, "User": "user\n"}))
+    start = subprocess.run(["python3", str(DISK / "tools" / "image-env"), str(config)], capture_output=True, text=True,
+                           check=True).stdout
+    subprocess.run(["sh", str(DISK / "launcher" / "seed"), str(tmp_path)], check=True, env={
+        "PATH": os.environ["PATH"], **{f"VM_ENV_V{i}": value for i, value in enumerate(values)}})
+    seed = (tmp_path / "user-data").read_text()
+
+    def decoded(text: str) -> list[str]:
+        script = f"{decoder}\n" + "".join(f"decode {line.partition('=')[2]}; printf '%s\\0' \"$decoded\"\n"
+                                          for line in text.splitlines() if line and not line.startswith("#"))
+        return subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=True).stdout.split("\0")[:-1]
+
+    assert decoded(start) == [*values, "user\n", "/"] and decoded(seed) == values
+
+
 def test_the_launcher_gets_kvm_the_vms_ports_and_size_and_its_environment_under_its_prefix():
     args = local_disk.launcher_args([18765, 5900], {"ENVIRONMENT_NAME": "desk", "A": "b c"}, 1.5, 4096)
 
@@ -94,6 +117,30 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
     assert second[-2:] == ("VM_ENV_ENVIRONMENT_NAME=again", "agentenv-vm:0123") and "VM_CPUS=2" in second
     LocalSandbox.pull_images.assert_awaited_with(["localhost:5000/disk@sha256:" + "a" * 64])
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"} and rebuilt.owns_container
+
+
+@pytest.mark.asyncio
+async def test_a_boot_cancelled_while_docker_starts_the_launcher_waits_for_it_then_tears_it_down(launched, monkeypatch):
+    started, release, order = threading.Event(), threading.Event(), []
+
+    def docker(*args):
+        started.set()
+        release.wait(5)
+        order.append("run")
+        return ""
+
+    monkeypatch.setattr(local_sandbox, "_docker", docker)
+    monkeypatch.setattr(LocalSandbox, "terminate", AsyncMock(side_effect=lambda: order.append("terminate")))
+    booting = asyncio.ensure_future(LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={}))
+    await asyncio.to_thread(started.wait, 5)
+
+    booting.cancel()
+    await asyncio.sleep(0.1)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await booting
+    assert order == ["run", "terminate"]
 
 
 @pytest.mark.asyncio

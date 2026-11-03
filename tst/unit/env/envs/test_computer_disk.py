@@ -20,6 +20,7 @@ from agent_env.env.envs.computer.utils import boot, composer
 from agent_env.env.published_images import DISK
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
+from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.unit.env.envs._computer import DISK_FORM, _base, _put, disk_layer
@@ -76,6 +77,18 @@ def test_a_disk_is_reused_by_its_key_of_its_containers_key_the_base_disk_and_the
     assert len(docker.disk_builds) > made
 
 
+def test_a_bases_disk_size_is_in_the_key_and_the_build_of_the_disk_made_for_it(disk_base, driver, docker):
+    bigger = _base(disk_base.image(), id="@local/~/kit/bigger", forms={
+        **disk_base.forms.model_dump(exclude_none=True), "disk": {**DISK_FORM, "min_disk_gb": 32}})
+
+    small = Env.get(_put(disk_base, driver).id).metadata["composed"]["disk"]["arm64"]
+    large = Env.get(_put(bigger, driver, id="@local/~/kit/other", environment_name="other").id)
+
+    assert large.metadata["composed"]["disk"]["arm64"]["key"] != small["key"]
+    assert sorted(build["args"]["SIZE_GB"] for build in docker.disk_builds if "base-disk-arm64" in build["tag"]) == [
+        "16", "32"]
+
+
 def test_a_base_with_a_disk_image_or_a_published_one_keeps_its_partition_and_makes_none(disk_base, driver, docker,
                                                                                        monkeypatch):
     registry = docker.registry
@@ -86,6 +99,8 @@ def test_a_base_with_a_disk_image_or_a_published_one_keeps_its_partition_and_mak
         **disk_base.forms.model_dump(exclude_none=True), "disk": {**DISK_FORM, "image": {"id": image.id,
                                                                                         "version": image.version}}})
     monkeypatch.setattr(composer, "published_disk", lambda sources: "ghcr.io/scaleapi/base-disk:src-1@sha256:" + "a" * 64)
+    asked = []
+    monkeypatch.setattr(LocalRegistryImageStore, "auth", lambda self, ref: asked.append(ref))
 
     own = Env.get(_put(with_disk, driver).id).metadata["composed"]["disk"]
     published = Env.get(_put(disk_base, driver, id="@local/~/kit/other", environment_name="other").id)
@@ -95,6 +110,7 @@ def test_a_base_with_a_disk_image_or_a_published_one_keeps_its_partition_and_mak
     assert not [build for build in docker.disk_builds if "base-disk" in build["tag"]]
     assert {arch: r["status"] for arch, r in own.items()} == {"amd64": "unverified", "arm64": "unverified"}
     assert own["arm64"]["key"] != published.metadata["composed"]["disk"]["arm64"]["key"]
+    assert {image.image_name, "ghcr.io/scaleapi/base-disk:src-1@sha256:" + "a" * 64} <= set(asked)
 
 
 def test_a_disk_isnt_made_for_a_container_that_didnt_build_and_is_made_by_the_next_build(disk_base, driver, docker):
@@ -162,6 +178,17 @@ async def test_a_deploy_of_the_disk_form_boots_it_in_a_vm_with_its_settings_and_
     assert created["env"][CONTROL_TOKEN_ENV] == deployed.control_token
     assert (deployed.metadata["computer"]["form"], deployed.metadata["computer"]["image"]) == ("disk", disk["image"])
     assert deployed.environment_url == "http://127.0.0.1:20001"
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_of_a_disk_bigger_than_the_disk_is_refused_rather_than_booted_smaller(disk_base, driver, docker,
+                                                                                            vms):
+    env = _put(disk_base, driver)
+
+    with pytest.raises(Exception, match="disk is 16 GB, which a deploy doesn't enlarge, and it asks for 64 GB"):
+        await Env.get(env.id).deploy(disk_size_gb=64, env_params={"form": "disk"})
+
+    assert vms.created == []
 
 
 @pytest.mark.asyncio

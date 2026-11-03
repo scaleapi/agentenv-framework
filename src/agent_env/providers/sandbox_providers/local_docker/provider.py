@@ -685,7 +685,7 @@ class LocalSandboxProvider(SandboxProvider):
         env: Optional[dict[str, str]] = None,
     ) -> LocalSandbox:
         """This machine as a VM, or with ``image``, a computer's disk form booted under KVM in the QEMU launcher's
-        container, reached on each of ``exposed_ports``."""
+        container, reached on each of ``exposed_ports``, at the disk's own size: ``disk_size_gb`` is this machine's."""
         refuse_unenforceable_policy(self, network_policy)
         if network_policy is not None and network_policy.restricts_egress:
             raise NetworkPolicyUnsupportedError(f"{type(self).__name__} takes a container's network away, not a VM's")
@@ -723,9 +723,15 @@ class LocalSandboxProvider(SandboxProvider):
         ports = list(sandbox._port_map)
         publish = [arg for port in ports for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port)
                    for arg in ("-p", spec)]
-        await asyncio.to_thread(_docker, "run", "-d", "--name", sandbox.container_name, "--label",
-                                f"{SANDBOX_LABEL}={sandbox.sandbox_id}", *publish,
-                                *launcher_args(ports, env, size["cpu"], size["memory"]), machine)
+        running = asyncio.ensure_future(asyncio.to_thread(
+            _docker, "run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
+            *publish, *launcher_args(ports, env, size["cpu"], size["memory"]), machine))
+        try:
+            await asyncio.shield(running)
+        except asyncio.CancelledError:  # the container docker is still starting must exist before teardown removes it
+            with contextlib.suppress(Exception):
+                await running
+            raise
 
     async def create_container(
         self,

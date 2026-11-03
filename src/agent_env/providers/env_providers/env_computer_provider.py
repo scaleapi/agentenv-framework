@@ -93,11 +93,15 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
         form, arch, build = native[0]
+        computer = env.computer_artifact()
+        if form == "disk" and disk_size_gb > computer.forms.disk.min_disk_gb:
+            raise ValueError(f"{env.id}'s disk is {computer.forms.disk.min_disk_gb} GB, which a deploy doesn't enlarge, "
+                             f"and it asks for {disk_size_gb:g} GB")
         if build["status"] == "unverified":
             build = await probe_first_boot(env, form, arch, sandbox_provider)
             if build["status"] != "ready":
                 raise RuntimeError(f"{env.id}'s {form}/{arch} failed its probe on its first boot: {build['reason']}")
-        computer, name, token = env.computer_artifact(), env.environment_name, control_token()
+        name, token = env.environment_name, control_token()
         values = _values(computer, values)
         policy = NetworkPolicy.from_dict(env.network) if env.network else None
         booted = await boot(
