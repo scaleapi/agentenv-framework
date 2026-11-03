@@ -152,7 +152,7 @@ def test_one_deadline_bounds_a_resolve_from_its_containers_pull_to_its_output_an
         if command[1] == stalls:
             now[0] += kwargs["timeout"]
             raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="Pulling from acme/base")
-        now[0] += 1
+        now[0] += 0 if command[1] == "rm" else 1
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(builder.time, "monotonic", lambda: now[0])

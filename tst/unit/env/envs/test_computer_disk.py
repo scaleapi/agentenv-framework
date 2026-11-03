@@ -196,9 +196,10 @@ async def test_an_arch_whose_disk_built_deploys_it_though_the_computer_has_no_di
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fails", [False, True], ids=["ready", "failed"])
+@pytest.mark.parametrize("fails", [None, "probe", "boot"])
 async def test_first_deploys_of_an_unverified_disk_at_once_share_one_probe_and_its_recorded_result(
         disk_base, driver, docker, vms, monkeypatch, fails):
+    """Whether its probe passes, fails, or never boots it, whose record keeps no image."""
     monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset())
     env = _put(disk_base, driver)
     monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset({"linux/arm64"}))
@@ -206,6 +207,8 @@ async def test_first_deploys_of_an_unverified_disk_at_once_share_one_probe_and_i
 
     async def slow(*args, **kwargs):
         await asyncio.sleep(0.3)
+        if fails == "boot":
+            raise RuntimeError("LocalSandboxProvider: no boot")
         return await probe(*args, **kwargs)
 
     async def counted(*args):
@@ -214,16 +217,19 @@ async def test_first_deploys_of_an_unverified_disk_at_once_share_one_probe_and_i
 
     monkeypatch.setattr(composer, "_probe", slow)
     monkeypatch.setattr(env_computer_provider, "probe_first_boot", counted)
-    if fails:
+    if fails == "probe":
         docker.probe_fails["arm64"] = "the click never landed"
 
     deployed = await asyncio.gather(*(Env.get(env.id).deploy(env_params={"form": "disk"}) for _ in range(3)),
                                     return_exceptions=True)
 
-    assert waited == [("disk", "arm64")] * 3 and len([probed for probed in docker.probed if probed[0] == "disk"]) == 1
+    assert waited == [("disk", "arm64")] * 3
+    assert len([probed for probed in docker.probed if probed[0] == "disk"]) == (fails != "boot")
     recorded = Env.get(env.id).metadata["composed"]["disk"]["arm64"]
     if fails:
         assert recorded["status"] == "failed" and vms.created == []
+        assert recorded["reason"] == ("it didn't boot: LocalSandboxProvider: no boot" if fails == "boot" else
+                                      "the probe failed: P4 clicks show their effect: the click never landed")
         assert {str(failure) for failure in deployed} == {
             f"{env.id}'s disk/arm64 failed its probe on its first boot: {recorded['reason']}"}
     else:
