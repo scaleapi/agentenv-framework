@@ -229,7 +229,8 @@ def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(scri
 
     commands = [command for command, _ in calls]
     assert calls[1] == (["docker", "build", "-q", "-t", "disk:1-arm64-machine", "-"],
-                        "FROM agentenv-qemu-launcher\nCOPY --from=disk:1-arm64 /disk/ /disk/\n")
+                        "FROM --platform=linux/arm64 disk:1-arm64 AS disk\nFROM agentenv-qemu-launcher\n"
+                        "COPY --from=disk /disk/ /disk/\n")
     assert commands[2] == ["docker", "run", "-d", *(["--device", "/dev/kvm"] if kvm else []), "-e", "VM_ARCH=arm64",
                            "disk:1-arm64-machine"]
     assert commands[-1] == ["docker", "rm", "-f", "c1"] and commands.count(["docker", "logs", "c1"]) == 2

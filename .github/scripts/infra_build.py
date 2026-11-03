@@ -294,7 +294,8 @@ def _boots(image: str) -> int:
                           text=True, check=True).stdout.strip()
     machine = f"{image}-machine"
     subprocess.run(["docker", "build", "-q", "-t", machine, "-"], text=True, check=True, capture_output=True,
-                   input=f"FROM agentenv-qemu-launcher\nCOPY --from={image} /disk/ /disk/\n")
+                   input=f"FROM --platform=linux/{arch} {image} AS disk\nFROM agentenv-qemu-launcher\n"
+                         "COPY --from=disk /disk/ /disk/\n")
     kvm = ["--device", "/dev/kvm"] if Path("/dev/kvm").exists() else []
     container = subprocess.run(["docker", "run", "-d", *kvm, "-e", f"VM_ARCH={arch}", machine], capture_output=True,
                                text=True, check=True).stdout.strip()
