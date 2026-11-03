@@ -1,7 +1,7 @@
-"""``agent_env.training.miles`` on the OpenEnv server ``build_app`` makes, served on loopback over the Episode API's fake
-steps: the rows ``write_rows`` writes, and the agent function playing a row's task through a stand-in for Miles'
-session endpoint, which answers each chat request from a script and records it; with the reward hook and the filter
-Miles calls beside it."""
+"""``agent_env.training._chat``, the chat rows and episode the Miles and slime helpers share, on the OpenEnv server
+``build_app`` makes, served on loopback over the Episode API's fake steps: the rows ``write_rows`` writes and both
+helpers' commands, and ``play`` playing a row's task through a stand-in for a trainer's session endpoint, which answers
+each chat request from a script and records it; with the reward hook and the filter beside it."""
 
 import asyncio
 import json
@@ -16,11 +16,11 @@ from starlette.routing import Route
 from agent_env.openenv.environment import END_TURN
 from agent_env.openenv.reward import _unscored
 from agent_env.training._openenv import Server
-from agent_env.training.miles.__main__ import main
-from agent_env.training.miles.agent import keep_scored_groups, reward, run
-from agent_env.training.miles.prepare import write_rows
+from agent_env.training.miles.__main__ import main as miles_main
+from agent_env.training._chat import keep_scored_groups, play, reward, write_rows
+from agent_env.training.slime.__main__ import main as slime_main
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
-from tst.unit.training.nemo_gym_test import PLAYED
+from tst.unit.training._support import PLAYED
 
 ADD_ITEM = {"type": "function", "function": {"name": "add_item", "description": "add_item.",
                                              "parameters": {"type": "object"}}}
@@ -95,7 +95,7 @@ def test_the_agent_plays_a_rows_task_through_the_session_and_returns_its_reward(
     row = _row(server, tmp_path)
     model = session(_call('{"item": "crate"}'), _says("Added a crate."))
 
-    played = asyncio.run(run(model.base_url, row["messages"], SAMPLING, row["metadata"]))
+    played = asyncio.run(play(model.base_url, row["messages"], SAMPLING, row["metadata"]))
     server.stop()
 
     assert played == {"reward": 1.0, "agentenv_scores": {"replies": 1.0}, "agentenv_tool_calls": 1,
@@ -113,7 +113,7 @@ def test_a_call_whose_arguments_arent_an_object_is_answered_and_the_episode_goes
     model = session(_call('"{\\"item\\": \\"crate\\"}"'), _call("not json", id="call_2"), _call("", id="call_3"),
                     _says("Added a crate."))
 
-    played = asyncio.run(run(model.base_url, row["messages"], SAMPLING, row["metadata"]))
+    played = asyncio.run(play(model.base_url, row["messages"], SAMPLING, row["metadata"]))
     server.stop()
 
     assert (played["reward"], played["agentenv_tool_calls"], played["agentenv_invalid_calls"]) == (1.0, 0, 3)
@@ -129,7 +129,7 @@ def test_a_rollout_that_reaches_its_turn_cap_ends_the_turn_without_a_reply(serve
     row = _row(server, tmp_path, max_turns=2)
     model = session(_call('{"item": "crate"}'))
 
-    played = asyncio.run(run(model.base_url, row["messages"], SAMPLING, row["metadata"]))
+    played = asyncio.run(play(model.base_url, row["messages"], SAMPLING, row["metadata"]))
     server.stop()
 
     assert (played["reward"], played["agentenv_tool_calls"], len(model.requests)) == (0.0, 2, 2)
@@ -147,7 +147,7 @@ def test_an_episode_that_fails_or_ends_without_a_reward_is_flagged_and_its_group
     if failing == "env":
         server.stop()
 
-    played = asyncio.run(run(model.base_url, row["messages"], SAMPLING, row["metadata"]))
+    played = asyncio.run(play(model.base_url, row["messages"], SAMPLING, row["metadata"]))
     server.stop()
 
     assert played["reward"] == 0.0 and played["agentenv_failure"].startswith(why)
@@ -165,7 +165,8 @@ def test_the_reward_hook_reads_each_samples_reward_from_its_metadata():
     assert asyncio.run(reward(None, [one, two])) == [0.25, 0.0]
 
 
-def test_the_command_writes_the_rows(serve, tmp_path, teardowns):
+@pytest.mark.parametrize("main", [miles_main, slime_main], ids=["miles", "slime"])
+def test_the_command_writes_the_rows(serve, tmp_path, teardowns, main):
     server = serve({"a": PLAYED})
 
     result = CliRunner().invoke(main, [server.url, str(tmp_path / "rows"), "--max-turns", "2"])

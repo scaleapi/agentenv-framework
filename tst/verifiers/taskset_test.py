@@ -17,7 +17,7 @@ import pytest
 
 from agent_env.training.nemo_gym.prepare import write_server
 from tst.nemo_gym.server_test import _free_port, _up
-from tst.unit.training.nemo_gym_test import PLAYED
+from tst.unit.training._support import PLAYED
 from tst.util.capabilities import NEMO_GYM, VERIFIERS, missing_capability_reason
 
 pytest.importorskip("agent_env.training.nemo_gym.server", reason=missing_capability_reason(NEMO_GYM),

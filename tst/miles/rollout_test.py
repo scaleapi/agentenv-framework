@@ -10,8 +10,7 @@ import httpx
 import pytest
 
 from agent_env.training.miles.prepare import write_rows
-from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
-from tst.unit.training.nemo_gym_test import PLAYED
+from tst.unit.training._support import ADDS_A_CRATE, FAILS_AFTER_THE_TURN, PLAYED
 from tst.util.capabilities import MILES, missing_capability_reason
 
 fixtures = pytest.importorskip("tests.fast.fixtures.rollout_fixtures", reason=missing_capability_reason(MILES))
@@ -24,9 +23,6 @@ misc = pytest.importorskip("miles.utils.misc", reason=missing_capability_reason(
 mock_sglang = pytest.importorskip("miles.utils.test_utils.mock_sglang_server", reason=missing_capability_reason(MILES))
 sample_types = pytest.importorskip("miles.utils.types", reason=missing_capability_reason(MILES))
 
-ADDS_A_CRATE = '<tool_call>\n{"name": "add_item", "arguments": {"item": "crate"}}\n</tool_call>'
-FAILS_AFTER_THE_TURN = [ITEMS, ALICE, TURN, {"id": "crane", "type": "episode_test_env", "env_id": "crane", "fail": True},
-                        REPLIES]
 
 
 @pytest.fixture(params=[[], ["v2"]], ids=["session-server-v1", "session-server-v2"])

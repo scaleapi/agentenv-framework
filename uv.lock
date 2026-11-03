@@ -162,6 +162,9 @@ skyrl = [
     { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13.14'" },
     { name = "transformers" },
 ]
+slime = [
+    { name = "openenv" },
+]
 smol = [
     { name = "smolmachines" },
 ]
@@ -197,6 +200,7 @@ requires-dist = [
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'miles'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'nemo-gym'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'skyrl'" },
+    { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'slime'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'trl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'verl'" },
     { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
@@ -263,7 +267,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "miles", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
+provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "miles", "slime", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"

@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 from agent_env.training.skyrl.prepare import token_vars, write_dataset
 from tst.unit.task.episode import run_test
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN
-from tst.unit.training.nemo_gym_test import PLAYED
+from tst.unit.training._support import PLAYED
 from tst.util.capabilities import SKYRL, missing_capability_reason
 
 skyrl_env = pytest.importorskip("agent_env.training.skyrl.env", reason=missing_capability_reason(SKYRL),

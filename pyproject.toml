@@ -98,6 +98,11 @@ skyrl = [
 miles = [
     "agentenv-framework[openenv]",
 ]
+# agent_env.training.slime: slime's trainers on a bundle served as an OpenEnv env; installed into slime's own environment,
+# whose slime, SGLang and torch are the trainer's to pin. It needs nothing beyond the openenv extra.
+slime = [
+    "agentenv-framework[openenv]",
+]
 # The AWS store backends (S3, Secrets Manager, DynamoDB, ECR), selected by impl pointer in config.toml.
 aws = [
     "boto3>=1.35.0",
