@@ -14,7 +14,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 COPY packages/agentenv-protocol /tmp/agentenv-protocol
 RUN pip install --no-cache-dir /tmp/agentenv-protocol "uvicorn>=0.30" && rm -rf /tmp/agentenv-protocol
-COPY ${NOTES}/site.py /app/site.py
+COPY ${NOTES}/site.py ${NOTES}/website.toml /app/
 COPY ${NOTES}/data /app/data
 COPY --from=web /web/dist /app/web/dist
 ENV PORT=8000

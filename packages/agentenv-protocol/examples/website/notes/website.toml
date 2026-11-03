@@ -1,0 +1,41 @@
+[site]
+name = "notes"
+domains = ["notes.test"]
+health = "/healthz"
+
+[source]
+sdk = "site:Notes"
+assets = "web/dist"
+
+[data]
+seed = ["data/seed.json"]
+
+[data.collections.users]
+
+[data.collections.notes]
+owner = "owner"
+
+[users]
+personas = [{ id = "ann", name = "Ann Lee" }, { id = "ben", name = "Ben Ortiz" }]
+acting_user = "ann"
+sign_in = "cookie"
+
+[roles]
+admin = ["all_notes"]
+
+[routes.ops]
+list_users = "GET /api/users"
+sign_in = "POST /api/sign-in"
+list_notes = "GET /api/notes"
+create_note = "POST /api/notes"
+get_note = "GET /api/notes/{note_id}"
+edit_note = "PATCH /api/notes/{note_id}"
+toggle_note = "POST /api/notes/{note_id}/toggle"
+delete_note = "DELETE /api/notes/{note_id}"
+all_notes = "GET /api/admin/notes"
+
+[state]
+read = "go"
+
+[clock]
+follow = "header"

@@ -1,0 +1,23 @@
+[site]
+name = "slack"
+domains = ["slack.com", "*.slack.com"]
+health = "/api/api.test"
+
+[source.live]
+allow_hosts = ["*.slack-edge.com", "*.slack-imgs.com"]
+credentials = { token = "secret:SLACK_USER_TOKEN" }
+
+[users]
+sign_in = "live"
+
+[routes.ops]
+list_conversations = "GET /api/conversations.list"
+history = "GET /api/conversations.history"
+post_message = "POST /api/chat.postMessage"
+add_reaction = "POST /api/reactions.add"
+
+[state]
+read = "diff"
+
+[clock]
+follow = "none"

@@ -48,8 +48,8 @@ def rpc(client: TestClient, method: str, params: dict | None = None) -> dict:
 def notes_class(tmp_path: Path) -> type[WebsiteEnvironment]:
     """The example's class, serving a stand-in page instead of ``web/dist``, which only a Vite build makes."""
     (tmp_path / "index.html").write_text("<!doctype html><html><head><title>Notes</title></head><body></body></html>")
-    declared = notes_site.Notes.declaration()._replace(static=str(tmp_path), data=str(NOTES_DIR / "data" / "seed.json"))
-    return website(**declared._asdict())(type("Notes", (notes_site.Notes,), {}))
+    spec = notes_site.Notes.declaration().spec.overlay({"source": {"sdk": "site:Notes", "assets": str(tmp_path)}})
+    return website(spec=spec)(type("Notes", (notes_site.Notes,), {}))
 
 
 @pytest.fixture

@@ -1,5 +1,7 @@
 """Website environment: one site, served by one server image that holds its pages and API. A site
-built before the server image held its pages may still name a separate frontend image, which is deprecated.
+built before the server image held its pages may still name a separate frontend image, which is deprecated. Its
+env.toml may carry the site's website spec, ``spec = "website.toml"`` or an inline ``[spec]`` table, whose site name,
+health path and domains the env takes.
 
 A deploy reads whether the site is ready from its env card, the protocol layer: ``website/v1``'s ``ready``, as
 ``computer-app/v1``'s says of an app. ``health_path`` (env.toml's ``health``) is read only for a site whose card has no
@@ -15,9 +17,11 @@ import shlex
 import re
 import uuid
 from importlib.metadata import version as pkg_version
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.website.spec import SpecError, WebsiteSpec, load as load_spec, resolve as resolve_spec
 from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifact
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
 from agent_env.entity.refs import EntityRef
@@ -51,7 +55,7 @@ class WebsiteEnv(Env):
                                                   EntityRef.artifact("frontend_image", artifact_type="docker_image",
                                                                      optional=True))
     toml_keys: ClassVar[dict[str, type]] = {"backend_image": object, "frontend_image": object, "environment_name": str,
-                                            "health": str, "env_provider_type": str}
+                                            "health": str, "env_provider_type": str, "spec": object}
 
     def __init__(
         self,
@@ -65,6 +69,7 @@ class WebsiteEnv(Env):
         health_path: str = DEFAULT_HEALTH_PATH,
         metadata: Optional[dict[str, str]] = None,
         env_provider_type: str = "gateway",
+        domains: tuple[str, ...] | list[str] = (),
     ):
         super().__init__(id, version, metadata=metadata)
         if not environment_name:
@@ -79,6 +84,7 @@ class WebsiteEnv(Env):
         if problem := health_path_problem(health_path):
             raise ValueError(f"website env {id!r}: {problem}")
         self.health_path = health_path
+        self.domains = tuple(domains)
         self.environment_name = environment_name
         self.env_provider_type = env_provider_type
         self._sandbox = None
@@ -106,6 +112,8 @@ class WebsiteEnv(Env):
                 "type": self.frontend_docker_image_artifact.type,
             }
         base["health_path"] = self.health_path
+        if self.domains:
+            base["domains"] = list(self.domains)
         base["service_name"] = self.environment_name
         base["environment_name"] = self.environment_name  # dual-write with service_name during the rename
         base["env_provider_type"] = self.env_provider_type
@@ -125,6 +133,7 @@ class WebsiteEnv(Env):
             health_path=data.get("health_path", DEFAULT_HEALTH_PATH),
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
+            domains=data.get("domains", ()),
         )
 
     @classmethod
@@ -147,7 +156,8 @@ class WebsiteEnv(Env):
                        frontend_docker_image_artifact=ctx.artifact(frontend, DockerImageArtifact) if frontend else None,
                        environment_name=fields["environment_name"],
                        health_path=fields.get("health", DEFAULT_HEALTH_PATH),
-                       env_provider_type=fields["env_provider_type"])
+                       env_provider_type=fields["env_provider_type"],
+                       domains=fields.get("domains", ()))
 
     def to_toml(self, out: ExportContext) -> dict:
         """The env.toml of a folder this env's images are built from, which ``from_toml`` reads back as it."""
@@ -157,17 +167,28 @@ class WebsiteEnv(Env):
             toml["frontend_image"] = out.image(self.frontend_docker_image_artifact, "frontend_image")
         if self.health_path != DEFAULT_HEALTH_PATH:
             toml["health"] = self.health_path
+        if self.domains:
+            toml["spec"] = {"site": {"domains": list(self.domains)}}
         return {**toml, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a website env takes, ``backend_image`` naming its server image, its
-        environment_name read from that image's @environment_card when it isn't set. Raises BundleError listing every
-        problem."""
+        environment_name read from its spec's site name, else from that image's @environment_card, when it isn't set,
+        and its health path from the spec when it isn't set. Raises BundleError listing every problem."""
+        spec, problems = website_spec_of(data, ctx.dir) if "spec" in data else (None, [])
+        if problems:
+            ctx.refuse([ctx.config_problem(p) for p in problems])
+        if spec is not None:
+            data = {**({"environment_name": spec.site.name} if spec.site.name else {}),
+                    **({"health": spec.site.health} if spec.site.health else {}), **data}
         health = data.get("health", DEFAULT_HEALTH_PATH)
         if isinstance(health, str) and (problem := health_path_problem(health)):
             ctx.refuse([ctx.config_problem(problem)])
-        return ctx.accept_env(data, cls, named_by="backend_image")
+        fields = ctx.accept_env(data, cls, named_by="backend_image")
+        if spec is not None and spec.site.domains:
+            fields["domains"] = spec.site.domains
+        return fields
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None, keyed_roles: bool = False) -> DeployedEnv:
         return await deploy_through_provider(
@@ -386,6 +407,32 @@ class WebsiteEnv(Env):
             health_path=health_path,
         )
         return env
+
+
+def website_spec_of(data: dict, folder: Path) -> tuple[Optional[WebsiteSpec], list[str]]:
+    """The website spec an env.toml's ``spec`` names, a file relative to ``folder`` or an inline table, and the
+    problems with it: one that doesn't load, a live or replayed source, which a server image can't serve, and a site
+    name or health path that isn't the env.toml's own."""
+    given = data.get("spec")
+    if given is None:
+        return None, []
+    try:
+        if isinstance(given, str):
+            spec = load_spec(folder / given)
+        elif isinstance(given, dict):
+            spec = resolve_spec(given, folder, origin="spec")
+        else:
+            return None, [f"spec is the path of a website spec or a table of one, not {given!r}"]
+    except SpecError as e:
+        return None, [f"spec: {problem}" for problem in e.problems]
+    problems = []
+    if spec.source is not None and spec.source.kind in ("live", "replay"):
+        problems.append(f"spec: a {spec.source.kind} source isn't served by a server image, so a website env can't "
+                        "deploy it")
+    for key, ours in (("environment_name", spec.site.name), ("health", spec.site.health)):
+        if ours is not None and key in data and data[key] != ours:
+            problems.append(f"{key} {data[key]!r} isn't the spec's {ours!r}")
+    return spec, problems
 
 
 def health_path_problem(health_path: str) -> str | None:

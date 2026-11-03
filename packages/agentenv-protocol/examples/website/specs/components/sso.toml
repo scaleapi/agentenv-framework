@@ -1,0 +1,19 @@
+[site]
+name = "sso"
+
+[source]
+sdk = "fake_sso:FakeSso"
+
+[data.collections.accounts]
+
+[data.collections.grants]
+owner = "user"
+
+[users]
+sign_in = "cookie"
+
+[routes.ops]
+authorize = "GET /authorize"
+login = "POST /login"
+token = "POST /token"
+userinfo = "GET /userinfo"

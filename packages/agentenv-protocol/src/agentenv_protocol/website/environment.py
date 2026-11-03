@@ -47,10 +47,10 @@ from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 from .routes import (ApiContext, ApiRoute, endpoint, error_response, forwarded_prefix, openapi, openapi_path, request_role,
                      reserved_path, routes_of)
 from .session import SessionSigner, expires_at, session_cookie_name
+from .spec import (DEFAULT_HEALTH_PATH, SESSION_PATH, SpecError, WebsiteSpec, from_environment, load,
+                   problems_with_environment)
 from .store import Collections
 
-DEFAULT_HEALTH_PATH = "/api/health"
-SESSION_PATH = "/api/session"
 _WEBSITE_ATTR = "_aee_website"
 _READY_ATTR = "_aee_website_ready"
 _DEFAULT_HOOK_ATTR = "_aee_default_store_hook"
@@ -60,8 +60,8 @@ _HEAD = re.compile(rb"<head[^>]*>", re.IGNORECASE)
 
 class WebsiteDeclaration(NamedTuple):
     """What ``@website`` declares: the site's domains, its static folder and seed data file (relative to the class's
-    file), its health path, whether its HTML pages read the universe's time, and the models whose database keeps its
-    state instead of the default store."""
+    file), its health path, whether its HTML pages read the universe's time, the models whose database keeps its state
+    instead of the default store, and the spec it was declared from."""
 
     domains: tuple[str, ...] = ()
     static: Optional[str] = None
@@ -69,16 +69,23 @@ class WebsiteDeclaration(NamedTuple):
     clock_patch: bool = False
     data: Optional[str] = None
     models: Any = None
+    spec: Optional[WebsiteSpec] = None
 
 
 def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = (), static: str | None = None,
             health: str = DEFAULT_HEALTH_PATH, clock_patch: bool = False, data: str | None = None,
-            models: Any = None) -> Any:
+            models: Any = None, spec: str | Path | WebsiteSpec | None = None) -> Any:
     """Declare a WebsiteEnvironment's site. ``data`` names a JSON file the default store starts with; ``models``
     keeps the site's data in a database instead, an MCP server's (see ``website.database``), and the site's
-    data plane is that database's."""
+    data plane is that database's. With ``spec``, a website spec file (relative to the class's file) or a loaded one,
+    the site is the spec's, and the class must serve what it declares; the other arguments but ``models`` are then
+    the spec's to give."""
     if _cls is not None:
         raise TypeError("use @website(...) with parentheses")
+    if spec is not None and (domains or static is not None or health != DEFAULT_HEALTH_PATH or clock_patch
+                             or data is not None):
+        raise TypeError("@website(spec=...) takes the site from its spec; set domains, health, assets, seed and "
+                        "clock there")
     if not health.startswith("/") or health == "/" or reserved_path(health):
         raise ValueError(f"health is a path of its own under '/', not {health!r}")
     if models is not None and data is not None:
@@ -89,7 +96,20 @@ def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = 
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, WebsiteEnvironment)):
             raise TypeError(f"@website declares a WebsiteEnvironment subclass, not {cls!r}")
-        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, health, clock_patch, data, models))
+        if spec is None:
+            setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, health, clock_patch, data, models))
+        else:
+            declared = spec if isinstance(spec, WebsiteSpec) else load(cls._site_path(str(spec)))
+            if models is not None and declared.data.seed:
+                raise ValueError("the spec's data.seed seeds the default store; a site of models= is seeded through "
+                                 "data/add")
+            source = declared.source
+            assets = str(declared.path(source.assets)) if source is not None and source.assets else None
+            setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(
+                declared.site.domains, assets, declared.health,
+                declared.clock is not None and declared.clock.follow == "date_patch", None, models, declared))
+            if problems := problems_with_environment(declared, cls):
+                raise SpecError([f"{cls.__name__} doesn't serve its spec: {p}" for p in problems])
         _check_health(cls)
         return cls
 
@@ -122,13 +142,12 @@ class WebsiteEnvironment(AgentEnvEnvironment):
                 setattr(cls, name, None)
 
     def __init__(self) -> None:
-        declaration = self.declaration()
         self.store = Collections()
-        if declaration.data is not None:
-            self.store.load(json.loads(self._site_path(declaration.data).read_text(encoding="utf-8")))
+        for seed in self._seed_files():
+            self.store.load(json.loads(seed.read_text(encoding="utf-8")))
         self.clock = UniverseClock()
         self._signer = SessionSigner(cookie_name=session_cookie_name(self.environment_name()))
-        models = declaration.models
+        models = self.declaration().models
         self._tables = (None if models is None or is_hooks(models)
                         else Tables(metadata_of(models), lambda: self.database_url))
         self._models = None if models is None else ModelState(models if self._tables is None else self._tables)
@@ -144,14 +163,30 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     def environment_name(self) -> str:
         """The site's name, as its card names it: ``ENVIRONMENT_NAME``, else the card's declared name, else the
-        class's."""
+        spec's, else the class's."""
         declared = (getattr(self, _CARD_CONFIG_ATTR, None) or {}).get("name")
-        return os.environ.get("ENVIRONMENT_NAME") or declared or type(self).__name__
+        spec = self.declaration().spec
+        return (os.environ.get("ENVIRONMENT_NAME") or declared or (spec.site.name if spec is not None else None)
+                or type(self).__name__)
 
     @property
     def session_cookie(self) -> str:
         """The name of the site's session cookie, ``agentenv_session_<environment_name>``."""
         return self._session_signer().cookie_name
+
+    @classmethod
+    def site_spec(cls) -> WebsiteSpec:
+        """The site's spec: the one ``@website(spec=...)`` names with what the class serves filled in, else the one
+        its decorators declare. Its card's website/v1 params are this spec's ``to_card_extension()``, with the
+        session cookie the running site's."""
+        return from_environment(cls)
+
+    @classmethod
+    def _seed_files(cls) -> list[Path]:
+        declaration = cls.declaration()
+        if declaration.spec is not None:
+            return [declaration.spec.path(seed) for seed in declaration.spec.data.seed]
+        return [cls._site_path(declaration.data)] if declaration.data is not None else []
 
     @property
     def database_url(self) -> str | None:
@@ -219,12 +254,30 @@ class WebsiteEnvironment(AgentEnvEnvironment):
                     port=int(os.environ.get("PORT", "8000")))
 
     def extension_params(self, uri: str) -> dict:
+        """``website/v1``'s params are the spec's card params, each route named by the path the class serves it at,
+        converters and all (``/files/{rest:path}``), so a gateway matches the requests it answers, nested paths
+        included; a spec names a path by its template."""
         if uri == WEBSITE_EXTENSION_URI:
-            declaration = self.declaration()
-            return {"domains": list(declaration.domains), "health": declaration.health,
-                    "routes": [r.advertised() for r in self.routes()], "session_cookie": self.session_cookie,
-                    "session_path": SESSION_PATH}
+            params = {**self.site_spec().to_card_extension(), "session_cookie": self.session_cookie,
+                      "session_path": SESSION_PATH}
+            served = {r.name: r.path for r in self.routes()}
+            params["routes"] = [{**r, "path": served.get(r["name"], r["path"])} for r in params["routes"]]
+            return params
         return super().extension_params(uri)
+
+    def _build_card(self) -> Any:
+        """The card, named by the spec's site name when neither ``ENVIRONMENT_NAME`` nor ``@environment_card``
+        names it; a card name and a spec name that differ are refused."""
+        card = super()._build_card()
+        spec = self.declaration().spec
+        named = (getattr(self, _CARD_CONFIG_ATTR, None) or {}).get("name")
+        if spec is None or spec.site.name is None:
+            return card
+        if named is not None and named != spec.site.name:
+            raise SpecError([f"{type(self).__name__}: @environment_card names it {named!r}, its spec "
+                             f"{spec.site.name!r}"])
+        return card if named is not None or os.environ.get("ENVIRONMENT_NAME") else card.model_copy(
+            update={"name": spec.site.name})
 
     @extension(CLOCK_EXTENSION_URI, description="Sync this site to the gateway's virtual clock.")
     async def sync_time(self, env_get_time_url: str, timezone: Optional[str] = None) -> dict:

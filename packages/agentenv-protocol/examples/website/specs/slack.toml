@@ -1,0 +1,11 @@
+extends = "slack-live.toml"
+
+[source.replay]
+capture = "captures/slack-workspace.har"
+allow_hosts = ["*.slack-edge.com"]
+
+[routes.ops]
+post_message = { served_by = "slack_synthetic:SlackChat" }
+
+[clock]
+follow = "date_patch"

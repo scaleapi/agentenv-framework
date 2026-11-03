@@ -1,0 +1,8 @@
+extends = "intranet.toml"
+
+[users]
+personas = ["ben", "cy"]
+acting_user = "ben"
+
+[roles]
+editor = false

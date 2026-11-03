@@ -341,6 +341,7 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'db'", specifier = ">=2.1" },
     { name = "sqlalchemy", marker = "extra == 'dev'", specifier = ">=2.1" },
     { name = "starlette", specifier = ">=0.37" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.1" },
     { name = "uvicorn", marker = "extra == 'agent'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'app'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'computer'", specifier = ">=0.30" },

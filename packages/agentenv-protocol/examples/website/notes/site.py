@@ -11,7 +11,6 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from agentenv_protocol import environment_card
 from agentenv_protocol.website import (
     ApiContext,
     BadRequest,
@@ -43,8 +42,7 @@ class SignIn(BaseModel):
     user: str
 
 
-@environment_card(name="notes")
-@website(domains=["notes.test"], static="web/dist", health="/healthz", data="data/seed.json")
+@website(spec="website.toml")
 class Notes(WebsiteEnvironment):
     @ready_check
     def seeded(self) -> bool:

@@ -155,6 +155,45 @@ def test_a_website_with_only_a_server_dockerfile_builds_one_image(bundle_dir, bu
     assert [call["build"][0] for call in builds] == ["Dockerfile.backend"]
 
 
+SPEC = '[site]\nname = "mail"\ndomains = ["mail.test", "*.mail.test"]\nhealth = "/healthz"\n'
+
+
+def test_a_website_takes_its_name_health_and_domains_from_the_spec_its_env_toml_names(bundle_dir, builds):
+    _bundle(bundle_dir, {"envs/mail/Dockerfile.backend": DOCKERFILE, "envs/mail/website.toml": SPEC,
+                         "envs/mail/env.toml": 'type = "website"\nspec = "website.toml"\n'}, "mail")
+
+    _run(bundle_dir)
+    env = Env.get(f"{ROOT}/mail")
+
+    assert (env.environment_name, env.health_path, env.domains) == ("mail", "/healthz", ("mail.test", "*.mail.test"))
+    assert WebsiteEnv.from_dict(env.to_dict()).domains == env.domains
+
+
+def test_a_website_takes_an_inline_spec_table(bundle_dir, builds):
+    _bundle(bundle_dir, {"envs/mail/Dockerfile.backend": DOCKERFILE,
+                         "envs/mail/env.toml": 'type = "website"\n[spec.site]\nname = "mail"\ndomains = ["mail.test"]\n'},
+            "mail")
+
+    _run(bundle_dir)
+    env = Env.get(f"{ROOT}/mail")
+
+    assert (env.environment_name, env.health_path, env.domains) == ("mail", "/api/health", ("mail.test",))
+
+
+@pytest.mark.parametrize("toml, spec, problem", [
+    ('health = "/other"\n', SPEC, "envs/mail: env.toml: health '/other' isn't the spec's '/healthz'"),
+    ('environment_name = "post"\n', SPEC, "envs/mail: env.toml: environment_name 'post' isn't the spec's 'mail'"),
+    ("", SPEC + '[source.live]\nallow_hosts = ["cdn.test"]\n[users]\nsign_in = "live"\n[state]\nread = "diff"\n',
+     "envs/mail: env.toml: spec: a live source isn't served by a server image, so a website env can't deploy it"),
+    ("", '[site]\ndomains = ["Mail.test"]\n', "site.domains: ['Mail.test'] aren't host names in lower case"),
+], ids=["health", "name", "live", "invalid"])
+def test_a_website_whose_spec_disagrees_or_cant_deploy_is_refused(bundle_dir, toml, spec, problem):
+    _bundle(bundle_dir, {"envs/mail/Dockerfile.backend": DOCKERFILE, "envs/mail/website.toml": spec,
+                         "envs/mail/env.toml": f'type = "website"\nspec = "website.toml"\n{toml}'}, "mail")
+
+    assert any(problem in p for p in _problems(bundle_dir)), _problems(bundle_dir)
+
+
 def test_a_multi_names_bundle_and_store_envs_and_is_rewritten_when_a_child_is(bundle_dir, builds):
     with namespace_routing():
         MCPServerEnv.put(id="inbox", docker_image_artifact=_store_image("inbox-image"), environment_name="inbox")

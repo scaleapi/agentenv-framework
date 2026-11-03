@@ -1,0 +1,30 @@
+[site]
+name = "intranet"
+domains = ["intranet.test", "*.intranet.test"]
+
+[source.image]
+dockerfile = "Dockerfile.intranet"
+
+[data.collections.users]
+
+[data.collections.pages]
+owner = "author"
+
+[users]
+personas = ["ann", "ben"]
+acting_user = "ann"
+
+[roles]
+editor = ["publish_page"]
+
+[routes.ops]
+list_pages = "GET /api/pages"
+publish_page = "POST /api/pages"
+
+[[uses]]
+spec = "components/sso.toml"
+mount = "/sso"
+data = { accounts = "users" }
+
+[state]
+read = "go"

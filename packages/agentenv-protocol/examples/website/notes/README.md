@@ -6,19 +6,23 @@ them. The page shows the universe's time.
 
 | File | What it is |
 | --- | --- |
-| `site.py` | The server: the `Notes` WebsiteEnvironment, its `@api` routes, and `serve()` on `PORT` (8000). |
+| `website.toml` | The site's spec: its name, domains, health path, source, seed, collections, personas, roles, routes, state read and clock (see `docs/website-spec.md`). |
+| `site.py` | The server: the `Notes` WebsiteEnvironment, declared from `website.toml`, its `@api` routes, and `serve()` on `PORT` (8000). |
 | `data/seed.json` | The seed data: two users (`ann`, `ben`), their notes, and `current_user`, the acting user. |
 | `web/` | A minimal Vite app (`index.html`, `src/main.js`, `src/style.css`). Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/notes/` alike; opened at a path without its final slash, such as `/website/notes`, the page first reloads itself with it. |
 | `Dockerfile` | The server image: Node builds `web/`, then Python installs this repo's `packages/agentenv-protocol` with uvicorn. It installs `curl`, which the gateway's compose health check runs. |
-| `env.toml` | The website env as a bundle entry. |
+| `env.toml` | The website env as a bundle entry, pointing at `website.toml`. |
 
 ## What it exercises
 
-- **Site declaration.** `@website(domains=["notes.test"], static="web/dist", health="/healthz", data="data/seed.json")`.
-  The card advertises website/v1 with the domains, the health path and every route by name.
+- **Site declaration.** `@website(spec="website.toml")`. The spec gives the name, domains, static folder, health path
+  and seed, and the class is refused when its `@api` routes aren't the spec's. The card's website/v1 params are the
+  spec's `to_card_extension()`: the domains, the health path, every route by name, the session, the state read and
+  the clock.
 - **Routes.** `list_users`, `sign_in`, `list_notes` (with an optional `?done=`), `create_note` (201), `get_note`,
   `edit_note`, `toggle_note` and `delete_note`. Errors are raised as `NotFound`, `BadRequest` and `Unauthorized`.
-- **Roles.** `all_notes` (`GET /api/admin/notes`) is declared with `roles=["admin"]`. It answers only a caller that
+- **Roles.** `all_notes` (`GET /api/admin/notes`) is declared with `roles=["admin"]`, and the spec's `[roles]` grants
+  it to `admin`. It answers only a caller that
   sends `AgentEnv-Role: admin` with `AgentEnv-Role-Key` equal to the container's `WEBSITE_ROLE_KEY`; any other caller
   gets 403. A deploy with `keyed_roles` gives the site its own role key as `WEBSITE_ROLE_KEY` and its gateway sends it
   on only beside a role it verified with the same key, so a page cannot claim `admin` through it. Any other deploy sets
@@ -71,9 +75,11 @@ python -m agentenv_protocol.website.conformance http://localhost:18080 --clock-h
 curl -s http://localhost:18080/api/notes
 ```
 
-Use `--clock-host` so the container can reach the checker's clock. `--strict` fails on a recommended check's warning
-too (the card, `X-Universe-Now`, the clock, forwarded headers, cookies); without it only the contract's required checks
-fail the run, and Notes passes every check either way. The clock check leaves the server following a
+Use `--clock-host` so the container can reach the checker's clock, and add
+`--spec packages/agentenv-protocol/examples/website/notes/website.toml` to check the server against its spec too.
+`--strict` fails on a recommended check's warning too (the card, `X-Universe-Now`, the clock, forwarded headers,
+cookies); without it only the contract's required checks, and the spec's when given, fail the run, and Notes passes
+every check either way. The clock check leaves the server following a
 clock that is gone once the check ends: later timestamps start from 2031 until the server is synced again, so restart
 the container before using it.
 
@@ -85,10 +91,10 @@ agent-env env website put --id notes-site \
   --server-docker-context . --health-path /healthz
 ```
 
-Run it from the repo root. `environment_name` comes from the card (`@environment_card(name="notes")`). The stored env
+Run it from the repo root. `environment_name` comes from the card, which the spec names `notes`. The stored env
 has a server image and no frontend image. Pass `--skip-validation` to register without deploying.
 
-`env.toml` describes the same env for a bundle. Its keys are `type`, `environment_name`, `health` and
-`backend_image`. Domains are not one of them: they come from the card. A bundle builds `backend_image` with this
+`env.toml` describes the same env for a bundle. Its keys are `type`, `spec` and `backend_image`; the env takes its
+`environment_name`, health path and domains from the spec. A bundle builds `backend_image` with this
 folder as the build context, but this Dockerfile needs the repo root. Until the protocol package is installed from a
 published release instead, register the site with `put` as above.
