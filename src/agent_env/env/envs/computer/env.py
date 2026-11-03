@@ -30,7 +30,9 @@ from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import get_env_store
+from agent_env.store.ids import is_local_id
 from agent_env.store.local_state import awaiting_lock
+from agent_env.store.routing import in_local_run
 from agent_env.providers.env_providers.env_computer_provider import end_recordings
 from agent_env.utils.paths import validate_relative_filename
 
@@ -178,7 +180,10 @@ class ComputerEnv(Env):
         """Compose first the pairs a deploy on ``sandbox_provider`` boots, of ``form`` when it names one, that no compose
         has started (``composer.unstarted``), as a run that composed for another sandbox leaves them; deploys of the env
         at once, in this process or another, compose them once, each after the one composing, a deploy that finds them
-        building included."""
+        building included. A local run composes none for an env the configured stores hold: its record is a write the
+        run's fence refuses, so the deploy refuses for want of a ready build instead."""
+        if in_local_run() and not is_local_id(self.stored_id):
+            return
         if not composer.unstarted(self, sandbox_provider, form, building=True):
             return
         async with awaiting_lock(f"computer-compose:{self.stored_id}:{self.version}"):
