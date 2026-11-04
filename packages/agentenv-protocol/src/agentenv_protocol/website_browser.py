@@ -375,8 +375,9 @@ class BrowserControl:
                 await self.devtools.call("Target.closeTarget", {"targetId": target})
 
     async def active_tab(self) -> Optional[str]:
-        """The tab a dialog is open on, whose page it blocks from saying; else the tab whose page has focus, else the
-        one agentenv last brought to the front, else the first visible one: CDP has no event for a tab made active."""
+        """The tab a dialog is open on, whose page it blocks from saying; else the visible tab whose page has focus, as
+        a hidden tab's page that had input still says it has; else the one agentenv last brought to the front, else the
+        first visible one: CDP has no event for a tab made active."""
         if dialogs := [dialog["tab"] for dialog in self._open_dialogs.values() if dialog["tab"] in self.tabs]:
             return dialogs[-1]
         visible = None
@@ -390,7 +391,7 @@ class BrowserControl:
                     timeout_s=ACTIVE_CHECK_TIMEOUT_S))["result"]["value"]
             except (ConnectionError, DevToolsError, asyncio.TimeoutError, KeyError):
                 continue
-            if state[1]:
+            if state[0] == "visible" and state[1]:
                 return target
             if state[0] == "visible" and visible is None:
                 visible = target

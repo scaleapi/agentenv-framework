@@ -664,6 +664,15 @@ async def test_a_tab_it_opens_loads_once_held_to_the_window_comes_to_the_front_a
 
 
 @pytest.mark.asyncio
+async def test_a_hidden_tab_whose_page_still_says_it_has_focus_isnt_the_active_one():
+    states = {"s-a": ["hidden", True], "s-b": ["visible", True]}
+    devtools = Tabbed({"Runtime.evaluate": lambda params, session: {"result": {"value": states[session]}}})
+    control = await _tabs(devtools, "a", "b")
+
+    assert await control.active_tab() == "b"
+
+
+@pytest.mark.asyncio
 async def test_a_dialog_makes_its_tab_the_active_one_its_state_names_it_and_the_agent_answers_it():
     devtools = Tabbed()
     control = await _tabs(devtools, "a", "b")

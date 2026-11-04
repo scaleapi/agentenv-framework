@@ -812,7 +812,8 @@ are the profile's template. The base class adds:
 - **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
   to every page with flattened sessions, telling each page it attached to as it opened, a popup say, to run, and keeps a
   record, `since` its server started: open tabs in opened order, each with its URL and title as the browser has them
-  when the record is read (Chrome sends no event for a title), the one whose page has focus `active`; `closed_tabs`,
+  when the record is read (Chrome sends no event for a title), the visible one whose page has focus `active`;
+  `closed_tabs`,
   each as of its page's last load, with `closed_at` and
   `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
   ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
@@ -832,8 +833,9 @@ are the profile's template. The base class adds:
   drivers and agentenv's own steps alike:
   - `navigate {url}` and `history {direction}` (`back`, `forward` or `reload`), in the active tab;
   - `tabs/list`, `tabs/open {url?}`, `tabs/activate {tab}` and `tabs/close {tab}`, by the browser's own tab
-    ids. The active tab is the one a dialog is open on, else the one whose page has focus, else the one
-    agentenv last brought to the front;
+    ids. The active tab is the one a dialog is open on, else the visible one whose page has focus (a hidden
+    tab's page that had input still says it has focus), else the one agentenv last brought to the front.
+    Headless, a tab opened at a URL opens blank and goes there once it's held to the window's size;
   - `dialog/answer {accept, text?}`, the agent's answer to the dialog open on the active tab;
   - `files/choose {paths}`, files in `~/Uploads` for the file chooser open on it, which headless, and so
     alone, it intercepts;
