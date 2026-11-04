@@ -20,7 +20,10 @@ It also has a disk form, a disk a VM boots from UEFI, which is the container for
 recipe in `disk/linux/`: a GPT disk of an EFI system partition holding one UKI, Ubuntu's kernel with a busybox initramfs,
 and an ext4 root filesystem that is the image's own, with `/etc/agentenv/vm/image.env`, its entrypoint, command,
 user, working folder and environment, from its OCI config. The init mounts it, brings up the network, reads the deploy's
-settings from a NoCloud seed (`CIDATA`) and becomes the image's entrypoint, as its user. A release publishes it as
+settings from a NoCloud seed (`CIDATA`) and becomes the image's entrypoint, as its user. The seed is
+`agentenv_protocol.computer.seed`'s: it carries every version its launcher writes, and the init (`disk/linux/boot/`,
+its reader in `seed-env`) reads the newest it knows, so a disk keeps booting under a later agent-env's launcher, and
+stops the boot, saying to recompose the disk, when the seed carries none. A release publishes it as
 `ghcr.io/scaleapi/agentenv-ubuntu-24.04-disk:src-<hex>`, tagged by both its sources; without it, composing makes it.
 Composing a computer env makes each arch's disk from its composed container, the root filesystem rebuilt with
 `mkfs.ext4 -d` by the disk tools (`disk/linux/tools/`) on the builder's own platform and the base disk's EFI system
@@ -28,7 +31,8 @@ partition kept, so nothing is emulated or privileged. A disk boots where `/dev/k
 (`disk/linux/launcher/`): gate 3 probes it there, and elsewhere it stays `unverified` until a deploy's first boot with
 KVM probes it. A deploy boots it with `env_params = { form = "disk" }`. The launcher serves each of the computer's ports
 through socat, whose listen backlog takes a burst of connections, in front of QEMU's own forward, whose backlog is 1, and
-a reset boots the disk afresh on a new overlay in the same launcher, at the same URLs. It boots on local Docker where
+a reset boots the disk afresh on a new overlay in the same launcher, at the same URLs; a container an agent-env from
+before reset in place started is refused a reset, to be redeployed. It boots on local Docker where
 Docker can pass it `/dev/kvm`, and on `modal_vm`, amd64 only, whose sandbox runs the launcher as its image under nested
 virtualization: the provider exports the disk from the image store with this machine's Docker, compressed, once for each
 composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal uploads once for each

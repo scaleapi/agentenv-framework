@@ -1,6 +1,6 @@
 """The Linux disk form's recipe as the init reads what it writes: the image's start (image-env, run by the disk tools) and
-the deploy's environment (the launcher's NoCloud seed), each a line per value base64'd so any bytes survive; the
-launcher, with QEMU and its tools stood in for, serving each port through socat in front of QEMU's forward and booting
+the deploy's environment (the launcher's NoCloud seed, agentenv_protocol.computer.seed's), each a line per value
+base64'd so any bytes survive, the init stopping the boot when the seed carries no version it reads; the launcher, with QEMU and its tools stood in for, serving each port through socat in front of QEMU's forward and booting
 its disk afresh in place on a reset; and the local provider booting a disk in the launcher, with KVM and the VM's ports,
 settings and size, and exporting one, compressed, once."""
 
@@ -9,19 +9,22 @@ import base64
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from agentenv_protocol.computer import seed as seed_protocol
 
 from agent_env.env.published_images import DISK
-from agent_env.providers.sandbox_providers.disk_launcher import reset_input
+from agent_env.providers.sandbox_providers.disk_launcher import CONTROL, LAUNCH, RESET, UNRESETTABLE, reset_input
 from agent_env.providers.sandbox_providers.local_docker import disk as local_disk
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
+from agent_env.providers.sandbox_providers.local_docker.cli import DockerFailed
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL
 
@@ -66,11 +69,54 @@ def test_the_seed_holds_each_variable_the_launcher_is_handed_by_its_name_whateve
                                    ("AGENTENV_SETTING_NOTE", forged), ("AGENTENV_SETTING_RESOLUTION", "1280x800"),
                                    ("EMPTY", "")]
     assert meta_data.endswith("\nlocal-hostname: computer\n") and meta_data.startswith("instance-id: ")
+    assert (tmp_path / seed_protocol.OLDEST).read_text() == "1\n"
+
+
+def test_the_launchers_seed_and_the_inits_reader_hold_to_the_protocols_sample_byte_for_byte(tmp_path):
+    _seed(tmp_path / "written", seed_protocol.SAMPLE)
+    (tmp_path / "sample").mkdir()
+    (tmp_path / "sample" / "user-data").write_text(seed_protocol.SAMPLE_USER_DATA)
+
+    assert (tmp_path / "written" / seed_protocol.user_data_file(1)).read_text() == seed_protocol.SAMPLE_USER_DATA
+    assert _seed_environment(tmp_path / "sample") == (0, seed_protocol.SAMPLE)
+
+
+@pytest.mark.parametrize("files, read", [
+    ({"user-data": seed_protocol.SAMPLE_USER_DATA}, (0, seed_protocol.SAMPLE)),
+    ({"user-data": seed_protocol.SAMPLE_USER_DATA, "user-data.v2": "#agentenv-environment\nV2=MQ==\n",
+      seed_protocol.OLDEST: "1\n"}, (0, seed_protocol.SAMPLE)),
+    ({"user-data.v2": "#agentenv-environment\nV2=MQ==\n", seed_protocol.OLDEST: "2\n"},
+     (1, "this disk reads seed v1; this agent-env writes v2 or later; recompose it with agent-env env build")),
+    ({}, (0, {})),
+], ids=["an-older-launchers-seed", "a-newer-launchers-seed", "a-seed-past-this-init", "no-user-data"])
+def test_the_init_reads_the_newest_seed_version_it_knows_and_refuses_a_seed_that_carries_none(tmp_path, files, read):
+    """An older launcher's seed has no oldest-version file; a newer one's carries later versions beside version 1."""
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+
+    assert _seed_environment(tmp_path) == read
+
+
+def test_the_inits_reader_keeps_its_versions_and_leaves_an_images_variables_of_the_same_names_alone(tmp_path):
+    """init sources it, then exports the image's environment, whose variables may share a name with the reader's."""
+    (tmp_path / "user-data").write_text(seed_protocol.SAMPLE_USER_DATA)
+    image = {name: "the image's" for name in ("reads", "oldest", "newest", "file", "version", "name", "line", "value",
+                                             "quoted", "rest", "decoded", "refused")}
+
+    assert _seed_environment(tmp_path, image) == (0, seed_protocol.SAMPLE)
+
+
+def test_the_inits_reader_exports_a_seed_variable_named_as_one_of_its_own_and_one_holding_quotes(tmp_path):
+    environment = {**seed_protocol.SAMPLE, **{name: f"{name}'s value, 'quoted'\n" for name in (
+        "reads", "oldest", "file", "name", "line", "value", "quoted", "rest", "decoded", "refused", "_seed_reads")}}
+    (tmp_path / "user-data").write_text(seed_protocol.user_data(environment))
+
+    assert _seed_environment(tmp_path) == (0, environment)
 
 
 def test_the_inits_decoder_keeps_every_byte_of_a_start_and_a_seed_trailing_newlines_included(tmp_path):
     """As a container runtime would: $(...) alone drops a value's trailing newlines."""
-    decoder = re.search(r"^decode\(\) .*$", (DISK / "boot" / "init").read_text(), re.MULTILINE).group(0)
+    decoder = re.search(r"^decode\(\) .*$", (DISK / "boot" / "seed-env").read_text(), re.MULTILINE).group(0)
     values = ["plain", "ends with a newline\n", "\n", f"{TRICKY}\n\n"]
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"Cmd": values, "User": "user\n"}))
@@ -107,8 +153,8 @@ _STAND_INS = {
     "cp": 'touch "${@: -1}"',
     "zstd": 'echo "zstd $*" >> "$CALLS"; sleep "${ZSTD_TAKES_S:-0}"; touch "${@: -1}"',
     "socat": 'echo "socat $*" >> "$CALLS"; sleep "${SOCAT_EXITS_S:-30}"; exit 7',
-    **{qemu: f'echo "{qemu} $* seed=$(grep -vc "^#" "$VM_STATE/boot/user-data")'
-             f' $(sed -n 2,9p "$VM_STATE/boot/user-data" | tr "\\n" " ")" >> "$CALLS"\n'
+    **{qemu: f'echo "{qemu} $* seed=$(grep -vc "^#" "$VM_STATE/boot/seed/user-data")'
+             f' $(sed -n 2,9p "$VM_STATE/boot/seed/user-data" | tr "\\n" " ")" >> "$CALLS"\n'
              'trap \'echo "stopped $$" >> "$CALLS"; kill $!; exit 0\' TERM\n'
              'sleep "${QEMU_RUNS_S:-30}" & wait' for qemu in ("qemu-system-x86_64", "qemu-system-aarch64")},
 }
@@ -254,12 +300,40 @@ def test_a_reset_with_no_computer_running_says_so(launcher):
     assert reset.wait(10) == 1 and "no computer is running here" in reset.stderr.read()
 
 
+def test_a_reset_isnt_run_by_a_launcher_older_than_reset_in_place():
+    """Such a launcher has no control folder, and would take ``launch reset`` for a second boot of its computer."""
+    assert not Path(CONTROL).exists()
+
+    assert subprocess.run(RESET, capture_output=True).returncode == UNRESETTABLE
+
+
+def test_the_launcher_images_entrypoint_is_the_launch_script_its_providers_run():
+    lines = (DISK / "launcher" / "Dockerfile").read_text().splitlines()
+
+    assert f'ENTRYPOINT ["{LAUNCH}"]' in lines and f"COPY launch seed {PurePosixPath(LAUNCH).parent}/" in lines
+
+
 def _seed(folder, env: dict[str, str]) -> None:
     """The seed of ``env`` in ``folder``, as the launcher makes it from what the local provider hands it."""
     args = local_disk.launcher_args([18765], env, 2, 4096)
     handed = dict(arg.split("=", 1) for flag, arg in zip(args, args[1:]) if flag == "-e")
     subprocess.run(["sh", str(DISK / "launcher" / "seed"), str(folder)], check=True,
                    env={"PATH": os.environ["PATH"], "HOME": "/root", **handed})
+
+
+def _seed_environment(folder: Path, exported: dict[str, str] | None = None) -> tuple[int, dict[str, str] | str]:
+    """The init's reading of the seed mounted at ``folder``, ``exported`` set after it sources the reader, as the image's
+    environment is: 0 and the variables it exported or changed, or 1 and why it stops."""
+    image = "".join(f"export {name}={shlex.quote(value)}; " for name, value in (exported or {}).items())
+    script = (f'. "{DISK / "boot" / "seed-env"}"; {image}env > "$1/before"; seed_environment "$1" || '
+              '{ printf %s "$refused"; exit 1; }; env -0')
+    done = subprocess.run(["sh", "-c", script, "seed-env", str(folder)], capture_output=True, text=True,
+                          env={"PATH": os.environ["PATH"]})
+    if done.returncode:
+        return done.returncode, done.stdout
+    before = set((folder / "before").read_text().splitlines())
+    return 0, {name: value for name, _, value in (entry.partition("=") for entry in done.stdout.split("\0")[:-1])
+               if f"{name}={value}" not in before and name != "_"}
 
 
 @pytest.fixture
@@ -291,11 +365,32 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
     assert first == ("run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
                      "-p", "127.0.0.1:20001:18765", *local_disk.launcher_args([18765], {"ENVIRONMENT_NAME": "desk"},
                                                                                2, 4096), "agentenv-vm:0123")
-    assert reset == ("exec", "-i", sandbox.container_name, "/usr/local/bin/launch", "reset",
-                     "VM_ENV_ENVIRONMENT_NAME=YWdhaW4=\n", local_sandbox._RESET_SECONDS)
+    assert reset == ("exec", "-i", sandbox.container_name, *RESET, "VM_ENV_ENVIRONMENT_NAME=YWdhaW4=\n",
+                     local_sandbox._RESET_SECONDS)
     assert local_sandbox._RESET_SECONDS > 60
     LocalSandbox.pull_images.assert_awaited_once_with(["localhost:5000/disk@sha256:" + "a" * 64])
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"} and rebuilt.owns_container
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returncode, refused", [
+    (UNRESETTABLE, "the computer in container .* was booted by an older agent-env, whose launcher can't reset it in "
+                   "place; redeploy it"),
+    (1, "docker exec .* failed: launch reset: no computer is running here"),
+], ids=["older-launcher", "other-failure"])
+async def test_a_reset_in_a_container_an_older_launcher_runs_is_refused_naming_the_fix(launched, monkeypatch,
+                                                                                          returncode, refused):
+    """An agent-env before reset in place started it, and a run resumed after an upgrade resets it."""
+    provider = LocalSandboxProvider()
+    sandbox = await provider.create_vm(image="localhost:5000/disk@sha256:" + "a" * 64, exposed_ports=[18765],
+                                       env={"ENVIRONMENT_NAME": "desk"}, cpu=2, memory=4096)
+
+    def docker(*args, **options):
+        raise DockerFailed(f"docker {' '.join(args)} failed: launch reset: no computer is running here", returncode)
+
+    monkeypatch.setattr(local_sandbox, "docker", docker)
+    with pytest.raises(RuntimeError, match=refused):
+        await provider.reset_vm(sandbox, image="localhost:5000/disk@sha256:" + "a" * 64, env={})
 
 
 @pytest.mark.asyncio

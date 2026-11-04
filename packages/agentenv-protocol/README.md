@@ -644,6 +644,17 @@ leasing, and unverified for one with it until the probe has lease checks. The pr
 default role; the tool-access check hides a tool from a role of its own, `agentenv-probe-<random>`,
 and gives it back.
 
+### A disk's boot seed
+
+A Linux computer's disk form gets the deploy's environment at boot from a NoCloud seed, a FAT filesystem labelled
+`CIDATA` that the launcher writes and the disk's init reads. `agentenv_protocol.computer.seed` defines it. A disk
+composed by one agent-env version boots under another's launcher, so the seed carries every version its launcher
+writes: version 1 in `user-data`, a later version N in `user-data.vN`, and the oldest it carries in
+`agentenv-seed-oldest`. An init reads the newest version it knows, and stops the boot when the seed carries none of
+them. Version 1 is `#agentenv-environment`, then `NAME=<value, base64'd>` a line, in byte order; `SAMPLE` and
+`SAMPLE_USER_DATA` pin it, for a launcher's writer and an init's reader, wherever either is written, to be tested
+against. A change an older init would misread is a new version; one it ignores, such as a new file on the seed, isn't.
+
 ## Computer apps
 
 A computer app is software an agent uses on a computer, beside the driver: a desktop app, a service

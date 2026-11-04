@@ -1,7 +1,7 @@
 #!/bin/sh
 # uki.sh OUT: the one file the disk form's EFI system partition holds, written to OUT under the name UEFI firmware boots
-# from removable media: a UKI of Ubuntu's kernel and an initramfs of busybox, init, and the modules a virtio guest needs
-# that the kernel doesn't build in, decompressed, since busybox's insmod reads no zstd.
+# from removable media: a UKI of Ubuntu's kernel and an initramfs of busybox, init with its seed-env, and the modules a
+# virtio guest needs that the kernel doesn't build in, decompressed, since busybox's insmod reads no zstd.
 set -eu
 out=$1
 kver=$(ls /lib/modules | sort -V | tail -1)
@@ -12,7 +12,7 @@ esac
 root=/tmp/initramfs
 mkdir -p "$root/bin" "$root/dev" "$root/proc" "$root/sys" "$root/newroot" "$root/seed" "$root/lib/modules" "$out"
 cp /bin/busybox "$root/bin/busybox"
-cp /build/init /build/udhcpc.script "$root/"
+cp /build/init /build/seed-env /build/udhcpc.script "$root/"
 chmod 755 "$root/init" "$root/udhcpc.script"
 : > "$root/modules.order"
 for module in virtio_pci virtio_mmio virtio_blk virtio_scsi virtio_net virtio_rng virtio_console ext4 vfat \
