@@ -48,6 +48,7 @@ _WEBSITE_ATTR = "_aee_website"
 _READY_ATTR = "_aee_website_ready"
 _HEAD = re.compile(rb"<head(?:\s[^>]*)?>", re.IGNORECASE)
 _PREAMBLE = re.compile(rb"\A(?:\s|<!--.*?-->|<!doctype[^>]*>|<html(?:\s[^>]*)?>)*", re.IGNORECASE | re.DOTALL)
+_HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
 
 
 class WebsiteDeclaration(NamedTuple):
@@ -65,6 +66,10 @@ def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = 
     """Declare a WebsiteEnvironment's site."""
     if _cls is not None:
         raise TypeError("use @website(...) with parentheses")
+    if isinstance(domains, str):
+        raise ValueError(f"domains is a list of host names, not the string {domains!r}")
+    if problems := [problem for host in domains if (problem := host_problem(host))]:
+        raise ValueError(f"domains: {problems[0]}")
     if isinstance(ready_timeout_s, bool) or not isinstance(ready_timeout_s, (int, float)) or not (
             0 < ready_timeout_s < math.inf):
         raise ValueError(f"ready_timeout_s is a number of seconds above 0, not {ready_timeout_s!r}")
@@ -76,6 +81,14 @@ def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = 
         return cls
 
     return deco
+
+
+def host_problem(host: Any) -> str | None:
+    """Why ``host`` isn't a host name a site is reached at, None when it is: a name like ``github.com``, or
+    ``*.github.com`` for its subdomains, with no scheme, port or path."""
+    if not isinstance(host, str) or not _HOST.fullmatch(host):
+        return f"{host!r} is not a host name such as example.com or *.example.com"
+    return None
 
 
 def ready_check(fn: Any) -> Any:

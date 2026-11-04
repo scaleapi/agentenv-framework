@@ -12,6 +12,7 @@ from .environment import (
     SESSION_PATH,
     WebsiteDeclaration,
     WebsiteEnvironment,
+    host_problem,
     ready_check,
     website,
 )
@@ -30,7 +31,7 @@ from .routes import ROLE_KEY_ENV, ROLE_KEY_HEADER, ApiContext, ApiRoute, api, re
 from .session import SESSION_COOKIE, SESSION_SECRET_ENV, SessionSigner
 
 __all__ = [
-    "WebsiteEnvironment", "WebsiteDeclaration", "website", "api", "ApiContext", "ApiRoute", "ready_check",
+    "WebsiteEnvironment", "WebsiteDeclaration", "website", "api", "ApiContext", "ApiRoute", "ready_check", "host_problem",
     "ApiError", "BadRequest", "Unauthorized", "Forbidden", "NotFound", "Conflict",
     "UniverseClock", "ClockUnavailable", "SessionSigner", "reserved_path",
     "WEBSITE_EXTENSION_URI", "CLOCK_EXTENSION_URI", "UNIVERSE_NOW_HEADER", "DEFAULT_HEALTH_PATH", "SESSION_PATH",

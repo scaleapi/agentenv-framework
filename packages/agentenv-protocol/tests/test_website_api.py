@@ -387,6 +387,21 @@ def test_a_route_must_take_its_path_parameters_and_at_most_one_body() -> None:
         Bodies().create_app()
 
 
+@pytest.mark.parametrize("domains", ["shop.example", ["https://shop.example"], ["shop.example:8080"], ["shop.example/x"],
+                                     [""], ["-shop.example"], ["shop..example"], ["*shop.example"], [None]])
+def test_a_sites_domains_are_a_list_of_host_names(domains: object) -> None:
+    with pytest.raises(ValueError, match="domains"):
+        website(domains=domains)
+
+
+def test_a_wildcard_domain_names_a_sites_subdomains() -> None:
+    @website(domains=["shop.example", "*.shop.example", "intranet.localhost"])
+    class Shop(WebsiteEnvironment):
+        pass
+
+    assert Shop.declaration().domains == ("shop.example", "*.shop.example", "intranet.localhost")
+
+
 @pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), "60", True])
 def test_a_ready_timeout_is_a_number_of_seconds_above_zero(timeout: object) -> None:
     with pytest.raises(ValueError, match="ready_timeout_s"):
