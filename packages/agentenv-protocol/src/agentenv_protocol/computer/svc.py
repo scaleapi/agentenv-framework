@@ -9,6 +9,7 @@ import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote, unquote
 
 import httpx
 import websockets
@@ -34,6 +35,8 @@ FORWARDED = ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix")
 UNSENDABLE_CLOSES = (1005, 1006, 1015)
 #: A Host header that names a host, and its port or not, and nothing else.
 HOST = re.compile(r"(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
+#: What a path's segments may hold unescaped, besides letters, digits and ``_.-~``.
+PATH_SAFE = "/:@!$&'()*+,;="
 
 
 def passed_on(headers: Iterable[tuple[str, str]], *dropped: str) -> list[tuple[str, str]]:
@@ -56,10 +59,14 @@ def to_app(headers: Iterable[tuple[str, str]], host: str, scheme: str, prefix: s
 
 def target(connection: Request | WebSocket) -> str:
     """The path and query a request under ``/svc/<name>/`` asks its app for, as it came: still percent-encoded, so an
-    escaped ``?``, ``#`` or ``/`` stays one."""
-    raw = (connection.scope.get("raw_path") or connection.scope["path"].encode()).decode("latin-1")
-    tail = raw[raw.find("/svc/") + len("/svc/"):].partition("/")[2]
-    query = connection.url.query
+    escaped ``?``, ``#`` or ``/`` stays one; re-escaped from the routed path when the raw one's first two segments
+    aren't ``svc`` and the app's name."""
+    parts = (connection.scope.get("raw_path") or b"").decode("latin-1").split("/", 3)
+    if len(parts) == 4 and unquote(parts[1]) == "svc" and unquote(parts[2]) == connection.path_params["name"]:
+        tail = parts[3]
+    else:
+        tail = quote(connection.path_params["path"], safe=PATH_SAFE)
+    query = connection.scope.get("query_string", b"").decode("latin-1")
     return f"/{tail}" + (f"?{query}" if query else "")
 
 

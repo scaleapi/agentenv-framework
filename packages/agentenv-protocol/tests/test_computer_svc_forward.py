@@ -57,7 +57,8 @@ class Echo(ComputerAppEnvironment):
         return mcp
 
     async def _raw(self, request: Request) -> Response:
-        return JSONResponse({"path": request.scope["raw_path"].decode(), "query": request.url.query})
+        scope = request.scope
+        return JSONResponse({"path": scope["raw_path"].decode(), "query": scope["query_string"].decode()})
 
     async def _raw_socket(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -185,6 +186,7 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
             refused = await httpx.AsyncClient(base_url=url).get("/svc/echo/headers")
             utf8 = (await http.get("/svc/echo/headers", headers=[(b"x-name", "报告".encode())])).json()["headers"]
             raw = (await http.get("/svc/echo/raw/a%3Fb%2Fc?q=1")).json()
+            escaped = (await http.get(httpx.URL(url, raw_path=b"/%73vc/echo/raw/a%3Fb?q=1"))).json()
             http.headers.clear()
             bare = (await http.get("/svc/echo/headers", headers=client.control_headers(TOKEN))).json()["headers"]
     got, host = seen.json()["headers"], url.removeprefix("http://")
@@ -200,7 +202,7 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
     assert not {"accept", "accept-encoding", "user-agent"} & set(bare)
     assert (b"content-disposition", 'attachment; filename="报告.zip"'.encode()) in seen.headers.raw
     assert utf8["x-name"] == "报告".encode().decode("latin-1")
-    assert raw == {"path": "/raw/a%3Fb%2Fc", "query": "q=1"}
+    assert raw == {"path": "/raw/a%3Fb%2Fc", "query": "q=1"} and escaped == {"path": "/raw/a%3Fb", "query": "q=1"}
 
 
 async def _handshake(url: str, host: str) -> bytes:
