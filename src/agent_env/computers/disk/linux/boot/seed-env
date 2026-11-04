@@ -1,34 +1,34 @@
 # seed-env, sourced by init: the deploy's environment from the launcher's NoCloud seed, as
-# agentenv_protocol.computer.seed defines it. This init reads the seed versions in $reads; a seed carries the ones its
-# launcher writes, from the one its agentenv-seed-oldest names, 1 without it.
-reads=1
+# agentenv_protocol.computer.seed defines it. init sources it before it exports the image's environment, so the reader
+# keeps its versions and working variables local and prefixed, and no image or seed variable shares one.
 
 # decode VALUE: VALUE's base64 decoded into $decoded, its trailing newlines kept, which $(...) alone would drop.
 decode() { decoded=$(echo "$1" | base64 -d; echo .); decoded=${decoded%.}; }
 
-# seed_environment DIR: export each variable of the newest version this init reads that the seed mounted at DIR
-# carries; with none, return 1, the reason in $refused.
+# seed_environment DIR: export each variable of the newest seed version this init reads (1) that the seed mounted at DIR
+# carries, from the one its agentenv-seed-oldest names, 1 without it; with none, return 1, the reason in $refused.
 seed_environment() {
-    oldest=$(cat "$1/agentenv-seed-oldest" 2>/dev/null || echo 1)
-    newest=${reads##* }
-    case "$oldest" in ''|*[!0-9]*) oldest=1 ;; esac
-    if [ "$oldest" -gt "$newest" ]; then
-        refused="this disk reads seed v$newest; this agent-env writes v$oldest or later;"
+    local _seed_reads=1 _seed_oldest _seed_newest _seed_file _seed_version _seed_name _seed_line _seed_key _seed_value
+    _seed_oldest=$(cat "$1/agentenv-seed-oldest" 2>/dev/null || echo 1)
+    _seed_newest=${_seed_reads##* }
+    case "$_seed_oldest" in ''|*[!0-9]*) _seed_oldest=1 ;; esac
+    if [ "$_seed_oldest" -gt "$_seed_newest" ]; then
+        refused="this disk reads seed v$_seed_newest; this agent-env writes v$_seed_oldest or later;"
         refused="$refused recompose it with agent-env env build"
         return 1
     fi
-    file=
-    for version in $reads; do
-        [ "$version" -ge "$oldest" ] || continue
-        name=user-data
-        [ "$version" -gt 1 ] && name=user-data.v$version
-        [ -f "$1/$name" ] && file=$1/$name
+    _seed_file=
+    for _seed_version in $_seed_reads; do
+        [ "$_seed_version" -ge "$_seed_oldest" ] || continue
+        _seed_name=user-data
+        [ "$_seed_version" -gt 1 ] && _seed_name=user-data.v$_seed_version
+        [ -f "$1/$_seed_name" ] && _seed_file=$1/$_seed_name
     done
-    [ -n "$file" ] || return 0
-    while read -r line; do
-        key=${line%%=*} value=${line#*=}
-        case "$key" in ''|\#*) continue ;; esac
-        decode "$value"
-        export "$key=$decoded"
-    done < "$file"
+    [ -n "$_seed_file" ] || return 0
+    while read -r _seed_line; do
+        _seed_key=${_seed_line%%=*} _seed_value=${_seed_line#*=}
+        case "$_seed_key" in ''|\#*) continue ;; esac
+        decode "$_seed_value"
+        export "$_seed_key=$decoded"
+    done < "$_seed_file"
 }

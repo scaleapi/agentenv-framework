@@ -96,6 +96,15 @@ def test_the_init_reads_the_newest_seed_version_it_knows_and_refuses_a_seed_that
     assert _seed_environment(tmp_path) == read
 
 
+def test_the_inits_reader_keeps_its_versions_and_leaves_an_images_variables_of_the_same_names_alone(tmp_path):
+    """init sources it before it exports the image's environment, whose variables may share a name with the reader's."""
+    (tmp_path / "user-data").write_text(seed_protocol.SAMPLE_USER_DATA)
+    image = {name: "the image's" for name in ("reads", "oldest", "newest", "file", "version", "name", "line", "key",
+                                             "value")}
+
+    assert _seed_environment(tmp_path, image) == (0, seed_protocol.SAMPLE)
+
+
 def test_the_inits_decoder_keeps_every_byte_of_a_start_and_a_seed_trailing_newlines_included(tmp_path):
     """As a container runtime would: $(...) alone drops a value's trailing newlines."""
     decoder = re.search(r"^decode\(\) .*$", (DISK / "boot" / "seed-env").read_text(), re.MULTILINE).group(0)
@@ -303,12 +312,13 @@ def _seed(folder, env: dict[str, str]) -> None:
                    env={"PATH": os.environ["PATH"], "HOME": "/root", **handed})
 
 
-def _seed_environment(folder: Path) -> tuple[int, dict[str, str] | str]:
-    """The init's reading of the seed mounted at ``folder``: 0 and the variables it exported, or 1 and why it stops."""
+def _seed_environment(folder: Path, exported: dict[str, str] | None = None) -> tuple[int, dict[str, str] | str]:
+    """The init's reading of the seed mounted at ``folder``, with ``exported`` already in its environment, as the image's
+    is: 0 and the variables it exported or changed, or 1 and why it stops."""
     script = (f'. "{DISK / "boot" / "seed-env"}"; env > "$1/before"; seed_environment "$1" || {{ printf %s "$refused"; '
               'exit 1; }; env -0')
     done = subprocess.run(["sh", "-c", script, "seed-env", str(folder)], capture_output=True, text=True,
-                          env={"PATH": os.environ["PATH"]})
+                          env={"PATH": os.environ["PATH"], **(exported or {})})
     if done.returncode:
         return done.returncode, done.stdout
     before = set((folder / "before").read_text().splitlines())
