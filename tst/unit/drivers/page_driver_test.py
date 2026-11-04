@@ -131,13 +131,15 @@ async def test_a_double_click_is_one_move_then_two_presses_and_releases_counted(
 
 @pytest.mark.asyncio
 async def test_its_capture_is_the_pages_png_and_a_tab_that_paints_nothing_is_white(page):
-    page.served["page/capture"] = {"png": base64.b64encode(PNG).decode()}
+    shown = {"tab": "A1", "url": "https://mail.test/", "title": "Inbox"}
+    page.served["page/capture"] = {"png": base64.b64encode(PNG).decode(), "page": shown}
     shot = await page.page()
-    page.served["page/capture"] = {"blank": True}
+    page.served["page/capture"] = {"blank": True, "page": shown}
     blank = await page.page()
 
     assert (shot.width, shot.height, shot.mode, shot.data) == (2, 1, "png", PNG)
     assert (blank.width, blank.height, blank.mode) == (1280, 800, "RGB") and set(blank.data) == {0xff}
+    assert shot.page == blank.page == PageState("A1", "https://mail.test/", "Inbox")
 
 
 @pytest.mark.asyncio

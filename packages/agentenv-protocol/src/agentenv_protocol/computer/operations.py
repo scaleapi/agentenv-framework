@@ -19,6 +19,9 @@ The page group, for a driver whose screen is a website browser's active tab:
     tabs(action, tab, url) -> [Tab, ...]                  list, open, switch or close; the tabs open after it
     dialog(accept, text)                                  upload(paths), relative to the session user's ~/Uploads
     page_state() -> PageState
+
+A page driver's ``capture`` may return its ``Image`` with the ``page`` it shows, read with it, which every frame then
+carries rather than one ``page_state`` reads after.
 """
 from __future__ import annotations
 
@@ -54,11 +57,12 @@ class Display:
 @dataclass(frozen=True)
 class Image:
     """A capture: encoded ``png`` or ``jpeg`` bytes, or raw pixels in a Pillow raw mode (``RGB``, ``RGBA``, ``BGRA``,
-    ``BGRX``)."""
+    ``BGRX``); and, from a page driver, the page it shows."""
     width: int
     height: int
     data: bytes
     mode: str = "png"
+    page: PageState | None = None
 
 
 @dataclass(frozen=True)

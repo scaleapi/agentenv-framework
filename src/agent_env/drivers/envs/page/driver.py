@@ -111,13 +111,14 @@ class PageDriver(ComputerDriverEnvironment):
     @capture
     async def page(self) -> Image:
         """The page, or a blank one where the browser shows nothing, as a desktop browser shows a tab with nothing
-        in it."""
+        in it; with the page it shows, read with it."""
         shot = await self._call("page/capture")
+        page = _page_state(shot["page"]) if shot.get("page") else None
         if shot.get("blank"):
             size = await self.viewport()
-            return Image(size.width, size.height, BLANK * (size.width * size.height), "RGB")
+            return Image(size.width, size.height, BLANK * (size.width * size.height), "RGB", page)
         data = base64.b64decode(shot["png"])
-        return Image(int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"), data, "png")
+        return Image(int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"), data, "png", page)
 
     async def ready_checks(self) -> list[ReadyCheck]:
         try:
@@ -243,11 +244,7 @@ class PageDriver(ComputerDriverEnvironment):
 
     @page_state
     async def page_now(self) -> PageState:
-        state = await self._call("page/state")
-        open_dialog, chooser = state.get("dialog"), state.get("file_chooser")
-        return PageState(state["tab"], state["url"], state["title"],
-                         PageDialog(**open_dialog) if open_dialog else None,
-                         FileChooser(**chooser) if chooser else None)
+        return _page_state(await self._call("page/state"))
 
     def _mask(self) -> int:
         return _modifiers(self._held)
@@ -288,6 +285,12 @@ class PageDriver(ComputerDriverEnvironment):
             else:
                 raise DeviceUnavailable("no website browser on this computer answers yet")
         return self._browser
+
+
+def _page_state(state: dict) -> PageState:
+    open_dialog, chooser = state.get("dialog"), state.get("file_chooser")
+    return PageState(state["tab"], state["url"], state["title"], PageDialog(**open_dialog) if open_dialog else None,
+                     FileChooser(**chooser) if chooser else None)
 
 
 def _refusal(answer: httpx.Response) -> Optional[str]:

@@ -710,6 +710,65 @@ async def test_input_that_opens_a_dialog_returns_once_it_opens_and_the_rest_wait
 
 
 @pytest.mark.asyncio
+async def test_input_that_opens_a_dialog_answered_for_the_agent_goes_on_once_it_is_answered():
+    class Answered(Tabbed):
+        """A page whose handler of a mouse release opens a dialog, answered at once by the control's setting."""
+
+        def __init__(self):
+            super().__init__({"Page.handleJavaScriptDialog": self._close})
+            self.released = asyncio.get_running_loop().create_future()
+
+        def _close(self, params, session):
+            self.released.set_result({})
+            return {}
+
+        async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+            if method == "Input.dispatchMouseEvent" and params["type"] == "mouseReleased":
+                self.calls.append((method, params, session_id))
+                self.send("Page.javascriptDialogOpening", {"type": "alert", "message": "Saved"}, session=session_id)
+                return await self.released
+            return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    devtools = Answered()
+    control = BrowserControl(devtools, "accept", (1280, 800))
+    await control.attach()
+    devtools.send("Target.targetCreated", _page("a", "https://mail.test/a", "Mail a"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-a", **_page("a")})
+    await asyncio.sleep(0)
+    events = [{"method": "Input.dispatchMouseEvent", "params": {"type": kind, "x": 1, "y": 1}}
+              for kind in ("mousePressed", "mouseReleased", "mouseMoved")]
+
+    await asyncio.wait_for(control.dispatch(events), 5)
+
+    assert [params["type"] for method, params, _ in devtools.calls if method == "Input.dispatchMouseEvent"] == [
+        "mousePressed", "mouseReleased", "mouseMoved"]
+
+
+@pytest.mark.asyncio
+async def test_its_page_capture_names_the_tab_it_captured_though_another_becomes_active_meanwhile():
+    class Switching(Tabbed):
+        """Tabs of which only ``focused``'s page has focus, which a capture of the first moves to the second."""
+
+        def __init__(self):
+            super().__init__({"Runtime.evaluate": lambda params, session: {
+                "result": {"value": ["visible", session == self.focused]}}})
+            self.focused = "s-a"
+
+        async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+            if method == "Page.captureScreenshot":
+                self.focused = "s-b"
+            return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    devtools = Switching()
+    control = await _tabs(devtools, "a", "b")
+
+    shot = await control.capture_page()
+
+    assert shot == {"png": "png of s-a", "page": {"tab": "a", "url": "https://mail.test/a", "title": "Mail a"}}
+    assert (await control.state())["tab"] == "b"
+
+
+@pytest.mark.asyncio
 async def test_while_a_dialog_keeps_its_page_from_painting_its_capture_is_the_last_it_took():
     devtools = Tabbed()
     control = await _tabs(devtools, "a")

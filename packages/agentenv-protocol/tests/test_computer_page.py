@@ -12,9 +12,11 @@ from computer_fake import FakeDriver, http_client, mcp_session  # noqa: E402
 
 from agentenv_protocol.computer import (  # noqa: E402
     FileChooser,
+    Image,
     PageDialog,
     PageState,
     Tab,
+    capture,
     dialog,
     history,
     navigate,
@@ -35,6 +37,14 @@ class PageFake(FakeDriver):
         self.open_dialog: PageDialog | None = None
         self.chooser: FileChooser | None = None
         self.calls: list = []
+        self.captured: PageState | None = None
+
+    @capture
+    async def grab(self):
+        image = await super().grab()
+        if self.captured is None:
+            return image
+        return Image(image.width, image.height, image.tobytes(), "RGB", self.captured)
 
     @navigate
     async def go_to(self, url):
@@ -142,3 +152,14 @@ async def test_while_a_dialog_is_open_input_it_blocks_is_refused_until_computer_
     assert navigated.structuredContent["code"] == "dialog_open" and not listed.isError
     assert answered.structuredContent["summary"] == "Dismissed the dialog" and not clicked.isError
     assert ("dialog", False, None) in driver.calls and not any(entry[0] == "click" for entry in driver.screen.log[:-1])
+
+
+@pytest.mark.asyncio
+async def test_a_frame_names_the_page_its_capture_came_with_rather_than_one_read_after_it():
+    driver = PageFake()
+    driver.captured = PageState("b", "https://docs.test/", "Docs")
+    async with mcp_session(driver) as session:
+        shot = await session.call_tool("computer_screenshot", {})
+
+    assert shot.structuredContent["page"] == {"tab": "b", "url": "https://docs.test/", "title": "Docs"}
+

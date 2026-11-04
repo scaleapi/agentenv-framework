@@ -16,7 +16,7 @@ from ..tool_context import ToolContext
 from . import apps
 from .errors import DeliveryFailed, DeviceUnavailable, DialogOpen, InputBusy, Internal
 from .frames import Frame, FrameStore, to_pil
-from .operations import DIALOG_BLOCKS, GROUPS, INPUT, Display, PageState, ReadyCheck, resolve
+from .operations import DIALOG_BLOCKS, GROUPS, INPUT, Display, Image, PageState, ReadyCheck, resolve
 from .queue import InputQueue
 from .recording import RecordHints, Recordings
 from .results import EffectData, InputResult, send
@@ -80,8 +80,11 @@ class ComputerRuntime:
         counts as after the frame, which the frame may not show."""
         inputs = self.queue.snapshot()
         display = await self.display_now()
-        image = to_pil(await self.call("capture"), display)
-        page = await self.page_now() if self.has("page") else None
+        captured = await self.call("capture")
+        image = to_pil(captured, display)
+        page = captured.page if isinstance(captured, Image) and isinstance(captured.page, PageState) else None
+        if page is None and self.has("page"):
+            page = await self.page_now()
         return self.frames.add(image, display, inputs, identity=identity, page=page)
 
     async def page_now(self) -> PageState:

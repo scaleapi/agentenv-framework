@@ -326,12 +326,15 @@ class BrowserControl:
         active = await self.active_tab()
         if active is None:
             raise DeviceUnavailable("the browser has no tab open")
-        tab = self.tabs[active]
-        state: dict[str, Any] = {"tab": active, "url": tab["url"], "title": tab["title"]}
-        if dialog := next((d for d in self._open_dialogs.values() if d["tab"] == active), None):
+        return self._state_of(active)
+
+    def _state_of(self, target: str) -> dict:
+        tab = self.tabs.get(target) or {"url": "", "title": ""}
+        state: dict[str, Any] = {"tab": target, "url": tab["url"], "title": tab["title"]}
+        if dialog := next((d for d in self._open_dialogs.values() if d["tab"] == target), None):
             state["dialog"] = {"type": dialog["type"], "message": dialog["message"],
                                "default_text": dialog["default_text"]}
-        if chooser := next((c for s, c in self._choosers.items() if self._sessions.get(s) == active), None):
+        if chooser := next((c for s, c in self._choosers.items() if self._sessions.get(s) == target), None):
             state["file_chooser"] = {"multiple": chooser["multiple"]}
         return state
 
@@ -403,7 +406,18 @@ class BrowserControl:
         """The active tab's page as it shows now, a PNG, base64; None for a tab that paints nothing within
         ``CAPTURE_TIMEOUT_S``, which a desktop browser shows blank, or sooner for a tab with no URL yet, such as a new
         tab whose navigation the browser blocked, which may never paint."""
+        return await self._capture(await self.active_session())
+
+    async def capture_page(self) -> dict:
+        """The active tab's capture, ``png``, else ``blank``, with its ``page`` state, of that tab whatever becomes
+        active meanwhile."""
         session = await self.active_session()
+        target = self._sessions[session]
+        png = await self._capture(session)
+        await self._refresh(target)
+        return {**({"png": png} if png is not None else {"blank": True}), "page": self._state_of(target)}
+
+    async def _capture(self, session: str) -> Optional[str]:
         target = self._sessions[session]
         navigated = self.tabs.get(target, {}).get("url")
         try:
@@ -416,15 +430,16 @@ class BrowserControl:
         return shot["data"]
 
     async def dispatch(self, events: list[dict]) -> None:
-        """Each of ``events``, a CDP input call, sent to the active tab in order, until one opens a dialog: the page
-        answers that one only once the dialog is answered, so it finishes then, and the rest aren't sent.
-        InvalidArgument for any other call."""
+        """Each of ``events``, a CDP input call, sent to the active tab in order, until one opens a dialog left to the
+        agent: the page answers that one only once the dialog is answered, so it finishes then, and the rest aren't
+        sent. A dialog answered for the agent is answered at once, and the rest go on. InvalidArgument for any other
+        call."""
         if refused := [event.get("method") for event in events if event.get("method") not in PAGE_INPUT]:
             raise InvalidArgument(f"page input takes {', '.join(sorted(PAGE_INPUT))}, not {refused}")
         session = await self.active_session()
         opened = self._dialog_opened.setdefault(session, asyncio.Event())
         for event in events:
-            if session in self._open_dialogs:
+            if self.dialogs == AGENT and session in self._open_dialogs:
                 return
             opened.clear()
             sent = asyncio.ensure_future(self.devtools.call(event["method"], event.get("params") or {},
@@ -435,6 +450,9 @@ class BrowserControl:
             finally:
                 waiting.cancel()
             if not sent.done():
+                if self.dialogs != AGENT:
+                    await sent
+                    continue
                 self._tasks.add(sent)
                 sent.add_done_callback(self._finished)
                 return
@@ -783,8 +801,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @extension(BROWSER, op="page/capture", method="GET")
     async def browser_page_capture(self) -> dict:
-        png = await self.control.capture()
-        return {"png": png} if png is not None else {"blank": True}
+        return await self.control.capture_page()
 
     @extension(BROWSER, op="page/input")
     async def browser_page_input(self, events: list[dict]) -> dict:
