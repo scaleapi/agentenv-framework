@@ -929,9 +929,15 @@ async def test_an_nl_action_ok_counts_the_calls_its_executor_made_for_the_fire(e
 
 @pytest.mark.asyncio
 async def test_fires_one_executor_realizes_at_once_name_each_other_beside_the_calls_they_share(engine, monkeypatch):
+    both_called = asyncio.Event()
+    called = []
+
     async def executor(self, executor, instruction, context_id):
-        await asyncio.sleep(0.05)  # both fires are in flight before either replies
         engine.on_tool_call("bob", "slack_send_message", {}, _result())
+        called.append(instruction)
+        if len(called) == 2:
+            both_called.set()
+        await both_called.wait()  # neither fire ends before both calls are made
         return "done"
 
     monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
