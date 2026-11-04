@@ -929,15 +929,12 @@ async def test_an_nl_action_ok_counts_the_calls_its_executor_made_for_the_fire(e
 
 @pytest.mark.asyncio
 async def test_fires_one_executor_realizes_at_once_name_each_other_beside_the_calls_they_share(engine, monkeypatch):
-    both_called = asyncio.Event()
-    called = []
+    started, called = _Gate(2), _Gate(2)
 
     async def executor(self, executor, instruction, context_id):
+        await started.arrive()  # both fires are in flight before either executor calls
         engine.on_tool_call("bob", "slack_send_message", {}, _result())
-        called.append(instruction)
-        if len(called) == 2:
-            both_called.set()
-        await both_called.wait()  # neither fire ends before both calls are made
+        await called.arrive()  # and neither ends before both calls are made
         return "done"
 
     monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
@@ -1179,6 +1176,19 @@ async def test_step_path_respects_watch_roles(monkeypatch):
 
 class _ExecutorCalls(list):
     reply: object = "done"
+
+
+class _Gate:
+    """Holds each arrival until ``n`` have arrived."""
+
+    def __init__(self, n: int) -> None:
+        self.n, self.arrived, self.open = n, 0, asyncio.Event()
+
+    async def arrive(self) -> None:
+        self.arrived += 1
+        if self.arrived == self.n:
+            self.open.set()
+        await self.open.wait()
 
 
 
