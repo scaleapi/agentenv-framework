@@ -147,16 +147,23 @@ def current(env: ComputerEnv) -> bool:
 def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
             forms: list[str] | None = None) -> list[tuple[str, str]]:
     """The pairs of ``forms``, by default every form of the base, left to compose in ``env``: never started, failed,
-    left building by a put that stopped, or built but unprobed though ``sandbox_provider``, by default the env's, runs
-    the arch natively."""
+    left building by a put that stopped, built but unprobed though ``sandbox_provider``, by default the env's, runs the
+    arch natively, or a VM bundle the Mac it would compose on doesn't hold, which this agent-env composes and records
+    there, as one that composes differently names it."""
     from agent_env.providers import get_env_sandbox_provider
 
     provider = sandbox_provider or get_env_sandbox_provider()
 
     def left(form: str, arch: str, record: dict | None) -> bool:
         status = (record or {}).get("status")
-        return status not in BUILT or (status == "unverified" and bool(boot.native_links(provider, arch, form,
-                                                                                        env.stored_id)))
+        if status not in BUILT:
+            return True
+        if status == "unverified":
+            return bool(boot.native_links(provider, arch, form, env.stored_id))
+        if form != "vm_bundle":
+            return False
+        links = boot.native_links(provider, arch, form, env.stored_id)
+        return bool(links) and not asyncio.run(links[0].has_vm_bundle(record["image"]))
 
     return _pairs(env, gate.forms(env.computer) if forms is None else forms, left)
 
@@ -235,7 +242,8 @@ def compose_here(env: ComputerEnv, arch: str, link: SandboxProvider,
         raise RuntimeError(f"{env.id}'s vm_bundle/{arch} couldn't be composed on this Mac: {result.get('reason')}")
     if result["image"] != recorded:
         raise RuntimeError(f"{env.id}'s vm_bundle/{arch} composed on this Mac as {result['image']}, not the "
-                           f"{recorded} its record names; compose it again with agent-env env build")
+                           f"{recorded} its record names, as another agent-env composed it; compose it on this Mac "
+                           "with agent-env run or agent-env env build, which record what this one composes")
 
 
 def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,

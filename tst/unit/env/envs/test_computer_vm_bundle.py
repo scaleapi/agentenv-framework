@@ -186,8 +186,25 @@ def test_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_under
 
     assert other.kept == {recorded} and env.metadata["composed"]["vm_bundle"]["arm64"]["image"] == recorded
     env.metadata["composed"]["vm_bundle"]["arm64"]["image"] = "local:agentenv-computer-elsewhere"
-    with pytest.raises(RuntimeError, match="not the local:agentenv-computer-elsewhere its record names"):
+    with pytest.raises(RuntimeError, match="not the local:agentenv-computer-elsewhere its record names, as another "
+                                           "agent-env composed it; compose it on this Mac with agent-env run"):
         composer.compose_here(env, "arm64", FakeMac())
+
+
+def test_a_sync_on_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_and_records_what_it_composed(
+        mac, tmp_path):
+    env = _put(_driver(tmp_path / "desk"), mac)
+    composed = env.metadata["composed"]["vm_bundle"]["arm64"]["image"]
+    other = FakeMac()
+
+    assert composer.pending(env, mac) == [] and composer.pending(env, SandboxProvider()) == []
+    assert composer.pending(env, other) == [("vm_bundle", "arm64")]
+    env.metadata["composed"]["vm_bundle"]["arm64"]["image"] = "local:agentenv-computer-elsewhere"
+    composer.compose(env, composer.pending(env, other), Composing(sandbox_provider=other))
+
+    built = Env.get(env.id, env.version)
+    assert other.kept == {composed} and built.metadata["composed"]["vm_bundle"]["arm64"]["image"] == composed
+    assert built.computer_artifact().forms.vm_bundle.image == composed and composer.pending(built, other) == []
 
 
 @pytest.mark.asyncio

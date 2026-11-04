@@ -104,7 +104,9 @@ TCC permissions macOS gives only to the executable launchd starts itself must. m
 name, and gate 3 probes it at full, a check its driver declares it fails on macOS (`known_failures`) recorded and not
 failing the build; a compose of the same inputs on that Mac reuses it. A VM bundle is kept on the Mac that composed it
 alone, so a deploy on a Mac that doesn't hold the one its env's record names composes it there first, from the same
-inputs and so under the same name.
+inputs and so under the same name. A deploy that would compose another name, as a different agent-env does, refuses;
+`agent-env run` and `agent-env env build` on a Mac that doesn't hold the VM bundle compose it there and record what
+they composed, so a deploy after them boots it.
 
 A deploy clones the env's VM bundle, writes the deploy's environment into a folder the VM shares as
 `agentenv_protocol.computer.seed`'s seed, which `agentenv-service` reads (waiting for the share, which mounts at login),
