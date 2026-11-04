@@ -15,8 +15,6 @@ from agent_env.task.store import (
 )
 from agent_env.task_step.context import TaskStepContext
 
-UNFENCED = "seed_task_instance_context takes no attempt_epoch, so seed_context cannot refuse a superseded run's seed"
-
 
 @pytest.fixture
 def store(tmp_path) -> TaskInstanceStore:
@@ -50,7 +48,6 @@ def _replayed(store, doc):
     return replay_context(commit_ordered(store.journal_entries_sync("i"), doc["completed_steps"]), doc["rerecorded_steps"])
 
 
-@pytest.mark.xfail(strict=True, raises=TypeError, reason=UNFENCED)
 def test_a_superseded_run_cannot_seed_over_the_run_that_replaced_it(store):
     superseded = _register()
     live = _register()
@@ -62,7 +59,6 @@ def test_a_superseded_run_cannot_seed_over_the_run_that_replaced_it(store):
     assert _replayed(store, d) == d["context"]
 
 
-@pytest.mark.xfail(strict=True, raises=TypeError, reason=UNFENCED)
 def test_replaying_the_live_journal_reproduces_the_stored_context_after_a_late_seed(store, monkeypatch):
     superseded = _register()
     live = _register()
