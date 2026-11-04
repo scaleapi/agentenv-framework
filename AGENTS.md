@@ -411,8 +411,7 @@ pass, but a failing one does not block the merge.
 `integration-local-gateway` (the slow tier's `gateway_test.py`, run beside the rest of it) and
 `installer`. The slow tier runs on twelve runners (`integration-local-slow (1/12)` to `(12/12)`), the
 gateway tests on five, and the unit and installer tiers on two each; `unit`, `integration-local-slow`,
-`integration-local-gateway` and `installer` each pass when all of their shards do. `integration-local`
-runs its tests in parallel on one runner, a module's tests on one worker. The Python jobs install from `uv.lock` (public PyPI only), with the uv that
+`integration-local-gateway` and `installer` each pass when all of their shards do. The Python jobs install from `uv.lock` (public PyPI only), with the uv that
 `.github/ci-requirements.txt` pins, and use no secrets and no external services (a `registry:2`
 container for the integration jobs). The `unit` job also fails if `uv.lock` resolves anything from a
 registry other than PyPI, if `agentenv-framework-protocol` is not the editable workspace member, if
