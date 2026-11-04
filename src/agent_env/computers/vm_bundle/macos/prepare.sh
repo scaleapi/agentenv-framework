@@ -20,7 +20,6 @@ ln -sf "$(uv python find 3.12)" /opt/agentenv/bin/python3
 install -m 755 "$build/prepare/agentenv-service" /opt/agentenv/bin/agentenv-service
 command -v swiftc > /dev/null || fail "the base has no swiftc, which builds set-display"
 swiftc -O "$build/prepare/set-display.swift" -o /opt/agentenv/bin/set-display
-/opt/agentenv/bin/set-display
 
 if [ -f /Library/LaunchAgents/com.trycua.spacesd.plist ]; then
     as_root mv /Library/LaunchAgents/com.trycua.spacesd.plist /Library/LaunchAgents/com.trycua.spacesd.plist.disabled
