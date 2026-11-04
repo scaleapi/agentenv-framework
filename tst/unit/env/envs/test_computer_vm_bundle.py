@@ -73,7 +73,7 @@ class FakeMac(SandboxProvider):
 
 
 @pytest.fixture
-def mac(local_stores, monkeypatch):
+def mac(local_stores, cli_routing, monkeypatch):
     monkeypatch.setattr(composer, "_probed", lambda env, driver, form, arch, result, provider, progress: {
         **result, "status": "ready"})
     return FakeMac()
@@ -159,7 +159,7 @@ def test_a_failed_provisioning_deletes_its_builder_and_fails_the_pair_with_what_
     assert mac.terminated == [mac.opened[0][1]] and not mac.kept
 
 
-def test_a_vm_bundle_is_composed_only_where_a_link_boots_macos_vm_bundles(local_stores, tmp_path):
+def test_a_vm_bundle_is_composed_only_where_a_link_boots_macos_vm_bundles(mac, tmp_path):
     env = _put(_driver(tmp_path / "desk"), SandboxProvider())
 
     built = env.metadata["composed"]["vm_bundle"]["arm64"]
