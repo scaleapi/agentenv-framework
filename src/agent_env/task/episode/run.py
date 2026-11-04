@@ -22,7 +22,7 @@ from agent_env.a2a_agent import protocol
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 from agent_env.runner import store as run_store
-from agent_env.runner.runner import RunRecord, RunStatus
+from agent_env.runner.runner import RunRecord, RunStatus, run_outcome
 from agent_env.store.routing import namespace_routing, run_scope
 from agent_env.task.episode.proxy import InProcessProxy, ProxyClient, ProxyRefused
 from agent_env.task.store import record_task_cancelled
@@ -254,9 +254,11 @@ class Episode:
         resolves."""
         running.set()
         with namespace_routing():
-            _record_run(self._task, self.id, self._context.metadata)  # before any await: start() returns it listed
             failure: BaseException | None = None
             try:
+                # Before any await, so start() returns with the run listed; a write that fails is the run's error, and
+                # the finally below still takes the episode out of _live.
+                _record_run(self._task, self.id, self._context.metadata)
                 await self._task.run(context=self._context, instance_id=self.id)
                 self._ran = True
                 self._notify()
@@ -280,13 +282,13 @@ class Episode:
                         del _live[self.id]
 
     def _outcome(self, failure: BaseException | None) -> tuple[RunStatus, str | None]:
+        """How the run ended, by the rule every runner records a run's end by (``run_outcome``: a step that failed
+        without failing the task fails the run too), but cancelled when it was abandoned or cancelled."""
         if self._abandoned is not None:
             return RunStatus.CANCELED, self._abandoned
         if isinstance(failure, asyncio.CancelledError):
             return RunStatus.CANCELED, "the episode was cancelled"
-        if failure is not None:
-            return RunStatus.FAILED, f"{type(failure).__name__}: {failure}"
-        return RunStatus.COMPLETED, None
+        return run_outcome(self._context, failure)
 
     async def _wait(self, changed: asyncio.Future[None]) -> None:
         """Until the run ends or what was ``changed`` when the caller last looked changes again."""
