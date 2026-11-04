@@ -924,7 +924,26 @@ async def test_an_nl_action_ok_counts_the_calls_its_executor_made_for_the_fire(e
     oks = [e["detail"] for e in engine._events if e["kind"] == "action_ok"]
     assert [(d["calls"], d.get("failed_calls")) for d in oks] == [
         ({"slack_conversations_history": 1, "slack_send_message": 1}, {"slack_send_message": 1}), ({}, None)]
-    assert engine.caused_by("bob") == []
+    assert engine.caused_by("bob") == [] and not any("calls_shared_with" in d for d in oks)
+
+
+@pytest.mark.asyncio
+async def test_fires_one_executor_realizes_at_once_name_each_other_beside_the_calls_they_share(engine, monkeypatch):
+    async def executor(self, executor, instruction, context_id):
+        await asyncio.sleep(0.05)  # both fires are in flight before either replies
+        engine.on_tool_call("bob", "slack_send_message", {}, _result())
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}}, "triggers": [
+        {"id": tid, "when": {"type": "action", "tool": "t"}, "actions": [{"type": "nl", "executor": "bob", "instruction": tid}]}
+        for tid in ("chan", "dm")]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    oks = {e["trigger_id"]: e["detail"] for e in engine._events if e["kind"] == "action_ok"}
+    assert {tid: (d["calls"], d["calls_shared_with"]) for tid, d in oks.items()} == {
+        "chan": ({"slack_send_message": 2}, ["dm"]), "dm": ({"slack_send_message": 2}, ["chan"])}
 
 
 def test_generated_id_on_omit(engine):

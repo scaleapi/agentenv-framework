@@ -1425,7 +1425,8 @@ class TriggerEngine:
                 if fire is None:
                     return False
                 detail = {"nl": action["instruction"][:120], **_named_executor(action), "calls": fire["calls"],
-                          **({"failed_calls": fire["failed_calls"]} if fire["failed_calls"] else {})}
+                          **({"failed_calls": fire["failed_calls"]} if fire["failed_calls"] else {}),
+                          **({"calls_shared_with": sorted(fire["shared_with"])} if fire["shared_with"] else {})}
             if "verify" in action and action["type"] != "nl":
                 # only an action's own verify inherits its `as`; when.check state probes read as the pin
                 if not await self._run_verify(tid, index, action["verify"], ctx, role=action.get("as")):
@@ -1454,9 +1455,11 @@ class TriggerEngine:
         executor = self._executors.get(action.get("executor"))
         if executor is not None and "hours" in executor:
             await self._await_hours(tid, trig, index, executor["hours"], named)
-        fire = {"cause": {"trigger_id": tid, "action_index": index, "fire": trig["attempts"]},
-                "calls": {}, "failed_calls": {}}
+        fire = _in_flight_fire({"trigger_id": tid, "action_index": index, "fire": trig["attempts"]})
         fires = self._in_flight.setdefault(executor["role"], []) if executor is not None else []
+        for other in fires:  # an executor's calls carry only its role, so fires it realizes at once share their counts
+            other["shared_with"].add(tid)
+            fire["shared_with"].add(other["cause"]["trigger_id"])
         fires.append(fire)
         try:
             for attempt in (1, 2):
@@ -1595,6 +1598,11 @@ def _result_text(result: CallToolResult) -> str:
 def _named_executor(action: dict) -> dict:
     """``{"executor": name}`` for an nl action that names its executor, for its firing-log events; else empty."""
     return {"executor": action["executor"]} if action.get("executor") is not None else {}
+
+
+def _in_flight_fire(cause: dict) -> dict:
+    """An nl fire as `_in_flight` holds it: its cause, its executor's calls by tool, and the triggers it overlapped."""
+    return {"cause": cause, "calls": {}, "failed_calls": {}, "shared_with": set()}
 
 
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
