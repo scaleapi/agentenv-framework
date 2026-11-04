@@ -150,7 +150,7 @@ def _only_in(extra: str) -> list[str]:
     """Module paths the extra installs and neither a core install nor any other extra does, but for an extra that
     includes it (``trl`` includes ``openenv``): a distribution two extras share (grpcio, for gcp and tensorlake) stays
     for the other's modules. A distribution the extra names stays the extra's though a core dependency brings it too
-    (litellm requires boto3 from 1.104), so core is still shown to import without it."""
+    (litellm requires boto3 from 1.98), so core is still shown to import without it."""
     mine = _closure(frozenset({extra}))
     others = [other for other in _optional_requirements()
               if other != extra and not mine <= _closure(frozenset({other}))]
