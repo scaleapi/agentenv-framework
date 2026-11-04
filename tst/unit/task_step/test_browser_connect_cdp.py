@@ -106,6 +106,42 @@ async def test_reset_env_gives_the_agent_a_fresh_address_under_the_same_name_wit
     assert len(context.metadata["browser_connections"]) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_connection_reset_env_cant_make_again_is_removed_from_its_agent_and_the_step_fails(monkeypatch):
+    sent = _mock(monkeypatch, tokens=["t1"], failing_after=1)
+    context = TaskStepContext(deployed_envs=[_env()], deployed_agents=[_agent()], metadata={})
+
+    class Computer:
+        async def reset(self, deployed):
+            pass
+
+    monkeypatch.setattr(Env, "get", lambda env_id, version: Computer())
+    await BrowserConnectCdpTaskStep(id="connect", version=None, env_id="computer", agent_name="solver").execute(
+        context)
+    with pytest.raises(RuntimeError, match="removed from their agents: solver's 'chromium' \\(ExtensionCallError"):
+        await ResetEnvTaskStep(id="reset", version=None, env_id="computer").execute(context)
+
+    removed = sent[-1]
+    assert (removed.method, str(removed.url), json.loads(removed.content)) == (
+        "DELETE", f"{_AGENT}/ext/cdp-config", {"name": "chromium"})
+
+
+@pytest.mark.asyncio
+async def test_a_connection_under_a_name_already_connected_replaces_its_record(monkeypatch):
+    sent = _mock(monkeypatch, tokens=["t1", "t2"])
+    other = _env()
+    other.env_id = "other"
+    context = TaskStepContext(deployed_envs=[_env(), other], deployed_agents=[_agent()], metadata={})
+
+    for env_id in ("computer", "other"):
+        await BrowserConnectCdpTaskStep(id=f"connect-{env_id}", version=None, env_id=env_id,
+                                        agent_name="solver").execute(context)
+
+    assert len(sent) == 6
+    assert [(record["env_id"], record["name"]) for record in context.metadata["browser_connections"]] == [
+        ("other", "chromium")]
+
+
 def test_it_round_trips_and_a_blank_name_is_a_config_problem():
     step = BrowserConnectCdpTaskStep(id="connect", version=None, env_id="computer", agent_name="solver",
                                      browser="chromium", name="shop", keep_tools=True)
@@ -120,11 +156,12 @@ def _app(name: str) -> dict:
 
 
 def _env(children: list | None = None) -> DeployedSandboxEnv:
-    """A browser computer's deployment: tool access on its own card, a browser app among its children."""
+    """A browser computer's deployment: a driver serving a data plane and tool access on its own card, named after
+    its browser app among its children, as a browser computer's driver is."""
     return DeployedSandboxEnv(
         env_id="computer", env_version=1, sandbox_id="sb", sandbox_type="local", control_token="control",
         environment_card_url=f"{_ENV}/.well-known/agent-env.json",
-        environment_card={"name": "browser-computer", "capabilities": {"extensions": [_TOOL_ACCESS]},
+        environment_card={"name": "chromium", "capabilities": {"extensions": [_TOOL_ACCESS], "operations": ["reset"]},
                           "children_environments": [_app("chromium")] if children is None else children})
 
 
@@ -133,13 +170,17 @@ def _agent(role: str | None = None, extensions: list | None = None) -> DeployedA
                          a2a_card={"capabilities": {"extensions": [_CDP_CONFIG] if extensions is None else extensions}})
 
 
-def _mock(monkeypatch, *, tokens: list[str], base: str = f"{_ENV}/svc/chromium") -> list[httpx.Request]:
-    """Answer the browser's cdp with each of ``tokens`` in turn, at ``base``, and anything else as done; return the
-    requests."""
+def _mock(monkeypatch, *, tokens: list[str], base: str = f"{_ENV}/svc/chromium",
+          failing_after: int | None = None) -> list[httpx.Request]:
+    """Answer the browser's cdp with each of ``tokens`` in turn, at ``base``, a 503 once ``failing_after`` have been
+    answered, and anything else as done; return the requests."""
     sent, real, left = [], httpx.AsyncClient, iter(tokens)
 
     def handle(request: httpx.Request) -> httpx.Response:
         sent.append(request)
+        asked = sum(1 for earlier in sent if earlier.url.path.endswith("/browser/cdp"))
+        if request.url.path.endswith("/browser/cdp") and failing_after is not None and asked > failing_after:
+            return httpx.Response(503, json={"error": "the browser isn't answering"})
         if request.url.path.endswith("/browser/cdp"):
             token = next(left)
             ws = "wss" + base.removeprefix("https") if base.startswith("https") else "ws" + base.removeprefix("http")

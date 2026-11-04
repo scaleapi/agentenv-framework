@@ -7,7 +7,7 @@ import logging
 from typing import ClassVar, Optional
 
 import httpx
-from agentenv_protocol.client import find_extension_method
+from agentenv_protocol.client import find_extension_method, invoke_extension
 from agentenv_protocol.tool_access import DISABLE, DISABLE_TOOL_EXTENSION_URI, WILDCARD
 from agentenv_protocol.tool_context import DEFAULT_ROLE
 from agentenv_protocol.website_browser import BROWSER
@@ -90,7 +90,10 @@ class BrowserConnectCdpTaskStep(TaskStep):
         connection = {"step_id": self.id, "env_id": self.env_id, "agent_name": self.agent_name,
                       "browser": self.browser, "name": self.name, "keep_tools": self.keep_tools}
         connection.update(await connect(context, connection))
-        context.metadata.setdefault(CONNECTIONS_KEY, []).append(connection)
+        # The agent's cdp-config now holds this address under its name, so it replaces any connection recorded so.
+        records = context.metadata.setdefault(CONNECTIONS_KEY, [])
+        records[:] = [record for record in records
+                      if (record["agent_name"], record["name"]) != (self.agent_name, self.name)] + [connection]
         return context
 
 
@@ -104,9 +107,9 @@ async def connect(context: TaskStepContext, connection: dict) -> dict:
     if cdp_config is None or not agent.a2a_url:
         raise RuntimeError(f"agent {agent.agent_name!r} can't take a CDP address: its card has no "
                            f"{A2AAgent.EXT_CDP_CONFIG}")
-    browser = _browser(deployed, connection.get("browser"))
-    address = await deployed.invoke(BROWSER, "cdp", {"user": agent.agent_name}, environment_name=browser,
-                                    timeout=CDP_TIMEOUT_S)
+    browser, card = _browser(deployed, connection.get("browser"))
+    address = await invoke_extension(deployed.environment_url, card, BROWSER, {"user": agent.agent_name},
+                                     CDP_TIMEOUT_S, method="cdp", headers=deployed.control_headers)
     http_url, ws_url = _as_agent_reaches(address, deployed, agent)
     async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
         added = await client.post(agent.a2a_url + cdp_config["params"]["endpoint"], json={
@@ -120,6 +123,22 @@ async def connect(context: TaskStepContext, connection: dict) -> dict:
     logger.info(f"agent {agent.agent_name!r} has {connection['name']!r}, a CDP address to {browser or 'the env'} in "
                 f"env {deployed.env_id!r}" + (f"; the env's tools are hidden from role {role!r}" if hidden else ""))
     return {"browser": browser, "role": role, "tools_hidden": hidden}
+
+
+async def disconnect(context: TaskStepContext, connection: dict) -> None:
+    """``connection``'s endpoint removed from its agent's cdp-config, so the agent's next turn fails closed rather than
+    drive an address that has ended. Best-effort: the agent may be what failed."""
+    agent = next((a for a in context.deployed_agents if a.agent_name == connection["agent_name"]), None)
+    cdp_config = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_CDP_CONFIG) if agent else None
+    if cdp_config is None or not agent.a2a_url:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
+            removed = await client.request("DELETE", agent.a2a_url + cdp_config["params"]["endpoint"],
+                                           json={"name": connection["name"]})
+        removed.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.warning(f"agent {agent.agent_name!r} still holds {connection['name']!r}: removing it failed: {e}")
 
 
 def _deployed_env(context: TaskStepContext, env_id: str) -> DeployedEnv:
@@ -136,17 +155,19 @@ def _deployed_agent(context: TaskStepContext, agent_name: str) -> DeployedAgent:
     return agent
 
 
-def _browser(deployed: DeployedEnv, named: Optional[str]) -> Optional[str]:
-    """The website browser to connect to, by its name among the env's children, or None for the env itself: the one
-    named, else the env's only one."""
+def _browser(deployed: DeployedEnv, named: Optional[str]) -> tuple[Optional[str], dict]:
+    """The website browser to connect to, the one named else the env's only one: its name among the env's children,
+    or None for the env itself, and its card. A browser computer's driver takes its app's name, so a child is found
+    among the children, never by name as the driver's own card."""
     card = deployed.environment_card or {}
-    browsers = [None] if find_extension_method(card, BROWSER, "cdp") else []
-    browsers += [child.get("name") for child in card.get("children_environments") or []
+    browsers = [(None, card)] if find_extension_method(card, BROWSER, "cdp") else []
+    browsers += [(child.get("name"), child) for child in card.get("children_environments") or []
                  if find_extension_method(child, BROWSER, "cdp")]
     if named is not None:
-        if named not in browsers:
+        found = next((browser for browser in browsers if browser[0] == named), None)
+        if found is None:
             raise RuntimeError(f"env {deployed.env_id!r} has no website browser named {named!r}")
-        return named
+        return found
     if len(browsers) != 1:
         raise RuntimeError(f"env {deployed.env_id!r} has {len(browsers) or 'no'} website browsers"
                            + (": name one as browser" if browsers else ""))
