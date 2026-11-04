@@ -782,7 +782,7 @@ async def test_its_page_capture_names_the_tab_it_captured_though_another_becomes
 
 
 @pytest.mark.asyncio
-async def test_while_a_dialog_keeps_its_page_from_painting_its_capture_is_the_last_it_took():
+async def test_while_a_dialog_keeps_its_page_from_painting_its_capture_is_the_last_it_took_without_waiting_on_it():
     devtools = Tabbed()
     control = await _tabs(devtools, "a")
     before = await control.capture()
@@ -790,6 +790,7 @@ async def test_while_a_dialog_keeps_its_page_from_painting_its_capture_is_the_la
     devtools.send("Page.javascriptDialogOpening", {"type": "alert", "message": "Saved"}, session="s-a")
 
     assert before == "png of s-a" and await control.capture() == "png of s-a"
+    assert len(devtools.timeouts) == 1
 
 
 @pytest.mark.asyncio
