@@ -1,4 +1,4 @@
-"""The browser as a computer: agentenv's chromium deployed alone, on the browser-24.04 base with no display and the page
+"""The browser as a computer: agentenv's chromium deployed alone, on the ubuntu-24.04-headless base with no display and the page
 driver, whose screen is chromium's active tab, headless. Gate 3 makes this machine's arch ready with it; deployed
 through the computer provider like any computer, its computer_* tools see and drive the page; nothing runs X and nothing
 listens but the driver and the site proxy; a killed app server or driver is started again by supervisord and the

@@ -1,6 +1,6 @@
 The website browsers that come with agent-env, today `chromium`, a `computer_app` env a computer env lists in its
-`apps`. Deployed alone, `chromium` is a browser computer: the `browser-24.04` base, with no display, and the `page`
-driver, whose screen is the browser's active tab, headless.
+`apps`. Deployed alone, `chromium` is a browser computer: the `ubuntu-24.04-headless` base, with no display, and the
+`page` driver, whose screen is the browser's active tab, headless.
 
 `envs/chromium/` is Chromium for an X11 desktop or a computer with no display on Linux (`amd64` and `arm64`): Chrome for Testing 156.0.8078.4, the
 build Playwright 1.64.1 pins, fetched by sha256 when a computer env that lists it is put and unpacked into

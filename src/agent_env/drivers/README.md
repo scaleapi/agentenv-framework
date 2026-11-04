@@ -7,7 +7,7 @@ pointer and keyboard groups, and `computer-ready`, `computer-display`, `computer
 `x11grab` through PyAV at up to 30 fps. Name it from another bundle as `reference`, the
 alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/drivers/reference`.
 
-`envs/page/` is the page driver, for a computer with no display on Linux (`amd64` and `arm64`), such as `browser-24.04`:
+`envs/page/` is the page driver, for a computer with no display on Linux (`amd64` and `arm64`), such as `ubuntu-24.04-headless`:
 its screen is the computer's one website browser's active tab, its `screen` feature `page`. A screenshot is the page,
 and input reaches it as CDP input events, both through `browser/v1`'s `page/*` operations on the browser's own server;
 a tab that paints nothing shows white. The browser ending on its own fails the computer for good: its ready check is

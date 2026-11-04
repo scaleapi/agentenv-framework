@@ -1,4 +1,4 @@
-# The browser-24.04 base computer: Ubuntu 24.04 with no display server or desktop (XDG_SESSION_TYPE=none), for one
+# The ubuntu-24.04-headless base computer: Ubuntu 24.04 with no display server or desktop (XDG_SESSION_TYPE=none), for one
 # website browser, which runs headless there, and a page driver whose screen is the browser's page. supervisord runs
 # every program as the session user, and the browser goes out only through the site proxy on 127.0.0.1:3128. Composing
 # a driver or an app onto it adds its services as programs in /etc/supervisor/conf.d.
