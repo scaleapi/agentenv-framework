@@ -7,7 +7,7 @@ is ready is its ``WebsiteReadiness`` answer to ``ready``, which ``website_readin
 
 from __future__ import annotations
 
-from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, UniverseClock
+from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, ClockUnavailable, UniverseClock
 from .environment import (
     DEFAULT_HEALTH_PATH,
     SESSION_PATH,
@@ -20,12 +20,11 @@ from .errors import ApiError, BadRequest, Conflict, Forbidden, NotFound, Unautho
 from .readiness import READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness, env_readiness, website_readiness
 from .routes import ROLE_KEY_ENV, ROLE_KEY_HEADER, ApiContext, ApiRoute, api, reserved_path
 from .session import SESSION_COOKIE, SessionSigner
-from .store import Collections
 
 __all__ = [
     "WebsiteEnvironment", "WebsiteDeclaration", "website", "api", "ApiContext", "ApiRoute", "ready_check",
     "ApiError", "BadRequest", "Unauthorized", "Forbidden", "NotFound", "Conflict",
-    "Collections", "UniverseClock", "SessionSigner", "reserved_path",
+    "UniverseClock", "ClockUnavailable", "SessionSigner", "reserved_path",
     "WEBSITE_EXTENSION_URI", "CLOCK_EXTENSION_URI", "UNIVERSE_NOW_HEADER", "DEFAULT_HEALTH_PATH", "SESSION_PATH",
     "SESSION_COOKIE", "ROLE_KEY_ENV", "ROLE_KEY_HEADER",
     "WEBSITE_READY_OP", "READY_TIMEOUT_S", "WebsiteReadiness", "website_readiness", "env_readiness",

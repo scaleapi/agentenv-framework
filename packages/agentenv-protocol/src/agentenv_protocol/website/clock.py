@@ -1,27 +1,30 @@
-"""The universe's clock as a site reads it: ``clock/v1``'s ``sync_time`` hands the server the gateway's ``/clock/time``
-URL, as it hands it to MCP servers, and the site's time then follows that clock's ``{"virtual_time": <RFC3339>}``,
-read at most once a second and extrapolated between reads. The rate it extrapolates at is one two successive intervals
-between reads agreed on, so a clock set or advanced between two reads is taken for a jump, not a speed; until two agree
-it is real time's. An unsynced site reads wall time. Every answer of a site carries the time it answered at as ``X-Universe-Now``,
-RFC3339 in UTC. ``sync_time`` may also name the universe's time zone, an IANA name, which the clock keeps for the site
-to show local times in; the time itself stays UTC."""
+"""The universe's clock as a site reads it, the way MCP servers read it: ``clock/v1``'s ``sync_time`` hands the server
+the gateway's ``/clock/time`` URL, and each request then reads that clock's ``{"virtual_time": <RFC3339>}`` once,
+the one instant everything the request does reads (``now()``) and its answer carries as ``X-Universe-Now``, RFC3339 in
+UTC. An unsynced site reads wall time, and so does a synced one whose gateway clock isn't armed (404); one whose clock
+can't be read raises ``ClockUnavailable``. ``sync_time`` with an empty URL goes back to wall time. ``sync_time`` may
+also name the universe's time zone, an IANA name, which the clock keeps for the site to show local times in; the time
+itself stays UTC."""
 from __future__ import annotations
 
-import asyncio
+import contextvars
 import datetime
 import json
-import logging
-import time
+import re
 
 import httpx
 
-logger = logging.getLogger(__name__)
-
 CLOCK_EXTENSION_URI = "urn:agentenv:clock/v1"
 UNIVERSE_NOW_HEADER = "X-Universe-Now"
-REFRESH_S = 1.0
-READ_TIMEOUT_S = 5.0
-RATE_AGREEMENT = 0.1
+READ_TIMEOUT = httpx.Timeout(connect=0.5, read=1.0, write=1.0, pool=0.5)
+READ_ATTEMPTS = 2
+
+_FRACTION = re.compile(r"(\.\d+)(?=[+-]\d\d:?\d\d$|Z$|$)")
+_request_now: contextvars.ContextVar[datetime.datetime | None] = contextvars.ContextVar("universe_now", default=None)
+
+
+class ClockUnavailable(Exception):
+    """The synced clock couldn't be read: unreachable, a 5xx after a retry, or an answer that isn't a time."""
 
 
 def iso(moment: datetime.datetime) -> str:
@@ -29,76 +32,81 @@ def iso(moment: datetime.datetime) -> str:
 
 
 def parse_time(value: str) -> datetime.datetime:
-    moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    """An RFC3339 time, its fraction of a second of any length (Python 3.10 parses only 3 or 6 digits)."""
+    value = _FRACTION.sub(lambda m: m.group(1)[:7].ljust(7, "0"), value.replace("Z", "+00:00"))
+    moment = datetime.datetime.fromisoformat(value)
     return moment if moment.tzinfo else moment.replace(tzinfo=datetime.timezone.utc)
 
 
+def _wall() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 class UniverseClock:
-    """The time a site answers with: wall time until ``sync`` names a gateway clock, that clock's after."""
+    """The time a site answers with: wall time until ``sync`` names a gateway clock, that clock's, read per request,
+    after."""
 
     def __init__(self) -> None:
         self.url: str | None = None
         self.timezone: str | None = None
-        self._virtual: datetime.datetime | None = None
-        self._read_at = 0.0
-        self._tried_at = 0.0
-        self._rate = 1.0
-        self._measured: float | None = None
-        self._lock: asyncio.Lock | None = None
+        self._last: datetime.datetime | None = None
 
     @property
     def synced(self) -> bool:
-        return self._virtual is not None
+        return self.url is not None
 
     def now(self) -> datetime.datetime:
-        if self._virtual is None:
-            return datetime.datetime.now(datetime.timezone.utc)
-        return self._virtual + datetime.timedelta(seconds=(time.monotonic() - self._read_at) * self._rate)
+        """The instant the request being answered read, else the last one read, else wall time."""
+        return _request_now.get() or self._last or _wall()
+
+    async def read(self) -> datetime.datetime:
+        """The universe's time now: the synced clock's, wall time when none is synced or it isn't armed; raises
+        ``ClockUnavailable`` when it can't be read."""
+        if self.url is None:
+            return _wall()
+        self._last = await _read(self.url) or _wall()
+        return self._last
+
+    def answering_at(self, moment: datetime.datetime) -> contextvars.Token:
+        """Make ``moment`` what ``now()`` reads while the current request is answered."""
+        return _request_now.set(moment)
+
+    def answered(self, token: contextvars.Token) -> None:
+        _request_now.reset(token)
 
     async def sync(self, url: str, timezone: str | None = None) -> datetime.datetime:
-        """Follow the clock at ``url`` from now on, in ``timezone`` (none when the sync names none); raises when it
-        can't be read, keeping the clock and zone it followed. It waits for a refresh reading the clock it followed,
-        so that read never lands on the new clock."""
-        async with self._reading():
-            virtual = await _read(url)
-            self.url, self._virtual, self._rate, self._measured = url, virtual, 1.0, None
-            self.timezone = timezone
-            self._read_at = self._tried_at = time.monotonic()
-            return virtual
-
-    async def refresh(self) -> None:
-        """Read the synced clock again when the last read is a second old; a failed read keeps extrapolating."""
-        if self.url is None or time.monotonic() - self._tried_at < REFRESH_S:
-            return
-        async with self._reading():
-            started = time.monotonic()
-            if started - self._tried_at < REFRESH_S:
-                return
-            self._tried_at = started
-            try:
-                virtual = await _read(self.url)
-            except Exception as e:
-                logger.debug("reading the universe's clock at %s failed: %r", self.url, e)
-                return
-            read_at = time.monotonic()
-            if self._virtual is not None and read_at > self._read_at:
-                measured = max(0.0, (virtual - self._virtual).total_seconds() / (read_at - self._read_at))
-                if self._measured is not None and abs(measured - self._measured) <= RATE_AGREEMENT * max(measured, self._measured, 1.0):
-                    self._rate = measured
-                self._measured = measured
-            self._virtual, self._read_at = virtual, read_at
-
-    def _reading(self) -> asyncio.Lock:
-        """The lock a sync and a refresh each read the clock under."""
-        self._lock = self._lock or asyncio.Lock()
-        return self._lock
+        """Follow the clock at ``url`` from now on, in ``timezone`` (none when the sync names none), or wall time again
+        for an empty ``url``; raises ``ClockUnavailable`` when the clock can't be read, keeping the clock and zone it
+        followed."""
+        if not url:
+            self.url, self.timezone, self._last = None, None, None
+            return _wall()
+        virtual = await _read(url) or _wall()
+        self.url, self.timezone, self._last = url, timezone, virtual
+        return virtual
 
 
-async def _read(url: str) -> datetime.datetime:
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, timeout=READ_TIMEOUT_S)
-        response.raise_for_status()
-        return parse_time(response.json()["virtual_time"])
+async def _read(url: str) -> datetime.datetime | None:
+    """The clock at ``url``'s time, None when it isn't armed (404); a transport error or a 5xx is tried again once."""
+    failure: Exception | None = None
+    for _attempt in range(READ_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=READ_TIMEOUT) as client:
+                response = await client.get(url)
+        except httpx.TransportError as e:
+            failure = e
+            continue
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 500:
+            failure = httpx.HTTPStatusError(f"{response.status_code}", request=response.request, response=response)
+            continue
+        try:
+            response.raise_for_status()
+            return parse_time(response.json()["virtual_time"])
+        except (httpx.HTTPStatusError, ValueError, KeyError, TypeError) as e:
+            raise ClockUnavailable(f"the universe's clock at {url} answered {response.status_code}: {e}") from e
+    raise ClockUnavailable(f"the universe's clock at {url} can't be read: {type(failure).__name__}: {failure}")
 
 
 def clock_patch_script(now: datetime.datetime) -> bytes:

@@ -4,6 +4,7 @@ that don't."""
 from __future__ import annotations
 
 import datetime
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from agentenv_protocol import DataPart, add_data, get_data, reset_data
 from agentenv_protocol.website import WebsiteEnvironment, api, website
 from agentenv_protocol.website import conformance
 from agentenv_protocol.website.clock import UNIVERSE_NOW_HEADER, iso
@@ -30,13 +32,31 @@ def notes(tmp_path: Path) -> WebsiteEnvironment:
 
     @website(domains=["notes.example"], static=str(tmp_path))
     class Notes(WebsiteEnvironment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.data: dict = {"notes": [{"id": 1, "text": "hello"}]}
+
+        def acting_user(self) -> str | None:
+            return "ann"
+
+        @reset_data
+        def reset(self) -> None:
+            self.data = {}
+
+        @add_data
+        def add(self, parts: list) -> None:
+            for part in parts:
+                self.data.update(part.data)
+
+        @get_data
+        def export(self) -> list:
+            return [DataPart(data=self.data)]
+
         @api.get("/api/notes")
         def notes(self) -> list:
-            return self.store["notes"]
+            return self.data.get("notes", [])
 
-    env = Notes()
-    env.store.load({"current_user": "ann", "notes": [{"id": 1, "text": "hello"}]})
-    return env
+    return Notes()
 
 
 @pytest.fixture
@@ -49,17 +69,18 @@ def test_an_sdk_site_passes_every_check(sdk_site: TestClient) -> None:
     assert [r.name for r in results] == CHECKS
     assert all(r.status == "passed" for r in results), results
     assert sdk_site.post("/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/get"}).json()["result"][
-        "parts"][0]["data"] == {"current_user": "ann", "notes": [{"id": 1, "text": "hello"}]}
+        "parts"][0]["data"] == {"notes": [{"id": 1, "text": "hello"}]}
 
 
 def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock: bool = True,
                  clock_ops_first: tuple[str, ...] = (),
                  leak_redirect: bool = False, stamp_rpc: bool = True, reset_keeps: bool = False,
                  get_fails_after_reset: bool = False, rpc_reply: tuple[int, dict] | None = None,
-                 ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None) -> Starlette:
+                 ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None,
+                 ready_endpoint: str = "/ready", card_url: str | None = None) -> Starlette:
     """A server written without the SDK: the contract by hand, optionally broken. Its state is its ``state.data``; with
     ``ready_answer`` its card advertises ``website/v1``'s ``ready``, which answers it with ``ready_status``. With ``rpc_path`` its card's
-    ``url`` names its data plane there, not at ``/agentenv``."""
+    ``url`` names its data plane there, not at ``/agentenv``; ``card_url`` puts what it says in the card's ``url`` alone."""
     state = {"items": ["a"], "url": None, "at": None, "reset": False}
 
     def now() -> datetime.datetime:
@@ -93,13 +114,14 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
                        "params": {"domains": ["h.example"], "health": "/healthz",
                                   "routes": [{"method": "GET", "path": "/items", "name": "items"}]}}]
         if ready_answer is not None:
-            extensions[0]["params"]["methods"] = {"ready": {"method": "GET", "endpoint": "/ready"}}
+            extensions[0]["params"]["methods"] = {"ready": {"method": "GET", "endpoint": ready_endpoint}}
         if clock:
             extensions.append({"uri": "urn:agentenv:clock/v1", "params": {
                 "endpoint": "/agentenv/ext/sync_time", "methods": {
                     **{op: {"method": "GET", "endpoint": f"/agentenv/ext/{op}"} for op in clock_ops_first},
                     "sync_time": {"method": "POST"}}}})
-        return stamp(JSONResponse({"name": "hand", **({"url": rpc_path} if rpc_path else {}),
+        url = card_url or rpc_path
+        return stamp(JSONResponse({"name": "hand", **({"url": url} if url else {}),
                                    "capabilities": {"extensions": extensions,
                                                     "operations": ["data/reset", "data/add", "data/get"]}}))
 
@@ -127,6 +149,10 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
         import httpx
 
         url = (await request.json())["env_get_time_url"]
+        state["synced"] = url
+        if not url:
+            state["at"] = None
+            return stamp(JSONResponse({"env_get_time_url": url}))
         async with httpx.AsyncClient() as client:
             virtual = (await client.get(url)).json()["virtual_time"]
         state["at"] = datetime.datetime.fromisoformat(virtual.replace("Z", "+00:00"))
@@ -223,11 +249,45 @@ def test_a_data_request_without_a_2xx_json_rpc_result_fails_the_data_plane(reply
 def test_an_sdk_sites_data_round_trips_and_is_left_as_the_check_found_it_changed_or_not(
         notes: WebsiteEnvironment, sdk_site: TestClient) -> None:
     for _ in range(2):
-        before = notes.store.export()
+        before = json.loads(json.dumps(notes.data))
         result = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"]
         assert result.status == "passed", result
-        assert notes.store.export() == before
-        notes.store.insert("notes", {"text": "new"})
+        assert notes.data == before
+        notes.data["notes"].append({"id": 2, "text": "new"})
+
+
+def _hosts_asked(client: TestClient) -> list[str]:
+    hosts: list[str] = []
+    client.event_hooks = {"request": [lambda request: hosts.append(request.url.host)], "response": []}
+    return hosts
+
+
+def test_a_card_naming_another_server_for_its_data_plane_fails_it_with_nothing_sent_there() -> None:
+    app = _handwritten(card_url="http://elsewhere.example/agentenv")
+    client = TestClient(app)
+    hosts = _hosts_asked(client)
+    result = {r.name: r for r in conformance.check("http://testserver", client=client)}["data_plane"]
+    assert result.status == "failed" and "outside the server under check" in result.detail
+    assert set(hosts) == {"testserver"} and app.state.data["items"] == ["a"]
+
+
+def test_a_card_path_that_would_name_another_host_stays_on_the_server() -> None:
+    client = TestClient(_handwritten(card_url="//elsewhere.example/agentenv", ready_endpoint="@elsewhere.example/ready",
+                                     ready_answer={"ready": True, "problems": []}))
+    hosts = _hosts_asked(client)
+    conformance.check("http://testserver", client=client)
+    assert set(hosts) == {"testserver"}
+
+
+def test_the_clock_check_leaves_the_server_back_on_wall_time() -> None:
+    app = _handwritten()
+    results = {r.name: r.status for r in conformance.check("http://testserver", client=TestClient(app))}
+    assert results["clock"] == "passed" and app.state.data["synced"] == "" and app.state.data["at"] is None
+
+
+def test_the_clock_check_leaves_an_sdk_site_unsynced(notes: WebsiteEnvironment, sdk_site: TestClient) -> None:
+    results = {r.name: r.status for r in conformance.check("http://testserver", client=sdk_site)}
+    assert results["clock"] == "passed" and not notes.clock.synced
 
 
 def test_the_data_plane_is_reached_at_the_cards_url() -> None:

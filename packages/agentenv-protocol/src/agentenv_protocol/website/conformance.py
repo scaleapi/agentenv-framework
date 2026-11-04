@@ -8,11 +8,12 @@ returned, data/get again), ``clock/v1``'s
 ``sync_time`` against a clock the checker serves, and the forwarded headers wherever an answer shows them, on ``/`` and
 on a GET route with its trailing slash toggled, which a server may redirect.
 
-The round trip leaves the server's data as it found it, adding the export back when a step after the reset fails too.
-The clock check leaves the
-server following a clock that is gone once the check ends, so a server it ran against keeps extrapolating from that
-clock's time until it's synced again. The checker's clock starts at ``CLOCK_START``, far enough from wall time that a
-synced server shows it, and a synced server's ``X-Universe-Now`` may be ``CLOCK_SLACK_S`` seconds from it."""
+Every request goes to the server under check: a card's path or URL naming another scheme, host or port fails the check
+that would have used it, with nothing sent there. The round trip leaves the server's data as it found it, adding the
+export back when a step after the reset fails too. The clock check ends by syncing the server back to wall time (an
+empty ``env_get_time_url``), since the checker's clock is gone once the check ends. That clock starts at
+``CLOCK_START``, far enough from wall time that a synced server shows it, and a synced server's ``X-Universe-Now``
+may be ``CLOCK_SLACK_S`` seconds from it."""
 from __future__ import annotations
 
 import argparse
@@ -72,7 +73,14 @@ class _Checker:
         self.responses: list[httpx.Response] = []
 
     def get(self, path: str, **kwargs) -> httpx.Response:
-        return self._seen(self.client.get(self.base_url + path, **kwargs))
+        return self._seen(self.client.get(self._url(path), **kwargs))
+
+    def _url(self, where: str) -> str:
+        """Where ``where``, a path or a full URL a card names, is; raises ``OffServer`` for one on another server."""
+        url = where if "://" in where else self.base_url + (where if where.startswith("/") else "/" + where)
+        if _origin(url) != _origin(self.base_url):
+            raise OffServer(f"the card points outside the server under check, at {url}")
+        return url
 
     def _seen(self, response: httpx.Response) -> httpx.Response:
         self.responses.append(response)
@@ -84,7 +92,6 @@ class _Checker:
             card = response.json() if response.status_code == 200 else {}
         except ValueError:
             card = {}
-        self.rpc_url = _rpc_url(self.base_url, card)
         site = (find_extension(card, WEBSITE_EXTENSION_URI) or {}).get("params") or {}
         health = site.get("health") if isinstance(site.get("health"), str) else DEFAULT_HEALTH_PATH
         steps = (("any_host", self._any_host), ("health", lambda: self._health(card, health)),
@@ -126,7 +133,7 @@ class _Checker:
             return (("passed" if response.status_code == 200 else "failed"),
                     f"{health} answered {response.status_code}; the card has no website/v1 ready, so the health path "
                     "was read, which is deprecated")
-        response = self._seen(self.client.request(ready.get("method", "GET"), self.base_url + ready["endpoint"]))
+        response = self._seen(self.client.request(ready.get("method", "GET"), self._url(ready["endpoint"])))
         try:
             answer = response.json()
         except ValueError:
@@ -166,6 +173,8 @@ class _Checker:
         missing = [m for m in (METHOD_GET, METHOD_RESET, METHOD_ADD) if operations is not None and m not in operations]
         if missing:
             return "failed", f"the card's operations lack {', '.join(missing)}"
+        url = card.get("url")
+        self.rpc_url = self._url(url if isinstance(url, str) and url else RPC_PATH)
         exported = self._rpc(METHOD_GET).get("parts") or []
         self._rpc(METHOD_RESET)
         added_back = False
@@ -194,13 +203,17 @@ class _Checker:
         method = find_extension_method(card, CLOCK_EXTENSION_URI, "sync_time")
         if method is None or not method.get("endpoint"):
             return "failed", f"{CLOCK_EXTENSION_URI} advertises no sync_time endpoint"
+        endpoint = self._url(method["endpoint"])
         with _clock_server(self.clock_host) as (url, virtual_now):
-            response = self._seen(self.client.request(method["method"], self.base_url + method["endpoint"],
-                                                      json={"env_get_time_url": url}))
+            response = self._seen(self.client.request(method["method"], endpoint, json={"env_get_time_url": url}))
             if response.status_code >= 400:
                 return "failed", f"sync_time answered {response.status_code}: {response.text[:200]}"
-            seen = self.get(health).headers.get(UNIVERSE_NOW_HEADER)
-            expected = virtual_now()
+            try:
+                seen = self.get(health).headers.get(UNIVERSE_NOW_HEADER)
+                expected = virtual_now()
+            finally:
+                with contextlib.suppress(Exception):
+                    self.client.request(method["method"], endpoint, json={"env_get_time_url": ""})
         if seen is None:
             return "failed", f"no {UNIVERSE_NOW_HEADER} after sync_time"
         off = abs((parse_time(seen) - expected).total_seconds())
@@ -235,11 +248,14 @@ class _Checker:
         return "passed", f"{len(cookies)} cookie(s), none tied to a domain"
 
 
-def _rpc_url(base_url: str, card: dict) -> str:
-    """Where the card says its data plane is: its ``url``, a path joined onto ``base_url`` or a full URL, else
-    ``RPC_PATH``."""
-    url = card.get("url") if isinstance(card.get("url"), str) and card.get("url") else RPC_PATH
-    return url if "://" in url else base_url + url
+class OffServer(ValueError):
+    """A card named a path or URL on a server other than the one under check."""
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """A URL's scheme, host and port, the port its scheme's default when it names none."""
+    parsed = httpx.URL(url)
+    return parsed.scheme, parsed.host, parsed.port or {"http": 80, "https": 443}.get(parsed.scheme)
 
 
 def _outcome(step: Callable[[], tuple[Status, str]]) -> tuple[Status, str]:

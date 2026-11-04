@@ -1,10 +1,10 @@
-"""WebsiteEnvironment as a site's server: static pages, health, the card and its OpenAPI document, the default store
-and its data plane, sessions, the universe's clock, and a mounted app."""
+"""WebsiteEnvironment as a site's server: static pages, health, the card and its OpenAPI document, a site's own data
+plane, sessions, the universe's clock read per request, and a mounted app."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
+import copy
 import datetime
 import json
 import shutil
@@ -19,14 +19,14 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from agentenv_protocol import DataPart, get_data
+from agentenv_protocol import DataPart, add_data, get_data, reset_data
 from agentenv_protocol.website import (
     SESSION_COOKIE,
     UNIVERSE_NOW_HEADER,
     WEBSITE_EXTENSION_URI,
     WEBSITE_READY_OP,
     ApiContext,
-    Collections,
+    Unauthorized,
     WebsiteEnvironment,
     WebsiteReadiness,
     api,
@@ -58,14 +58,36 @@ def dist(tmp_path: Path) -> Path:
 def site(dist: Path, **declared) -> type[WebsiteEnvironment]:
     @website(domains=["shop.example", "www.shop.example"], static=str(dist), **declared)
     class Shop(WebsiteEnvironment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.data: dict = {}
+
+        def acting_user(self) -> str | None:
+            return self.data.get("current_user")
+
+        @reset_data
+        def reset(self) -> None:
+            self.data = {}
+
+        @add_data
+        def add(self, parts: list) -> None:
+            for part in parts:
+                self.data.update(part.data)
+
+        @get_data
+        def export(self) -> list:
+            return [DataPart(data=self.data)]
+
         @api.get("/api/orders", name="list_orders")
         def list_orders(self, ctx: ApiContext) -> list:
             """List the signed-in user's orders."""
-            return self.store.find("orders", user=ctx.user)
+            return [order for order in self.data.get("orders", []) if order["user"] == ctx.user]
 
         @api.post("/api/orders", name="place_order", roles=["default", "agent"])
         def place_order(self, order: dict, ctx: ApiContext) -> dict:
-            return self.store.insert("orders", {**order, "user": ctx.user, "at": self.now().isoformat()})
+            placed = {**order, "user": ctx.user, "at": self.now().isoformat()}
+            self.data.setdefault("orders", []).append(placed)
+            return placed
 
         @api.post("/api/sign-in")
         def sign_in(self, body: dict, ctx: ApiContext) -> dict:
@@ -81,7 +103,7 @@ SEED = {"current_user": "alice", "users": [{"id": "alice"}, {"id": "bob"}], "ord
 @pytest.fixture
 def shop(dist: Path) -> WebsiteEnvironment:
     env = site(dist)()
-    env.store.load(SEED)
+    env.data = copy.deepcopy(SEED)
     return env
 
 
@@ -203,18 +225,25 @@ def test_the_openapi_document_names_each_route(client: TestClient) -> None:
     assert listed["parameters"] == []
 
 
-def test_the_default_store_round_trips_through_the_data_plane(client: TestClient, shop: WebsiteEnvironment) -> None:
+def test_a_sites_own_hooks_are_its_data_plane(client: TestClient, shop: WebsiteEnvironment) -> None:
     assert rpc(client, "data/get")["parts"][0]["data"] == SEED
     rpc(client, "data/reset")
     assert rpc(client, "data/get")["parts"][0]["data"] == {}
-    as_file = base64.b64encode(json.dumps({"orders": [{"id": 7, "user": "carol"}]}).encode()).decode()
-    rpc(client, "data/add", {"parts": [{"kind": "data", "data": {"current_user": "carol", "users": [{"id": "carol"}]}},
-                                       {"kind": "file", "file": {"bytes": as_file, "name": "orders.json"}},
-                                       {"kind": "text", "text": json.dumps({"notes": [{"id": "n1"}]})}]})
-    assert rpc(client, "data/get")["parts"][0]["data"] == {
-        "current_user": "carol", "users": [{"id": "carol"}], "orders": [{"id": 7, "user": "carol"}],
-        "notes": [{"id": "n1"}]}
+    rpc(client, "data/add", {"parts": [{"kind": "data", "data": {"current_user": "carol", "users": [{"id": "carol"}]}}]})
+    assert rpc(client, "data/get")["parts"][0]["data"] == {"current_user": "carol", "users": [{"id": "carol"}]}
     assert shop.acting_user() == "carol"
+
+
+def test_a_site_without_data_hooks_serves_no_data_plane_and_signs_nobody_in(dist: Path) -> None:
+    @website(static=str(dist))
+    class Bare(WebsiteEnvironment):
+        pass
+
+    client = TestClient(Bare().create_app())
+    assert not client.get("/.well-known/agent-env.json").json()["capabilities"].get("operations")
+    answer = client.post(RPC, json={"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": {}}).json()
+    assert "error" in answer and "result" not in answer
+    assert client.get("/api/session").json() == {"user": None, "role": "default", "signed_in": False}
 
 
 def test_a_sites_data_is_read_through_the_data_plane_alone(client: TestClient) -> None:
@@ -237,7 +266,7 @@ def test_broad_routes_leave_the_built_in_ones_answering_their_paths(dist: Path) 
             return {"named": name}
 
     env = Broad()
-    env.store.load(SEED)
+    env.data = copy.deepcopy(SEED)
     client = TestClient(env.create_app())
     assert client.get("/api/session").json()["user"] == "alice"
     assert client.get("/api/health").json() == {"status": "ok"}
@@ -266,12 +295,6 @@ def test_a_site_with_its_own_hooks_keeps_them(dist: Path) -> None:
     client = TestClient(Own().create_app())
     assert rpc(client, "data/get")["parts"][0]["data"] == {"mine": True}
     assert client.get("/.well-known/agent-env.json").json()["capabilities"]["operations"] == ["data/reset", "data/add", "data/get"]
-
-
-def test_a_seed_data_file_is_the_sites_data_to_start(tmp_path: Path, dist: Path) -> None:
-    (tmp_path / "seed.json").write_text(json.dumps(SEED))
-    env = site(dist, data=str(tmp_path / "seed.json"))()
-    assert env.store.export() == SEED and env.acting_user() == "alice"
 
 
 def test_the_acting_user_is_signed_in_until_a_session_says_else(client: TestClient) -> None:
@@ -321,14 +344,19 @@ def test_every_answer_carries_the_universe_time(client: TestClient) -> None:
 
 
 class _Clock:
-    """A gateway-shaped /clock/time whose time a test sets."""
+    """A gateway-shaped /clock/time whose time a test sets; None answers 404, as an unarmed clock does."""
 
-    def __init__(self, virtual: str) -> None:
+    def __init__(self, virtual: str | None) -> None:
         self.virtual = virtual
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                if outer.virtual is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 body = json.dumps({"virtual_time": outer.virtual}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
@@ -354,17 +382,34 @@ def gateway_clock():
     clock.close()
 
 
-def test_sync_time_ties_now_and_the_header_to_the_gateway_clock(client: TestClient, shop: WebsiteEnvironment,
-                                                               gateway_clock: _Clock, monkeypatch) -> None:
+def test_sync_time_ties_now_and_the_header_to_the_gateway_clock_read_per_request(client: TestClient,
+                                                                                shop: WebsiteEnvironment,
+                                                                                gateway_clock: _Clock) -> None:
     synced = client.post("/agentenv/ext/sync_time", json={"env_get_time_url": gateway_clock.url}).json()
     assert synced == {"env_get_time_url": gateway_clock.url, "gateway_virtual_time": "2031-01-01T00:00:00.000Z"}
     assert shop.now().year == 2031
-    assert client.get("/").headers[UNIVERSE_NOW_HEADER].startswith("2031-01-01T00:00:0")
+    assert client.get("/").headers[UNIVERSE_NOW_HEADER] == "2031-01-01T00:00:00.000Z"
     order = client.post("/api/orders", json={"sku": "pen"}).json()
-    assert order["at"].startswith("2031-01-01")
+    assert order["at"] == "2031-01-01T00:00:00+00:00"
     gateway_clock.virtual = "2031-06-01T12:00:00Z"
-    monkeypatch.setattr(clock_module, "REFRESH_S", 0.0)
-    assert client.get("/").headers[UNIVERSE_NOW_HEADER].startswith("2031-06-01T12:00")
+    for _ in range(2):
+        assert client.get("/").headers[UNIVERSE_NOW_HEADER] == "2031-06-01T12:00:00.000Z"
+
+
+def test_an_unarmed_gateway_clock_reads_as_wall_time(client: TestClient, gateway_clock: _Clock) -> None:
+    client.post("/agentenv/ext/sync_time", json={"env_get_time_url": gateway_clock.url})
+    gateway_clock.virtual = None
+    now = parse_time(client.get("/").headers[UNIVERSE_NOW_HEADER])
+    assert abs((now - datetime.datetime.now(datetime.timezone.utc)).total_seconds()) < 60
+
+
+def test_sync_time_with_an_empty_url_goes_back_to_wall_time(client: TestClient, shop: WebsiteEnvironment,
+                                                            gateway_clock: _Clock) -> None:
+    client.post("/agentenv/ext/sync_time", json={"env_get_time_url": gateway_clock.url, "timezone": "America/Chicago"})
+    unsynced = client.post("/agentenv/ext/sync_time", json={"env_get_time_url": ""}).json()
+    assert unsynced["env_get_time_url"] == "" and not shop.clock.synced and shop.timezone is None
+    now = parse_time(client.get("/").headers[UNIVERSE_NOW_HEADER])
+    assert abs((now - datetime.datetime.now(datetime.timezone.utc)).total_seconds()) < 60
 
 
 def test_sync_time_takes_the_universe_s_time_zone_and_a_later_sync_without_one_drops_it(
@@ -378,15 +423,18 @@ def test_sync_time_takes_the_universe_s_time_zone_and_a_later_sync_without_one_d
     assert "timezone" not in unzoned and shop.timezone is None
 
 
-def test_a_clock_that_cannot_be_read_is_refused_and_a_lost_one_extrapolates(client: TestClient,
-                                                                           shop: WebsiteEnvironment,
-                                                                           gateway_clock: _Clock, monkeypatch) -> None:
+def test_a_clock_that_cannot_be_read_is_refused_and_a_lost_one_fails_the_sites_answers_but_not_agentenvs(
+        client: TestClient, shop: WebsiteEnvironment, gateway_clock: _Clock) -> None:
     refused = client.post("/agentenv/ext/sync_time", json={"env_get_time_url": "http://127.0.0.1:9/clock/time"})
-    assert refused.status_code == 500 and shop.now().year == datetime.datetime.now().year
+    assert refused.status_code == 500 and not shop.clock.synced
     client.post("/agentenv/ext/sync_time", json={"env_get_time_url": gateway_clock.url})
     gateway_clock.close()
-    monkeypatch.setattr(clock_module, "REFRESH_S", 0.0)
-    assert client.get("/").headers[UNIVERSE_NOW_HEADER].startswith("2031-01-01")
+    for path in ("/", "/api/orders", "/api/health"):
+        answer = client.get(path)
+        assert answer.status_code == 503 and answer.json()["code"] == "clock_unavailable", path
+    card = client.get("/.well-known/agent-env.json")
+    assert card.status_code == 200 and UNIVERSE_NOW_HEADER not in card.headers
+    assert rpc(client, "data/get")["parts"][0]["data"] == SEED
 
 
 def test_clock_patch_puts_the_clock_script_in_html_only(dist: Path, gateway_clock: _Clock) -> None:
@@ -401,6 +449,25 @@ def test_clock_patch_puts_the_clock_script_in_html_only(dist: Path, gateway_cloc
     assert "<script>" not in TestClient(site(dist)().create_app()).get("/").text
     partial = client.get("/index.html", headers={"Range": "bytes=0-5"})
     assert (partial.status_code, partial.content) == (206, b"<html>")
+
+
+def test_the_clock_script_goes_after_head_not_header_and_after_the_doctype_without_a_head(tmp_path: Path,
+                                                                                          gateway_clock: _Clock) -> None:
+    root = tmp_path / "pages"
+    root.mkdir()
+    (root / "index.html").write_text("<!doctype html><html><body><header>top</header></body></html>")
+    (root / "headed.html").write_text("<html><header>x</header><head><title>t</title></head></html>")
+
+    @website(static=str(root), clock_patch=True)
+    class Patched(WebsiteEnvironment):
+        pass
+
+    client = TestClient(Patched().create_app())
+    client.post("/agentenv/ext/sync_time", json={"env_get_time_url": gateway_clock.url})
+    page = client.get("/").text
+    assert page.startswith("<!doctype html><html><script>") and page.endswith("<body><header>top</header></body></html>")
+    headed = client.get("/headed.html").text
+    assert headed.index("<script>") == headed.index("<head>") + len("<head>")
 
 
 def test_clock_patch_streams_a_streamed_page_holding_only_what_comes_before_its_head(dist: Path) -> None:
@@ -512,83 +579,64 @@ def test_a_subclass_init_must_call_super(dist: Path) -> None:
         TestClient(Forgot().create_app()).get("/")
 
 
-def test_collections_insert_update_delete_and_find() -> None:
-    store = Collections({"todos": [{"id": 1, "title": "a"}, {"id": 2, "title": "b"}]})
-    assert store.insert("todos", {"title": "c"})["id"] == 3
-    store.update("todos", 1, title="A")
-    assert store.delete("todos", 2) and not store.delete("todos", 9)
-    assert store.find("todos", title="A") == [{"id": 1, "title": "A"}]
-    assert store.export() == {"todos": [{"id": 1, "title": "A"}, {"id": 3, "title": "c"}]}
-    with pytest.raises(ValueError):
-        store.load({"todos": "nope"})
+def test_dotfiles_and_paths_that_cant_be_files_are_never_served(dist: Path) -> None:
+    (dist / ".env").write_text("SECRET=1")
+    (dist / ".git").mkdir()
+    (dist / ".git" / "config").write_text("SECRET=2")
+    client = TestClient(site(dist)().create_app())
+    for path in ("/.env", "/.git/config", "/assets/../.env"):
+        assert "SECRET" not in client.get(path).text, path
+    assert client.get("/.env").status_code == 404
+    assert client.get("/%00").status_code != 500
 
 
-def test_the_clock_extrapolates_at_a_rate_two_intervals_agree_on_and_takes_a_set_for_a_jump(monkeypatch) -> None:
-    asyncio.run(_clock_rates(monkeypatch))
+def test_a_request_that_fails_sets_no_session_cookie(dist: Path) -> None:
+    class Fails(site(dist)):
+        @api.post("/api/refused")
+        def refused(self, ctx: ApiContext) -> dict:
+            ctx.sign_in("mallory")
+            raise Unauthorized("no")
+
+        @api.post("/api/crashes")
+        def crashes(self, ctx: ApiContext) -> dict:
+            ctx.sign_in("mallory")
+            raise RuntimeError("boom")
+
+    client = TestClient(Fails().create_app())
+    for path, status in (("/api/refused", 401), ("/api/crashes", 500), ("/api/sign-in", 200)):
+        answer = client.post(path, json={"user": "bob"})
+        assert answer.status_code == status and ("set-cookie" in answer.headers) is (status == 200), path
 
 
-async def _clock_rates(monkeypatch) -> None:
-    from agentenv_protocol.website import UniverseClock
+def test_a_plain_def_route_runs_in_a_worker_thread_and_an_async_one_on_the_loop(dist: Path) -> None:
+    class Threads(site(dist)):
+        @api.get("/api/plain")
+        def plain(self) -> dict:
+            return {"thread": threading.get_ident()}
 
-    real, virtual = [0.0], [datetime.datetime(2031, 1, 1, tzinfo=datetime.timezone.utc)]
+        @api.get("/api/awaited")
+        async def awaited(self) -> dict:
+            return {"thread": threading.get_ident()}
 
-    async def read(url: str) -> datetime.datetime:
-        return virtual[0]
-
-    monkeypatch.setattr(clock_module.time, "monotonic", lambda: real[0])
-    monkeypatch.setattr(clock_module, "_read", read)
-    clock = UniverseClock()
-    await clock.sync("http://gateway/clock/time")
-
-    def tick(seconds: float, virtual_seconds: float) -> None:
-        real[0] += seconds
-        virtual[0] += datetime.timedelta(seconds=virtual_seconds)
-
-    tick(1, 100)
-    await clock.refresh()
-    assert clock._rate == 1.0
-    tick(1, 100)
-    await clock.refresh()
-    assert clock._rate == 100.0
-    real[0] += 0.5
-    assert clock.now() == virtual[0] + datetime.timedelta(seconds=50)
-    real[0] -= 0.5
-    tick(0.4, 0)
-    await clock.refresh()
-    assert clock._rate == 100.0
-    tick(1, 86400 * 30)
-    await clock.refresh()
-    assert clock._rate == 100.0 and clock.now() == virtual[0]
+    client = TestClient(Threads().create_app())
+    assert client.get("/api/plain").json()["thread"] != client.get("/api/awaited").json()["thread"]
 
 
-def test_a_refresh_of_the_old_clock_never_overwrites_a_sync_to_a_new_one(monkeypatch) -> None:
-    asyncio.run(_refresh_during_sync(monkeypatch))
+def test_a_route_whose_type_hints_cant_be_resolved_fails_the_apps_build(dist: Path) -> None:
+    class Unresolved(site(dist)):
+        @api.post("/api/notes")
+        def add_note(self, note: MissingModel) -> dict:  # noqa: F821
+            return {}
+
+    with pytest.raises(TypeError, match="add_note: its type hints can't be resolved"):
+        Unresolved().create_app()
 
 
-async def _refresh_during_sync(monkeypatch) -> None:
-    from agentenv_protocol.website import UniverseClock
-
-    old, new = (datetime.datetime(year, 1, 1, tzinfo=datetime.timezone.utc) for year in (2031, 2040))
-    release, held = asyncio.Event(), []
-
-    async def read(url: str) -> datetime.datetime:
-        if url == "http://old/clock/time":
-            if held:
-                await release.wait()
-            return old
-        return new
-
-    monkeypatch.setattr(clock_module, "_read", read)
-    monkeypatch.setattr(clock_module, "REFRESH_S", 0.0)
-    clock = UniverseClock()
-    await clock.sync("http://old/clock/time")
-    held.append(True)
-    refreshing = asyncio.create_task(clock.refresh())
-    await asyncio.sleep(0)
-    syncing = asyncio.create_task(clock.sync("http://new/clock/time"))
-    await asyncio.sleep(0)
-    release.set()
-    await refreshing
-    await syncing
-    assert clock.url == "http://new/clock/time" and clock._rate == 1.0
-    assert abs((clock.now() - new).total_seconds()) < 5
+@pytest.mark.parametrize(("value", "microseconds"), [("2031-01-01T00:00:00.12Z", 120000),
+                                                     ("2031-01-01T00:00:00.123456789Z", 123456),
+                                                     ("2031-01-01T00:00:00Z", 0),
+                                                     ("2031-01-01T02:00:00.5+02:00", 500000)])
+def test_a_time_parses_whatever_its_fraction_of_a_second(value: str, microseconds: int) -> None:
+    moment = parse_time(value)
+    assert moment.astimezone(datetime.timezone.utc).replace(microsecond=0) == datetime.datetime(
+        2031, 1, 1, tzinfo=datetime.timezone.utc) and moment.microsecond == microseconds

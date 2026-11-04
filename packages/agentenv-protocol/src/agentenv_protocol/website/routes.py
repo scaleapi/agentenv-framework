@@ -3,7 +3,9 @@ the path is a path parameter, one annotated with a pydantic model or ``dict`` is
 ``ApiContext`` receives the request's context, and every other one is a query parameter; path and query values are
 coerced to their annotated types (int, float, bool, datetime, UUID, enum, Literal). What the method returns is the
 JSON answer, a Starlette ``Response`` as it is; an ``ApiError`` it raises answers with its status, and a request its
-parameters can't be bound from answers 400."""
+parameters can't be bound from answers 400. A plain ``def`` method runs in a worker thread, as FastAPI runs one, so a
+blocking call in it (a database query, say) holds up only its own request; an ``async def`` one runs on the event
+loop."""
 from __future__ import annotations
 
 import dataclasses
@@ -19,6 +21,7 @@ from typing import Any, Callable, Literal, NamedTuple, Optional, get_args, get_o
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -271,8 +274,10 @@ async def _body(p: _Param, request: Request) -> Any:
 
 
 def endpoint(fn: Callable, route: ApiRoute, context_for: Callable[[Request], ApiContext]) -> Callable:
-    """The Starlette endpoint of one route, calling the bound method ``fn``."""
+    """The Starlette endpoint of one route, calling the bound method ``fn``, a plain ``def`` one in a worker thread.
+    The request's session cookies go on a successful answer only."""
     params = plan(route)
+    threaded = not inspect.iscoroutinefunction(fn)
 
     async def handle(request: Request) -> Response:
         context = None
@@ -280,7 +285,8 @@ def endpoint(fn: Callable, route: ApiRoute, context_for: Callable[[Request], Api
             context = context_for(request)
             if route.roles and context.role not in route.roles:
                 raise Forbidden(f"role {context.role!r} may not call {route.name}")
-            result = await _maybe_await(fn(**await bind(params, request, context)))
+            kwargs = await bind(params, request, context)
+            result = await _maybe_await(await run_in_threadpool(fn, **kwargs) if threaded else fn(**kwargs))
             if isinstance(result, Response):
                 response = result
             elif not _has_body(route.status):
@@ -292,7 +298,7 @@ def endpoint(fn: Callable, route: ApiRoute, context_for: Callable[[Request], Api
         except Exception:
             logger.exception("@api %s failed", route.name)
             response = error_response(ApiError("internal error", code="internal"))
-        return context.apply(response) if context is not None else response
+        return context.apply(response) if context is not None and response.status_code < 400 else response
 
     return handle
 
@@ -353,10 +359,13 @@ def openapi(title: str, routes: list[ApiRoute]) -> dict:
 
 
 def _hints(fn: Callable) -> dict:
+    """``fn``'s type hints; a ``TypeError`` naming the route when one can't be resolved, as one naming a type imported
+    only under ``TYPE_CHECKING`` can't, rather than binding every parameter as an unresolved string."""
     try:
         return get_type_hints(fn)
-    except Exception:
-        return {}
+    except Exception as e:
+        raise TypeError(f"@api {fn.__qualname__}: its type hints can't be resolved ({type(e).__name__}: {e}); "
+                        "every type its parameters and answer name must be importable when the site runs") from e
 
 
 def _adapter(annotation: Any) -> TypeAdapter | None:

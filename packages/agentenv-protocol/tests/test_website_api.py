@@ -344,8 +344,8 @@ def test_parameterized_routes_never_take_the_data_plane_or_card() -> None:
     assert client.post("/notes").json() == {"captured": "notes"}
     assert client.get("/.well-known/other.json").json() == {"captured": "other.json"}
     assert client.get("/files/a/b.txt").json() == {"rest": "a/b.txt"}
-    reset = client.post("/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": {}}).json()
-    assert reset["id"] == 1 and "result" in reset
+    answer = client.post("/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": {}}).json()
+    assert answer["jsonrpc"] == "2.0" and answer["id"] == 1 and "captured" not in answer
     assert client.get("/.well-known/agent-env.json").json()["name"] == "Wiki"
     assert client.get("/api/health").json() == {"status": "ok"}
 
