@@ -46,7 +46,9 @@ FAKE = textwrap.dedent('''\
             state = load()
             state["calls"].append(args)
             if not os.environ.get("FAKE_LUME_NO_SESSION"):
-                state["vms"][name].update(status="running", ipAddress="192.168.64.%d" % len(state["vms"]))
+                state["vms"][name].update(status="running")
+            if not os.environ.get("FAKE_LUME_NO_SESSION") and not os.environ.get("FAKE_LUME_NO_ADDRESS"):
+                state["vms"][name].update(ipAddress="192.168.64.%d" % len(state["vms"]))
             save(state)
         if os.environ.get("FAKE_LUME_NO_SESSION"):
             sys.exit("Unable to access security information. The virtual machine encountered a security error")
@@ -166,7 +168,8 @@ async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_relayed_and_policed_
 
 
 @pytest.mark.asyncio
-async def test_a_reset_clones_the_vm_afresh_under_its_mac_address_with_the_new_seed(mac):
+async def test_a_reset_clones_the_vm_afresh_under_its_mac_address_with_the_new_seed_and_one_not_up_is_stopped(
+        mac, monkeypatch):
     sandbox = await mac.create_vm(image="local:bench", env={"N": "1"}, exposed_ports=[18765])
     mac_address = _state(mac.fake)["vms"][sandbox.sandbox_id]["macAddress"]
 
@@ -178,6 +181,11 @@ async def test_a_reset_clones_the_vm_afresh_under_its_mac_address_with_the_new_s
                          ["set", sandbox.sandbox_id, "--mac-address", mac_address]]
     folder = mac.fake / "state" / "agent-env" / "lume" / sandbox.sandbox_id
     assert seed.read_user_data((folder / lume.SEED_FOLDER / "user-data").read_text()) == {"N": "2"}
+    monkeypatch.setenv("FAKE_LUME_NO_ADDRESS", "1")
+    mac.boot_timeout_s = 1
+    with pytest.raises(TimeoutError, match="had no address within 1 s"):
+        await mac.reset_vm(sandbox, image="local:bench", env={"N": "3"})
+    assert _state(mac.fake)["vms"][sandbox.sandbox_id]["status"] == "stopped"
     await sandbox.terminate()
 
 

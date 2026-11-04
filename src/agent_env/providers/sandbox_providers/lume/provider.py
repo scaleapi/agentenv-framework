@@ -160,14 +160,20 @@ class LumeSandboxProvider(SandboxProvider):
     async def reset_vm(self, sandbox: Any, *, image: str, env: dict[str, str]) -> None:
         """The VM cloned afresh from the bundle it was cloned from, under its MAC address, so it takes the same
         address, with ``env`` in its seed, its relays pointed at it on the same ports; its slot held from its stop until
-        it runs again, so no deploy takes it meanwhile."""
+        it runs again, so no deploy takes it meanwhile. One that doesn't come up is stopped, freeing its slot."""
         state = self._state(sandbox.sandbox_id)
         async with self._admitting():
             await self._stopped(sandbox.sandbox_id, state)
+            for ended in ("run", "relay"):
+                state.pop(ended, None)
             await self._lume("delete", sandbox.sandbox_id, "--force")
             await self._lume("clone", state["source"], sandbox.sandbox_id)
             await self._lume("set", sandbox.sandbox_id, "--mac-address", state["mac"])
-            await self._started(sandbox.sandbox_id, state, env)
+            try:
+                await self._started(sandbox.sandbox_id, state, env)
+            except BaseException:
+                await self._stopped(sandbox.sandbox_id, state)
+                raise
 
     async def get_sandbox(self, sandbox_id: str) -> LumeSandbox:
         return self._sandbox(sandbox_id, self._state(sandbox_id))
