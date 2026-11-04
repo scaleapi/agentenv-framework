@@ -44,6 +44,9 @@ RESENDABLE = frozenset({409, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 5
 RESEND_DELAYS = (1, 2, 4, 8, 16)
 # Past the 900 s Agent37 lets a command run, so its answer arrives first.
 _TIMEOUT = httpx.Timeout(30.0, read=1000.0)
+# Instance calls answer in about a second, a create once its VM is running. A create that has not answered by then is
+# given up on, and the VM it may still make is found by name and deleted.
+API_TIMEOUT_SECONDS = 120
 KEEPALIVE_SECONDS = 15
 
 
@@ -112,7 +115,8 @@ class Agent37Api:
 
     async def _call(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
         return await self._client().request(method, f"{API_URL}{path}", json=json,
-                                            headers={"Authorization": f"Bearer {self._api_key}"})
+                                            headers={"Authorization": f"Bearer {self._api_key}"},
+                                            timeout=httpx.Timeout(30.0, read=API_TIMEOUT_SECONDS))
 
     async def create_instance(self, body: dict[str, Any]) -> dict[str, Any]:
         """Create an instance; Agent37 answers once it is running."""

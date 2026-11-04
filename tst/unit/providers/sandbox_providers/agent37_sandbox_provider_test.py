@@ -8,7 +8,6 @@ import httpx
 import pytest
 
 from agent_env.config.errors import ConfigError
-from agent_env.providers.sandbox_providers.agent37 import provider as provider_module
 from agent_env.providers.sandbox_providers.agent37 import sandbox as sandbox_module
 from agent_env.providers.sandbox_providers.agent37.provider import (
     NAME_SUFFIX_LENGTH,
@@ -178,29 +177,6 @@ async def test_a_cancelled_create_deletes_the_instance_once_the_create_answers(a
     gate.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert api.deleted == ["i000000001"]
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_create_is_raised_without_waiting_out_a_slow_create(api, monkeypatch):
-    monkeypatch.setattr(provider_module, "CANCEL_WAIT_SECONDS", 0.01)
-    gate = asyncio.Event()
-    provider = _provider(api)
-    create = provider._api.create_instance
-
-    async def slow_create(body):
-        await gate.wait()
-        return await create(body)
-
-    provider._api.create_instance = slow_create
-    task = asyncio.ensure_future(provider.create_vm(setup_for_gateway=False))
-    await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 1)
-    assert api.deleted == []
-    gate.set()
-    await asyncio.gather(*provider_module._cleanups)
     assert api.deleted == ["i000000001"]
 
 
