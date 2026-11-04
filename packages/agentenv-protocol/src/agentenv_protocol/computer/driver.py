@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
@@ -42,6 +43,8 @@ DEFAULT_IDENTITY = "default"
 FORWARDED_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 #: A WebSocket close code that means the connection ended without one, which a close can't send on.
 UNSENDABLE_CLOSES = (1005, 1006, 1015)
+#: A Host header that names a host, and its port or not, and nothing else.
+HOST = re.compile(r"(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
 
 
 class DriverPlatform(BaseModel):
@@ -188,13 +191,14 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
 
     async def _computer_relay(self, websocket: WebSocket) -> None:
         """A WebSocket under ``/svc/<name>/``, relayed both ways to the app named so until either side closes; refused,
-        before it opens, without the control token or with no app or none answering."""
+        before it opens, without the control token, with a Host that isn't a host and port, or with no app or none
+        answering."""
         name = websocket.path_params["name"]
         folder = self._computer_app_folder(name)
-        if folder is None or not control_check()(websocket.headers):
+        host = websocket.headers.get("host", "")
+        if folder is None or not control_check()(websocket.headers) or (host and not HOST.fullmatch(host)):
             await websocket.close(code=1008)
             return
-        host = websocket.headers.get("host", "")
         headers = [(key, value) for key, value in apps.to_app(
             websocket.headers.items(), host, "https" if websocket.url.scheme == "wss" else "http", f"/svc/{name}")
             if key.lower() != "host" and not key.lower().startswith("sec-websocket-")]
@@ -202,8 +206,8 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         try:
             upstream = await unix_connect(str(folder / SOCKET), f"ws://{host or 'app'}{_target(websocket)}",
                                           additional_headers=headers, subprotocols=offered or None, max_size=None,
-                                          compression=None, ping_interval=None)
-        except (OSError, websockets.InvalidHandshake, asyncio.TimeoutError):
+                                          compression=None, ping_interval=None, user_agent_header=None)
+        except (OSError, ValueError, asyncio.TimeoutError, websockets.WebSocketException):
             await websocket.close(code=1011)
             return
         async with upstream:

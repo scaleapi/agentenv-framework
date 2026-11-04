@@ -1,7 +1,8 @@
 """The driver's /svc/<app>/ in front of an app's own server on its socket: a WebSocket is relayed both ways, with the
-subprotocol the app picks, until the app closes it with its code, and only with the control token; an answer streams
-through as the app sends it, 20 MB whole; every method and body goes on, and headers pass on but for the hop-by-hop
-ones, the control token and any address the caller forwarded, which the driver sets as the one it was reached at."""
+subprotocol the app picks, until the app closes it with its code, and only with the control token and a Host that's a
+host; an answer streams through as the app sends it, 20 MB whole; every method and body goes on, and the caller's
+headers, and only those, pass on but for the hop-by-hop ones, the control token and any address the caller forwarded,
+which the driver sets as the one it was reached at."""
 from __future__ import annotations
 
 import asyncio
@@ -130,10 +131,11 @@ async def test_a_websocket_through_svc_reaches_the_app_both_ways_until_it_closes
                 async with connect(url.replace("http", "ws") + path, additional_headers=headers):
                     pass
             refused.append(status.value.response.status_code)
+        malformed = [await _handshake(url, host) for host in ("x/y", "[::1")]
 
     assert hello == {"forwarded": "/svc/echo", "authorization": None} and subprotocol == "cdp"
     assert (text, data) == ("Page.navigate", b"\x03\x02\x01") and closed.value.rcvd.code == 4001
-    assert refused == [403, 403, 403]
+    assert refused == [403, 403, 403] and malformed == [b"HTTP/1.1 403 Forbidden", b"HTTP/1.1 403 Forbidden"]
 
 
 @pytest.mark.asyncio
@@ -166,6 +168,8 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
             put = (await http.put("/svc/echo/upload", content=payload)).json()
             deleted = (await http.delete("/svc/echo/upload")).json()
             refused = await httpx.AsyncClient(base_url=url).get("/svc/echo/headers")
+            http.headers.clear()
+            bare = (await http.get("/svc/echo/headers", headers=client.control_headers(TOKEN))).json()["headers"]
     got, host = seen.json()["headers"], url.removeprefix("http://")
 
     assert seen.json()["host"] == host and got["x-kept"] == "1"
@@ -176,3 +180,16 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
     assert seen.headers["x-kept"] == "1"
     assert put == {"method": "PUT", "bytes": 3 * MB, "sha256": hashlib.sha256(payload).hexdigest()}
     assert deleted["method"] == "DELETE" and deleted["bytes"] == 0 and refused.status_code == 401
+    assert not {"accept", "accept-encoding", "user-agent"} & set(bare)
+
+
+async def _handshake(url: str, host: str) -> bytes:
+    """The status line the driver answers a WebSocket handshake for the app's echo route with, sent with ``host`` as
+    its Host and the control token."""
+    reader, writer = await asyncio.open_connection(*url.removeprefix("http://").split(":"))
+    writer.write((f"GET /svc/echo/echo HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+                  f"Authorization: Bearer {TOKEN}\r\n\r\n").encode())
+    status = (await asyncio.wait_for(reader.readline(), 10)).strip()
+    writer.close()
+    return status

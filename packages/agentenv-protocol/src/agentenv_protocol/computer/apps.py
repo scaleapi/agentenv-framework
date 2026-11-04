@@ -117,10 +117,11 @@ def to_app(headers: Iterable[tuple[str, str]], host: str, scheme: str, prefix: s
 
 async def forward(folder: Path, method: str, target: str, headers: list[tuple[str, str]],
                   body: Optional[AsyncIterator[bytes]]) -> tuple[httpx.Response, Callable[[], Awaitable[None]]]:
-    """The app's server's answer to the request, its body still to be read, and what closes it once read; it takes as
-    long as the app does."""
+    """The app's server's answer to the request, sent with ``headers`` and none of the client's own, its body still to
+    be read, and what closes it once read; it takes as long as the app does."""
     http = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(folder / SOCKET)), base_url="http://app",
                              timeout=None)
+    http.headers.clear()
     try:
         answer = await http.send(http.build_request(method, target, headers=headers, content=body), stream=True)
     except BaseException:
