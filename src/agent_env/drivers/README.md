@@ -46,8 +46,8 @@ direct LaunchAgent, CuaDriver.app's own executable, since macOS gives the app's 
 Event and Screen Recording, which `[install.macos]` grants it, only to the executable launchd starts itself; its socket
 is `/tmp/agentenv-cua-driver.sock`. `requirements-macos.txt` installs the protocol alone. Agents get the 62 tools
 `mcp-macos.json` pins, as macOS's `cua-driver mcp` lists them; `computer-ready` checks CuaDriver.app's executable's
-sha256, those tools, and that cua-driver reports Accessibility and Screen Recording granted. Its pointer's actions and
-its typing go in the foreground, where cua-driver otherwise keeps from moving a person's pointer over a background app,
+sha256, those tools, and that cua-driver reports Accessibility and Screen Recording granted. Its pointer's actions go in
+the foreground, where cua-driver otherwise keeps from moving a person's pointer over a background app,
 and a drag first rests the pointer on its start, since an app such as Tk reads where the pointer is when it handles the
 press. cua-driver 0.38.0 fails two of the probe's checks on macOS for defects of its own: it posts each typed
 character's key-up with the A key's code (P6, typed text arrives as key events), and a drag's mouse-down after the

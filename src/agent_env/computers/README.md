@@ -106,9 +106,10 @@ failing the build; a compose of the same inputs on that Mac reuses it.
 
 A deploy clones the env's VM bundle, writes the deploy's environment into a folder the VM shares as
 `agentenv_protocol.computer.seed`'s seed, which `agentenv-service` reads (waiting for the share, which mounts at login),
-boots it, and fronts the driver's port with a relay on this Mac, run by Apple's `/usr/bin/python3`, since macOS's Local
-Network privacy lets only Apple's own binaries reach a VM's address; agent-env reaches the computer at
-`127.0.0.1:<port>`. A reset clones it afresh under its MAC address, so it keeps its address and its URLs.
+boots it, and fronts the driver's port with a relay on this Mac's loopback, run by Apple's `/usr/bin/python3`, since
+macOS's Local Network privacy lets only Apple's own binaries reach a VM's address; agent-env reaches the computer at
+`127.0.0.1:<port>`. The relay listens on loopback alone unless `relay_host` names another address, since a computer's
+MCP endpoint takes no token. A reset clones it afresh under its MAC address, so it keeps its address and its URLs.
 Virtualization.framework runs a VM only in a logged-in session, so on a Mac with no one at it (an EC2 Mac), the user
 agent-env runs as logs in at boot and agent-env runs in that session (`launchctl asuser`). A Mac runs two macOS VMs at
 once, as Apple's licence allows and Virtualization.framework enforces; `lume` refuses a third. Its `resolution` setting

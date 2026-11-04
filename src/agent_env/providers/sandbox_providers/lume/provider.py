@@ -91,16 +91,20 @@ class LumeSandbox(VmSandbox):
 class LumeSandboxProvider(SandboxProvider):
     """VM bundles of macOS on this Mac, run by Lume, configured under ``[sandbox.providers.lume.config]``: the session
     user's ``ssh_user`` and ``ssh_password`` (an ``env:`` or ``secret:`` reference), which composing and exec log in
-    with; ``max_running``, at most ``MAX_RUNNING``; and the ``lume`` and ``relay_python`` executables."""
+    with; ``max_running``, at most ``MAX_RUNNING``; ``relay_host``, the address the relays listen on, this Mac's
+    loopback unless something off it must reach the computers, since a computer's MCP endpoint takes no token; and the
+    ``lume`` and ``relay_python`` executables."""
 
     ON_THIS_MACHINE: ClassVar[bool] = True
 
     def __init__(self, *, ssh_user: str = "lume", ssh_password: str = "lume", max_running: int = MAX_RUNNING,
-                 lume: str = "lume", relay_python: str = "/usr/bin/python3", boot_timeout_s: float = 600) -> None:
+                 relay_host: str = "127.0.0.1", lume: str = "lume", relay_python: str = "/usr/bin/python3",
+                 boot_timeout_s: float = 600) -> None:
         if not 1 <= max_running <= MAX_RUNNING:
             raise ValueError(f"max_running is 1 to {MAX_RUNNING}, the macOS VMs Apple's licence allows on a Mac, not "
                              f"{max_running}")
         self.ssh_user, self.ssh_password, self.max_running = ssh_user, ssh_password, max_running
+        self.relay_host = relay_host
         self.lume, self.relay_python, self.boot_timeout_s = lume, relay_python, boot_timeout_s
 
     @classmethod
@@ -264,7 +268,7 @@ class LumeSandboxProvider(SandboxProvider):
         relays = {int(port): local for port, local in state["ports"].items()}
         if relays:
             relay = subprocess.Popen([self.relay_python, "-I", str(RELAY),
-                                      *(f"{local}={address}:{port}" for port, local in relays.items())],
+                                      *(f"{self.relay_host}:{local}={address}:{port}" for port, local in relays.items())],
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
             state["relay"] = relay.pid

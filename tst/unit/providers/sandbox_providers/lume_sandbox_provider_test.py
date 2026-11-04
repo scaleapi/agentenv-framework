@@ -121,7 +121,7 @@ async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_and_relayed_and_term
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:48123"}
     address = _state(mac.fake)["vms"][sandbox.sandbox_id]["ipAddress"]
     assert _waited(lambda: (mac.fake / "relay.args").read_text().split()) == ["-I", str(lume.RELAY),
-                                                                             f"48123={address}:18765"]
+                                                                             f"127.0.0.1:48123={address}:18765"]
 
     await sandbox.terminate()
 

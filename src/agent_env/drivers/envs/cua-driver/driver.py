@@ -2,8 +2,8 @@
 as a daemon, which this file starts when run as a script on Linux and CuaDriver.app's LaunchAgent starts on macOS, so
 macOS gives it the app's TCC permissions. Agents get what its own MCP server serves at its pinned version (``mcp.json``,
 ``mcp-macos.json``): its instructions, its tools beside the ``computer_*`` tools, and its skill resources, read from it.
-The computer/v1 operations are its desktop-scope calls, the pointer's and typing in the foreground on macOS, where
-cua-driver otherwise keeps from moving a person's pointer over a background app. The daemon takes
+The computer/v1 operations are its desktop-scope calls, the pointer's in the foreground on macOS, where cua-driver
+otherwise keeps from moving a person's pointer over a background app. The daemon takes
 line-delimited JSON on a Unix socket, and each call goes on a connection of its own, as cua-driver's own MCP server sends
 them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
 cua-driver starts again after ending it for idling, where a named one stays ended. A call the daemon can't take, as
@@ -65,7 +65,7 @@ EXECUTABLES = {
     "arm64": "26e9eee8165e9ce7b614b5e3d68e5d963231385a82b65236406718b5ce1ff936",
     "macos/arm64": "b4d974a9c1c92a700cd7be7ede987aea4a1e6835e37039ce3d628b71bd5f0ca8",
 }
-#: How the daemon delivers the pointer's actions and typing: in the foreground on macOS, where it doesn't by default.
+#: How the daemon delivers the pointer's actions: in the foreground on macOS, where it doesn't by default.
 FOREGROUND = {"delivery_mode": "foreground"} if MACOS else {}
 #: On macOS, how long the pointer rests on a drag's start before the press, since an app such as Tk reads where the
 #: pointer is when it handles the press; and the drag's steps, about one a pixel, within cua-driver's 1 to 200.
@@ -168,7 +168,7 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @type_text
     async def type_in(self, text) -> None:
-        await self._send("type_text", text=text, **FOREGROUND)
+        await self._send("type_text", text=text)
 
     @press
     async def press_keys(self, keys) -> None:

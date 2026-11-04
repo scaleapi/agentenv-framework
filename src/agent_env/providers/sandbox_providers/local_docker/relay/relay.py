@@ -1,5 +1,5 @@
-"""Relay TCP connections: each argument ``PORT=HOST:PORT`` accepts connections on the first port and joins each to the
-second address, both ways, until either side closes."""
+"""Relay TCP connections: each argument ``[LISTEN:]PORT=HOST:PORT`` accepts connections on the first port, on the
+address LISTEN or every one, and joins each to the second address, both ways, until either side closes."""
 
 import asyncio
 import sys
@@ -8,11 +8,12 @@ import sys
 async def main(routes: list[str]) -> None:
     servers = []
     for route in routes:
-        port, target = route.split("=")
+        listen, target = route.split("=")
+        bind, _, port = listen.rpartition(":")
         host, _, target_port = target.rpartition(":")
         servers.append(await asyncio.start_server(
             lambda reader, writer, host=host, target_port=int(target_port): join(reader, writer, host, target_port),
-            "0.0.0.0", int(port)))
+            bind or "0.0.0.0", int(port)))
     await asyncio.gather(*(server.serve_forever() for server in servers))
 
 
