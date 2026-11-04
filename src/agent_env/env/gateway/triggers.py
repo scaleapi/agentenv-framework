@@ -287,7 +287,7 @@ def _shape(value: Any) -> dict:
 
 
 def _echo_args(value: Any, key: str | None = None) -> Any:
-    """Trajectory-safe projection of a mirror's resolved args.
+    """Trajectory-safe projection of a mirror's resolved args, or of a provoking call's.
 
     Allowlisted identifier/metadata scalars pass through so a grader can see *which* object the
     mirror wrote; every other value becomes a `{"redacted": {...}}` shape descriptor. Structure is
@@ -899,7 +899,7 @@ class TriggerEngine:
             return [], None
         data = _result_data(result)
         ctx = {"args": arguments, "result": data}
-        provoking = {"tool": name, "role": role}
+        provoking = {"tool": name, "role": role, "args": _echo_call_args(arguments)}
         # Before detection, so the call that sets off a deadline's anchor can't also be the call that cancels it.
         for tid, trig in provokable:
             when = trig["spec"]["when"]
@@ -1706,3 +1706,17 @@ def _hours_zone(hours: dict) -> tzinfo:
         return ZoneInfo(hours["time_zone"])
     sign, hh, mm = _UTC_OFFSET_RE.fullmatch(hours["utc_offset"]).groups()
     return timezone((1 if sign == "+" else -1) * timedelta(hours=int(hh), minutes=int(mm)))
+
+
+_ECHO_ARGS_MAX = 4096  # JSON chars; a provoking call's echo past this is recorded as its args' shape alone
+
+
+def _echo_call_args(arguments: dict) -> Any:
+    """A provoking call's args as its events carry them: `_echo_args`, or only their shape when too large or too deep."""
+    try:
+        echo = _echo_args(arguments)
+        if len(json.dumps(echo)) <= _ECHO_ARGS_MAX:
+            return echo
+    except RecursionError:  # detection is fail-open, so raising here would skip every trigger the call provokes
+        pass
+    return _shape(arguments)
