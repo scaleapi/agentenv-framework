@@ -93,12 +93,13 @@ def _installed(part: Part) -> list[str]:
             lines += [f"mkdir -p \"$(dirname {to})\"", f"curl -fsSL --retry 3 -o {to} {shlex.quote(download.url)}",
                       f'echo "{download.sha256}  "{to} | shasum -a 256 -c - > /dev/null']
     if part.venv:
-        pip = f"{prefix}/venv/bin/pip install -q --disable-pip-version-check"
+        # One resolve of the requirements and the protocol, as a lock is on Linux, so this checkout's protocol is the
+        # one a requirement of it gets.
+        wants = [*(("-r", shlex.quote(str(PurePosixPath(prefix) / install.python))) if install.python else ()),
+                 *((part.protocol,) if part.protocol else ())]
         lines.append(f"{BIN}/python3 -m venv {quoted}/venv")
-        if install.python is not None:
-            lines.append(f"{pip} -r {shlex.quote(str(PurePosixPath(prefix) / install.python))}")
-        if part.protocol is not None:
-            lines.append(f"{pip} {part.protocol}")
+        if wants:
+            lines.append(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check {' '.join(wants)}")
         lines.append(f"{prefix}/venv/bin/pip list --format=json > {quoted}/installed.json")
     if part.served is not None:
         lines.append(f"mkdir -p {shlex.quote(f'{prefix}/{SOCKET.parent}')}")
