@@ -157,6 +157,7 @@ dev = [
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "tomli-w==1.2.0",  # the Codex agent's config writer, which only its image installs; its tests import it
+    "hypothesis>=6.100",  # the property tests of the judge score parse
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
     "pytest>=9.0",
