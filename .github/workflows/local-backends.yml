@@ -196,7 +196,8 @@ jobs:
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
             tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
       # Only the computer images are kept, and only main saves them, so pull requests reuse main's without filling the
-      # repository's cache.
+      # repository's cache. The garbage collection frees what only the deleted repositories referenced; with
+      # --delete-untagged it would also delete the untagged platform manifests of an image index, and their layers.
       - name: Keep only the computer images
         id: kept
         if: always()
@@ -206,7 +207,7 @@ jobs:
           docker stop registry
           sudo find "$repositories" -mindepth 1 -maxdepth 1 ! -name agentenv-computers -exec rm -rf {} +
           docker run --rm --volume "$RUNNER_TEMP/registry:/var/lib/registry" mirror.gcr.io/library/registry:2 \
-            garbage-collect --delete-untagged /etc/docker/registry/config.yml > /dev/null
+            garbage-collect /etc/docker/registry/config.yml > /dev/null
           du -sh "$RUNNER_TEMP/registry"
           echo "computers=true" >> "$GITHUB_OUTPUT"
       - name: Save the computer images
