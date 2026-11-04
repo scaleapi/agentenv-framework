@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -97,12 +98,20 @@ def test_the_init_reads_the_newest_seed_version_it_knows_and_refuses_a_seed_that
 
 
 def test_the_inits_reader_keeps_its_versions_and_leaves_an_images_variables_of_the_same_names_alone(tmp_path):
-    """init sources it before it exports the image's environment, whose variables may share a name with the reader's."""
+    """init sources it, then exports the image's environment, whose variables may share a name with the reader's."""
     (tmp_path / "user-data").write_text(seed_protocol.SAMPLE_USER_DATA)
-    image = {name: "the image's" for name in ("reads", "oldest", "newest", "file", "version", "name", "line", "key",
-                                             "value")}
+    image = {name: "the image's" for name in ("reads", "oldest", "newest", "file", "version", "name", "line", "value",
+                                             "quoted", "rest", "decoded", "refused")}
 
     assert _seed_environment(tmp_path, image) == (0, seed_protocol.SAMPLE)
+
+
+def test_the_inits_reader_exports_a_seed_variable_named_as_one_of_its_own_and_one_holding_quotes(tmp_path):
+    environment = {**seed_protocol.SAMPLE, **{name: f"{name}'s value, 'quoted'\n" for name in (
+        "reads", "oldest", "file", "name", "line", "value", "quoted", "rest", "decoded", "refused", "_seed_reads")}}
+    (tmp_path / "user-data").write_text(seed_protocol.user_data(environment))
+
+    assert _seed_environment(tmp_path) == (0, environment)
 
 
 def test_the_inits_decoder_keeps_every_byte_of_a_start_and_a_seed_trailing_newlines_included(tmp_path):
@@ -313,12 +322,13 @@ def _seed(folder, env: dict[str, str]) -> None:
 
 
 def _seed_environment(folder: Path, exported: dict[str, str] | None = None) -> tuple[int, dict[str, str] | str]:
-    """The init's reading of the seed mounted at ``folder``, with ``exported`` already in its environment, as the image's
-    is: 0 and the variables it exported or changed, or 1 and why it stops."""
-    script = (f'. "{DISK / "boot" / "seed-env"}"; env > "$1/before"; seed_environment "$1" || {{ printf %s "$refused"; '
-              'exit 1; }; env -0')
+    """The init's reading of the seed mounted at ``folder``, ``exported`` set after it sources the reader, as the image's
+    environment is: 0 and the variables it exported or changed, or 1 and why it stops."""
+    image = "".join(f"export {name}={shlex.quote(value)}; " for name, value in (exported or {}).items())
+    script = (f'. "{DISK / "boot" / "seed-env"}"; {image}env > "$1/before"; seed_environment "$1" || '
+              '{ printf %s "$refused"; exit 1; }; env -0')
     done = subprocess.run(["sh", "-c", script, "seed-env", str(folder)], capture_output=True, text=True,
-                          env={"PATH": os.environ["PATH"], **(exported or {})})
+                          env={"PATH": os.environ["PATH"]})
     if done.returncode:
         return done.returncode, done.stdout
     before = set((folder / "before").read_text().splitlines())
