@@ -1709,9 +1709,25 @@ def _hours_zone(hours: dict) -> tzinfo:
 
 
 _ECHO_ARGS_MAX = 4096  # JSON chars; a provoking call's echo past this is recorded as its args' shape alone
+_ECHO_ARGS_VALUES = 256  # a provoking call's args holding more values are shaped without building their echo
 
 
 def _echo_call_args(arguments: dict) -> Any:
     """A provoking call's args as its events carry them: `_echo_args`, or only their shape when that echo is too large."""
+    if _holds_more_than(arguments, _ECHO_ARGS_VALUES):
+        return _shape(arguments)
     echo = _echo_args(arguments)
     return echo if len(json.dumps(echo)) <= _ECHO_ARGS_MAX else _shape(arguments)
+
+
+def _holds_more_than(value: Any, limit: int) -> bool:
+    """Whether ``value`` nests more than ``limit`` values, counting no further than ``limit``."""
+    pending, count = [value], 1
+    while pending:
+        node = pending.pop()
+        children = node.values() if isinstance(node, dict) else node if isinstance(node, list) else ()
+        count += len(children)
+        if count > limit:
+            return True
+        pending.extend(children)
+    return False
