@@ -387,6 +387,8 @@ orchestrators call it the same way. What callers rely on:
   `.github/scripts/slow_test_durations.py`.
 - `tst/manual/` and `tst/benchmarks/` run only by hand, as each module's docstring says; no CI job
   collects them.
+- `tst/formal/` holds TLA+ models, run only by hand with each model's `check.sh`; the `AGENTS.md`
+  beside each model says which code it covers. No CI job runs them.
 - Skips are declared capability gaps, decided at collection time: the gates in
   `tst/util/capabilities.py` produce `skipif` marks with the reason
   `agentenv-capability-missing: <name>` (`model_endpoint_configured`, `remote_sandbox`,
