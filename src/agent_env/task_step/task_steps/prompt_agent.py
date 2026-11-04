@@ -6,6 +6,7 @@ import copy
 import functools
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import nullcontext
@@ -127,6 +128,51 @@ _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
     },
 }
 
+# What ``user_message_template`` replaces with the agent's reply.
+_REPLY_PLACEHOLDER = "{reply}"
+_USER_SIM_GUARD_KEYS = frozenset({"max_chars", "reject_markdown", "retry_message"})
+# Headings, bullets, numbered lists, table rows and bold: how a report is laid out, not a chat message.
+_MARKDOWN_RE = re.compile(r"(?m)^\s*(?:#{1,6}\s|[-*•]\s|\d+\.\s|\|.*\|)|\*\*")
+_DEFAULT_GUARD_RETRY_MESSAGE = (
+    "Your last reply reads like the assistant's work, not like the user's next message. Write it again as the "
+    "user: only the user's own next message to the assistant, short and in plain text."
+)
+
+
+def _validate_user_sim_guard(guard: dict) -> None:
+    if not isinstance(guard, dict):
+        raise ValueError(f"user_sim_guard must be a dict, got {type(guard).__name__}")
+    unknown = set(guard) - _USER_SIM_GUARD_KEYS
+    if unknown:
+        raise ValueError(f"user_sim_guard has unknown keys {sorted(unknown)}; allowed: {sorted(_USER_SIM_GUARD_KEYS)}")
+    max_chars = guard.get("max_chars")
+    if max_chars is not None and (not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 1):
+        raise ValueError("user_sim_guard.max_chars must be a positive int")
+    if not isinstance(guard.get("reject_markdown", False), bool):
+        raise ValueError("user_sim_guard.reject_markdown must be a bool")
+    if max_chars is None and not guard.get("reject_markdown"):
+        raise ValueError("user_sim_guard checks nothing: set max_chars, reject_markdown, or both")
+    retry = guard.get("retry_message")
+    if retry is not None and (not isinstance(retry, str) or not retry.strip()):
+        raise ValueError("user_sim_guard.retry_message must be a non-empty string")
+
+
+def _guard_violation(guard: dict, message: str) -> Optional[str]:
+    """Why a user-sim message reads like the assistant's, or None when it passes ``guard``."""
+    max_chars = guard.get("max_chars")
+    if max_chars is not None and len(message) > max_chars:
+        return f"over {max_chars} chars ({len(message)})"
+    if guard.get("reject_markdown") and _MARKDOWN_RE.search(message):
+        return "markdown"
+    return None
+
+
+def _framed_parts(template: str, agent_parts: list[dict]) -> list[dict]:
+    """The agent's reply as the user-sim is sent it: its text inside ``template``, then its other parts as they are."""
+    reply = "\n".join(p.get("text") or "" for p in agent_parts if p.get("kind") == "text")
+    return [{"kind": "text", "text": template.replace(_REPLY_PLACEHOLDER, reply)},
+            *(p for p in agent_parts if p.get("kind") != "text")]
+
 
 class PromptAgentTaskStep(TaskStep):
     type: ClassVar[str] = "prompt_agent"
@@ -170,6 +216,8 @@ class PromptAgentTaskStep(TaskStep):
         user_agent_timeout_seconds: int = 600,
         user_output_format: Optional[dict[str, Any]] = None,
         user_model: Optional[str] = None,
+        user_message_template: Optional[str] = None,
+        user_sim_guard: Optional[dict] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         retry_config: Optional[RetryConfig | dict] = None,
@@ -192,6 +240,10 @@ class PromptAgentTaskStep(TaskStep):
             raise ValueError("max_conversation_turns must be >= 1")
         if post_turn_hooks is not None:
             validate_hook_specs(post_turn_hooks)
+        if user_message_template is not None and _REPLY_PLACEHOLDER not in user_message_template:
+            raise ValueError(f"user_message_template must contain {_REPLY_PLACEHOLDER} for the agent's reply")
+        if user_sim_guard is not None:
+            _validate_user_sim_guard(user_sim_guard)
         if model_params:
             reserved = set(model_params) & MODEL_PARAMS_RESERVED
             if reserved:
@@ -220,6 +272,8 @@ class PromptAgentTaskStep(TaskStep):
         self.user_agent_timeout_seconds = user_agent_timeout_seconds
         self.user_output_format = user_output_format
         self.user_model = user_model
+        self.user_message_template = user_message_template
+        self.user_sim_guard = user_sim_guard
         self.snapshot_config = snapshot_config
         self.live_trajectory = live_trajectory
         self.post_turn_hooks = post_turn_hooks
@@ -294,6 +348,10 @@ class PromptAgentTaskStep(TaskStep):
         base["user_agent_timeout_seconds"] = self.user_agent_timeout_seconds
         base["user_output_format"] = self.user_output_format
         base["user_model"] = self.user_model
+        if self.user_message_template is not None:
+            base["user_message_template"] = self.user_message_template
+        if self.user_sim_guard is not None:
+            base["user_sim_guard"] = self.user_sim_guard
         if self.snapshot_config:
             base["snapshot_config"] = self.snapshot_config.to_dict()
         if self.live_trajectory:
@@ -330,6 +388,8 @@ class PromptAgentTaskStep(TaskStep):
             user_agent_timeout_seconds=data.get("user_agent_timeout_seconds", 600),
             user_output_format=data.get("user_output_format"),
             user_model=data.get("user_model"),
+            user_message_template=data.get("user_message_template"),
+            user_sim_guard=data.get("user_sim_guard"),
             snapshot_config=(
                 SnapshotConfig.from_dict(data["snapshot_config"])
                 if data.get("snapshot_config")
@@ -1079,12 +1139,37 @@ class _UserSide:
         step = self._step
         if self._url is None:
             self._url = get_config().get_default_human_a2a_url()
+        if not self._is_user_sim:
+            return await self._peer_answer(number, agent_parts)
+        parts = agent_parts
+        if step.user_message_template is not None:
+            parts = _framed_parts(step.user_message_template, agent_parts)
+        answer = await self._peer_answer(number, parts)
+        guard = step.user_sim_guard
+        if guard is None or "message" not in answer:
+            return answer
+        violation = _guard_violation(guard, _answer_text(answer))
+        if violation is None:
+            return answer
+        # The user-sim wrote what reads like the assistant's work. Asked again once in the same conversation, so it
+        # sees what it wrote; the second answer goes on either way, and the record says whether it passed.
+        logger.warning(f"user-sim message at turn {number} failed its guard ({violation}); asking it again once")
+        retry_text = guard.get("retry_message") or _DEFAULT_GUARD_RETRY_MESSAGE
+        retried = await self._peer_answer(number, [{"kind": "text", "text": retry_text}])
+        still = _guard_violation(guard, _answer_text(retried)) if "message" in retried else None
+        self._record("usersim_guard", {"turn": number, "rejected": violation, "retry_rejected": still,
+                                       "retry_ended": retried.get("end")})
+        return retried
+
+    async def _peer_answer(self, number: int, parts: list[dict]) -> dict:
+        """One message to the user side and its answer: ``{"message": parts}`` or ``{"end": reason}``."""
+        step = self._step
         user_a2a_task_id = uuid.uuid4().hex
         try:
             # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
             # user_a2a_url, has none and reads the store itself.
-            _, user_result = await send_and_wait(
-                self._url, agent_parts,
+            user_task_id, user_result = await send_and_wait(
+                self._url, parts,
                 agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
                 shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
                 timeout_seconds=step.user_agent_timeout_seconds,
@@ -1093,6 +1178,9 @@ class _UserSide:
         except TimeoutError as e:
             logger.warning(f"user_a2a_url timeout for conversation {self._conversation_id} ({e}); marking abandoned")
             return {"end": "user_timeout"}
+
+        if self._is_user_sim:
+            await self._save_user_sim_trajectory(number, user_task_id, user_a2a_task_id)
 
         user_state = (user_result.get("status") or {}).get("state")
         if user_state != TaskState.completed:
@@ -1123,8 +1211,30 @@ class _UserSide:
             return {"end": "user_done"}
         return {"message": [{"kind": "text", "text": message_text}]}
 
+    async def _save_user_sim_trajectory(self, number: int, user_task_id: str, user_a2a_task_id: str) -> None:
+        """Store the user-sim's own trajectory for this answer, when its card serves one, and record where it went.
+        Best-effort: a failed fetch is logged and the conversation goes on."""
+        card = self._user_sim.a2a_card or {}
+        traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        if not traj_ext:
+            return
+        prefix = self._step._trajectory_prefix().rstrip("/") + "/usersim/"
+        try:
+            url = await self._step._fetch_trajectory(
+                self._url, traj_ext, user_task_id, prefix, user_a2a_task_id,
+                card=card, sandbox_type=self._user_sim.sandbox_type,
+            )
+        except Exception as e:
+            logger.warning(f"user-sim trajectory fetch at turn {number} failed (continuing): {e}")
+            return
+        self._record("usersim_trajectories", {"turn": number, "a2a_task_id": user_a2a_task_id, "url": url})
+
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
+
+
+def _answer_text(answer: dict) -> str:
+    return "\n".join(p.get("text") or "" for p in answer.get("message") or [] if p.get("kind") == "text")
 
 
 def _trigger_answer(resp: dict) -> Optional[dict]:
