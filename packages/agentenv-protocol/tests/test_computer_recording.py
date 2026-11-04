@@ -188,6 +188,13 @@ async def test_a_start_answers_once_its_recording_has_its_first_frame_however_sl
         assert took >= 0.5 and recording.encoder is not None and recording.encoder.frames >= 1
         await http.post(END, json={"recording_id": started["recording_id"]})
 
+        recordings = driver._computer.recordings
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(recordings.start("cancelled", "display", None, 10, None, True, None), 0.1)
+        retried = await recordings.start("cancelled", "display", None, 10, None, True, None)
+        assert [rid for rid, r in recordings.running.items() if not r.done] == [retried["recording_id"]]
+        await http.post(END, json={"recording_id": retried["recording_id"]})
+
 
 @pytest.mark.asyncio
 async def test_a_driver_without_the_pointer_group_records_without_a_cursor(home):

@@ -34,6 +34,7 @@ from pydantic import AnyUrl
 
 if sys.platform != "darwin":
     from Xlib import display as x_display
+    from Xlib.error import ConnectionClosedError, DisplayConnectionError
 
 from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, resource, server_instructions
 from agentenv_protocol.computer import (
@@ -178,7 +179,7 @@ class CuaDriver(ComputerDriverEnvironment):
     @type_text
     async def type_in(self, text) -> None:
         if not MACOS and any(ord(ch) >= LATIN_1 for ch in text):
-            await asyncio.to_thread(self._x_keymap().hold, text)
+            await asyncio.to_thread(self._hold, text)
         await self._send("type_text", text=text)
 
     @press
@@ -200,6 +201,15 @@ class CuaDriver(ComputerDriverEnvironment):
     async def _rest(self, x: int, y: int) -> None:
         await self._send("move_cursor", x=x, y=y, **FOREGROUND)
         await asyncio.sleep(SETTLE_S)
+
+    def _hold(self, text: str) -> None:
+        """``text``'s characters on X's keymap, through a connection opened afresh once when X dropped the last, as it
+        does when it restarts."""
+        try:
+            self._x_keymap().hold(text)
+        except (ConnectionClosedError, DisplayConnectionError, OSError):
+            self._keymap = None
+            self._x_keymap().hold(text)
 
     def _x_keymap(self) -> _Keymap:
         if self._keymap is None:

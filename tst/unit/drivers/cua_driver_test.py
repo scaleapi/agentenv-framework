@@ -126,8 +126,12 @@ def module(monkeypatch):
     xlib = types.ModuleType("Xlib")
     xlib.display = types.ModuleType("Xlib.display")
     xlib.display.Display = FakeKeymap
+    xlib.error = types.ModuleType("Xlib.error")
+    xlib.error.ConnectionClosedError = type("ConnectionClosedError", (Exception,), {})
+    xlib.error.DisplayConnectionError = type("DisplayConnectionError", (Exception,), {})
     monkeypatch.setitem(sys.modules, "Xlib", xlib)
     monkeypatch.setitem(sys.modules, "Xlib.display", xlib.display)
+    monkeypatch.setitem(sys.modules, "Xlib.error", xlib.error)
     spec = importlib.util.spec_from_file_location("cua_driver_driver", DRIVER)
     loaded = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loaded)
@@ -195,6 +199,8 @@ async def test_characters_off_x11s_keymap_are_kept_on_spare_keycodes_before_cua_
         module, daemon, monkeypatch):
     monkeypatch.setattr(module, "MACOS", False)
     monkeypatch.setattr(module, "x_display", sys.modules["Xlib.display"], raising=False)
+    for name in ("ConnectionClosedError", "DisplayConnectionError"):
+        monkeypatch.setattr(module, name, getattr(sys.modules["Xlib.error"], name), raising=False)
     driver = module.CuaDriver()
     oe, east, capital = 0xF6, 0x1000000 | ord("東"), 0x1000000 | ord("京")
 
@@ -206,7 +212,13 @@ async def test_characters_off_x11s_keymap_are_kept_on_spare_keycodes_before_cua_
     assert keymap.keys[103] == (capital, capital) and keymap.keys[104] == (east, east)
     await driver.type_in("東京ö")
     assert keymap.keys[103] == keymap.keys[104] == (0, 0) and not driver._keymap.ours
-    assert [r["text"] for name, r in daemon.calls() if name == "type_text"] == ["Wörld", "東", "京", "東京ö"]
+
+    def dropped(*args):
+        raise sys.modules["Xlib.error"].ConnectionClosedError("X restarted")
+    monkeypatch.setattr(keymap, "get_keyboard_mapping", dropped)
+    await driver.type_in("ö")
+    assert driver._keymap.d is not keymap and driver._keymap.d.keys[103] == (oe, oe)
+    assert [r["text"] for name, r in daemon.calls() if name == "type_text"] == ["Wörld", "東", "京", "東京ö", "ö"]
 
 
 @pytest.mark.asyncio

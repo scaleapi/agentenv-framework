@@ -163,12 +163,12 @@ class Recordings:
             self.running[recording_id] = recording
             recording.task = asyncio.create_task(recording.run())
             recording.timer = asyncio.get_running_loop().call_later(features.max_duration_s, recording.expire)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(recording.live.wait(), FIRST_FRAME_S)
             answer = {"recording_id": recording_id, "started_at": _iso(recording.requested_at), "format": MP4}
             self.started[request_id] = answer
             while len(self.started) > KEEP_STARTED:
                 self.started.popitem(last=False)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(recording.live.wait(), FIRST_FRAME_S)
             return answer
 
     async def end(self, recording_id: str, upload: Optional[dict], reason: str) -> dict:
