@@ -8,12 +8,13 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import time
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
-from agent_env.artifact import Artifact
+from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway import gateway as gw_mod
@@ -217,6 +218,16 @@ async def test_what_teardown_collects_is_saved_to_the_runs_stored_instance(gatew
     assert stored == context.metadata[TRAFFIC_KEY] and stored["notes-env"]["state"] == "collected"
 
 
+async def _saved(instance_id: str, timeout_s: float = 10.0) -> dict:
+    """The run's saved ``traffic_captures`` entries, once a save teardown left running has landed."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        stored = find_task_instance(instance_id).context.get("metadata", {}).get(TRAFFIC_KEY)
+        if stored is not None or asyncio.get_running_loop().time() > deadline:
+            return stored
+        await asyncio.sleep(0.05)
+
+
 @pytest.mark.asyncio
 async def test_what_teardown_collected_before_its_time_ran_out_is_still_saved_to_the_run(gateway, monkeypatch):
     instance = get_task_instance_store().create_instance("task-1", 1, total_steps=1)
@@ -234,7 +245,7 @@ async def test_what_teardown_collected_before_its_time_ran_out_is_still_saved_to
         async with asyncio.timeout(1):
             await collect_uncollected_captures(context, context.deployed_envs)
 
-    stored = find_task_instance(instance.instance_id).context["metadata"][TRAFFIC_KEY]
+    stored = await _saved(instance.instance_id)
     assert stored["notes-env"]["state"] == "collected" and "slow-env" not in stored
 
 
@@ -260,11 +271,60 @@ async def test_a_collection_stopped_partway_keeps_the_files_it_stored_linked_as_
     assert entry["state"] == "partial" and entry["files"] == ["notes-website-backend-00.pcap"]
     universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
     assert sorted(universe.get_file_artifacts()) == ["notes-website-backend-00.pcap"]
-    assert find_task_instance(instance.instance_id).context["metadata"][TRAFFIC_KEY]["notes-env"] == entry
+    assert (await _saved(instance.instance_id))["notes-env"] == entry
 
     monkeypatch.setattr(traffic_capture_module, "fetch_traffic_capture", real)
     await collect_uncollected_captures(context, context.deployed_envs)
     assert context.metadata[TRAFFIC_KEY]["notes-env"]["state"] == "collected"
+
+
+@pytest.mark.asyncio
+async def test_a_slow_document_store_doesnt_hold_teardowns_time_and_what_was_stored_still_lands(gateway, monkeypatch):
+    instance = get_task_instance_store().create_instance("task-1", 1, total_steps=1)
+    context = _context(_deployed())
+    context.instance_id = instance.instance_id
+    store = get_artifact_store()
+    real, stored = store.put_document, []
+
+    def slow_put(document):
+        if isinstance(document, FileArtifact):
+            if stored:
+                time.sleep(2)
+            stored.append(document.id)
+        return real(document)
+
+    monkeypatch.setattr(store, "put_document", slow_put)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.5):
+            await collect_uncollected_captures(context, context.deployed_envs)
+
+    assert time.monotonic() - started < 1.5
+    entry = (await _saved(instance.instance_id))["notes-env"]
+    assert entry["state"] == "partial" and entry["files"] == ["notes-website-backend-00.pcap"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_run_save_doesnt_hold_teardowns_time_and_still_lands(gateway, monkeypatch):
+    from agent_env.task import store as task_store
+
+    instance = get_task_instance_store().create_instance("task-1", 1, total_steps=1)
+    context = _context(_deployed())
+    context.instance_id = instance.instance_id
+    real = task_store.record_context_metadata
+
+    def slow_record(*args):
+        time.sleep(2)
+        real(*args)
+
+    monkeypatch.setattr(task_store, "record_context_metadata", slow_record)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(1):
+            await collect_uncollected_captures(context, context.deployed_envs)
+
+    assert time.monotonic() - started < 2
+    assert (await _saved(instance.instance_id))["notes-env"]["state"] == "collected"
 
 
 @pytest.mark.asyncio

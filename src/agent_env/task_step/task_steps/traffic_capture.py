@@ -6,6 +6,8 @@ didn't, a retry's rolled-back ones included, before the env closes (``collect_un
 isn't lost with its VM, and saves what it recorded to the run's stored instance."""
 from __future__ import annotations
 
+import asyncio
+import copy
 import functools
 import logging
 import os
@@ -39,6 +41,7 @@ logger = logging.getLogger(__name__)
 #: ``context.metadata[TRAFFIC_KEY][env_id]``: each env whose captures a run collected, or tried to.
 TRAFFIC_KEY = "traffic_captures"
 _ARTIFACT_TYPE = "traffic_captures"
+_SAVING: set[asyncio.Future] = set()
 _ERROR_CHARS = 500
 
 
@@ -100,11 +103,31 @@ async def collect_uncollected_captures(context: TaskStepContext, envs: Sequence[
             if captures_traffic(deployed) and (entries.get(key) or {}).get("state") != "collected":
                 tried = True
                 await collect_captures(context, deployed, key=key)
-    finally:
-        if tried and context.instance_id and TRAFFIC_KEY in context.metadata:
-            from agent_env.task.store import record_context_metadata
+    except BaseException:
+        if tried:
+            _save_in_background(context)
+        raise
+    if tried:
+        await _save(context)
 
-            record_context_metadata(context.instance_id, TRAFFIC_KEY, context.metadata[TRAFFIC_KEY])
+
+async def _save(context: TaskStepContext) -> None:
+    """Save the run's ``traffic_captures`` entries to its stored instance on a worker thread, which finishes the
+    write even when teardown's time runs out while it waits."""
+    if context.instance_id and TRAFFIC_KEY in context.metadata:
+        from agent_env.task.store import record_context_metadata
+
+        await finish_on_thread(functools.partial(record_context_metadata, context.instance_id, TRAFFIC_KEY,
+                                                 copy.deepcopy(context.metadata[TRAFFIC_KEY])),
+                               f"Saving the traffic captures of task instance {context.instance_id}")
+
+
+def _save_in_background(context: TaskStepContext) -> None:
+    """Start ``_save`` without waiting for it, as a collection teardown's time ran out on does, so the entries
+    collected by then are saved while teardown goes on to terminate the sandboxes."""
+    saving = asyncio.ensure_future(_save(context))
+    _SAVING.add(saving)
+    saving.add_done_callback(_SAVING.discard)
 
 
 def rolled_back_deployments(context: TaskStepContext) -> list[tuple[str, DeployedEnv]]:
@@ -122,9 +145,9 @@ async def collect_captures(context: TaskStepContext, deployed: DeployedEnv, *, k
     """Store each capture ``deployed`` serves as a pcap FileArtifact, register them as one FileArtifactUniverse, and
     record it in ``context.metadata[TRAFFIC_KEY][key]``, by default its env_id. Each file is named for its container
     and its place among that container's files, oldest first, so they read in the order their packets were captured.
-    Never raises: the entry, which it also returns, says what happened. A collection that stops partway, failed or
-    cancelled, still registers the files it stored by then and records them as ``partial``, which teardown collects
-    again."""
+    Never raises: the entry, which it also returns, says what happened. Each file stored is registered in the universe
+    as it lands, every store write on a worker thread, so a collection that stops partway, failed or cancelled, keeps
+    the files it stored by then recorded as ``partial``, which teardown collects again."""
     key = key or deployed.env_id
     entries = context.metadata.setdefault(TRAFFIC_KEY, {})
     try:
@@ -147,7 +170,7 @@ async def _store(context: TaskStepContext, deployed: DeployedEnv, captures: list
     get_config().check_local_run_write(universe_id)
     store = get_artifact_store()
     prefix = store.attempt_prefix(_ARTIFACT_TYPE, universe_id)
-    files, total, seen = {}, 0, {}
+    files, total, seen, artifact = {}, 0, {}, None
     try:
         for capture in captures:
             container = capture.container
@@ -164,26 +187,31 @@ async def _store(context: TaskStepContext, deployed: DeployedEnv, captures: list
             url = await finish_on_thread(functools.partial(_upload, universe_id, prefix + filename, path),
                                          f"Uploading traffic capture {filename} of env {deployed.env_id!r}",
                                          if_never_run=functools.partial(_remove, path))
-            files[filename] = store.put_document(FileArtifact(
+            document = FileArtifact(
                 id=derive_id(universe_id, filename), filename=filename, content_type=PCAP_MEDIA_TYPE, object_url=url,
-                description=f"Traffic capture of {container} in env {deployed.env_id!r}, task instance {context.instance_id}"))
+                description=f"Traffic capture of {container} in env {deployed.env_id!r}, task instance {context.instance_id}")
+            files[filename] = await finish_on_thread(functools.partial(store.put_document, document),
+                                                     f"Storing traffic capture {filename} of env {deployed.env_id!r}")
+            artifact = await finish_on_thread(functools.partial(_register, universe_id, dict(files)),
+                                              f"Registering the traffic captures of env {deployed.env_id!r}")
+            context.metadata[TRAFFIC_KEY][key] = _entry("partial", artifact, files, total, seen)
     except BaseException as e:
-        if files:
-            context.metadata[TRAFFIC_KEY][key] = {**_entry(universe_id, files, total, seen), "state": "partial",
+        if artifact is not None:
+            context.metadata[TRAFFIC_KEY][key] = {**_entry("partial", artifact, files, total, seen),
                                                   "error": _failed(e)["error"]}
         raise
     logger.info("collect_traffic_capture %s: %d capture files, %d bytes", deployed.env_id, len(files), total)
-    return _entry(universe_id, files, total, seen)
+    return _entry("collected", artifact, files, total, seen)
 
 
-def _entry(universe_id: str, files: dict, total: int, seen: dict) -> dict:
-    """The ``collected`` entry of ``files``, registered as one FileArtifactUniverse when there are any."""
-    artifact = None
-    if files:
-        universe = FileArtifactUniverse.put(id=universe_id, file_artifacts=files)
-        artifact = {"id": universe.id, "version": universe.version}
-    return {"state": "collected", "artifact": artifact, "files": sorted(files), "bytes": total,
-            "containers": sorted(seen)}
+def _register(universe_id: str, files: dict) -> dict:
+    """Register ``files`` as the next version of the FileArtifactUniverse ``universe_id``."""
+    universe = FileArtifactUniverse.put(id=universe_id, file_artifacts=files)
+    return {"id": universe.id, "version": universe.version}
+
+
+def _entry(state: str, artifact: Optional[dict], files: dict, total: int, seen: dict) -> dict:
+    return {"state": state, "artifact": artifact, "files": sorted(files), "bytes": total, "containers": sorted(seen)}
 
 
 def _upload(universe_id: str, object_url: str, path: str) -> str:
