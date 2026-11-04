@@ -50,6 +50,8 @@ BLOCK = 2
 AGENTENV, UNKNOWN, EXIT, STOP = "agentenv", "unknown", "exit", "stop"
 #: How long the active tab's check waits on each page.
 ACTIVE_CHECK_TIMEOUT_S = 2.0
+#: How often a call that waits for the browser to be ready checks it.
+READY_POLL_S = 0.5
 #: How long a tab opened headless may take to be attached and held to its window's size.
 PIN_TIMEOUT_S = 10.0
 #: How much of a download each read hashes.
@@ -865,8 +867,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         if self.cdp_tokens.address(token) is None:
             return JSONResponse({"error": "agentenv didn't mint this CDP address"}, status_code=403)
         try:
+            version = await self.devtools.call("Browser.getVersion")
             if request.url.path.rstrip("/").endswith("/json/version"):
-                version = await self.devtools.call("Browser.getVersion")
                 return JSONResponse({
                     "Browser": version.get("product"), "Protocol-Version": version.get("protocolVersion"),
                     "User-Agent": version.get("userAgent"), "V8-Version": version.get("jsVersion"),
@@ -893,7 +895,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         while not await self.devtools_answers():
             if asyncio.get_running_loop().time() > deadline:
                 raise DeviceUnavailable(f"the browser isn't ready after {timeout_s:g} s")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(READY_POLL_S)
 
     @extension(BROWSER, op="page/viewport", method="GET")
     async def browser_page_viewport(self) -> dict:

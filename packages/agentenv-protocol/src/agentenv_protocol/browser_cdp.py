@@ -101,11 +101,13 @@ class Tokens:
 
 
 class _Connection:
-    """One client's WebSocket and the sessions it holds over the pipe: its browser-level one and those it attached."""
+    """One client's WebSocket, the sessions it holds over the pipe (its browser-level one and those it attached) and
+    its commands the browser hasn't answered yet."""
 
     def __init__(self, websocket: WebSocket, user: str, session: str) -> None:
         self.websocket, self.user, self.session = websocket, user, session
         self.sessions = {session}
+        self.commands: set[asyncio.Future] = set()
         self.outbox: asyncio.Queue[Optional[dict]] = asyncio.Queue()
 
 
@@ -141,12 +143,17 @@ class Relay:
                 if message["type"] == "websocket.disconnect":
                     break
                 text = message.get("text") if message.get("text") is not None else message["bytes"].decode()
-                asyncio.ensure_future(self._command(connection, json.loads(text)))
+                command = asyncio.ensure_future(self._command(connection, json.loads(text)))
+                connection.commands.add(command)
+                command.add_done_callback(connection.commands.discard)
         except (WebSocketDisconnect, ValueError):
             pass
         finally:
             record["closed_at"] = _now()
             self._end(connection)
+            for command in list(connection.commands):
+                command.cancel()
+            await asyncio.gather(*connection.commands, return_exceptions=True)
             connection.outbox.put_nowait(None)
             await asyncio.gather(sending, return_exceptions=True)
             with contextlib.suppress(Exception):

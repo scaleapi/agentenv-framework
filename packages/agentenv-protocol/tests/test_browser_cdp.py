@@ -38,10 +38,11 @@ class Browser(WebsiteBrowserEnvironment):
 
 class Pipe:
     """A browser's pipe: each connection's browser-level session ``b<n>``, an attach on a session making its child
-    ``<session>-c`` and saying so on that session, ``Boom`` failing, anything else echoed; every request recorded."""
+    ``<session>-c`` and saying so on that session, ``Boom`` failing, ``Hang`` never answered, anything else echoed;
+    every request recorded, and each ``Hang`` given up."""
 
     def __init__(self) -> None:
-        self.listeners, self.sent, self.sessions = [], [], 0
+        self.listeners, self.sent, self.sessions, self.given_up = [], [], 0, []
 
     def listen(self, listener) -> None:
         self.listeners.append(listener)
@@ -66,6 +67,12 @@ class Pipe:
             return {"result": {"sessionId": child}}
         if method == "Boom":
             return {"error": {"code": -32000, "message": "boom"}}
+        if method == "Hang":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.given_up.append(method)
+                raise
         return {"result": {"method": method, "session": session_id}}
 
 
@@ -115,7 +122,7 @@ def test_a_users_token_is_minted_once_kept_by_hash_and_still_known_after_a_resta
 
 
 @pytest.mark.asyncio
-async def test_each_connection_gets_its_own_browser_session_and_only_its_own_answers_and_events():
+async def test_each_connection_gets_its_own_browser_session_its_own_answers_and_events_and_its_commands_end_with_it():
     async with _relay() as (pipe, relay, base):
         async with connect(f"{base}/ada") as ada, connect(f"{base}/bob") as bob:
             mine = await _ask(ada, {"id": 1, "method": "Browser.getVersion"})
@@ -127,6 +134,7 @@ async def test_each_connection_gets_its_own_browser_session_and_only_its_own_ans
             child = await _ask(ada, {"id": 3, "method": "Runtime.evaluate", "sessionId": "b1-c"})
             refused = await _ask(bob, {"id": 4, "method": "Runtime.evaluate", "sessionId": "b1-c"})
             failed = await _ask(ada, {"id": 5, "method": "Boom"})
+            await ada.send(json.dumps({"id": 6, "method": "Hang"}))
             pipe.emit({"method": "Page.loadEventFired", "sessionId": "b1-c", "params": {}})
             pipe.emit({"method": "Target.targetCreated", "sessionId": "b2", "params": {}})
             pipe.emit({"method": "Page.frameNavigated", "params": {}})
@@ -148,11 +156,12 @@ async def test_each_connection_gets_its_own_browser_session_and_only_its_own_ans
     assert (closed.value.rcvd.code, closed.value.rcvd.reason) == browser_cdp.RELAUNCHED
     assert [(c["user"], "closed_at" in c) for c in relay.connections] == [("ada", True), ("bob", True)]
     assert ("Target.detachFromTarget", None) in pipe.sent
+    assert pipe.given_up == ["Hang"]
 
 
 @pytest.mark.asyncio
-async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and_refuse_other_tokens(monkeypatch,
-                                                                                                      tmp_path):
+async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and_refuse_other_tokens_or_a_gone_browser(
+        monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(app, "detect", lambda: Platform(os="linux", display="none"))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -169,6 +178,9 @@ async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and
         return {"product": "HeadlessChrome/156.0.8078.4", "protocolVersion": "1.3", "userAgent": "UA",
                 "jsVersion": "15.6", "revision": "@abc"}
 
+    async def gone(method, params=None, *, session_id=None, timeout_s=None):
+        raise ConnectionError("the browser closed its debugging pipe")
+
     async def tabs():
         return [{"id": "T1", "url": "https://site.test/", "title": "Site", "active": True}]
 
@@ -184,13 +196,15 @@ async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and
         listed = (await http.get(f"{root}json/list")).json()
         refused = await http.get("/cdp/guess/json/version")
         card = (await http.get("/.well-known/agent-env.json")).json()
+        monkeypatch.setattr(browser.devtools, "call", gone)
+        unanswered = await http.get(f"{root}json/list")
 
     assert again == ada and ada["ws_url"].startswith("wss://computer.test:443/svc/chromium/cdp/")
     assert version["Browser"] == "HeadlessChrome/156.0.8078.4"
     assert version["webSocketDebuggerUrl"] == f"wss://seen.test/svc/chromium{root}devtools/browser"
     assert listed == [{"id": "T1", "type": "page", "title": "Site", "url": "https://site.test/", "description": "",
                        "devtoolsFrontendUrl": ""}]
-    assert refused.status_code == 403
+    assert refused.status_code == 403 and unanswered.status_code == 503
     computer_app_params = next(e["params"] for e in card["capabilities"]["extensions"]
                                if e["uri"] == "urn:agentenv:computer-app/v1")
     browser_methods = next(e["params"]["methods"] for e in card["capabilities"]["extensions"]
