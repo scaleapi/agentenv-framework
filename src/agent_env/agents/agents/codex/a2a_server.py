@@ -19,6 +19,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -235,6 +236,8 @@ class CodexConfig(AgentConfig):
     project_id: str | None = None
     task_id: str | None = None
     timeout_seconds: int = 1800
+    # Which of the CLI's own tools it may use. With any selection, the MCP tools agent-env gives it stay.
+    builtin_tools: codex_config.CodexTools | None = None
 
 
 @asynccontextmanager
@@ -666,6 +669,15 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
 
                 try:
                     await codex_config.write_mcp_servers(request.mcp_servers)
+                    # The catalog read a selection may need counts against the turn's time limit.
+                    started = time.monotonic()
+                    catalog = await codex_config.catalog_overrides(cfg.builtin_tools, cfg.timeout_seconds)
+                    remaining_s = cfg.timeout_seconds
+                    if catalog:
+                        remaining_s -= time.monotonic() - started
+                        if remaining_s <= 0:
+                            raise RuntimeError(
+                                f"no time left of the turn's {cfg.timeout_seconds}s after the catalog read")
                     async with _workspace_barrier.shared():
                         result = await run_codex(
                             prompt=prompt,
@@ -674,12 +686,14 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             effort=cfg.effort,
                             system_prompt=cfg.system_prompt,
                             output_format=cfg.output_format,
-                            timeout_s=cfg.timeout_seconds,
+                            timeout_s=remaining_s,
                             # Forward LiteLLM attribution per subprocess.
                             project_id=cfg.project_id,
                             task_id=cfg.task_id,
                             event_callback=_record_event,
-                            config_overrides=codex_config.role_overrides(request.mcp_servers, cfg.role),
+                            config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
+                                              *codex_config.builtin_tools_overrides(cfg.builtin_tools),
+                                              *catalog],
                         )
                 except Exception as e:
                     logger.error(f"codex CLI invocation raised: {e}", exc_info=True)

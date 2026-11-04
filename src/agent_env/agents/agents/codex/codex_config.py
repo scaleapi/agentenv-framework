@@ -14,9 +14,10 @@ import stat
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomli_w
+from pydantic import BaseModel, ConfigDict, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,120 @@ _ROLE_VARIABLE = "AGENTENV_ROLE"
 # Codex hands a stdio MCP server only a few of its own variables; these tell mcp-remote, a Node client, which
 # certificates to trust.
 _TRUST_ENV = ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE")
+
+# The CLI version CodexTool names the tools of; a test holds it to package.json's @openai/codex.
+TOOLS_CLI_VERSION = "0.147.0"
+# The CLI's own tools, by the names its model sees, that a selection can turn off. Some only go together, as one
+# setting turns them on: the shell's two, the six collaboration tools `multi_agent_v2` brings, and the three goal tools.
+# `apply_patch` is turned off through the model catalog (`catalog_overrides`), the others by `_TOOL_SWITCHES`. Left out:
+# the MCP tools (`tool_search`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`) that come
+# with MCP servers.
+CodexTool = Literal["apply_patch", "create_goal", "exec_command", "followup_task", "get_goal", "interrupt_agent",
+                    "list_agents", "request_user_input", "send_message", "spawn_agent", "update_goal", "update_plan",
+                    "view_image", "wait_agent", "web_search", "write_stdin"]
+# Each setting that turns some of the CLI's tools off: those tools, and the `-c` overrides that turn them off. Turning
+# off `multi_agent_v2` alone would bring back the v1 collaboration tools behind `tool_search`, so both go.
+_TOOL_SWITCHES: tuple[tuple[frozenset[str], tuple[str, ...]], ...] = (
+    (frozenset({"exec_command", "write_stdin"}), ("features.shell_tool=false",)),
+    (frozenset({"update_plan"}), ("tools.update_plan.enabled=false",)),
+    (frozenset({"request_user_input"}), ("tools.experimental_request_user_input.enabled=false",)),
+    (frozenset({"view_image"}), ("features.view_image=false",)),
+    (frozenset({"followup_task", "interrupt_agent", "list_agents", "send_message", "spawn_agent", "wait_agent"}),
+     ("features.multi_agent_v2=false", "features.multi_agent=false")),
+    (frozenset({"create_goal", "get_goal", "update_goal"}), ("features.goals=false",)),
+    (frozenset({"web_search"}), ('web_search="disabled"',)),
+)
+
+
+class CodexTools(BaseModel):
+    """The protocol's ``BuiltinTools[CodexTool]``, which the image's protocol floor doesn't have yet: the same fields
+    and checks, so the card's schema is the same. A list must name all the tools of a setting or none of them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disable: Literal["*"] | list[CodexTool] | None = None
+    only: list[CodexTool] | None = None
+
+    @model_validator(mode="after")
+    def _one_of(self) -> CodexTools:
+        if (self.disable is None) == (self.only is None):
+            raise ValueError("builtin_tools takes exactly one of disable and only")
+        named = set(self.only if self.only is not None else [] if self.disable == "*" else self.disable)
+        for tools, _ in _TOOL_SWITCHES:
+            if named & tools and not tools <= named:
+                raise ValueError(f"codex turns {', '.join(sorted(tools))} on and off together: name all or none")
+        return self
+
+
+def builtin_tools_overrides(builtin_tools: CodexTools | None) -> list[str]:
+    """The `-c` overrides that turn off the CLI's own tools a selection doesn't keep; none without one. The MCP
+    tools agent-env gives the agent stay with any selection."""
+    if builtin_tools is None:
+        return []
+    if builtin_tools.only is not None:
+        off = [tools for tools, _ in _TOOL_SWITCHES if not tools <= set(builtin_tools.only)]
+    elif builtin_tools.disable == "*":
+        off = [tools for tools, _ in _TOOL_SWITCHES]
+    else:
+        off = [tools for tools, _ in _TOOL_SWITCHES if tools <= set(builtin_tools.disable)]
+    return [override for tools, overrides in _TOOL_SWITCHES if tools in off for override in overrides]
+
+
+# No setting turns off `apply_patch`: a model's entry in the CLI's model catalog offers it when its
+# `apply_patch_tool_type` is set, as it is for every GPT model 0.147.0 ships with. A selection without it points the CLI,
+# with `model_catalog_json`, at a copy of the catalog it would use whose models all have the field null. The copy is
+# made from the installed CLI's own catalog each time, so it follows the pinned version.
+CATALOG_WITHOUT_APPLY_PATCH = "model_catalog_without_apply_patch.json"
+_CATALOG_TIMEOUT_S = 60
+# How much of `codex debug models`' stderr a failed catalog read keeps in its error.
+_CATALOG_STDERR_CHARS = 500
+
+
+def removes_apply_patch(builtin_tools: CodexTools | None) -> bool:
+    """Whether a selection turns `apply_patch` off; never without one."""
+    if builtin_tools is None:
+        return False
+    if builtin_tools.only is not None:
+        return "apply_patch" not in builtin_tools.only
+    return builtin_tools.disable == "*" or "apply_patch" in builtin_tools.disable
+
+
+async def _catalog(timeout_s: float) -> dict[str, Any]:
+    """The model catalog the CLI uses: the file config.toml's `model_catalog_json` names (relative to CODEX_HOME, as
+    the CLI reads it), or else the one the installed CLI ships with, from `codex debug models --bundled`."""
+    configured = _read().get("model_catalog_json")
+    if configured:
+        return json.loads((_config_path().parent / Path(configured).expanduser()).read_text())
+    process = await asyncio.create_subprocess_exec(
+        "codex", "debug", "models", "--bundled", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
+    except (TimeoutError, asyncio.CancelledError) as e:
+        # A turn cancelled or out of time mid-read must not leave the child running.
+        if process.returncode is None:
+            process.kill()
+            await asyncio.shield(process.wait())
+        if isinstance(e, asyncio.CancelledError):
+            raise
+        raise RuntimeError(f"codex debug models gave no catalog within {timeout_s:.0f}s") from None
+    if process.returncode != 0:
+        tail = stderr.decode(errors="replace")[-_CATALOG_STDERR_CHARS:]
+        raise RuntimeError(f"codex debug models exited {process.returncode}: {tail}")
+    return json.loads(stdout)
+
+
+async def catalog_overrides(builtin_tools: CodexTools | None, timeout_s: float = _CATALOG_TIMEOUT_S) -> list[str]:
+    """The `-c` override that points the CLI at a catalog copy without `apply_patch`, when the selection turns it off;
+    none otherwise. Raises when the catalog can't be read, so a turn never gets the tool its selection turned off."""
+    if not removes_apply_patch(builtin_tools):
+        return []
+    catalog = await _catalog(min(timeout_s, _CATALOG_TIMEOUT_S))
+    for model in catalog["models"]:
+        model["apply_patch_tool_type"] = None
+    path = _config_path().with_name(CATALOG_WITHOUT_APPLY_PATCH)
+    async with _write_lock:
+        _replace(path, json.dumps(catalog, ensure_ascii=False))
+    return [f"model_catalog_json={json.dumps(str(path))}"]
 
 
 def _config_path() -> Path:
@@ -46,12 +161,15 @@ def _write(cfg: dict[str, Any]) -> bool:
     """Replace config.toml whole, never truncating it in place: a codex CLI starting in
     another context reads it at launch. Unchanged content is left alone. Returns whether
     the file was written."""
-    path = _config_path()
+    return _replace(_config_path(), tomli_w.dumps(cfg))
+
+
+def _replace(path: Path, text: str) -> bool:
+    """Replace a file under CODEX_HOME whole, unless its content is already ``text``; see `_write`."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = tomli_w.dumps(cfg)
     if path.exists() and path.read_text() == text:
         return False
-    # It carries MCP and model headers: keep the existing file's permissions (owner-only when new).
+    # config.toml carries MCP and model headers: keep the existing file's permissions (owner-only when new).
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     staged = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with os.fdopen(os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w") as handle:

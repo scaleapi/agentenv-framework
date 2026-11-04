@@ -27,8 +27,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
+from pydantic import BaseModel, ConfigDict, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,32 @@ MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
 # under $HOME so host-mode instances don't share session state.
 SESSIONS_ROOT = os.environ.get("OPENCODE_SESSIONS_ROOT") or os.path.join(os.environ.get("HOME", "/data"), "sessions")
 _CLI_TIMEOUT_S = 120
+
+# The CLI version OpenCodeTool names the tools of; a test holds it to package.json's opencode-ai.
+TOOLS_CLI_VERSION = "1.17.18"
+# The CLI's own tools, by the permission names that remove them from the model's tool list. `edit` covers `write` and
+# `apply_patch` too, which the CLI offers in its place for some models, so neither can be selected alone. `question`
+# is left out: it is denied on every turn, so a headless run never waits for a human. Which tools the CLI offers by
+# default depends on the model and its flags (`lsp`, `websearch` and `plan_exit` are off by default), and its MCP
+# resource tools come only with MCP servers, under `read`.
+OpenCodeTool = Literal["bash", "edit", "glob", "grep", "lsp", "plan_exit", "read", "skill", "task", "todowrite",
+                       "webfetch", "websearch"]
+
+
+class OpenCodeTools(BaseModel):
+    """The protocol's ``BuiltinTools[OpenCodeTool]``, which the image's protocol floor doesn't have yet: the same
+    fields and checks, so the card's schema is the same."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disable: Literal["*"] | list[OpenCodeTool] | None = None
+    only: list[OpenCodeTool] | None = None
+
+    @model_validator(mode="after")
+    def _one_of(self) -> OpenCodeTools:
+        if (self.disable is None) == (self.only is None):
+            raise ValueError("builtin_tools takes exactly one of disable and only")
+        return self
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
@@ -196,6 +224,40 @@ def _mcp_headers(headers: Mapping[str, str] | None, role: str | None) -> dict[st
     return merged
 
 
+def _mcp_tool_prefix(server: str) -> str:
+    """The prefix of the names the CLI gives a server's tools: ``<server>_<tool>``, each part with every character
+    but letters, digits, ``_`` and ``-`` replaced by ``_``, as opencode-ai 1.17.18 names them."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", server) + "_"
+
+
+# The permissions opencode-ai 1.17.18 asks that aren't the name of a tool, and that its own defaults set.
+_NON_TOOL_PERMISSIONS = ("external_directory", "doom_loop")
+
+
+def _permission(builtin_tools: OpenCodeTools | None, mcp_servers: dict[str, dict] | None) -> dict[str, str]:
+    """The config's ``permission``: which tools the CLI offers the model. A denied tool is left out of the model's
+    tool list, not only refused when called. Without a selection every tool is allowed; ``{"disable": "*"}`` and
+    ``{"only": [...]}`` deny every tool but those named and the tools of ``mcp_servers``, which a ``"*"`` deny would
+    remove too; ``{"disable": [...]}`` denies those alone. ``question`` is denied in every case, and last, since the
+    CLI applies the last rule that matches a tool.
+
+    A ``"*"`` deny would also deny the CLI's checks that aren't tools: ``external_directory``, which every file tool
+    asks before it touches a path outside the run directory, and ``doom_loop``, which it asks when the model repeats
+    a call. Those stay allowed, as ``"*": "allow"`` leaves them, so a kept tool works as it does without a
+    selection."""
+    if builtin_tools is None:
+        return {"*": "allow", "question": "deny"}
+    if isinstance(builtin_tools.disable, list):
+        return {"*": "allow", **{tool: "deny" for tool in builtin_tools.disable}, "question": "deny"}
+    return {
+        "*": "deny",
+        **{check: "allow" for check in _NON_TOOL_PERMISSIONS},
+        **{tool: "allow" for tool in builtin_tools.only or []},
+        **{f"{_mcp_tool_prefix(name)}*": "allow" for name in mcp_servers or {}},
+        "question": "deny",
+    }
+
+
 def _build_config(
     model: str,
     mcp_servers: dict[str, dict] | None,
@@ -204,6 +266,7 @@ def _build_config(
     effort: str | None = None,
     environ: Mapping[str, str] = os.environ,
     instructions: list[str] | None = None,
+    builtin_tools: OpenCodeTools | None = None,
 ) -> dict:
     """Assemble the inline OpenCode config passed via OPENCODE_CONFIG_CONTENT.
 
@@ -250,9 +313,10 @@ def _build_config(
             }
         },
         "model": f"litellm/{model}",
-        # Headless: allow every tool, hard-deny the "ask the human" tool so a
-        # run can never block waiting for input.
-        "permission": {"*": "allow", "question": "deny"},
+        # Headless: hard-deny the "ask the human" tool so a run can never block
+        # waiting for input; every other tool is allowed unless builtin_tools
+        # selects otherwise.
+        "permission": _permission(builtin_tools, mcp_servers),
         "autoupdate": False,
     }
     if instructions:
@@ -363,11 +427,13 @@ async def run_opencode(
     role: str | None = None,
     attachment_paths: list[str] | None = None,
     effort: str | None = None,
+    builtin_tools: OpenCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
 ) -> OpencodeResult:
     """Run one `opencode run` turn in ``workspace``. ``event_callback`` gets each JSON event as the CLI prints it:
-    exactly the events of the returned trajectory, in order."""
+    exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
+    ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection."""
     model = model or DEFAULT_MODEL
     attribution = _attribution_headers(project_id, task_id)
     if attribution:
@@ -385,7 +451,7 @@ async def run_opencode(
         )
 
     config = _build_config(model, mcp_servers, provider_headers(os.environ, attribution), role, effort,
-                           instructions=instructions)
+                           instructions=instructions, builtin_tools=builtin_tools)
 
     # Resume a specific session by id (multi-turn continuity). `--continue`
     # does NOT replay history to the model; `-s <session_id>` does. First turn
