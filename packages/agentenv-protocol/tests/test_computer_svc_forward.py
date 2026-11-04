@@ -1,8 +1,8 @@
 """The driver's /svc/<app>/ in front of an app's own server on its socket: a WebSocket is relayed both ways, with the
 subprotocol the app picks, until the app closes it with its code, and only with the control token and a Host that's a
-host; an answer streams through as the app sends it, 20 MB whole; every method and body goes on, and the caller's
-headers, and only those, pass on but for the hop-by-hop ones, the control token and any address the caller forwarded,
-which the driver sets as the one it was reached at."""
+host; an answer streams through as the app sends it, 20 MB whole; every method and body goes on to the path as it came,
+still escaped, and the caller's headers, and only those, pass on as their bytes but for the hop-by-hop ones, the
+control token and any address the caller forwarded, which the driver sets as the one it was reached at."""
 from __future__ import annotations
 
 import asyncio
@@ -51,12 +51,23 @@ class Echo(ComputerAppEnvironment):
         mcp.custom_route("/headers", methods=["GET"])(self._headers)
         mcp.custom_route("/upload", methods=["PUT", "DELETE"])(self._upload)
         mcp.custom_route("/big", methods=["GET"])(self._big)
-        mcp._custom_starlette_routes.append(WebSocketRoute("/echo", self._echo))
+        mcp.custom_route("/raw/{rest:path}", methods=["GET"])(self._raw)
+        mcp._custom_starlette_routes += [WebSocketRoute("/echo", self._echo), WebSocketRoute("/raw/{rest:path}",
+                                                                                             self._raw_socket)]
         return mcp
+
+    async def _raw(self, request: Request) -> Response:
+        return JSONResponse({"path": request.scope["raw_path"].decode(), "query": request.url.query})
+
+    async def _raw_socket(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_text(websocket.scope["raw_path"].decode())
+        await websocket.close()
 
     async def _headers(self, request: Request) -> Response:
         answer = JSONResponse({"host": request.headers.get("host"), "headers": dict(request.headers.items())})
-        for header in ("set-cookie: a=1", "set-cookie: b=2", "connection: x-secret", "x-secret: 1", "x-kept: 1"):
+        for header in ("set-cookie: a=1", "set-cookie: b=2", "connection: x-secret", "x-secret: 1", "x-kept: 1",
+                       'content-disposition: attachment; filename="报告.zip"'):
             name, _, value = header.partition(": ")
             answer.raw_headers.append((name.encode(), value.encode()))
         return answer
@@ -132,10 +143,14 @@ async def test_a_websocket_through_svc_reaches_the_app_both_ways_until_it_closes
                     pass
             refused.append(status.value.response.status_code)
         malformed = [await _handshake(url, host) for host in ("x/y", "[::1")]
+        async with connect(url.replace("http", "ws") + "/svc/echo/raw/a%3Fb",
+                           additional_headers=client.control_headers(TOKEN)) as socket:
+            raw = await socket.recv()
 
     assert hello == {"forwarded": "/svc/echo", "authorization": None} and subprotocol == "cdp"
     assert (text, data) == ("Page.navigate", b"\x03\x02\x01") and closed.value.rcvd.code == 4001
     assert refused == [403, 403, 403] and malformed == [b"HTTP/1.1 403 Forbidden", b"HTTP/1.1 403 Forbidden"]
+    assert raw == "/raw/a%3Fb"
 
 
 @pytest.mark.asyncio
@@ -168,6 +183,8 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
             put = (await http.put("/svc/echo/upload", content=payload)).json()
             deleted = (await http.delete("/svc/echo/upload")).json()
             refused = await httpx.AsyncClient(base_url=url).get("/svc/echo/headers")
+            utf8 = (await http.get("/svc/echo/headers", headers=[(b"x-name", "报告".encode())])).json()["headers"]
+            raw = (await http.get("/svc/echo/raw/a%3Fb%2Fc?q=1")).json()
             http.headers.clear()
             bare = (await http.get("/svc/echo/headers", headers=client.control_headers(TOKEN))).json()["headers"]
     got, host = seen.json()["headers"], url.removeprefix("http://")
@@ -181,6 +198,9 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
     assert put == {"method": "PUT", "bytes": 3 * MB, "sha256": hashlib.sha256(payload).hexdigest()}
     assert deleted["method"] == "DELETE" and deleted["bytes"] == 0 and refused.status_code == 401
     assert not {"accept", "accept-encoding", "user-agent"} & set(bare)
+    assert (b"content-disposition", 'attachment; filename="报告.zip"'.encode()) in seen.headers.raw
+    assert utf8["x-name"] == "报告".encode().decode("latin-1")
+    assert raw == {"path": "/raw/a%3Fb%2Fc", "query": "q=1"}
 
 
 async def _handshake(url: str, host: str) -> bytes:

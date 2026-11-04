@@ -55,9 +55,17 @@ def to_app(headers: Iterable[tuple[str, str]], host: str, scheme: str, prefix: s
 
 
 def target(connection: Request | WebSocket) -> str:
-    """The path and query a request under ``/svc/<name>/`` asks its app for."""
+    """The path and query a request under ``/svc/<name>/`` asks its app for, as it came: still percent-encoded, so an
+    escaped ``?``, ``#`` or ``/`` stays one."""
+    raw = (connection.scope.get("raw_path") or connection.scope["path"].encode()).decode("latin-1")
+    tail = raw[raw.find("/svc/") + len("/svc/"):].partition("/")[2]
     query = connection.url.query
-    return f"/{connection.path_params['path']}" + (f"?{query}" if query else "")
+    return f"/{tail}" + (f"?{query}" if query else "")
+
+
+def _bytes(headers: Iterable[tuple[str, str]]) -> list[tuple[bytes, bytes]]:
+    """Headers decoded as Latin-1, as Starlette and the helpers here hold them, as the bytes they came as."""
+    return [(name.encode("latin-1"), value.encode("latin-1")) for name, value in headers]
 
 
 def websocket_route(app: Any, path: str, endpoint: Callable) -> None:
@@ -79,7 +87,7 @@ async def forward(folder: Path, name: str, request: Request) -> Response:
                              timeout=None)
     http.headers.clear()
     try:
-        answer = await http.send(http.build_request(request.method, target(request), headers=headers,
+        answer = await http.send(http.build_request(request.method, target(request), headers=_bytes(headers),
                                                     content=request.stream() if has_body else None), stream=True)
     except (httpx.HTTPError, OSError) as e:
         await http.aclose()
@@ -100,8 +108,8 @@ async def forward(folder: Path, name: str, request: Request) -> Response:
             await close()
 
     response = StreamingResponse(streamed(), status_code=answer.status_code, background=BackgroundTask(close))
-    response.raw_headers = [(key.encode("latin-1"), value.encode("latin-1"))
-                            for key, value in passed_on(answer.headers.multi_items())]
+    response.raw_headers = _bytes(passed_on((name.decode("latin-1"), value.decode("latin-1"))
+                                            for name, value in answer.headers.raw))
     return response
 
 
@@ -113,7 +121,7 @@ async def relay(folder: Path, name: str, websocket: WebSocket) -> None:
     if not control_check()(websocket.headers) or (host and not HOST.fullmatch(host)):
         await websocket.close(code=1008)
         return
-    headers = [(key, value) for key, value in to_app(
+    headers = [(key, _utf8(value)) for key, value in to_app(
         websocket.headers.items(), host, "https" if websocket.url.scheme == "wss" else "http", f"/svc/{name}")
         if key.lower() != "host" and not key.lower().startswith("sec-websocket-")]
     offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
@@ -127,6 +135,12 @@ async def relay(folder: Path, name: str, websocket: WebSocket) -> None:
     async with upstream:
         await websocket.accept(subprotocol=upstream.subprotocol)
         await _both_ways(websocket, upstream)
+
+
+def _utf8(value: str) -> str:
+    """A header value decoded as Latin-1 as the string ``websockets`` sends as the same bytes, which it encodes as
+    UTF-8; bytes that aren't UTF-8 become replacement characters."""
+    return value.encode("latin-1").decode("utf-8", "replace")
 
 
 async def _both_ways(client: WebSocket, app: ClientConnection) -> None:
