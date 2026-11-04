@@ -513,8 +513,8 @@ async def test_two_cdp_agents_drive_one_browser_at_once_each_through_an_address_
         try:
             for name in ("solver", "buyer"):
                 await _connected(context, agent, browser_computer.id, name)
-            turns = await asyncio.gather(*(_opened_over_cdp(context, f"{name}-turn", name, DATA_PAGE)
-                                           for name in ("solver", "buyer") for _ in range(2)))
+            turns = await asyncio.gather(*(_opened_over_cdp(context, f"{name}-turn-{index}", name, DATA_PAGE)
+                                           for name in ("solver", "buyer") for index in range(2)))
             record = await _record(deployed)
         finally:
             report = await teardown_run(context)
