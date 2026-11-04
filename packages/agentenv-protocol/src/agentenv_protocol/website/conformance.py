@@ -14,14 +14,10 @@ headers wherever an answer shows them (on ``/`` and on a GET route with its trai
 redirect), and cookies tied to no domain, the session path's the one the card names. A failed one is a ``warning``.
 
 The round trip leaves the server's data as it found it, adding the export back when a step after the reset fails too.
-data/add sets the state a task starts from, so a server whose state shows changes since its initial state, as an SDK
-site's does, would have them folded into it, and data/reset drops a site's named sessions, which data/get doesn't
-export: the round trip is skipped for a server whose state shows changes or ``changed_sessions``. Its state is its
-card's ``website/v1`` ``state``, else, for a card without it, what the path its ``params.state.path`` names answers,
-else ``/go``'s, deprecated. The clock check leaves the server following a clock that is gone once the check ends, so a
-server it ran against keeps extrapolating from that clock's time until it's synced again. The checker's clock starts at
-``CLOCK_START``, far enough from wall time that a synced server shows it, and a synced server's ``X-Universe-Now`` may
-be ``CLOCK_SLACK_S`` seconds from it."""
+The clock check leaves the server following a clock that is gone once the check ends, so a server it ran against
+keeps extrapolating from that clock's time until it's synced again. The checker's clock starts at ``CLOCK_START``, far
+enough from wall time that a synced server shows it, and a synced server's ``X-Universe-Now`` may be ``CLOCK_SLACK_S``
+seconds from it."""
 from __future__ import annotations
 
 import argparse
@@ -42,9 +38,8 @@ from pydantic import ValidationError
 from ..client import find_extension, find_extension_method
 from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, iso, parse_time
-from .environment import DEFAULT_HEALTH_PATH, STATE_PATH
+from .environment import DEFAULT_HEALTH_PATH
 from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
-from .state import WEBSITE_STATE_OP
 
 Status = Literal["passed", "failed", "warning", "skipped"]
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
@@ -204,10 +199,6 @@ class _Checker:
         if missing:
             return "failed", f"the card's operations lack {', '.join(missing)}"
         exported = self._rpc(METHOD_GET).get("parts") or []
-        if where := self._changed_since_initial(card):
-            return "skipped", (f"data/get answered; {where} shows changes since the initial state, or named sessions "
-                               "with changes, which data/reset and data/add would fold in or drop, so the round trip "
-                               "was not run")
         self._rpc(METHOD_RESET)
         added_back = False
         try:
@@ -228,26 +219,6 @@ class _Checker:
         if again != exported:
             return "failed", "data/get after data/reset and data/add of its own export returned other data"
         return "passed", f"{len(exported)} part(s) round-tripped through reset and add"
-
-    def _changed_since_initial(self, card: dict) -> str | None:
-        """Where the server's state was read when its ``state_diff`` names changes or it names ``changed_sessions``,
-        None when it names neither or can't be read: the card's ``website/v1`` ``state``, else the path its
-        ``params.state.path`` names, else ``/go``. Read aside, as no check's answer, since a server without one needn't
-        stamp its 404."""
-        op = find_extension_method(card, WEBSITE_EXTENSION_URI, WEBSITE_STATE_OP)
-        if op is not None and op.get("endpoint"):
-            where, request = f"website/v1 {WEBSITE_STATE_OP}", (op["method"], self.base_url + op["endpoint"])
-        else:
-            declared = ((find_extension(card, WEBSITE_EXTENSION_URI) or {}).get("params") or {}).get("state")
-            path = declared.get("path") if isinstance(declared, dict) else None
-            where = path if isinstance(path, str) and path.startswith("/") else STATE_PATH
-            request = ("GET", self.base_url + where)
-        try:
-            state = self.client.request(*request).json()
-        except Exception:
-            return None
-        changed = isinstance(state, dict) and bool(state.get("state_diff") or state.get("changed_sessions"))
-        return where if changed else None
 
     def _clock(self, card: dict, health: str) -> tuple[Status, str]:
         if find_extension(card, CLOCK_EXTENSION_URI) is None:

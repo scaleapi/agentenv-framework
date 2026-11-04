@@ -17,7 +17,6 @@ import secrets
 import time
 
 SESSION_COOKIE = "agentenv_session"
-SID_COOKIE = "agentenv_sid"
 SECRET_ENV = "WEBSITE_SESSION_SECRET"
 SESSION_TTL_S = 7 * 24 * 3600
 SECRET_BYTES = 32
@@ -38,13 +37,6 @@ def session_cookie_name(environment_name: str | None) -> str:
     """The session cookie of the site named ``environment_name``: ``agentenv_session_<name>``, a name a cookie name
     can't hold spelled as ``_cookie_suffix`` spells it; the shared ``agentenv_session`` for a site with no name."""
     return f"{SESSION_COOKIE}_{_cookie_suffix(environment_name)}" if environment_name else SESSION_COOKIE
-
-
-def sid_cookie_name(environment_name: str | None) -> str:
-    """The cookie in which the site named ``environment_name`` keeps the store session its browser last named:
-    ``agentenv_sid_<name>``, made as ``session_cookie_name`` makes its name, ``agentenv_sid`` for a site with no name.
-    Its prefix is no session cookie's, so no site's store-selection cookie is another site's session cookie."""
-    return f"{SID_COOKIE}_{_cookie_suffix(environment_name)}" if environment_name else SID_COOKIE
 
 
 class SessionSigner:

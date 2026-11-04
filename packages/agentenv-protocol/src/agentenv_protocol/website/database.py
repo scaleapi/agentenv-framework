@@ -12,15 +12,12 @@ from the ``db`` extra, which carries SQLAlchemy 2.1 and its ``postgresql://`` dr
 naming it.
 
 Beside the tables, the data's string ``current_user`` names the user a browser starts signed in as, as the default
-store's does, and the state data/add last loaded is the initial one ``/go`` reports. A models site keeps one state,
-the database's, so ``/go`` answers it for every ``sid``."""
+store's does."""
 from __future__ import annotations
 
-import copy
 import datetime
 import decimal
 import itertools
-import json
 import types
 import uuid
 from typing import Any, Callable, Iterable
@@ -28,7 +25,7 @@ from typing import Any, Callable, Iterable
 from pydantic_core import to_jsonable_python
 
 from ..agent_env_environment import _maybe_await
-from .store import CURRENT_USER, part_data, verifier_state
+from .store import CURRENT_USER, part_data
 
 HOOKS = ("load", "export", "reset")
 
@@ -136,12 +133,6 @@ class Tables:
             for table in reversed(self.metadata.sorted_tables):
                 connection.execute(table.delete())
 
-    def key(self, name: str, row: dict) -> str:
-        """A row's identity, its primary key's values, which ``/go``'s diff matches rows by."""
-        table = next((t for t in self.metadata.sorted_tables if t.name == name), None)
-        columns = [c.name for c in table.primary_key.columns] if table is not None else []
-        return json.dumps([row.get(c) for c in columns] if columns else row, sort_keys=True, default=str)
-
 
 def _parents_first(table: Any, rows: list[dict]) -> list[dict]:
     """``rows`` in their order, but each row that refers to another row of ``table`` through a foreign key of the table's
@@ -230,17 +221,16 @@ class Sessions:
 
 
 class ModelState:
-    """A models site's data plane and ``/go``: ``hooks`` loads, exports and resets its data, the state data/add last
-    loaded is the initial one, and the data's ``current_user`` is kept beside it."""
+    """A models site's data plane: ``hooks`` loads, exports and resets its data, and the data's ``current_user`` is
+    kept beside it."""
 
     def __init__(self, hooks: Any) -> None:
         self.hooks = hooks
-        self.initial: dict = {}
         self.current_user: str | None = None
 
     async def reset(self) -> None:
         await _maybe_await(self.hooks.reset())
-        self.initial, self.current_user = {}, None
+        self.current_user = None
 
     async def load_parts(self, parts: list) -> None:
         for part in parts:
@@ -248,14 +238,9 @@ class ModelState:
             if CURRENT_USER in data:
                 self.current_user = data.pop(CURRENT_USER)
             await _maybe_await(self.hooks.load(data))
-        self.initial = copy.deepcopy(await self.export())
 
     async def export(self) -> dict:
         data = dict(await _maybe_await(self.hooks.export()))
         if self.current_user is not None:
             data[CURRENT_USER] = self.current_user
         return data
-
-    async def state(self) -> dict:
-        key = getattr(self.hooks, "key", None)
-        return verifier_state(copy.deepcopy(self.initial), await self.export(), key)

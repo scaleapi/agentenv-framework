@@ -197,14 +197,6 @@ def test_the_seed_loads_exports_and_resets_through_the_data_plane(client: TestCl
 
 
 
-def test_a_page_opened_at_a_sid_keeps_that_sessions_notes_apart(client: TestClient, env: WebsiteEnvironment) -> None:
-    other = TestClient(env.asgi)
-    other.get("/", params={"sid": "task-1"})
-    created = other.post("/api/notes", json={"title": "only in task-1"}).json()
-    assert client.get("/go", params={"sid": "task-1"}).json()["state_diff"]["notes"]["added"] == [created]
-    assert client.get("/go", params={"sid": "default"}).json()["state_diff"] == {}
-    assert all(note["title"] != "only in task-1" for note in client.get("/api/notes").json())
-
 GATEWAY_PREFIX = "/website/notes"
 
 

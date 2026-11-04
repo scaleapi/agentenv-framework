@@ -1,6 +1,6 @@
 """A site of ``@website(models=...)``: its state is a database's, SQLAlchemy models' tables on DATABASE_URL (sqlite
-here) or an object's own load/export/reset, which its data plane and /go read and write, and its routes reach
-through ``self.db``."""
+here) or an object's own load/export/reset, which its data plane reads and writes, and its routes reach through
+``self.db``."""
 
 from __future__ import annotations
 
@@ -156,7 +156,7 @@ def test_an_export_whose_child_row_sorts_before_its_parent_loads_back_with_forei
         sqlalchemy.event.remove(sqlalchemy.engine.Engine, "connect", enforce)
 
 
-def test_a_row_the_gui_adds_is_the_mcp_servers_and_go_reports_it(dist: Path, database: str) -> None:
+def test_a_row_the_gui_adds_is_the_mcp_servers_and_data_get_reports_it(dist: Path, database: str) -> None:
     env = helpdesk(dist, Base)()
     client = TestClient(env.create_app())
     rpc(client, "data/add", {"parts": [{"kind": "data", "data": SEED}]})
@@ -166,12 +166,8 @@ def test_a_row_the_gui_adds_is_the_mcp_servers_and_go_reports_it(dist: Path, dat
         assert connection.execute(select(Ticket.title).order_by(Ticket.id)).scalars().all() == ["printer", "badge"]
         connection.execute(sqlalchemy.update(Ticket).where(Ticket.id == 1).values(title="printer jam"))
         connection.commit()
-    state = client.get("/go", params={"sid": "default"}).json()
-    assert state["initial_state"] == SEED
-    diff = state["state_diff"]["tickets"]
-    assert [t["title"] for t in diff["added"]] == ["badge"] and diff["removed"] == []
-    assert diff["changed"][0]["before"]["title"] == "printer" and diff["changed"][0]["after"]["title"] == "printer jam"
-    assert client.get("/go", params={"sid": "other"}).json() == state
+    tickets = rpc(client, "data/get")["parts"][0]["data"]["tickets"]
+    assert [t["title"] for t in tickets] == ["printer jam", "badge"]
 
 
 def test_a_models_site_passes_the_conformance_check(dist: Path, database: str) -> None:
@@ -232,28 +228,5 @@ def test_an_object_with_its_own_hooks_is_the_sites_data(dist: Path) -> None:
     rpc(client, "data/add", {"parts": [{"kind": "data", "data": {"current_user": "bo", "rows": [{"id": 1}]}}]})
     rows.rows.append({"id": 2})
     assert rpc(client, "data/get")["parts"][0]["data"] == {"current_user": "bo", "rows": [{"id": 1}, {"id": 2}]}
-    assert client.get("/go").json()["state_diff"] == {"rows": {"added": [{"id": 2}], "removed": [], "changed": []}}
     assert env.acting_user() == "bo"
     assert env.db is None
-
-
-def test_editing_a_row_a_hook_still_owns_leaves_the_initial_state(dist: Path) -> None:
-    class Rows:
-        def __init__(self) -> None:
-            self.rows: list = []
-
-        def load(self, data: dict) -> None:
-            self.rows += data["rows"]
-
-        def export(self) -> dict:
-            return {"rows": list(self.rows)}
-
-        def reset(self) -> None:
-            self.rows.clear()
-
-    rows = Rows()
-    client = TestClient(helpdesk(dist, rows)().create_app())
-    rpc(client, "data/add", {"parts": [{"kind": "data", "data": {"rows": [{"id": 1, "status": "open"}]}}]})
-    rows.rows[0]["status"] = "closed"
-    assert client.get("/go").json()["state_diff"] == {"rows": {"added": [], "removed": [], "changed": [
-        {"id": 1, "before": {"id": 1, "status": "open"}, "after": {"id": 1, "status": "closed"}}]}}

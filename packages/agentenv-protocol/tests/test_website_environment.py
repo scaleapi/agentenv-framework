@@ -239,39 +239,6 @@ def test_a_sites_data_is_read_through_the_data_plane_alone(client: TestClient) -
     assert "state" not in website_params and "state" not in website_params.get("methods", {})
 
 
-def test_each_sid_keeps_a_state_of_its_own_started_from_the_initial_state(client: TestClient,
-                                                                          shop: WebsiteEnvironment) -> None:
-    client.post("/api/orders", json={"sku": "mug"})
-    assert TestClient(shop.asgi).get("/go", params={"sid": "task-7"}).json() == {
-        "initial_state": SEED, "current_state": SEED, "state_diff": {}, "changed_sessions": []}
-    page = client.get("/", params={"sid": "task-7"})
-    assert page.headers["set-cookie"].startswith("agentenv_sid_Shop=task-7;")
-    assert "set-cookie" not in client.get("/", params={"sid": "task-7"}).headers
-    client.post("/api/orders", json={"sku": "pen"})
-    client.post("/api/orders", params={"sid": "other"}, json={"sku": "cup"})
-    added = {sid: [o.get("sku") for d in [client.get("/go", params={"sid": sid}).json()["state_diff"]]
-                   for o in d.get("orders", {}).get("added", [])] for sid in ("default", "task-7", "other")}
-    assert added == {"default": ["mug"], "task-7": ["pen"], "other": ["cup"]}
-    assert client.get("/go").json()["state_diff"]["orders"]["added"][0]["sku"] == "cup"
-    client.get("/", params={"sid": "default"})
-    assert client.get("/go").json()["state_diff"]["orders"]["added"][0]["sku"] == "mug"
-    assert rpc(client, "data/get")["parts"][0]["data"]["orders"][-1]["sku"] == "mug"
-    assert sorted(shop._store.sessions()) == ["other", "task-7"]
-    assert sorted(client.get("/go").json()["changed_sessions"]) == ["other", "task-7"]
-    rpc(client, "data/reset")
-    assert shop._store.sessions() == [] and client.get("/go", params={"sid": "task-7"}).json()["current_state"] == {}
-
-
-def test_a_session_id_is_sanitised_as_cua_gym_sites_do() -> None:
-    from agentenv_protocol.website.store import session_id
-
-    assert [session_id(v) for v in (None, "", "default", "../a b", "x" * 200)] == [None, None, None, "ab", "x" * 128]
-    store = Collections({"items": [{"id": 1}]})
-    store.session("s")["items"].append({"id": 2})
-    assert store.session("default") is store and store.export() == {"items": [{"id": 1}]}
-    assert store.session("s").diff() == {"items": {"added": [{"id": 2}], "removed": [], "changed": []}}
-
-
 def test_broad_routes_leave_the_built_in_ones_answering_their_paths(dist: Path) -> None:
     class Broad(site(dist)):
         @api.get("/{slug}")
@@ -379,20 +346,6 @@ def test_each_site_keeps_its_own_session_cookie_and_reads_the_legacy_one(dist: P
     assert TestClient(first.asgi, cookies={SESSION_COOKIE: legacy}).get("/api/orders").json() == [{"id": 1, "user": "bob"}]
 
 
-def test_no_site_s_session_choice_is_another_site_s_sign_in(dist: Path, monkeypatch) -> None:
-    monkeypatch.setenv("ENVIRONMENT_NAME", "notes")
-    notes = site(dist)()
-    monkeypatch.setenv("ENVIRONMENT_NAME", "notes_sid")
-    notes_sid = site(dist)()
-    browser = TestClient(notes.create_app())
-    browser.post("/api/orders", params={"sid": "task-1"}, json={"sku": "mug"})
-    other = TestClient(notes_sid.create_app(), cookies=browser.cookies)
-    other.post("/api/sign-in", json={"user": "bob"})
-    back = TestClient(notes.asgi, cookies=other.cookies)
-    assert [o["sku"] for o in back.get("/go").json()["current_state"]["orders"]] == ["mug"]
-    assert TestClient(notes_sid.asgi, cookies=back.cookies).get("/api/session").json()["user"] == "bob"
-
-
 def test_sites_whose_names_spell_alike_keep_their_own_cookies(dist: Path, monkeypatch) -> None:
     apps = []
     for name in ("shop a/1", "shop_a_1"):
@@ -402,14 +355,11 @@ def test_sites_whose_names_spell_alike_keep_their_own_cookies(dist: Path, monkey
         apps.append(env.create_app())
     browser = TestClient(apps[0])
     browser.post("/api/sign-in", json={"user": "bob"})
-    browser.get("/", params={"sid": "task-1"})
     other = TestClient(apps[1], cookies=browser.cookies)
     other.post("/api/sign-in", json={"user": "alice"})
-    other.get("/", params={"sid": "task-2"})
-    assert len(other.cookies.keys()) == 4
+    assert len(other.cookies.keys()) == 2
     back = TestClient(apps[0], cookies=other.cookies)
     assert back.get("/api/session").json()["user"] == "bob"
-    assert back.cookies.get("agentenv_sid_shop_a_1~030f5785d67a") == "task-1"
 
 
 def test_every_answer_carries_the_universe_time(client: TestClient) -> None:

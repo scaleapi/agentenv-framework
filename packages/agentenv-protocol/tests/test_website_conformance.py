@@ -37,7 +37,6 @@ def notes(tmp_path: Path) -> WebsiteEnvironment:
 
     env = Notes()
     env.store.load({"current_user": "ann", "notes": [{"id": 1, "text": "hello"}]})
-    env.store.mark_initial()
     return env
 
 
@@ -58,12 +57,10 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
                  clock_ops_first: tuple[str, ...] = (),
                  leak_redirect: bool = False, stamp_rpc: bool = True, reset_keeps: bool = False,
                  get_fails_after_reset: bool = False, rpc_reply: tuple[int, dict] | None = None,
-                 ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None,
-                 state_path: str | None = None, changed: bool = False) -> Starlette:
+                 ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None) -> Starlette:
     """A server written without the SDK: the contract by hand, optionally broken. Its state is its ``state.data``; with
     ``ready_answer`` its card advertises ``website/v1``'s ``ready``, which answers it with ``ready_status``. With ``rpc_path`` its card's
-    ``url`` names its data plane there, not at ``/agentenv``, and with ``state_path`` its ``params.state.path`` names
-    where it serves its state, which shows changes since the initial state when ``changed``."""
+    ``url`` names its data plane there, not at ``/agentenv``."""
     state = {"items": ["a"], "url": None, "at": None, "reset": False}
 
     def now() -> datetime.datetime:
@@ -98,8 +95,6 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
                                   "routes": [{"method": "GET", "path": "/items", "name": "items"}]}}]
         if ready_answer is not None:
             extensions[0]["params"]["methods"] = {"ready": {"method": "GET", "endpoint": "/ready"}}
-        if state_path is not None:
-            extensions[0]["params"]["state"] = {"path": state_path}
         if clock:
             extensions.append({"uri": "urn:agentenv:clock/v1", "params": {
                 "endpoint": "/agentenv/ext/sync_time", "methods": {
@@ -108,9 +103,6 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
         return stamp(JSONResponse({"name": "hand", **({"url": rpc_path} if rpc_path else {}),
                                    "capabilities": {"extensions": extensions,
                                                     "operations": ["data/reset", "data/add", "data/get"]}}))
-
-    async def site_state(request: Request) -> Response:
-        return JSONResponse({"state_diff": {"items": {"added": ["b"]}} if changed else {}})
 
     async def rpc(request: Request) -> Response:
         body = await request.json()
@@ -147,8 +139,7 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
     app = Starlette(routes=[Route("/", page), Route("/healthz", health), Route("/ready", ready), Route("/items", items),
                             Route("/items/", items_slash),
                             Route("/.well-known/agent-env.json", card), Route(rpc_path or "/agentenv", rpc, methods=["POST"]),
-                            Route("/agentenv/ext/sync_time", sync_time, methods=["POST"]),
-                            *([Route(state_path, site_state)] if state_path else [])],
+                            Route("/agentenv/ext/sync_time", sync_time, methods=["POST"])],
                     exception_handlers={404: unrouted, 405: unrouted})
     app.state.data = state
     return app
@@ -234,28 +225,14 @@ def test_a_data_request_without_a_2xx_json_rpc_result_fails_the_data_plane(reply
     assert result.status == "failed" and "no JSON-RPC result" in result.detail
 
 
-def test_an_sdk_site_keeps_its_initial_state_and_one_changed_since_skips_the_round_trip(
+def test_an_sdk_sites_data_round_trips_and_is_left_as_the_check_found_it_changed_or_not(
         notes: WebsiteEnvironment, sdk_site: TestClient) -> None:
-    before = sdk_site.get("/go").json()
-    conformance.check("http://testserver", client=sdk_site)
-    assert sdk_site.get("/go").json() == before
-    notes.store.insert("notes", {"text": "new"})
-    changed = sdk_site.get("/go").json()
-    assert changed["state_diff"]
-    result = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"]
-    assert result.status == "skipped" and "website/v1 state shows changes" in result.detail
-    assert sdk_site.get("/go").json() == changed
-
-
-def test_a_named_session_with_changes_skips_the_round_trip_and_keeps_its_state(
-        notes: WebsiteEnvironment, sdk_site: TestClient) -> None:
-    sdk_site.get("/api/notes", params={"sid": "task-1"})
-    assert {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"].status == "passed"
-    notes.store.session("task-2")["notes"].append({"id": 2, "text": "draft"})
-    result = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"]
-    assert result.status == "skipped" and "named sessions" in result.detail
-    assert sdk_site.get("/go", params={"sid": "task-2"}).json()["state_diff"]["notes"]["added"] == [
-        {"id": 2, "text": "draft"}]
+    for _ in range(2):
+        before = notes.store.export()
+        result = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["data_plane"]
+        assert result.status == "passed", result
+        assert notes.store.export() == before
+        notes.store.insert("notes", {"text": "new"})
 
 
 def test_the_data_plane_is_reached_at_the_cards_url() -> None:
@@ -269,14 +246,6 @@ def test_the_clock_check_calls_sync_time_whichever_operation_the_card_lists_firs
     results = {r.name: r.status for r in conformance.check(
         "http://testserver", client=TestClient(_handwritten(clock_ops_first=("time",))))}
     assert results["clock"] == "passed", results
-
-
-@pytest.mark.parametrize(("changed", "status"), [(True, "skipped"), (False, "passed")])
-def test_a_card_without_state_is_read_at_the_state_path_it_names(changed: bool, status: str) -> None:
-    app = _handwritten(state_path="/grading/state", changed=changed)
-    result = {r.name: r for r in conformance.check("http://testserver", client=TestClient(app))}["data_plane"]
-    assert result.status == status, result
-    assert ("/grading/state shows changes" in result.detail) is changed
 
 
 def test_a_server_with_no_card_health_or_header_fails_the_contract_and_warns_of_the_rest() -> None:
