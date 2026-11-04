@@ -1,6 +1,7 @@
 """WebsiteEnvironment: an AgentEnvEnvironment that is a site's server, meeting ``urn:agentenv:website/v1``. It serves
 plain HTTP on ``PORT`` for any host name: its ``@api`` routes, its static folder at ``/`` with ``index.html`` for the
-pages a single-page app routes itself, its health path, and the data plane and card the base class serves. Every answer
+pages a single-page app routes itself, and the data plane and card the base class serves, the card's ``website/v1``
+``ready`` saying whether the site is usable yet by its ``@ready_check`` methods. Every answer
 carries ``X-Universe-Now``, the universe's time, which ``self.now()`` reads and ``clock/v1``'s ``sync_time`` ties to
 the gateway's virtual clock, read once per request as MCP servers read it. A site keeps its data where it likes,
 usually its schema of the env's database (``database_url``), and serves it through the data plane's hooks
@@ -12,9 +13,12 @@ parameters would also match it: ``/api/session``, which a frontend calls to lear
 user in when nobody is (GET), or to sign out (DELETE)."""
 from __future__ import annotations
 
+import asyncio
 import inspect
+import math
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple, Optional
 
@@ -34,12 +38,12 @@ from ..agent_env_environment import (
 )
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, ClockUnavailable, UniverseClock, clock_patch_script, iso
 from .errors import ApiError, NotFound
-from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
+from .readiness import SITE_READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 from .routes import ApiContext, ApiRoute, endpoint, error_response, openapi, openapi_path, request_role, reserved_path, routes_of
 from .session import SESSION_COOKIE, SessionSigner
 
-DEFAULT_HEALTH_PATH = "/api/health"
 SESSION_PATH = "/api/session"
+CHECK_TIMEOUT_S = 10.0
 _WEBSITE_ATTR = "_aee_website"
 _READY_ATTR = "_aee_website_ready"
 _HEAD = re.compile(rb"<head(?:\s[^>]*)?>", re.IGNORECASE)
@@ -47,36 +51,36 @@ _PREAMBLE = re.compile(rb"\A(?:\s|<!--.*?-->|<!doctype[^>]*>|<html(?:\s[^>]*)?>)
 
 
 class WebsiteDeclaration(NamedTuple):
-    """What ``@website`` declares: the site's domains, its static folder (relative to the class's file), its health
-    path, and whether its HTML pages read the universe's time."""
+    """What ``@website`` declares: the site's domains, its static folder (relative to the class's file), how long it
+    may take to be ready after its server starts, and whether its HTML pages read the universe's time."""
 
     domains: tuple[str, ...] = ()
     static: Optional[str] = None
-    health: str = DEFAULT_HEALTH_PATH
+    ready_timeout_s: float = SITE_READY_TIMEOUT_S
     clock_patch: bool = False
 
 
 def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = (), static: str | None = None,
-            health: str = DEFAULT_HEALTH_PATH, clock_patch: bool = False) -> Any:
+            ready_timeout_s: float = SITE_READY_TIMEOUT_S, clock_patch: bool = False) -> Any:
     """Declare a WebsiteEnvironment's site."""
     if _cls is not None:
         raise TypeError("use @website(...) with parentheses")
-    if not health.startswith("/") or health == "/" or reserved_path(health):
-        raise ValueError(f"health is a path of its own under '/', not {health!r}")
+    if isinstance(ready_timeout_s, bool) or not isinstance(ready_timeout_s, (int, float)) or not (
+            0 < ready_timeout_s < math.inf):
+        raise ValueError(f"ready_timeout_s is a number of seconds above 0, not {ready_timeout_s!r}")
 
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, WebsiteEnvironment)):
             raise TypeError(f"@website declares a WebsiteEnvironment subclass, not {cls!r}")
-        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, health, clock_patch))
-        _check_health(cls)
+        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, float(ready_timeout_s), clock_patch))
         return cls
 
     return deco
 
 
 def ready_check(fn: Any) -> Any:
-    """Mark a method that says whether the site is usable yet: the health path answers 200 once every one returns a
-    truthy value, and 503 while one returns a falsy one or raises."""
+    """Mark a method that says whether the site is usable yet: ``website/v1``'s ``ready`` says ready once every one
+    returns a truthy value. They run at once, each within ``CHECK_TIMEOUT_S``, a plain ``def`` in a worker thread."""
     setattr(fn, _READY_ATTR, True)
     return fn
 
@@ -96,6 +100,8 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     def __init__(self) -> None:
         self.clock = UniverseClock()
         self._signer = SessionSigner()
+        self._started = time.monotonic()
+        self._checking: dict[str, asyncio.Future] = {}
 
     @classmethod
     def declaration(cls) -> WebsiteDeclaration:
@@ -135,13 +141,11 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         if self._mounted:
             raise RuntimeError(f"{type(self).__name__} is already mounted")
         declaration = self.declaration()
-        _check_health(type(self))
         api_routes = self.routes()
         taken = {openapi_path(r.path) for r in api_routes}
         root = self._site_path(declaration.static) if declaration.static is not None else None
         asgi = Starlette(middleware=[Middleware(_Forwarded), Middleware(_Universe, env=self)])
         AgentEnvStarletteApplication(self._build_card(), self).add_routes_to_app(asgi)
-        asgi.router.routes.append(Route(declaration.health, self._health, methods=["GET"]))
         if SESSION_PATH not in taken:
             asgi.router.routes.append(Route(SESSION_PATH, self._session, methods=["GET", "DELETE"]))
         asgi.router.routes.extend(Route(r.path, _unreserved(endpoint(getattr(self, r.fn.__name__), r, self.context)),
@@ -166,7 +170,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     def extension_params(self, uri: str) -> dict:
         if uri == WEBSITE_EXTENSION_URI:
             declaration = self.declaration()
-            return {"domains": list(declaration.domains), "health": declaration.health,
+            return {"domains": list(declaration.domains),
                     "routes": [r.advertised() for r in self.routes()], "session_cookie": SESSION_COOKIE,
                     "session_path": SESSION_PATH}
         return super().extension_params(uri)
@@ -180,7 +184,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
                 **({"timezone": self.timezone} if self.timezone else {})}
 
     @extension(WEBSITE_EXTENSION_URI, op="openapi", method="GET", description=(
-        "A site's server: domains, its health path and its @api routes by name; openapi returns the OpenAPI document "
+        "A site's server: domains and its @api routes by name; openapi returns the OpenAPI document "
         "of its routes, ready whether the site is usable now and why not, and session the storage state a browser adds "
         "to start signed in as user, or signed out without one: {cookies, local_storage}, each cookie's lifetime a "
         "max_age."))
@@ -190,23 +194,42 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @extension(WEBSITE_EXTENSION_URI, op=WEBSITE_READY_OP, method="GET")
     async def _website_ready(self) -> dict:
-        """Whether the site is usable now, a ``WebsiteReadiness`` by its ``@ready_check`` methods: ``problems`` names
-        each not yet true. A deploy reads it through the card, as ``computer-app/v1``'s ``ready`` of an app."""
+        """Whether the site is usable now, a ``WebsiteReadiness`` by its ``@ready_check`` methods: ``problems`` says
+        what each not yet true returned, raised or how long it ran, and ``waited_s`` how long since the server started,
+        against the ``ready_timeout_s`` it declared. A deploy reads it through the card."""
         problems = await self._not_ready()
-        return WebsiteReadiness(ready=not problems, problems=problems).model_dump()
+        return WebsiteReadiness(ready=not problems, problems=problems, waited_s=round(time.monotonic() - self._started, 1),
+                                timeout_s=self.declaration().ready_timeout_s).model_dump()
 
     @extension(WEBSITE_EXTENSION_URI, op="session")
     async def _website_session(self, user: Optional[str] = None) -> dict:
         return {"cookies": [self._session_signer().cookie(user)], "local_storage": []}
 
     async def _not_ready(self) -> list[str]:
-        return [check.__name__ for check, _marker in _marked_members(self, _READY_ATTR) if not await _ready(check)]
+        found = await asyncio.gather(*(self._checked(check) for check, _marker in _marked_members(self, _READY_ATTR)))
+        return [problem for problem in found if problem is not None]
 
-    async def _health(self, request: Request) -> Response:
-        waiting = await self._not_ready()
-        if waiting:
-            return JSONResponse({"status": "starting", "waiting_for": waiting}, status_code=503)
-        return JSONResponse({"status": "ok"})
+    async def _checked(self, check: Any) -> Optional[str]:
+        """What ``check`` finds wrong, within ``CHECK_TIMEOUT_S``; one that runs past it or raises says so."""
+        name = f"@ready_check {check.__name__}"
+        try:
+            passed = await asyncio.wait_for(self._run_check(check), CHECK_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return f"{name} ran past {CHECK_TIMEOUT_S:g} s"
+        except Exception as e:
+            return f"{name}: {type(e).__name__}: {e}"
+        return None if passed else f"{name} returned {passed!r}"
+
+    async def _run_check(self, check: Any) -> Any:
+        """A plain ``def`` check runs in a worker thread, so it can't hold up the site's answers, and once at a time:
+        a thread can't be stopped, so a poll while one runs past its bound waits on that same call."""
+        if inspect.iscoroutinefunction(check):
+            return await check()
+        running = self._checking.get(check.__name__)
+        if running is None or running.done():
+            running = self._checking[check.__name__] = asyncio.ensure_future(asyncio.to_thread(check))
+            running.add_done_callback(lambda done: done.cancelled() or done.exception())
+        return await _maybe_await(await asyncio.shield(running))
 
     async def _session(self, request: Request) -> Response:
         context = self.context(request)
@@ -231,20 +254,6 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     def _site_path(cls, path: str) -> Path:
         given = Path(path)
         return given if given.is_absolute() else Path(inspect.getfile(cls)).resolve().parent / given
-
-
-async def _ready(check: Any) -> bool:
-    try:
-        return bool(await _maybe_await(check()))
-    except Exception:
-        return False
-
-
-def _check_health(cls: type) -> None:
-    health = cls.declaration().health
-    clash = [r.name for r in routes_of(cls) if r.method == "GET" and openapi_path(r.path) == health]
-    if clash:
-        raise ValueError(f"{cls.__name__}'s health path {health} is served by @api {clash[0]}; use @ready_check")
 
 
 class _Forwarded:

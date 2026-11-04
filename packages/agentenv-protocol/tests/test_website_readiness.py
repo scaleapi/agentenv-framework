@@ -40,8 +40,10 @@ def _routed(handler):
 
 def test_a_website_readiness_names_no_problem_unless_told_and_ignores_fields_it_doesnt_know() -> None:
     assert WebsiteReadiness.model_validate({"ready": True}) == WebsiteReadiness(ready=True, problems=[])
-    assert WebsiteReadiness.model_validate({"ready": False, "problems": ["seeded"], "waited_s": 3}).model_dump() == {
-        "ready": False, "problems": ["seeded"]}
+    assert WebsiteReadiness.model_validate({"ready": False, "problems": ["seeded"], "since": "boot"}).model_dump(
+        exclude_none=True) == {"ready": False, "problems": ["seeded"]}
+    assert WebsiteReadiness.model_validate({"ready": False, "waited_s": 3, "timeout_s": 60}).model_dump(
+        exclude_none=True) == {"ready": False, "problems": [], "waited_s": 3.0, "timeout_s": 60.0}
 
 
 @pytest.mark.parametrize("answer", [{}, {"ready": "soon"}, {"ready": "true"}, {"ready": 1}, {"ready": True, "problems": "none"},
@@ -82,9 +84,10 @@ async def test_website_readiness_reads_an_sdk_sites_ready_through_its_card(tmp_p
     async with real(transport=httpx.ASGITransport(app=app), base_url="http://site") as client:
         card = (await client.get("/.well-known/agent-env.json")).json()
     with patch.object(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.ASGITransport(app=app))):
-        assert await website_readiness("http://site", card) == WebsiteReadiness(ready=False, problems=["database_up"])
+        waiting = await website_readiness("http://site", card)
+        assert (waiting.ready, waiting.problems, waiting.timeout_s) == (False, ["@ready_check database_up returned False"], 300)
         env.up = True
-        assert await website_readiness("http://site", card) == WebsiteReadiness(ready=True)
+        assert (await website_readiness("http://site", card)).ready is True
 
 
 @pytest.mark.asyncio

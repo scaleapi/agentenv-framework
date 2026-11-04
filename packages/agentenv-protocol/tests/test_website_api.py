@@ -347,7 +347,6 @@ def test_parameterized_routes_never_take_the_data_plane_or_card() -> None:
     answer = client.post("/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": {}}).json()
     assert answer["jsonrpc"] == "2.0" and answer["id"] == 1 and "captured" not in answer
     assert client.get("/.well-known/agent-env.json").json()["name"] == "Wiki"
-    assert client.get("/api/health").json() == {"status": "ok"}
 
 
 @pytest.mark.parametrize("path", ["/agentenv", "/agentenv/ext/x", "/.well-known/agent-env.json",
@@ -388,16 +387,10 @@ def test_a_route_must_take_its_path_parameters_and_at_most_one_body() -> None:
         Bodies().create_app()
 
 
-def test_the_health_path_is_not_an_api_route() -> None:
-    with pytest.raises(ValueError, match="ready_check"):
-        @website(health="/api/up")
-        class Clash(WebsiteEnvironment):
-            @api.get("/api/up")
-            def up(self) -> dict:
-                return {}
-
-    with pytest.raises(ValueError, match="health"):
-        website(health="/agentenv/health")
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), "60", True])
+def test_a_ready_timeout_is_a_number_of_seconds_above_zero(timeout: object) -> None:
+    with pytest.raises(ValueError, match="ready_timeout_s"):
+        website(ready_timeout_s=timeout)
 
 
 @website(domains=["shelf.example"])

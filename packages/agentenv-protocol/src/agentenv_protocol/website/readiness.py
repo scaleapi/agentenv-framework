@@ -2,10 +2,13 @@
 it is usable now through its card's ``urn:agentenv:website/v1`` ``ready`` (``WEBSITE_READY_OP``), answering a
 ``WebsiteReadiness``. ``website_readiness`` asks one site as its card advertises it; ``env_readiness`` asks every site
 of an env, a composed card's children or a single site's own card, and answers for the env as a whole; asking one
-site may take ``READY_TIMEOUT_S`` by default."""
+site may take ``READY_TIMEOUT_S`` by default. A site may say how long it may take to be ready (``timeout_s``,
+``SITE_READY_TIMEOUT_S`` when it says nothing). A server whose card has no ``ready`` is asked at its health path,
+``DEFAULT_HEALTH_PATH`` unless it names one, which is deprecated."""
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -15,18 +18,23 @@ from ..client import find_extension_method, invoke_extension
 WEBSITE_EXTENSION_URI = "urn:agentenv:website/v1"
 WEBSITE_READY_OP = "ready"
 READY_TIMEOUT_S = 10.0
+SITE_READY_TIMEOUT_S = 300.0
+DEFAULT_HEALTH_PATH = "/api/health"
 
 
 class WebsiteReadiness(BaseModel):
-    """What a site says of its readiness, ``website/v1``'s ``ready``: whether it is ``ready``, and the ``problems``
-    that keep it from being so, each a name a person reads, such as a ``@ready_check`` method's. Fields it doesn't
-    name are ignored rather than refused, so a reader keeps reading a newer site that says more, as ``ready`` and
-    ``problems`` keep their meaning. Its types are strict, as JSON's are: ``"yes"`` or ``1`` is no ``ready``."""
+    """What a site says of its readiness, ``website/v1``'s ``ready``: whether it is ``ready``, the ``problems`` that
+    keep it from being so, each a line a person reads, such as a ``@ready_check`` method's and what it returned, and,
+    for a site that says, the ``waited_s`` since its server started against the ``timeout_s`` it may take. Fields it
+    doesn't name are ignored rather than refused, so a reader keeps reading a newer site that says more, as ``ready``
+    and ``problems`` keep their meaning. Its types are strict, as JSON's are: ``"yes"`` or ``1`` is no ``ready``."""
 
     model_config = ConfigDict(extra="ignore", strict=True)
 
     ready: bool
     problems: list[str] = []
+    waited_s: Optional[float] = None
+    timeout_s: Optional[float] = None
 
 
 def _advertises_ready(card: dict) -> bool:

@@ -2568,6 +2568,40 @@ async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_an
 
 
 @pytest.mark.asyncio
+async def test_a_site_that_says_how_long_it_may_take_is_waited_that_long_not_the_default():
+    answers = iter([{"ready": False, "problems": ["seeded"], "waited_s": 1, "timeout_s": 600},
+                    {"ready": True, "problems": [], "waited_s": 2, "timeout_s": 600}])
+
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=_READY_CARD)
+        return httpx.Response(200, json=next(answers))
+
+    with _sites(site):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
+            timeout_s=0, poll_s=0)
+    assert next(answers, "done") == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_site_past_the_time_it_declared_fails_the_deploy_saying_so(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=_READY_CARD)
+        return httpx.Response(200, json={"ready": False, "problems": ["@ready_check seeded returned False"],
+                                         "waited_s": 61, "timeout_s": 0})
+
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(not ready after 0 s: "
+                                                         r"@ready_check seeded returned False\)"):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
+            timeout_s=300, poll_s=0)
+
+
+@pytest.mark.asyncio
 async def test_a_deploy_reads_a_sites_readiness_through_the_protocols_website_readiness():
     asked = []
 
@@ -2579,7 +2613,7 @@ async def test_a_deploy_reads_a_sites_readiness_through_the_protocols_website_re
         return httpx.Response(200, json=_READY_CARD)
 
     with _sites(site), patch.object(env_gateway_provider, "website_readiness", readiness):
-        assert await env_gateway_provider._website_ready("http://gw/svc/mail", "/healthz") == (False, "a, b")
+        assert await env_gateway_provider._website_ready("http://gw/svc/mail", "/healthz") == (False, "a, b", None)
     assert asked == [("http://gw/svc/mail", "mail")]
 
 

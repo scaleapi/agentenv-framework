@@ -435,9 +435,13 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
 
 `agentenv_protocol.website` is the one definition of whether a website env is healthy. A site's card advertises
 `urn:agentenv:website/v1`'s `ready` (`WEBSITE_READY_OP`), a GET answering a `WebsiteReadiness`: `ready`, a boolean,
-and `problems`, the names of what keeps it from being ready (a `WebsiteEnvironment`'s are its `@ready_check` methods
-not yet true). The model is strict about those two (`"yes"` is no `ready`) and ignores fields it doesn't know, so a
-reader keeps reading a newer site. Everything that judges a site reads it through these helpers: agent-env's deploy,
+`problems`, what keeps it from being ready, and optionally `waited_s` since its server started and the `timeout_s` it
+may take (`SITE_READY_TIMEOUT_S` when it says nothing), which is how long a deploy waits for it. A
+`WebsiteEnvironment` answers from its `@ready_check` methods, run at once, each within `CHECK_TIMEOUT_S` and a plain
+`def` in a worker thread, and from `@website(ready_timeout_s=...)`; it serves no separate health path. The model is
+strict about `ready` and `problems` (`"yes"` is no `ready`) and ignores fields it doesn't know, so a reader keeps
+reading a newer site. A server whose card has no `ready` is still read at its health path (`DEFAULT_HEALTH_PATH`
+unless it names one), which is deprecated. Everything that judges a site reads it through these helpers: agent-env's deploy,
 `DeployedEnv.readiness()`, and the conformance checker's `health`, which fails an answer that isn't a
 `WebsiteReadiness`.
 

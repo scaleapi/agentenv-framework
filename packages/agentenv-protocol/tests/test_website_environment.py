@@ -1,4 +1,4 @@
-"""WebsiteEnvironment as a site's server: static pages, health, the card and its OpenAPI document, a site's own data
+"""WebsiteEnvironment as a site's server: static pages, readiness, the card and its OpenAPI document, a site's own data
 plane, sessions, the universe's clock read per request, and a mounted app."""
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from agentenv_protocol import DataPart, add_data, get_data, reset_data
 from agentenv_protocol.website import (
     SESSION_COOKIE,
     SESSION_SECRET_ENV,
+    SITE_READY_TIMEOUT_S,
     UNIVERSE_NOW_HEADER,
     WEBSITE_EXTENSION_URI,
     WEBSITE_READY_OP,
@@ -35,6 +37,7 @@ from agentenv_protocol.website import (
     website,
 )
 from agentenv_protocol.website import clock as clock_module
+from agentenv_protocol.website import environment as environment_module
 from agentenv_protocol.website.clock import parse_time
 
 RPC = "/agentenv"
@@ -136,33 +139,67 @@ def test_a_link_out_of_the_static_folder_is_never_served(dist: Path) -> None:
     assert "outside" not in client.get("/linked/").text
 
 
-def test_the_fallback_never_shadows_api_health_or_reserved_paths(client: TestClient) -> None:
+def test_the_fallback_never_shadows_api_or_reserved_paths(client: TestClient) -> None:
     assert client.get("/api/orders").json() == []
     assert client.put("/api/orders").status_code == 405
-    assert client.get("/api/health").json() == {"status": "ok"}
     for path in ("/agentenv", "/agentenv/anything", "/agentenv/ext/website/nope", "/agentenv/../agentenv/x"):
         assert client.get(path).status_code in (404, 405), path
     assert client.get("/.well-known/agent-env.json").json()["name"] == "Shop"
 
 
-def test_health_waits_for_every_ready_check(dist: Path) -> None:
+def test_ready_checks_run_at_once_each_bounded_and_say_what_they_found(dist: Path, monkeypatch) -> None:
+    monkeypatch.setattr(environment_module, "CHECK_TIMEOUT_S", 0.3)
+
     class Slow(site(dist)):
-        ready = False
-
         @ready_check
-        def database_up(self) -> bool:
-            return self.ready
-
-        @ready_check
-        async def cache_warm(self) -> bool:
+        def stuck(self) -> bool:
+            time.sleep(1)
             return True
 
-    env = Slow()
-    client = TestClient(env.create_app())
-    waiting = client.get("/api/health")
-    assert waiting.status_code == 503 and waiting.json() == {"status": "starting", "waiting_for": ["database_up"]}
-    env.ready = True
-    assert client.get("/api/health").status_code == 200
+        @ready_check
+        async def waiting(self) -> bool:
+            await asyncio.sleep(1)
+            return True
+
+        @ready_check
+        async def broken(self) -> bool:
+            raise RuntimeError("database locked")
+
+        @ready_check
+        def seeded(self) -> int:
+            return 0
+
+    async def ask() -> tuple[dict, float]:
+        started = time.monotonic()
+        return await Slow()._website_ready(), time.monotonic() - started
+
+    answer, took = asyncio.run(ask())
+    assert answer["problems"] == ["@ready_check broken: RuntimeError: database locked", "@ready_check seeded returned 0",
+                                  "@ready_check stuck ran past 0.3 s", "@ready_check waiting ran past 0.3 s"]
+    assert answer["ready"] is False and took < 0.9
+
+
+def test_a_plain_def_check_past_its_bound_runs_once_however_often_ready_is_asked(dist: Path, monkeypatch) -> None:
+    monkeypatch.setattr(environment_module, "CHECK_TIMEOUT_S", 0.2)
+    released, calls = threading.Event(), []
+
+    class Syncing(site(dist)):
+        @ready_check
+        def synced(self) -> bool:
+            calls.append(len(calls))
+            return released.wait(5)
+
+    async def ask() -> tuple[list, dict]:
+        env = Syncing()
+        stuck = [(await env._website_ready())["problems"] for _ in range(3)]
+        released.set()
+        while not env._checking["synced"].done():
+            await asyncio.sleep(0.01)
+        return stuck, await env._website_ready()
+
+    stuck, after = asyncio.run(ask())
+    assert stuck == [["@ready_check synced ran past 0.2 s"]] * 3
+    assert after["ready"] is True and calls == [0, 1]
 
 
 def test_the_cards_website_v1_ready_says_whether_the_site_is_usable_by_its_ready_checks(dist: Path) -> None:
@@ -178,19 +215,22 @@ def test_the_cards_website_v1_ready_says_whether_the_site_is_usable_by_its_ready
     card = client.get("/.well-known/agent-env.json").json()
     ready = _extension(card, WEBSITE_EXTENSION_URI)["params"]["methods"][WEBSITE_READY_OP]
     assert (ready["method"], ready["endpoint"]) == ("GET", "/agentenv/ext/website/ready")
-    assert client.get(ready["endpoint"]).json() == {"ready": False, "problems": ["database_up"]}
-    assert WebsiteReadiness.model_validate(client.get(ready["endpoint"]).json()) == WebsiteReadiness(
-        ready=False, problems=["database_up"])
+    answer = client.get(ready["endpoint"]).json()
+    assert (answer["ready"], answer["problems"]) == (False, ["@ready_check database_up returned False"])
+    assert answer["timeout_s"] == SITE_READY_TIMEOUT_S and 0 <= answer["waited_s"] < 60
+    assert WebsiteReadiness.model_validate(answer).problems == ["@ready_check database_up returned False"]
     env.ready = True
-    assert client.get(ready["endpoint"]).json() == {"ready": True, "problems": []}
+    assert {k: v for k, v in client.get(ready["endpoint"]).json().items() if k in ("ready", "problems")} == {
+        "ready": True, "problems": []}
 
 
 
-def test_a_declared_health_path_is_served_there(dist: Path) -> None:
-    client = TestClient(site(dist, health="/healthz")().create_app())
-    assert client.get("/healthz").json() == {"status": "ok"}
+def test_a_site_says_how_long_it_may_take_to_be_ready_and_serves_no_health_path(dist: Path) -> None:
+    client = TestClient(site(dist, ready_timeout_s=45)().create_app())
+    assert client.get("/agentenv/ext/website/ready").json()["timeout_s"] == 45
     card = client.get("/.well-known/agent-env.json").json()
-    assert _extension(card, WEBSITE_EXTENSION_URI)["params"]["health"] == "/healthz"
+    assert "health" not in _extension(card, WEBSITE_EXTENSION_URI)["params"]
+    assert client.get("/api/health").status_code == 404
 
 
 def _extension(card: dict, uri: str) -> dict:
@@ -202,7 +242,7 @@ def test_the_card_declares_website_v1_its_routes_clock_and_data_plane(client: Te
     assert card["capabilities"]["operations"] == ["data/reset", "data/add", "data/get"]
     params = _extension(card, WEBSITE_EXTENSION_URI)["params"]
     assert params["domains"] == ["shop.example", "www.shop.example"]
-    assert params["health"] == "/api/health"
+    assert "health" not in params
     assert params["routes"] == [
         {"method": "GET", "path": "/api/orders", "name": "list_orders", "roles": None},
         {"method": "POST", "path": "/api/orders", "name": "place_order", "roles": ["default", "agent"]},
@@ -270,7 +310,7 @@ def test_broad_routes_leave_the_built_in_ones_answering_their_paths(dist: Path) 
     env.data = copy.deepcopy(SEED)
     client = TestClient(env.create_app())
     assert client.get("/api/session").json()["user"] == "alice"
-    assert client.get("/api/health").json() == {"status": "ok"}
+    assert client.get("/api/health").json() == {"named": "health"}
     assert client.get("/about").json() == {"page": "about"} and client.get("/api/other").json() == {"named": "other"}
 
 
@@ -437,7 +477,7 @@ def test_a_clock_that_cannot_be_read_is_refused_and_a_lost_one_fails_the_sites_a
     assert refused.status_code == 500 and not shop.clock.synced
     client.post("/agentenv/ext/sync_time", json={"env_get_time_url": gateway_clock.url})
     gateway_clock.close()
-    for path in ("/", "/api/orders", "/api/health"):
+    for path in ("/", "/api/orders", "/api/missing"):
         answer = client.get(path)
         assert answer.status_code == 503 and answer.json()["code"] == "clock_unavailable", path
     card = client.get("/.well-known/agent-env.json")

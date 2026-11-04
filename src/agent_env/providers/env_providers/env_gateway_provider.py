@@ -16,7 +16,14 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
-from agentenv_protocol.website import SESSION_SECRET_ENV, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, website_readiness
+from agentenv_protocol.website import (
+    SESSION_SECRET_ENV,
+    SITE_READY_TIMEOUT_S,
+    WEBSITE_EXTENSION_URI,
+    WEBSITE_READY_OP,
+    WebsiteReadiness,
+    website_readiness,
+)
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
@@ -88,7 +95,8 @@ MCP_HC_RETRIES = 30
 
 MCP_HC_START_PERIOD = "60s"
 
-WEBSITE_READY_TIMEOUT_S = 300.0
+WEBSITE_READY_TIMEOUT_S = SITE_READY_TIMEOUT_S
+WEBSITE_READY_MARGIN_S = 30.0
 WEBSITE_READY_POLL_S = 2.0
 
 
@@ -1621,15 +1629,19 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
                              timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
     """Wait until each site is ready, as its card says through ``/svc/<name>/``: by ``website/v1``'s ``ready``, or,
     for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
-    Raises naming each site still not ready, and why, once ``timeout_s`` has passed, and at once, with
-    ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
-    deadline = time.monotonic() + timeout_s
+    A site whose answer says how long it may take (``timeout_s``) is waited that long and ``WEBSITE_READY_MARGIN_S``,
+    any other ``timeout_s``. Raises naming each site still not ready, and why, once one is waited past its time, and at
+    once, with ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
+    started = time.monotonic()
     waiting = {wc.environment_name: wc for wc in website_configs}
     why: dict[str, str] = {}
+    limit: dict[str, float] = {}
     warned: set[str] = set()
     while waiting:
         for name, wc in list(waiting.items()):
-            ready, why[name] = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
+            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
+            if declared is not None:
+                limit[name] = declared + WEBSITE_READY_MARGIN_S
             if ready is None and name not in warned:
                 warned.add(name)
                 logger.warning(f"website {name!r} has no {WEBSITE_EXTENSION_URI} {WEBSITE_READY_OP} on its card, so its "
@@ -1638,28 +1650,38 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
                 del waiting[name]
         if not waiting:
             return
-        if time.monotonic() >= deadline:
+        waited = time.monotonic() - started
+        if any(waited >= limit.get(name, timeout_s) for name in waiting):
             raise RuntimeError("websites not ready after %ds: %s" % (
-                timeout_s, "; ".join(f"{name} ({why[name]})" for name in waiting)))
+                waited, "; ".join(f"{name} ({why[name]})" for name in waiting)))
         await asyncio.sleep(poll_s)
 
 
-async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool], str]:
-    """Whether the site at ``base_url`` is ready and, when not, why: True or False by the ``WebsiteReadiness`` its
-    card's ``website/v1`` ``ready`` answers, as the protocol's ``website_readiness`` reads it, an answer that isn't one
-    False; with no card or no ``ready`` on it, None once its health path answers 200 and False before."""
+async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool], str, Optional[float]]:
+    """Whether the site at ``base_url`` is ready, why not, and how long it says it may take: True or False by the
+    ``WebsiteReadiness`` its card's ``website/v1`` ``ready`` answers, as the protocol's ``website_readiness`` reads it,
+    an answer that isn't one False; with no card or no ``ready`` on it, None once its health path answers 200 and False
+    before."""
     async with httpx.AsyncClient() as client:
         try:
             card = _card_of(await client.get(base_url + WELL_KNOWN_PATH, timeout=10), base_url)
             readiness = None if card is None else await website_readiness(base_url, card, timeout=10)
             if readiness is not None:
-                if readiness.ready:
-                    return True, ""
-                return False, ", ".join(readiness.problems) or f"{WEBSITE_READY_OP} says not ready"
+                return readiness.ready, "" if readiness.ready else _not_ready_why(readiness), readiness.timeout_s
             health = await client.get(base_url + health_path, timeout=10)
         except (httpx.HTTPError, ValueError) as e:
-            return False, f"{type(e).__name__}: {e}"
-    return (None, "") if health.status_code == 200 else (False, f"{health_path} answered {health.status_code}")
+            return False, f"{type(e).__name__}: {e}", None
+    return (None, "", None) if health.status_code == 200 else (False, f"{health_path} answered {health.status_code}", None)
+
+
+def _not_ready_why(readiness: WebsiteReadiness) -> str:
+    """Why a site isn't ready, as its answer says, and for one that says how long it has waited, whether past its time."""
+    problems = ", ".join(readiness.problems) or f"{WEBSITE_READY_OP} says not ready"
+    if readiness.waited_s is None or readiness.timeout_s is None:
+        return problems
+    when = (f"not ready after {readiness.timeout_s:.0f} s" if readiness.waited_s > readiness.timeout_s
+            else f"not ready yet, {readiness.waited_s:.0f} s in")
+    return f"{when}: {problems}"
 
 
 def _card_of(response: httpx.Response, base_url: str) -> Optional[dict]:

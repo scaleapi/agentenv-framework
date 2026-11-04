@@ -35,8 +35,7 @@ from pydantic import ValidationError
 from ..client import find_extension, find_extension_method
 from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, iso, parse_time
-from .environment import DEFAULT_HEALTH_PATH
-from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
+from .readiness import DEFAULT_HEALTH_PATH, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 
 Status = Literal["passed", "failed", "skipped", "warned"]
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
@@ -97,13 +96,13 @@ class _Checker:
         health = site.get("health") if isinstance(site.get("health"), str) else DEFAULT_HEALTH_PATH
         steps = (("any_host", self._any_host), ("health", lambda: self._health(card, health)),
                  ("universe_now", self._universe_now), ("data_plane", lambda: self._data_plane(card)),
-                 ("clock", lambda: self._clock(card, health)), ("forwarded", lambda: self._forwarded(site)),
+                 ("clock", lambda: self._clock(card)), ("forwarded", lambda: self._forwarded(site)),
                  ("cookies", lambda: self._cookies(site)))
         outcomes = {name: _outcome(step) for name, step in steps if name != "universe_now"}
         outcomes["universe_now"] = _outcome(self._universe_now)
-        return [self._card(response, site), *(Result(name, *outcomes[name]) for name, _step in steps)]
+        return [self._card(response, card, site), *(Result(name, *outcomes[name]) for name, _step in steps)]
 
-    def _card(self, response: httpx.Response, site: dict) -> Result:
+    def _card(self, response: httpx.Response, card: dict, site: dict) -> Result:
         if response.status_code != 200:
             return Result("card", "failed", f"{WELL_KNOWN_PATH} answered {response.status_code}")
         problems = []
@@ -111,8 +110,9 @@ class _Checker:
             problems.append(f"declares no {WEBSITE_EXTENSION_URI} with params")
         if not isinstance(site.get("domains"), list):
             problems.append("its params have no domains list")
-        if not (isinstance(site.get("health"), str) and site["health"].startswith("/")):
-            problems.append("its params have no health path")
+        if find_extension_method(card, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP) is None and not (
+                isinstance(site.get("health"), str) and site["health"].startswith("/")):
+            problems.append(f"it has no {WEBSITE_READY_OP}, and its params no health path")
         routes = site.get("routes")
         if not isinstance(routes, list) or not all(isinstance(r, dict) and {"method", "path", "name"} <= set(r)
                                                    for r in routes):
@@ -198,7 +198,7 @@ class _Checker:
             return "failed", "data/get after data/reset and data/add of its own export returned other data"
         return "passed", f"{len(exported)} part(s) round-tripped through reset and add"
 
-    def _clock(self, card: dict, health: str) -> tuple[Status, str]:
+    def _clock(self, card: dict) -> tuple[Status, str]:
         if find_extension(card, CLOCK_EXTENSION_URI) is None:
             return "failed", f"the card declares no {CLOCK_EXTENSION_URI}"
         method = find_extension_method(card, CLOCK_EXTENSION_URI, "sync_time")
@@ -210,7 +210,7 @@ class _Checker:
             if response.status_code >= 400:
                 return "failed", f"sync_time answered {response.status_code}: {response.text[:200]}"
             try:
-                seen = self.get(health).headers.get(UNIVERSE_NOW_HEADER)
+                seen = self.get("/").headers.get(UNIVERSE_NOW_HEADER)
                 expected = virtual_now()
             finally:
                 with contextlib.suppress(Exception):
