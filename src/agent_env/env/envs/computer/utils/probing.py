@@ -71,24 +71,29 @@ async def checked(links: list[SandboxProvider], env: ComputerEnv, driver: Comput
                                  f"error talking to its driver, the last {attempts[-1]['reason']}"),
                         "attempts": attempts}
         else:
-            outcome = _reported(env, form, arch, result, report, card, provider)
+            outcome = _reported(env, driver, form, arch, result, report, card, provider)
         return _attempted(attempts, outcome)
 
 
-def _reported(env: ComputerEnv, form: str, arch: str, result: dict, report: ProbeReport, card: dict,
-              provider: str) -> dict:
+def _reported(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict, report: ProbeReport,
+              card: dict, provider: str) -> dict:
     """``result`` probed: ready with the driver's card, or failed at the probe, with a summary of the probe and its
-    report stored."""
+    report stored. A failed check the driver declares it's known to fail on the base's OS is recorded in the summary,
+    and doesn't fail the build."""
     stored = FileArtifact.put_bytes(derive_id(env.stored_id, f"probe_report_{form}_{arch}"), description=(
         f"the {form}/{arch} probe of {env.stored_id} v{env.version}"), filename="probe.json",
         content=report.model_dump_json(indent=1).encode(), content_type="application/json")
     probe = {"level": report.level, "provider": provider, "passed": report.passed, "checks": report.counts(),
              "extensions": report.extensions, "report": {"id": stored.id, "version": stored.version},
              "probed_at": now()}
-    if not report.passed:
-        failing = "; ".join(f"{c.check} {c.name}: {c.detail}" for c in report.checks if c.status == "failed")
-        return {**result, "status": "failed", "stage": "probe", "reason": f"the probe failed: {failing}",
-                "failed_at": now(), "probe": probe}
+    known = {(failure.check, failure.name): failure for failure in driver.known_failures.get(env.computer.os.type, [])}
+    failed_checks = [c for c in report.checks if c.status == "failed"]
+    if waived := [c for c in failed_checks if (c.check, c.name) in known]:
+        probe["known_failures"] = [{"check": c.check, "name": c.name, "detail": c.detail,
+                                    "reason": known[c.check, c.name].reason} for c in waived]
+    if failing := [c for c in failed_checks if (c.check, c.name) not in known]:
+        return {**result, "status": "failed", "stage": "probe", "failed_at": now(), "probe": probe,
+                "reason": "the probe failed: " + "; ".join(f"{c.check} {c.name}: {c.detail}" for c in failing)}
     return {**result, "status": "ready", "card": card, "probe": probe}
 
 

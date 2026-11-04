@@ -101,7 +101,8 @@ installs, bound to the bundle's code signature, and its services as LaunchAgents
 through `agentenv-service`, or, when `direct`, as its own command, with the variables it names, as an app bundle whose
 TCC permissions macOS gives only to the executable launchd starts itself must. macOS has no apt: a layer's
 `[install.macos]` names no `packages` or `sources`. Then the VM shuts down, is kept on that Mac as the VM bundle of its
-name, and gate 3 probes it at full; a compose of the same inputs on that Mac reuses it.
+name, and gate 3 probes it at full, a check its driver declares it fails on macOS (`known_failures`) recorded and not
+failing the build; a compose of the same inputs on that Mac reuses it.
 
 A deploy clones the env's VM bundle, writes the deploy's environment into a folder the VM shares as
 `agentenv_protocol.computer.seed`'s seed, which `agentenv-service` reads (waiting for the share, which mounts at login),

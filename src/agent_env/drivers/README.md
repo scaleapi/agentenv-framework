@@ -49,7 +49,11 @@ is `/tmp/agentenv-cua-driver.sock`. `requirements-macos.txt` installs the protoc
 sha256, those tools, and that cua-driver reports Accessibility and Screen Recording granted. Its pointer's actions and
 its typing go in the foreground, where cua-driver otherwise keeps from moving a person's pointer over a background app,
 and a drag first rests the pointer on its start, since an app such as Tk reads where the pointer is when it handles the
-press.
+press. cua-driver 0.38.0 fails two of the probe's checks on macOS for defects of its own: it posts each typed
+character's key-up with the A key's code (P6, typed text arrives as key events), and a drag's mouse-down after the
+pointer has moved along its path (P7). `env.toml`'s `[[known_failures.macos]]` names both with that reason, so gate 3
+records them in the build's probe (`known_failures`) and doesn't fail the build for them; any other failure still
+does. A driver's `known_failures`, by OS type, names a check by its id and name, with why.
 
 To move it to another cua-driver version:
 
