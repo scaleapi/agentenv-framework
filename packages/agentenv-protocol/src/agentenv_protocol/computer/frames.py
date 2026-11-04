@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from PIL import Image as PILImage
 
 from .errors import Internal, StaleFrame
-from .operations import Display, Image
-from .results import DisplayData, FrameData
+from .operations import Display, Image, PageState
+from .results import DialogData, DisplayData, FileChooserData, FrameData, PageData
 
 KEEP = 64
 #: The JPEG quality a screenshot answers with when it names none.
@@ -34,6 +34,8 @@ class Frame:
     parent_id: str | None
     captured_at: datetime
     inputs: tuple = field(repr=False)
+    #: The page it shows, on a computer whose screen is a website browser's active tab.
+    page: PageState | None = None
 
     @property
     def width(self) -> int:
@@ -71,7 +73,20 @@ class Frame:
             display=DisplayData(width=self.display.width, height=self.display.height, scale=self.display.scale),
             parent_frame_id=self.parent_id,
             captured_at=self.captured_at.isoformat().replace("+00:00", "Z"),
+            page=_page_data(self.page),
         )
+
+    def note(self) -> str:
+        """What a summary adds for the page it shows: its title and URL, and an open dialog or file chooser."""
+        if self.page is None:
+            return ""
+        page = self.page
+        note = f' on "{page.title}" ({page.url})'
+        if page.dialog is not None:
+            note += f'; a {page.dialog.type} dialog is open: "{page.dialog.message}"'
+        if page.file_chooser is not None:
+            note += f"; a file chooser is open, for {'files' if page.file_chooser.multiple else 'one file'}"
+        return note
 
     def encode(self, fmt: str = "png", quality: int | None = None) -> tuple[str, str]:
         """The frame as base64 and its MIME type."""
@@ -92,7 +107,7 @@ class FrameStore:
         self._latest: dict[str, str] = {}
 
     def add(self, image: PILImage.Image, display: Display, inputs: tuple, *, identity: str,
-            parent: Frame | None = None, origin: tuple[int, int] = (0, 0)) -> Frame:
+            parent: Frame | None = None, origin: tuple[int, int] = (0, 0), page: PageState | None = None) -> Frame:
         frame = Frame(
             id=f"f{self._next}",
             png=_png(image),
@@ -103,6 +118,7 @@ class FrameStore:
             parent_id=parent.id if parent is not None else None,
             captured_at=parent.captured_at if parent is not None else datetime.now(timezone.utc),
             inputs=parent.inputs if parent is not None else inputs,
+            page=parent.page if parent is not None else page,
         )
         self._next += 1
         self._frames[frame.id] = frame
@@ -151,6 +167,16 @@ def to_pil(capture: object, display: Display) -> PILImage.Image:
         raise Internal(f"@capture returned {image.size[0]}×{image.size[1]}, but the display at scale "
                        f"{display.scale:g} is {expected[0]}×{expected[1]}")
     return image
+
+
+def _page_data(page: PageState | None) -> PageData | None:
+    if page is None:
+        return None
+    dialog, chooser = page.dialog, page.file_chooser
+    return PageData(tab=page.tab, url=page.url, title=page.title,
+                    dialog=DialogData(type=dialog.type, message=dialog.message, default_text=dialog.default_text)
+                    if dialog is not None else None,
+                    file_chooser=FileChooserData(multiple=chooser.multiple) if chooser is not None else None)
 
 
 def _png(image: PILImage.Image) -> bytes:

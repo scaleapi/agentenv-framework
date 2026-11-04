@@ -19,24 +19,35 @@ from agentenv_protocol.computer import (
     ComputerDriverEnvironment,
     DeviceUnavailable,
     Display,
+    FileChooser,
     Image,
+    InvalidArgument,
+    PageDialog,
+    PageState,
     ReadyCheck,
     Recording,
+    Tab,
     Unsupported,
     capture,
     click,
     computer_driver,
+    dialog,
     display,
     drag,
+    history,
     key_down,
     key_up,
+    navigate,
+    page_state,
     pointer_down,
     pointer_move,
     pointer_position,
     pointer_up,
     press,
     scroll,
+    tabs,
     type_text,
+    upload,
 )
 from agentenv_protocol.computer import apps
 from agentenv_protocol.computer.app import SOCKET
@@ -80,7 +91,10 @@ class PageDriver(ComputerDriverEnvironment):
     recording = Recording(max_fps=10)
     screen_kind = "page"
     notes = ("This computer is one web page: the browser's active tab, with no address bar, tab strip or desktop "
-             "around it. Its screen is the page's viewport.")
+             "around it. Its screen is the page's viewport. Go to a URL with computer_navigate, back, forward or "
+             "reload with computer_history, and list, open, switch or close tabs with computer_tabs. Each screenshot "
+             "names the page, and an open dialog, which computer_dialog answers, or file chooser, which "
+             "computer_upload gives files in ~/Uploads.")
 
     def __init__(self) -> None:
         super().__init__()
@@ -202,6 +216,39 @@ class PageDriver(ComputerDriverEnvironment):
         self._held = [key for key in self._held if key not in keys]
         await self._input([_key("keyUp", key, self._mask()) for key in keys])
 
+    @navigate
+    async def go_to(self, url) -> None:
+        await self._call("navigate", {"url": url})
+
+    @history
+    async def move_in_history(self, direction) -> None:
+        await self._call("history", {"direction": direction})
+
+    @tabs
+    async def tab_action(self, action, tab, url) -> list[Tab]:
+        if action == "open":
+            await self._call("tabs/open", {"url": url} if url else {})
+        elif action in ("switch", "close"):
+            await self._call("tabs/activate" if action == "switch" else "tabs/close", {"tab": tab})
+        listed = (await self._call("tabs/list"))["tabs"]
+        return [Tab(t["id"], t["url"], t["title"], t["active"]) for t in listed]
+
+    @dialog
+    async def answer_dialog(self, accept, text) -> None:
+        await self._call("dialog/answer", {"accept": accept, **({"text": text} if text is not None else {})})
+
+    @upload
+    async def choose_files(self, paths) -> None:
+        await self._call("files/choose", {"paths": paths})
+
+    @page_state
+    async def page_now(self) -> PageState:
+        state = await self._call("page/state")
+        open_dialog, chooser = state.get("dialog"), state.get("file_chooser")
+        return PageState(state["tab"], state["url"], state["title"],
+                         PageDialog(**open_dialog) if open_dialog else None,
+                         FileChooser(**chooser) if chooser else None)
+
     def _mask(self) -> int:
         return _modifiers(self._held)
 
@@ -225,6 +272,8 @@ class PageDriver(ComputerDriverEnvironment):
             raise DeviceUnavailable(_ended(folder) or f"the browser's server isn't answering: {type(e).__name__}: {e}"
                                     ) from None
         if answer.status_code >= 400:
+            if (refused := _refusal(answer)) is not None:
+                raise InvalidArgument(refused)
             raise DeviceUnavailable(_ended(folder) or f"the browser couldn't {op}: {answer.text[:300]}")
         return answer.json()
 
@@ -239,6 +288,15 @@ class PageDriver(ComputerDriverEnvironment):
             else:
                 raise DeviceUnavailable("no website browser on this computer answers yet")
         return self._browser
+
+
+def _refusal(answer: httpx.Response) -> Optional[str]:
+    """Why the browser's server refused a call it was given wrong, which the agent can put right."""
+    try:
+        error = answer.json().get("error") or {}
+    except ValueError:
+        return None
+    return error.get("message") if error.get("code") == "invalid_argument" else None
 
 
 def _ended(folder: Path) -> Optional[str]:

@@ -1,9 +1,10 @@
-"""The browser as a computer: agentenv's chromium deployed alone, on the ubuntu-24.04-headless base with no display and the page
-driver, whose screen is chromium's active tab, headless. Gate 3 makes this machine's arch ready with it; deployed
-through the computer provider like any computer, its computer_* tools see and drive the page; nothing runs X and nothing
-listens but the driver and the site proxy; a killed app server or driver is started again by supervisord and the
-computer is ready again; and chromium killed fails it for good, computer-ready/v1 saying why and the tools answering
-with it. Needs Docker and the local registry on localhost:5000."""
+"""The browser as a computer: agentenv's chromium deployed alone, on the ubuntu-24.04-headless base with no display
+and the page driver, whose screen is chromium's active tab, headless. Gate 3 makes this machine's arch ready with it;
+deployed through the computer provider like any computer, its computer_* tools see and drive the page, and its page
+tools navigate, move in history, answer a dialog, use tabs and upload; nothing runs X and nothing listens but the driver
+and the site proxy; a killed app server or driver is started again by supervisord and the computer is ready again; and
+chromium killed fails it for good, computer-ready/v1 saying why and the tools answering with it. Needs Docker and the
+local registry on localhost:5000."""
 
 import asyncio
 import json
@@ -53,6 +54,33 @@ onkeydown = e => { s.k.push((e.ctrlKey ? "C-" : "") + e.key); show(); };
 show();
 </script>"""
 PAGE_URL = "data:text/html," + urllib.parse.quote(PAGE)
+SITE = "http://127.0.0.1:8771/"
+# Serves, on loopback for the seconds it's given, a home page with a button that asks to confirm and a file input, each
+# saying in the title what came of it, and two more pages.
+SERVE_SITE = """import http.server, sys, threading, time
+PAGES = {
+    "/": (b"<title>Home</title><style>body{margin:0} button,input{position:absolute;left:0;width:300px;"
+          b"height:100px}</style><button style='top:0' "
+          b"onclick=\\"document.title = 'confirmed ' + confirm('Delete this message?')\\">ask</button>"
+          b"<input type=file style='top:200px' onchange=\\"document.title = 'chose ' + this.files[0].name\\">"),
+    "/two": b"<title>Two</title><h1>Two</h1>",
+    "/three": b"<title>Three</title><h1>Three</h1>",
+}
+class Site(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = PAGES.get(self.path, b"<title>Missing</title>")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 8771), Site)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+time.sleep(float(sys.argv[1]))
+"""
+SERVE_START_S = 3
 # Every TCP port something in the computer listens on, and whether any process is an X server.
 LISTENING = """import glob
 ports = set()
@@ -153,6 +181,80 @@ async def test_a_killed_app_server_or_driver_comes_back_and_a_killed_browser_fai
     assert "by signal SIGKILL" in browser["detail"] and "infrastructure failure" in browser["detail"]
     assert refused.isError and "has failed" in refused.content[0].text and "SIGKILL" in refused.content[0].text
     assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_an_agent_navigates_moves_in_history_answers_a_dialog_uses_tabs_and_uploads_with_its_page_tools(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
+            await inside.run(deployed, ["sh", "-c", "printf cv > ~/Uploads/cv.txt"], timeout_s=30)
+            await asyncio.sleep(SERVE_START_S)
+            async with streamablehttp_client(deployed.mcp_url) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    await _tool(session, "computer_history", {"direction": "reload"})
+                    home = await _shown(session, lambda page: page["title"] == "Home")
+                    await _tool(session, "computer_navigate", {"url": SITE + "two"})
+                    two = await _shown(session, lambda page: page["title"] == "Two")
+                    await _tool(session, "computer_history", {"direction": "back"})
+                    back = await _shown(session, lambda page: page["title"] == "Home")
+                    await _tool(session, "computer_history", {"direction": "forward"})
+                    forward = await _shown(session, lambda page: page["title"] == "Two")
+                    await _tool(session, "computer_history", {"direction": "back"})
+                    await _shown(session, lambda page: page["title"] == "Home")
+                    asked = await session.call_tool("computer_click", {"x": 150, "y": 50, "screenshot": True})
+                    open_dialog = await _shown(session, lambda page: page.get("dialog") is not None)
+                    blocked = await session.call_tool("computer_click", {"x": 150, "y": 50})
+                    await _tool(session, "computer_dialog", {"accept": True})
+                    confirmed = await _shown(session, lambda page: page["title"] == "confirmed true")
+                    opened = await session.call_tool("computer_tabs", {"action": "open", "url": SITE + "three"})
+                    three = await _shown(session, lambda page: page["title"] == "Three")
+                    first = next(tab["tab"] for tab in opened.structuredContent["tabs"] if not tab["active"])
+                    second = next(tab["tab"] for tab in opened.structuredContent["tabs"] if tab["active"])
+                    await _tool(session, "computer_tabs", {"action": "switch", "tab": first})
+                    switched = await _shown(session, lambda page: page["tab"] == first)
+                    closed = await session.call_tool("computer_tabs", {"action": "close", "tab": second})
+                    await _tool(session, "computer_click", {"x": 150, "y": 250})
+                    chooser = await _shown(session, lambda page: page.get("file_chooser") is not None)
+                    await _tool(session, "computer_upload", {"paths": ["cv.txt"]})
+                    chose = await _shown(session, lambda page: page["title"] == "chose cv.txt")
+            record = await _record(deployed)
+            serving.cancel()
+        finally:
+            report = await teardown_run(context)
+
+    assert home["page"]["url"] == SITE and two["page"]["url"] == SITE + "two"
+    assert back["page"]["title"] == "Home" and forward["page"]["title"] == "Two"
+    assert not asked.isError and asked.structuredContent["applied"] == "yes"
+    assert open_dialog["page"]["dialog"] == {"type": "confirm", "message": "Delete this message?", "default_text": ""}
+    assert 'a confirm dialog is open: "Delete this message?"' in open_dialog["summary"]
+    assert blocked.isError and blocked.structuredContent["code"] == "dialog_open"
+    assert confirmed["page"]["title"] == "confirmed true" and "dialog" not in confirmed["page"]
+    assert [tab["url"] for tab in opened.structuredContent["tabs"]] == [SITE, SITE + "three"]
+    assert three["page"]["tab"] == second and switched["page"]["title"] == "confirmed true"
+    assert [tab["tab"] for tab in closed.structuredContent["tabs"]] == [first]
+    assert chooser["page"]["file_chooser"] == {"multiple": False} and chose["page"]["title"] == "chose cv.txt"
+    assert [(d["message"], d["answer"], d["by"]) for d in record["dialogs"]] == [
+        ("Delete this message?", "accepted", "agent")]
+    assert any(tab["id"] == second and tab["closed_by"] == "agentenv" for tab in record["closed_tabs"])
+    assert not report.failed
+
+
+async def _shown(session: ClientSession, holds) -> dict:
+    """A screenshot's result once the page it shows is what ``holds`` waits for, within ``WAIT_S``."""
+    last, deadline = None, time.monotonic() + WAIT_S
+    while time.monotonic() < deadline:
+        shot = await session.call_tool("computer_screenshot", {"space": "frame"})
+        last = shot.structuredContent
+        if not shot.isError and last.get("page") and holds(last["page"]):
+            return last
+        await asyncio.sleep(POLL_S)
+    raise AssertionError(f"the page didn't get there within {WAIT_S:g} s; it last showed {last!r}")
 
 
 async def _tool(session: ClientSession, name: str, args: dict) -> None:
