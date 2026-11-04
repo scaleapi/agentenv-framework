@@ -55,6 +55,8 @@ PAGES = [{"type": "page"}]
 #: The CDP input a computer's page driver may send to the active tab, and how long its screenshot may take.
 PAGE_INPUT = frozenset({"Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"})
 CAPTURE_TIMEOUT_S, UNNAVIGATED_CAPTURE_TIMEOUT_S = 3.0, 1.0
+#: Where files a page's file chooser may be given come from, under the session user's home.
+UPLOADS = "Uploads"
 #: Alone, loopback goes through the proxy too. In a computer, the apps on loopback beside it stay reachable; ``<-loopback>``
 #: removes Chromium's own rule, so ``*.localhost`` names still don't.
 ALONE_BYPASS = "<-loopback>"
@@ -204,6 +206,14 @@ class BrowserControl:
         self._closing: set[str] = set()
         self._open_dialogs: dict[str, dict] = {}
         self._answering: set[str] = set()
+        #: The file chooser each page's session opened that waits, headless, and the tab agentenv last brought to the
+        #: front.
+        self._choosers: dict[str, dict] = {}
+        self._front: Optional[str] = None
+        #: Each tab's latest capture, which shows while a dialog keeps its page from painting; and, by session, what
+        #: input sent there waits on to learn a dialog opened.
+        self._shots: dict[str, str] = {}
+        self._dialog_opened: dict[str, asyncio.Event] = {}
         self._tasks: set[asyncio.Future] = set()
         devtools.listen(self._event)
 
@@ -225,11 +235,119 @@ class BrowserControl:
         self.tabs.clear()
         self._sessions.clear()
         self._open_dialogs.clear()
+        self._choosers.clear()
+        self._shots.clear()
+        self._dialog_opened.clear()
 
     async def close_tab(self, target: str) -> None:
         """Close the tab ``target``, which the record says agentenv closed."""
         self._closing.add(target)
         await self.devtools.call("Target.closeTarget", {"targetId": target})
+
+    async def tab_list(self) -> list[dict]:
+        """The open tabs in opened order, each with its URL and title now and whether it's active."""
+        await self._refresh()
+        active = await self.active_tab()
+        return [{"id": tab["id"], "url": tab["url"], "title": tab["title"], "active": tab["id"] == active}
+                for tab in self.tabs.values()]
+
+    async def open_tab(self, url: Optional[str] = None) -> str:
+        """A new tab at ``url``, else blank, brought to the front; its id."""
+        target = (await self.devtools.call("Target.createTarget", {"url": url or "about:blank"}))["targetId"]
+        await self._bring_to_front(target)
+        return target
+
+    async def activate(self, target: str) -> None:
+        """The open tab ``target`` brought to the front, the active one."""
+        self._open(target)
+        await self._bring_to_front(target)
+
+    async def close(self, target: str) -> None:
+        """The open tab ``target`` closed, which the record says agentenv closed."""
+        self._open(target)
+        await self.close_tab(target)
+
+    async def navigate(self, url: str) -> None:
+        """The active tab opened at ``url``; InvalidArgument, with the browser's reason, when it can't."""
+        answer = await self.devtools.call("Page.navigate", {"url": url}, session_id=await self.active_session())
+        if error := answer.get("errorText"):
+            raise InvalidArgument(f"the browser couldn't open {url}: {error}")
+
+    async def history(self, direction: str) -> None:
+        """The active tab's page reloaded, or the one before or after it in its history opened."""
+        session = await self.active_session()
+        if direction == "reload":
+            await self.devtools.call("Page.reload", {}, session_id=session)
+            return
+        if direction not in ("back", "forward"):
+            raise InvalidArgument(f"direction is back, forward or reload, not {direction!r}")
+        history = await self.devtools.call("Page.getNavigationHistory", session_id=session)
+        index = history["currentIndex"] + (-1 if direction == "back" else 1)
+        if not 0 <= index < len(history["entries"]):
+            raise InvalidArgument(f"the active tab has no page to go {direction} to")
+        await self.devtools.call("Page.navigateToHistoryEntry", {"entryId": history["entries"][index]["id"]},
+                                 session_id=session)
+
+    async def answer_dialog(self, accept: bool, text: Optional[str] = None) -> None:
+        """The dialog open on the active tab answered, as the agent's answer; InvalidArgument with none open."""
+        active = await self.active_tab()
+        session = next((s for s, dialog in self._open_dialogs.items() if dialog["tab"] == active), None)
+        if session is None:
+            raise InvalidArgument("no dialog is open on the page")
+        await self.devtools.call("Page.handleJavaScriptDialog", {
+            "accept": accept, **({"promptText": text} if text is not None else {})}, session_id=session)
+
+    async def choose_files(self, paths: list[str]) -> None:
+        """The file chooser open on the active tab given ``paths``, files in the session user's ``~/Uploads``;
+        InvalidArgument for one outside it or missing, for several where it takes one, or with no chooser open."""
+        active = await self.active_tab()
+        session = next((s for s in self._choosers if self._sessions.get(s) == active), None)
+        if session is None:
+            raise InvalidArgument("no file chooser is open on the page")
+        uploads = (Path.home() / UPLOADS).resolve()
+        files = []
+        for path in paths:
+            file = (uploads / path).resolve()
+            if not file.is_relative_to(uploads):
+                raise InvalidArgument(f"{path} isn't in ~/{UPLOADS}")
+            if not file.is_file():
+                raise InvalidArgument(f"there's no file {path} in ~/{UPLOADS}")
+            files.append(str(file))
+        chooser = self._choosers[session]
+        if len(files) > 1 and not chooser["multiple"]:
+            raise InvalidArgument("the file chooser takes one file")
+        await self.devtools.call("DOM.setFileInputFiles", {"files": files, "backendNodeId": chooser["node"]},
+                                 session_id=session)
+        self._choosers.pop(session, None)
+
+    async def state(self) -> dict:
+        """The active tab's id, URL and title now, and the dialog and file chooser open on it."""
+        await self._refresh()
+        active = await self.active_tab()
+        if active is None:
+            raise DeviceUnavailable("the browser has no tab open")
+        return self._state_of(active)
+
+    def _state_of(self, target: str) -> dict:
+        tab = self.tabs.get(target) or {"url": "", "title": ""}
+        state: dict[str, Any] = {"tab": target, "url": tab["url"], "title": tab["title"]}
+        if dialog := next((d for d in self._open_dialogs.values() if d["tab"] == target), None):
+            state["dialog"] = {"type": dialog["type"], "message": dialog["message"],
+                               "default_text": dialog["default_text"]}
+        if chooser := next((c for s, c in self._choosers.items() if self._sessions.get(s) == target), None):
+            state["file_chooser"] = {"multiple": chooser["multiple"]}
+        return state
+
+    def _open(self, target: str) -> None:
+        if target not in self.tabs:
+            raise InvalidArgument(f"no tab {target} is open; list the tabs for their ids")
+
+    async def _bring_to_front(self, target: str) -> None:
+        await self.devtools.call("Target.activateTarget", {"targetId": target})
+        if (session := next((s for s, t in self._sessions.items() if t == target), None)) is not None:
+            with contextlib.suppress(DevToolsError):
+                await self.devtools.call("Page.bringToFront", session_id=session)
+        self._front = target
 
     @contextlib.asynccontextmanager
     async def hidden_page(self, url: str = "about:blank") -> AsyncIterator[str]:
@@ -246,7 +364,10 @@ class BrowserControl:
                 await self.devtools.call("Target.closeTarget", {"targetId": target})
 
     async def active_tab(self) -> Optional[str]:
-        """The tab whose page has focus, else the first visible one; CDP has no event for a tab made active."""
+        """The tab a dialog is open on, whose page it blocks from saying; else the tab whose page has focus, else the
+        one agentenv last brought to the front, else the first visible one: CDP has no event for a tab made active."""
+        if dialogs := [dialog["tab"] for dialog in self._open_dialogs.values() if dialog["tab"] in self.tabs]:
+            return dialogs[-1]
         visible = None
         for session, target in list(self._sessions.items()):
             if target not in self.tabs:
@@ -262,7 +383,7 @@ class BrowserControl:
                 return target
             if state[0] == "visible" and visible is None:
                 visible = target
-        return visible
+        return self._front if self._front in self.tabs else visible
 
     async def record(self) -> dict:
         """The record ``since`` it started: open ``tabs``, each with its URL and title now and whether it's ``active``,
@@ -285,23 +406,57 @@ class BrowserControl:
         """The active tab's page as it shows now, a PNG, base64; None for a tab that paints nothing within
         ``CAPTURE_TIMEOUT_S``, which a desktop browser shows blank, or sooner for a tab with no URL yet, such as a new
         tab whose navigation the browser blocked, which may never paint."""
+        return await self._capture(await self.active_session())
+
+    async def capture_page(self) -> dict:
+        """The active tab's capture, ``png``, else ``blank``, with its ``page`` state, of that tab whatever becomes
+        active meanwhile."""
         session = await self.active_session()
-        navigated = self.tabs.get(self._sessions[session], {}).get("url")
+        target = self._sessions[session]
+        png = await self._capture(session)
+        await self._refresh(target)
+        return {**({"png": png} if png is not None else {"blank": True}), "page": self._state_of(target)}
+
+    async def _capture(self, session: str) -> Optional[str]:
+        target = self._sessions[session]
+        navigated = self.tabs.get(target, {}).get("url")
         try:
             shot = await self.devtools.call("Page.captureScreenshot", {"format": "png", "optimizeForSpeed": True},
                                             session_id=session,
                                             timeout_s=CAPTURE_TIMEOUT_S if navigated else UNNAVIGATED_CAPTURE_TIMEOUT_S)
         except asyncio.TimeoutError:
-            return None
+            return self._shots.get(target) if session in self._open_dialogs else None
+        self._shots[target] = shot["data"]
         return shot["data"]
 
     async def dispatch(self, events: list[dict]) -> None:
-        """Each of ``events``, a CDP input call, sent to the active tab in order; InvalidArgument for any other call."""
+        """Each of ``events``, a CDP input call, sent to the active tab in order, until one opens a dialog left to the
+        agent: the page answers that one only once the dialog is answered, so it finishes then, and the rest aren't
+        sent. A dialog answered for the agent is answered at once, and the rest go on. InvalidArgument for any other
+        call."""
         if refused := [event.get("method") for event in events if event.get("method") not in PAGE_INPUT]:
             raise InvalidArgument(f"page input takes {', '.join(sorted(PAGE_INPUT))}, not {refused}")
         session = await self.active_session()
+        opened = self._dialog_opened.setdefault(session, asyncio.Event())
         for event in events:
-            await self.devtools.call(event["method"], event.get("params") or {}, session_id=session)
+            if self.dialogs == AGENT and session in self._open_dialogs:
+                return
+            opened.clear()
+            sent = asyncio.ensure_future(self.devtools.call(event["method"], event.get("params") or {},
+                                                            session_id=session))
+            waiting = asyncio.ensure_future(opened.wait())
+            try:
+                await asyncio.wait({sent, waiting}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                waiting.cancel()
+            if not sent.done():
+                if self.dialogs != AGENT:
+                    await sent
+                    continue
+                self._tasks.add(sent)
+                sent.add_done_callback(self._finished)
+                return
+            sent.result()
 
     async def _refresh(self, target: Optional[str] = None) -> None:
         """The URL and title of the tab ``target``, or of every open tab, as the browser has them now: it sends no
@@ -353,21 +508,34 @@ class BrowserControl:
                 width, height = self.viewport
                 await self.devtools.call("Emulation.setDeviceMetricsOverride", {
                     "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session_id=session)
+                await self.devtools.call("Page.setInterceptFileChooserDialog", {"enabled": True}, session_id=session)
         finally:
             await self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=session)
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
-        self._sessions.pop(params["sessionId"], None)
+        if (target := self._sessions.pop(params["sessionId"], None)) is not None:
+            self._shots.pop(target, None)
+        self._choosers.pop(params["sessionId"], None)
+        self._dialog_opened.pop(params["sessionId"], None)
 
     def _on_Page_loadEventFired(self, params: dict, session: Optional[str]) -> None:
+        self._choosers.pop(session, None)
         if (target := self._sessions.get(session)) is not None:
             self._spawn(self._refresh(target))
 
+    def _on_Page_fileChooserOpened(self, params: dict, session: Optional[str]) -> None:
+        if session in self._sessions:
+            self._choosers[session] = {"node": params.get("backendNodeId"),
+                                       "multiple": params.get("mode") == "selectMultiple"}
+
     def _on_Page_javascriptDialogOpening(self, params: dict, session: Optional[str]) -> None:
         dialog = {"tab": self._sessions.get(session), "type": params.get("type"), "message": params.get("message", ""),
-                  "url": params.get("url", ""), "opened_at": _now(), "answer": None, "by": None}
+                  "default_text": params.get("defaultPrompt", ""), "url": params.get("url", ""), "opened_at": _now(),
+                  "answer": None, "by": None}
         self.dialog_log.append(dialog)
         self._open_dialogs[session] = dialog
+        if (opened := self._dialog_opened.get(session)) is not None:
+            opened.set()
         if self.dialogs != AGENT:
             self._answering.add(session)
             leave = params.get("type") == "beforeunload"
@@ -618,7 +786,11 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "who closed them, its downloads with their size and sha256, its JavaScript dialogs and who answered each, and "
         "each launch, stop and exit of it since the computer booted, with its cause. page/viewport, page/capture and "
         "page/input are its active tab's page as a computer's page driver sees it: its size in pixels, which headless "
-        "is its window's, a PNG of it, and CDP input calls sent to it in order."))
+        "is its window's, a PNG of it, and CDP input calls sent to it in order. navigate and history open a URL in "
+        "the active tab, or go back, forward or reload; tabs/list, tabs/open, tabs/activate and tabs/close manage "
+        "its tabs by their ids; dialog/answer answers the dialog open on the active tab; files/choose gives the file "
+        "chooser open on it files in ~/Uploads, headless; and page/state is the active tab's id, URL and title and "
+        "what is open on it."))
     async def browser_record(self) -> dict:
         return {**await self.control.record(), "launches": self._computer_app.launches()}
 
@@ -629,12 +801,53 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @extension(BROWSER, op="page/capture", method="GET")
     async def browser_page_capture(self) -> dict:
-        png = await self.control.capture()
-        return {"png": png} if png is not None else {"blank": True}
+        return await self.control.capture_page()
 
     @extension(BROWSER, op="page/input")
     async def browser_page_input(self, events: list[dict]) -> dict:
         await self.control.dispatch(events)
+        return {}
+
+    @extension(BROWSER, op="page/state", method="GET")
+    async def browser_page_state(self) -> dict:
+        return await self.control.state()
+
+    @extension(BROWSER, op="navigate")
+    async def browser_navigate(self, url: str) -> dict:
+        await self.control.navigate(url)
+        return {}
+
+    @extension(BROWSER, op="history")
+    async def browser_history(self, direction: str) -> dict:
+        await self.control.history(direction)
+        return {}
+
+    @extension(BROWSER, op="tabs/list", method="GET")
+    async def browser_tabs_list(self) -> dict:
+        return {"tabs": await self.control.tab_list()}
+
+    @extension(BROWSER, op="tabs/open")
+    async def browser_tabs_open(self, url: Optional[str] = None) -> dict:
+        return {"tab": await self.control.open_tab(url)}
+
+    @extension(BROWSER, op="tabs/activate")
+    async def browser_tabs_activate(self, tab: str) -> dict:
+        await self.control.activate(tab)
+        return {}
+
+    @extension(BROWSER, op="tabs/close")
+    async def browser_tabs_close(self, tab: str) -> dict:
+        await self.control.close(tab)
+        return {}
+
+    @extension(BROWSER, op="dialog/answer")
+    async def browser_dialog_answer(self, accept: bool, text: Optional[str] = None) -> dict:
+        await self.control.answer_dialog(accept, text)
+        return {}
+
+    @extension(BROWSER, op="files/choose")
+    async def browser_files_choose(self, paths: list[str]) -> dict:
+        await self.control.choose_files(paths)
         return {}
 
     def extension_params(self, uri: str) -> dict:

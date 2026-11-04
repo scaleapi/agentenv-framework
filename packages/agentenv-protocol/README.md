@@ -473,6 +473,7 @@ pixels), at the display's size times its scale. Input operations may return an `
 | `@set_display` | no, with `display_modes` | `computer-display/v1` `set` (`get` is always served) |
 | `@pointer_move`, `@pointer_down`, `@pointer_up`, `@pointer_position` | all or none | `computer-pointer/v1` and its five tools; click and scroll at the pointer |
 | `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
+| `@navigate`, `@history`, `@tabs`, `@dialog`, `@upload`, `@page_state` | all or none, for a screen that is a website browser's page | `computer-page/v1` and its five tools; the `page` of every frame |
 | `@run_in_session` | no; a Linux default | `computer-exec/v1` |
 | `@write_files` | no; a Linux default | `data/add` |
 | `@record` | no | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
@@ -497,13 +498,21 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   group tools. Every result is structured, with a one-line summary as its text block; input results
   carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
   after acting. Click and scroll leave out `x` and `y` to act at the pointer on a computer with
-  `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`.
+  `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`. With the page
+  group, `computer_navigate` opens a URL in the active tab, `computer_history` goes `back`, `forward`
+  or `reload`s, `computer_tabs` lists, opens, switches and closes tabs by the browser's own ids and
+  answers with the tabs after it, `computer_dialog` answers the page's open dialog and
+  `computer_upload` gives its open file chooser files in `~/Uploads`.
 - **Frames and spaces.** Points are pixels of a named frame (your latest by default), or a
   0..`norm_scale` grid over it with `space: "norm"`. A point outside the frame or the range is
   refused (`out_of_bounds`), never clamped. The last 64 frames are kept, and a frame goes stale
-  (`stale_frame`) when the display geometry it was captured at changes.
+  (`stale_frame`) when the display geometry it was captured at changes. With the page group, every
+  frame carries `page`: the active tab's `tab`, `url` and `title`, and the `dialog` (`type`, `message`,
+  `default_text`) or `file_chooser` (`multiple`) open on it, which its summary names too.
 - **The input queue.** Input calls run one at a time in arrival order; one that waits past
-  `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue.
+  `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue. While a dialog is open
+  on the page, input it blocks (all but `computer_tabs`, `computer_dialog` and `computer_upload`) is
+  refused `dialog_open`, with `applied: "no"`.
 - **The computer skill.** `computer/v1` declares the seven tools, its params the driver's
   features, among them `screen`: `desktop`, or `page` for a driver whose screen is a website
   browser's active tab, which a computer env pairs with exactly one website browser. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
@@ -799,7 +808,8 @@ are the profile's template. The base class adds:
   each as of its page's last load, with `closed_at` and
   `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
   ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
-  and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.
+  and, completed, its size and sha256; and `dialogs`, each with its type, message, default text, answer
+  and who gave it.
   `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
 - **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
   `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
@@ -808,8 +818,18 @@ are the profile's template. The base class adds:
   Nothing relaunches a browser that exits on its own: in a computer the agent can, and alone it's an infra
   failure, its ready check false. `page/viewport`, `page/capture` and `page/input`, framework-only, are
   its active tab's page as a page driver sees it: its size, which headless is its window's; a PNG of it,
-  or `blank` for a tab that paints nothing within 3 s (1 s with no URL yet); and CDP input calls
-  (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText`), sent to it in order.
+  or `blank` for a tab that paints nothing within 3 s (1 s with no URL yet), its last capture while
+  a dialog keeps it from painting; and CDP input calls (`Input.dispatchMouseEvent`,
+  `Input.dispatchKeyEvent`, `Input.insertText`), sent to it in order. Also framework-only, for page
+  drivers and agentenv's own steps alike:
+  - `navigate {url}` and `history {direction}` (`back`, `forward` or `reload`), in the active tab;
+  - `tabs/list`, `tabs/open {url?}`, `tabs/activate {tab}` and `tabs/close {tab}`, by the browser's own tab
+    ids. The active tab is the one a dialog is open on, else the one whose page has focus, else the one
+    agentenv last brought to the front;
+  - `dialog/answer {accept, text?}`, the agent's answer to the dialog open on the active tab;
+  - `files/choose {paths}`, files in `~/Uploads` for the file chooser open on it, which headless, and so
+    alone, it intercepts;
+  - `page/state`, the active tab's id, URL and title and the dialog or file chooser open on it.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 

@@ -12,16 +12,19 @@ import httpx
 import pytest
 
 import agent_env
-from agentenv_protocol.computer import DeviceUnavailable, Platform
+from agentenv_protocol.computer import (DeviceUnavailable, FileChooser, InvalidArgument, PageDialog, PageState,
+                                        Platform, Tab)
 from agentenv_protocol.computer import driver as computer_driver
 from agentenv_protocol.computer.app_runtime import LAUNCHES
 from agentenv_protocol.website_browser import BROWSER
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "page" / "driver.py"
 NO_DISPLAY = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="none")
-PAGE_OPS = ("page/viewport", "page/capture", "page/input")
+PAGE_OPS = ("page/viewport", "page/capture", "page/input", "page/state", "navigate", "history", "tabs/list",
+            "tabs/open", "tabs/activate", "tabs/close", "dialog/answer", "files/choose")
+GETS = ("page/viewport", "page/capture", "page/state", "tabs/list")
 CARD = {"name": "chromium", "capabilities": {"extensions": [{"uri": BROWSER, "params": {"methods": {
-    op: {"method": "POST" if op == "page/input" else "GET", "endpoint": f"/agentenv/ext/browser/{op}"}
+    op: {"method": "GET" if op in GETS else "POST", "endpoint": f"/agentenv/ext/browser/{op}"}
     for op in PAGE_OPS}}}]}}
 #: A 2×1 PNG's first 24 bytes: its signature, then its IHDR's length, type, width and height.
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (2).to_bytes(4, "big") + (1).to_bytes(4, "big")
@@ -128,13 +131,15 @@ async def test_a_double_click_is_one_move_then_two_presses_and_releases_counted(
 
 @pytest.mark.asyncio
 async def test_its_capture_is_the_pages_png_and_a_tab_that_paints_nothing_is_white(page):
-    page.served["page/capture"] = {"png": base64.b64encode(PNG).decode()}
+    shown = {"tab": "A1", "url": "https://mail.test/", "title": "Inbox"}
+    page.served["page/capture"] = {"png": base64.b64encode(PNG).decode(), "page": shown}
     shot = await page.page()
-    page.served["page/capture"] = {"blank": True}
+    page.served["page/capture"] = {"blank": True, "page": shown}
     blank = await page.page()
 
     assert (shot.width, shot.height, shot.mode, shot.data) == (2, 1, "png", PNG)
     assert (blank.width, blank.height, blank.mode) == (1280, 800, "RGB") and set(blank.data) == {0xff}
+    assert shot.page == blank.page == PageState("A1", "https://mail.test/", "Inbox")
 
 
 @pytest.mark.asyncio
@@ -163,3 +168,46 @@ async def test_once_the_browser_has_ended_its_calls_say_why_and_send_nothing_tho
     with pytest.raises(DeviceUnavailable, match="has failed"):
         await page.click_at(1, 2, "left", 1, [])
     assert len(page.sent) == sent
+
+
+@pytest.mark.asyncio
+async def test_its_page_operations_call_the_browsers_and_a_tab_action_answers_with_the_tabs_after_it(page):
+    page.served["tabs/list"] = {"tabs": [{"id": "A1", "url": "https://mail.test/", "title": "Inbox", "active": True}]}
+    await page.go_to("https://mail.test/")
+    await page.move_in_history("back")
+    opened = await page.tab_action("open", None, "https://mail.test/")
+    await page.tab_action("switch", "A1", None)
+    await page.tab_action("close", "A1", None)
+    await page.answer_dialog(False, None)
+    await page.answer_dialog(True, "Grace")
+    await page.choose_files(["cv.pdf"])
+
+    assert opened == [Tab("A1", "https://mail.test/", "Inbox", True)]
+    assert [entry for entry in page.sent if entry[0] != "tabs/list"] == [
+        ("navigate", {"url": "https://mail.test/"}), ("history", {"direction": "back"}),
+        ("tabs/open", {"url": "https://mail.test/"}), ("tabs/activate", {"tab": "A1"}), ("tabs/close", {"tab": "A1"}),
+        ("dialog/answer", {"accept": False}), ("dialog/answer", {"accept": True, "text": "Grace"}),
+        ("files/choose", {"paths": ["cv.pdf"]})]
+
+
+@pytest.mark.asyncio
+async def test_its_page_state_is_the_browsers_with_what_is_open_on_it(page):
+    page.served["page/state"] = {"tab": "A1", "url": "https://mail.test/", "title": "Inbox",
+                                 "dialog": {"type": "confirm", "message": "Delete?", "default_text": ""},
+                                 "file_chooser": {"multiple": True}}
+    open_on_it = await page.page_now()
+    page.served["page/state"] = {"tab": "A1", "url": "https://mail.test/", "title": "Inbox"}
+
+    assert open_on_it == PageState("A1", "https://mail.test/", "Inbox", PageDialog("confirm", "Delete?"),
+                                   FileChooser(True))
+    assert await page.page_now() == PageState("A1", "https://mail.test/", "Inbox")
+
+
+@pytest.mark.asyncio
+async def test_a_call_the_browser_refuses_as_given_wrong_is_an_invalid_argument_the_agent_can_put_right(page):
+    page.served["files/choose"] = httpx.Response(400, json={"ok": False, "error": {
+        "code": "invalid_argument", "message": "there's no file cv.pdf in ~/Uploads"}})
+
+    with pytest.raises(InvalidArgument, match="there's no file cv.pdf in ~/Uploads"):
+        await page.choose_files(["cv.pdf"])
+

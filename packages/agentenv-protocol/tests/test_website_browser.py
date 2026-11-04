@@ -514,7 +514,8 @@ async def test_alone_each_page_it_attaches_to_is_held_to_its_window_before_it_ru
     sent = [method for method, _, session in devtools.calls if session == "s-popup"]
     assert next(params for method, params, _ in devtools.calls if method == "Target.setAutoAttach")[
         "waitForDebuggerOnStart"] is True
-    assert sent == ["Page.enable", "Emulation.setDeviceMetricsOverride", "Runtime.runIfWaitingForDebugger"]
+    assert sent == ["Page.enable", "Emulation.setDeviceMetricsOverride", "Page.setInterceptFileChooserDialog",
+                    "Runtime.runIfWaitingForDebugger"]
     assert ("Emulation.setDeviceMetricsOverride", {"width": 1024, "height": 768, "deviceScaleFactor": 1,
                                                    "mobile": False}, "s-popup") in devtools.calls
 
@@ -588,6 +589,222 @@ async def test_its_page_input_goes_to_the_active_tab_in_order_and_takes_only_inp
     sent = [(method, params, session) for method, params, session in devtools.calls if method.startswith("Input.")]
     assert sent == [("Input.dispatchMouseEvent", {"type": "mousePressed", "x": 1, "y": 2}, "s-a"),
                     ("Input.insertText", {"text": "hi"}, "s-a")]
+
+
+class Tabbed(Painting):
+    """A browser whose tabs paint and none has focus, with a history of two pages, the second current, and each call's
+    answer by method in ``answers``."""
+
+    def __init__(self, answers=None, blank=()):
+        super().__init__(blank)
+        self.answers.update({"Runtime.evaluate": lambda params, session: {"result": {"value": ["visible", False]}},
+                             "Page.getNavigationHistory": {"currentIndex": 1, "entries": [{"id": 7}, {"id": 8}]},
+                             "Target.createTarget": {"targetId": "b"}, "Page.navigate": {}, **(answers or {})})
+
+
+async def _tabs(devtools, *targets) -> BrowserControl:
+    control = BrowserControl(devtools, "agent", (1280, 800))
+    await control.attach()
+    for target in targets:
+        devtools.send("Target.targetCreated", _page(target, f"https://mail.test/{target}", f"Mail {target}"))
+        devtools.send("Target.attachedToTarget", {"sessionId": f"s-{target}", **_page(target)})
+    await asyncio.sleep(0)
+    return control
+
+
+def _sent(devtools, method):
+    return [(params, session) for name, params, session in devtools.calls if name == method]
+
+
+@pytest.mark.asyncio
+async def test_it_navigates_the_active_tab_and_moves_in_its_history_or_says_why_it_cant():
+    devtools = Tabbed({"Page.navigate": lambda params, session: {"errorText": "net::ERR_NAME_NOT_RESOLVED"}
+                       if "nowhere" in params["url"] else {}})
+    control = await _tabs(devtools, "a")
+
+    await control.navigate("https://mail.test/inbox")
+    await control.history("back")
+    await control.history("reload")
+    with pytest.raises(InvalidArgument, match="net::ERR_NAME_NOT_RESOLVED"):
+        await control.navigate("https://nowhere.test/")
+    with pytest.raises(InvalidArgument, match="no page to go forward to"):
+        await control.history("forward")
+
+    assert _sent(devtools, "Page.navigate")[0] == ({"url": "https://mail.test/inbox"}, "s-a")
+    assert _sent(devtools, "Page.navigateToHistoryEntry") == [({"entryId": 7}, "s-a")]
+    assert _sent(devtools, "Page.reload") == [({}, "s-a")]
+
+
+@pytest.mark.asyncio
+async def test_a_tab_it_opens_or_activates_is_brought_to_the_front_and_the_active_one_and_one_it_closes_its_own():
+    devtools = Tabbed()
+    control = await _tabs(devtools, "a")
+
+    opened = await control.open_tab("https://mail.test/b")
+    devtools.send("Target.targetCreated", _page("b", "https://mail.test/b", "Mail b"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-b", **_page("b")})
+    await asyncio.sleep(0)
+    after_open = await control.tab_list()
+    await control.activate("a")
+    after_switch = await control.tab_list()
+    with pytest.raises(InvalidArgument, match="no tab c is open"):
+        await control.activate("c")
+    await control.close("b")
+    devtools.send("Target.targetDestroyed", {"targetId": "b"})
+
+    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "https://mail.test/b"}, None)]
+    assert [(tab["id"], tab["active"]) for tab in after_open] == [("a", False), ("b", True)]
+    assert [(tab["id"], tab["active"]) for tab in after_switch] == [("a", True), ("b", False)]
+    assert ({}, "s-a") in _sent(devtools, "Page.bringToFront")
+    assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs] == [("b", "agentenv")]
+
+
+@pytest.mark.asyncio
+async def test_a_dialog_makes_its_tab_the_active_one_its_state_names_it_and_the_agent_answers_it():
+    devtools = Tabbed()
+    control = await _tabs(devtools, "a", "b")
+    with pytest.raises(InvalidArgument, match="no dialog is open"):
+        await control.answer_dialog(True)
+    devtools.send("Page.javascriptDialogOpening", {"type": "prompt", "message": "Name?", "defaultPrompt": "Ada",
+                                                   "url": "https://mail.test/b"}, session="s-b")
+
+    state = await control.state()
+    await control.answer_dialog(True, "Grace")
+    devtools.send("Page.javascriptDialogClosed", {"result": True, "userInput": "Grace"}, session="s-b")
+
+    assert state == {"tab": "b", "url": "https://mail.test/b", "title": "Mail b",
+                     "dialog": {"type": "prompt", "message": "Name?", "default_text": "Ada"}}
+    assert _sent(devtools, "Page.handleJavaScriptDialog") == [({"accept": True, "promptText": "Grace"}, "s-b")]
+    (dialog,) = control.dialog_log
+    assert (dialog["answer"], dialog["by"], dialog["input"]) == ("accepted", "agent", "Grace")
+
+
+@pytest.mark.asyncio
+async def test_input_that_opens_a_dialog_returns_once_it_opens_and_the_rest_waits_for_nothing():
+    class Held(Tabbed):
+        """A page whose handler of a mouse release opens a dialog, so the release isn't answered until it's closed."""
+
+        def __init__(self):
+            super().__init__()
+            self.released = asyncio.get_running_loop().create_future()
+
+        async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+            if method == "Input.dispatchMouseEvent" and params["type"] == "mouseReleased":
+                self.calls.append((method, params, session_id))
+                self.send("Page.javascriptDialogOpening", {"type": "confirm", "message": "Delete?"},
+                          session=session_id)
+                return await self.released
+            return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    devtools = Held()
+    control = await _tabs(devtools, "a")
+    events = [{"method": "Input.dispatchMouseEvent", "params": {"type": kind, "x": 1, "y": 1}}
+              for kind in ("mousePressed", "mouseReleased", "mouseMoved")]
+
+    await asyncio.wait_for(control.dispatch(events), 5)
+    sent = [params["type"] for method, params, _ in devtools.calls if method == "Input.dispatchMouseEvent"]
+    devtools.released.set_result({})
+    await asyncio.sleep(0)
+
+    assert sent == ["mousePressed", "mouseReleased"] and (await control.state())["dialog"]["message"] == "Delete?"
+
+
+@pytest.mark.asyncio
+async def test_input_that_opens_a_dialog_answered_for_the_agent_goes_on_once_it_is_answered():
+    class Answered(Tabbed):
+        """A page whose handler of a mouse release opens a dialog, answered at once by the control's setting."""
+
+        def __init__(self):
+            super().__init__({"Page.handleJavaScriptDialog": self._close})
+            self.released = asyncio.get_running_loop().create_future()
+
+        def _close(self, params, session):
+            self.released.set_result({})
+            return {}
+
+        async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+            if method == "Input.dispatchMouseEvent" and params["type"] == "mouseReleased":
+                self.calls.append((method, params, session_id))
+                self.send("Page.javascriptDialogOpening", {"type": "alert", "message": "Saved"}, session=session_id)
+                return await self.released
+            return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    devtools = Answered()
+    control = BrowserControl(devtools, "accept", (1280, 800))
+    await control.attach()
+    devtools.send("Target.targetCreated", _page("a", "https://mail.test/a", "Mail a"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-a", **_page("a")})
+    await asyncio.sleep(0)
+    events = [{"method": "Input.dispatchMouseEvent", "params": {"type": kind, "x": 1, "y": 1}}
+              for kind in ("mousePressed", "mouseReleased", "mouseMoved")]
+
+    await asyncio.wait_for(control.dispatch(events), 5)
+
+    assert [params["type"] for method, params, _ in devtools.calls if method == "Input.dispatchMouseEvent"] == [
+        "mousePressed", "mouseReleased", "mouseMoved"]
+
+
+@pytest.mark.asyncio
+async def test_its_page_capture_names_the_tab_it_captured_though_another_becomes_active_meanwhile():
+    class Switching(Tabbed):
+        """Tabs of which only ``focused``'s page has focus, which a capture of the first moves to the second."""
+
+        def __init__(self):
+            super().__init__({"Runtime.evaluate": lambda params, session: {
+                "result": {"value": ["visible", session == self.focused]}}})
+            self.focused = "s-a"
+
+        async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+            if method == "Page.captureScreenshot":
+                self.focused = "s-b"
+            return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    devtools = Switching()
+    control = await _tabs(devtools, "a", "b")
+
+    shot = await control.capture_page()
+
+    assert shot == {"png": "png of s-a", "page": {"tab": "a", "url": "https://mail.test/a", "title": "Mail a"}}
+    assert (await control.state())["tab"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_while_a_dialog_keeps_its_page_from_painting_its_capture_is_the_last_it_took():
+    devtools = Tabbed()
+    control = await _tabs(devtools, "a")
+    before = await control.capture()
+    devtools.blank.add("s-a")
+    devtools.send("Page.javascriptDialogOpening", {"type": "alert", "message": "Saved"}, session="s-a")
+
+    assert before == "png of s-a" and await control.capture() == "png of s-a"
+
+
+@pytest.mark.asyncio
+async def test_the_file_chooser_a_page_opens_takes_files_in_uploads_only_and_as_many_as_it_allows(tmp_path,
+                                                                                                    monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "Uploads" / "docs").mkdir(parents=True)
+    for name in ("cv.pdf", "docs/letter.pdf"):
+        (tmp_path / "Uploads" / name).write_text("x")
+    (tmp_path / "secret.txt").write_text("x")
+    devtools = Tabbed()
+    control = await _tabs(devtools, "a")
+    with pytest.raises(InvalidArgument, match="no file chooser is open"):
+        await control.choose_files(["cv.pdf"])
+    devtools.send("Page.fileChooserOpened", {"frameId": "f", "mode": "selectSingle", "backendNodeId": 42},
+                  session="s-a")
+
+    state = await control.state()
+    for paths, refused in ((["../secret.txt"], "isn't in ~/Uploads"), (["gone.pdf"], "no file gone.pdf"),
+                           (["cv.pdf", "docs/letter.pdf"], "takes one file")):
+        with pytest.raises(InvalidArgument, match=refused):
+            await control.choose_files(paths)
+    await control.choose_files(["docs/letter.pdf"])
+
+    assert state["file_chooser"] == {"multiple": False}
+    assert _sent(devtools, "DOM.setFileInputFiles") == [
+        ({"files": [str((tmp_path / "Uploads" / "docs" / "letter.pdf").resolve())], "backendNodeId": 42}, "s-a")]
+    assert "file_chooser" not in await control.state()
 
 
 @pytest.mark.asyncio

@@ -14,9 +14,9 @@ from mcp.types import CallToolResult
 from ..errors import AgentEnvError
 from ..tool_context import ToolContext
 from . import apps
-from .errors import DeliveryFailed, DeviceUnavailable, InputBusy, Internal
+from .errors import DeliveryFailed, DeviceUnavailable, DialogOpen, InputBusy, Internal
 from .frames import Frame, FrameStore, to_pil
-from .operations import GROUPS, INPUT, Display, ReadyCheck, resolve
+from .operations import DIALOG_BLOCKS, GROUPS, INPUT, Display, Image, PageState, ReadyCheck, resolve
 from .queue import InputQueue
 from .recording import RecordHints, Recordings
 from .results import EffectData, InputResult, send
@@ -80,8 +80,18 @@ class ComputerRuntime:
         counts as after the frame, which the frame may not show."""
         inputs = self.queue.snapshot()
         display = await self.display_now()
-        image = to_pil(await self.call("capture"), display)
-        return self.frames.add(image, display, inputs, identity=identity)
+        captured = await self.call("capture")
+        image = to_pil(captured, display)
+        page = captured.page if isinstance(captured, Image) and isinstance(captured.page, PageState) else None
+        if page is None and self.has("page"):
+            page = await self.page_now()
+        return self.frames.add(image, display, inputs, identity=identity, page=page)
+
+    async def page_now(self) -> PageState:
+        page = await self.call("page_state")
+        if not isinstance(page, PageState):
+            raise Internal(f"@page_state returned {page!r}, not a PageState")
+        return page
 
     async def pointer(self) -> tuple[int, int]:
         where = await self.call("pointer_position")
@@ -93,15 +103,20 @@ class ComputerRuntime:
 
     async def act(self, ctx: ToolContext, operation: str, args: tuple, *, frame: Frame | None, screenshot: bool,
                   summary: str, mapped: bool = False, at_pointer: bool = False, repeat: int = 1,
-                  hold: tuple | None = None, move_to: tuple | None = None, then: Callable | None = None) -> CallToolResult:
+                  hold: tuple | None = None, move_to: tuple | None = None, then: Callable | None = None,
+                  wrap: Callable[[InputResult, Any], InputResult] | None = None) -> CallToolResult:
         """One input call: its turn in the queue, the operation (after a move, repeated or held), then the result
         with others' input since ``frame`` and, when asked, a fresh frame. Whatever the call's turn can change is read
         once it has the turn: a point ``mapped`` from ``frame`` is checked again, since the display may have changed
-        while it waited, and ``at_pointer`` reads the pointer and puts it before ``args``. ``then`` runs as soon as
-        the input is delivered."""
+        while it waited, and ``at_pointer`` reads the pointer and puts it before ``args``; input a page's open dialog
+        blocks is refused. ``then`` runs as soon as the input is delivered, and ``wrap`` makes the result from the
+        operation's own."""
         identity = self.driver.caller_identity(ctx)
         sent = False
         async with self.queue.turn(self.driver.settings.queue_wait_s):
+            if operation in DIALOG_BLOCKS and self.has("page") and (dialog := (await self.page_now()).dialog):
+                raise DialogOpen(f'a {dialog.type} dialog is open on the page: "{dialog.message}"; answer it with '
+                                 "computer_dialog first")
             if mapped and frame is not None:
                 self.frames.check_current(frame, await self.display_now())
             if at_pointer:
@@ -129,14 +144,16 @@ class ComputerRuntime:
                 then()
         result = InputResult(summary=summary, applied="yes", delivery="foreground", others_since_frame=others,
                              effect=EffectData.of(effect))
+        if wrap is not None:
+            result = wrap(result, effect)
         if not screenshot:
             return send(result)
         try:
             new = await self.capture(identity)
         except AgentEnvError as e:
-            result.summary = f"{summary}; the screenshot after it failed ({e.code}: {e.message})"
+            result.summary = f"{result.summary}; the screenshot after it failed ({e.code}: {e.message})"
             return send(result)
-        result.summary, result.frame = f"{summary}, then captured {new.id}", new.result()
+        result.summary, result.frame = f"{result.summary}, then captured {new.id}{new.note()}", new.result()
         return send(result, new.encode())
 
     async def _hold_for(self, ms: int, keys: list[str]) -> None:
