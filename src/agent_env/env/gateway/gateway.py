@@ -49,7 +49,6 @@ from .constants import (
     CHILD_DISCOVERY_TIMEOUT_S,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
-    EXT_WEBSITE_URI,
     GATEWAY_COMPOSE_HOST,
     GATEWAY_EXTENSIONS,
     GATEWAY_TRAJECTORY_FILE,
@@ -629,9 +628,9 @@ class Gateway:
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
-        A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), its
-        state's among them, are never reached through its route, so an agent browsing the site can't read what grades
-        it; agentenv reaches them through /svc/<name>/."""
+        A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), are
+        never reached through its route, so an agent browsing the site can't read its data or what grades it; agentenv
+        reaches them through /svc/<name>/."""
         reserved = await self._site_reserved_paths(request.path_params["service_name"])
         if reserved is None:
             return self._json_response({"error": "website card unavailable"}, 503)
@@ -1552,9 +1551,8 @@ def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> boo
 
 
 def site_reserved_paths(card: dict) -> frozenset[str]:
-    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, every extension's
-    endpoint and each of its methods', and ``website/v1``'s ``params.state.path``, where it serves its state; each one
-    a path of its own, not the site's root."""
+    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, and every
+    extension's endpoint and each of its methods'; each one a path of its own, not the site's root."""
     paths = [card.get("url")]
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
         params = ext.get("params") if isinstance(ext, dict) else None
@@ -1562,8 +1560,6 @@ def site_reserved_paths(card: dict) -> frozenset[str]:
             continue
         paths += [endpoint for *_, endpoint in operations(params)]
         paths.append(params.get("endpoint"))
-        state = params.get("state") if ext.get("uri") == EXT_WEBSITE_URI else None
-        paths.append(state.get("path") if isinstance(state, dict) else None)
     return frozenset(_normalized(p) for p in paths if isinstance(p, str) and p.startswith("/") and _normalized(p) != "/")
 
 
