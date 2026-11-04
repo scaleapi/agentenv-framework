@@ -233,6 +233,8 @@ def test_an_optional_list_query_parameter_is_a_list_of_its_coerced_values(client
     assert client.get("/api/picked?ids=1&ids=2").json() == {"ids": [1, 2]}
     assert client.get("/api/picked").json() == {"ids": None}
     assert client.get("/api/picked?ids=x").status_code == 400
+    [ids] = client.get("/agentenv/ext/website/openapi").json()["paths"]["/api/picked"]["get"]["parameters"]
+    assert ids["schema"] == {"type": "array", "items": {"type": "integer"}, "default": None}
 
 
 def test_a_route_declared_204_answers_with_no_body(client: TestClient) -> None:

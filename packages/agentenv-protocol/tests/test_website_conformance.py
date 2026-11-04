@@ -53,6 +53,7 @@ def test_an_sdk_site_passes_every_check(sdk_site: TestClient) -> None:
 
 
 def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock: bool = True,
+                 clock_ops_first: tuple[str, ...] = (),
                  leak_redirect: bool = False, stamp_rpc: bool = True, reset_keeps: bool = False,
                  get_fails_after_reset: bool = False, rpc_reply: tuple[int, dict] | None = None,
                  ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None) -> Starlette:
@@ -95,7 +96,9 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
             extensions[0]["params"]["methods"] = {"ready": {"method": "GET", "endpoint": "/ready"}}
         if clock:
             extensions.append({"uri": "urn:agentenv:clock/v1", "params": {
-                "endpoint": "/agentenv/ext/sync_time", "methods": {"sync_time": {"method": "POST"}}}})
+                "endpoint": "/agentenv/ext/sync_time", "methods": {
+                    **{op: {"method": "GET", "endpoint": f"/agentenv/ext/{op}"} for op in clock_ops_first},
+                    "sync_time": {"method": "POST"}}}})
         return stamp(JSONResponse({"name": "hand", **({"url": rpc_path} if rpc_path else {}),
                                    "capabilities": {"extensions": extensions,
                                                     "operations": ["data/reset", "data/add", "data/get"]}}))
@@ -232,6 +235,12 @@ def test_the_data_plane_is_reached_at_the_cards_url() -> None:
     result = {r.name: r for r in conformance.check("http://testserver", client=TestClient(app))}["data_plane"]
     assert result.status == "passed", result
     assert app.state.data["items"] == ["a"]
+
+
+def test_the_clock_check_calls_sync_time_whichever_operation_the_card_lists_first() -> None:
+    results = {r.name: r.status for r in conformance.check(
+        "http://testserver", client=TestClient(_handwritten(clock_ops_first=("time",))))}
+    assert results["clock"] == "passed", results
 
 
 def test_a_server_with_no_card_health_or_header_fails_them() -> None:

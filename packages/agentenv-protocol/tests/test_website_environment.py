@@ -399,6 +399,8 @@ def test_clock_patch_puts_the_clock_script_in_html_only(dist: Path, gateway_cloc
     assert int(page.headers["content-length"]) == len(page.content)
     assert client.get("/assets/app.js").text == "console.log(1)"
     assert "<script>" not in TestClient(site(dist)().create_app()).get("/").text
+    partial = client.get("/index.html", headers={"Range": "bytes=0-5"})
+    assert (partial.status_code, partial.content) == (206, b"<html>")
 
 
 def test_clock_patch_streams_a_streamed_page_holding_only_what_comes_before_its_head(dist: Path) -> None:
