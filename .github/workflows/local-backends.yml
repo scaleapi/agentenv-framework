@@ -167,14 +167,19 @@ jobs:
       # starts afterwards.
       - name: Pull the base images from mirror.gcr.io
         run: python3 .github/scripts/mirror_base_images.py src tst
-      # The registry keeps its storage on the runner, cached between runs: a computer image or disk is keyed by its
-      # inputs, so one an earlier run pushed is reused rather than built again.
-      - name: Restore the local registry's storage
+      # A computer image or disk is keyed by what it is built from, and the composer reuses one the image store already
+      # holds for its key. The registry keeps its storage on the runner, restored from the computer images main saved
+      # this week, so a run reuses them rather than building them again. A shard that runs no computer tests misses.
+      - name: Week of the computer images' cache
+        id: week
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - name: Restore the computer images
+        id: computers
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/registry
-          key: registry-slow-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: registry-slow-${{ matrix.shard }}-
+          key: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-${{ hashFiles('src/agent_env/env/envs/computer/**', 'tst/integration/computer/**', 'packages/agentenv-protocol/src/**') }}
+          restore-keys: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-
       - name: Start the local registry
         run: |
           mkdir -p "$RUNNER_TEMP/registry"
@@ -190,15 +195,28 @@ jobs:
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
             tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
-      - name: Size of the local registry's storage
+      # Only the computer images are kept, and only main saves them, so pull requests reuse main's without filling the
+      # repository's cache.
+      - name: Keep only the computer images
+        id: kept
         if: always()
-        run: du -sh "$RUNNER_TEMP/registry"
-      - name: Save the local registry's storage
-        if: always()
+        run: |
+          repositories="$RUNNER_TEMP/registry/docker/registry/v2/repositories"
+          if [ ! -d "$repositories/agentenv-computers" ]; then echo "computers=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          docker stop registry
+          sudo find "$repositories" -mindepth 1 -maxdepth 1 ! -name agentenv-computers -exec rm -rf {} +
+          docker run --rm --volume "$RUNNER_TEMP/registry:/var/lib/registry" mirror.gcr.io/library/registry:2 \
+            garbage-collect --delete-untagged /etc/docker/registry/config.yml > /dev/null
+          du -sh "$RUNNER_TEMP/registry"
+          echo "computers=true" >> "$GITHUB_OUTPUT"
+      - name: Save the computer images
+        if: >-
+          always() && github.event_name == 'push' && steps.kept.outputs.computers == 'true'
+          && steps.computers.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/registry
-          key: registry-slow-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ steps.computers.outputs.cache-primary-key }}
       - name: Skips must be declared capability gaps
         if: always()
         run: |
