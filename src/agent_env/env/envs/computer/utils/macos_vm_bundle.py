@@ -2,8 +2,10 @@
 the base's readying (``computers/vm_bundle/macos``), each layer's files under ``context/``, its services as LaunchAgents
 under ``agents/``, and ``provision.sh``, which the VM runs as its session user, root through sudo with the password
 beside them. A layer installs as its ``[install.macos]`` says: its files under its prefix, its downloads checked by
-sha256, its venv on the base's Python, its run scripts and install steps, its grants, and its services, each through
-``agentenv-service``, which gives it the deploy's environment, or, when direct, as its own command."""
+sha256, its venv on the pinned Python ``prepare`` installs, from the wheels of its lock, staged under ``packages/``
+and installed offline, its run scripts and install steps, its grants, and its services, each through
+``agentenv-service``, which gives it the deploy's environment, or, when direct, as its own command. ``resolver`` is the
+script a VM of the base runs to resolve those wheels, once for given inputs."""
 
 from __future__ import annotations
 
@@ -12,13 +14,14 @@ import plistlib
 import shlex
 import shutil
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from agentenv_protocol.computer.app import SOCKET
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.env.envs.computer.utils.install import MacInstall
+from agent_env.env.envs.computer.utils.packages import staged_wheels
 from agent_env.providers.sandbox_providers.lume.provider import BUILD_FOLDER, SHARED_FILES
 
 #: The base's readying, copied into each build folder.
@@ -33,7 +36,8 @@ ARCH = "arm64"
 class Part:
     """A layer as a VM bundle installs it: its folder under ``context/``, its prefix, its install, its programs by name
     (each a command, and when launchd runs it directly, the variables it has), the environment the others are given,
-    and for an app, the class its server serves and its install steps."""
+    what its venv adds to its requirements (the protocol), the wheels of its lock its venv installs, and for an app,
+    the class its server serves and its install steps."""
 
     folder: str
     prefix: str
@@ -44,6 +48,7 @@ class Part:
     protocol: str | None = None
     served: str | None = None
     steps: tuple[tuple[str, str], ...] = ()
+    wheels: tuple[str, ...] = ()
 
 
 def write(build: Path, base: ComputerArtifact, parts: list[Part], password: str,
@@ -97,13 +102,11 @@ def _installed(part: Part) -> list[str]:
             lines += [f"mkdir -p \"$(dirname {to})\"", f"curl -fsSL --retry 3 -o {to} {shlex.quote(download.url)}",
                       f'echo "{download.sha256}  "{to} | shasum -a 256 -c - > /dev/null']
     if part.venv:
-        # One resolve of the requirements and the protocol, as a lock is on Linux, so this checkout's protocol is the
-        # one a requirement of it gets.
-        wants = [*(("-r", shlex.quote(str(PurePosixPath(prefix) / install.python))) if install.python else ()),
-                 *((part.protocol,) if part.protocol else ())]
+        staged = staged_wheels(part.folder)
         lines.append(f"{BIN}/python3 -m venv {quoted}/venv")
-        if wants:
-            lines.append(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check {' '.join(wants)}")
+        if part.wheels:
+            lines.append(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check --no-index --no-deps "
+                         + " ".join(f'"$build/{staged}/"{shlex.quote(wheel)}' for wheel in part.wheels))
         lines.append(f"{prefix}/venv/bin/pip list --format=json > {quoted}/installed.json")
     if part.served is not None:
         lines.append(f"mkdir -p {shlex.quote(f'{prefix}/{SOCKET.parent}')}")
@@ -115,6 +118,24 @@ def _installed(part: Part) -> list[str]:
         lines.append(f"as_root env PREFIX={quoted} bash -c {shlex.quote(run)}" if scope == "system" else f"({run})")
     lines += [f"grant {shlex.quote(grant.app)} {' '.join(grant.services)}" for grant in install.grants or []]
     return lines
+
+
+def resolver(parts: list[Part]) -> str:
+    """The script a VM of the base runs, as its session user, to resolve the wheels of ``parts``' venvs: it installs the
+    pinned Python they run on, then builds each venv's wheels from its requirements and what it adds (the protocol)
+    into ``staged_wheels`` of the folder the VM shares, one resolve of them all, as a lock's is on Linux."""
+    lines = ["#!/bin/bash", "set -euo pipefail", f'. "{SHARED_FILES}/{BUILD_FOLDER}/prepare/lib.sh"', "pinned_python"]
+    for part in parts:
+        if not part.venv:
+            continue
+        staged, venv = staged_wheels(part.folder), shlex.quote(f"/tmp/agentenv-resolve/{part.folder}")
+        wants = [*(("-r", f'"$build/context/{part.folder}/"{shlex.quote(part.install.python)}')
+                   if part.install.python else ()), *((part.protocol,) if part.protocol else ())]
+        lines += [f'mkdir -p "$build/{staged}"', f"{BIN}/python3 -m venv {venv}"]
+        if wants:
+            lines.append(f"{venv}/bin/pip wheel -q --disable-pip-version-check --no-cache-dir --wheel-dir "
+                         f'"$build/{staged}" {" ".join(wants)}')
+    return "\n".join(lines) + "\n"
 
 
 def _agent(label: str, arguments: list[str], directory: str, home: str, keep_alive: bool = True,

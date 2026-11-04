@@ -9,6 +9,7 @@ import importlib.util
 import json
 import logging
 import plistlib
+import re
 import shlex
 import stat
 import time
@@ -46,6 +47,7 @@ class FakeBuilder:
             path.name: plistlib.loads(path.read_bytes()) for path in (build / "agents").iterdir()},
             stat.S_IMODE((build / ".password").stat().st_mode)))
         mac.settings.append(json.loads((build / "build-settings.json").read_text()))
+        mac.staged.append(sorted(path.relative_to(build).as_posix() for path in build.rglob("*.whl")))
 
     async def exec_with_output(self, *command):
         self.mac.ran.append(command)
@@ -53,6 +55,24 @@ class FakeBuilder:
 
     async def terminate(self):
         self.mac.terminated.append(self.sandbox_id)
+
+
+class FakeResolver:
+    """A VM resolving a VM bundle's wheels: one wheel into each folder its script builds wheels into."""
+
+    def __init__(self, mac, name, build):
+        self.mac, self.sandbox_id, self.build = mac, name, build
+
+    async def exec_with_output(self, *command):
+        script = (self.build / "resolve.sh").read_text()
+        self.mac.resolve_scripts.append(script)
+        for staged in re.findall(r'--wheel-dir "\$build/([^"]+)"', script):
+            (self.build / staged).mkdir(parents=True, exist_ok=True)
+            (self.build / staged / "mss-10.1.0-py3-none-any.whl").write_bytes(b"wheel of " + staged.encode())
+        return self.mac.resolve_exit, "", "no matching distribution"
+
+    async def terminate(self):
+        self.mac.resolve_terminated.append(self.sandbox_id)
 
 
 class FakeMac(SandboxProvider):
@@ -63,6 +83,7 @@ class FakeMac(SandboxProvider):
     def __init__(self):
         self.opened, self.provisioned, self.ran, self.terminated, self.kept, self.exit = [], [], [], [], set(), 0
         self.settings, self.keep_error, self.delay = [], None, 0
+        self.resolves, self.resolve_scripts, self.resolve_terminated, self.resolve_exit, self.staged = [], [], [], 0, []
 
     @classmethod
     def native_platforms(cls):
@@ -80,6 +101,9 @@ class FakeMac(SandboxProvider):
 
     async def open_builder(self, image, name, build):
         time.sleep(self.delay)
+        if name.startswith("agentenv-resolve-"):
+            self.resolves.append((image, name))
+            return FakeResolver(self, name, build)
         self.opened.append((image, name))
         return FakeBuilder(self, name, build)
 
@@ -106,9 +130,11 @@ def _base() -> ComputerArtifact:
                                 "min_disk_gb": 150}}})
 
 
-def _driver(folder: Path, macos: MacInstall | None = None, daemon: dict[str, str] | None = None) -> ComputerDriverEnv:
+def _driver(folder: Path, macos: MacInstall | None = None, daemon: dict[str, str] | None = None,
+            requirements: str = "mss\n") -> ComputerDriverEnv:
     folder.mkdir(parents=True, exist_ok=True)
-    for name, text in (("driver.py", "class Desk: ...\n"), ("requirements.txt", "mss\n"), ("install-app.sh", "true\n")):
+    for name, text in (("driver.py", "class Desk: ...\n"), ("requirements.txt", requirements),
+                       ("install-app.sh", "true\n")):
         (folder / name).write_text(text)
     files = FileArtifactUniverse.put_bundled("@local/~/kit/desk__files", files={
         name: folder / name for name in ("driver.py", "requirements.txt", "install-app.sh")})
@@ -149,8 +175,14 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
                  f"grant {APP} accessibility screen_capture", 'cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"',
                  'as_root cp "$build/image.json" "$build/build-settings.json" /etc/agentenv/', "sync"]:
         assert line in script.splitlines()
-    assert any(line.startswith(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check -r "
-                               f"{prefix}/requirements.txt") for line in script.splitlines())
+    wheels = "packages/wheels/driver"
+    assert (f'{prefix}/venv/bin/pip install -q --disable-pip-version-check --no-index --no-deps "$build/{wheels}/"'
+            "mss-10.1.0-py3-none-any.whl") in script.splitlines()
+    assert mac.staged == [[f"{wheels}/mss-10.1.0-py3-none-any.whl"]]
+    (resolver,) = mac.resolve_scripts
+    assert mac.resolves == [(BASE_IMAGE, mac.resolve_terminated[0])] and "pinned_python" in resolver.splitlines()
+    assert any(f'--wheel-dir "$build/{wheels}" -r "$build/context/driver/"requirements.txt "$build/context/protocol"'
+               in line for line in resolver.splitlines())
     daemon, server = agents["dev.agentenv.driver-desk-daemon.plist"], agents["dev.agentenv.driver-desk-driver.plist"]
     assert daemon["ProgramArguments"] == [f"{APP}/Contents/MacOS/desk", "serve"]
     assert daemon["EnvironmentVariables"]["DO_NOT_TRACK"] == "1" and daemon["LimitLoadToSessionType"] == "Aqua"
@@ -177,6 +209,25 @@ def test_a_compose_of_the_same_inputs_reuses_the_vm_bundle_this_mac_keeps_and_a_
     other = _put(_driver(tmp_path / "desk", daemon={"DO_NOT_TRACK": "0"}), mac)
     assert len(mac.opened) == 2 and (other.metadata["composed"]["vm_bundle"]["arm64"]["image"]
                                      != first.metadata["composed"]["vm_bundle"]["arm64"]["image"])
+
+
+def test_a_vm_bundles_venvs_install_offline_from_a_lock_resolved_once_for_their_inputs(mac, tmp_path):
+    driver = _driver(tmp_path / "desk")
+    first = _put(driver, mac)
+    image = first.metadata["composed"]["vm_bundle"]["arm64"]["image"]
+    other = FakeMac()
+
+    composer.compose(first, [("vm_bundle", "arm64")], Composing(sandbox_provider=other))
+
+    assert len(mac.resolves) == 1 and not other.resolves and other.kept == {image} and other.staged == mac.staged
+    changed = _put(_driver(tmp_path / "desk", requirements="mss\npillow\n"), mac)
+    assert len(mac.resolves) == 2 and changed.metadata["composed"]["vm_bundle"]["arm64"]["image"] != image
+    failing = FakeMac()
+    failing.resolve_exit = 1
+    broken = _put(_driver(tmp_path / "desk", requirements="mss\nnumpy\n"), failing)
+    built = broken.metadata["composed"]["vm_bundle"]["arm64"]
+    assert (built["status"], built["stage"]) == ("failed", "resolve") and "no matching distribution" in built["reason"]
+    assert failing.resolve_terminated == [name for _, name in failing.resolves] and not failing.opened
 
 
 def test_the_build_settings_a_vm_bundle_fixes_reach_its_services_and_another_value_composes_another(mac, tmp_path):

@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, Literal
@@ -281,6 +281,10 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
             f"venv/bin/python -m agentenv_protocol.computer.serve_app {staged.served}",
             *(service.command for service in staged.install.services)])), {"ENVIRONMENT_NAME": app.environment_name},
             protocol, True) for app, staged in apps]
+        if (lock := _vm_bundle_lock(env, base, link, parts, context, arch, progress)) is not None:
+            packages.stage_wheels(lock, build, env.stored_id)
+            parts = [replace(part, wheels=tuple(wheel.file for wheel in lock.wheels.get(part.folder, [])))
+                     for part in parts]
         # A VM bundle's base bakes none in, as a Linux base's image does its defaults, so each value is the env's or the
         # setting's default.
         values = env.computer_values()
@@ -289,7 +293,8 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
         script = macos_vm_bundle.write(build, base, parts, link.ssh_password, settings)
         key = attempt.key = _key(base=base.forms.vm_bundle.image, provision=script, context=_digest(context),
                                  agents=_digest(build / "agents"), prepare=_digest(macos_vm_bundle.PREPARE),
-                                 build_settings=settings, form="vm_bundle", arch=arch, format=FORMAT)
+                                 lock=lock.digest() if lock is not None else None, build_settings=settings,
+                                 form="vm_bundle", arch=arch, format=FORMAT)
         image = f"{LOCAL_IMAGE_PREFIX}agentenv-computer-{key[7:23]}"
         if held is not None and image != held:
             raise RuntimeError(f"this agent-env composes it as {image}, not the {held} its record names, as another "
@@ -313,8 +318,55 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
     return attempt.result
 
 
+def _vm_bundle_lock(env: ComputerEnv, base: ComputerArtifact, link: SandboxProvider, parts: list[macos_vm_bundle.Part],
+                    context: Path, arch: str, progress: _Progress) -> packages.Lock | None:
+    """The lock of ``parts``' venvs' wheels, their folders staged in ``context``: the one stored for their inputs, or
+    one resolved first in a VM of the base on ``link``, which installs the pinned Python they run on and builds their
+    wheels into the folder it shares, then is deleted. One resolve of given inputs runs on a Mac at once; another waits,
+    then takes its lock. None when no layer has a venv."""
+    resolver = macos_vm_bundle.resolver(parts)
+    requirements = {part.folder: builder.sha256_of(context / part.folder / part.install.python)
+                    if part.install.python else None for part in parts if part.venv}
+    protocol = context / "protocol"
+    inputs = packages.vm_bundle_inputs(resolver, _digest(macos_vm_bundle.PREPARE), requirements,
+                                       protocol if protocol.is_dir() else None, base.forms.vm_bundle.image, arch)
+    if inputs is None:
+        return None
+    pair = f"vm_bundle/{arch}"
+    with holding_locks([f"vm-bundle-resolve:{inputs}"], lambda: progress.at(
+            pair, "waiting", "waiting for the resolve of the same wheels under way on this Mac")):
+        if (lock := packages.stored(inputs, env.stored_id)) is not None:
+            return lock
+        progress.at(pair, "resolving", f"resolving its venvs' wheels on {type(link).__name__}")
+        with tempfile.TemporaryDirectory(prefix="agentenv-resolve-") as work:
+            folder = Path(work) / macos_vm_bundle.BUILD_FOLDER
+            shutil.copytree(context, folder / "context")
+            shutil.copytree(macos_vm_bundle.PREPARE, folder / "prepare")
+            (folder / "resolve.sh").write_text(resolver)
+            secret = folder / ".password"
+            secret.write_text(link.ssh_password + "\n")
+            secret.chmod(0o600)
+            asyncio.run(_resolved(link, base.forms.vm_bundle.image, f"agentenv-resolve-{inputs[7:23]}", folder))
+            return packages.store_resolved(inputs, arch, {part.folder: folder / packages.staged_wheels(part.folder)
+                                                          for part in parts if part.venv}, env.stored_id)
+
+
 def _bundle_lock(image: str) -> str:
     return f"vm-bundle:{image}"
+
+
+async def _resolved(link: SandboxProvider, source: str, name: str, folder: Path) -> None:
+    """``folder``'s ``resolve.sh`` run in a VM of ``source`` on ``link``, named ``name``, which is deleted after; its
+    output in the error when it fails."""
+    vm = await link.open_builder(source, name, folder)
+    try:
+        code, stdout, stderr = await vm.exec_with_output(
+            "bash", f"{macos_vm_bundle.SHARED_FILES}/{macos_vm_bundle.BUILD_FOLDER}/resolve.sh")
+        if code != 0:
+            raise builder.ResolveError(f"resolving exited {code}: {(stderr or stdout).strip()[-2000:]}",
+                                       log=stdout + stderr)
+    finally:
+        await vm.terminate()
 
 
 async def _provisioned(link: SandboxProvider, source: str, name: str, build: Path) -> None:

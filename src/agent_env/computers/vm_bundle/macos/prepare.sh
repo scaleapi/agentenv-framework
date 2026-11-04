@@ -1,7 +1,7 @@
 #!/bin/bash
 # prepare.sh: a macOS base readied for agent-env, once a composed VM bundle, before its layers, in the VM as its session
-# user. /opt/agentenv holds the layers; a Python with a current Tk, which layers' venvs and the probe's fixture run on,
-# is python3 first on the PATH of what services run; agentenv-service starts each service with the deploy's
+# user. /opt/agentenv holds the layers; the pinned Python, with a current Tk, which layers' venvs and the probe's fixture
+# run on, is python3 first on the PATH of what services run; agentenv-service starts each service with the deploy's
 # environment, and set-display follows the virtual display's size at login; and nothing of the base's own is in an
 # agent's way: Cua Spacesd and the Login Items banner are off.
 set -euo pipefail
@@ -13,9 +13,7 @@ as_root mkdir -p /opt/agentenv/bin /opt/agentenv/drivers /opt/agentenv/apps /etc
 as_root chown -R "$(id -un):staff" /opt/agentenv
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/agentenv"
 
-command -v uv > /dev/null || fail "the base has no uv, which installs the Python agent-env runs on"
-uv python install -q 3.12
-ln -sf "$(uv python find 3.12)" /opt/agentenv/bin/python3
+pinned_python
 /opt/agentenv/bin/python3 -c 'import tkinter; assert tkinter.TkVersion >= 8.6' || fail "its Python has no Tk"
 install -m 755 "$build/prepare/agentenv-service" /opt/agentenv/bin/agentenv-service
 command -v swiftc > /dev/null || fail "the base has no swiftc, which builds set-display"
