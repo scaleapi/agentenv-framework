@@ -1,7 +1,6 @@
-"""The default state store of a simple site: named collections of JSON objects, each with an ``id``. Its data is a JSON
-object of collections by name, beside which a string ``current_user`` names the user a browser starts signed in as.
-It remembers the state it was last loaded with, so a verifier can read the initial state, the current one and the
-difference between them."""
+"""The default data store of a simple site: named collections of JSON objects, each with an ``id``. Its data is a JSON
+object of collections by name, beside which a string ``current_user`` names the user a browser starts signed in as;
+the data plane loads, exports and resets it."""
 from __future__ import annotations
 
 import base64
@@ -22,10 +21,8 @@ class Collections:
     def __init__(self, data: dict | None = None) -> None:
         self._collections: dict[str, list[dict]] = {}
         self.current_user: str | None = None
-        self.initial: dict = {}
         if data:
             self.load(data)
-            self.mark_initial()
 
     def __getitem__(self, name: str) -> list[dict]:
         return self._collections.setdefault(name, [])
@@ -78,43 +75,12 @@ class Collections:
     def reset(self) -> None:
         self._collections.clear()
         self.current_user = None
-        self.initial = {}
 
     def export(self) -> dict:
         data: dict = copy.deepcopy(self._collections)
         if self.current_user is not None:
             data[CURRENT_USER] = self.current_user
         return data
-
-    def mark_initial(self) -> None:
-        self.initial = self.export()
-
-    def diff(self) -> dict:
-        """Each collection that changed since the initial state, as its ``added``, ``removed`` and ``changed``
-        objects, matched by ``id``; a changed one as its ``id``, ``before`` and ``after``."""
-        current = self.export()
-        changes: dict = {}
-        for name in dict.fromkeys([*self.initial, *current]):
-            if name == CURRENT_USER:
-                continue
-            before = {_key(d): d for d in self.initial.get(name, [])}
-            after = {_key(d): d for d in current.get(name, [])}
-            entry = {
-                "added": [d for k, d in after.items() if k not in before],
-                "removed": [d for k, d in before.items() if k not in after],
-                "changed": [{"id": d.get("id"), "before": before[k], "after": d}
-                            for k, d in after.items() if k in before and before[k] != d],
-            }
-            if any(entry.values()):
-                changes[name] = entry
-        return changes
-
-    def state(self) -> dict:
-        return {"initial_state": copy.deepcopy(self.initial), "current_state": self.export(), "state_diff": self.diff()}
-
-
-def _key(doc: dict) -> str:
-    return json.dumps(doc.get("id")) if doc.get("id") is not None else json.dumps(doc, sort_keys=True)
 
 
 def _part_data(part: Part) -> dict:

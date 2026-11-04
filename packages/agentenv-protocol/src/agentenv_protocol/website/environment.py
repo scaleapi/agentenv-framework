@@ -2,14 +2,12 @@
 plain HTTP on ``PORT`` for any host name: its ``@api`` routes, its static folder at ``/`` with ``index.html`` for the
 pages a single-page app routes itself, its health path, and the data plane and card the base class serves. Every answer
 carries ``X-Universe-Now``, the universe's time, which ``self.now()`` reads and ``clock/v1``'s ``sync_time`` ties to
-the gateway's virtual clock. Without data hooks of its own a site keeps its state in ``self.store``.
+the gateway's virtual clock. Without data hooks of its own a site keeps its data in ``self.store``, which the data
+plane loads, exports and resets: ``data/get`` is how agentenv reads what a task left a site with.
 
-Two routes are built in, each replaced by a site's own ``@api`` route at its very path and answering before one whose
-path parameters would also match it: ``/api/session``, which a frontend calls to learn who is signed in, signing the
-acting user in when nobody is (GET), or to sign out (DELETE); and, for a store-backed site, ``/go``, its
-``{initial_state, current_state, state_diff}`` at the path ``website/v1``'s ``params.state.path`` names, which a reader
-of a card without ``state`` falls back to. A store-backed site answers ``website/v1``'s ``state`` with the same
-``WebsiteState``, among agentenv's own routes, which is how the website state verifier reads it."""
+One route is built in, replaced by a site's own ``@api`` route at its very path and answering before one whose path
+parameters would also match it: ``/api/session``, which a frontend calls to learn who is signed in, signing the acting
+user in when nobody is (GET), or to sign out (DELETE)."""
 from __future__ import annotations
 
 import inspect
@@ -37,18 +35,16 @@ from ..agent_env_environment import (
     get_data,
     reset_data,
 )
-from ..types import DataPart, EnvironmentExtension
+from ..types import DataPart
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, UniverseClock, clock_patch_script, iso
 from .errors import NotFound
 from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 from .routes import ApiContext, ApiRoute, endpoint, error_response, openapi, openapi_path, request_role, reserved_path, routes_of
 from .session import SESSION_COOKIE, SessionSigner, expires_at
-from .state import WEBSITE_STATE_OP, WebsiteState
 from .store import Collections
 
 DEFAULT_HEALTH_PATH = "/api/health"
 SESSION_PATH = "/api/session"
-STATE_PATH = "/go"
 _WEBSITE_ATTR = "_aee_website"
 _READY_ATTR = "_aee_website_ready"
 _DEFAULT_HOOK_ATTR = "_aee_default_store_hook"
@@ -114,7 +110,6 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         self.store = Collections()
         if declaration.data is not None:
             self.store.load(json.loads(self._site_path(declaration.data).read_text(encoding="utf-8")))
-            self.store.mark_initial()
         self.clock = UniverseClock()
         self._signer = SessionSigner()
 
@@ -169,8 +164,6 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         asgi.router.routes.append(Route(declaration.health, self._health, methods=["GET"]))
         if SESSION_PATH not in taken:
             asgi.router.routes.append(Route(SESSION_PATH, self._session, methods=["GET", "DELETE"]))
-        if self._serves_state_path():
-            asgi.router.routes.append(Route(STATE_PATH, self._state, methods=["GET"]))
         asgi.router.routes.extend(Route(r.path, _unreserved(endpoint(getattr(self, r.fn.__name__), r, self.context)),
                                         methods=[r.method]) for r in api_routes)
         asgi.router.default = _Fallback(root, type(self).app)
@@ -195,16 +188,8 @@ class WebsiteEnvironment(AgentEnvEnvironment):
             declaration = self.declaration()
             return {"domains": list(declaration.domains), "health": declaration.health,
                     "routes": [r.advertised() for r in self.routes()], "session_cookie": SESSION_COOKIE,
-                    "session_path": SESSION_PATH, **({"state": {"path": STATE_PATH}} if self._serves_state_path() else {})}
+                    "session_path": SESSION_PATH}
         return super().extension_params(uri)
-
-    def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
-        """The extensions the base class serves, ``website/v1``'s ``state`` only for a store-backed site: one with data
-        hooks of its own keeps its state where ``self.store`` can't see it."""
-        served = super().served_extensions(extensions)
-        if self.uses_store:
-            return served
-        return [_without_method(e, WEBSITE_STATE_OP) if e.uri == WEBSITE_EXTENSION_URI else e for e in served]
 
     @extension(CLOCK_EXTENSION_URI, description="Sync this site to the gateway's virtual clock.")
     async def sync_time(self, env_get_time_url: str, timezone: Optional[str] = None) -> dict:
@@ -216,9 +201,8 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @extension(WEBSITE_EXTENSION_URI, op="openapi", method="GET", description=(
         "A site's server: domains, its health path and its @api routes by name; openapi returns the OpenAPI document "
-        "of its routes, ready whether the site is usable now and why not, state the task state it is in (its "
-        "initial and current state and their diff), and session the cookies a browser adds to start signed in as user, "
-        "or signed out without one."))
+        "of its routes, ready whether the site is usable now and why not, and session the cookies a browser adds to "
+        "start signed in as user, or signed out without one."))
     async def _website_openapi(self) -> dict:
         name = self._application.environment_card.name if self._application is not None else type(self).__name__
         return openapi(name, self.routes())
@@ -229,12 +213,6 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         each not yet true. A deploy reads it through the card, as ``computer-app/v1``'s ``ready`` of an app."""
         problems = await self._not_ready()
         return WebsiteReadiness(ready=not problems, problems=problems).model_dump()
-
-    @extension(WEBSITE_EXTENSION_URI, op=WEBSITE_STATE_OP, method="GET")
-    async def _website_state(self, sid: Optional[str] = None) -> dict:
-        """The site's task state, a ``WebsiteState`` of ``self.store``: its state when the task started, now, and what
-        changed between them. A store-backed site keeps one session, so ``sid`` names no other."""
-        return WebsiteState.model_validate(self.store.state()).model_dump()
 
     @extension(WEBSITE_EXTENSION_URI, op="session")
     async def _website_session(self, user: Optional[str] = None) -> dict:
@@ -248,7 +226,6 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     @add_data
     async def _store_add(self, parts: list) -> None:
         self.store.load_parts(parts)
-        self.store.mark_initial()
 
     @get_data
     async def _store_get(self) -> list:
@@ -272,13 +249,6 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         return context.apply(JSONResponse({"user": context.user, "role": context.role,
                                            "signed_in": context.user is not None}))
 
-    def _serves_state_path(self) -> bool:
-        """Whether the site serves its state at ``STATE_PATH``: it is store-backed and no ``@api`` route takes the path."""
-        return self.uses_store and STATE_PATH not in {openapi_path(r.path) for r in self.routes()}
-
-    async def _state(self, request: Request) -> Response:
-        return JSONResponse(self.store.state())
-
     def _clock(self) -> UniverseClock:
         if not hasattr(self, "clock"):
             raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")
@@ -297,12 +267,6 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
 for _hook in _DEFAULT_HOOKS.values():
     setattr(getattr(WebsiteEnvironment, _hook), _DEFAULT_HOOK_ATTR, True)
-
-
-def _without_method(extension: EnvironmentExtension, method: str) -> EnvironmentExtension:
-    params = dict(extension.params or {})
-    params["methods"] = {name: entry for name, entry in (params.get("methods") or {}).items() if name != method}
-    return extension.model_copy(update={"params": params})
 
 
 async def _ready(check: Any) -> bool:

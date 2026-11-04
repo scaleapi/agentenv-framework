@@ -82,7 +82,6 @@ SEED = {"current_user": "alice", "users": [{"id": "alice"}, {"id": "bob"}], "ord
 def shop(dist: Path) -> WebsiteEnvironment:
     env = site(dist)()
     env.store.load(SEED)
-    env.store.mark_initial()
     return env
 
 
@@ -218,13 +217,13 @@ def test_the_default_store_round_trips_through_the_data_plane(client: TestClient
     assert shop.acting_user() == "carol"
 
 
-def test_go_reports_initial_current_and_diff_state(client: TestClient) -> None:
+def test_a_sites_data_is_read_through_the_data_plane_alone(client: TestClient) -> None:
     client.post("/api/orders", json={"sku": "mug"})
-    state = client.get("/go", params={"sid": "default"}).json()
-    assert state["initial_state"] == SEED
-    assert state["current_state"]["orders"][-1]["sku"] == "mug"
-    assert state["state_diff"] == {"orders": {"added": [state["current_state"]["orders"][-1]], "removed": [],
-                                              "changed": []}}
+    assert rpc(client, "data/get")["parts"][0]["data"]["orders"][-1]["sku"] == "mug"
+    assert "home" in client.get("/go").text
+    params = client.get("/.well-known/agent-env.json").json()["capabilities"]["extensions"]
+    website_params = next(e for e in params if e["uri"] == "urn:agentenv:website/v1")["params"]
+    assert "state" not in website_params and "state" not in website_params.get("methods", {})
 
 
 def test_broad_routes_leave_the_built_in_ones_answering_their_paths(dist: Path) -> None:
@@ -239,9 +238,7 @@ def test_broad_routes_leave_the_built_in_ones_answering_their_paths(dist: Path) 
 
     env = Broad()
     env.store.load(SEED)
-    env.store.mark_initial()
     client = TestClient(env.create_app())
-    assert client.get("/go").json()["initial_state"] == SEED
     assert client.get("/api/session").json()["user"] == "alice"
     assert client.get("/api/health").json() == {"status": "ok"}
     assert client.get("/about").json() == {"page": "about"} and client.get("/api/other").json() == {"named": "other"}
@@ -260,7 +257,7 @@ def test_a_broad_route_never_serves_a_page_at_the_data_planes_or_cards_paths(dis
     assert client.get("/docs/a").json() == {"page": "docs/a"}
 
 
-def test_a_site_with_its_own_hooks_keeps_them_and_serves_no_go(dist: Path) -> None:
+def test_a_site_with_its_own_hooks_keeps_them(dist: Path) -> None:
     class Own(site(dist)):
         @get_data
         def export(self) -> list:
@@ -269,13 +266,12 @@ def test_a_site_with_its_own_hooks_keeps_them_and_serves_no_go(dist: Path) -> No
     client = TestClient(Own().create_app())
     assert rpc(client, "data/get")["parts"][0]["data"] == {"mine": True}
     assert client.get("/.well-known/agent-env.json").json()["capabilities"]["operations"] == ["data/reset", "data/add", "data/get"]
-    assert "home" in client.get("/go").text
 
 
-def test_a_seed_data_file_is_the_initial_state(tmp_path: Path, dist: Path) -> None:
+def test_a_seed_data_file_is_the_sites_data_to_start(tmp_path: Path, dist: Path) -> None:
     (tmp_path / "seed.json").write_text(json.dumps(SEED))
     env = site(dist, data=str(tmp_path / "seed.json"))()
-    assert env.store.export() == SEED and env.store.initial == SEED and env.acting_user() == "alice"
+    assert env.store.export() == SEED and env.acting_user() == "alice"
 
 
 def test_the_acting_user_is_signed_in_until_a_session_says_else(client: TestClient) -> None:
@@ -514,15 +510,13 @@ def test_a_subclass_init_must_call_super(dist: Path) -> None:
         TestClient(Forgot().create_app()).get("/")
 
 
-def test_collections_insert_update_delete_and_diff() -> None:
+def test_collections_insert_update_delete_and_find() -> None:
     store = Collections({"todos": [{"id": 1, "title": "a"}, {"id": 2, "title": "b"}]})
     assert store.insert("todos", {"title": "c"})["id"] == 3
     store.update("todos", 1, title="A")
     assert store.delete("todos", 2) and not store.delete("todos", 9)
     assert store.find("todos", title="A") == [{"id": 1, "title": "A"}]
-    assert store.diff() == {"todos": {"added": [{"id": 3, "title": "c"}], "removed": [{"id": 2, "title": "b"}],
-                                      "changed": [{"id": 1, "before": {"id": 1, "title": "a"},
-                                                   "after": {"id": 1, "title": "A"}}]}}
+    assert store.export() == {"todos": [{"id": 1, "title": "A"}, {"id": 3, "title": "c"}]}
     with pytest.raises(ValueError):
         store.load({"todos": "nope"})
 
