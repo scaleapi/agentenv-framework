@@ -12,13 +12,15 @@ as_root() { sudo -S -p '' "$@" < "$build/.password"; }
 # grant APP SERVICE...: each TCC SERVICE (accessibility, post_event, screen_capture) for the app bundle APP, by its
 # identifier, bound to the code signature it has now, so another app of that identifier gets none.
 grant() {
-    local app=$1 id requirement hex service now
+    local app=$1 id requirement hex service now csreq
     shift
     id=$(defaults read "$app/Contents/Info" CFBundleIdentifier) || fail "$app has no bundle identifier"
     requirement=$(codesign -d -r- "$app" 2>&1 | sed -n 's/^\(# *\)\{0,1\}designated => //p')
     [ -n "$requirement" ] || fail "$app has no designated requirement, so it can't be granted"
-    echo "$requirement" | csreq -r- -b "$TMPDIR/agentenv.csreq"
-    hex=$(xxd -p "$TMPDIR/agentenv.csreq" | tr -d '\n')
+    csreq=$(mktemp)
+    echo "$requirement" | csreq -r- -b "$csreq"
+    hex=$(xxd -p "$csreq" | tr -d '\n')
+    rm -f "$csreq"
     now=$(date +%s)
     for service in "$@"; do
         case "$service" in
