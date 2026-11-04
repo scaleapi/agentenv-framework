@@ -256,8 +256,8 @@ class ComputerArtifact(Artifact):
         computer = cls(**fields)
         disk, checks = computer.forms.disk, {}
         if computer.forms.container is not None:
-            checks["container"] = (_inspect(computer.image(), computer.arch,
-                                            functools.partial(_read_container, computer.os))
+            image = computer.image()
+            checks["container"] = (_inspect(image, computer.arch, functools.partial(_read_container, computer.os))
                                    if inspect else _unread(computer.arch, "inspection was skipped"))
         if computer.forms.vm_bundle is not None:
             checks["vm_bundle"] = _unread(computer.arch, "a VM bundle is read by the host that boots it")

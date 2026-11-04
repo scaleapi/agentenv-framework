@@ -19,24 +19,44 @@ from agent_env.providers.sandbox_providers.lume import provider as lume
 from agent_env.providers.sandbox_providers.lume.provider import LumeSandboxProvider
 
 FAKE = textwrap.dedent('''\
-    import json, os, signal, sys, time
+    import contextlib, fcntl, json, os, signal, sys, time
     path = os.environ["FAKE_LUME_STATE"]
+    @contextlib.contextmanager
+    def held():
+        with open(path + ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
     def load():
         try:
             return json.load(open(path))
         except FileNotFoundError:
             return {"vms": {"bench": {"status": "stopped", "macAddress": "aa:00:00:00:00:00"}}, "calls": []}
     def save(state):
-        json.dump(state, open(path + ".part", "w"))
-        os.replace(path + ".part", path)
+        part = f"{path}.{os.getpid()}.part"
+        json.dump(state, open(part, "w"))
+        os.replace(part, path)
     args = sys.argv[1:]
+    command, name = args[0], args[1] if len(args) > 1 else None
+    if command == "run":
+        with held():
+            state = load()
+            state["calls"].append(args)
+            if not os.environ.get("FAKE_LUME_NO_SESSION"):
+                state["vms"][name].update(status="running", ipAddress="192.168.64.%d" % len(state["vms"]))
+            save(state)
+        if os.environ.get("FAKE_LUME_NO_SESSION"):
+            sys.exit("Unable to access security information. The virtual machine encountered a security error")
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        while True:
+            time.sleep(0.05)
+    lock = held()
+    lock.__enter__()
     state = load()
     state["calls"].append(args)
-    save(state)
     vms = state["vms"]
-    command, name = args[0], args[1] if len(args) > 1 else None
     if command == "get":
         if name not in vms:
+            save(state)
             sys.exit(f"VM not found: {name}")
         print(json.dumps([{"name": name, **vms[name]}]))
     elif command == "ls":
@@ -46,14 +66,6 @@ FAKE = textwrap.dedent('''\
     elif command == "set":
         for flag, value in zip(args[2::2], args[3::2]):
             vms[name][flag.lstrip("-")] = value
-    elif command == "run":
-        if os.environ.get("FAKE_LUME_NO_SESSION"):
-            sys.exit("Unable to access security information. The virtual machine encountered a security error")
-        vms[name].update(status="running", ipAddress="192.168.64.%d" % len(vms))
-        save(state)
-        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-        while True:
-            time.sleep(0.05)
     elif command == "stop":
         vms[name].update(status="stopped", ipAddress=None)
     elif command == "delete":
