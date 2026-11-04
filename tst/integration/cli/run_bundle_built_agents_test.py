@@ -37,7 +37,7 @@ assert "HERE = Path" in AGENT_PY and "sees {seen}" in AGENT_PY
 PREFIX = f'''{BASE}
 WORKDIR /app
 COPY agentenv-protocol/ ./agentenv-protocol/
-RUN pip install --no-cache-dir './agentenv-protocol[agent]'
+RUN pip install --no-cache-dir './agentenv-protocol[agent]' 'websockets>=13'
 '''
 
 
