@@ -1,8 +1,9 @@
 """The lume provider against a fake ``lume``, which keeps its VMs in a file: a VM is cloned from its VM bundle, sized,
 given the deploy's environment as the protocol's seed in the folder it shares, run, and relayed from this Mac's
 loopback; a reset clones it afresh under its MAC address; a registry image is pulled once by its tag, checked against
-its digest; two VMs run at most; and a builder shares its build folder and is kept as a local VM bundle."""
+its digest; two VMs run at most, a reset holding its slot; and a builder shares its build folder and is kept as a local VM bundle."""
 
+import asyncio
 import json
 import os
 import signal
@@ -180,13 +181,16 @@ async def test_a_registry_bundle_is_pulled_once_by_its_tag_once_its_digest_is_ch
 
 
 @pytest.mark.asyncio
-async def test_a_local_bundle_this_mac_lacks_is_refused_and_a_third_vm_is_refused_naming_the_limit(mac):
+async def test_a_local_bundle_this_mac_lacks_is_refused_and_a_third_vm_is_refused_naming_the_limit_even_mid_reset(mac):
     with pytest.raises(ValueError, match="no VM bundle named 'gone'"):
         await mac.create_vm(image="local:gone", env={})
     sandboxes = [await mac.create_vm(image="local:bench", env={}) for _ in range(2)]
 
     with pytest.raises(RuntimeError, match="at most 2 .Apple's licence allows 2."):
         await mac.create_vm(image="local:bench", env={})
+    reset, third = await asyncio.gather(mac.reset_vm(sandboxes[0], image="local:bench", env={}),
+                                        mac.create_vm(image="local:bench", env={}), return_exceptions=True)
+    assert reset is None and isinstance(third, RuntimeError) and "at most 2" in str(third)
 
     for sandbox in sandboxes:
         await sandbox.terminate()

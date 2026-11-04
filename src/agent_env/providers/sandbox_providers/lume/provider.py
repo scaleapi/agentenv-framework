@@ -160,13 +160,15 @@ class LumeSandboxProvider(SandboxProvider):
 
     async def reset_vm(self, sandbox: Any, *, image: str, env: dict[str, str]) -> None:
         """The VM cloned afresh from the bundle it was cloned from, under its MAC address, so it takes the same
-        address, with ``env`` in its seed, its relays pointed at it on the same ports."""
+        address, with ``env`` in its seed, its relays pointed at it on the same ports; its slot held from its stop until
+        it runs again, so no deploy takes it meanwhile."""
         state = self._state(sandbox.sandbox_id)
-        await self._stopped(sandbox.sandbox_id, state)
-        await self._lume("delete", sandbox.sandbox_id, "--force")
-        await self._lume("clone", state["source"], sandbox.sandbox_id)
-        await self._lume("set", sandbox.sandbox_id, "--mac-address", state["mac"])
-        await self._started(sandbox.sandbox_id, state, env)
+        async with self._admitting():
+            await self._stopped(sandbox.sandbox_id, state)
+            await self._lume("delete", sandbox.sandbox_id, "--force")
+            await self._lume("clone", state["source"], sandbox.sandbox_id)
+            await self._lume("set", sandbox.sandbox_id, "--mac-address", state["mac"])
+            await self._started(sandbox.sandbox_id, state, env)
 
     async def get_sandbox(self, sandbox_id: str) -> LumeSandbox:
         return self._sandbox(sandbox_id, self._state(sandbox_id))
@@ -406,8 +408,8 @@ class LumeSandboxProvider(SandboxProvider):
         _private(self._folder(name) / "state.json", json.dumps(state))
 
     def _admitting(self) -> AbstractAsyncContextManager[None]:
-        """Held while a VM is counted, cloned and started, or a base pulled, by every agent-env on this Mac, so two
-        deploys don't both take its last slot or pull one base twice; waited for on the event loop."""
+        """Held while a VM is counted, cloned and started, or reset, or a base pulled, by every agent-env on this Mac,
+        so two deploys don't both take its last slot or pull one base twice; waited for on the event loop."""
         return awaiting_lock("lume-admitting")
 
 
