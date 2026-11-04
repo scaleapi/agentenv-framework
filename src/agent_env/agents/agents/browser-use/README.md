@@ -11,6 +11,7 @@ next to the browser, named `<server>__<tool>`.
 - **The browser** is the one the task gives it through `cdp-config/v1`, as the `browser_connect_cdp` step does: the endpoint `browser` names, else the turn's only one.
 - **Connecting:** it connects by the endpoint's `ws_url`, or by `http_url` with `connect_by = "http"`.
 - **With no endpoint,** or several and none named, the turn fails with `cdp.no_endpoint` or `cdp.ambiguous`, an `infra_error`. It never drives a browser of its own.
+- **An endpoint with headers** fails the turn with `browser_use.cdp_headers`, an `infra_error`, since Browser Use Pi connects by the address alone.
 - **Across turns:** a context's turns continue one conversation through a saved history file, and each turn connects afresh.
 
 It takes its model from the prompt, so a run needs `[model] default` (or the `agent` role) set. The smoke task deploys

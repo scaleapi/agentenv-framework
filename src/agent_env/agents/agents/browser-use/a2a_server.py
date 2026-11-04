@@ -73,6 +73,12 @@ class BrowserUseAgent(AgentEnvAgent):
             return TaskResult.failure("browser_use.no_model", "no model is configured; set 'model' through agent-config")
         # With no browser from the task the turn fails closed, so the agent never drives one of its own.
         endpoint = request.cdp_endpoint(config.browser)
+        if endpoint["headers"]:
+            # Browser Use Pi connects with the address alone, so a browser that needs headers isn't reached without them.
+            return TaskResult.failure(
+                "browser_use.cdp_headers",
+                f"the browser needs headers ({', '.join(sorted(endpoint['headers']))}), which Browser Use can't send",
+                error_type="infra_error")
         session = request.session_ref or hashlib.sha256(request.context_id.encode()).hexdigest()[:32]
         workspace = request.workspace or HOME / "workspaces" / session
         workspace.mkdir(parents=True, exist_ok=True)

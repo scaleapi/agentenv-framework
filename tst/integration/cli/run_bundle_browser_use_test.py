@@ -40,6 +40,7 @@ OPEN: Final[str] = (f"page = await tabs.open({json.dumps(PAGE)});\n"
                     "await page.waitFor(() => document.title.startsWith('Lantern'));\n"
                     "(await page.info()).title")
 PROMPT: Final[str] = "Open the page and reply with its title."
+AGAIN: Final[str] = "Open it once more and reply with its title."
 
 
 @pytest.fixture
@@ -114,7 +115,10 @@ def test_it_connects_by_http_url_too_refuses_a_wrong_credential_and_without_an_a
 
         await BrowserConnectCdpTaskStep(id="connect", version=None, env_id=BROWSER).execute(context)
         await protocol.post_agent_config(f"{base_url}/ext/agent-config", {"connect_by": "http"})
-        outcomes["http"] = await _send(base_url, PROMPT)
+        outcomes["http"] = await _send(base_url, PROMPT, context_id="kept")
+        asked = len(endpoint.completions())
+        outcomes["again"] = await _send(base_url, AGAIN, context_id="kept")
+        outcomes["again_carried"] = json.dumps(endpoint.completions()[asked].body["messages"])
 
         forged = reachable_url(env.environment_url.rstrip("/"), from_sandbox_type=env.sandbox_type,
                                to_sandbox_type=agent.sandbox_type).rstrip("/") + f"/svc/chromium/cdp/{uuid.uuid4().hex}"
@@ -145,14 +149,20 @@ def test_it_connects_by_http_url_too_refuses_a_wrong_credential_and_without_an_a
     assert (outcomes["none"]["state"], outcomes["none"]["data"].get("error_code")) == ("failed", "cdp.no_endpoint"), seen
     assert outcomes["none_asked"] == 0, seen
     assert outcomes["http"]["state"] == "completed" and "Lantern 7" in outcomes["http"]["text"], seen
+    # The context's second turn continues its conversation, through a connection of its own.
+    assert outcomes["again"]["state"] == "completed" and "Lantern 7" in outcomes["again"]["text"], seen
+    assert PROMPT in outcomes["again_carried"] and "'Lantern 7'" in outcomes["again_carried"], seen
     # The relay refuses the forged token's WebSocket upgrade, and its discovery with a 403.
     assert "Could not connect to CDP endpoint" in outcomes["forged_ws"]["text"], seen
     assert "CDP discovery failed (403)" in outcomes["forged_http"]["text"], seen
 
 
 def _browses(body: dict) -> Text | ToolCall:
-    """Run ``OPEN``, then finish with what it printed, or the error it raised."""
-    results = _tool_results(body)
+    """Run ``OPEN``, then finish with what it printed, or the error it raised, for the turn's prompt."""
+    messages = body.get("messages") or []
+    asked = max((i for i, m in enumerate(messages) if m.get("role") == "user" and "reply with its title" in json.dumps(m)),
+                default=0)
+    results = _tool_results({"messages": messages[asked:]})
     if not results:
         return ToolCall("javascript", {"code": OPEN})
     if results[-1] == "Result accepted.":
@@ -183,12 +193,12 @@ def _writes_the_agent_and_browser(state):
     return root
 
 
-async def _send(base_url: str, text: str) -> dict:
+async def _send(base_url: str, text: str, context_id: str | None = None) -> dict:
     async with httpx.AsyncClient(timeout=600) as client:
         response = await client.post(f"{base_url}/a2a", json={
             "jsonrpc": "2.0", "id": "1", "method": "message/send", "params": {
                 "message": {"kind": "message", "messageId": uuid.uuid4().hex, "role": "user",
-                            "contextId": uuid.uuid4().hex, "parts": [{"kind": "text", "text": text}]},
+                            "contextId": context_id or uuid.uuid4().hex, "parts": [{"kind": "text", "text": text}]},
                 "configuration": {"blocking": True}}})
     task = response.json()["result"]
     parts = task["status"]["message"]["parts"]

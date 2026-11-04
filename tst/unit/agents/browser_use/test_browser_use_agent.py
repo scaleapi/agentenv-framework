@@ -99,6 +99,19 @@ def test_with_no_browser_or_several_and_none_named_the_turn_fails_closed_before_
     assert not record.exists()
 
 
+def test_a_browser_that_needs_headers_fails_the_turn_since_browser_use_cant_send_them(
+        client: TestClient, record: Path) -> None:
+    client.post("/ext/cdp-config", json={"name": "chromium", "http_url": HTTP_URL, "ws_url": WS_URL,
+                                         "headers": {"Authorization": "Bearer secret"}})
+
+    task = _send(client, "hi")
+
+    data = _reply(task)[1]
+    assert (data["error_type"], data["error_code"]) == ("infra_error", "browser_use.cdp_headers")
+    assert "Authorization" in data["error_message"] and "secret" not in json.dumps(task)
+    assert not record.exists()
+
+
 def test_a_run_that_stops_early_fails_with_its_reason(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FAKE_SCENARIO", "max_steps")
     task = _send(client, "too long")
