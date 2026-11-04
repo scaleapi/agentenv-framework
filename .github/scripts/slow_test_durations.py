@@ -1,11 +1,12 @@
-"""Rewrite tst/integration/slow_durations.json from the slow tier's JUnit reports, so the CI shards stay balanced.
+"""Rewrite tst/integration/slow_durations.json from the sharded tiers' JUnit reports, so the CI shards stay balanced.
 
-    gh run download <run id> --pattern 'junit-integration-local-*'
-    python .github/scripts/slow_test_durations.py junit-integration-local-*/junit-integration-slow.xml
+    gh run download <run id> --pattern 'junit-*'
+    python .github/scripts/slow_test_durations.py junit-*/junit-*.xml
 
-Use a green ``main`` run: it has a ``junit-integration-local-*`` artifact for every ``integration-local-slow`` and
-``integration-local-gateway`` shard, which ``gh run download`` puts in a folder each. Each test's time counts toward its file,
-or toward the test itself for a file the table names in ``split_by_test``; that list is kept as it is.
+Use a green ``main`` run: it has a ``junit-*`` artifact for every shard of the slow tier, the gateway tests, the unit
+tier and the installer tier, which ``gh run download`` puts in a folder each. Pass them all, since the table is
+rewritten whole. Each test's time counts toward its file, or toward the test itself for a file the table names in
+``split_by_test``; that list is kept as it is.
 """
 
 from __future__ import annotations
