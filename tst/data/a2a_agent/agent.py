@@ -135,14 +135,16 @@ async def _opened(endpoint: Mapping[str, Any], name: str, url: str) -> str:
 
             target = (await call("Target.createTarget", {"url": url}))["targetId"]
             session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["sessionId"]
-            deadline, state, title = asyncio.get_running_loop().time() + CDP_LOAD_SECONDS, "", ""
-            while state != "complete" and asyncio.get_running_loop().time() < deadline:
-                # A page still navigating may have no context to evaluate in yet.
+            deadline, loaded, title = asyncio.get_running_loop().time() + CDP_LOAD_SECONDS, False, ""
+            while not loaded and asyncio.get_running_loop().time() < deadline:
+                # A new tab is about:blank, already complete, until it commits the URL; a page still navigating may
+                # have no context to evaluate in yet.
                 with contextlib.suppress(RuntimeError):
-                    state, title = (await call("Runtime.evaluate", {
-                        "expression": "[document.readyState, document.title]", "returnByValue": True}, session))[
-                        "result"]["value"]
-                if state != "complete":
+                    state, title, href = (await call("Runtime.evaluate", {
+                        "expression": "[document.readyState, document.title, location.href]", "returnByValue": True},
+                        session))["result"]["value"]
+                    loaded = state == "complete" and href != "about:blank"
+                if not loaded:
                     await asyncio.sleep(0.2)
             await call("Target.closeTarget", {"targetId": target})
         return f"cdp {name} {digest}: {title}"
