@@ -129,6 +129,33 @@ def test_an_export_with_a_computed_column_loads_back_as_the_database_computes_it
     assert rpc(client, "data/get")["parts"][0]["data"] == exported
 
 
+def test_an_export_whose_child_row_sorts_before_its_parent_loads_back_with_foreign_keys_enforced(
+        dist: Path, database: str) -> None:
+    class Threads(DeclarativeBase):
+        pass
+
+    class Note(Threads):
+        __tablename__ = "notes"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        parent_id: Mapped[int | None] = mapped_column(ForeignKey("notes.id"), nullable=True)
+
+    def enforce(connection, record) -> None:
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    sqlalchemy.event.listen(sqlalchemy.engine.Engine, "connect", enforce)
+    try:
+        client = TestClient(helpdesk(dist, Threads)().create_app())
+        rpc(client, "data/add", {"parts": [{"kind": "data", "data": {"notes": [
+            {"id": 3, "parent_id": None}, {"id": 2, "parent_id": 3}, {"id": 1, "parent_id": 2}]}}]})
+        exported = rpc(client, "data/get")["parts"][0]["data"]
+        assert [row["id"] for row in exported["notes"]] == [1, 2, 3]
+        rpc(client, "data/reset")
+        rpc(client, "data/add", {"parts": [{"kind": "data", "data": exported}]})
+        assert rpc(client, "data/get")["parts"][0]["data"] == exported
+    finally:
+        sqlalchemy.event.remove(sqlalchemy.engine.Engine, "connect", enforce)
+
+
 def test_a_row_the_gui_adds_is_the_mcp_servers_and_go_reports_it(dist: Path, database: str) -> None:
     env = helpdesk(dist, Base)()
     client = TestClient(env.create_app())

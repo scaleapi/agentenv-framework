@@ -112,10 +112,11 @@ class Tables:
                 sqlalchemy.select(table).order_by(*table.primary_key.columns))] for table in self.metadata.sorted_tables}
 
     def load(self, data: dict) -> None:
-        """Insert ``data``'s rows, each table's after the tables it refers to, in their order, each run of rows that name
-        the same columns as one insert (one insert takes its columns from its first row, so a row that leaves an
-        optional column out goes in its own), leaving out each computed column, which the database works out itself, so
-        what ``export`` gave loads back; refuses a name that is no table."""
+        """Insert ``data``'s rows, each table's after the tables it refers to, in their order but each row of a table that
+        refers to itself after the row it refers to (``_parents_first``), each run of rows that name the same columns as
+        one insert (one insert takes its columns from its first row, so a row that leaves an optional column out goes in
+        its own), leaving out each computed column, which the database works out itself, so what ``export`` gave loads
+        back; refuses a name that is no table."""
         tables = {table.name: table for table in self.metadata.sorted_tables}
         unknown = sorted(set(data) - set(tables))
         if unknown:
@@ -125,7 +126,7 @@ class Tables:
                 rows = data.get(name) or []
                 if not (isinstance(rows, list) and all(isinstance(row, dict) for row in rows)):
                     raise ValueError(f"table {name!r}'s data is not a list of rows")
-                for _, run in itertools.groupby(rows, key=lambda row: sorted(row)):
+                for _, run in itertools.groupby(_parents_first(table, rows), key=lambda row: sorted(row)):
                     connection.execute(table.insert(), [_row(table, row) for row in run])
             if connection.dialect.name == "postgresql":
                 _advance_sequences(connection, tables.values())
@@ -140,6 +141,33 @@ class Tables:
         table = next((t for t in self.metadata.sorted_tables if t.name == name), None)
         columns = [c.name for c in table.primary_key.columns] if table is not None else []
         return json.dumps([row.get(c) for c in columns] if columns else row, sort_keys=True, default=str)
+
+
+def _parents_first(table: Any, rows: list[dict]) -> list[dict]:
+    """``rows`` in their order, but each row that refers to another row of ``table`` through a foreign key of the table's
+    own after that row, so a constraint that isn't deferred holds at each insert; rows in a cycle keep their order."""
+    links = [(fk.parent.name, fk.column.name) for fk in table.foreign_keys if fk.column.table is table]
+    if not links:
+        return rows
+    by_value = {(referenced, row.get(referenced)): index for index, row in enumerate(rows)
+                for _, referenced in links if row.get(referenced) is not None}
+    ordered, placed, visiting = [], set(), set()
+
+    def place(index: int) -> None:
+        if index in placed or index in visiting:
+            return
+        visiting.add(index)
+        for local, referenced in links:
+            parent = by_value.get((referenced, rows[index].get(local)))
+            if parent is not None and parent != index:
+                place(parent)
+        visiting.discard(index)
+        placed.add(index)
+        ordered.append(rows[index])
+
+    for index in range(len(rows)):
+        place(index)
+    return ordered
 
 
 _PARSERS: dict = {datetime.datetime: datetime.datetime.fromisoformat, datetime.date: datetime.date.fromisoformat,
