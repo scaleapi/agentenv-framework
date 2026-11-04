@@ -19,6 +19,8 @@ from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway import gateway as gw_mod
 from agent_env.env.gateway.constants import PCAP_MEDIA_TYPE, TRAFFIC_EXTENSION
 from agent_env.env.gateway.gateway import Gateway
+from agent_env.task.store import find_task_instance, get_task_instance_store
+from agent_env.task.task import _rolled_back_sandboxes
 from agent_env.task.teardown import recorded_sandboxes, tear_down
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
@@ -54,9 +56,10 @@ def gateway(tmp_path, monkeypatch, local_stores):
     gw._close_trajectory_file()
 
 
-def _deployed(env_id: str = "notes-env", *, token: str | None = TOKEN, capturing: bool = True) -> DeployedGatewayEnv:
+def _deployed(env_id: str = "notes-env", *, token: str | None = TOKEN, capturing: bool = True,
+              sandbox_id: str = "vm-1") -> DeployedGatewayEnv:
     card = {"name": "env1", "capabilities": {"extensions": [TRAFFIC_EXTENSION] if capturing else []}}
-    return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url="http://gateway", sandbox_id="vm-1",
+    return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url="http://gateway", sandbox_id=sandbox_id,
                               environment_card_url="http://gateway/.well-known/agent-env.json", environment_card=card,
                               control_token=token)
 
@@ -200,3 +203,37 @@ async def test_tear_down_leaves_an_env_already_torn_down_alone(gateway):
          patch("agent_env.task.teardown.terminate", AsyncMock(return_value=False)):
         await tear_down(context, recorded_sandboxes(context), context.deployed_envs, timeout=30)
     assert TRAFFIC_KEY not in context.metadata
+
+
+@pytest.mark.asyncio
+async def test_what_teardown_collects_is_saved_to_the_runs_stored_instance(gateway):
+    instance = get_task_instance_store().create_instance("task-1", 1, total_steps=1)
+    context = _context(_deployed())
+    context.instance_id = instance.instance_id
+
+    await collect_uncollected_captures(context, context.deployed_envs)
+
+    stored = find_task_instance(instance.instance_id).context["metadata"][TRAFFIC_KEY]
+    assert stored == context.metadata[TRAFFIC_KEY] and stored["notes-env"]["state"] == "collected"
+
+
+@pytest.mark.asyncio
+async def test_tear_down_collects_a_retrys_rolled_back_deployment_under_its_own_key_before_its_vm_goes(gateway):
+    rolled_back, live = _deployed(sandbox_id="vm-1"), _deployed(sandbox_id="vm-2")
+    gone = _rolled_back_sandboxes(TaskStepContext(deployed_envs=[rolled_back]).to_dict(), TaskStepContext().to_dict(), {})
+    context = _context(live)
+    context.metadata["retry_resets"] = [{"attempt": 2, "rolled_back_sandboxes": gone}]
+    collected_before_terminate: list[set] = []
+
+    async def terminate(sandbox):
+        collected_before_terminate.append({key for key, entry in context.metadata[TRAFFIC_KEY].items()
+                                           if entry["state"] == "collected"})
+        return False
+
+    with patch("agent_env.task.teardown._close", AsyncMock()), patch("agent_env.task.teardown.terminate", terminate):
+        report = await tear_down(context, recorded_sandboxes(context), context.deployed_envs, timeout=30)
+
+    assert sorted(s.sandbox_id for s in report.terminated) == ["vm-1", "vm-2"]
+    assert collected_before_terminate == [{"notes-env", "notes-env-rolled-back-1"}] * 2
+    assert context.metadata[TRAFFIC_KEY]["notes-env-rolled-back-1"]["artifact"] != \
+        context.metadata[TRAFFIC_KEY]["notes-env"]["artifact"]

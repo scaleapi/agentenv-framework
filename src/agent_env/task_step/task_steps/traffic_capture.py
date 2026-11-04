@@ -2,9 +2,11 @@
 packet its websites' containers send and receive as rotating pcap files, which its gateway's card serves as traffic/v1
 behind the deploy's control token. ``collect_traffic_capture`` stores each as a FileArtifact and registers them as one
 FileArtifactUniverse, recorded in ``context.metadata[TRAFFIC_KEY][env_id]``. Teardown collects any capturing env a run
-didn't, before the env closes (``collect_uncollected_captures``), so a capture isn't lost with its VM."""
+didn't, a retry's rolled-back ones included, before the env closes (``collect_uncollected_captures``), so a capture
+isn't lost with its VM, and saves what it recorded to the run's stored instance."""
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import os
@@ -85,36 +87,57 @@ def captures_traffic(deployed: DeployedEnv) -> bool:
     return isinstance(deployed, DeployedEnv) and serves_traffic(deployed.environment_card)
 
 
-async def collect_uncollected_captures(context: TaskStepContext, envs: Sequence[DeployedEnv]) -> None:
+async def collect_uncollected_captures(context: TaskStepContext, envs: Sequence[DeployedEnv], *,
+                                      rolled_back: Sequence[tuple[str, DeployedEnv]] = ()) -> None:
     """Collect the captures of each of ``envs`` that serves traffic/v1 and whose captures the run hasn't collected, a
-    collection that failed tried again, as teardown does before the envs close; ``collect_captures`` records what
-    happened to each."""
+    collection that failed tried again, as teardown does before the envs close, and of each ``rolled_back`` deployment,
+    a retry's, under its own key (``rolled_back_deployments``); ``collect_captures`` records what happened to each, and
+    the entries are saved to the run's stored instance, since teardown runs after its steps saved theirs."""
     entries = context.metadata.get(TRAFFIC_KEY) or {}
-    for deployed in envs:
-        if captures_traffic(deployed) and (entries.get(deployed.env_id) or {}).get("state") != "collected":
-            await collect_captures(context, deployed)
+    tried = False
+    for key, deployed in [*((deployed.env_id, deployed) for deployed in envs), *rolled_back]:
+        if captures_traffic(deployed) and (entries.get(key) or {}).get("state") != "collected":
+            await collect_captures(context, deployed, key=key)
+            tried = True
+    if tried and context.instance_id:
+        from agent_env.task.store import record_context_metadata
+
+        await asyncio.to_thread(record_context_metadata, context.instance_id, TRAFFIC_KEY,
+                                context.metadata[TRAFFIC_KEY])
 
 
-async def collect_captures(context: TaskStepContext, deployed: DeployedEnv) -> dict:
+def rolled_back_deployments(context: TaskStepContext) -> list[tuple[str, DeployedEnv]]:
+    """Each capturing env a retry rolled back, with the key its captures are recorded under:
+    ``<env_id>-rolled-back-<n>`` for the ``n``-th of the run's ``retry_resets``."""
+    found = []
+    for n, reset in enumerate(context.metadata.get("retry_resets") or [], start=1):
+        for record in (reset.get("rolled_back_sandboxes") or {}).get("capturing_envs") or []:
+            deployed = DeployedEnv.from_dict(record)
+            found.append((f"{deployed.env_id}-rolled-back-{n}", deployed))
+    return found
+
+
+async def collect_captures(context: TaskStepContext, deployed: DeployedEnv, *, key: Optional[str] = None) -> dict:
     """Store each capture ``deployed`` serves as a pcap FileArtifact, register them as one FileArtifactUniverse, and
-    record it in ``context.metadata[TRAFFIC_KEY]``. Each file is named for its container and its place among that
-    container's files, oldest first, so they read in the order their packets were captured. Never raises: the entry,
-    which it also returns, says what happened."""
+    record it in ``context.metadata[TRAFFIC_KEY][key]``, by default its env_id. Each file is named for its container
+    and its place among that container's files, oldest first, so they read in the order their packets were captured.
+    Never raises: the entry, which it also returns, says what happened."""
+    key = key or deployed.env_id
     entries = context.metadata.setdefault(TRAFFIC_KEY, {})
     try:
         if not captures_traffic(deployed):
             raise EnvCapabilityUnsupported(TRAFFIC_EXTENSION_URI, TRAFFIC_LIST_OP, deployed.env_id, deployed.instance_id)
         listing = await list_traffic_captures(deployed.environment_url, deployed.environment_card,
                                               headers=deployed.control_headers)
-        entries[deployed.env_id] = await _store(context, deployed, listing.captures)
+        entries[key] = await _store(context, deployed, listing.captures, key)
     except Exception as e:
-        logger.warning("collect_traffic_capture %s: %s", deployed.env_id, e)
-        entries[deployed.env_id] = _failed(e)
-    return entries[deployed.env_id]
+        logger.warning("collect_traffic_capture %s: %s", key, e)
+        entries[key] = _failed(e)
+    return entries[key]
 
 
-async def _store(context: TaskStepContext, deployed: DeployedEnv, captures: list[TrafficCapture]) -> dict:
-    universe_id = derive_id(context.instance_id or "run", f"traffic-{deployed.env_id}")
+async def _store(context: TaskStepContext, deployed: DeployedEnv, captures: list[TrafficCapture], key: str) -> dict:
+    universe_id = derive_id(context.instance_id or "run", f"traffic-{key}")
     if is_local_id(universe_id):
         validate_local_id(universe_id)
     get_config().check_local_run_write(universe_id)

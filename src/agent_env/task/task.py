@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.traffic import serves_traffic
 
 from agent_env.config import run_env_ids
 from agent_env.plugins import _registration
@@ -47,7 +48,8 @@ def _rolled_back_sandboxes(before: dict, after: dict, live: dict) -> dict:
     slices so the executor's cleanup can scan the marker exactly as it scans a context. The ``live``
     context the undo's rebuild replaces counts as ``before`` too. The undo is what removes these
     from the live and persisted context, so without this record an orphaned sandbox from the failed
-    attempt is discoverable nowhere.
+    attempt is discoverable nowhere. ``capturing_envs`` keeps the whole record of each env among them that
+    serves traffic/v1, so teardown can still collect its captures before its sandboxes go.
     """
     slices = ("deployed_envs", "deployed_agents", "deployed_sandboxes")
     kept = {i for key in slices for e in after.get(key) or [] for _, _, i in _sandbox_ids(key, e)}
@@ -79,6 +81,7 @@ def _rolled_back_sandboxes(before: dict, after: dict, live: dict) -> dict:
         "deployed_sandboxes": [
             {"sandbox_id": x["sandbox_id"], "sandbox_type": x.get("sandbox_type")} for x, _ in gone("deployed_sandboxes")
         ],
+        "capturing_envs": [e for e, _ in gone("deployed_envs") if serves_traffic(e.get("environment_card") or {})],
     }
 
 

@@ -791,6 +791,12 @@ class TaskInstanceStore:
             ),
         )
 
+    def set_context_metadata_sync(self, instance_id: str, key: str, value: object) -> None:
+        """Set ``context.metadata[key]`` of a stored instance outside any step, as teardown records what it did after
+        the run's last step saved; not journaled, since nothing after teardown undoes it."""
+        self._doc_store.update(TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id),
+                               UpdateSpec(set={f"context.metadata.{key}": value}))
+
     def append_step_attempt_failure_sync(self, instance_id: str, failure: "StepAttemptFailure") -> None:
         """Best-effort append of one attempt's failure, designed not to conflict with the
         ``record_task_failure`` write. ``add_to_set`` creates the array on the first append and
@@ -898,6 +904,15 @@ def seed_task_instance_context(instance_id: str, context: "TaskStepContext", att
         get_task_instance_store().seed_context(instance_id, ops, attempt_epoch)
     except Exception:
         logger.warning("Failed to seed task instance context", exc_info=True)
+
+
+def record_context_metadata(instance_id: str, key: str, value: object) -> None:
+    """Save ``context.metadata[key]`` of the stored instance ``instance_id``, as teardown does once the run's steps
+    have saved theirs; a failure is logged, never raised."""
+    try:
+        get_task_instance_store().set_context_metadata_sync(instance_id, key, value)
+    except Exception:
+        logger.warning("Failed to save context.metadata[%r] of task instance %s", key, instance_id, exc_info=True)
 
 
 async def record_step_complete(
