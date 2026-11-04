@@ -142,7 +142,7 @@ def test_false_removes_an_operation_of_the_openapi_document(tmp_path: Path) -> N
     ('[users]\npersonas = ["ann"]\nacting_user = "zed"\n', "users: acting_user 'zed' is none of the personas ['ann']"),
     ('[users]\npersonas = ["ann", "ann"]\n', "users: personas ['ann'] are declared twice"),
     ('[users]\nsign_in = "sso"\n', "users.sign_in: Input should be 'cookie', 'none' or 'live'"),
-    ('[routes.ops]\na = "FETCH /x"\n', "routes.ops.a: method is one of GET, POST, PUT, PATCH, DELETE, not 'FETCH'"),
+    ('[routes.ops]\na = "FETCH /x"\n', "routes.ops.a: method is one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, not 'FETCH'"),
     ('[routes.ops]\na = "GET /agentenv/x"\n', "routes.ops.a: path '/agentenv/x' is the data plane's or the card's"),
     ('[routes.ops]\na = "GET /x"\nb = "get /x"\n', "routes.ops: b and a are both GET /x"),
     ('[site]\nhealth = "/up"\n[routes.ops]\nup = "GET /up"\n', "site.health: /up is served by route up"),
@@ -631,6 +631,24 @@ def test_from_environment_keeps_any_name_an_api_route_takes() -> None:
         {"routes": {"ops": {"items:list": "GET /api/items"}}}, Path.cwd())[0]
 
 
+def test_from_environment_keeps_a_head_or_options_route_an_api_route_takes() -> None:
+    @environment_card(name="shop")
+    @website(domains=["shop.test"])
+    class Shop(WebsiteEnvironment):
+        @api.route("HEAD", "/ping")
+        def ping(self) -> dict:
+            return {}
+
+        @api.route("OPTIONS", "/items")
+        def items_options(self) -> dict:
+            return {}
+
+    assert {name: (r.method, r.path) for name, r in from_environment(Shop).route_table().items()} == {
+        "ping": ("HEAD", "/ping"), "items_options": ("OPTIONS", "/items")}
+    routes = website_params(card_of(TestClient(Shop().create_app())))["routes"]
+    assert [(r["method"], r["name"]) for r in routes] == [("HEAD", "ping"), ("OPTIONS", "items_options")]
+
+
 def test_a_class_declared_from_a_spec_must_serve_what_it_declares(tmp_path: Path) -> None:
     path = write(tmp_path, {"site.toml": '[site]\nname = "wiki"\ndomains = ["wiki.test"]\n[source]\nsdk = "m:Wiki"\n'
                                          '[routes.ops]\npages = "GET /api/pages"\nedit = "PUT /api/pages/{id}"\n'
@@ -916,3 +934,12 @@ def test_the_json_schema_takes_the_false_that_removes_an_inherited_entry() -> No
     jsonschema.validate(website_spec._read(SPECS_DIR / "slack.toml"), schema)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"roles": {"staff": True}}, schema)
+
+
+@pytest.mark.parametrize("route", ["get /items", "GET /items", "Patch /items/{id}", "head /ping", "OPTIONS /items"])
+def test_the_json_schema_takes_a_route_shorthand_in_the_case_the_loader_takes(route: str, tmp_path: Path) -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    jsonschema.validate({"routes": {"ops": {"a": route}}}, website_spec.json_schema())
+    assert list(resolve({"routes": {"ops": {"a": route}}}, tmp_path).route_table()) == ["a"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"routes": {"ops": {"a": "FETCH /items"}}}, website_spec.json_schema())

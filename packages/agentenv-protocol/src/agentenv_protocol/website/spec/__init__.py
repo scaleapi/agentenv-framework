@@ -48,7 +48,7 @@ except ImportError:
 DEFAULT_HEALTH_PATH = "/api/health"
 SESSION_PATH = "/api/session"
 STATE_PATH = "/go"
-METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 SOURCE_KINDS = ("image", "sdk", "static", "live", "replay")
 NameKind = Literal["synthetic", "live", "allowlist"]
 _PRECEDENCE: dict[str, int] = {"synthetic": 0, "live": 1, "allowlist": 2}
@@ -1018,7 +1018,8 @@ def json_schema() -> dict:
     schema = WebsiteSpec.model_json_schema(by_alias=True)
     defs = schema.get("$defs", {})
     route_ref = {"$ref": "#/$defs/Route"}
-    shorthand = {"type": "string", "pattern": f"^({'|'.join(METHODS)}) /", "description": "METHOD /path"}
+    either_case = "|".join("".join(f"[{c}{c.lower()}]" for c in method) for method in METHODS)
+    shorthand = {"type": "string", "pattern": rf"^\s*({either_case}) +/", "description": "METHOD /path"}
     removed = {"const": False, "description": "removes the inherited entry"}
     partial = {**{k: v for k, v in defs["Route"].items() if k != "required"},
                "title": "RouteChange", "description": "keys of an inherited route an overlay changes"}
