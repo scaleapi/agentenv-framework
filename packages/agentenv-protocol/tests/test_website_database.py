@@ -5,6 +5,7 @@ here) or an object's own load/export/reset, which its data plane reads and write
 from __future__ import annotations
 
 import datetime
+import enum
 import sys
 import types
 from pathlib import Path
@@ -37,6 +38,11 @@ class Ticket(Base):
     owner: Mapped[str] = mapped_column(ForeignKey("users.id"))
     title: Mapped[str] = mapped_column(String)
     opened_at: Mapped[datetime.datetime] = mapped_column(DateTime)
+
+
+class State(enum.Enum):
+    OPEN = "open"
+    CLOSED = "closed"
 
 
 SEED = {"current_user": "ann", "users": [{"id": "ann", "name": "Ann"}],
@@ -154,6 +160,56 @@ def test_an_export_whose_child_row_sorts_before_its_parent_loads_back_with_forei
         assert rpc(client, "data/get")["parts"][0]["data"] == exported
     finally:
         sqlalchemy.event.remove(sqlalchemy.engine.Engine, "connect", enforce)
+
+
+def test_a_composite_self_reference_loads_back_parents_first_matching_the_whole_key(dist: Path, database: str) -> None:
+    class Tenants(DeclarativeBase):
+        pass
+
+    class Node(Tenants):
+        __tablename__ = "nodes"
+        tenant: Mapped[str] = mapped_column(String, primary_key=True)
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        parent_tenant: Mapped[str | None] = mapped_column(String, nullable=True)
+        parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+        __table_args__ = (sqlalchemy.ForeignKeyConstraint(["parent_tenant", "parent_id"],
+                                                          ["nodes.tenant", "nodes.id"]),)
+
+    def enforce(connection, record) -> None:
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    sqlalchemy.event.listen(sqlalchemy.engine.Engine, "connect", enforce)
+    try:
+        client = TestClient(helpdesk(dist, Tenants)().create_app())
+        rows = [{"tenant": t, "id": i, "parent_tenant": None, "parent_id": None} for t, i in (("b", 2), ("b", 5), ("c", 2))]
+        rows.append({"tenant": "a", "id": 1, "parent_tenant": "b", "parent_id": 2})
+        rpc(client, "data/add", {"parts": [{"kind": "data", "data": {"nodes": rows}}]})
+        exported = rpc(client, "data/get")["parts"][0]["data"]
+        assert [(row["tenant"], row["id"]) for row in exported["nodes"]] == [("a", 1), ("b", 2), ("b", 5), ("c", 2)]
+        rpc(client, "data/reset")
+        rpc(client, "data/add", {"parts": [{"kind": "data", "data": exported}]})
+        assert rpc(client, "data/get")["parts"][0]["data"] == exported
+    finally:
+        sqlalchemy.event.remove(sqlalchemy.engine.Engine, "connect", enforce)
+
+
+def test_an_export_of_an_enum_column_loads_back_as_its_members(dist: Path, database: str) -> None:
+    class Desk(DeclarativeBase):
+        pass
+
+    class Issue(Desk):
+        __tablename__ = "issues"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        state: Mapped[State] = mapped_column(sqlalchemy.Enum(State))
+
+    client = TestClient(helpdesk(dist, Desk)().create_app())
+    rpc(client, "data/add", {"parts": [{"kind": "data", "data": {"issues": [{"id": 1, "state": "open"},
+                                                                            {"id": 2, "state": "CLOSED"}]}}]})
+    exported = rpc(client, "data/get")["parts"][0]["data"]
+    assert exported == {"issues": [{"id": 1, "state": "open"}, {"id": 2, "state": "closed"}]}
+    rpc(client, "data/reset")
+    rpc(client, "data/add", {"parts": [{"kind": "data", "data": exported}]})
+    assert rpc(client, "data/get")["parts"][0]["data"] == exported
 
 
 def test_a_row_the_gui_adds_is_the_mcp_servers_and_data_get_reports_it(dist: Path, database: str) -> None:

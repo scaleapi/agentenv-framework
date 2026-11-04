@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import enum
 import itertools
 import types
 import uuid
@@ -136,20 +137,28 @@ class Tables:
 
 def _parents_first(table: Any, rows: list[dict]) -> list[dict]:
     """``rows`` in their order, but each row that refers to another row of ``table`` through a foreign key of the table's
-    own after that row, so a constraint that isn't deferred holds at each insert; rows in a cycle keep their order."""
-    links = [(fk.parent.name, fk.column.name) for fk in table.foreign_keys if fk.column.table is table]
+    own after that row, each key matched whole, every column of a composite one together, so a constraint that isn't
+    deferred holds at each insert; rows in a cycle keep their order."""
+    links = [([element.parent.name for element in constraint.elements],
+              [element.column.name for element in constraint.elements])
+             for constraint in table.foreign_key_constraints if constraint.referred_table is table]
     if not links:
         return rows
-    by_value = {(referenced, row.get(referenced)): index for index, row in enumerate(rows)
-                for _, referenced in links if row.get(referenced) is not None}
+    by_key: dict = {}
+    for index, row in enumerate(rows):
+        for n, (_, referenced) in enumerate(links):
+            key = tuple(row.get(column) for column in referenced)
+            if None not in key:
+                by_key[(n, key)] = index
     ordered, placed, visiting = [], set(), set()
 
     def place(index: int) -> None:
         if index in placed or index in visiting:
             return
         visiting.add(index)
-        for local, referenced in links:
-            parent = by_value.get((referenced, rows[index].get(local)))
+        for n, (local, _) in enumerate(links):
+            key = tuple(rows[index].get(column) for column in local)
+            parent = by_key.get((n, key)) if None not in key else None
             if parent is not None and parent != index:
                 place(parent)
         visiting.discard(index)
@@ -166,8 +175,9 @@ _PARSERS: dict = {datetime.datetime: datetime.datetime.fromisoformat, datetime.d
 
 
 def _row(table: Any, row: dict) -> dict:
-    """``row`` without its computed columns' values, and with each JSON string a date, time, decimal or UUID column
-    holds parsed to that type."""
+    """``row`` without its computed columns' values, with each JSON string a date, time, decimal or UUID column holds
+    parsed to that type, and each an enum column holds made its member again, found by its value, as ``export`` writes
+    it, else by its name."""
     parsed = dict(row)
     for column in table.columns:
         if column.computed is not None:
@@ -178,7 +188,17 @@ def _row(table: Any, row: dict) -> dict:
             kind = _python_type(column)
             if kind in _PARSERS:
                 parsed[column.name] = _PARSERS[kind](value.replace("Z", "+00:00") if kind is datetime.datetime else value)
+            elif isinstance(kind, type) and issubclass(kind, enum.Enum):
+                parsed[column.name] = _member(kind, value)
     return parsed
+
+
+def _member(kind: type[enum.Enum], value: str) -> Any:
+    """The member of ``kind`` whose value is ``value``, else the one so named, else ``value`` as given."""
+    try:
+        return kind(value)
+    except ValueError:
+        return kind.__members__.get(value, value)
 
 
 def _python_type(column: Any) -> type | None:
