@@ -350,8 +350,8 @@ async def test_each_nl_action_goes_to_the_executor_it_names(engine, executor_cal
     assert sorted((e["a2a_url"], i, c) for e, i, c in executor_calls) == [
         ("http://alice", "as a", "trigger-a"), ("http://bob", "as b", "trigger-b"), ("http://default", "as d", "trigger-d")]
     details = {e["trigger_id"]: e["detail"] for e in engine._events if e["kind"] == "action_ok"}
-    assert details == {"d": {"nl": "as d"}, "a": {"nl": "as a", "executor": "alice"},
-                       "b": {"nl": "as b", "executor": "bob"}}
+    assert details == {"d": {"nl": "as d", "calls": {}}, "a": {"nl": "as a", "executor": "alice", "calls": {}},
+                       "b": {"nl": "as b", "executor": "bob", "calls": {}}}
 
 
 @pytest.mark.asyncio
