@@ -91,6 +91,8 @@ case ${1:-baseline} in
     expect NoSeedDocFence-inv2     takeover.cfg ReplayReproducesStored NoSeedDocFence       "violates ReplayReproducesStored"
     expect NoSeedJournalFence-inv1 takeover.cfg NoSupersededWriteLands NoSeedJournalFence   "violates NoSupersededWriteLands"
     expect NoSeedJournalFence-inv2 takeover.cfg ReplayReproducesStored NoSeedJournalFence   "violates ReplayReproducesStored"
+    expect MarkerFromStoreOnly     single.cfg   NoSandboxLeaks         MarkerFromStoreOnly  "violates NoSandboxLeaks"
+    expect MarkerNamesSurvivors    single.cfg   NoMarkerNamesLive      MarkerNamesSurvivors "violates NoMarkerNamesLive"
     expect NoCasGenerationCheck    takeover.cfg ""                     NoCasGenerationCheck holds "redundant: re-register also bumps attempt_epoch"
     ;;
   one)

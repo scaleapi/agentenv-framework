@@ -17,6 +17,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import RetryConfig, TaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 
+
 @pytest.fixture
 def store(tmp_path):
     set_document_store(LocalSqliteDocumentStore(str(tmp_path / "instances.db")))
@@ -68,8 +69,6 @@ class _FailsFirstAttemptOnceReady(TaskStep):
         return context
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="the retry_resets marker names only sandboxes the stored context held before the undo")
 @pytest.mark.asyncio
 async def test_a_sibling_cancelled_during_its_completion_write_is_still_torn_down(store, monkeypatch):
     provider = _Provider()
