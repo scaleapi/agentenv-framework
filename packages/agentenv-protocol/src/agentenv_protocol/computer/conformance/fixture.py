@@ -5,6 +5,7 @@ arrived. It records the same effects under X11, macOS's Aqua and Windows, whose 
 reports the wheel differently. Run as ``python3 fixture.py <state-dir>``; it needs a 1280x800 screen or larger."""
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import sys
@@ -22,6 +23,10 @@ CLIPBOARD = "agentenv-probe clipboard"
 MIN_SIZE = (1280, 800)
 #: X11's keysyms for the keys Aqua's Tk names by their character.
 KEYSYMS = {",": "comma", " ": "space"}
+#: A wheel notch's <MouseWheel> delta where Tk scales the wheel: Windows', and Tk 9's everywhere.
+NOTCH_DELTA = 120
+#: Tk 9 packs a <TouchpadScroll>'s distances into its delta: y, a signed 16-bit number, in the low bits, x above.
+Y_BITS = 16
 #: The pixels of a scrolled line, macOS's for a scroll posted in lines.
 LINE_PX = 10
 
@@ -225,14 +230,13 @@ def main(state_dir: Path) -> None:
 def wheel_steps(delta: int) -> int:
     """The wheel steps a <MouseWheel> event's ``delta`` holds, up positive: whole notches of 120 where Tk scales them
     so (Windows, and Tk 9 everywhere), else one a unit (Aqua's Tk 8.6)."""
-    return int(delta / 120) if abs(delta) >= 120 else delta
+    return int(delta / NOTCH_DELTA) if abs(delta) >= NOTCH_DELTA else delta
 
 
 def touchpad_steps(delta: int) -> tuple[bool, int] | None:
     """The steps a <TouchpadScroll> event's ``delta`` holds, as horizontal or not and up or left positive, or None
-    when it moves nothing. Tk packs the x distance in its high 16 bits and the y distance, signed, in its low 16; a
-    step is a line, LINE_PX, and macOS may coalesce several into one event."""
-    dx, dy = delta >> 16, (delta & 0xFFFF) - (0x10000 if delta & 0x8000 else 0)
+    when it moves nothing. A step is a line, LINE_PX, and macOS may coalesce several into one event."""
+    dx, dy = delta >> Y_BITS, ctypes.c_int16(delta).value
     if not (dx or dy):
         return None
     distance = dy or dx
