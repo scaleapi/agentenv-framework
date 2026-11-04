@@ -177,3 +177,104 @@ async def test_a_v1_services_state_is_the_data_it_answers_with_else_its_export_s
 
     assert await legacy_protocol.service_state(None, "http://gw", "slack") == state
     assert ("GET /svc/mcp-slack/export-state" in asked) is reads_export_state
+
+
+def test_definition_servers_are_an_envs_mcp_servers_then_its_websites():
+    from types import SimpleNamespace
+
+    from agent_env.env.envs.website import WebsiteEnv
+    from agent_env.env.legacy_protocol import BackingServer
+
+    named = lambda *names: [SimpleNamespace(environment_name=n) for n in names]
+    multi = SimpleNamespace(mcp_server_envs=named("slack", "email"), website_envs=named("shop", "slack"))
+
+    assert legacy_protocol.definition_servers(multi) == [BackingServer("slack"), BackingServer("email"),
+                                                         BackingServer("shop", mcp=False), BackingServer("slack", mcp=False)]
+    assert legacy_protocol.definition_servers(WebsiteEnv(id="w", version=1, environment_name="shop")) == [BackingServer("shop", mcp=False)]
+    assert legacy_protocol.definition_servers(SimpleNamespace(environment_name="notes")) == [BackingServer("notes")]
+    assert legacy_protocol.definition_servers(SimpleNamespace()) == []
+
+
+_COMPOSED = {"name": "gw", "url": RPC_PATH, "capabilities": {"extensions": []}, "children_environments": [
+    {"name": "slack", "url": "/svc/mcp-slack/agentenv", "capabilities": {"extensions": []}},
+    {"name": "slack", "url": "/svc/slack/agentenv", "capabilities": {"extensions": []}},
+    {"name": "docs", "url": "/svc/mcp-docs/agentenv", "capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1"}]}},
+]}
+
+
+def test_card_servers_are_the_cards_children_a_website_told_apart_by_its_route_or_its_website_extension():
+    servers = legacy_protocol.card_servers(_COMPOSED, "https://env.example")
+
+    assert [(s.environment_name, s.mcp, s.address) for s in servers] == [
+        ("slack", True, "https://env.example"), ("slack", False, "https://env.example"), ("docs", False, "https://env.example")]
+    assert [s.child.base_url(s.address) for s in servers] == [
+        "https://env.example/svc/mcp-slack", "https://env.example/svc/slack", "https://env.example/svc/mcp-docs"]
+
+
+def test_card_servers_of_a_leaf_card_is_the_env_itself_and_a_composed_card_serving_data_get_comes_first():
+    leaf = {"name": "notes", "url": RPC_PATH}
+    assert [(s.environment_name, s.card) for s in legacy_protocol.card_servers(leaf, "https://n")] == [("notes", leaf)]
+    driver = {**_COMPOSED, "name": "desktop", "capabilities": {"operations": ["data/get"]}}
+    assert [s.environment_name for s in legacy_protocol.card_servers(driver, "https://d")] == ["desktop", "slack", "slack", "docs"]
+
+
+def _record(card: dict | None, card_url: str | None = "https://env.example/.well-known/agent-env.json"):
+    from agent_env.env.env import DeployedGatewayEnv
+
+    return DeployedGatewayEnv(env_id="e", env_version=1, gateway_url="http://gw", mcp_url="http://gw/mcp", db_web_url=None,
+                              sandbox_id="sb", environment_card_url=card_url, environment_card=card)
+
+
+@pytest.mark.asyncio
+async def test_backing_servers_are_the_stored_cards_then_those_the_definition_names_serving_no_card():
+    from types import SimpleNamespace
+
+    env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name=n) for n in ("slack", "legacy")],
+                          website_envs=[SimpleNamespace(environment_name="slack")])
+
+    servers = await legacy_protocol.backing_servers(_record(_COMPOSED), "http://gw", env)
+
+    assert [(s.environment_name, s.mcp, s.card is not None, s.address) for s in servers] == [
+        ("slack", True, True, "https://env.example"), ("slack", False, True, "https://env.example"),
+        ("docs", False, True, "https://env.example"), ("legacy", True, False, "https://env.example")]
+    assert await legacy_protocol.server_card(servers[-1], "http://gw") == ("https://env.example", None)
+    assert await legacy_protocol.server_v1_base_url(servers[-1], "http://gw") is None
+
+
+@pytest.mark.asyncio
+async def test_backing_servers_read_the_card_live_without_a_stored_one_or_for_another_gateway(monkeypatch):
+    from types import SimpleNamespace
+
+    read = []
+
+    async def get_card(base_url, **kw):
+        read.append(base_url)
+        return _COMPOSED
+
+    monkeypatch.setattr(legacy_protocol.protocol_v1, "get_card", get_card)
+    env = SimpleNamespace(environment_name="slack")
+    for record, gateway in ((_record(None), "http://gw/"), (_record(_COMPOSED), "http://elsewhere")):
+        servers = await legacy_protocol.backing_servers(record, gateway, env)
+        assert [(s.environment_name, s.address) for s in servers] == [
+            ("slack", gateway.rstrip("/")), ("slack", gateway.rstrip("/")), ("docs", gateway.rstrip("/"))]
+    assert read == ["http://gw", "http://elsewhere"]
+
+
+@pytest.mark.asyncio
+async def test_a_record_whose_card_cant_be_read_falls_back_to_its_definition_logged_once(monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    async def get_card(base_url, **kw):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(legacy_protocol.protocol_v1, "get_card", get_card)
+    env = SimpleNamespace(id="e", mcp_server_envs=[SimpleNamespace(environment_name="slack")],
+                          website_envs=[SimpleNamespace(environment_name="slack")])
+    with caplog.at_level("INFO", logger="agent_env.env.legacy_protocol"):
+        for record in (_record(None, card_url=None), _record(None), None):
+            servers = await legacy_protocol.backing_servers(record, "http://gw", env)
+            assert [(s.environment_name, s.mcp, s.address) for s in servers] == [("slack", True, None), ("slack", False, None)]
+
+    assert [r.getMessage().split(",")[0] for r in caplog.records] == [
+        "env 'e': its record has no card URL", "env 'e': its card at http://gw could not be read (ConnectError)",
+        "env 'e': it has no record"]

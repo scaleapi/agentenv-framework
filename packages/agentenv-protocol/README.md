@@ -199,6 +199,16 @@ with any other transport are kept beside the SDK's entry. Card URLs are paths, r
 address the card was fetched from. On the client side, `client.mcp_path(card)` returns the
 declared path, or `/mcp` for a card without one.
 
+A composed card, such as a gateway's, nests each backing environment's card under
+`children_environments`, its `url` and endpoints rooted at the route the composer serves it at.
+`client.children(card)` returns each as a `ChildEnv` (its `name`, `url` and `card`, with its
+`extensions`, `operations` and `serves(method)`, and `base_url(address)`, its data plane resolved
+against the composed card's address). Two children may share a name, as a website and an MCP
+server can, so `client.child_at(card, url)` finds one by its url or route; `client.child_named(card,
+name)` raises `AmbiguousChildError` for a shared name, and `client.find_child` returns the first.
+`client.serves(card, method)` says whether a card serves a data-plane method by its declared
+`operations`, None for a card that declares none.
+
 Extensions are invoked from what the card advertises. `client.find_extension_method(card, uri,
 method)` returns one advertised method, whose `endpoint` is the method's own or else the
 extension's, and `client.invoke_extension(base_url, card, uri, params, method=...)` calls it with

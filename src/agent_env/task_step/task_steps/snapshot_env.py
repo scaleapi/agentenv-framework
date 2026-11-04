@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from typing import ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -36,6 +36,9 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+
+if TYPE_CHECKING:
+    from agent_env.env.legacy_protocol import BackingServer
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +170,9 @@ class SnapshotEnvTaskStep(TaskStep):
 
     Output: ``context.metadata["env_snapshotted_universes"][self.id]`` =
     ``{"id", "version"}``. Fails the step if any service fails to export.
+    Websites are snapshotted through their v1 data plane; a website serving
+    none is left out, and one sharing its name with an MCP server is left to
+    the MCP server, as a MultiEnv loads that name's artifact into it.
 
     ``include_env_changes`` also stores who changed what (urn:agentenv:changes/v1) under ``metadata["env_changes"]``.
 
@@ -470,27 +476,42 @@ class SnapshotEnvTaskStep(TaskStep):
         return (su["id"], su.get("version")) if su and su.get("id") else None
 
     @staticmethod
-    def _enumerate_environments(env) -> list[str]:
-        """environment names for a multi env or a single MCP server env."""
-        if getattr(env, "mcp_server_envs", None):
-            return [e.environment_name for e in env.mcp_server_envs]
-        if getattr(env, "environment_name", None):
-            return [env.environment_name]
-        raise RuntimeError(
-            f"Env '{env.id}' v{env.version} has no MCP services to snapshot "
-            "(expected mcp_server_envs or environment_name)"
-        )
+    def _snapshot_servers(servers: list[BackingServer], env) -> list[BackingServer]:
+        """The servers to snapshot of ``servers`` (``legacy_protocol.backing_servers``), one per environment_name: a
+        universe names each environment by it, and a load hands an environment of a name an MCP server and a website
+        share to the MCP server, so a server whose name one kept earlier holds (the env itself, else an MCP server) is
+        left out, and logged."""
+        if not servers:
+            raise RuntimeError(
+                f"Env '{env.id}' v{env.version} has no MCP services or websites to snapshot "
+                "(its card lists no child envs, and its definition names no mcp_server_envs, website_envs or environment_name)"
+            )
+        if not all(server.environment_name for server in servers):
+            raise RuntimeError(f"Env '{env.id}' v{env.version} has a card naming no environment to snapshot")
+        kept: dict[str, BackingServer] = {}
+        for server in sorted(servers, key=lambda s: not s.mcp):
+            if (holder := kept.get(server.environment_name)) is not None:
+                logger.warning(f"snapshot_env: {'website' if not server.mcp else 'server'} {server.environment_name!r} "
+                               f"of {env.id} is not snapshotted: it shares its name with the {'MCP server' if holder.mcp else 'website'} "
+                               "kept, and a universe names an environment by its name")
+                continue
+            kept[server.environment_name] = server
+        return list(kept.values())
 
     @staticmethod
     async def _export_environment_to_file(
         gateway_url: Optional[str], environment_name: str, tmp_path: str, timeout_seconds: float, deployed=None,
-        data_get_params: Optional[dict] = None,
-    ) -> str | tuple[GetDataResponse, Optional[_SnapshotUpload]]:
-        """Export one service; return the suffix written (".json"/".zip") to
-        ``tmp_path``, or the object url a FilePart names when the service uploaded the
-        bundle itself (nothing written to ``tmp_path`` then — export_one registers it), or, for
-        an environment whose card declares a file tree, its data/get answer and the upload it
-        answered under, which export_one keeps file by file. ``data_get_params`` go to its data/get.
+        data_get_params: Optional[dict] = None, mcp: bool = True, server: Optional[BackingServer] = None,
+    ) -> Optional[str | tuple[GetDataResponse, Optional[_SnapshotUpload]]]:
+        """Export one service, an MCP server or with ``mcp=False`` a website; return the
+        suffix written (".json"/".zip") to ``tmp_path``, or the object url a FilePart names
+        when the service uploaded the bundle itself (nothing written to ``tmp_path`` then —
+        export_one registers it), or, for an environment whose card declares a file tree, its
+        data/get answer and the upload it answered under, which export_one keeps file by file,
+        or None for a service serving no v1 data plane: a website with no card, or a service whose card declares
+        operations without data/get. ``data_get_params`` go to its data/get. ``server`` is the service as the env's
+        card lists it (``legacy_protocol.backing_servers``), its card and route; without it, the service is looked up
+        by name on ``deployed``'s stored card, or probed live at its gateway path.
 
         v1 ``get_data``, handed a namespace grant when the service takes the data-objects
         form: an upload through it → its object url; ``DataPart`` → json; ``FilePart`` →
@@ -499,10 +520,22 @@ class SnapshotEnvTaskStep(TaskStep):
         guard. Errors are caught by the caller (fails just this service)."""
         from agent_env.env import legacy_protocol
 
-        base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=True)
+        if server is not None:
+            mcp = server.mcp
+            base_url = await legacy_protocol.server_v1_base_url(server, gateway_url)
+        else:
+            base_url = await legacy_protocol.v1_base_url(deployed, gateway_url, environment_name, mcp=mcp)
+        card_base, card = None, None
+        if base_url is not None:
+            card_base, card = (await legacy_protocol.server_card(server, gateway_url) if server is not None else
+                               await legacy_protocol.child_env_card(deployed, gateway_url, environment_name, mcp=mcp))
+            if card is not None and protocol_v1.serves(card, METHOD_GET) is False:
+                logger.info(f"snapshot_env: {environment_name}'s card declares {protocol_v1.operations(card)}, no {METHOD_GET}")
+                return None
+        if base_url is None and not mcp:
+            return None
         if base_url is not None:
             headers = deployed.control_headers_for(base_url) if deployed is not None else None
-            card_base, card = await legacy_protocol.child_env_card(deployed, gateway_url, environment_name)
             if returns_file_tree(card or {}):
                 upload = await asyncio.to_thread(_snapshot_upload, card or {}, timeout_seconds,
                                                  getattr(deployed, "sandbox_type", None), FILE_TREE_LIMITS)
@@ -609,10 +642,12 @@ class SnapshotEnvTaskStep(TaskStep):
 
         A classmethod so callers that have no step instance can reuse it."""
         from agent_env.artifact import FileArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact
+        from agent_env.env import legacy_protocol
         from agent_env.env.env import gateway_url_of
 
-        services = cls._enumerate_environments(env) if gateway_url else _card_environments(deployed)
         gateway = gateway_url.rstrip("/") if gateway_url else None
+        servers = cls._snapshot_servers(await legacy_protocol.backing_servers(deployed, gateway, env), env)
+        services = [server.environment_name for server in servers]
         # `gateway` identifies which deployment was exported: env= alone doesn't when one env_id has several.
         logger.info(
             f"snapshot_env: env={env.id} v{env.version} snapshot_id={snapshot_id} "
@@ -643,9 +678,12 @@ class SnapshotEnvTaskStep(TaskStep):
         # The stored card describes the deployment's own gateway; an override pointing elsewhere keeps the live probe.
         card_record = deployed if deployed is not None and (gateway is None or (gateway_url_of(deployed) or "").rstrip("/") == gateway) else None
         sem = asyncio.Semaphore(concurrency)
+        no_data_plane: set[str] = set()
 
-        async def export_one(environment_name: str):
-            """Returns EnvironmentArtifact on success, (public_err, log_err) on failure."""
+        async def export_one(server: BackingServer):
+            """Returns EnvironmentArtifact on success, (public_err, log_err) on failure, None for a service serving no data plane."""
+            environment_name = server.environment_name
+            website = {} if server.mcp else {"mcp": False}
             async with sem:
                 # Suffix (.json/.zip) is reported by _export_environment_to_file.
                 fd, tmp_path = tempfile.mkstemp(prefix=f"{environment_name}-")
@@ -657,6 +695,7 @@ class SnapshotEnvTaskStep(TaskStep):
                         result = await cls._export_environment_to_file(
                             gateway, environment_name, tmp_path, export_timeout_seconds,
                             deployed=card_record, data_get_params=(data_get_params or {}).get(environment_name),
+                            server=server, **website,
                         )
                     except httpx.HTTPStatusError as e:
                         body_snippet = ""
@@ -671,6 +710,9 @@ class SnapshotEnvTaskStep(TaskStep):
                         return public, f"{public}: {e}"
                     except ValueError as e:
                         return str(e), str(e)
+                    if result is None:
+                        no_data_plane.add(environment_name)
+                        return None
 
                     if isinstance(result, tuple):
                         try:
@@ -744,7 +786,7 @@ class SnapshotEnvTaskStep(TaskStep):
                         except OSError:
                             pass
 
-        results = await asyncio.gather(*(export_one(name) for name in services))
+        results = await asyncio.gather(*(export_one(server) for server in servers))
 
         environment_artifacts = []
         skipped: dict[str, tuple[str, str]] = {}
@@ -767,9 +809,18 @@ class SnapshotEnvTaskStep(TaskStep):
                 f"{len(skipped)}/{len(services)} services were not exported "
                 f"(missing={sorted(skipped)}): {public_summary}"
             )
-        if empty := [name for name, result in zip(services, results) if result is None]:
-            if len(empty) == len(services):
-                raise RuntimeError(f"{', '.join(map(repr, empty))} returned no files to snapshot")
+        without_data_plane = [name for name in services if name in no_data_plane]
+        if without_data_plane:
+            logger.warning(
+                f"snapshot_env: {without_data_plane} of {env.id} serve no v1 data plane; "
+                "their state is not in the snapshot"
+            )
+        empty = [name for name, result in zip(services, results) if result is None and name not in no_data_plane]
+        if not environment_artifacts:
+            reasons = [f"{without_data_plane} serve no v1 data plane"] if without_data_plane else []
+            reasons += [f"{', '.join(map(repr, empty))} returned no files to snapshot"] if empty else []
+            raise RuntimeError(f"Env '{env.id}' v{env.version} exported no state: {'; '.join(reasons)}")
+        if empty:
             logger.info(f"snapshot_env: {empty} returned no files to keep, so {snapshot_id} leaves them out")
 
         universe = await asyncio.to_thread(
@@ -847,25 +898,6 @@ def registered_upload(object_url: str, file_id: str, filename: str, content_type
     get_config().check_object_url(file_id, object_url)
     return get_artifact_store().put_document(FileArtifact(
         id=file_id, description=description, filename=filename, content_type=content_type, object_url=object_url))
-
-
-def _card_environments(deployed) -> list[str]:
-    """The environments a deployment without a gateway serves, as the card it recorded names them: the env itself when
-    it has no children; else each child its name reaches that exports, and the env too, first, when it exports beside
-    them, as a computer fronting its apps does."""
-    card = deployed.environment_card or {}
-    children = card.get("children_environments")
-    if not isinstance(children, list):
-        names = [card.get("name")]
-    else:
-        names = [child.get("name") for child in children if deployed.get_child_env_card(child.get("name")) is child
-                 and ((operations := protocol_v1.operations(child)) is None
-                      or METHOD_GET in operations)]
-        if METHOD_GET in (protocol_v1.operations(card) or []):
-            names.insert(0, card.get("name"))
-    if not all(names):
-        raise RuntimeError(f"Deployed env '{deployed.env_id}' recorded a card naming no environment to snapshot")
-    return names
 
 
 def _changes_route(deployed, override_url: Optional[str]) -> tuple[str, str]:

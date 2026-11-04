@@ -1,8 +1,9 @@
 """Arm a deployed env gateway's virtual clock, then sync its backing servers to it.
 
 Arms the clock (set_time) and reads the gateway's server-reachable env_get_time_url (state), both as the
-stored env card declares clock/v1, then invokes sync_time on each backing server whose child env card
-advertises it. Non-advertisers are skipped when tolerate_missing_sync_time (default True). Place right
+stored env card declares clock/v1, then invokes sync_time on each backing server, MCP server or website, the
+env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
+Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
 before prompt_agent so the virtual timeline starts at agent-start.
 """
 
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone as _utc_tz
-from typing import ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -21,6 +22,9 @@ from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+
+if TYPE_CHECKING:
+    from agent_env.env.legacy_protocol import BackingServer
 
 logger = logging.getLogger(__name__)
 
@@ -107,14 +111,13 @@ class SyncEnvClockTaskStep(TaskStep):
             timezone=data.get("timezone"),
         )
 
-    def _service_names(self, deployed) -> list[str]:
-        """Backing MCP server names for the env (mirrors apply_server_config's enumeration)."""
-        from agent_env.env.env import Env
-        env = Env.get(deployed.env_id, deployed.env_version)
-        names = [e.environment_name for e in (getattr(env, "mcp_server_envs", None) or [])]
-        if not names and getattr(env, "environment_name", None):
-            names = [env.environment_name]
-        return names
+    async def _backing_servers(self, deployed) -> list[BackingServer]:
+        """The env's backing MCP servers and websites, as its card lists them (``legacy_protocol.backing_servers``):
+        a website sharing its name with an MCP server is a server of its own, at its own route."""
+        from agent_env.env import legacy_protocol
+        from agent_env.env.env import Env, gateway_url_of
+        return await legacy_protocol.backing_servers(deployed, gateway_url_of(deployed), Env.get(deployed.env_id, deployed.env_version),
+                                                     timeout=self.timeout_seconds)
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.env.env import gateway_url_of
@@ -132,9 +135,12 @@ class SyncEnvClockTaskStep(TaskStep):
         env_get_time_url = state.get("env_get_time_url")
 
         synced, skipped = [], []
-        for service in self._service_names(deployed):
-            outcome = await self._sync_one(deployed, gateway_url_of(deployed), service, env_get_time_url)
-            (synced if outcome.get("synced") else skipped).append({"service": service, "environment": service, **outcome})
+        for server in await self._backing_servers(deployed):
+            service = server.environment_name
+            outcome = await self._sync_one(deployed, gateway_url_of(deployed), service, env_get_time_url, mcp=server.mcp,
+                                           tolerate=self.tolerate_missing_sync_time or not server.mcp, server=server)
+            entry = {"service": service, "environment": service, **({} if server.mcp else {"website": True}), **outcome}
+            (synced if outcome.get("synced") else skipped).append(entry)
 
         configuration = {
             "step_id": self.id, "env_id": self.env_id,
@@ -151,17 +157,27 @@ class SyncEnvClockTaskStep(TaskStep):
                            f"({[(s['service'], s.get('reason')) for s in skipped]}) — every tool still answers wall time")
         return context
 
-    async def _sync_one(self, deployed, gateway_url: str, service: str, env_get_time_url: Optional[str]) -> dict:
-        """Invoke sync_time on one server if its card advertises clock/v1; skip (or raise) per the flag."""
+    async def _sync_one(self, deployed, gateway_url: str, service: str, env_get_time_url: Optional[str], mcp: bool = True,
+                        tolerate: Optional[bool] = None, server: Optional[BackingServer] = None) -> dict:
+        """Invoke sync_time on one server, an MCP server or with ``mcp=False`` a website, if its card advertises
+        clock/v1; skip a server with no card or no clock/v1 when ``tolerate`` (tolerate_missing_sync_time by default),
+        else raise. ``execute`` tolerates every website, so one that doesn't follow the clock never fails the step; one
+        that follows it but can't take the task's timezone does, as an MCP server does. ``server`` is the server as the
+        env's card lists it (``legacy_protocol.server_card``); without it, the card is ``service``'s on ``deployed``'s
+        stored card, or read live at its gateway path."""
+        tolerate = self.tolerate_missing_sync_time if tolerate is None else tolerate
         from agent_env.env import legacy_protocol
 
-        base_url, card = await legacy_protocol.child_env_card(deployed, gateway_url, service, timeout=self.timeout_seconds)
+        if server is not None:
+            base_url, card = await legacy_protocol.server_card(server, gateway_url, timeout=self.timeout_seconds)
+        else:
+            base_url, card = await legacy_protocol.child_env_card(deployed, gateway_url, service, timeout=self.timeout_seconds, mcp=mcp)
         if card is None:
-            if self.tolerate_missing_sync_time:
+            if tolerate:
                 return {"synced": False, "reason": "no_env_card"}
             raise RuntimeError(f"{service} has no env card: it serves none, its card isn't named {service!r}, or the deploy couldn't read it")
         if protocol_v1.find_extension(card, EXT_CLOCK_URI) is None:
-            if self.tolerate_missing_sync_time:
+            if tolerate:
                 logger.info(f"sync_env_clock: {service} does not advertise {EXT_CLOCK_URI}; skipping")
                 return {"synced": False, "reason": "not_advertised"}
             raise RuntimeError(f"{service} does not advertise {EXT_CLOCK_URI}")
@@ -176,5 +192,6 @@ class SyncEnvClockTaskStep(TaskStep):
             params["timezone"] = self.timezone
         result = await protocol_v1.invoke_extension(base_url, card, EXT_CLOCK_URI,
                                                     params=params,
-                                                    timeout=self.timeout_seconds, headers=deployed.control_headers)
+                                                    timeout=self.timeout_seconds,
+                                                    headers=deployed.control_headers)
         return {"synced": True, "result": result}
