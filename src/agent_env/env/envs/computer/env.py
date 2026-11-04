@@ -118,6 +118,7 @@ class ComputerEnv(Env):
         apps, app_settings = list(apps), app_settings or {}
         values, problems = gate.check(computer, driver, environment_name=environment_name, apps=apps, display=display,
                                       network=network, computer_settings=computer_settings or {})
+        problems += gate.check_screen(driver, apps)
         by_name = {app.environment_name: app for app in apps}
         for name, defaults in app_settings.items():
             problems += ([f"apps.{name}.settings: {id} has no app {name!r}"] if name not in by_name else

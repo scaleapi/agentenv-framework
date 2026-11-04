@@ -37,6 +37,10 @@ _STATUS_TIMEOUT_S = int(ANSWER_TIMEOUT_S) + 15
 _POLL_S = 0.5
 #: How a setting a record keeps shows a secret's or a generated one's value, which it never holds.
 WITHHELD = "<withheld>"
+
+
+class ComputerFailed(RuntimeError):
+    """The computer's ``computer-ready`` status says it failed for good, a check that can't pass again."""
 #: How many random bytes a computer's control token carries: 256 bits, past guessing.
 CONTROL_TOKEN_BYTES = 32
 #: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in.
@@ -168,12 +172,13 @@ def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
 
 async def ready(url: str, timeout: float, token: Optional[str] = None) -> dict:
     """The card of the driver at ``url``, read once its ``computer-ready`` status, asked with its control ``token``,
-    says it's ready, so each app it fronts is on it as the app's own server serves it; raises TimeoutError, naming
-    what it last saw, when it isn't within ``timeout`` seconds."""
-    last = "nothing answered"
+    says it's ready, so each app it fronts is on it as the app's own server serves it; raises ComputerFailed as soon
+    as the status says it failed, and TimeoutError, naming what it last saw, when it isn't ready within ``timeout``
+    seconds."""
+    last, failed = "nothing answered", None
     try:
         async with asyncio.timeout(timeout):
-            while True:
+            while failed is None:
                 try:
                     card = await protocol_v1.get_card(url, timeout=5)
                     status = await protocol_v1.invoke_extension(url, card, COMPUTER_READY, None, _STATUS_TIMEOUT_S,
@@ -181,10 +186,13 @@ async def ready(url: str, timeout: float, token: Optional[str] = None) -> dict:
                                                                 headers=protocol_v1.control_headers(token))
                     if status.get("ready"):
                         return await protocol_v1.get_card(url, timeout=5)
+                    failed = status.get("failed")
                     last = "not ready: " + "; ".join(f"{check['name']}: {check.get('detail')}"
                                                      for check in status.get("checks", []) if not check.get("ok"))
                 except Exception as e:
                     last = f"{type(e).__name__}: {e}"
-                await asyncio.sleep(_POLL_S)
+                if failed is None:
+                    await asyncio.sleep(_POLL_S)
     except TimeoutError:
         raise TimeoutError(f"the computer at {url} wasn't ready within {timeout:.0f} s ({last})") from None
+    raise ComputerFailed(f"the computer at {url} failed: {failed}")

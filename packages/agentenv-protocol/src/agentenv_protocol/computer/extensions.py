@@ -45,8 +45,12 @@ class Extensions:
                description="Whether the computer is usable now, by real checks; never sends input.")
     async def _computer_ready_status(self) -> dict:
         checks = await self._computer.ready_checks()
-        return {"ready": all(c.ok for c in checks),
-                "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks]}
+        status = {"ready": all(c.ok for c in checks),
+                  "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail, **({"final": True} if c.final else {})}
+                             for c in checks]}
+        if failed := [c for c in checks if c.final and not c.ok]:
+            status["failed"] = "; ".join(f"{c.name}: {c.detail}" for c in failed)
+        return status
 
     @extension(COMPUTER_DISPLAY, op="get", method="GET", description="Get or set the display's resolution and scale.")
     async def _computer_display_get(self) -> dict:

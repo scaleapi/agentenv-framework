@@ -4,7 +4,7 @@ computer's apps as child environments, each reached at ``/svc/<name>/`` through 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, ClassVar
+from typing import Any, Callable, ClassVar, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -79,6 +79,9 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     recording: ClassVar[Recording | None] = Recording()
     #: What an agent should know about this driver's computer beyond what its card says, as markdown: the end of its skill.
     notes: ClassVar[str] = ""
+    #: What the computer's screen shows, its card's ``screen``: a ``desktop``, or a website browser's ``page``, its
+    #: active tab.
+    screen_kind: ClassVar[Literal["desktop", "page"]] = "desktop"
     tool_access = True
     #: What the base class keeps for the driver, built by ``__init__``.
     _computer: ComputerRuntime | None = None

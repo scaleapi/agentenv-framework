@@ -236,7 +236,7 @@ class AppDeclaration(BaseModel):
     """What a ComputerAppEnvironment class declares, as a ``computer_app`` env stores it: the platforms it ``supports``,
     as a driver names them; ``os``, what it declares for each OS type; ``settings`` and ``build_settings``, the JSON
     schemas of its ``Settings`` and of its ``BuildSettings`` when it declares any; its ``skill``; and the ``data``
-    methods, ``install_steps`` and ``ready_checks`` it serves, by name."""
+    methods, ``install_steps`` and ``ready_checks`` it serves, by name; and ``browser``, true for a website browser."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -249,6 +249,7 @@ class AppDeclaration(BaseModel):
     data: list[str]
     install_steps: list[InstallStep]
     ready_checks: list[AppReadyCheck]
+    browser: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
