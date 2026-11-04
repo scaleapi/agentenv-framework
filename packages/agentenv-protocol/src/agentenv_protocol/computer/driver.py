@@ -4,21 +4,22 @@ computer's apps as child environments, each reached at ``/svc/<name>/`` through 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, ClassVar, Literal
+from pathlib import Path
+from typing import Any, Callable, ClassVar, Literal, Optional
 
-import httpx
 from pydantic import BaseModel, ConfigDict
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.websockets import WebSocket
 
 from ..agent_env_environment import (_CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
                                      _error_response, control_guard, environment_card)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
-from . import _linux, apps, card
+from . import _linux, apps, card, svc
 from .checks import check_features, check_names
 from .dataplane import DataPlane
-from .errors import DeliveryFailed, TargetUnavailable
+from .errors import TargetUnavailable
 from .extensions import Extensions
 from .operations import ReadyCheck, check_class, default_for
 from .platform import Platform, detect
@@ -138,21 +139,28 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return await apps.children(self._computer.apps) if self._computer.apps else None
 
     def _computer_front_apps(self, app: Any) -> Any:
-        app.custom_route("/svc/{name}/{path:path}", methods=["GET", "POST"])(control_guard()(self._computer_forward))
+        app.custom_route("/svc/{name}/{path:path}", methods=svc.METHODS)(control_guard()(self._computer_forward))
+        svc.websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
         return app
+
+    def _computer_app_folder(self, name: str) -> Optional[Path]:
+        return next((folder for folder in self._computer.apps if folder.name == name), None)
 
     async def _computer_forward(self, request: Request) -> Response:
         """A request under ``/svc/<name>/``, sent on to the app named so: its own server answers it."""
         name = request.path_params["name"]
-        folder = next((folder for folder in self._computer.apps if folder.name == name), None)
-        if folder is None:
+        if (folder := self._computer_app_folder(name)) is None:
             return _error_response(TargetUnavailable(f"this computer has no app named {name!r}"))
-        try:
-            answer = await apps.forward(folder, request.method, request.path_params["path"], request.url.query,
-                                        await request.body(), request.headers.get("content-type"))
-        except (httpx.HTTPError, OSError) as e:
-            return _error_response(DeliveryFailed(f"app {name}'s server isn't answering: {type(e).__name__}: {e}"))
-        return Response(answer.content, status_code=answer.status_code, media_type=answer.headers.get("content-type"))
+        return await svc.forward(folder, name, request)
+
+    async def _computer_relay(self, websocket: WebSocket) -> None:
+        """A WebSocket under ``/svc/<name>/``, relayed both ways to the app named so; refused, before it opens, with no
+        such app."""
+        name = websocket.path_params["name"]
+        if (folder := self._computer_app_folder(name)) is None:
+            await websocket.close(code=1008)
+            return
+        await svc.relay(folder, name, websocket)
 
     # The card: what the driver's operations support.
 

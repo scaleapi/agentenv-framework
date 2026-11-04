@@ -41,13 +41,14 @@ app = [
     "mcp>=1.25,<2",
     "uvicorn>=0.30",
 ]
-# A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, and
-# records the display as H.264 with PyAV (computer-recording/v1).
+# A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, records
+# the display as H.264 with PyAV (computer-recording/v1), and relays WebSockets to its apps on /svc/<app>/.
 computer = [
     "av>=17",
     "mcp>=1.25,<2",
     "Pillow>=10.4",
     "uvicorn>=0.30",
+    "websockets>=13",
 ]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
@@ -59,6 +60,7 @@ dev = [
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path
     "Pillow>=10.4",  # the computer extra's frame crops and encodings
     "av>=17",  # the computer extra's encoder, and the tests' decoder
+    "websockets>=13",  # the computer extra's /svc/<app>/ relay
 ]
 [project.urls]
 Homepage = "https://www.agentenvframework.com"

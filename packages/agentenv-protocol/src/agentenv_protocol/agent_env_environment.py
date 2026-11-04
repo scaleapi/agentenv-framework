@@ -1546,18 +1546,27 @@ def _error_response(error: AgentEnvError) -> Response:
     return _json_response(error_body(**error.fields()), error.status)
 
 
+def control_check() -> Callable[[Any], bool]:
+    """Whether a call's headers carry the env's control token as their bearer, with ``CONTROL_TOKEN_ENV`` set; without
+    it, any do."""
+    token = os.environ.get(CONTROL_TOKEN_ENV)
+    if not token:
+        return lambda headers: True
+    expected = f"Bearer {token}".encode()
+    return lambda headers: hmac.compare_digest(headers.get("authorization", "").encode(), expected)
+
+
 def control_guard() -> Callable[[Callable], Callable]:
     """What wraps a framework-only route, everything an env serves but its MCP endpoint and its card: with
     ``CONTROL_TOKEN_ENV`` set, a call that doesn't carry that token as its bearer is refused before the route runs;
     without it, nothing."""
-    token = os.environ.get(CONTROL_TOKEN_ENV)
-    if not token:
+    if not os.environ.get(CONTROL_TOKEN_ENV):
         return lambda handler: handler
-    expected = f"Bearer {token}".encode()
+    allowed = control_check()
 
     def guard(handler: Callable) -> Callable:
         async def guarded(request: Request) -> Response:
-            if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected):
+            if not allowed(request.headers):
                 return _error_response(AgentEnvError(
                     "unauthorized", "this route is agent-env's own: it takes the env's control token", status=401))
             return await handler(request)
