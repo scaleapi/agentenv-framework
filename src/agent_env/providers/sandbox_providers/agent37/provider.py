@@ -40,6 +40,8 @@ _CONFIG_KEYS = frozenset({"api_key", "region"})
 
 # Agent37's VM shapes, (vCPU, GiB of memory, largest disk in GB), smallest first.
 SHAPES = ((2, 4, 12), (4, 8, 20), (4, 16, 40), (4, 32, 80))
+# How long a failed or cancelled create waits for what it made to be deleted before it is raised.
+CANCEL_WAIT_SECONDS = 30
 _cleanups: set[asyncio.Task] = set()
 
 
@@ -62,12 +64,15 @@ def instance_name() -> str:
 
 
 async def _settle(cleanup: Any) -> None:
-    """Run ``cleanup`` to its end, also while the caller is being cancelled; a second cancellation leaves it running on
-    its own."""
+    """Run ``cleanup`` to its end, also while the caller is being cancelled. A second cancellation, or
+    ``CANCEL_WAIT_SECONDS`` passing, leaves it running on its own."""
     task = asyncio.ensure_future(cleanup)
     _cleanups.add(task)
     task.add_done_callback(_cleanups.discard)
-    await asyncio.shield(task)
+    try:
+        await asyncio.wait_for(asyncio.shield(task), CANCEL_WAIT_SECONDS)
+    except TimeoutError:
+        logger.warning("Agent37 cleanup is still running after %ss; it continues on its own", CANCEL_WAIT_SECONDS)
 
 
 class Agent37SandboxProvider(SandboxProvider):
