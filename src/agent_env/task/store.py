@@ -407,17 +407,19 @@ class TaskInstanceStore:
     def count(self, task_id: str, *, task_version: int | None = None) -> int:
         return self._doc_store.count(TASK_INSTANCES_COLLECTION, _task_filter(task_id, task_version))
 
-    def seed_context(self, instance_id: str, ops: "ContextUpdateOps") -> None:
-        """Apply the run's initial context, then journal it as the replay base (even when empty)."""
+    def seed_context(self, instance_id: str, ops: "ContextUpdateOps", attempt_epoch: int | None = None) -> None:
+        """Apply the run's initial context, then journal it as the replay base (even when empty).
+        Given ``attempt_epoch``, neither write takes effect once a later attempt owns the instance."""
         store = self._doc_store
         # One entry per deployment, as completions and the replay of this seed write them.
         ops = dataclasses.replace(ops, add_to_sets={p: _union([], items, path=p) for p, items in ops.add_to_sets.items()})
         if not ops.is_empty():
-            store.update(
-                TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id), ops.to_update_spec()
-            )
+            match = Filter.of(instance_id=instance_id)
+            if attempt_epoch is not None:
+                match = match.where("attempt_epoch", Lte(attempt_epoch))
+            store.update(TASK_INSTANCES_COLLECTION, match, ops.to_update_spec())
         # Doc first: a failed journal write (logged by the caller) must not cost the run its seed.
-        self._journal_step(store, instance_id, _SEED_STEP_ID, ops, "seed")
+        self._journal_step(store, instance_id, _SEED_STEP_ID, ops, "seed", attempt_epoch=attempt_epoch)
 
     def _bump_journal_seq(self, store: DocumentStore, instance_id: str) -> dict | None:
         """Atomically bump the instance's journal sequence; the post-update doc, or None if the
@@ -882,7 +884,7 @@ def register_task_instance(
         return None
 
 
-def seed_task_instance_context(instance_id: str, context: "TaskStepContext") -> None:
+def seed_task_instance_context(instance_id: str, context: "TaskStepContext", attempt_epoch: int | None = None) -> None:
     """Apply the caller's initial context to an instance row created by
     ``register_task_instance``, as path-level Mongo updates.
 
@@ -893,7 +895,7 @@ def seed_task_instance_context(instance_id: str, context: "TaskStepContext") -> 
 
     ops = build_context_update_ops(None, context)
     try:
-        get_task_instance_store().seed_context(instance_id, ops)
+        get_task_instance_store().seed_context(instance_id, ops, attempt_epoch)
     except Exception:
         logger.warning("Failed to seed task instance context", exc_info=True)
 
