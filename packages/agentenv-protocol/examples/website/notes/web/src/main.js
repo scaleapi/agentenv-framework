@@ -6,6 +6,7 @@ let renders = 0;
 const saving = new Map();
 const lastSent = new Map();
 const landed = new Map();
+const drafts = new Map();
 const CLOCK_REFRESH_MS = 5000;
 
 export function universeNow() {
@@ -31,6 +32,21 @@ async function api(path, { method = "GET", body } = {}) {
 
 const $ = (id) => document.getElementById(id);
 
+function setDraft(id, kind, value, saved) {
+  const draft = { ...drafts.get(id) };
+  if (value === saved) delete draft[kind];
+  else draft[kind] = value;
+  if (Object.keys(draft).length) drafts.set(id, draft);
+  else drafts.delete(id);
+}
+
+function settleDraft(id, sent) {
+  const draft = drafts.get(id);
+  if (!draft) return;
+  for (const kind of Object.keys(sent)) if (draft[kind] === sent[kind]) delete draft[kind];
+  if (!Object.keys(draft).length) drafts.delete(id);
+}
+
 function queueSave(id, fields) {
   lastSent.set(id, fields);
   const queued = saving.get(id);
@@ -46,6 +62,7 @@ function queueSave(id, fields) {
         const next = state.next;
         state.next = null;
         await api(`api/notes/${id}`, { method: "PATCH", body: next });
+        settleDraft(id, next);
       }
       landed.set(id, renders);
     } catch (error) {
@@ -84,15 +101,18 @@ function noteItem(note) {
   done.setAttribute("aria-label", `Mark "${note.title}" ${note.done ? "not done" : "done"}`);
   done.addEventListener("change", () => run(() => api(`api/notes/${note.id}/toggle`, { method: "POST" })));
 
+  const draft = drafts.get(note.id) ?? {};
   const title = document.createElement("input");
   title.className = "title";
   title.defaultValue = note.title;
+  title.value = draft.title ?? note.title;
   title.setAttribute("aria-label", "Title");
 
   const body = document.createElement("textarea");
   body.className = "body";
   body.rows = 2;
   body.defaultValue = note.body;
+  body.value = draft.body ?? note.body;
   body.placeholder = "Details";
   body.setAttribute("aria-label", "Details");
 
@@ -101,7 +121,8 @@ function noteItem(note) {
     if (title.value === sent.title && body.value === sent.body) return;
     queueSave(note.id, { title: title.value, body: body.value });
   };
-  for (const field of [title, body]) {
+  for (const [kind, field] of [["title", title], ["body", body]]) {
+    field.addEventListener("input", () => setDraft(note.id, kind, field.value, note[kind]));
     field.addEventListener("change", save);
     field.addEventListener("blur", save);
   }
@@ -112,7 +133,10 @@ function noteItem(note) {
   const remove = document.createElement("button");
   remove.className = "delete";
   remove.textContent = "Delete";
-  remove.addEventListener("click", () => run(() => api(`api/notes/${note.id}`, { method: "DELETE" })));
+  remove.addEventListener("click", () => run(async () => {
+    await api(`api/notes/${note.id}`, { method: "DELETE" });
+    drafts.delete(note.id);
+  }));
 
   const text = document.createElement("div");
   text.className = "text";
@@ -121,28 +145,19 @@ function noteItem(note) {
   return item;
 }
 
-function editing() {
-  const kept = [];
-  for (const field of document.querySelectorAll("#notes .title, #notes .body")) {
-    const focused = field === document.activeElement;
-    if (focused || field.value !== field.defaultValue) {
-      kept.push({ id: field.closest("li").dataset.id, kind: field.className, value: field.value, focused,
-                  start: field.selectionStart, end: field.selectionEnd });
-    }
-  }
-  return kept;
+function focused() {
+  const field = document.activeElement;
+  if (!field?.matches?.("#notes .title, #notes .body")) return null;
+  return { id: field.closest("li").dataset.id, kind: field.className, start: field.selectionStart,
+           end: field.selectionEnd };
 }
 
-function restore(kept) {
-  for (const { id, kind, value, focused, start, end } of kept) {
-    const field = document.querySelector(`#notes li[data-id="${id}"] .${kind}`);
-    if (!field) continue;
-    field.value = value;
-    if (focused) {
-      field.focus();
-      field.setSelectionRange(start, end);
-    }
-  }
+function refocus(kept) {
+  if (!kept) return;
+  const field = document.querySelector(`#notes li[data-id="${kept.id}"] .${kept.kind}`);
+  if (!field) return;
+  field.focus();
+  field.setSelectionRange(kept.start, kept.end);
 }
 
 async function render() {
@@ -156,9 +171,9 @@ async function render() {
       landed.delete(id);
     }
   }
-  const kept = editing();
+  const kept = focused();
   $("notes").replaceChildren(...notes.map(noteItem));
-  restore(kept);
+  refocus(kept);
   if (!notes.length) {
     const empty = document.createElement("li");
     empty.className = "empty";
@@ -195,6 +210,7 @@ async function start() {
         }
         await api("api/sign-in", { method: "POST", body: { user } });
         signedInAs = user;
+        drafts.clear();
       } finally {
         $("user").value = signedInAs;
         $("user").disabled = false;

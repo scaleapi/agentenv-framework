@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Notes</title>
     <script>
-      if (!location.pathname.endsWith("/")) location.replace(`${location.pathname}/${location.search}${location.hash}`);
+      if (!location.pathname.endsWith("/")) { const url = new URL(location.href); url.pathname += "/"; location.replace(url.href); }
     </script>
   </head>
   <body>
