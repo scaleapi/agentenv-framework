@@ -14,6 +14,7 @@ TLA_VERSION=1.7.4
 TLA_SHA256=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 TLA_URL=https://github.com/tlaplus/tlaplus/releases/download/v$TLA_VERSION/tla2tools.jar
 cache=${AGENTENV_TLA_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/agentenv-formal}
+[[ $cache == /* ]] || cache=$PWD/$cache
 jar=$cache/tla2tools-$TLA_VERSION.jar
 out=${OUT:-$(mktemp -d "${TMPDIR:-/tmp}/step-journal-tlc.XXXXXX")}
 
@@ -22,14 +23,15 @@ sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum 
 fetch_tlc() {
   if [[ -f $jar && $(sha256 "$jar") == "$TLA_SHA256" ]]; then return; fi
   mkdir -p "$cache"
-  curl -fsSL -o "$jar.part" "$TLA_URL"
-  local got; got=$(sha256 "$jar.part")
+  local part got; part=$(mktemp "$cache/tla2tools.XXXXXX")
+  curl -fsSL -o "$part" "$TLA_URL" || { rm -f "$part"; exit 2; }
+  got=$(sha256 "$part")
   if [[ $got != "$TLA_SHA256" ]]; then
-    rm -f "$jar.part"
+    rm -f "$part"
     echo "tla2tools.jar sha256 $got, expected $TLA_SHA256" >&2
     exit 2
   fi
-  mv "$jar.part" "$jar"
+  mv -f "$part" "$jar"
 }
 
 die() { echo "check.sh: $*" >&2; exit 2; }
@@ -95,6 +97,7 @@ case ${1:-baseline} in
     configure one "${2:?config file}" "${3:-}" "${4:-none}"
     IFS=$'\t' read -r outcome states < <(run one)
     echo "$outcome, $states; TLC output: $out/one/tlc.out"
+    if [[ $outcome == error ]]; then exit 2; fi
     exit 0
     ;;
   *) echo "usage: $0 [baseline|mutations|one CFG [INVARIANT] [MUT]]" >&2; exit 2 ;;
