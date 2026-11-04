@@ -10,6 +10,8 @@ import importlib.util
 import json
 import plistlib
 import stat
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -58,7 +60,7 @@ class FakeMac(SandboxProvider):
 
     def __init__(self):
         self.opened, self.provisioned, self.ran, self.terminated, self.kept, self.exit = [], [], [], [], set(), 0
-        self.settings, self.keep_error = [], None
+        self.settings, self.keep_error, self.delay = [], None, 0
 
     @classmethod
     def native_platforms(cls):
@@ -75,6 +77,7 @@ class FakeMac(SandboxProvider):
         self.kept.discard(image)
 
     async def open_builder(self, image, name, build):
+        time.sleep(self.delay)
         self.opened.append((image, name))
         return FakeBuilder(self, name, build)
 
@@ -193,7 +196,7 @@ def test_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_under
         composer.compose_here(env, "arm64", FakeMac())
 
 
-def test_a_sync_on_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_and_records_what_it_composed(
+def test_a_sync_on_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_once_and_records_what_it_composed(
         mac, tmp_path):
     env = _put(_driver(tmp_path / "desk"), mac)
     composed = env.metadata["composed"]["vm_bundle"]["arm64"]["image"]
@@ -207,6 +210,12 @@ def test_a_sync_on_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_t
     built = Env.get(env.id, env.version)
     assert other.kept == {composed} and built.metadata["composed"]["vm_bundle"]["arm64"]["image"] == composed
     assert built.computer_artifact().forms.vm_bundle.image == composed and composer.pending(built, other) == []
+    slow = FakeMac()
+    slow.delay = 0.3
+    with ThreadPoolExecutor(2) as pool:
+        list(pool.map(lambda _: composer.compose(Env.get(env.id, env.version), [("vm_bundle", "arm64")],
+                                                 Composing(sandbox_provider=slow)), range(2)))
+    assert len(slow.opened) == 1 and slow.kept == {composed}
 
 
 @pytest.mark.asyncio
@@ -233,7 +242,8 @@ async def test_deploys_on_a_mac_that_lacks_the_vm_bundle_compose_it_once_and_pro
     assert len(failing.opened) == 1 and not failing.kept
 
 
-def test_a_failed_provisioning_or_keep_deletes_its_builder_and_fails_the_pair_with_what_it_said(mac, tmp_path):
+def test_a_failed_provisioning_or_keep_deletes_its_builder_and_a_failed_probe_its_vm_bundle_failing_the_pair(
+        mac, tmp_path, monkeypatch):
     mac.exit = 1
 
     env = _put(_driver(tmp_path / "desk"), mac)
@@ -247,6 +257,12 @@ def test_a_failed_provisioning_or_keep_deletes_its_builder_and_fails_the_pair_wi
     built = Env.get(env.id, env.version).metadata["composed"]["vm_bundle"]["arm64"]
     assert built["status"] == "failed" and "didn't shut down within 600 s" in built["reason"]
     assert stuck.terminated == [stuck.opened[0][1]] and not stuck.kept
+    monkeypatch.setattr(composer, "_probed", lambda env, driver, form, arch, result, provider, progress: {
+        **result, "status": "failed", "stage": "probe", "reason": "the probe failed: P4"})
+    flaky = FakeMac()
+    composer.compose(env, [("vm_bundle", "arm64")], Composing(sandbox_provider=flaky))
+    built = Env.get(env.id, env.version).metadata["composed"]["vm_bundle"]["arm64"]
+    assert (built["status"], built["stage"]) == ("failed", "probe") and len(flaky.opened) == 1 and not flaky.kept
 
 
 def test_a_vm_bundle_is_composed_only_where_a_link_boots_macos_vm_bundles(mac, tmp_path):

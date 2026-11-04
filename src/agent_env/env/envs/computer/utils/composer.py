@@ -46,6 +46,7 @@ from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, write_index
+from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError
 
 if TYPE_CHECKING:
@@ -248,18 +249,23 @@ def compose_here(env: ComputerEnv, arch: str, link: SandboxProvider,
 
 def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
                         provider: SandboxProvider, progress: _Progress) -> dict:
-    """The VM bundle of ``arch`` composed or reused, then probed when it was (gate 3)."""
+    """The VM bundle of ``arch`` composed or reused, then probed when it was (gate 3); one that fails its probe deleted
+    from its Mac, so no deploy there boots it, though a record of another of its name says ready."""
     result = _built_vm_bundle(env, base, driver, arch, provider, progress)
     if result["status"] != "unverified":
         return result
-    return _probed(env, driver, "vm_bundle", arch, result, provider, progress)
+    probed = _probed(env, driver, "vm_bundle", arch, result, provider, progress)
+    if probed["status"] == "failed":
+        asyncio.run(boot.native_links(provider, arch, "vm_bundle", env.stored_id)[0].delete_vm_bundle(result["image"]))
+    return probed
 
 
 def _built_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
                      provider: SandboxProvider, progress: _Progress) -> dict:
     """The VM bundle of ``arch`` composed on the first link of ``provider`` that boots macOS VM bundles: its base's
     cloned and booted with a build folder of everything that goes into it (``vm_bundle``), given each layer over ssh,
-    shut down and kept on that Mac by a name of its key; or one of that key reused, kept there already."""
+    shut down and kept on that Mac by a name of its key; or one of that key reused, kept there already. One compose of
+    a name runs on a Mac at once, as a builder of that name deletes an earlier one; another waits, then reuses it."""
     pair = f"vm_bundle/{arch}"
     with (_attempting(env, "vm_bundle", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work):
@@ -289,11 +295,13 @@ def _built_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerD
                                  agents=_digest(build / "agents"), prepare=_digest(vm_bundle.PREPARE),
                                  build_settings=settings, form="vm_bundle", arch=arch, format=FORMAT)
         image = f"{LOCAL_IMAGE_PREFIX}agentenv-computer-{key[7:23]}"
-        if asyncio.run(link.has_vm_bundle(image)):
-            progress.at(pair, "reusing", "reusing the VM bundle of the same key, composed on this Mac earlier")
-            return {"status": "unverified", "key": key, "image": image, "reused": True, "built_at": now()}
-        progress.at(pair, "composing", f"composing on {type(link).__name__}")
-        asyncio.run(_provisioned(link, base.forms.vm_bundle.image, image.removeprefix(LOCAL_IMAGE_PREFIX), build))
+        with holding_locks([f"vm-bundle-build:{image}"], lambda: progress.at(
+                pair, "waiting", "waiting for the compose of the same VM bundle under way on this Mac")):
+            if asyncio.run(link.has_vm_bundle(image)):
+                progress.at(pair, "reusing", "reusing the VM bundle of the same key, composed on this Mac earlier")
+                return {"status": "unverified", "key": key, "image": image, "reused": True, "built_at": now()}
+            progress.at(pair, "composing", f"composing on {type(link).__name__}")
+            asyncio.run(_provisioned(link, base.forms.vm_bundle.image, image.removeprefix(LOCAL_IMAGE_PREFIX), build))
         return {"status": "unverified", "key": key, "image": image, "reused": False, "builder": type(link).__name__,
                 "built_at": now()}
     return attempt.result

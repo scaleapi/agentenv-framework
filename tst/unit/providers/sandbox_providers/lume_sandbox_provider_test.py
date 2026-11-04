@@ -101,7 +101,8 @@ def mac(tmp_path, monkeypatch):
     bin_.mkdir()
     (bin_ / "lume").write_text(f"#!{sys.executable}\n{FAKE}")
     (bin_ / "ssh").write_text(f"#!{sys.executable}\n{SSH}")
-    (bin_ / "relay").write_text(f"#!/bin/sh\necho \"$@\" > {tmp_path}/relay.args\nexec sleep 60\n")
+    (bin_ / "relay").write_text(f"#!/bin/sh\necho \"$@\" > {tmp_path}/relay.part && mv {tmp_path}/relay.part "
+                                f"{tmp_path}/relay.args\nexec sleep 60\n")
     for name in ("lume", "ssh", "relay"):
         (bin_ / name).chmod(0o755)
     monkeypatch.setenv("FAKE_LUME_STATE", str(tmp_path / "lume.json"))
