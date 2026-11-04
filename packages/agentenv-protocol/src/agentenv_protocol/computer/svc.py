@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
@@ -35,6 +36,10 @@ UNSENDABLE_CLOSES = (1005, 1006, 1015)
 HOST = re.compile(r"(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
 #: What a path's segments may hold unescaped, besides letters, digits and ``_.-~``.
 PATH_SAFE = "/:@!$&'()*+,;="
+#: The loggers the driver's server writes each request's path to: HTTP requests, and WebSocket handshakes.
+SERVER_LOGGERS = ("uvicorn.access", "uvicorn.error")
+#: What a logged path shows past a route an app opens to agents.
+REDACTED = "<redacted>"
 
 
 def passed_on(headers: Iterable[tuple[str, str]], *dropped: str) -> list[tuple[str, str]]:
@@ -81,6 +86,29 @@ def open_to_agents(routes: list[str], path: str) -> bool:
     if any(segment in (".", "..") for segment in unquote(path).split("/")):
         return False
     return any(path.startswith(route) for route in routes)
+
+
+class AgentRouteRedaction(logging.Filter):
+    """The paths the driver's server logs, cut short past a route an app opens to agents, with ``routes`` each app's
+    by name: what follows such a route, as a CDP token does, is a secret the app checks, and the computer's session can
+    read the driver's log."""
+
+    def __init__(self, routes: dict[str, list[str]]) -> None:
+        super().__init__()
+        self.routes = routes
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self.redacted(arg) if isinstance(arg, str) else arg for arg in record.args)
+        return True
+
+    def redacted(self, path: str) -> str:
+        parts = path.split("/", 3)
+        if len(parts) < 4 or parts[0] or parts[1] != "svc":
+            return path
+        route = next((route for route in self.routes.get(unquote(parts[2]), []) if f"/{parts[3]}".startswith(route)),
+                     None)
+        return path if route is None else f"/svc/{parts[2]}{route}{REDACTED}"
 
 
 async def forward(folder: Path, name: str, request: Request) -> Response:

@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -213,6 +214,26 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
     assert (b"content-disposition", 'attachment; filename="报告.zip"'.encode()) in seen.headers.raw
     assert utf8["x-name"] == "报告".encode().decode("latin-1")
     assert raw == {"path": "/raw/a%3Fb%2Fc", "query": "q=1"} and escaped == {"path": "/raw/a%3Fb", "query": "q=1"}
+
+
+@pytest.mark.asyncio
+async def test_the_drivers_server_logs_a_path_under_a_route_open_to_agents_only_up_to_the_route(monkeypatch):
+    async with _computer(monkeypatch) as (_, url):
+        async with httpx.AsyncClient(base_url=url) as tokenless:
+            opened = await tokenless.get("/svc/echo/raw/a-secret/open")
+        logged = []
+        for logger, message, path in [("uvicorn.access", '%s - "%s %s HTTP/%s" %d', "/svc/echo/raw/a-secret/open"),
+                                      ("uvicorn.error", '%s - "WebSocket %s" [accepted]', "/svc/echo/raw/a-secret"),
+                                      ("uvicorn.access", '%s - "%s %s HTTP/%s" %d', "/svc/echo/headers")]:
+            args = ("127.0.0.1:1", "GET", path, "1.1", 200) if "HTTP" in message else ("127.0.0.1:1", path)
+            record = logging.LogRecord(logger, logging.INFO, __file__, 0, message, args, None)
+            logging.getLogger(logger).filter(record)
+            logged.append(record.getMessage())
+
+    assert opened.status_code == 200
+    assert logged == ['127.0.0.1:1 - "GET /svc/echo/raw/<redacted> HTTP/1.1" 200',
+                      '127.0.0.1:1 - "WebSocket /svc/echo/raw/<redacted>" [accepted]',
+                      '127.0.0.1:1 - "GET /svc/echo/headers HTTP/1.1" 200']
 
 
 @pytest.mark.parametrize(("raw", "root", "routed"), [(b"/svc/echo/raw/a%2Fb", "", "raw/a/b"),

@@ -4,6 +4,7 @@ computer's apps as child environments, each reached at ``/svc/<name>/`` through 
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -100,6 +101,7 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         self._computer = ComputerRuntime(self)
         #: The routes each app's card opens to agents, by app, read once it answers.
         self._computer_agent_routes: dict[str, list[str]] = {}
+        self._computer_redaction = svc.AgentRouteRedaction(self._computer_agent_routes)
 
     @classmethod
     def declaration(cls, platform: Platform) -> EnvironmentCard:
@@ -144,6 +146,8 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     def _computer_front_apps(self, app: Any) -> Any:
         app.custom_route("/svc/{name}/{path:path}", methods=svc.METHODS)(self._computer_forward)
         add_websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
+        for logger in svc.SERVER_LOGGERS:
+            logging.getLogger(logger).addFilter(self._computer_redaction)
         return app
 
     def _computer_app_folder(self, name: str) -> Optional[Path]:

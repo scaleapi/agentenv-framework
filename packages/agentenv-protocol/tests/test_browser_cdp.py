@@ -76,6 +76,29 @@ class Pipe:
         return {"result": {"method": method, "session": session_id}}
 
 
+class SlowClient:
+    """A client's WebSocket that takes in nothing sent to it until ``reading`` is set, and records what it got and how
+    it was closed."""
+
+    def __init__(self) -> None:
+        self.reading, self.incoming = asyncio.Event(), asyncio.Queue()
+        self.received, self.closed = [], None
+
+    async def accept(self) -> None:
+        pass
+
+    async def receive(self) -> dict:
+        return await self.incoming.get()
+
+    async def send_text(self, text: str) -> None:
+        await self.reading.wait()
+        self.received.append(text)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed = (code, reason)
+        self.incoming.put_nowait({"type": "websocket.disconnect", "code": code})
+
+
 @contextlib.asynccontextmanager
 async def _relay():
     """The relay over a fake pipe, served on loopback with each connection's user its path's: the pipe, the relay and
@@ -157,6 +180,23 @@ async def test_each_connection_gets_its_own_browser_session_its_own_answers_and_
     assert [(c["user"], "closed_at" in c) for c in relay.connections] == [("ada", True), ("bob", True)]
     assert ("Target.detachFromTarget", None) in pipe.sent
     assert pipe.given_up == ["Hang"]
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_falls_too_far_behind_is_closed_and_what_waited_for_it_dropped(monkeypatch):
+    monkeypatch.setattr(browser_cdp, "OUTBOX_LIMIT_BYTES", 10_000)
+    pipe, slow = Pipe(), SlowClient()
+    relay = Relay(pipe)
+    serving = asyncio.ensure_future(relay.serve(slow, "ada"))
+    while not relay.connections:
+        await asyncio.sleep(0)
+    for n in range(20):
+        pipe.emit({"method": "Network.dataReceived", "sessionId": "b1", "params": {"n": n, "data": "x" * 1000}})
+    slow.reading.set()
+    await asyncio.wait_for(serving, 5)
+
+    assert slow.closed == browser_cdp.TOO_SLOW and slow.received == []
+    assert "closed_at" in relay.connections[0] and ("Target.detachFromTarget", None) in pipe.sent
 
 
 @pytest.mark.asyncio

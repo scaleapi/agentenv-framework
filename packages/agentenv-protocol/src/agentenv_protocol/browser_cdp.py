@@ -29,6 +29,11 @@ TOKEN_BYTES = 32
 ROUTE = "/cdp/"
 #: The close code and reason a connection gets when its browser goes away, which a client may connect again after.
 RELAUNCHED = (1012, "the browser relaunched: connect again")
+#: The close code and reason a connection gets when its client falls behind by more than ``OUTBOX_LIMIT_BYTES``.
+TOO_SLOW = (1013, "the client fell too far behind: connect again")
+#: How much a connection's client may have waiting to be sent to it before it is closed; a single answer bigger than
+#: this still goes when nothing else waits.
+OUTBOX_LIMIT_BYTES = 64 << 20
 #: CDP's own answer to a command for a session the connection doesn't have.
 NO_SESSION = {"code": -32001, "message": "Session with given id not found."}
 
@@ -101,14 +106,16 @@ class Tokens:
 
 
 class _Connection:
-    """One client's WebSocket, the sessions it holds over the pipe (its browser-level one and those it attached) and
-    its commands the browser hasn't answered yet."""
+    """One client's WebSocket, its sessions over the pipe (its browser-level one and those it attached), its unanswered
+    commands, and what waits to be sent to it."""
 
     def __init__(self, websocket: WebSocket, user: str, session: str) -> None:
         self.websocket, self.user, self.session = websocket, user, session
         self.sessions = {session}
         self.commands: set[asyncio.Future] = set()
-        self.outbox: asyncio.Queue[Optional[dict]] = asyncio.Queue()
+        self.outbox: asyncio.Queue[str | tuple[int, str]] = asyncio.Queue()
+        self.waiting_bytes = 0
+        self.closing = False
 
 
 class Relay:
@@ -150,20 +157,18 @@ class Relay:
             pass
         finally:
             record["closed_at"] = _now()
+            connection.closing = True
             self._end(connection)
-            for command in list(connection.commands):
-                command.cancel()
-            await asyncio.gather(*connection.commands, return_exceptions=True)
-            connection.outbox.put_nowait(None)
-            await asyncio.gather(sending, return_exceptions=True)
+            for task in [*connection.commands, sending]:
+                task.cancel()
+            await asyncio.gather(*connection.commands, sending, return_exceptions=True)
             with contextlib.suppress(Exception):
                 await self.devtools.call("Target.detachFromTarget", {"sessionId": session})
 
     def ended(self) -> None:
         """The browser has gone: every connection is closed with a reason a client may connect again after."""
         for connection in list(self._open):
-            self._end(connection)
-            connection.outbox.put_nowait({"close": RELAUNCHED})
+            self._close(connection, RELAUNCHED)
 
     async def _command(self, connection: _Connection, message: dict) -> None:
         session = message.get("sessionId") or connection.session
@@ -178,7 +183,7 @@ class Relay:
         reply = {"id": message.get("id"), **{key: answer[key] for key in ("result", "error") if key in answer}}
         if message.get("sessionId"):
             reply["sessionId"] = message["sessionId"]
-        connection.outbox.put_nowait(reply)
+        self._put(connection, reply)
 
     def _event(self, message: dict) -> None:
         connection = self._by_session.get(message.get("sessionId"))
@@ -193,7 +198,28 @@ class Relay:
             self._by_session.pop(params["sessionId"], None)
         if message["sessionId"] == connection.session:
             message = {key: value for key, value in message.items() if key != "sessionId"}
-        connection.outbox.put_nowait(message)
+        self._put(connection, message)
+
+    def _put(self, connection: _Connection, message: dict) -> None:
+        """``message`` waiting to be sent to ``connection``'s client, which is closed instead, with what waited dropped,
+        once it has fallen too far behind."""
+        if connection.closing:
+            return
+        text = json.dumps(message)
+        if connection.waiting_bytes and connection.waiting_bytes + len(text) > OUTBOX_LIMIT_BYTES:
+            self._close(connection, TOO_SLOW)
+            return
+        connection.waiting_bytes += len(text)
+        connection.outbox.put_nowait(text)
+
+    def _close(self, connection: _Connection, close: tuple[int, str]) -> None:
+        """``connection`` closed with ``close`` once what's being sent to it has gone, and nothing else sent."""
+        connection.closing = True
+        self._end(connection)
+        while not connection.outbox.empty():
+            connection.outbox.get_nowait()
+        connection.waiting_bytes = 0
+        connection.outbox.put_nowait(close)
 
     def _end(self, connection: _Connection) -> None:
         self._open.discard(connection)
@@ -202,12 +228,13 @@ class Relay:
 
     async def _send(self, connection: _Connection) -> None:
         with contextlib.suppress(WebSocketDisconnect, RuntimeError):
-            while (message := await connection.outbox.get()) is not None:
-                if "close" in message:
-                    code, reason = message["close"]
-                    await connection.websocket.close(code=code, reason=reason)
+            while True:
+                message = await connection.outbox.get()
+                if isinstance(message, tuple):
+                    await connection.websocket.close(code=message[0], reason=message[1])
                     return
-                await connection.websocket.send_text(json.dumps(message))
+                connection.waiting_bytes -= len(message)
+                await connection.websocket.send_text(message)
 
 
 def _now() -> str:

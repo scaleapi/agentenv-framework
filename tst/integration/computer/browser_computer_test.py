@@ -48,6 +48,8 @@ WAIT_S, POLL_S = 120.0, 0.5
 CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
 #: A WebSocket handshake for the browser's relay sent straight to its app server's socket, as code in the computer's
 #: session can, with the token it's given; prints the status line it gets.
+#: The computer's logs that hold either of two tokens, then one path the driver logged past ``/cdp/``.
+LOGGED_TOKENS = 'grep -rlF -e "$1" -e "$2" /var/log/agentenv; grep -rhoF "/cdp/<redacted>" /var/log/agentenv | head -1'
 SOCKET_HANDSHAKE = """import socket, sys
 s = socket.socket(socket.AF_UNIX)
 s.connect("/opt/agentenv/apps/chromium/.agentenv/server.sock")
@@ -378,6 +380,9 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
             refused = await _clients(cdp_clients, "refused", ada)
             from_inside = (await inside.run(deployed, ["python3", "-c", SOCKET_HANDSHAKE, "not-a-token"],
                                             timeout_s=30))["stdout"].strip()
+            tokens = [address["http_url"].split("/cdp/")[1].strip("/") for address in (ada, bob)]
+            logged = (await inside.run(deployed, ["sh", "-c", LOGGED_TOKENS, "sh", *tokens],
+                                       timeout_s=30))["stdout"].split()
             record = await _record(deployed)
             await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium", headers=deployed.control_headers)
             relaunched_address = await _cdp(deployed, "ada")
@@ -396,6 +401,7 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
         assert relaunched[client].get("ok", {}).get("title") == "Home", relaunched
     assert "error" in refused["playwright"] and "error" in refused["puppeteer"], refused
     assert from_inside == "HTTP/1.1 403 Forbidden"
+    assert logged == ["/cdp/<redacted>"], logged
     assert [c["user"] for c in record["cdp_connections"]] == ["ada", "ada", "ada"]
     assert relaunched_address == ada
     assert "error" in after_reset["playwright"] and "error" in after_reset["puppeteer"], after_reset
