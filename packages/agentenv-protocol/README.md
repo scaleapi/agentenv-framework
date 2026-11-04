@@ -759,7 +759,16 @@ launches one at a time, runs a load and a reset with the app stopped and relaunc
 follows a failed load with a reset, and fails a call that runs past `data_timeout_s` (300 s); a sync
 hook runs in a thread, which the reset and relaunch after it wait for. The driver fronts its apps:
 its card lists each one's card as a child environment, rooted at `/svc/<app>/`, where it forwards
-requests to the app's server.
+requests to the app's server, taking the control token:
+
+- every method, its body and the answer's streamed both ways, so a large answer isn't held whole;
+- headers passed on but the hop-by-hop ones, those a `Connection` header names and the control token's
+  `Authorization`; `Host` as the caller sent it, and in place of any address the caller forwarded,
+  the one it reached the driver at: `X-Forwarded-Host`, `X-Forwarded-Proto` and `X-Forwarded-Prefix`
+  (`/svc/<app>`), as the gateway sets them;
+- WebSockets, relayed to the app's server both ways with the subprotocol it picks until either side
+  closes, the other then closed with its code; refused before they open without the token, or with no
+  such app or one not answering. The `computer` extra brings `websockets` for this.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores (`browser: true` for a website browser), and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
