@@ -626,9 +626,22 @@ def test_from_environment_keeps_any_name_an_api_route_takes() -> None:
             return []
 
     assert list(from_environment(Shop).route_table()) == ["items:list"]
-    assert [r["name"] for r in website_params(card_of(TestClient(Shop().create_app())))["routes"]] == ["items:list"]
+    card = card_of(TestClient(Shop().create_app()))
+    assert [r["name"] for r in website_params(card)["routes"]] == ["items:list"]
+    assert list(from_card(card).route_table()) == ["items:list"]
     assert "routes.ops: route names ['items:list'] aren't names" in problems(
         {"routes": {"ops": {"items:list": "GET /api/items"}}}, Path.cwd())[0]
+
+
+def test_a_site_whose_domains_are_in_upper_case_starts_and_its_spec_names_them_in_lower_case() -> None:
+    @environment_card(name="notes")
+    @website(domains=["Notes.TEST", "*.Notes.Test"])
+    class Notes(WebsiteEnvironment):
+        pass
+
+    card = card_of(TestClient(Notes().create_app()))
+    assert from_environment(Notes).site.domains == ("notes.test", "*.notes.test")
+    assert from_card(card).site.domains == ("notes.test", "*.notes.test")
 
 
 def test_from_environment_keeps_a_head_or_options_route_an_api_route_takes() -> None:

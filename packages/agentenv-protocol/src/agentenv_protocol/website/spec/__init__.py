@@ -824,7 +824,8 @@ def from_card(card: dict) -> WebsiteSpec:
     if extension is None:
         raise SpecError([f"the card declares no {WEBSITE_EXTENSION_URI}"])
     params = extension.get("params") or {}
-    raw: dict = {"site": {"name": card.get("name"), "domains": params.get("domains") or [],
+    raw: dict = {"site": {"name": card.get("name"), "domains": [d.lower() if isinstance(d, str) else d
+                                                                for d in params.get("domains") or []],
                           "health": params.get("health")},
                  "routes": {"ops": {r["name"]: {"method": r["method"], "path": r["path"], "roles": r.get("roles") or []}
                                     for r in params.get("routes") or []}}}
@@ -840,7 +841,7 @@ def from_card(card: dict) -> WebsiteSpec:
         raw["state"] = {k: v for k, v in params["state"].items() if k != "path" or v != STATE_PATH}
     if isinstance(params.get("clock"), dict):
         raw["clock"] = params["clock"]
-    return resolve(_pruned(raw), Path.cwd(), origin=f"card {card.get('name')!r}")
+    return resolve(_pruned(raw), Path.cwd(), origin=f"card {card.get('name')!r}", declared_routes=True)
 
 
 def from_environment(cls: type) -> WebsiteSpec:
@@ -857,7 +858,8 @@ def from_environment(cls: type) -> WebsiteSpec:
     routes = cls.routes()
     serves_go = any(r.method == "GET" and openapi_path(r.path) == STATE_PATH for r in routes)
     site_file = Path(inspect.getfile(cls)).resolve().parent
-    raw["site"] = {**raw.get("site", {}), "domains": list(declaration.domains), "health": declaration.health}
+    raw["site"] = {**raw.get("site", {}), "domains": [d.lower() for d in declaration.domains],
+                   "health": declaration.health}
     if card_name or raw["site"].get("name") is None:
         raw["site"]["name"] = card_name or cls.__name__
     raw["source"] = {"sdk": f"{cls.__module__}:{cls.__qualname__}",
