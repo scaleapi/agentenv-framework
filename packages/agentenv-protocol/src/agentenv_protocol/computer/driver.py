@@ -4,31 +4,22 @@ computer's apps as child environments, each reached at ``/svc/<name>/`` through 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import re
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
-import httpx
-import websockets
 from pydantic import BaseModel, ConfigDict
-from starlette.background import BackgroundTask
 from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
-from starlette.routing import WebSocketRoute
-from starlette.websockets import WebSocket, WebSocketDisconnect
-from websockets.asyncio.client import ClientConnection, unix_connect
+from starlette.responses import Response
+from starlette.websockets import WebSocket
 
 from ..agent_env_environment import (_CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
-                                     _error_response, control_check, control_guard, environment_card)
+                                     _error_response, control_guard, environment_card)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
-from . import _linux, apps, card
-from .app import SOCKET
+from . import _linux, apps, card, svc
 from .checks import check_features, check_names
 from .dataplane import DataPlane
-from .errors import DeliveryFailed, TargetUnavailable
+from .errors import TargetUnavailable
 from .extensions import Extensions
 from .operations import ReadyCheck, check_class, default_for
 from .platform import Platform, detect
@@ -39,12 +30,6 @@ from .tools import Tools
 
 #: The caller every call comes from until agents carry an identity of their own.
 DEFAULT_IDENTITY = "default"
-#: The methods ``/svc/<name>/`` forwards to an app.
-FORWARDED_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-#: A WebSocket close code that means the connection ended without one, which a close can't send on.
-UNSENDABLE_CLOSES = (1005, 1006, 1015)
-#: A Host header that names a host, and its port or not, and nothing else.
-HOST = re.compile(r"(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
 
 
 class DriverPlatform(BaseModel):
@@ -154,65 +139,28 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return await apps.children(self._computer.apps) if self._computer.apps else None
 
     def _computer_front_apps(self, app: Any) -> Any:
-        app.custom_route("/svc/{name}/{path:path}", methods=FORWARDED_METHODS)(control_guard()(self._computer_forward))
-        _websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
+        app.custom_route("/svc/{name}/{path:path}", methods=svc.METHODS)(control_guard()(self._computer_forward))
+        svc.websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
         return app
 
     def _computer_app_folder(self, name: str) -> Optional[Path]:
         return next((folder for folder in self._computer.apps if folder.name == name), None)
 
     async def _computer_forward(self, request: Request) -> Response:
-        """A request under ``/svc/<name>/``, sent on to the app named so, its body and its answer's streamed: its own
-        server answers it."""
+        """A request under ``/svc/<name>/``, sent on to the app named so: its own server answers it."""
         name = request.path_params["name"]
-        folder = self._computer_app_folder(name)
-        if folder is None:
+        if (folder := self._computer_app_folder(name)) is None:
             return _error_response(TargetUnavailable(f"this computer has no app named {name!r}"))
-        headers = apps.to_app(request.headers.items(), request.headers.get("host", ""), request.url.scheme,
-                              f"/svc/{name}")
-        has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
-        try:
-            answer, close = await apps.forward(folder, request.method, _target(request), headers,
-                                               request.stream() if has_body else None)
-        except (httpx.HTTPError, OSError) as e:
-            return _error_response(DeliveryFailed(f"app {name}'s server isn't answering: {type(e).__name__}: {e}"))
-
-        async def streamed() -> AsyncIterator[bytes]:
-            try:
-                async for chunk in answer.aiter_raw():
-                    yield chunk
-            finally:
-                await close()
-
-        response = StreamingResponse(streamed(), status_code=answer.status_code, background=BackgroundTask(close))
-        response.raw_headers = [(key.encode("latin-1"), value.encode("latin-1"))
-                                for key, value in apps.passed_on(answer.headers.multi_items())]
-        return response
+        return await svc.forward(folder, name, request)
 
     async def _computer_relay(self, websocket: WebSocket) -> None:
-        """A WebSocket under ``/svc/<name>/``, relayed both ways to the app named so until either side closes; refused,
-        before it opens, without the control token, with a Host that isn't a host and port, or with no app or none
-        answering."""
+        """A WebSocket under ``/svc/<name>/``, relayed both ways to the app named so; refused, before it opens, with no
+        such app."""
         name = websocket.path_params["name"]
-        folder = self._computer_app_folder(name)
-        host = websocket.headers.get("host", "")
-        if folder is None or not control_check()(websocket.headers) or (host and not HOST.fullmatch(host)):
+        if (folder := self._computer_app_folder(name)) is None:
             await websocket.close(code=1008)
             return
-        headers = [(key, value) for key, value in apps.to_app(
-            websocket.headers.items(), host, "https" if websocket.url.scheme == "wss" else "http", f"/svc/{name}")
-            if key.lower() != "host" and not key.lower().startswith("sec-websocket-")]
-        offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
-        try:
-            upstream = await unix_connect(str(folder / SOCKET), f"ws://{host or 'app'}{_target(websocket)}",
-                                          additional_headers=headers, subprotocols=offered or None, max_size=None,
-                                          compression=None, ping_interval=None, user_agent_header=None)
-        except (OSError, ValueError, asyncio.TimeoutError, websockets.WebSocketException):
-            await websocket.close(code=1011)
-            return
-        async with upstream:
-            await websocket.accept(subprotocol=upstream.subprotocol)
-            await _relay(websocket, upstream)
+        await svc.relay(folder, name, websocket)
 
     # The card: what the driver's operations support.
 
@@ -244,53 +192,6 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     @default_for("write_files", os="linux")
     async def _computer_linux_write_files(self, files: dict) -> None:
         await asyncio.to_thread(_linux.write_files, files)
-
-
-def _target(connection: Request | WebSocket) -> str:
-    """The path and query a request under ``/svc/<name>/`` asks its app for."""
-    query = connection.url.query
-    return f"/{connection.path_params['path']}" + (f"?{query}" if query else "")
-
-
-def _websocket_route(app: Any, path: str, endpoint: Callable) -> None:
-    """``endpoint`` served at ``path`` as a WebSocket route of ``app``, an mcp or a standalone fastmcp FastMCP, which
-    have no API for one."""
-    for routes in ("_custom_starlette_routes", "_additional_http_routes"):
-        if isinstance(getattr(app, routes, None), list):
-            getattr(app, routes).append(WebSocketRoute(path, endpoint))
-            return
-    raise TypeError(f"a driver's app takes WebSocket routes on an mcp or a fastmcp FastMCP, not a {type(app).__name__}")
-
-
-async def _relay(client: WebSocket, app: ClientConnection) -> None:
-    """Each message from either side sent to the other until one side closes, then the other closed with its code."""
-    async def inbound() -> None:
-        while True:
-            message = await client.receive()
-            if message["type"] == "websocket.disconnect":
-                code = message.get("code") or 1000
-                await app.close(1000 if code in UNSENDABLE_CLOSES else code)
-                return
-            await app.send(message["text"] if message.get("text") is not None else message["bytes"])
-
-    async def outbound() -> None:
-        with contextlib.suppress(websockets.ConnectionClosed):
-            async for message in app:
-                if isinstance(message, str):
-                    await client.send_text(message)
-                else:
-                    await client.send_bytes(message)
-        code = app.close_code or 1000
-        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
-            await client.close(1000 if code in UNSENDABLE_CLOSES else code)
-
-    tasks = [asyncio.ensure_future(inbound()), asyncio.ensure_future(outbound())]
-    try:
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def computer_driver(name: str | None = None, *, supports: list | None = None) -> Callable:

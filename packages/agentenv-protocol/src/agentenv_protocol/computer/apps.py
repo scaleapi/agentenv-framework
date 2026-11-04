@@ -3,13 +3,12 @@ Each app's own server answers on its folder's socket (``serve_app``): its card s
 paths it owns, and its ``computer-app/v1`` ``ready`` whether it's ready. Every app's server must answer before the
 computer is ready; an app that starts with the computer must also be ready, and a ``demand`` app is checked once
 something launches it. The driver lists each app as a child environment named for its folder, its card's paths under
-``/svc/<name>/``, and forwards each request there to the app's server."""
+``/svc/<name>/``, where it forwards each request to the app's server (``svc``)."""
 from __future__ import annotations
 
 import asyncio
 import copy
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Optional
 
@@ -25,11 +24,6 @@ from .operations import ReadyCheck
 APPS = Path("/opt/agentenv/apps")
 #: How long an app's server may take to answer, its checks run at once, before it counts as not answering.
 ANSWER_TIMEOUT_S = CHECK_TIMEOUT_S + 5
-#: The headers that belong to one connection, which a proxy doesn't pass on.
-HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection",
-                         "te", "trailer", "transfer-encoding", "upgrade"})
-#: The address a request reached the driver at, which the driver sets for the app in place of any the caller sent.
-FORWARDED = ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix")
 
 
 def expected() -> list[Path]:
@@ -95,43 +89,6 @@ async def owned_paths(folders: list[Path]) -> list[str]:
     cards = await asyncio.gather(*(served_card(folder) for folder in folders))
     return [path for card in cards if card is not None
             for path in client.extension_params(card, COMPUTER_APP).get("paths") or []]
-
-
-def passed_on(headers: Iterable[tuple[str, str]], *dropped: str) -> list[tuple[str, str]]:
-    """``headers`` as a proxy passes them on: without the hop-by-hop ones, those a ``Connection`` header names, and
-    ``dropped``."""
-    headers = list(headers)
-    named = {token.strip().lower() for name, value in headers if name.lower() == "connection"
-             for token in value.split(",")}
-    skipped = HOP_HEADERS | named | set(dropped)
-    return [(name, value) for name, value in headers if name.lower() not in skipped]
-
-
-def to_app(headers: Iterable[tuple[str, str]], host: str, scheme: str, prefix: str) -> list[tuple[str, str]]:
-    """A caller's headers as the app gets them: passed on without the control token's ``Authorization`` or any address
-    the caller forwarded, and with the one it reached the driver at, its ``host``, ``scheme`` and the app's
-    ``prefix``."""
-    return passed_on(headers, "authorization", *FORWARDED) + [
-        ("x-forwarded-host", host), ("x-forwarded-proto", scheme), ("x-forwarded-prefix", prefix)]
-
-
-async def forward(folder: Path, method: str, target: str, headers: list[tuple[str, str]],
-                  body: Optional[AsyncIterator[bytes]]) -> tuple[httpx.Response, Callable[[], Awaitable[None]]]:
-    """The app's server's answer to the request, sent with ``headers`` and none of the client's own, its body still to
-    be read, and what closes it once read; it takes as long as the app does."""
-    http = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(folder / SOCKET)), base_url="http://app",
-                             timeout=None)
-    http.headers.clear()
-    try:
-        answer = await http.send(http.build_request(method, target, headers=headers, content=body), stream=True)
-    except BaseException:
-        await http.aclose()
-        raise
-
-    async def close() -> None:
-        await answer.aclose()
-        await http.aclose()
-    return answer, close
 
 
 def endpoint(card: dict, method: str) -> str:

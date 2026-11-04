@@ -29,7 +29,7 @@ from websockets.asyncio.client import connect  # noqa: E402
 from websockets.exceptions import ConnectionClosedError, InvalidStatus  # noqa: E402
 
 from agentenv_protocol import CONTROL_TOKEN_ENV, client  # noqa: E402
-from agentenv_protocol.computer import ComputerAppEnvironment, apps, linux  # noqa: E402
+from agentenv_protocol.computer import ComputerAppEnvironment, apps, linux, svc  # noqa: E402
 from agentenv_protocol.computer.app import SOCKET  # noqa: E402
 
 MB = 1 << 20
@@ -173,7 +173,7 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
     got, host = seen.json()["headers"], url.removeprefix("http://")
 
     assert seen.json()["host"] == host and got["x-kept"] == "1"
-    assert {key: got[key] for key in apps.FORWARDED} == {
+    assert {key: got[key] for key in svc.FORWARDED} == {
         "x-forwarded-host": host, "x-forwarded-proto": "http", "x-forwarded-prefix": "/svc/echo"}
     assert "authorization" not in got and "x-drop" not in got
     assert seen.headers.get_list("set-cookie") == ["a=1", "b=2"] and "x-secret" not in seen.headers
