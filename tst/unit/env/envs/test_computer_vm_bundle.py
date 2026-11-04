@@ -8,6 +8,7 @@ import asyncio
 import importlib.machinery
 import importlib.util
 import json
+import logging
 import plistlib
 import stat
 import time
@@ -15,12 +16,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 from agentenv_protocol.computer import DriverDeclaration, seed
 from agentenv_protocol.computer.app import Download, RunScript
 
+from agent_env import providers
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.cli import cli
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -197,7 +201,8 @@ def test_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_under
 
 
 def test_a_sync_on_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_once_and_records_what_it_composed(
-        mac, tmp_path):
+        mac, tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.ERROR, logger=composer.__name__)  # live logging would put pytest's stdout back mid-command
     env = _put(_driver(tmp_path / "desk"), mac)
     composed = env.metadata["composed"]["vm_bundle"]["arm64"]["image"]
     other = FakeMac()
@@ -216,6 +221,13 @@ def test_a_sync_on_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_t
         list(pool.map(lambda _: composer.compose(Env.get(env.id, env.version), [("vm_bundle", "arm64")],
                                                  Composing(sandbox_provider=slow)), range(2)))
     assert len(slow.opened) == 1 and slow.kept == {composed}
+    flaky = FakeMac()
+    monkeypatch.setattr(composer, "_probed", lambda env, driver, form, arch, result, provider, progress: {
+        **result, "status": "failed", "stage": "probe", "reason": "the probe failed: P4"})
+    monkeypatch.setattr(providers, "get_env_sandbox_provider", lambda: flaky)
+    rebuilt = CliRunner().invoke(cli, ["env", "build", "--id", env.id])
+    assert rebuilt.exit_code == 1 and "vm_bundle/arm64: failed (the probe failed: P4)" in rebuilt.output
+    assert len(flaky.opened) == 1 and not flaky.kept
 
 
 @pytest.mark.asyncio

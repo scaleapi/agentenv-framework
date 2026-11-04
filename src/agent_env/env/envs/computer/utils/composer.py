@@ -108,16 +108,18 @@ class Composing:
         return gate.forms(env.computer) if self.forms_of == "base" else booted_forms(env, self.deploys_on or provider)
 
 
-def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, composing: Composing = Composing()) -> None:
+def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
+            composing: Composing = Composing()) -> dict[tuple[str, str], dict]:
     """Build each of ``pairs``, by default each of ``composing``'s forms in each arch the env composes, and the container
     each disk among them is made from unless it's built, in parallel, as ``composing`` says, and probe each one its
     provider runs natively (gate 3), recording each as it starts and finishes, then write the env's computer over every
-    pair built so far. Each pair's stages and how it ended go to the log too (``_Progress``)."""
+    pair built so far. Each pair's stages and how it ended go to the log too (``_Progress``). What each pair came to,
+    which the record keeps unless the one it holds got further, as a ready one does over a rebuild that failed."""
     base, driver, provider = env.computer, env.driver, composing.provider()
     builds = builder.Builds(provider, env.stored_id, REPOSITORY, composing.emulate)
     pairs = _with_containers(env, pairs if pairs is not None else [
         (form, arch) for form in composing.forms(env, provider) for arch in env.composed_arches()])
-    record = Record(env)
+    record, results = Record(env), {}
     record.started(pairs)
     with _Progress(env, composing.on_progress) as progress, ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
         progress.say(f"composing {', '.join(f'{form}/{arch}' for form, arch in pairs)} on "
@@ -131,10 +133,11 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, compos
                     for form, arch in pairs if form == "vm_bundle"}
         for future in as_completed(futures):
             form, arch = futures[future]
-            result = future.result()
+            results[form, arch] = result = future.result()
             progress.ended(f"{form}/{arch}", result)
             record.finished(form, arch, result)
     record.computer(_computer(env, base, record.built(), record.built("disk"), record.built("vm_bundle")))
+    return results
 
 
 def current(env: ComputerEnv) -> bool:
