@@ -488,6 +488,11 @@ def agentenv_website_env() -> WebsiteEnv:
         id="coreweave",
         marks=skip_without_remote_sandbox("coreweave"),
     ),
+    pytest.param(
+        "agent37",
+        id="agent37",
+        marks=skip_without_remote_sandbox("agent37"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -527,6 +532,9 @@ def sandbox_provider(request):
     elif request.param == "coreweave":
         set_sandbox_provider(build_sandbox_provider("coreweave"))
         set_env_sandbox_provider(build_sandbox_provider("coreweave"))
+    elif request.param == "agent37":
+        set_sandbox_provider(build_sandbox_provider("agent37"))
+        set_env_sandbox_provider(build_sandbox_provider("agent37"))
     try:
         yield request.param
     finally:

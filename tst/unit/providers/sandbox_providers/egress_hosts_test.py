@@ -50,6 +50,7 @@ def test_union_covers_every_registered_platforms_tunnel_hosts(platform_registry)
     assert "*.sb.tenki.sh" in hosts
     assert "*.boxd.sh" in hosts                        # boxd's p<port>.<machine> subdomain proxies
     assert "*.daytonaproxy01.net" in hosts             # Daytona's <port>-<sandbox-id> preview URLs
+    assert "*.agent37.app" in hosts                    # Agent37's public-port URLs
 
 
 def test_union_holds_only_platform_hosts():
@@ -102,5 +103,5 @@ def test_the_builtin_floor_is_pinned(builtin_registry):
     assert set(all_sandbox_egress_hosts()) == {
         "*.modal.host", "*.w.modal.host", "*.e2b.app", "*.sail.box", "*.sandbox.tensorlake.ai", "*.sb.tenki.sh",
         "*.us.sb.tenki.sh", "*.vercel.run", "*.boxd.sh", "*.daytonaproxy01.net", "*.daytonaproxy01.eu",
-        "*.on.boat.dev",
+        "*.on.boat.dev", "*.agent37.app",
     }
