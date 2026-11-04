@@ -4,8 +4,10 @@ full needs gets those checks unverified; a driver broken one way fails the check
 fronts that exports is asked for its export once; the report's verdicts and the CLI."""
 from __future__ import annotations
 
+import importlib
 import json
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -32,7 +34,6 @@ from agentenv_protocol.computer import (  # noqa: E402
 )
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run_probe  # noqa: E402
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
-from agentenv_protocol.computer.conformance import fixture  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
 from agentenv_protocol.computer.conformance.__main__ import main  # noqa: E402
 from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
@@ -287,8 +288,14 @@ async def test_a_fixture_that_doesnt_start_leaves_full_unverified_and_is_cleaned
 
 @pytest.mark.parametrize("delta, steps", [(1, 1), (-3, -3), (120, 1), (-360, -3), (240, 2)],
                          ids=["aqua-up", "aqua-down-3", "scaled-up", "scaled-down-3", "scaled-up-2"])
-def test_the_fixture_counts_a_wheel_events_steps_whether_tk_scales_them_by_120_or_not(delta, steps):
-    """Aqua's Tk 8.6 reports a step as a delta of 1; Windows, and Tk 9 everywhere, as 120."""
+def test_the_fixture_counts_a_wheel_events_steps_whether_tk_scales_them_by_120_or_not(delta, steps, monkeypatch):
+    """Aqua's Tk 8.6 reports a step as a delta of 1; Windows, and Tk 9 everywhere, as 120. The fixture runs in the
+    computer, so it's read here with Tk stood in for, as this Python may have none."""
+    monkeypatch.setitem(sys.modules, "tkinter", ModuleType("tkinter"))
+    monkeypatch.delitem(sys.modules, "agentenv_protocol.computer.conformance.fixture", raising=False)
+
+    fixture = importlib.import_module("agentenv_protocol.computer.conformance.fixture")
+
     assert fixture.wheel_steps(delta) == steps
 
 
