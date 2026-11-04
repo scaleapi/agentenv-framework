@@ -531,7 +531,7 @@ class Task:
         instance_id = instance.instance_id if instance else None
         context.instance_id = instance_id
         if instance_id:
-            seed_task_instance_context(instance_id, context)
+            seed_task_instance_context(instance_id, context, instance.attempt_epoch)
 
         state = self._build_scheduler_state(steps, start_step, end_step)
         if instance:
