@@ -430,7 +430,10 @@ class BrowserControl:
         return {**({"png": png} if png is not None else {"blank": True}), "page": self._state_of(target)}
 
     async def _capture(self, session: str) -> Optional[str]:
+        """The tab's page as it shows now; with a dialog open on it, which keeps it from painting, the last it took."""
         target = self._sessions[session]
+        if session in self._open_dialogs:
+            return self._shots.get(target)
         navigated = self.tabs.get(target, {}).get("url")
         try:
             shot = await self.devtools.call("Page.captureScreenshot", {"format": "png", "optimizeForSpeed": True},
