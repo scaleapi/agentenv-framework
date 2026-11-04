@@ -625,12 +625,20 @@ driver booted with a control token is probed with it: `--token`, by default
 | Level | Checks | Needs on the computer |
 |---|---|---|
 | `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
-| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held | Linux, `python3` with Tk, a 1280x800 screen or larger, `computer-exec` and `data/add` |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
 
 At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
 `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
 window's widgets report, reads back what reached them, and then removes the fixture. When the
-fixture can't be staged, the `full` checks are unverified rather than failed. The probe leaves out
+fixture can't be staged, the `full` checks are unverified rather than failed.
+
+On a driver whose card says `screen: "page"`, the desk is an HTML page with the same widgets at the
+same places (`conformance/page_fixture.py`). The probe starts its server on loopback, which writes
+what the page reports to the same files, and opens the desk with `computer_tabs` in a tab of its
+own. "Typing leaves the clipboard as it was" fails there when typing arrives as a paste. After the
+input checks it checks the page tools against the desk; a browser that answers dialogs itself makes
+the dialog check not applicable. It then closes its tab and removes the desk, and the file it put in
+`~/Uploads`. The tab that was open before keeps its page and history. The probe leaves out
 the checks for an extension the card doesn't declare. P8 is not applicable to a driver without
 leasing, and unverified for one with it until the probe has lease checks. The probe calls as the
 default role; the tool-access check hides a tool from a role of its own, `agentenv-probe-<random>`,
@@ -804,7 +812,8 @@ are the profile's template. The base class adds:
 - **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
   to every page with flattened sessions, telling each page it attached to as it opened, a popup say, to run, and keeps a
   record, `since` its server started: open tabs in opened order, each with its URL and title as the browser has them
-  when the record is read (Chrome sends no event for a title), the one whose page has focus `active`; `closed_tabs`,
+  when the record is read (Chrome sends no event for a title), the visible one whose page has focus `active`;
+  `closed_tabs`,
   each as of its page's last load, with `closed_at` and
   `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
   ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
@@ -824,8 +833,9 @@ are the profile's template. The base class adds:
   drivers and agentenv's own steps alike:
   - `navigate {url}` and `history {direction}` (`back`, `forward` or `reload`), in the active tab;
   - `tabs/list`, `tabs/open {url?}`, `tabs/activate {tab}` and `tabs/close {tab}`, by the browser's own tab
-    ids. The active tab is the one a dialog is open on, else the one whose page has focus, else the one
-    agentenv last brought to the front;
+    ids. The active tab is the one a dialog is open on, else the visible one whose page has focus (a hidden
+    tab's page that had input still says it has focus), else the one agentenv last brought to the front.
+    Headless, a tab opened at a URL opens blank and goes there once it's held to the window's size;
   - `dialog/answer {accept, text?}`, the agent's answer to the dialog open on the active tab;
   - `files/choose {paths}`, files in `~/Uploads` for the file chooser open on it, which headless, and so
     alone, it intercepts;

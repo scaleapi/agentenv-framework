@@ -156,12 +156,13 @@ class PageDriver(ComputerDriverEnvironment):
 
     @scroll
     async def scroll_at(self, x, y, direction, amount, modifiers) -> None:
-        dx = {"left": -1, "right": 1}.get(direction, 0) * amount * WHEEL_PX
-        dy = {"up": -1, "down": 1}.get(direction, 0) * amount * WHEEL_PX
+        """One wheel event a notch, as a mouse wheel sends them."""
+        dx = {"left": -1, "right": 1}.get(direction, 0) * WHEEL_PX
+        dy = {"up": -1, "down": 1}.get(direction, 0) * WHEEL_PX
         self._pointer = (x, y)
         await self._input([{"method": "Input.dispatchMouseEvent", "params": {
             "type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy,
-            "modifiers": _modifiers(modifiers) | self._mask()}}])
+            "modifiers": _modifiers(modifiers) | self._mask()}}] * amount)
 
     @pointer_move
     async def move(self, x, y) -> None:

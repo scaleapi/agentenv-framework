@@ -636,14 +636,15 @@ async def test_it_navigates_the_active_tab_and_moves_in_its_history_or_says_why_
 
 
 @pytest.mark.asyncio
-async def test_a_tab_it_opens_or_activates_is_brought_to_the_front_and_the_active_one_and_one_it_closes_its_own():
+async def test_a_tab_it_opens_loads_once_held_to_the_window_comes_to_the_front_and_one_it_closes_is_its_own():
     devtools = Tabbed()
     control = await _tabs(devtools, "a")
 
-    opened = await control.open_tab("https://mail.test/b")
+    opening = asyncio.ensure_future(control.open_tab("https://mail.test/b"))
+    await asyncio.sleep(0)
     devtools.send("Target.targetCreated", _page("b", "https://mail.test/b", "Mail b"))
     devtools.send("Target.attachedToTarget", {"sessionId": "s-b", **_page("b")})
-    await asyncio.sleep(0)
+    opened = await opening
     after_open = await control.tab_list()
     await control.activate("a")
     after_switch = await control.tab_list()
@@ -652,11 +653,23 @@ async def test_a_tab_it_opens_or_activates_is_brought_to_the_front_and_the_activ
     await control.close("b")
     devtools.send("Target.targetDestroyed", {"targetId": "b"})
 
-    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "https://mail.test/b"}, None)]
+    on_b = [name for name, _, session in devtools.calls if session == "s-b"]
+    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "about:blank"}, None)]
+    assert ({"url": "https://mail.test/b"}, "s-b") in _sent(devtools, "Page.navigate")
+    assert on_b.index("Emulation.setDeviceMetricsOverride") < on_b.index("Page.navigate")
     assert [(tab["id"], tab["active"]) for tab in after_open] == [("a", False), ("b", True)]
     assert [(tab["id"], tab["active"]) for tab in after_switch] == [("a", True), ("b", False)]
     assert ({}, "s-a") in _sent(devtools, "Page.bringToFront")
     assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs] == [("b", "agentenv")]
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_tab_whose_page_still_says_it_has_focus_isnt_the_active_one():
+    states = {"s-a": ["hidden", True], "s-b": ["visible", True]}
+    devtools = Tabbed({"Runtime.evaluate": lambda params, session: {"result": {"value": states[session]}}})
+    control = await _tabs(devtools, "a", "b")
+
+    assert await control.active_tab() == "b"
 
 
 @pytest.mark.asyncio
