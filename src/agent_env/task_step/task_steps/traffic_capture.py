@@ -122,7 +122,9 @@ async def collect_captures(context: TaskStepContext, deployed: DeployedEnv, *, k
     """Store each capture ``deployed`` serves as a pcap FileArtifact, register them as one FileArtifactUniverse, and
     record it in ``context.metadata[TRAFFIC_KEY][key]``, by default its env_id. Each file is named for its container
     and its place among that container's files, oldest first, so they read in the order their packets were captured.
-    Never raises: the entry, which it also returns, says what happened."""
+    Never raises: the entry, which it also returns, says what happened. A collection that stops partway, failed or
+    cancelled, still registers the files it stored by then and records them as ``partial``, which teardown collects
+    again."""
     key = key or deployed.env_id
     entries = context.metadata.setdefault(TRAFFIC_KEY, {})
     try:
@@ -133,7 +135,8 @@ async def collect_captures(context: TaskStepContext, deployed: DeployedEnv, *, k
         entries[key] = await _store(context, deployed, listing.captures, key)
     except Exception as e:
         logger.warning("collect_traffic_capture %s: %s", key, e)
-        entries[key] = _failed(e)
+        partial = entries.get(key) or {}
+        entries[key] = {**partial, **_failed(e), "state": "partial"} if partial.get("state") == "partial" else _failed(e)
     return entries[key]
 
 
@@ -145,29 +148,40 @@ async def _store(context: TaskStepContext, deployed: DeployedEnv, captures: list
     store = get_artifact_store()
     prefix = store.attempt_prefix(_ARTIFACT_TYPE, universe_id)
     files, total, seen = {}, 0, {}
-    for capture in captures:
-        container = capture.container
-        seen[container] = seen.get(container, -1) + 1
-        filename = f"{container}-{seen[container]:02d}.pcap"
-        handle, path = tempfile.mkstemp(suffix=".pcap")
-        os.close(handle)
-        try:
-            total += await fetch_traffic_capture(deployed.environment_url, deployed.environment_card, capture.name,
-                                                 path, headers=deployed.control_headers)
-        except BaseException:
-            _remove(path)
-            raise
-        url = await finish_on_thread(functools.partial(_upload, universe_id, prefix + filename, path),
-                                     f"Uploading traffic capture {filename} of env {deployed.env_id!r}",
-                                     if_never_run=functools.partial(_remove, path))
-        files[filename] = store.put_document(FileArtifact(
-            id=derive_id(universe_id, filename), filename=filename, content_type=PCAP_MEDIA_TYPE, object_url=url,
-            description=f"Traffic capture of {container} in env {deployed.env_id!r}, task instance {context.instance_id}"))
+    try:
+        for capture in captures:
+            container = capture.container
+            seen[container] = seen.get(container, -1) + 1
+            filename = f"{container}-{seen[container]:02d}.pcap"
+            handle, path = tempfile.mkstemp(suffix=".pcap")
+            os.close(handle)
+            try:
+                total += await fetch_traffic_capture(deployed.environment_url, deployed.environment_card, capture.name,
+                                                     path, headers=deployed.control_headers)
+            except BaseException:
+                _remove(path)
+                raise
+            url = await finish_on_thread(functools.partial(_upload, universe_id, prefix + filename, path),
+                                         f"Uploading traffic capture {filename} of env {deployed.env_id!r}",
+                                         if_never_run=functools.partial(_remove, path))
+            files[filename] = store.put_document(FileArtifact(
+                id=derive_id(universe_id, filename), filename=filename, content_type=PCAP_MEDIA_TYPE, object_url=url,
+                description=f"Traffic capture of {container} in env {deployed.env_id!r}, task instance {context.instance_id}"))
+    except BaseException as e:
+        if files:
+            context.metadata[TRAFFIC_KEY][key] = {**_entry(universe_id, files, total, seen), "state": "partial",
+                                                  "error": _failed(e)["error"]}
+        raise
+    logger.info("collect_traffic_capture %s: %d capture files, %d bytes", deployed.env_id, len(files), total)
+    return _entry(universe_id, files, total, seen)
+
+
+def _entry(universe_id: str, files: dict, total: int, seen: dict) -> dict:
+    """The ``collected`` entry of ``files``, registered as one FileArtifactUniverse when there are any."""
     artifact = None
     if files:
         universe = FileArtifactUniverse.put(id=universe_id, file_artifacts=files)
         artifact = {"id": universe.id, "version": universe.version}
-    logger.info("collect_traffic_capture %s: %d capture files, %d bytes", deployed.env_id, len(files), total)
     return {"state": "collected", "artifact": artifact, "files": sorted(files), "bytes": total,
             "containers": sorted(seen)}
 

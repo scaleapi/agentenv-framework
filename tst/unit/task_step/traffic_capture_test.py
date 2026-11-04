@@ -239,6 +239,35 @@ async def test_what_teardown_collected_before_its_time_ran_out_is_still_saved_to
 
 
 @pytest.mark.asyncio
+async def test_a_collection_stopped_partway_keeps_the_files_it_stored_linked_as_partial(gateway, monkeypatch):
+    instance = get_task_instance_store().create_instance("task-1", 1, total_steps=1)
+    context = _context(_deployed())
+    context.instance_id = instance.instance_id
+    real, fetched = traffic_capture_module.fetch_traffic_capture, []
+
+    async def fetch(*args, **kwargs):
+        fetched.append(args[2])
+        if len(fetched) == 2:
+            await asyncio.sleep(30)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(traffic_capture_module, "fetch_traffic_capture", fetch)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(1):
+            await collect_uncollected_captures(context, context.deployed_envs)
+
+    entry = context.metadata[TRAFFIC_KEY]["notes-env"]
+    assert entry["state"] == "partial" and entry["files"] == ["notes-website-backend-00.pcap"]
+    universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+    assert sorted(universe.get_file_artifacts()) == ["notes-website-backend-00.pcap"]
+    assert find_task_instance(instance.instance_id).context["metadata"][TRAFFIC_KEY]["notes-env"] == entry
+
+    monkeypatch.setattr(traffic_capture_module, "fetch_traffic_capture", real)
+    await collect_uncollected_captures(context, context.deployed_envs)
+    assert context.metadata[TRAFFIC_KEY]["notes-env"]["state"] == "collected"
+
+
+@pytest.mark.asyncio
 async def test_tear_down_collects_a_retrys_rolled_back_deployment_under_its_own_key_before_its_vm_goes(gateway):
     rolled_back, live = _deployed(sandbox_id="vm-1"), _deployed(sandbox_id="vm-2")
     gone = _rolled_back_sandboxes(TaskStepContext(deployed_envs=[rolled_back]).to_dict(), TaskStepContext().to_dict(), {})
