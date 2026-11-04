@@ -164,8 +164,6 @@ class LumeSandboxProvider(SandboxProvider):
         state = self._state(sandbox.sandbox_id)
         async with self._admitting():
             await self._stopped(sandbox.sandbox_id, state)
-            for ended in ("run", "relay"):
-                state.pop(ended, None)
             await self._lume("delete", sandbox.sandbox_id, "--force")
             await self._lume("clone", state["source"], sandbox.sandbox_id)
             await self._lume("set", sandbox.sandbox_id, "--mac-address", state["mac"])
@@ -339,13 +337,17 @@ class LumeSandboxProvider(SandboxProvider):
         raise TimeoutError(f"{name} didn't answer ssh within {self.boot_timeout_s:.0f} s")
 
     async def _stopped(self, name: str, state: dict) -> None:
-        """``name``'s relays ended and the VM stopped."""
-        if pid := state.get("relay"):
-            _kill(pid)
+        """``name``'s relays ended and the VM stopped, the process ids it ended dropped from its state and saved, so
+        nothing signals them again once the system has given them to another process."""
+        relay, run = state.pop("relay", None), state.pop("run", None)
+        if relay:
+            _kill(relay)
         with contextlib.suppress(RuntimeError):
             await self._lume("stop", name, "--force")
-        if pid := state.get("run"):
-            _kill(pid)
+        if run:
+            _kill(run)
+        if (state_root() / "lume" / name / "state.json").exists():
+            self._save(name, state)
 
     async def _ended_past_lifetime(self) -> None:
         """Each VM this provider made on this Mac whose lifetime has passed terminated, as one a runner that exited

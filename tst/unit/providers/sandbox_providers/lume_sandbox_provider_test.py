@@ -186,6 +186,7 @@ async def test_a_reset_clones_the_vm_afresh_under_its_mac_address_with_the_new_s
     with pytest.raises(TimeoutError, match="had no address within 1 s"):
         await mac.reset_vm(sandbox, image="local:bench", env={"N": "3"})
     assert _state(mac.fake)["vms"][sandbox.sandbox_id]["status"] == "stopped"
+    assert not {"run", "relay"} & set(json.loads((folder / "state.json").read_text()))
     await sandbox.terminate()
 
 
