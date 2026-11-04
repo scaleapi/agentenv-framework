@@ -1,7 +1,9 @@
 // Connects Playwright and Puppeteer to a website browser's CDP address and prints, as JSON, what each saw.
 // Usage: node connect.mjs <check> <http_url> <ws_url> <site url> [exact], <check> being:
 //   together: Playwright by http_url and Puppeteer by ws_url at once, then Playwright by ws_url, each opening the site;
-//   refused: both clients at the address with its token changed, or as given with "exact", each expected to fail.
+//   refused: both clients at the address with its token changed, or as given with "exact", each expected to fail;
+//   guard: Playwright kept connected by http_url while Puppeteer closes the browser by ws_url, then Playwright opening
+//   the site, and file:///etc/hostname, which the guard refuses.
 import { chromium } from "playwright-core";
 import puppeteer from "puppeteer-core";
 
@@ -41,6 +43,15 @@ let result;
 if (check === "together") {
   const [byHttp, byWs] = await Promise.all([settled(playwright(httpUrl)), settled(pptr(wsUrl))]);
   result = { playwright_http: byHttp, puppeteer_ws: byWs, playwright_ws: await settled(playwright(wsUrl)) };
+} else if (check === "guard") {
+  const kept = await chromium.connectOverCDP(httpUrl, { timeout: TIMEOUT_MS });
+  const closer = await puppeteer.connect({ browserWSEndpoint: wsUrl, protocolTimeout: TIMEOUT_MS });
+  const closed = await settled(closer.close().then(() => true));
+  const page = await kept.contexts()[0].newPage();
+  const after = await settled(page.goto(site, { timeout: TIMEOUT_MS }).then(() => page.title()));
+  const file = await settled(page.goto("file:///etc/hostname", { timeout: TIMEOUT_MS }));
+  await page.close();
+  result = { closed, after, file };
 } else {
   result = { playwright: await settled(playwright(wrong(httpUrl))), puppeteer: await settled(pptr(wrong(wsUrl))) };
 }

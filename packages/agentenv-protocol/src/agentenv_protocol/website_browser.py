@@ -693,7 +693,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                                       else None)
         #: The CDP addresses it has handed out, and the relay agents' connections to them go through.
         self.cdp_tokens = Tokens(SOCKET.parent / "cdp-tokens.json")
-        self.relay = Relay(self.devtools)
+        self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT)
         self.devtools.on_close(self._pipe_closed)
 
     @classmethod
@@ -837,8 +837,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "its tabs by their ids; dialog/answer answers the dialog open on the active tab; files/choose gives the file "
         "chooser open on it files in ~/Uploads, headless; and page/state is the active tab's id, URL and title and "
         "what is open on it. cdp returns a user's CDP address, http_url to discover from and ws_url to connect to, "
-        "with a token agentenv mints in its path: each connection to it gets its own browser-level session, and "
-        "record lists them as cdp_connections."))
+        "with a token agentenv mints in its path: each connection to it gets its own browser-level session behind a "
+        "guard, and record lists them as cdp_connections, each with the commands the guard refused or changed."))
     async def browser_record(self) -> dict:
         return {**await self.control.record(), "launches": self._computer_app.launches(),
                 "cdp_connections": list(self.relay.connections)}

@@ -880,7 +880,20 @@ are the profile's template. The base class adds:
   and the events of its sessions and those it attaches, and no one else's. Only flattened sessions are
   served, as Playwright, Puppeteer and Browser Use use. A token agentenv didn't mint is refused, and
   when the browser goes, each connection is closed with 1012 so its client can connect again.
-  `record` lists each connection as `cdp_connections`: its user, when it opened and when it closed.
+  A guard sits on every command, a guardrail, since the sandbox's network is the boundary:
+  - `Browser.close`, `Browser.crash` and `Browser.crashGpuProcess` are answered `{}` and end only that
+    connection, with 1000;
+  - `Target.exposeDevToolsProtocol`, a `Target.createBrowserContext` with its own proxy, and a
+    `Page.navigate` or `Target.createTarget` to the browser's own pages (`file:`, `chrome:`,
+    `chrome-extension:`, `chrome-untrusted:`, `view-source:`, `devtools:`, and `about:` but
+    `about:blank` and `about:srcdoc`) get a CDP error, `agentenv refuses …`;
+  - `Browser.setDownloadBehavior` and `Page.setDownloadBehavior` are sent on as agentenv's own, the
+    browser's default into `~/Downloads`, keeping only the context and whether to send events;
+  - when the deploy answers dialogs, an agent's `Page.handleJavaScriptDialog` is answered `{}` and not
+    sent on.
+
+  `record` lists each connection as `cdp_connections`: its user, when it opened and when it closed,
+  and the first 100 commands the guard refused, changed, answered or closed it on.
   Puppeteer connects by `ws_url`: its `browserURL` drops the address's path.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.

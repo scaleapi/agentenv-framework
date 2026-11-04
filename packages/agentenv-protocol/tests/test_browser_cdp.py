@@ -1,7 +1,7 @@
 """A website browser's CDP addresses: a user's token minted once, kept by hash only, so it still works after the server
 restarts and the computer's session can't use the file; the relay giving each WebSocket connection its own
-browser-level session over one pipe, its answers and events and nobody else's, until the browser goes; and the cdp
-operation and discovery answered at the address the call reached."""
+browser-level session over one pipe, its answers and events and nobody else's, until the browser goes; the guard on
+each command; and the cdp operation and discovery answered at the address the call reached."""
 from __future__ import annotations
 
 import asyncio
@@ -18,10 +18,10 @@ pytest.importorskip("mcp.server.fastmcp")
 from starlette.applications import Starlette  # noqa: E402
 from starlette.routing import WebSocketRoute  # noqa: E402
 from websockets.asyncio.client import connect  # noqa: E402
-from websockets.exceptions import ConnectionClosedError  # noqa: E402
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK  # noqa: E402
 
 from agentenv_protocol import browser_cdp  # noqa: E402
-from agentenv_protocol.browser_cdp import NO_SESSION, Relay, Tokens  # noqa: E402
+from agentenv_protocol.browser_cdp import NO_SESSION, Relay, Tokens, guard  # noqa: E402
 from agentenv_protocol.computer import Launch, Platform, Ready, app, computer_app, linux  # noqa: E402
 from agentenv_protocol.computer.app import APP_SETTINGS_ENV  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppReadiness  # noqa: E402
@@ -41,10 +41,10 @@ class Browser(WebsiteBrowserEnvironment):
 class Pipe:
     """A browser's pipe: each connection's browser-level session ``b<n>``, an attach on a session making its child
     ``<session>-c`` and saying so on that session, ``Boom`` failing, ``Hang`` never answered, anything else echoed;
-    every request recorded, and each ``Hang`` given up."""
+    every request recorded with the last params of each method, and each ``Hang`` given up."""
 
     def __init__(self) -> None:
-        self.listeners, self.sent, self.sessions, self.given_up = [], [], 0, []
+        self.listeners, self.sent, self.sessions, self.given_up, self.params = [], [], 0, [], {}
 
     def listen(self, listener) -> None:
         self.listeners.append(listener)
@@ -62,6 +62,7 @@ class Pipe:
 
     async def request(self, method, params=None, *, session_id=None):
         self.sent.append((method, session_id))
+        self.params[method] = params
         if method == "Target.attachToTarget":
             child = f"{session_id}-c"
             self.emit({"method": "Target.attachedToTarget", "sessionId": session_id,
@@ -102,11 +103,11 @@ class SlowClient:
 
 
 @contextlib.asynccontextmanager
-async def _relay():
+async def _relay(dialogs_answered: bool = False):
     """The relay over a fake pipe, served on loopback with each connection's user its path's: the pipe, the relay and
     the server's ws:// base."""
     pipe = Pipe()
-    relay = Relay(pipe)
+    relay = Relay(pipe, dialogs_answered=dialogs_answered)
 
     async def endpoint(websocket):
         await relay.serve(websocket, websocket.path_params["user"])
@@ -182,6 +183,62 @@ async def test_each_connection_gets_its_own_browser_session_its_own_answers_and_
     assert [(c["user"], "closed_at" in c) for c in relay.connections] == [("ada", True), ("bob", True)]
     assert ("Target.detachFromTarget", None) in pipe.sent
     assert pipe.given_up == ["Hang"]
+
+
+@pytest.mark.parametrize(("method", "params", "action"), [
+    ("Page.navigate", {"url": "https://site.test/"}, "send"),
+    ("Page.navigate", {"url": "about:blank"}, "send"),
+    ("Page.navigate", {"url": "about:settings"}, "refuse"),
+    ("Page.navigate", {"url": " \tFI\nLE:///etc/passwd"}, "refuse"),
+    ("Target.createTarget", {"url": "chrome://settings"}, "refuse"),
+    ("Target.createTarget", {"url": "View-Source:https://site.test/"}, "refuse"),
+    ("Target.createBrowserContext", {"proxyBypassList": "*"}, "refuse"),
+    ("Target.createBrowserContext", {"disposeOnDetach": True}, "send"),
+    ("Page.handleJavaScriptDialog", {"accept": True}, "send"),
+    ("Browser.crash", {}, "close"),
+])
+def test_the_guard_reads_a_url_as_the_browser_does_and_lets_through_what_it_doesnt_guard(method, params, action):
+    assert guard(method, params, dialogs_answered=False).action == action
+
+
+@pytest.mark.asyncio
+async def test_the_guard_keeps_the_browser_up_its_traffic_and_downloads_its_own_and_its_dialogs_agentenvs():
+    async with _relay(dialogs_answered=True) as (pipe, relay, base):
+        async with connect(f"{base}/ada") as ada, connect(f"{base}/bob") as bob:
+            navigated = await _ask(ada, {"id": 1, "method": "Page.navigate", "params": {"url": "file:///etc/passwd"}})
+            exposed = await _ask(ada, {"id": 2, "method": "Target.exposeDevToolsProtocol",
+                                       "params": {"targetId": "t1"}})
+            proxied = await _ask(ada, {"id": 3, "method": "Target.createBrowserContext",
+                                       "params": {"proxyServer": "http://elsewhere.test:8080"}})
+            context = await _ask(ada, {"id": 4, "method": "Target.createBrowserContext", "params": {}})
+            downloads = await _ask(ada, {"id": 5, "method": "Browser.setDownloadBehavior", "params": {
+                "behavior": "allowAndName", "downloadPath": "/tmp/elsewhere", "eventsEnabled": True}})
+            older = await _ask(ada, {"id": 6, "method": "Page.setDownloadBehavior",
+                                     "params": {"behavior": "allow", "downloadPath": "/tmp/elsewhere"}})
+            dialog = await _ask(ada, {"id": 7, "method": "Page.handleJavaScriptDialog", "params": {"accept": False}})
+            closed = await _ask(bob, {"id": 1, "method": "Browser.close"})
+            with pytest.raises(ConnectionClosedOK) as ended:
+                await bob.recv()
+            still = await _ask(ada, {"id": 8, "method": "Browser.getVersion"})
+    sent = {method for method, _ in pipe.sent}
+
+    assert navigated["error"] == {"code": -32000, "message": "agentenv refuses Page.navigate: file: URLs open the "
+                                                             "browser's own files, settings and tools"}
+    assert exposed["error"]["message"].startswith("agentenv refuses Target.exposeDevToolsProtocol: ")
+    assert proxied["error"]["message"].startswith("agentenv refuses Target.createBrowserContext: ")
+    assert "result" in context and "result" in downloads and "result" in older
+    assert pipe.params["Browser.setDownloadBehavior"] == {"behavior": "default", "eventsEnabled": True}
+    assert pipe.params["Page.setDownloadBehavior"] == {"behavior": "default"}
+    assert dialog == {"id": 7, "result": {}} and closed == {"id": 1, "result": {}}
+    assert (ended.value.rcvd.code, ended.value.rcvd.reason) == browser_cdp.CLOSED
+    assert still["result"] == {"method": "Browser.getVersion", "session": "b1"}
+    assert not {"Page.navigate", "Target.exposeDevToolsProtocol", "Page.handleJavaScriptDialog", "Browser.close"} & sent
+    assert [(entry["method"], entry["did"]) for entry in relay.connections[0]["guarded"]] == [
+        ("Page.navigate", "refused"), ("Target.exposeDevToolsProtocol", "refused"),
+        ("Target.createBrowserContext", "refused"), ("Browser.setDownloadBehavior", "changed"),
+        ("Page.setDownloadBehavior", "changed"), ("Page.handleJavaScriptDialog", "answered")]
+    assert [(entry["method"], entry["did"]) for entry in relay.connections[1]["guarded"]] == [
+        ("Browser.close", "closed")]
 
 
 @pytest.mark.asyncio

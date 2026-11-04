@@ -6,7 +6,8 @@ and upload; nothing runs X and nothing listens but the driver and the site proxy
 started again by supervisord and the computer is ready again; and chromium killed fails it for good, computer-ready/v1
 saying why and the tools answering with it. Through its cdp address, Playwright and Puppeteer drive it two at once,
 each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
-one; the address outlives a relaunch, and the computer's reset ends it. Needs Docker and the local registry on
+one; one client's close leaves the browser up for the other, which can't open file: URLs; the address outlives a
+relaunch, and the computer's reset ends it. Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
@@ -386,6 +387,8 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
             logged = (await inside.run(deployed, ["sh", "-c", LOGGED_TOKENS, "sh", *tokens],
                                        timeout_s=30))["stdout"].splitlines()
             record = await _record(deployed)
+            guarded = await _clients(cdp_clients, "guard", ada)
+            guarded_record = await _record(deployed)
             await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium", headers=deployed.control_headers)
             relaunched_address = await _cdp(deployed, "ada")
             relaunched = await _clients(cdp_clients, "together", ada)
@@ -405,6 +408,10 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
     assert from_inside == "HTTP/1.1 403 Forbidden"
     assert logged == ["/cdp/<redacted>"], logged
     assert [c["user"] for c in record["cdp_connections"]] == ["ada", "ada", "ada"]
+    assert guarded["closed"] == {"ok": True} and guarded["after"] == {"ok": "Home"}, guarded
+    assert "agentenv refuses Page.navigate: file:" in guarded["file"].get("error", ""), guarded
+    assert {("Browser.close", "closed"), ("Page.navigate", "refused"), ("Browser.setDownloadBehavior", "changed")} <= {
+        (entry["method"], entry["did"]) for c in guarded_record["cdp_connections"] for entry in c["guarded"]}
     assert relaunched_address == ada
     assert "error" in after_reset["playwright"] and "error" in after_reset["puppeteer"], after_reset
     assert fresh != ada and not report.failed
