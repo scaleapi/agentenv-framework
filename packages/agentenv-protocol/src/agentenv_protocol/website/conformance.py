@@ -191,8 +191,7 @@ class _Checker:
     def _clock(self, card: dict, health: str) -> tuple[Status, str]:
         if find_extension(card, CLOCK_EXTENSION_URI) is None:
             return "failed", f"the card declares no {CLOCK_EXTENSION_URI}"
-        params = find_extension(card, CLOCK_EXTENSION_URI).get("params") or {}
-        method = find_extension_method(card, CLOCK_EXTENSION_URI, next(iter(params.get("methods") or {}), "sync_time"))
+        method = find_extension_method(card, CLOCK_EXTENSION_URI, "sync_time")
         if method is None or not method.get("endpoint"):
             return "failed", f"{CLOCK_EXTENSION_URI} advertises no sync_time endpoint"
         with _clock_server(self.clock_host) as (url, virtual_now):

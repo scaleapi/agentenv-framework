@@ -309,7 +309,7 @@ def _first(value: bytes | None) -> str:
 
 
 class _Universe:
-    """Stamps ``X-Universe-Now`` on every answer, and with ``clock_patch`` puts the clock script in its HTML, holding
+    """Stamps ``X-Universe-Now`` on every answer, and with ``clock_patch`` puts the clock script in its whole HTML (never a range of it), holding
     only the HTML up to its ``<head>`` (at most ``HEAD_SCAN_BYTES``), so a page streamed in chunks reaches the browser
     as it's sent."""
 
@@ -331,7 +331,8 @@ class _Universe:
                 headers = MutableHeaders(scope=message)
                 now = clock.now()
                 headers[UNIVERSE_NOW_HEADER] = iso(now)
-                if patch and headers.get("content-type", "").startswith("text/html") and "content-encoding" not in headers:
+                if (patch and headers.get("content-type", "").startswith("text/html") and "content-encoding" not in headers
+                        and message.get("status") != 206 and "content-range" not in headers):
                     held.update(start=message, body=b"", script=clock_patch_script(now))
                     return
             elif held and message["type"] == "http.response.body":

@@ -323,7 +323,9 @@ def openapi(title: str, routes: list[ApiRoute]) -> dict:
             operation["x-agentenv-roles"] = list(route.roles)
         for p in plan(route):
             if p.kind in ("path", "query"):
-                schema = _schema_for_annotation(p.annotation)
+                listed = _list_type(p.annotation) if p.kind == "query" else None
+                schema = _schema_for_annotation(p.annotation) if listed is None else {
+                    "type": "array", **({"items": _schema_for_annotation(get_args(listed)[0])} if get_args(listed) else {})}
                 if p.default is not inspect.Parameter.empty:
                     schema["default"] = to_jsonable_python(p.default)
                 operation["parameters"].append({"name": p.name, "in": p.kind, "schema": schema,
