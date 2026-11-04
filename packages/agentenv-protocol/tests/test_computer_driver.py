@@ -115,6 +115,7 @@ def test_unknown_predicates_are_refused():
     ({"keys": ("enter",)}, "keys are W3C key values in their W3C case"),
     ({"keys": ("Return",)}, "keys: 'Return' is not a W3C key value"),
     ({"display_modes": ((10, 10),)}, "display_modes and @set_display come together"),
+    ({"screen_kind": "tablet"}, "screen_kind is desktop or page, got 'tablet'"),
 ])
 def test_features_are_checked_when_the_class_is_defined(features, error):
     with pytest.raises(TypeError, match=error):
@@ -169,7 +170,7 @@ async def test_the_card_declares_the_contract_the_driver_implements():
     computer = extensions["urn:agentenv:computer/v1"]["params"]
     assert computer["buttons"] == ["left", "right", "middle"] and computer["max_click_count"] == 3
     assert computer["keys"] == "all" and computer["platform"] == LINUX.as_dict() and computer["delivery"] == "foreground"
-    assert computer["default_data_paths"] == ["Desktop", "Documents", "Downloads"]
+    assert computer["default_data_paths"] == ["Desktop", "Documents", "Downloads"] and computer["screen"] == "desktop"
     assert "methods" not in computer and extensions["urn:agentenv:skill/v1"]["params"]["methods"]["get"]["method"] == "GET"
     assert extensions["urn:agentenv:computer-pointer/v1"]["params"]["buttons"] == ["left", "right", "middle"]
     assert set(extensions["urn:agentenv:computer-keyboard/v1"]["params"]["methods"]) == {"get", "set"}
@@ -294,6 +295,21 @@ async def test_the_drivers_own_ready_checks_count():
     async with http_client(Raising()) as http:
         raised = (await http.get("/agentenv/ext/computer-ready/status")).json()
     assert raised["checks"][-1] == {"name": "driver", "ok": False, "detail": "RuntimeError: probe crashed"}
+    assert "failed" not in before and "failed" not in raised
+
+
+@pytest.mark.asyncio
+async def test_a_final_check_that_fails_has_the_status_say_the_computer_failed_and_why():
+    class Ended(FakeDriver):
+        async def ready_checks(self):
+            return [ReadyCheck("browser", False, "it ended on its own", final=True),
+                    ReadyCheck("session", True, "logged in", final=True)]
+
+    async with http_client(Ended()) as http:
+        status = (await http.get("/agentenv/ext/computer-ready/status")).json()
+    assert status["ready"] is False and status["failed"] == "browser: it ended on its own"
+    assert status["checks"][-2:] == [{"name": "browser", "ok": False, "detail": "it ended on its own", "final": True},
+                                     {"name": "session", "ok": True, "detail": "logged in", "final": True}]
 
 
 @pytest.mark.asyncio

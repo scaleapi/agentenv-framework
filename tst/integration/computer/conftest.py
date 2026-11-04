@@ -1,6 +1,6 @@
 """The ubuntu-24.04 base computer, built from its folder once for the tests here and tagged for the local registry; the
-shipped desktop example's computer env, the cua-driver test bundle's, the chromium test bundle's and the website-browser
-test bundle's, each composed once for a module's tests;
+shipped desktop example's computer env, the cua-driver test bundle's, the chromium test bundle's, the website-browser
+test bundle's and agentenv's chromium deployed alone, each composed once for a module's tests;
 ``state``, local stores for a test that runs a bundle; and ``docker``, which runs the docker CLI for them."""
 
 import logging
@@ -28,6 +28,8 @@ BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.
 CUA_DRIVER = Path(__file__).parent / "cua-driver"
 CHROMIUM = Path(__file__).parent / "chromium"
 WEBSITE_BROWSER = Path(__file__).parent / "website-browser"
+BROWSER_COMPUTER = Path(__file__).parent / "browser-computer"
+CHROMIUM_ALONE = "@local/agentenv-framework/browsers/chromium"
 
 
 @pytest.fixture(scope="session")
@@ -67,7 +69,15 @@ def website_browser_desktop(tmp_path_factory):
     yield from _composed(tmp_path_factory.mktemp("website-browser-desktop"), parse_bundle(WEBSITE_BROWSER))
 
 
-def _composed(root: Path, bundle):
+@pytest.fixture(scope="module")
+def browser_computer(tmp_path_factory):
+    """agentenv's chromium, which deploys alone as a browser computer: the ubuntu-24.04-headless base, with no display, and the
+    page driver, whose screen is the browser's page; composed, through the browser-computer test bundle's task that
+    deploys it, as ``desktop`` is."""
+    yield from _composed(tmp_path_factory.mktemp("browser-computer"), parse_bundle(BROWSER_COMPUTER), CHROMIUM_ALONE)
+
+
+def _composed(root: Path, bundle, env_id: str | None = None):
     patch = pytest.MonkeyPatch()
     patch.chdir(root)
     patch.setenv("XDG_STATE_HOME", str(root / "state"))
@@ -78,7 +88,7 @@ def _composed(root: Path, bundle):
     with namespace_routing():
         plan = plan_bundle(resolve_bundle(bundle), installed=installed_bundles)
         materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)))
-        yield Env.get(f"{bundle.id_root}/desktop")
+        yield Env.get(env_id or f"{bundle.id_root}/desktop")
     reset_artifact_store()
     reset_config()
     patch.undo()

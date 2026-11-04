@@ -37,6 +37,8 @@ def check_features(cls: type) -> None:
                 problems.append("keys are W3C key values in their W3C case")
         except AgentEnvError as e:
             problems.append(f"keys: {e.message}")
+    if cls.screen_kind not in ("desktop", "page"):
+        problems.append(f"screen_kind is desktop or page, got {cls.screen_kind!r}")
     if ("set_display" in declared(cls)) != bool(cls.display_modes):
         problems.append("display_modes and @set_display come together")
     problems += check_recording(cls.recording)

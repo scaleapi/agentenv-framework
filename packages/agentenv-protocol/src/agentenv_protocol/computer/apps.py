@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,7 @@ import httpx
 from .. import client
 from ..types import RPC_PATH, WELL_KNOWN_PATH, EnvironmentCard
 from .app import COMPUTER_APP, FAILURE, SOCKET
-from .app_runtime import CHECK_TIMEOUT_S, AppReadiness
+from .app_runtime import CHECK_TIMEOUT_S, LAUNCHES, AppReadiness
 from .operations import ReadyCheck
 
 #: Where a composed computer installs its apps, a folder each.
@@ -54,7 +55,7 @@ async def check(folder: Path) -> ReadyCheck:
 async def children(folders: list[Path]) -> list[EnvironmentCard]:
     """Each app in ``folders`` as a child environment of its computer: its server's card, rooted at ``/svc/<name>/``,
     or, while its server isn't answering, its name and route alone."""
-    cards = await asyncio.gather(*(_card(folder) for folder in folders))
+    cards = await asyncio.gather(*(served_card(folder) for folder in folders))
     return [EnvironmentCard.model_validate(child_card(folder.name, card)) if card is not None
             else EnvironmentCard(name=folder.name, url=f"/svc/{folder.name}{RPC_PATH}")
             for folder, card in zip(folders, cards)]
@@ -85,7 +86,7 @@ def child_card(name: str, card: dict) -> dict:
 
 async def owned_paths(folders: list[Path]) -> list[str]:
     """The paths under the session user's home that the apps in ``folders`` keep their data in, as their cards say."""
-    cards = await asyncio.gather(*(_card(folder) for folder in folders))
+    cards = await asyncio.gather(*(served_card(folder) for folder in folders))
     return [path for card in cards if card is not None
             for path in client.extension_params(card, COMPUTER_APP).get("paths") or []]
 
@@ -104,13 +105,40 @@ def endpoint(card: dict, method: str) -> str:
     return client.find_extension_method(card, COMPUTER_APP, method)["endpoint"]
 
 
-async def _card(folder: Path) -> Optional[dict]:
+async def served_card(folder: Path) -> Optional[dict]:
     """The card the app in ``folder`` serves, or None while its server isn't answering."""
     try:
         async with _client(folder / SOCKET) as http:
             return (await http.get(WELL_KNOWN_PATH)).raise_for_status().json()
     except (httpx.HTTPError, OSError, ValueError):
         return None
+
+
+def ended_on_its_own(folder: Path) -> Optional[str]:
+    """Why the app in ``folder`` can't be ready again where nothing launches it but its server: its launch log says it
+    ended on its own, an infrastructure failure; None while it hasn't."""
+    for entry in launch_log(folder):
+        if entry.get("event") == "exit":
+            how = (f"by signal {entry['signal']}" if "signal" in entry else
+                   f"with code {entry['code']}" if "code" in entry else "in a way that wasn't recorded")
+            return (f"it ended on its own at {entry.get('at')}, {how}, and nothing launches it again: an "
+                    "infrastructure failure")
+    return None
+
+
+def launch_log(folder: Path) -> list[dict]:
+    """Each entry of the launch log of the app in ``folder`` that's whole, in order."""
+    try:
+        lines = (folder / LAUNCHES).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            continue
+    return entries
 
 
 def _unanswered(folder: Path) -> str:

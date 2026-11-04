@@ -28,14 +28,15 @@ class Platform:
 
 def detect(environ: dict | None = None, os_release: Path = Path("/etc/os-release")) -> Platform:
     """The running platform: the OS, ``/etc/os-release``'s ID and VERSION_ID on Linux, the machine, and the
-    display from ``XDG_SESSION_TYPE``, else ``DISPLAY`` (x11) or ``WAYLAND_DISPLAY`` (wayland)."""
+    display from ``XDG_SESSION_TYPE``, ``none`` for a computer with no display, else ``DISPLAY`` (x11) or
+    ``WAYLAND_DISPLAY`` (wayland)."""
     environ = os.environ if environ is None else environ
     name = _OS.get(sys.platform, sys.platform)
     release = _os_release(os_release) if name == "linux" else {}
     display = None
     if name == "linux":
         session = (environ.get("XDG_SESSION_TYPE") or "").strip().lower()
-        if session in ("x11", "wayland"):
+        if session in ("x11", "wayland", "none"):
             display = session
         elif environ.get("DISPLAY"):
             display = "x11"

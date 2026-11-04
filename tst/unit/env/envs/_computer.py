@@ -201,7 +201,8 @@ def _base(image, **changes):
                                                   "init": "supervisord", "input_channel": "env"}}, **changes})
 
 
-def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, install=True, extra=None):
+def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, install=True, extra=None,
+            features=None):
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "driver.py").write_text("class Desk: ...\n")
     (folder / "requirements.txt").write_text(requirements)
@@ -211,7 +212,7 @@ def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, i
         files = FileArtifactUniverse.put(files.id, file_artifacts={**files.get_file_artifacts(), **extra})
     supports = supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}]
     platforms = [{"platform": {"os": "linux", "arch": arch, "display": "x11"}, "provides": [], "tools": TOOLS,
-                  "features": {}} for arch in ("amd64", "arm64")]
+                  "features": features or {}} for arch in ("amd64", "arm64")]
     services = services or [Service(name="driver", command=SERVE)]
     return ComputerDriverEnv.put(
         id="@local/~/kit/desk", module="driver.py:Desk", files=files,
@@ -352,11 +353,12 @@ MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/pyt
 
 def _app(base, driver, folder, compose=True, supports=None, install=None, settings=MAIL_SETTINGS, launch=None,
          extra=None, steps=(), build=MAIL_BUILD, linux_settings=None, name="mail", paths=None, defaults=None,
-         **changes):
+         browser=None, **changes):
     """A mail app on ``base`` and ``driver``, which serves IMAP from a venv of its requirements; ``extra`` files beside
     them, by name, ``steps``, its install steps by name, scope and the OS types they run on, ``build``, the schema of
     its build settings, ``linux_settings``, that of its settings on Linux, ``name``, its id's last part and its
-    environment name, ``paths``, where it keeps its data on Linux, and ``defaults``, its env's ``[settings]``."""
+    environment name, ``paths``, where it keeps its data on Linux, ``defaults``, its env's ``[settings]``, and
+    ``browser``, whether it declares itself a website browser."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "app.py").write_text("class Mail: ...\n")
     (folder / "requirements.txt").write_text("agentenv-framework-protocol\n")
@@ -369,7 +371,7 @@ def _app(base, driver, folder, compose=True, supports=None, install=None, settin
         "supports": supports or [{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}],
         "permissions": [], "settings": settings, "build_settings": build, "skill": None,
         "data": [], "install_steps": [{"name": name, "scope": scope, "os": os or None} for name, scope, *os in steps],
-        "ready_checks": [], "os": {"linux": {
+        "ready_checks": [], **({"browser": browser} if browser is not None else {}), "os": {"linux": {
             "launch": launch, "settings": linux_settings, "paths": paths, "install": install or {
                 "python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}]}}}})
     return ComputerAppEnv.put(**{"id": f"@local/~/kit/{name}", "environment_name": name, "module": "app.py:Mail",

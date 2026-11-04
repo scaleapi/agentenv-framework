@@ -25,7 +25,7 @@ WINDOW_CLASS = "Chromium"
 PROFILE = ".config/chromium"
 
 
-@computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+@computer_app(supports=[{"os": {"type": "linux", "display": ["x11", "none"]}, "arch": ["amd64", "arm64"]}])
 @linux(packages=Packages(apt=PACKAGES), downloads=DOWNLOADS, paths=[PROFILE],
        launch=Launch(at="boot", command=["chromium/chrome/chrome", "--no-sandbox", f"--class={WINDOW_CLASS}"],
                      window={"class": WINDOW_CLASS}, ready=Ready(window=True)))

@@ -89,7 +89,7 @@ def computer_features(driver: ComputerDriverEnvironment) -> dict:
         "max_wait_ms": driver.max_wait_ms, "max_drag_points": driver.max_drag_points,
         "max_duration_ms": driver.max_duration_ms, "max_key_repeat": driver.max_key_repeat,
         "max_scroll_amount": driver.max_scroll_amount, "delivery": "foreground", "platform": driver.platform.as_dict(),
-        "supports": list(driver.supports), "default_data_paths": list(DEFAULT_DATA_PATHS),
+        "supports": list(driver.supports), "default_data_paths": list(DEFAULT_DATA_PATHS), "screen": driver.screen_kind,
     }
 
 

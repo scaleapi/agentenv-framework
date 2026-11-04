@@ -74,6 +74,8 @@ class ReadyCheck:
     name: str
     ok: bool
     detail: str = ""
+    #: Failed for good: the check can't pass again, so the computer has failed.
+    final: bool = False
 
 
 @dataclass(frozen=True)

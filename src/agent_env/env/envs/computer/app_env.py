@@ -124,7 +124,7 @@ class ComputerAppEnv(ComputerEnv):
         elif computer is not None and not problems:
             _, refused = gate.check(computer, driver, environment_name=environment_name, apps=[], display=None,
                                     network=None, computer_settings={})
-            problems += refused + gate.check_app(computer, driver, app)
+            problems += refused + gate.check_app(computer, driver, app) + gate.check_screen(driver, [app], "app")
         if problems:
             raise ValueError(f"computer app env {id!r}: " + "; ".join(problems))
         app = get_env_store().put_document(app)

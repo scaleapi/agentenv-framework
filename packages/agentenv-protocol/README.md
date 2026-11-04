@@ -505,7 +505,8 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
 - **The input queue.** Input calls run one at a time in arrival order; one that waits past
   `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue.
 - **The computer skill.** `computer/v1` declares the seven tools, its params the driver's
-  features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
+  features, among them `screen`: `desktop`, or `page` for a driver whose screen is a website
+  browser's active tab, which a computer env pairs with exactly one website browser. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
   the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
   class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
@@ -513,7 +514,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
   capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
-  own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  own server (see Computer apps); tools refuse `device_unavailable` until they pass once; a check
+  that can't pass again is `final`, and while one fails the status carries `failed`, saying why,
+  which `boot.ready()` raises at once rather than waiting out its timeout), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
   descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
   request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
   with `recording`, `computer-recording/v1` (below).
@@ -742,7 +745,7 @@ its card lists each one's card as a child environment, rooted at `/svc/<app>/`, 
 requests to the app's server.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
-env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
+env stores (`browser: true` for a website browser), and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
 JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
 
 ### Website browsers
@@ -769,8 +772,8 @@ are the profile's template. The base class adds:
   `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
   Alone it bypasses nothing, loopback included; in a computer it bypasses loopback (`127.0.0.1`,
   `[::1]`, `localhost`), so the apps beside it stay reachable while `*.localhost` names still go
-  through. Alone (`AGENTENV_BROWSER_ALONE=1`) it also takes `--window-size` and `--headless=new`,
-  except on the open web (`AGENTENV_BROWSER_OPEN_WEB=1`), and refuses to start with no proxy.
+  through. Alone, on a computer with no display (`XDG_SESSION_TYPE=none`, a browser computer's), it
+  also takes `--window-size` and `--headless=new`, and refuses to start with no proxy.
   `declaration()` refuses a subclass whose command carries any of these, or `--remote-allow-origins`, or
   any other way to open a debugging port.
 - **Before each launch** it empties its cache, so no launch inherits another's, and writes the deploy's
@@ -803,7 +806,10 @@ are the profile's template. The base class adds:
   launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
   and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.
   Nothing relaunches a browser that exits on its own: in a computer the agent can, and alone it's an infra
-  failure, its ready check false.
+  failure, its ready check false. `page/viewport`, `page/capture` and `page/input`, framework-only, are
+  its active tab's page as a page driver sees it: its size, which headless is its window's; a PNG of it,
+  or `blank` for a tab that paints nothing within 3 s (1 s with no URL yet); and CDP input calls
+  (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText`), sent to it in order.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 

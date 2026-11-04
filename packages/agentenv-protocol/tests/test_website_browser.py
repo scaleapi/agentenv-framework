@@ -19,10 +19,10 @@ import pytest
 from agentenv_protocol.computer import APP_SETTINGS_ENV, ComputerAppEnvironment, Launch, Ready, app, linux, session
 from agentenv_protocol import website_browser
 from agentenv_protocol.computer import app_runtime
+from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
 from agentenv_protocol.computer.platform import Platform
-from agentenv_protocol.website_browser import (ALONE_BYPASS, ALONE_ENV, BROWSER, COMPUTER_BYPASS, OPEN_WEB_ENV,
-                                               POLICIES, SITE_PROXY_ENV, SKILL, BrowserControl, DevToolsError,
-                                               WebsiteBrowserEnvironment)
+from agentenv_protocol.website_browser import (ALONE_BYPASS, BROWSER, COMPUTER_BYPASS, POLICIES, SITE_PROXY_ENV, SKILL,
+                                               BrowserControl, DevToolsError, WebsiteBrowserEnvironment)
 
 PROXY = "http://127.0.0.1:3128"
 OWNED = ["--user-data-dir", "--disk-cache-dir", "--remote-debugging-pipe", "--no-first-run",
@@ -80,13 +80,18 @@ def browser_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
-    for name in (ALONE_ENV, OPEN_WEB_ENV, SITE_PROXY_ENV, APP_SETTINGS_ENV):
+    for name in (SITE_PROXY_ENV, APP_SETTINGS_ENV):
         monkeypatch.delenv(name, raising=False)
     return tmp_path / "home"
 
 
 def _settings(monkeypatch, **values) -> None:
     monkeypatch.setenv(APP_SETTINGS_ENV, json.dumps({"chromium": values}))
+
+
+def _alone(monkeypatch) -> None:
+    """On a computer with no display, a browser computer's."""
+    monkeypatch.setattr(app, "detect", lambda: Platform(os="linux", display="none"))
 
 
 def test_in_a_computer_its_flags_follow_its_command_then_its_start_tabs_and_its_window_is_waited_for(browser_home):
@@ -110,7 +115,7 @@ def test_in_a_computer_with_a_site_proxy_only_loopback_bypasses_it(monkeypatch):
 
 
 def test_alone_it_goes_through_its_proxy_headless_at_its_window_and_its_launch_waits_on_no_window(monkeypatch):
-    monkeypatch.setenv(ALONE_ENV, "1")
+    _alone(monkeypatch)
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
     _settings(monkeypatch, window={"width": 1024, "height": 768})
 
@@ -130,7 +135,7 @@ def test_alone_its_launch_keeps_the_port_and_command_it_waits_on_and_their_timeo
     class Waiting(WebsiteBrowserEnvironment):
         pass
 
-    monkeypatch.setenv(ALONE_ENV, "1")
+    _alone(monkeypatch)
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
 
     waiting = Waiting()
@@ -140,18 +145,8 @@ def test_alone_its_launch_keeps_the_port_and_command_it_waits_on_and_their_timeo
     assert waiting._computer_app.timeout_s == 45
 
 
-def test_alone_on_the_open_web_it_runs_headful(monkeypatch):
-    monkeypatch.setenv(ALONE_ENV, "1")
-    monkeypatch.setenv(OPEN_WEB_ENV, "1")
-    monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
-
-    command = Browser().launch.command
-
-    assert "--window-size=1280,800" in command and not any(flag.startswith("--headless") for flag in command)
-
-
 def test_alone_it_refuses_to_launch_without_a_site_proxy(monkeypatch):
-    monkeypatch.setenv(ALONE_ENV, "1")
+    _alone(monkeypatch)
 
     with pytest.raises(ValueError, match=SITE_PROXY_ENV):
         Browser()
@@ -215,7 +210,7 @@ def test_its_settings_give_its_start_tabs_language_and_time_zone_and_no_start_ur
 @pytest.mark.asyncio
 async def test_alone_its_server_launches_it_at_once_in_its_environment_with_no_display_wait_or_launcher(
         monkeypatch, tmp_path):
-    monkeypatch.setenv(ALONE_ENV, "1")
+    _alone(monkeypatch)
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -314,7 +309,7 @@ async def test_a_launch_while_it_runs_opens_a_window_over_its_pipe_and_starts_no
 async def test_headless_it_opens_one_start_tab_from_its_command_line_and_the_rest_over_its_pipe(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
-    monkeypatch.setenv(ALONE_ENV, "1")
+    _alone(monkeypatch)
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
     _settings(monkeypatch, start_urls=["https://slack.com", "https://linear.app", "https://github.com"])
     browser = FakeBrowser()
@@ -400,7 +395,7 @@ def test_its_policies_are_agentenvs_with_its_own_over_them_where_its_build_reads
 
 def test_its_card_declares_browser_v1_with_its_build_and_clock_and_alone_its_window(monkeypatch):
     in_computer = Browser().extension_params(BROWSER)
-    monkeypatch.setenv(ALONE_ENV, "1")
+    _alone(monkeypatch)
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
     alone = Browser().extension_params(BROWSER)
 
@@ -503,6 +498,111 @@ async def test_each_page_it_attaches_to_is_told_to_run_so_a_popup_it_attached_to
 
     assert ("Page.enable", {}, "s-popup") in devtools.calls
     assert ("Runtime.runIfWaitingForDebugger", {}, "s-popup") in devtools.calls
+    assert not any(method == "Emulation.setDeviceMetricsOverride" for method, _, _ in devtools.calls)
+    assert next(params for method, params, _ in devtools.calls if method == "Target.setAutoAttach")[
+        "waitForDebuggerOnStart"] is False
+
+
+@pytest.mark.asyncio
+async def test_alone_each_page_it_attaches_to_is_held_to_its_window_before_it_runs(tmp_path):
+    devtools = StubDevTools()
+    control = BrowserControl(devtools, "agent", (1024, 768))
+    await control.attach()
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.sleep(0)
+
+    sent = [method for method, _, session in devtools.calls if session == "s-popup"]
+    assert next(params for method, params, _ in devtools.calls if method == "Target.setAutoAttach")[
+        "waitForDebuggerOnStart"] is True
+    assert sent == ["Page.enable", "Emulation.setDeviceMetricsOverride", "Runtime.runIfWaitingForDebugger"]
+    assert ("Emulation.setDeviceMetricsOverride", {"width": 1024, "height": 768, "deviceScaleFactor": 1,
+                                                   "mobile": False}, "s-popup") in devtools.calls
+
+
+@pytest.mark.asyncio
+async def test_a_page_it_couldnt_prepare_is_still_told_to_run_so_it_never_stays_held():
+    def refused(params, session):
+        raise DevToolsError("Target closed")
+
+    devtools = StubDevTools({"Page.enable": refused})
+    control = BrowserControl(devtools, "agent", (1024, 768))
+    await control.attach()
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.sleep(0)
+
+    assert [method for method, _, session in devtools.calls if session == "s-popup"] == [
+        "Page.enable", "Runtime.runIfWaitingForDebugger"]
+
+
+class Painting(StubDevTools):
+    """A browser whose every tab has focus and paints, but those whose sessions are in ``blank``, which never answer a
+    capture; it records each capture's timeout."""
+
+    def __init__(self, blank=()):
+        super().__init__({"Runtime.evaluate": lambda params, session: {"result": {"value": ["visible", True]}}})
+        self.blank, self.timeouts = set(blank), []
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method != "Page.captureScreenshot":
+            return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+        self.timeouts.append(timeout_s)
+        if session_id in self.blank:
+            raise asyncio.TimeoutError
+        return {"data": f"png of {session_id}"}
+
+
+async def _one_tab(devtools, url) -> BrowserControl:
+    control = BrowserControl(devtools, "agent")
+    await control.attach()
+    devtools.send("Target.targetCreated", _page("a", url))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-a", **_page("a", url)})
+    await asyncio.sleep(0)
+    return control
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url, blank, png, timeout", [
+    ("https://mail.test/", (), "png of s-a", 3.0),
+    ("https://mail.test/", ("s-a",), None, 3.0),
+    ("", ("s-a",), None, 1.0),
+])
+async def test_its_capture_is_the_active_tabs_page_or_none_for_one_that_paints_nothing_sooner_with_no_url(
+        url, blank, png, timeout):
+    devtools = Painting(blank)
+    control = await _one_tab(devtools, url)
+
+    assert await control.capture() == png and devtools.timeouts == [timeout]
+
+
+@pytest.mark.asyncio
+async def test_its_page_input_goes_to_the_active_tab_in_order_and_takes_only_input_calls():
+    devtools = Painting()
+    control = await _one_tab(devtools, "https://mail.test/")
+    events = [{"method": "Input.dispatchMouseEvent", "params": {"type": "mousePressed", "x": 1, "y": 2}},
+              {"method": "Input.insertText", "params": {"text": "hi"}}]
+
+    await control.dispatch(events)
+    with pytest.raises(InvalidArgument, match="Page.navigate"):
+        await control.dispatch([*events, {"method": "Page.navigate", "params": {"url": "https://elsewhere.test/"}}])
+
+    sent = [(method, params, session) for method, params, session in devtools.calls if method.startswith("Input.")]
+    assert sent == [("Input.dispatchMouseEvent", {"type": "mousePressed", "x": 1, "y": 2}, "s-a"),
+                    ("Input.insertText", {"text": "hi"}, "s-a")]
+
+
+@pytest.mark.asyncio
+async def test_with_no_tab_open_its_capture_and_input_are_unavailable():
+    control = BrowserControl(Painting(), "agent")
+    await control.attach()
+
+    with pytest.raises(DeviceUnavailable, match="no tab open"):
+        await control.capture()
+    with pytest.raises(DeviceUnavailable, match="no tab open"):
+        await control.dispatch([])
+
+
+def test_its_declaration_says_it_is_a_website_browser_and_another_apps_says_nothing():
+    assert Browser.declaration().browser is True and Mail.declaration().browser is None
 
 
 @pytest.mark.asyncio

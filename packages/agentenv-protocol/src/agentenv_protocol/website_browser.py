@@ -2,8 +2,9 @@
 its build installs and starts; this class adds what agentenv owns, the same in both: its flags after the subclass's
 command, the unattended-use policies, a CDP connection over the browser's debugging pipe, the settings every browser
 takes, a fresh cache and the deploy's prompt answers at every launch, another window for a launch while it runs, its
-skill and ``browser/v1`` on its card. Whether it runs alone, on the open web and through which site proxy come from
-variables agentenv sets, never from its settings."""
+skill and ``browser/v1`` on its card. It runs alone, headless, on a computer with no display, a browser computer's,
+whose screen is its page; which site proxy it goes through comes from a variable agentenv sets, never from its
+settings."""
 from __future__ import annotations
 
 import asyncio
@@ -23,11 +24,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from .agent_env_environment import agent_skill, extension
 from .computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
+from .computer import app as computer_app
+from .computer.errors import DeviceUnavailable, InvalidArgument
 
 logger = logging.getLogger(__name__)
 
-ALONE_ENV = "AGENTENV_BROWSER_ALONE"
-OPEN_WEB_ENV = "AGENTENV_BROWSER_OPEN_WEB"
 SITE_PROXY_ENV = "AGENTENV_SITE_PROXY"
 BROWSER = "urn:agentenv:browser/v1"
 #: The flags agentenv sets, by prefix, which a subclass's command may not carry: among them every way to open a debugging
@@ -51,6 +52,9 @@ HASH_CHUNK_BYTES = 1 << 20
 AGENT = "agent"
 #: The targets agentenv's connection follows.
 PAGES = [{"type": "page"}]
+#: The CDP input a computer's page driver may send to the active tab, and how long its screenshot may take.
+PAGE_INPUT = frozenset({"Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"})
+CAPTURE_TIMEOUT_S, UNNAVIGATED_CAPTURE_TIMEOUT_S = 3.0, 1.0
 #: Alone, loopback goes through the proxy too. In a computer, the apps on loopback beside it stay reachable; ``<-loopback>``
 #: removes Chromium's own rule, so ``*.localhost`` names still don't.
 ALONE_BYPASS = "<-loopback>"
@@ -187,8 +191,8 @@ class BrowserControl:
     ``dialogs`` says to: always leaving a page that asks before it's left, so no answer of agentenv's blocks a
     navigation."""
 
-    def __init__(self, devtools: DevToolsPipe, dialogs: str) -> None:
-        self.devtools, self.dialogs = devtools, dialogs
+    def __init__(self, devtools: DevToolsPipe, dialogs: str, viewport: Optional[tuple[int, int]] = None) -> None:
+        self.devtools, self.dialogs, self.viewport = devtools, dialogs, viewport
         #: When this record starts: a server that restarts starts another.
         self.since = _now()
         self.tabs: dict[str, dict] = {}
@@ -209,7 +213,8 @@ class BrowserControl:
         downloads unattended: into ``~/Downloads``, a name downloaded again kept beside the first."""
         self.ended(STOP)
         await self.devtools.call("Target.setDiscoverTargets", {"discover": True, "filter": PAGES})
-        await self.devtools.call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": False,
+        await self.devtools.call("Target.setAutoAttach", {"autoAttach": True,
+                                                          "waitForDebuggerOnStart": self.viewport is not None,
                                                           "flatten": True, "filter": PAGES})
         await self.devtools.call("Browser.setDownloadBehavior", {"behavior": "default", "eventsEnabled": True})
 
@@ -268,6 +273,36 @@ class BrowserControl:
                 "closed_tabs": list(self.closed_tabs), "downloads": list(self.downloads.values()),
                 "dialogs": list(self.dialog_log)}
 
+    async def active_session(self) -> str:
+        """The session of the active tab, else of the first open one; DeviceUnavailable with no tab open."""
+        active = await self.active_tab() or next(iter(self.tabs), None)
+        session = next((session for session, target in self._sessions.items() if target == active), None)
+        if session is None:
+            raise DeviceUnavailable("the browser has no tab open")
+        return session
+
+    async def capture(self) -> Optional[str]:
+        """The active tab's page as it shows now, a PNG, base64; None for a tab that paints nothing within
+        ``CAPTURE_TIMEOUT_S``, which a desktop browser shows blank, or sooner for a tab with no URL yet, such as a new
+        tab whose navigation the browser blocked, which may never paint."""
+        session = await self.active_session()
+        navigated = self.tabs.get(self._sessions[session], {}).get("url")
+        try:
+            shot = await self.devtools.call("Page.captureScreenshot", {"format": "png", "optimizeForSpeed": True},
+                                            session_id=session,
+                                            timeout_s=CAPTURE_TIMEOUT_S if navigated else UNNAVIGATED_CAPTURE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return None
+        return shot["data"]
+
+    async def dispatch(self, events: list[dict]) -> None:
+        """Each of ``events``, a CDP input call, sent to the active tab in order; InvalidArgument for any other call."""
+        if refused := [event.get("method") for event in events if event.get("method") not in PAGE_INPUT]:
+            raise InvalidArgument(f"page input takes {', '.join(sorted(PAGE_INPUT))}, not {refused}")
+        session = await self.active_session()
+        for event in events:
+            await self.devtools.call(event["method"], event.get("params") or {}, session_id=session)
+
     async def _refresh(self, target: Optional[str] = None) -> None:
         """The URL and title of the tab ``target``, or of every open tab, as the browser has them now: it sends no
         event when a page's title changes."""
@@ -307,9 +342,19 @@ class BrowserControl:
     def _on_Target_attachedToTarget(self, params: dict, session: Optional[str]) -> None:
         if params["targetInfo"].get("type") == "page":
             self._sessions[params["sessionId"]] = params["targetInfo"]["targetId"]
-            self._spawn(self.devtools.call("Page.enable", session_id=params["sessionId"]))
-            # A page attached as it opens, a popup say, waits for this before it navigates.
-            self._spawn(self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=params["sessionId"]))
+            self._spawn(self._let_run(params["sessionId"]))
+
+    async def _let_run(self, session: str) -> None:
+        """A page it attached to, enabled and, headless, held to its window's size, then told to run: a page attached as
+        it opens, a popup say, or any new page headless, waits for that before it runs."""
+        try:
+            await self.devtools.call("Page.enable", session_id=session)
+            if self.viewport is not None:
+                width, height = self.viewport
+                await self.devtools.call("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session_id=session)
+        finally:
+            await self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=session)
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
         self._sessions.pop(params["sessionId"], None)
@@ -433,16 +478,19 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         for folder in (UPLOADS, DOWNLOADS):
             (Path.home() / folder).mkdir(exist_ok=True)
         #: agentenv's control of it over that connection, and the record it keeps.
-        self.control = BrowserControl(self.devtools, self.settings.dialogs)
+        self.control = BrowserControl(self.devtools, self.settings.dialogs,
+                                      (self.settings.window.width, self.settings.window.height) if _alone()
+                                      else None)
         self.devtools.on_close(self._pipe_closed)
 
     @classmethod
     def declaration(cls) -> AppDeclaration:
-        """What the class declares; ValueError for a launch whose command carries a flag agentenv owns."""
+        """What the class declares, a website browser; ValueError for a launch whose command carries a flag agentenv
+        owns."""
         for declared in cls._installs.values():
             if declared.launch is not None:
                 _refuse_owned(cls.__name__, declared.launch)
-        return super().declaration()
+        return super().declaration().model_copy(update={"browser": True})
 
     def profile_dir(self) -> Path:
         return Path.home() / self.profile
@@ -469,7 +517,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                              "names none")
         if alone:
             flags.append(f"--window-size={settings.window.width},{settings.window.height}")
-        if _headless():
+        if alone:
             flags.append("--headless=new")
         return flags
 
@@ -491,7 +539,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def _command_line_tabs(self) -> list[str]:
         """The start tabs its command line opens: headless Chromium takes one, and the rest open over its pipe."""
-        return self.settings.start_urls[:1] if _headless() else self.settings.start_urls
+        return self.settings.start_urls[:1] if _alone() else self.settings.start_urls
 
     async def _launch_fds(self) -> dict[int, int]:
         """Before each launch, an empty cache and the deploy's prompt answers in its profile; and a new debugging pipe:
@@ -568,9 +616,26 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "A website browser agentenv runs: its build, the clock its pages see and, alone, its window. record returns "
         "what agentenv's own connection to it saw: its open tabs, each with whether it's active, the tabs closed and "
         "who closed them, its downloads with their size and sha256, its JavaScript dialogs and who answered each, and "
-        "each launch, stop and exit of it since the computer booted, with its cause."))
+        "each launch, stop and exit of it since the computer booted, with its cause. page/viewport, page/capture and "
+        "page/input are its active tab's page as a computer's page driver sees it: its size in pixels, which headless "
+        "is its window's, a PNG of it, and CDP input calls sent to it in order."))
     async def browser_record(self) -> dict:
         return {**await self.control.record(), "launches": self._computer_app.launches()}
+
+    @extension(BROWSER, op="page/viewport", method="GET")
+    async def browser_page_viewport(self) -> dict:
+        window = self.settings.window
+        return {"width": window.width, "height": window.height}
+
+    @extension(BROWSER, op="page/capture", method="GET")
+    async def browser_page_capture(self) -> dict:
+        png = await self.control.capture()
+        return {"png": png} if png is not None else {"blank": True}
+
+    @extension(BROWSER, op="page/input")
+    async def browser_page_input(self, events: list[dict]) -> dict:
+        await self.control.dispatch(events)
+        return {}
 
     def extension_params(self, uri: str) -> dict:
         if uri == BROWSER:
@@ -586,11 +651,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
 
 def _alone() -> bool:
-    return os.environ.get(ALONE_ENV) == "1"
-
-
-def _open_web() -> bool:
-    return os.environ.get(OPEN_WEB_ENV) == "1"
+    """Whether it runs on a computer with no display, a browser computer's, alone and headless."""
+    return computer_app.detect().display == "none"
 
 
 def _shm_bytes(path: str = "/dev/shm") -> int:
@@ -599,11 +661,6 @@ def _shm_bytes(path: str = "/dev/shm") -> int:
     except OSError:
         return 0
     return stats.f_frsize * stats.f_blocks
-
-
-def _headless() -> bool:
-    """Alone it runs headless, but headful on Xvfb for the open web, whose sites block headless browsers."""
-    return _alone() and not _open_web()
 
 
 def _refuse_owned(name: str, launch: Launch) -> None:

@@ -423,6 +423,40 @@ def test_a_driver_that_cant_compose_with_the_base_is_refused(base, docker, tmp_p
     assert problem in str(refused.value)
 
 
+@pytest.mark.parametrize("names, problem", [
+    ((), "apps: @local/~/kit/desk's screen is a website browser's page, so its computer takes exactly one website "
+         "browser; it has 0"),
+    (("first", "second"), "it has 2: @local/~/kit/first, @local/~/kit/second"),
+])
+def test_a_driver_whose_screen_is_a_page_takes_exactly_one_website_browser_and_any_other_apps(base, docker, tmp_path,
+                                                                                               names, problem):
+    page = _driver(tmp_path / "driver", features={"screen": "page"})
+    mail = _app(None, None, tmp_path / "mail", compose=False)
+    browsers = [_app(None, None, tmp_path / name, compose=False, name=name, browser=True) for name in names]
+
+    with pytest.raises(ValueError) as refused:
+        _put(base, page, compose=False, apps=[*browsers, mail])
+    alone = _put(base, page, compose=False, apps=[_app(None, None, tmp_path / "one", compose=False, name="one",
+                                                       browser=True), mail])
+    desktop = _put(base, _driver(tmp_path / "desktop-driver"), compose=False, id="@local/~/kit/two",
+                   apps=[_app(None, None, tmp_path / "a", compose=False, name="a", browser=True),
+                         _app(None, None, tmp_path / "b", compose=False, name="b", browser=True)])
+
+    assert problem in str(refused.value)
+    assert [app.environment_name for app in alone.apps] == ["one", "mail"] and len(desktop.apps) == 2
+
+
+def test_an_app_deployed_alone_on_a_driver_whose_screen_is_a_page_is_one_website_browser(base, docker, tmp_path):
+    page = _driver(tmp_path / "driver", features={"screen": "page"})
+
+    with pytest.raises(ValueError, match="app: @local/~/kit/desk's screen is a website browser's page, so its "
+                                         "computer takes exactly one website browser; it has 0"):
+        _app(base, page, tmp_path / "mail", compose=False)
+    browser = _app(base, page, tmp_path / "browser", compose=False, name="browser", browser=True)
+
+    assert browser.declaration.browser is True
+
+
 def test_a_base_and_driver_with_no_arch_in_common_and_an_image_that_cant_be_got_are_refused(docker, tmp_path):
     image = get_artifact_store().put_document(DockerImageArtifact(id="base-image", description="",
                                                                   image_name="local/base:1"))
@@ -738,6 +772,27 @@ async def test_a_boot_is_ready_with_the_card_read_once_its_status_asked_with_its
 
     assert await boot.ready("http://desk", 5, "t0ken") == {"name": "desk", "children_environments": [{"name": "mail"}]}
     assert sent == [{"Authorization": "Bearer t0ken"}] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_boot_whose_status_says_the_computer_failed_raises_at_once_with_why(monkeypatch):
+    asked = []
+
+    async def card(url, timeout):
+        return {"name": "desk"}
+
+    async def status(url, card, uri, params, timeout, method, headers):
+        asked.append(method)
+        return {"ready": False, "failed": "browser: it ended on its own", "checks": [
+            {"name": "browser", "ok": False, "detail": "it ended on its own", "final": True}]}
+
+    monkeypatch.setattr(boot.protocol_v1, "get_card", card)
+    monkeypatch.setattr(boot.protocol_v1, "invoke_extension", status)
+    monkeypatch.setattr(boot, "_POLL_S", 0)
+
+    with pytest.raises(boot.ComputerFailed, match="the computer at http://desk failed: browser: it ended on its own"):
+        await boot.ready("http://desk", 5, "t0ken")
+    assert asked == ["status"]
 
 
 def test_a_boot_mints_a_generated_setting_resolves_a_secret_its_record_withholds_both_and_a_secret_is_a_reference(
