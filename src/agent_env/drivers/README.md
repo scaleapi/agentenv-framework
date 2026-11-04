@@ -53,7 +53,9 @@ press. cua-driver 0.38.0 fails two of the probe's checks on macOS for defects of
 character's key-up with the A key's code (P6, typed text arrives as key events), and a drag's mouse-down after the
 pointer has moved along its path (P7). `env.toml`'s `[[known_failures.macos]]` names both with that reason, so gate 3
 records them in the build's probe (`known_failures`) and doesn't fail the build for them; any other failure still
-does. A driver's `known_failures`, by OS type, names a check by its id and name, with why.
+does. A driver's `known_failures`, by OS type, names a check by its id and name, with why. One that a probe didn't see
+fail is recorded in its probe (`unused_known_failures`, with what it saw) and warned of, so a waiver doesn't outlive its
+defect; P7's is intermittent, so a probe it passes doesn't show it fixed.
 
 To move it to another cua-driver version:
 

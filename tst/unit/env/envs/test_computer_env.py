@@ -329,14 +329,15 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
         "failed", "probe", f"the probe didn't finish within {probing._PROBE_TIMEOUT_S} s")
 
 
-def test_a_check_the_driver_declares_it_fails_on_the_bases_os_is_recorded_and_doesnt_fail_the_build(
-        base, docker, tmp_path):
+def test_a_check_the_driver_declares_it_fails_is_waived_and_recorded_and_a_declared_one_that_didnt_fail_is_flagged(
+        base, docker, tmp_path, caplog):
     docker.probe_fails["arm64"] = "the click never landed"
     elsewhere = _driver(tmp_path / "elsewhere", known_failures={"macos": [KnownFailure(
         check="P4", name="clicks show their effect", reason="its clicks lag on macOS")]})
     still_failed = Env.get(_put(base, elsewhere).id).metadata["composed"]["container"]["arm64"]
-    known = _driver(tmp_path / "known", known_failures={"linux": [KnownFailure(
-        check="P4", name="clicks show their effect", reason="its clicks lag")]})
+    known = _driver(tmp_path / "known", known_failures={"linux": [
+        KnownFailure(check="P4", name="clicks show their effect", reason="its clicks lag"),
+        KnownFailure(check="P4", name="clicks land", reason="a name the probe doesn't have")]})
 
     ready = Env.get(_put(base, known, id="@local/~/kit/known", environment_name="known").id).metadata[
         "composed"]["container"]["arm64"]
@@ -345,7 +346,17 @@ def test_a_check_the_driver_declares_it_fails_on_the_bases_os_is_recorded_and_do
     assert ready["status"] == "ready" and not ready["probe"]["passed"]
     assert ready["probe"]["known_failures"] == [{"check": "P4", "name": "clicks show their effect",
                                                  "detail": "the click never landed", "reason": "its clicks lag"}]
+    assert ready["probe"]["unused_known_failures"] == [{"check": "P4", "name": "clicks land", "status": "absent"}]
     assert Env.get(known.id, known.version).known_failures["linux"][0].reason == "its clicks lag"
+    docker.probe_fails.clear()
+    fixed = _driver(tmp_path / "fixed", known_failures={"linux": [KnownFailure(
+        check="P0", name="the card", reason="its card was late")]})
+    passed = Env.get(_put(base, fixed, id="@local/~/kit/fixed", environment_name="fixed").id).metadata[
+        "composed"]["container"]["arm64"]
+    assert passed["status"] == "ready" and "known_failures" not in passed["probe"]
+    assert passed["probe"]["unused_known_failures"] == [{"check": "P0", "name": "the card", "status": "passed"}]
+    assert ("declares P0 'the card' a known failure on linux, and its container/arm64 probe found it passed: once what "
+            "it declares is fixed, take it out" in caplog.text)
 
 
 def test_a_probe_ended_by_a_dropped_connection_runs_again_on_a_fresh_boot_and_one_with_a_failed_check_doesnt(
