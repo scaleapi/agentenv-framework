@@ -1,5 +1,6 @@
-"""Serves Browser Use Pi as an A2A agent: each turn runs ``agent.mjs`` once, and a context's turns share one
-conversation through a saved history file. ``AGENT_CARD`` is what agent-env's install/v1 reads."""
+"""Serves Browser Use Pi as an A2A agent: each turn runs ``agent.mjs`` once on the browser the task gives it through
+cdp-config/v1, and a context's turns share one conversation through a saved history file. ``AGENT_CARD`` is what
+agent-env's install/v1 reads."""
 
 import asyncio
 import contextlib
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from agentenv_protocol.a2a_agent import (
+    CDP_CONFIG_V1,
     MCP_CONFIG_V1,
     TRAJECTORY_V1,
     AgentConfig,
@@ -38,8 +40,10 @@ class BrowserUseConfig(AgentConfig):
     effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
     system_prompt: str | None = None
     max_steps: int = 40
-    # A Chrome DevTools endpoint to drive instead of a Browser Use Cloud browser.
-    cdp_url: str | None = None
+    # The cdp-config endpoint to drive, the turn's only one when unnamed, and which of its addresses to connect by: the
+    # browser's WebSocket, or its http_url to discover that from.
+    browser: str | None = None
+    connect_by: Literal["ws", "http"] = "ws"
     timeout_seconds: int = 1800
 
 
@@ -54,6 +58,7 @@ class BrowserUseConfig(AgentConfig):
     config_description="Configure Browser Use Pi: model, effort, system prompt, step budget and browser.",
     extensions=(
         MCP_CONFIG_V1,
+        CDP_CONFIG_V1,
         enable(TRAJECTORY_V1, live=True, description="Browser Use Pi's agent events, live."),
     ),
 )
@@ -66,6 +71,8 @@ class BrowserUseAgent(AgentEnvAgent):
         model = config.model or os.environ.get("BROWSER_USE_A2A_MODEL")
         if not model:
             return TaskResult.failure("browser_use.no_model", "no model is configured; set 'model' through agent-config")
+        # With no browser from the task the turn fails closed, so the agent never drives one of its own.
+        endpoint = request.cdp_endpoint(config.browser)
         session = request.session_ref or hashlib.sha256(request.context_id.encode()).hexdigest()[:32]
         workspace = request.workspace or HOME / "workspaces" / session
         workspace.mkdir(parents=True, exist_ok=True)
@@ -76,7 +83,7 @@ class BrowserUseAgent(AgentEnvAgent):
             "systemPrompt": config.system_prompt,
             "maxSteps": config.max_steps,
             "timeoutMs": max(config.timeout_seconds - DELIVERY_SECONDS, 1) * 1000,
-            "cdpUrl": config.cdp_url or os.environ.get("BROWSER_USE_A2A_CDP_URL"),
+            "cdpUrl": endpoint["ws_url"] if config.connect_by == "ws" else endpoint["http_url"],
             "mcpServers": {name: {"url": s["url"], "headers": s.get("headers") or {}} for name, s in request.mcp_servers.items()},
             "workspace": str(workspace),
             # Browser Use Pi refuses a history saved under another model, so a model change starts a new conversation.

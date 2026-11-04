@@ -13,7 +13,7 @@ scenario = os.environ.get("FAKE_SCENARIO", "ok")
 if scenario == "hang":
     time.sleep(60)
 if scenario == "crash":
-    sys.stderr.write("Error: Browser Use Cloud POST failed (401).")
+    sys.stderr.write("Error: CDP discovery failed (401).")
     sys.exit(1)
 # A library's own stdout, between agent.mjs' lines.
 print("{ not json")

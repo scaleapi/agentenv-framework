@@ -1,7 +1,9 @@
 [
+  {"id": "browser", "type": "deploy_env", "env_id": "chromium"},
   {"id": "deploy", "type": "deploy_agent", "a2a_agent_id": "browser-use", "env_ids": [], "sandbox_type": "local"},
-  {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "depends_on": ["deploy"],
-   "prompt": "Open https://example.com and reply with only the page's title."},
+  {"id": "connect", "type": "browser_connect_cdp", "env_id": "chromium", "depends_on": ["browser", "deploy"]},
+  {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "depends_on": ["connect"],
+   "prompt": "Open data:text/html,<title>Lantern 7</title><h1>Lantern 7</h1> and reply with only the page's title."},
   {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "ask", "verifier_id": "answer",
-   "criteria": [{"type": "response_contains", "needles": ["Example Domain"]}], "depends_on": ["ask"]}
+   "criteria": [{"type": "response_contains", "needles": ["Lantern 7"]}], "depends_on": ["ask"]}
 ]

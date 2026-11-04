@@ -18,6 +18,8 @@ sys.modules[_spec.name] = a2a_server
 _spec.loader.exec_module(a2a_server)
 
 FAKE_AGENT = Path(__file__).with_name("fake_agent.py")
+HTTP_URL = "http://computer.test/svc/chromium/cdp/t/"
+WS_URL = "ws://computer.test/svc/chromium/cdp/t/devtools/browser"
 
 
 @pytest.fixture
@@ -32,6 +34,7 @@ def client(record: Path):
     agent = a2a_server.BrowserUseAgent(command=(sys.executable, str(FAKE_AGENT)))
     with TestClient(agent.create_app()) as client:
         client.post("/ext/agent-config", json={"model": "gpt-test", "effort": "low", "system_prompt": "Be brief."})
+        client.post("/ext/cdp-config", json={"name": "chromium", "http_url": HTTP_URL, "ws_url": WS_URL})
         yield client
 
 
@@ -65,14 +68,35 @@ def test_a_turn_returns_the_answer_and_a_context_keeps_one_conversation(client: 
     assert json.loads(record.read_text())["historyFile"] != turn["historyFile"]
 
 
-def test_a_registration_names_the_browser_and_agent_config_overrides_it(
-        client: TestClient, record: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BROWSER_USE_A2A_CDP_URL", "http://172.17.0.1:9222")
+def test_a_turn_drives_the_browser_the_task_gave_by_its_ws_url_or_http_url_and_the_one_named_of_several(
+        client: TestClient, record: Path) -> None:
     _send(client, "hi")
-    assert json.loads(record.read_text())["cdpUrl"] == "http://172.17.0.1:9222"
-    client.post("/ext/agent-config", json={"cdp_url": "ws://chrome:9222/devtools/browser/b"})
+    by_ws = json.loads(record.read_text())["cdpUrl"]
+    client.post("/ext/agent-config", json={"connect_by": "http"})
     _send(client, "again")
-    assert json.loads(record.read_text())["cdpUrl"] == "ws://chrome:9222/devtools/browser/b"
+    by_http = json.loads(record.read_text())["cdpUrl"]
+    client.post("/ext/cdp-config", json={"name": "other", "http_url": "http://other.test/",
+                                         "ws_url": "ws://other.test/devtools/browser"})
+    client.post("/ext/agent-config", json={"browser": "other", "connect_by": "ws"})
+    _send(client, "third")
+
+    assert (by_ws, by_http) == (WS_URL, HTTP_URL)
+    assert json.loads(record.read_text())["cdpUrl"] == "ws://other.test/devtools/browser"
+
+
+@pytest.mark.parametrize(("endpoints", "code"), [([], "cdp.no_endpoint"), (["chromium", "other"], "cdp.ambiguous")])
+def test_with_no_browser_or_several_and_none_named_the_turn_fails_closed_before_it_runs(
+        record: Path, endpoints: list[str], code: str) -> None:
+    agent = a2a_server.BrowserUseAgent(command=(sys.executable, str(FAKE_AGENT)))
+    with TestClient(agent.create_app()) as client:
+        client.post("/ext/agent-config", json={"model": "gpt-test"})
+        for name in endpoints:
+            client.post("/ext/cdp-config", json={"name": name, "http_url": HTTP_URL, "ws_url": WS_URL})
+        task = _send(client, "hi")
+
+    data = _reply(task)[1]
+    assert task["status"]["state"] == "failed" and (data["error_type"], data["error_code"]) == ("infra_error", code)
+    assert not record.exists()
 
 
 def test_a_run_that_stops_early_fails_with_its_reason(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

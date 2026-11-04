@@ -24,7 +24,7 @@ models.setProvider(createProvider({
   api: openAICompletionsApi(),
 }));
 
-// A cancelled turn stops its browser before it goes, one it is still opening included.
+// A cancelled turn lets go of its browser before it goes, one it is still connecting to included.
 let agent;
 let cancelled = false;
 process.once('SIGTERM', () => {
@@ -68,7 +68,7 @@ agent = await BrowserUse.create({
   reasoning: turn.effort,
   instructions: turn.systemPrompt,
   tools,
-  browser: turn.cdpUrl ? Browser.chrome({ cdpUrl: turn.cdpUrl }) : Browser.cloud({ apiKey: process.env.BROWSER_USE_API_KEY, timeoutMinutes: Math.ceil(turn.timeoutMs / 60_000) + 1 }),
+  browser: Browser.chrome({ cdpUrl: turn.cdpUrl }),
   workspace: turn.workspace,
   historyFile: existsSync(turn.historyFile) ? turn.historyFile : undefined,
   telemetry: false,

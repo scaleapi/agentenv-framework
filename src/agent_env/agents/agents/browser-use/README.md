@@ -7,23 +7,23 @@ a real browser over CDP from a persistent JavaScript REPL. `package-lock.json` p
 
 Each turn runs `node agent.mjs` once. It calls the `[model]` endpoint as an OpenAI-compatible one
 (`LITELLM_BASE_URL`, `LITELLM_API_KEY`, `LITELLM_EXTRA_HEADERS`), and the task env's MCP tools are the agent's tools
-next to the browser, named `<server>__<tool>`. The browser is a [Browser Use Cloud](https://cloud.browser-use.com)
-browser, which needs `BROWSER_USE_API_KEY`, or the Chrome DevTools endpoint `cdp_url` names, else
-`BROWSER_USE_A2A_CDP_URL`, which a registration can set with `--env-var`. A context's turns continue one conversation
-through a saved history file; each turn opens a fresh browser.
+next to the browser, named `<server>__<tool>`.
+- **The browser** is the one the task gives it through `cdp-config/v1`, as the `browser_connect_cdp` step does: the endpoint `browser` names, else the turn's only one.
+- **Connecting:** it connects by the endpoint's `ws_url`, or by `http_url` with `connect_by = "http"`.
+- **With no endpoint,** or several and none named, the turn fails with `cdp.no_endpoint` or `cdp.ambiguous`, an `infra_error`. It never drives a browser of its own.
+- **Across turns:** a context's turns continue one conversation through a saved history file, and each turn connects afresh.
 
-It takes its model from the prompt, so a run needs `[model] default` (or the `agent` role) set, and the browser key
-reaches it through a registration of its own:
+It takes its model from the prompt, so a run needs `[model] default` (or the `agent` role) set. The smoke task deploys
+`chromium` from the `browsers` bundle beside it, connects the agent to it, and has it read a synthetic page's title:
 
 ```bash
-agent-env a2a-agent put --id browser-use --dockerfile src/agent_env/agents/agents/browser-use/Dockerfile \
-    --env-var BROWSER_USE_API_KEY=...
 agent-env run agents --task browser-use-smoke
 ```
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `model` (else `BROWSER_USE_A2A_MODEL`), `effort`, `system_prompt` (added to Browser Use Pi's instructions), `max_steps`, `cdp_url` (else `BROWSER_USE_A2A_CDP_URL`), `timeout_seconds` |
+| `agent-config/v1` | `model` (else `BROWSER_USE_A2A_MODEL`), `effort`, `system_prompt` (added to Browser Use Pi's instructions), `max_steps`, `browser`, `connect_by` (`ws` or `http`), `timeout_seconds` |
+| `cdp-config/v1` | SDK default; each turn reads its endpoint with `request.cdp_endpoint(browser)` |
 | `mcp-config/v1` | SDK default; each server's tools are listed per turn and called over streamable HTTP |
 | `trajectory/v1` | Browser Use Pi's agent events, live, format `browser-use-pi-events/1`, without the streamed `message_update` / `tool_execution_update` deltas |
 
