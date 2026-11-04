@@ -59,11 +59,12 @@ def to_app(headers: Iterable[tuple[str, str]], host: str, scheme: str, prefix: s
 
 def target(connection: Request | WebSocket) -> str:
     """The path and query a request under ``/svc/<name>/`` asks its app for, as it came: still percent-encoded, so an
-    escaped ``?``, ``#`` or ``/`` stays one; re-escaped from the routed path when the raw one's first two segments
-    aren't ``svc`` and the app's name."""
-    parts = (connection.scope.get("raw_path") or b"").decode("latin-1").split("/", 3)
-    if len(parts) == 4 and unquote(parts[1]) == "svc" and unquote(parts[2]) == connection.path_params["name"]:
-        tail = parts[3]
+    escaped ``?``, ``#`` or ``/`` stays one. The raw path's segments past any the driver is mounted under must be
+    ``svc`` and the app's name, else the routed path is escaped again."""
+    mounted = len([segment for segment in connection.scope.get("root_path", "").split("/") if segment])
+    parts = (connection.scope.get("raw_path") or b"").decode("latin-1").split("/")[1 + mounted:]
+    if len(parts) > 2 and [unquote(part) for part in parts[:2]] == ["svc", connection.path_params["name"]]:
+        tail = "/".join(parts[2:])
     else:
         tail = quote(connection.path_params["path"], safe=PATH_SAFE)
     query = connection.scope.get("query_string", b"").decode("latin-1")

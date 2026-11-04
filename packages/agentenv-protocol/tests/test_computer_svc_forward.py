@@ -11,6 +11,7 @@ import hashlib
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -203,6 +204,15 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
     assert (b"content-disposition", 'attachment; filename="报告.zip"'.encode()) in seen.headers.raw
     assert utf8["x-name"] == "报告".encode().decode("latin-1")
     assert raw == {"path": "/raw/a%3Fb%2Fc", "query": "q=1"} and escaped == {"path": "/raw/a%3Fb", "query": "q=1"}
+
+
+@pytest.mark.parametrize(("raw", "root", "routed"), [(b"/svc/echo/raw/a%2Fb", "", "raw/a/b"),
+                                                     (b"/gw/svc/echo/raw/a%2Fb", "/gw", "raw/a/b")])
+def test_the_apps_path_is_the_raw_one_past_svc_and_its_name_wherever_the_driver_is_mounted(raw, root, routed):
+    connection = SimpleNamespace(scope={"raw_path": raw, "root_path": root, "query_string": b"q=1"},
+                                 path_params={"name": "echo", "path": routed})
+
+    assert svc.target(connection) == "/raw/a%2Fb?q=1"
 
 
 async def _handshake(url: str, host: str) -> bytes:
