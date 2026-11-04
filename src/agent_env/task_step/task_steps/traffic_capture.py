@@ -86,11 +86,12 @@ def captures_traffic(deployed: DeployedEnv) -> bool:
 
 
 async def collect_uncollected_captures(context: TaskStepContext, envs: Sequence[DeployedEnv]) -> None:
-    """Collect the captures of each of ``envs`` that serves traffic/v1 and whose captures the run hasn't collected or
-    tried to, as teardown does before the envs close; ``collect_captures`` records what happened to each."""
-    tried = context.metadata.get(TRAFFIC_KEY) or {}
+    """Collect the captures of each of ``envs`` that serves traffic/v1 and whose captures the run hasn't collected, a
+    collection that failed tried again, as teardown does before the envs close; ``collect_captures`` records what
+    happened to each."""
+    entries = context.metadata.get(TRAFFIC_KEY) or {}
     for deployed in envs:
-        if captures_traffic(deployed) and deployed.env_id not in tried:
+        if captures_traffic(deployed) and (entries.get(deployed.env_id) or {}).get("state") != "collected":
             await collect_captures(context, deployed)
 
 

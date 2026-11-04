@@ -164,10 +164,11 @@ async def test_an_env_the_run_didnt_deploy_is_recorded(gateway):
 
 
 @pytest.mark.asyncio
-async def test_teardown_collects_only_capturing_envs_the_run_didnt_collect(gateway):
+async def test_teardown_collects_each_capturing_env_the_run_didnt_collect_a_failed_collection_again(gateway):
     capturing, plain, done = _deployed(), _deployed("plain-env", capturing=False), _deployed("done-env")
     context = _context(capturing, plain, done)
-    context.metadata[TRAFFIC_KEY] = {"done-env": {"state": "collected", "artifact": None}}
+    context.metadata[TRAFFIC_KEY] = {"done-env": {"state": "collected", "artifact": None},
+                                     "notes-env": {"state": "failed", "error": "ConnectError: refused"}}
 
     await collect_uncollected_captures(context, context.deployed_envs)
 
