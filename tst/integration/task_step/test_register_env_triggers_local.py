@@ -89,6 +89,9 @@ async def test_each_nl_action_reaches_the_executor_it_names(items_env):
         "ALICE-ACTS by alice@example.com", "BOB-ACTS by bob@example.com"]
     named = {e["trigger_id"]: e["detail"].get("executor") for e in state["events"] if e["kind"] == "action_ok"}
     assert named == {"to-alice": "alice", "to-bob": "bob"}
+    acted = {"items_whoami": 1, "items_add_item": 1}
+    assert {e["trigger_id"]: e["detail"]["calls"] for e in state["events"] if e["kind"] == "action_ok"} == {
+        "to-alice": acted, "to-bob": acted}
     assert state["config"]["executors"] == ["alice", "bob"]
     assert context.metadata["env_trigger_registrations"][0]["executor_agent_names"] == ["alice", "bob"]
 

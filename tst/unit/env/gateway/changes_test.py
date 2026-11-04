@@ -271,7 +271,7 @@ async def test_a_request_keeps_the_trigger_fire_it_started_under(monkeypatch):
     changelog = _Changelog()
     cause = {"trigger_id": "reply", "action_index": 0, "fire": 1}
     gw = _gateway(changelog, rest_proxy_urls={"mail": "http://mail-backend"})
-    gw._trigger_engine._in_flight["bob@example.com"] = [cause]
+    gw._trigger_engine._in_flight["bob@example.com"] = [{"cause": cause, "calls": {}, "failed_calls": {}}]
 
     async def body():
         yield b"a"
@@ -304,7 +304,8 @@ async def test_a_write_through_the_rest_proxy_is_a_logged_window_and_a_read_is_n
     transport = httpx.MockTransport(website)
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"}, rest_proxy_urls={"mail": "http://mail-backend"})
-    gw._trigger_engine._in_flight["bob@example.com"] = [{"trigger_id": "reply", "action_index": 0, "fire": 2}]
+    gw._trigger_engine._in_flight["bob@example.com"] = [
+        {"cause": {"trigger_id": "reply", "action_index": 0, "fire": 2}, "calls": {}, "failed_calls": {}}]
     before = len(_trajectory())
 
     assert (await _http(gw, "GET", "/website/mail/inbox"))[0] == 200

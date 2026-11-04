@@ -901,6 +901,32 @@ async def test_each_fire_is_numbered_failed_ones_included(engine, monkeypatch):
     assert [causes[0]["fire"] for causes in seen] == [1, 2, 3] and engine._triggers["x"]["fire_count"] == 2
 
 
+@pytest.mark.asyncio
+async def test_an_nl_action_ok_counts_the_calls_its_executor_made_for_the_fire(engine, monkeypatch):
+    acts = iter([[("slack_conversations_history", False), ("slack_send_message", True), ("slack_send_message", False)],
+                 []])
+
+    async def executor(self, executor, instruction, context_id):
+        for tool, failed in next(acts):
+            engine.on_tool_call("bob", tool, {}, _result(is_error=failed))
+        engine.on_tool_call("default", "gdocs_search_documents", {}, _result())  # someone else's call
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "repeat": True},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    for _ in range(2):
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.05)
+    engine.on_tool_call("bob", "slack_send_message", {}, _result())  # after its fires ended
+
+    oks = [e["detail"] for e in engine._events if e["kind"] == "action_ok"]
+    assert [(d["calls"], d.get("failed_calls")) for d in oks] == [
+        ({"slack_conversations_history": 1, "slack_send_message": 1}, {"slack_send_message": 1}), ({}, None)]
+    assert engine.caused_by("bob") == []
+
+
 def test_generated_id_on_omit(engine):
     r = engine.register({"watch_roles": ["default"], "triggers": [
         {"when": {"type": "action", "tool": "t"}, "actions": []}]})

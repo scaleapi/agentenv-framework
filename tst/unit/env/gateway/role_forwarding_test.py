@@ -88,7 +88,7 @@ def test_mcp_tool_calls_record_who_made_them_and_the_fires_in_flight_for_that_ex
     gw._clock.set_time("2019-06-15T12:00:00Z", 1)
     gw._register_get_time_tool()
     cause = {"trigger_id": "x", "action_index": 0, "fire": 1}
-    gw._trigger_engine._in_flight["bob@example.com"] = [cause]
+    gw._trigger_engine._in_flight["bob@example.com"] = [{"cause": cause, "calls": {}, "failed_calls": {}}]
     before = len(_trajectory(gw))
 
     for role in ("bob@example.com", "alice@example.com"):
