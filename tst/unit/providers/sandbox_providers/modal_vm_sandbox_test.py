@@ -419,7 +419,7 @@ async def test_terminate_sandbox_terminates_a_vm_by_id_and_counts_one_modal_no_l
 from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
-from agent_env.providers.sandbox_providers.local_docker.disk import launcher_variables  # noqa: E402
+from agent_env.providers.sandbox_providers.disk_launcher import launcher_variables  # noqa: E402
 
 DISK_IMAGE = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
 

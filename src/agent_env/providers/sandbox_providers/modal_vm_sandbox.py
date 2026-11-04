@@ -44,13 +44,8 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
 from agent_env.env.published_images import LAUNCHER_IMAGE, published_digest
-from agent_env.providers.sandbox_providers.local_docker.disk import (
-    LAUNCH,
-    RESET,
-    exported_disk,
-    launcher_variables,
-    reset_input,
-)
+from agent_env.providers.sandbox_providers.disk_launcher import LAUNCH, RESET, launcher_variables, reset_input
+from agent_env.providers.sandbox_providers.local_docker.disk import exported_disk
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox, VmSandbox, push_object_over_stdin
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
 
@@ -366,7 +361,8 @@ class ModalVmSandboxProvider(SandboxProvider):
         if image is None:
             return await self._created(_KEEPALIVE_CMD, _VM_IMAGE, cpu=cpu, memory=memory, timeout=timeout, ports=ports,
                                        attribution=attribution, network_policy=network_policy,
-                                       setup_for_gateway=setup_for_gateway, experimental_options={"vm_runtime": True})
+                                       setup_for_gateway=setup_for_gateway, idle_timeout=self._idle_timeout,
+                                       experimental_options={"vm_runtime": True})
         disk = await asyncio.to_thread(exported_disk, image)
         variables = {**launcher_variables(ports, env or {}, cpu, memory), "VM_DISK": _MOUNTED_DISK}
         return await self._created(
@@ -385,9 +381,10 @@ class ModalVmSandboxProvider(SandboxProvider):
 
     async def _created(self, command: tuple[str, ...], image: modal.Image, *, cpu: float, memory: int, timeout: int,
                        ports: list[int], attribution: Optional[Attribution], network_policy: Optional[NetworkPolicy],
-                       setup_for_gateway: bool, idle_timeout: Optional[int] = None, **create) -> ModalVmSandbox:
-        """A sandbox of ``image`` running ``command``, in the configured region, its ports' tunnels up, set up for a
-        gateway when ``setup_for_gateway``; one that fails before it's returned is terminated."""
+                       setup_for_gateway: bool, idle_timeout: Optional[int], **create) -> ModalVmSandbox:
+        """A sandbox of ``image`` running ``command``, in the configured region, its ports' tunnels up, ended once idle
+        ``idle_timeout`` seconds when given, set up for a gateway when ``setup_for_gateway``; one that fails before
+        it's returned is terminated."""
         attribution = dict(attribution or {})
         app_tags = _attribution_tags({})
         sandbox_tags = _attribution_tags(attribution)
@@ -395,7 +392,6 @@ class ModalVmSandboxProvider(SandboxProvider):
         app = await self._get_app(app_name, app_tags)
         client = await self._get_client()
         effective = self.effective_network_policy(network_policy)
-        idle_timeout = idle_timeout or self._idle_timeout
         logger.info(
             f"Creating Modal VM sandbox (app={app_name}, tags={app_tags}, sandbox_tags={sandbox_tags}, ports={ports}, "
             f"cpu={cpu}, memory={memory}MB, timeout={timeout}s, idle_timeout={idle_timeout}, region={self._region}, "

@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from agent_env.env.published_images import DISK
+from agent_env.providers.sandbox_providers.disk_launcher import reset_input
 from agent_env.providers.sandbox_providers.local_docker import disk as local_disk
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
@@ -91,7 +92,7 @@ def test_the_launcher_gets_kvm_the_vms_ports_and_size_and_its_environment_under_
 
     assert args == ["--device", "/dev/kvm", "-e", "VM_PORTS=18765 5900", "-e", "VM_CPUS=2", "-e", "VM_MEMORY_MB=4096",
                     "-e", "VM_REQUIRE_KVM=1", "-e", "VM_ENV_ENVIRONMENT_NAME=ZGVzaw==", "-e", "VM_ENV_A=YiBj"]
-    assert local_disk.reset_input({"ENVIRONMENT_NAME": "desk", "A": "b c"}) == (
+    assert reset_input({"ENVIRONMENT_NAME": "desk", "A": "b c"}) == (
         "VM_ENV_ENVIRONMENT_NAME=ZGVzaw==\nVM_ENV_A=YiBj\n")
 
 
@@ -270,7 +271,7 @@ def launched(monkeypatch):
     monkeypatch.setattr(local_sandbox, "machine_image", AsyncMock(return_value="agentenv-vm:0123"))
     monkeypatch.setattr(local_sandbox, "_free_host_port", lambda: 20001)
     monkeypatch.setattr(local_sandbox, "_host_ips", lambda: ("127.0.0.1",))
-    monkeypatch.setattr(local_sandbox, "_docker", lambda *args, input=None, timeout=None: ran.append(
+    monkeypatch.setattr(local_sandbox, "docker", lambda *args, input=None, timeout=None: ran.append(
         args if input is None else (*args, input, timeout)) or "")
     monkeypatch.setattr(LocalSandbox, "pull_images", AsyncMock())
     monkeypatch.setattr(LocalSandbox, "exec_script", AsyncMock(side_effect=lambda script: ran.append(script) or ""))
@@ -301,13 +302,13 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
 async def test_a_boot_cancelled_while_docker_starts_the_launcher_waits_for_it_then_tears_it_down(launched, monkeypatch):
     started, release, order = threading.Event(), threading.Event(), []
 
-    def docker(*args):
+    def docker(*args, **options):
         started.set()
         release.wait(5)
         order.append("run")
         return ""
 
-    monkeypatch.setattr(local_sandbox, "_docker", docker)
+    monkeypatch.setattr(local_sandbox, "docker", docker)
     monkeypatch.setattr(LocalSandbox, "terminate", AsyncMock(side_effect=lambda: order.append("terminate")))
     booting = asyncio.ensure_future(LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={}))
     await asyncio.to_thread(started.wait, 5)
@@ -345,7 +346,7 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
         ran.append(args)
         if args[0] == "cp":
             Path(args[2]).write_bytes(b"disk of " + args[1].encode())
-        return "container1\n" if args[0] == "create" else ""
+        return "container1" if args[0] == "create" else ""
 
     def run(argv, stdin=None, stdout=None, **kwargs):
         if argv[:2] == ["docker", "run"]:
@@ -353,7 +354,7 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
             stdout.write(b"zstd:" + stdin.read())
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
-    monkeypatch.setattr(local_disk, "_docker", docker)
+    monkeypatch.setattr(local_disk, "docker", docker)
     monkeypatch.setattr(local_disk.subprocess, "run", run)
     first = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
 

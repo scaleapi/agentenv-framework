@@ -15,6 +15,9 @@
 # stdin, returning once its new QEMU has started; its ports stay up throughout.
 set -euo pipefail
 state=${VM_STATE:-/var/lib/agentenv-vm}
+# A reset and the boot loop meet here: the reset writes next.env, creates reset and stops the QEMU qemu.pid names; the
+# loop, finding reset, takes next.env's environment, removes reset and boots afresh; the reset returns once qemu.pid
+# names the new QEMU.
 control=$state/control
 
 if [ "${1:-}" = reset ]; then

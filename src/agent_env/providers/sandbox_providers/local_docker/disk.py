@@ -4,9 +4,7 @@ run with /dev/kvm; and a disk exported from the image store by this machine's Do
 carry."""
 
 import asyncio
-import base64
 import hashlib
-import math
 import os
 import subprocess
 import tempfile
@@ -17,17 +15,13 @@ from agent_env.artifact.artifacts.docker_image import docker_login
 from agent_env.config import get_config
 from agent_env.config.paths import cache_root
 from agent_env.env.published_images import LAUNCHER_IMAGE, published_pinned
+from agent_env.providers.sandbox_providers.disk_launcher import launcher_variables
 from agent_env.providers.sandbox_providers.host_images import host_platform, present
+from agent_env.providers.sandbox_providers.local_docker.cli import docker
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import build_image
 
 KVM = "/dev/kvm"
-#: How the launcher takes the computer's environment, each variable under this prefix, base64'd (see its launch script).
-ENV_PREFIX = "VM_ENV_"
-#: The launcher's command, which boots the computer (see its launch script).
-LAUNCH = "/usr/local/bin/launch"
-#: Its command that boots the computer afresh, with the environment ``reset_input`` gives on its stdin.
-RESET = (LAUNCH, "reset")
 
 
 def kvm_platforms() -> frozenset[str]:
@@ -45,22 +39,10 @@ async def machine_image(disk: str) -> str:
     return tag
 
 
-def launcher_variables(ports: list[int], env: dict[str, str], cpu: float, memory: int) -> dict[str, str]:
-    """The environment that has the launcher size its VM, forward ``ports``, refuse to boot without KVM and hand the
-    computer ``env``, each value base64'd, so one of several lines reaches the computer whole."""
-    return {"VM_PORTS": " ".join(map(str, ports)), "VM_CPUS": str(max(1, math.ceil(cpu))), "VM_MEMORY_MB": str(memory),
-            "VM_REQUIRE_KVM": "1", **_computer_variables(env)}
-
-
 def launcher_args(ports: list[int], env: dict[str, str], cpu: float, memory: int) -> list[str]:
     """The ``docker run`` arguments that pass the launcher KVM and its ``launcher_variables``."""
     return ["--device", KVM, *(arg for name, value in launcher_variables(ports, env, cpu, memory).items()
                                for arg in ("-e", f"{name}={value}"))]
-
-
-def reset_input(env: dict[str, str]) -> str:
-    """What ``RESET`` reads on its stdin: the computer's new environment ``env``, a variable a line."""
-    return "".join(f"{name}={value}\n" for name, value in _computer_variables(env).items())
 
 
 def exported_disk(image: str) -> Path:
@@ -74,20 +56,16 @@ def exported_disk(image: str) -> Path:
     return path
 
 
-def _computer_variables(env: dict[str, str]) -> dict[str, str]:
-    return {f"{ENV_PREFIX}{name}": base64.b64encode(value.encode()).decode() for name, value in env.items()}
-
-
 def _export(image: str, path: Path) -> None:
     """Signed in to the image store first, as a boot's pull is, since ``docker create`` pulls ``image`` when it isn't
     here."""
     path.parent.mkdir(parents=True, exist_ok=True)
     docker_login(get_config().get_image_store().auth(image))
-    container = _docker("create", image, "disk").strip()
+    container = docker("create", image, "disk")
     try:
         with tempfile.TemporaryDirectory(prefix="export-", dir=path.parent) as work:
             raw, compressed = Path(work) / "disk.img", Path(work) / path.name
-            _docker("cp", f"{container}:/{DISK_FILE}", str(raw))
+            docker("cp", f"{container}:/{DISK_FILE}", str(raw))
             with raw.open("rb") as source, compressed.open("wb") as out:
                 done = subprocess.run(["docker", "run", "--rm", "-i", "--entrypoint", "zstd", _launcher(), "-q", "-3",
                                        "-T0", "-c"], stdin=source, stdout=out, stderr=subprocess.PIPE, text=False)
@@ -96,13 +74,6 @@ def _export(image: str, path: Path) -> None:
             os.replace(compressed, path)
     finally:
         subprocess.run(["docker", "rm", container], capture_output=True)
-
-
-def _docker(*args: str) -> str:
-    done = subprocess.run(["docker", *args], capture_output=True, text=True)
-    if done.returncode:
-        raise RuntimeError(f"docker {' '.join(args)} failed: {done.stderr.strip()}")
-    return done.stdout
 
 
 def _launcher() -> str:

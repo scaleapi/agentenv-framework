@@ -56,19 +56,29 @@ async def checked(links: list[SandboxProvider], env: ComputerEnv, driver: Comput
     while True:
         try:
             report, card, provider = await _probe(links, env, driver, result["image"], form)
-            break
         except TimeoutError:
-            return _attempted(attempts, failed(env, form, arch, "probe", result["key"],
-                                               f"the probe didn't finish within {_PROBE_TIMEOUT_S} s"))
+            outcome = failed(env, form, arch, "probe", result["key"],
+                             f"the probe didn't finish within {_PROBE_TIMEOUT_S} s")
         except Exception as e:
             if not _dropped(e):
-                return _attempted(attempts, failed(env, form, arch, "probe", result["key"], f"it didn't boot: {e}"))
-            attempts.append({"status": "dropped", "reason": _transport_errors(e), "dropped_at": now()})
-            if len(attempts) == _PROBE_ATTEMPTS:
+                outcome = failed(env, form, arch, "probe", result["key"], f"it didn't boot: {e}")
+            else:
+                attempts.append({"status": "dropped", "reason": _transport_errors(e), "dropped_at": now()})
+                if len(attempts) < _PROBE_ATTEMPTS:
+                    continue
                 return {**failed(env, form, arch, "probe", result["key"],
                                  f"each of its {_PROBE_ATTEMPTS} probes, each on a fresh boot, ended on a transport "
                                  f"error talking to its driver, the last {attempts[-1]['reason']}"),
                         "attempts": attempts}
+        else:
+            outcome = _reported(env, form, arch, result, report, card, provider)
+        return _attempted(attempts, outcome)
+
+
+def _reported(env: ComputerEnv, form: str, arch: str, result: dict, report: ProbeReport, card: dict,
+              provider: str) -> dict:
+    """``result`` probed: ready with the driver's card, or failed at the probe, with a summary of the probe and its
+    report stored."""
     stored = FileArtifact.put_bytes(derive_id(env.stored_id, f"probe_report_{form}_{arch}"), description=(
         f"the {form}/{arch} probe of {env.stored_id} v{env.version}"), filename="probe.json",
         content=report.model_dump_json(indent=1).encode(), content_type="application/json")
@@ -77,9 +87,9 @@ async def checked(links: list[SandboxProvider], env: ComputerEnv, driver: Comput
              "probed_at": now()}
     if not report.passed:
         failing = "; ".join(f"{c.check} {c.name}: {c.detail}" for c in report.checks if c.status == "failed")
-        return _attempted(attempts, {**result, "status": "failed", "stage": "probe",
-                                     "reason": f"the probe failed: {failing}", "failed_at": now(), "probe": probe})
-    return _attempted(attempts, {**result, "status": "ready", "card": card, "probe": probe})
+        return {**result, "status": "failed", "stage": "probe", "reason": f"the probe failed: {failing}",
+                "failed_at": now(), "probe": probe}
+    return {**result, "status": "ready", "card": card, "probe": probe}
 
 
 def _dropped(error: BaseException) -> bool:
