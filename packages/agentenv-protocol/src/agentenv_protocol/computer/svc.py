@@ -8,7 +8,6 @@ import contextlib
 import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
-from typing import Any, Callable
 from urllib.parse import quote, unquote
 
 import httpx
@@ -16,11 +15,10 @@ import websockets
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
-from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection, unix_connect
 
-from ..agent_env_environment import _error_response, control_check
+from ..agent_env_environment import _error_response
 from .app import SOCKET
 from .errors import DeliveryFailed
 
@@ -76,14 +74,13 @@ def _bytes(headers: Iterable[tuple[str, str]]) -> list[tuple[bytes, bytes]]:
     return [(name.encode("latin-1"), value.encode("latin-1")) for name, value in headers]
 
 
-def websocket_route(app: Any, path: str, endpoint: Callable) -> None:
-    """``endpoint`` served at ``path`` as a WebSocket route of ``app``, an mcp or a standalone fastmcp FastMCP, which
-    have no API for one."""
-    for routes in ("_custom_starlette_routes", "_additional_http_routes"):
-        if isinstance(getattr(app, routes, None), list):
-            getattr(app, routes).append(WebSocketRoute(path, endpoint))
-            return
-    raise TypeError(f"a driver's app takes WebSocket routes on an mcp or a fastmcp FastMCP, not a {type(app).__name__}")
+def open_to_agents(routes: list[str], path: str) -> bool:
+    """Whether ``path``, a request's target, is under one of the app's ``routes`` agents reach without the control
+    token, and has no ``.`` or ``..`` segment, escaped or not, that could step out of it."""
+    path = path.partition("?")[0]
+    if any(segment in (".", "..") for segment in unquote(path).split("/")):
+        return False
+    return any(path.startswith(route) for route in routes)
 
 
 async def forward(folder: Path, name: str, request: Request) -> Response:
@@ -123,10 +120,9 @@ async def forward(folder: Path, name: str, request: Request) -> Response:
 
 async def relay(folder: Path, name: str, websocket: WebSocket) -> None:
     """``websocket`` relayed both ways to the app ``name``'s server in ``folder`` until either side closes; refused,
-    before it opens, without the control token, with a Host that isn't a host and port, or with the app's server not
-    answering."""
+    before it opens, with a Host that isn't a host and port, or with the app's server not answering."""
     host = websocket.headers.get("host", "")
-    if not control_check()(websocket.headers) or (host and not HOST.fullmatch(host)):
+    if host and not HOST.fullmatch(host):
         await websocket.close(code=1008)
         return
     headers = [(key, _utf8(value)) for key, value in to_app(

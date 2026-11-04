@@ -84,6 +84,12 @@ def child_card(name: str, card: dict) -> dict:
     return card
 
 
+def agent_routes(card: dict) -> list[str]:
+    """The path prefixes under its own route that an app's ``card`` opens to agents, which reach them through the
+    driver without the computer's control token and the app checks itself."""
+    return list(client.extension_params(card, COMPUTER_APP).get("agent_routes") or [])
+
+
 async def owned_paths(folders: list[Path]) -> list[str]:
     """The paths under the session user's home that the apps in ``folders`` keep their data in, as their cards say."""
     cards = await asyncio.gather(*(served_card(folder) for folder in folders))

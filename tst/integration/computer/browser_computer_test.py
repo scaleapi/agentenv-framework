@@ -4,14 +4,21 @@ its input checks and page tools verified on the HTML desk; deployed through the 
 its computer_* tools see and drive the page, and its page tools navigate, move in history, answer a dialog, use tabs
 and upload; nothing runs X and nothing listens but the driver and the site proxy; a killed app server or driver is
 started again by supervisord and the computer is ready again; and chromium killed fails it for good, computer-ready/v1
-saying why and the tools answering with it. Needs Docker and the local registry on localhost:5000."""
+saying why and the tools answering with it. Through its cdp address, Playwright and Puppeteer drive it two at once,
+each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
+one; the address outlives a relaunch, and the computer's reset ends it. Needs Docker and the local registry on
+localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
 import json
 import platform
+import re
 import shlex
+import shutil
+import subprocess
 import time
 import urllib.parse
+from pathlib import Path
 
 import httpx
 import pytest
@@ -30,12 +37,43 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 #: How long an effect may take to reach the page, or the computer to be ready again; how often it's asked meanwhile.
 WAIT_S, POLL_S = 120.0, 0.5
+#: Playwright and Puppeteer, which connect to a cdp address from Node.
+CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
+#: A WebSocket handshake for the browser's relay sent straight to its app server's socket, as code in the computer's
+#: session can, with the token it's given; prints the status line it gets.
+SOCKET_HANDSHAKE = """import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect("/opt/agentenv/apps/chromium/.agentenv/server.sock")
+s.sendall(("GET /cdp/" + sys.argv[1] + "/devtools/browser HTTP/1.1\\r\\nHost: app\\r\\n"
+           "Upgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Version: 13\\r\\n"
+           "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n\\r\\n").encode())
+print(s.recv(200).split(b"\\r\\n")[0].decode())
+"""
+
+
+@pytest.fixture(scope="module")
+def cdp_clients(tmp_path_factory) -> Path:
+    """The CDP clients installed in a folder of their own, or the test skipped without Node 20 or later and npm."""
+    node, npm = shutil.which("node"), shutil.which("npm")
+    version = subprocess.run([node, "--version"], capture_output=True, text=True).stdout if node else ""
+    if not npm or not (match := re.match(r"v(\d+)", version)) or int(match.group(1)) < 20:
+        pytest.skip("the CDP clients need Node 20 or later and npm")
+    folder = tmp_path_factory.mktemp("cdp-clients")
+    for name in ("package.json", "connect.mjs"):
+        shutil.copy(CDP_CLIENTS / name, folder / name)
+    installed = subprocess.run([npm, "install", "--no-audit", "--no-fund", "--loglevel=error"], cwd=folder,
+                               capture_output=True, text=True, timeout=600)
+    assert installed.returncode == 0, installed.stderr
+    return folder
+
+
 # A page whose title says, as JSON, what reached it: clicks and double clicks on its red box, its input's value, how far
 # it has scrolled and the last keys pressed.
 PAGE = """<title>loading</title><style>body{margin:0;height:4000px;background:rgb(255,255,255)}
@@ -323,6 +361,68 @@ async def _screenshot(deployed) -> Image.Image:
         async with ClientSession(read, write) as session:
             await session.initialize()
             return image(await session.call_tool("computer_screenshot", {"space": "frame"}))
+
+
+@pytest.mark.asyncio
+async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a_relaunch_keeps_and_a_reset_ends(
+        browser_computer, cdp_clients):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
+            await asyncio.sleep(SERVE_START_S)
+            ada, again, bob = [await _cdp(deployed, user) for user in ("ada", "ada", "bob")]
+            together = await _clients(cdp_clients, "together", ada)
+            refused = await _clients(cdp_clients, "refused", ada)
+            from_inside = (await inside.run(deployed, ["python3", "-c", SOCKET_HANDSHAKE, "not-a-token"],
+                                            timeout_s=30))["stdout"].strip()
+            record = await _record(deployed)
+            await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium", headers=deployed.control_headers)
+            relaunched_address = await _cdp(deployed, "ada")
+            relaunched = await _clients(cdp_clients, "together", ada)
+            await ResetEnvTaskStep(id="reset", version=None, env_id=browser_computer.id,
+                                   fail_task_on_error=True).execute(context)
+            after_reset = await _clients(cdp_clients, "refused", ada, wrong=False)
+            fresh = await _cdp(deployed, "ada")
+            serving.cancel()
+        finally:
+            report = await teardown_run(context)
+
+    assert again == ada and bob != ada and ada["http_url"].startswith(f"{deployed.environment_url}/svc/chromium/cdp/")
+    for client in ("playwright_http", "puppeteer_ws", "playwright_ws"):
+        assert together[client].get("ok", {}).get("title") == "Home", together
+        assert relaunched[client].get("ok", {}).get("title") == "Home", relaunched
+    assert "error" in refused["playwright"] and "error" in refused["puppeteer"], refused
+    assert from_inside == "HTTP/1.1 403 Forbidden"
+    assert [c["user"] for c in record["cdp_connections"]] == ["ada", "ada", "ada"]
+    assert relaunched_address == ada
+    assert "error" in after_reset["playwright"] and "error" in after_reset["puppeteer"], after_reset
+    assert fresh != ada and not report.failed
+
+
+async def _cdp(deployed, user: str) -> dict:
+    """``user``'s CDP address, asked of the browser as agentenv asks: through the driver, with the control token."""
+    card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+    app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+    path = protocol_v1.find_extension_method(app, BROWSER, "cdp")["endpoint"]
+    async with httpx.AsyncClient(timeout=120) as http:
+        answer = await http.post(f"{deployed.environment_url}{path}", json={"user": user},
+                                 headers=deployed.control_headers)
+    assert answer.status_code == 200, answer.text
+    return answer.json()
+
+
+async def _clients(folder: Path, check: str, address: dict, wrong: bool = True) -> dict:
+    """What the CDP clients saw doing ``check`` at ``address``; for ``refused``, with its token changed unless not
+    ``wrong``."""
+    argv = ["node", "connect.mjs", check, address["http_url"], address["ws_url"], SITE] + ([] if wrong else ["exact"])
+    process = await asyncio.create_subprocess_exec(*argv, cwd=folder, stdout=asyncio.subprocess.PIPE,
+                                                   stderr=asyncio.subprocess.PIPE)
+    out, err = await asyncio.wait_for(process.communicate(), 300)
+    assert process.returncode == 0, err.decode()[-2000:]
+    return json.loads(out.decode().strip().splitlines()[-1])
 
 
 async def _get(deployed, path: str, **kwargs) -> httpx.Response:

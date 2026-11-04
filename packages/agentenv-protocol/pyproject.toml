@@ -36,10 +36,11 @@ agent = [
     "uvicorn>=0.30",
 ]
 # A computer app's own server: ComputerAppEnvironment serves its card and computer-app/v1 over mcp's FastMCP, on a Unix
-# socket through uvicorn.
+# socket through uvicorn, and a website browser's CDP relay over WebSockets.
 app = [
     "mcp>=1.25,<2",
     "uvicorn>=0.30",
+    "websockets>=13",
 ]
 # A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, records
 # the display as H.264 with PyAV (computer-recording/v1), and relays WebSockets to its apps on /svc/<app>/.
