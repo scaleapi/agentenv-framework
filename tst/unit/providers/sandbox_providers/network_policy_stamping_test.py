@@ -183,6 +183,7 @@ async def _smol_vm() -> Sandbox:
 async def _lume() -> Sandbox:
     provider = LumeSandboxProvider()
     with (patch.object(provider, "_source", AsyncMock(return_value="bench")),
+          patch.object(provider, "_ended_past_lifetime", AsyncMock()),
           patch.object(provider, "_refuse_over_limit", AsyncMock()), patch.object(provider, "_lume", AsyncMock()),
           patch.object(provider, "_get", AsyncMock(return_value={"macAddress": "aa:00:00:00:00:01"})),
           patch.object(provider, "_save"), patch.object(provider, "_started", AsyncMock())):

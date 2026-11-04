@@ -1,7 +1,9 @@
 """The lume provider against a fake ``lume``, which keeps its VMs in a file: a VM is cloned from its VM bundle, sized,
 given the deploy's environment as the protocol's seed in the folder it shares, run, and relayed from this Mac's
-loopback; a reset clones it afresh under its MAC address; a registry image is pulled once by its tag, checked against
-its digest before and after, a pull its tag moved under deleted; two VMs run at most, a reset holding its slot; and a builder shares its build folder and is kept as a local VM bundle."""
+loopback, and ended past its lifetime by the next VM admitted; a reset clones it afresh under its MAC address; a
+registry image is pulled once by its tag, checked against its digest before and after, a pull its tag moved under
+deleted; two VMs run at most, a reset holding its slot; and a builder shares its build folder and is kept as a local
+VM bundle."""
 
 import asyncio
 import json
@@ -84,6 +86,8 @@ SSH = textwrap.dedent('''\
         calls.write(json.dumps({"args": args, "askpass": os.environ.get("SSH_ASKPASS_REQUIRE") == "force"
                                 and os.environ.get("AGENTENV_LUME_SSH_PASSWORD") == "s3cret-pw"}) + "\\n")
     print(command)
+    if command == "true" and os.environ.get("FAKE_SSH_STALL"):
+        time.sleep(60)
     if "shutdown -h now" in command and os.environ.get("FAKE_SSH_HANG"):
         time.sleep(60)
     if "shutdown -h now" in command:
@@ -209,7 +213,7 @@ async def test_a_registry_bundle_is_pulled_once_by_its_tag_checked_before_and_af
 
 
 @pytest.mark.asyncio
-async def test_a_local_bundle_this_mac_lacks_is_refused_and_a_third_vm_is_refused_naming_the_limit_even_mid_reset(mac):
+async def test_a_local_bundle_this_mac_lacks_is_refused_a_third_vm_is_refused_even_mid_reset_and_an_old_one_ended(mac):
     with pytest.raises(ValueError, match="no VM bundle named 'gone'"):
         await mac.create_vm(image="local:gone", env={})
     sandboxes = [await mac.create_vm(image="local:bench", env={}) for _ in range(2)]
@@ -220,6 +224,11 @@ async def test_a_local_bundle_this_mac_lacks_is_refused_and_a_third_vm_is_refuse
                                         mac.create_vm(image="local:bench", env={}), return_exceptions=True)
     assert reset is None and isinstance(third, RuntimeError) and "at most 2" in str(third)
 
+    for sandbox in sandboxes:
+        await sandbox.terminate()
+    abandoned = await mac.create_vm(image="local:bench", env={}, timeout=0)
+    sandboxes = [await mac.create_vm(image="local:bench", env={}) for _ in range(2)]
+    assert abandoned.sandbox_id not in _state(mac.fake)["vms"]
     for sandbox in sandboxes:
         await sandbox.terminate()
     with pytest.raises(ValueError, match="max_running is 1 to 2"):
@@ -260,6 +269,10 @@ async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundl
     with pytest.raises(TimeoutError, match="agentenv-computer-4567 didn't shut down within 1 s, so it isn't kept"):
         await mac.keep_builder(hung)
     await hung.terminate()
+    monkeypatch.setenv("FAKE_SSH_STALL", "1")
+    with pytest.raises(TimeoutError, match="agentenv-computer-89ab didn't answer ssh within 1 s"):
+        await mac.open_builder("local:bench", "agentenv-computer-89ab", build)
+    assert "agentenv-computer-89ab" not in _state(mac.fake)["vms"]
 
 
 def test_it_boots_macos_vm_bundles_on_apple_silicon_alone(monkeypatch):

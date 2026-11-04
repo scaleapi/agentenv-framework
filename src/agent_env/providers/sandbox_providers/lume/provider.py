@@ -133,18 +133,21 @@ class LumeSandboxProvider(SandboxProvider):
                         network_policy: Optional[NetworkPolicy] = None,
                         env: Optional[dict[str, str]] = None) -> LumeSandbox:
         """A VM of the VM bundle ``image``, with ``env`` in its seed and each of ``exposed_ports`` relayed from this
-        Mac's loopback, sized ``cpu`` and ``memory`` (MB) when given, else as the bundle is."""
+        Mac's loopback, sized ``cpu`` and ``memory`` (MB) when given, else as the bundle is. It's ended once ``timeout``
+        seconds have passed, by the next VM admitted on this Mac, as one whose runner exited without terminating it."""
         refuse_unenforceable_policy(self, network_policy)
         if image is None:
             raise ValueError("lume boots a computer's VM bundle, and was given none")
         source = await self._source(image)
         sandbox_id = f"{SANDBOX_PREFIX}{uuid.uuid4().hex[:12]}"
         async with self._admitting():
+            await self._ended_past_lifetime()
             await self._refuse_over_limit()
             await self._lume("clone", source, sandbox_id)
             try:
                 state = {"source": source, "image": image, "mac": (await self._get(sandbox_id))["macAddress"],
-                         "cpu": cpu, "memory": memory, "ports": {str(port): _free_port() for port in exposed_ports or []}}
+                         "cpu": cpu, "memory": memory, "expires_at": time.time() + timeout,
+                         "ports": {str(port): _free_port() for port in exposed_ports or []}}
                 self._save(sandbox_id, state)
                 await self._started(sandbox_id, state, env or {})
             except BaseException:
@@ -191,6 +194,7 @@ class LumeSandboxProvider(SandboxProvider):
             await self._lume("delete", name, "--force")
         state = {"source": source, "image": image, "ports": {}, "build": str(build)}
         async with self._admitting():
+            await self._ended_past_lifetime()
             await self._refuse_over_limit()
             await self._lume("clone", source, name)
             try:
@@ -215,18 +219,12 @@ class LumeSandboxProvider(SandboxProvider):
         deadline = time.monotonic() + self.boot_timeout_s
         shutdown = await self._ssh(name, ["sh", "-c", f"sync; sudo -S -p '' shutdown -h now < {shlex.quote(password)}"],
                                    timeout=60)
-        try:
-            await asyncio.wait_for(shutdown.communicate(), self.boot_timeout_s)
-            while (await self._get(name)).get("status") != "stopped":
-                if time.monotonic() > deadline:
-                    raise TimeoutError
-                await asyncio.sleep(_POLL_S)
-        except TimeoutError:
-            raise TimeoutError(f"{name} didn't shut down within {self.boot_timeout_s:.0f} s, so it isn't kept") from None
-        finally:
-            if shutdown.returncode is None:
-                shutdown.kill()
-                await shutdown.wait()
+        ended = await _bounded(shutdown, self.boot_timeout_s) is not None
+        while ended and (await self._get(name)).get("status") != "stopped":
+            ended = time.monotonic() < deadline
+            await asyncio.sleep(_POLL_S)
+        if not ended:
+            raise TimeoutError(f"{name} didn't shut down within {self.boot_timeout_s:.0f} s, so it isn't kept")
         await self._stopped(name, self._state(name))
         shutil.rmtree(self._folder(name), ignore_errors=True)
         return f"{LOCAL_IMAGE_PREFIX}{name}"
@@ -326,10 +324,10 @@ class LumeSandboxProvider(SandboxProvider):
         raise TimeoutError(f"{name} had no address within {self.boot_timeout_s:.0f} s")
 
     async def _answering(self, name: str) -> None:
+        """``name`` answering ssh within ``boot_timeout_s``, each try bounded by what's left of it."""
         deadline = time.monotonic() + self.boot_timeout_s
-        while time.monotonic() < deadline:
-            process = await self._ssh(name, ["true"], timeout=15)
-            if await process.wait() == 0:
+        while (left := deadline - time.monotonic()) > 0:
+            if await _bounded(await self._ssh(name, ["true"], timeout=15), left) == 0:
                 return
             await asyncio.sleep(_POLL_S)
         raise TimeoutError(f"{name} didn't answer ssh within {self.boot_timeout_s:.0f} s")
@@ -342,6 +340,18 @@ class LumeSandboxProvider(SandboxProvider):
             await self._lume("stop", name, "--force")
         if pid := state.get("run"):
             _kill(pid)
+
+    async def _ended_past_lifetime(self) -> None:
+        """Each VM this provider made on this Mac whose lifetime has passed terminated, as one a runner that exited
+        never terminated holds a slot of the Mac's two."""
+        for vm in _json(await self._lume("ls", "--format", "json")) or []:
+            try:
+                expires_at = self._state(vm["name"]).get("expires_at")
+            except SandboxNotFoundError:
+                continue
+            if expires_at is not None and expires_at <= time.time():
+                logger.warning("lume: terminating %s, past its lifetime", vm["name"])
+                await self.terminate_sandbox(vm["name"])
 
     async def _refuse_over_limit(self) -> None:
         listed = _json(await self._lume("ls", "--format", "json")) or []
@@ -442,6 +452,19 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+async def _bounded(process: asyncio.subprocess.Process, seconds: float) -> int | None:
+    """``process``'s exit code once it ends within ``seconds``; None when it doesn't, it killed and reaped."""
+    try:
+        await asyncio.wait_for(process.communicate(), seconds)
+        return process.returncode
+    except TimeoutError:
+        return None
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
 
 
 def _kill(pid: int) -> None:
