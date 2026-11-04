@@ -51,7 +51,14 @@ jobs:
       - name: Lint
         run: .venv/bin/ruff check
       - name: Unit tier
-        run: .venv/bin/python -m pytest tst/unit packages/agentenv-protocol/tests -n auto -q --timeout=300 --junitxml=junit-unit.xml
+        run: .venv/bin/python -m pytest tst/unit packages/agentenv-protocol/tests -n auto -q --timeout=300 --durations=30 --junitxml=junit-unit.xml
+      # Its tests' times: the slowest few hold up the end of the run.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-unit
+          path: junit-unit.xml
+          retention-days: 14
 
   ui:
     runs-on: ubuntu-latest
@@ -113,11 +120,11 @@ jobs:
   # (tst/util/shards.py). The gateway tests are a check of their own, split the same way. Each check passes
   # when all of its shards do (the integration-local-slow and integration-local-gateway jobs below).
   integration-local-slow-shard:
-    name: integration-local-slow (${{ matrix.shard }}/8)
+    name: integration-local-slow (${{ matrix.shard }}/12)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -143,7 +150,7 @@ jobs:
         run: sudo chmod 666 /dev/kvm
       - name: Slow integration tier on the local defaults
         env:
-          AGENTENV_TEST_SHARD: ${{ matrix.shard }}/8
+          AGENTENV_TEST_SHARD: ${{ matrix.shard }}/12
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
             tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
@@ -161,11 +168,11 @@ jobs:
           retention-days: 14
 
   integration-local-gateway-shard:
-    name: integration-local-gateway (${{ matrix.shard }}/3)
+    name: integration-local-gateway (${{ matrix.shard }}/5)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -186,7 +193,7 @@ jobs:
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
       - name: Slow integration tier on the local defaults
         env:
-          AGENTENV_TEST_SHARD: ${{ matrix.shard }}/3
+          AGENTENV_TEST_SHARD: ${{ matrix.shard }}/5
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
             tst/integration/env/gateway/gateway_test.py
