@@ -61,8 +61,12 @@ _ECHO_KEYS = frozenset({
 _ECHO_ID_RE = re.compile(r"(?:^id|Id|_id)$")  # id, fileId, documentId, email_id, …
 _ECHO_VALUE_MAX = 200  # chars; an allowlisted scalar longer than this is a payload wearing an id's name
 _ECHO_DIGEST_CHARS = 16
+_ECHO_ARGS_MAX_CHARS = 4096  # JSON chars; a provoking call's echo past this is recorded as its args' shape alone
+_ECHO_ARGS_MAX_VALUES = 256  # a provoking call's args holding more values are shaped without building their echo
 
 # Firing-log event vocabulary (the GET /triggers/state contract); _emit rejects anything not here.
+# `provoking` is {tool, role, args} for a tool call, {source: "website", app, method, path, status, role}
+# for a website request, or {source: "clock"} for a time trigger.
 _EVENT_KINDS = frozenset({
     "added", "removed",               # registration lifecycle
     "detected",                       # a trigger's condition matched
@@ -305,6 +309,27 @@ def _echo_args(value: Any, key: str | None = None) -> Any:
             return _shape(value)
         return value
     return _shape(value)
+
+
+def _echo_call_args(arguments: dict) -> Any:
+    """A provoking call's args as its events carry them: `_echo_args`, or only their shape when that echo is too large."""
+    if _holds_more_than(arguments, _ECHO_ARGS_MAX_VALUES):
+        return _shape(arguments)
+    echo = _echo_args(arguments)
+    return echo if len(json.dumps(echo)) <= _ECHO_ARGS_MAX_CHARS else _shape(arguments)
+
+
+def _holds_more_than(value: Any, limit: int) -> bool:
+    """Whether ``value`` nests more than ``limit`` values, counting no further than ``limit``."""
+    pending, count = [value], 1
+    while pending:
+        node = pending.pop()
+        children = node.values() if isinstance(node, dict) else node if isinstance(node, list) else ()
+        count += len(children)
+        if count > limit:
+            return True
+        pending.extend(children)
+    return False
 
 
 def _strings(value: Any) -> list[str]:
@@ -899,7 +924,7 @@ class TriggerEngine:
             return [], None
         data = _result_data(result)
         ctx = {"args": arguments, "result": data}
-        provoking = {"tool": name, "role": role}
+        provoking = {"tool": name, "role": role, "args": _echo_call_args(arguments)}
         # Before detection, so the call that sets off a deadline's anchor can't also be the call that cancels it.
         for tid, trig in provokable:
             when = trig["spec"]["when"]

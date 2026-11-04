@@ -752,12 +752,41 @@ async def test_a_matching_call_after_the_anchor_cancels_the_deadline(engine, vir
     engine.on_tool_call("default", "slack_send_message", {"channel_id": "D1"}, _result())
     assert engine.state()["triggers"][1]["status"] == "cancelled"
     [cancelled] = [e for e in engine._events if e["kind"] == "cancelled"]
-    assert cancelled["provoking"] == {"tool": "slack_send_message", "role": "default"}
+    assert cancelled["provoking"] == {"tool": "slack_send_message", "role": "default", "args": {"channel_id": "D1"}}
 
     virtual_time.advance(3600)
     engine._eval_time_triggers()
     await asyncio.sleep(0.1)
     assert engine._triggers["deadline"]["status"] == "cancelled" and engine._triggers["deadline"]["fire_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_each_detection_names_its_own_calls_ids_but_not_its_content(engine):
+    engine.register({"triggers": [
+        {"id": "dm", "when": {"type": "action", "tool": "slack_send_message", "repeat": True}, "actions": []}]})
+    engine.on_tool_call("default", "slack_send_message", {"channel_id": "D1", "message": "approve $2,400?"}, _result())
+    engine.on_tool_call("default", "slack_send_message", {"channel_id": "U_1", "message": "ok"}, _result())  # queued
+    await asyncio.sleep(0.1)
+
+    detected = [e for e in engine._events if e["kind"] == "detected"]
+    assert [(e["provoking"]["args"], e.get("queued")) for e in detected] == [
+        ({"channel_id": "D1", "message": {"redacted": {"type": "str", "len": 15}}}, None),
+        ({"channel_id": "U_1", "message": {"redacted": {"type": "str", "len": 2}}}, 1)]
+    assert engine._triggers["dm"]["fire_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_args_too_large_to_echo_are_recorded_as_their_shape_and_still_fire(engine):
+    engine.register({"triggers": [{"id": "any", "when": {"type": "action", "tool": "t", "repeat": True}, "actions": []}]})
+    many_values = {"rows": [{"row_id": f"r{i}"} for i in range(10_000)], "name": "x"}
+    few_long_ids = {f"k{i}_id": "x" * 199 for i in range(25)}
+    for args in (many_values, few_long_ids):
+        engine.on_tool_call("default", "t", args, _result())
+        await asyncio.sleep(0.1)
+
+    assert [e["provoking"]["args"] for e in engine._events if e["kind"] == "detected"] == [
+        {"redacted": {"type": "dict", "len": 2}}, {"redacted": {"type": "dict", "len": 25}}]
+    assert engine._triggers["any"]["fire_count"] == 2
 
 
 @pytest.mark.asyncio
