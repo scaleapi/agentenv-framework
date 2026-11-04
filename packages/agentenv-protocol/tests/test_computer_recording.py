@@ -94,12 +94,16 @@ def _grant() -> dict:
                       "file_field": "file"}}
 
 
-async def _record(driver, seconds: float, start: dict | None = None, end: dict | None = None) -> tuple[dict, dict]:
-    """A recording that runs ``seconds`` from its first frame, however long that took to come, and then ends."""
+async def _record(driver, seconds: float, start: dict | None = None, end: dict | None = None,
+                  frames: int | None = None) -> tuple[dict, dict]:
+    """A recording that runs ``seconds`` from its first frame, however long that took to come, and, given ``frames``,
+    until its encoder holds that many, and then ends."""
     async with http_client(driver) as http:
         started = (await http.post(START, json={"request_id": "r", "fps": 10, **(start or {})})).json()
         await _first_frame(driver, started)
         await asyncio.sleep(seconds)
+        if frames is not None:
+            await _encoded(driver, started, frames)
         manifest = (await http.post(END, json={"recording_id": started["recording_id"], **(end or {})})).json()
     return started, manifest
 
@@ -237,7 +241,7 @@ async def test_a_stream_that_keeps_failing_ends_the_recording_with_its_error(hom
 
 @pytest.mark.asyncio
 async def test_a_stream_of_frames_keeps_each_frames_capture_time(home):
-    _, manifest = await _record(Streamed(), 0.8, start={"fps": 20, "max_edge": 640})
+    _, manifest = await _record(Streamed(), 0.8, start={"fps": 20, "max_edge": 640}, frames=10)
     (segment,) = manifest["segments"]
     assert manifest["source"] == "stream" and (segment["width"], segment["height"]) == (640, 400)
     frames = _decoded(home / ".agentenv-recordings" / segment["path"])
@@ -511,3 +515,12 @@ async def test_frames_in_thread_keeps_the_latest_frames_for_a_slow_reader_and_cl
     await endless.aclose()
     assert first == 0 and rest == [26, 27, 28, 29]
     assert await asyncio.to_thread(stopped.wait, 5)
+
+
+async def _encoded(driver, started: dict, frames: int) -> None:
+    """Until the recording's encoder holds ``frames`` frames: a busy machine captures fewer a second."""
+    recording = driver._computer.recordings.running[started["recording_id"]]
+    for _ in range(3000):
+        if recording.encoder and recording.encoder.frames >= frames:
+            return
+        await asyncio.sleep(0.01)
