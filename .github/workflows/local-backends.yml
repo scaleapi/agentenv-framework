@@ -167,9 +167,19 @@ jobs:
       # starts afterwards.
       - name: Pull the base images from mirror.gcr.io
         run: python3 .github/scripts/mirror_base_images.py src tst
+      # The registry keeps its storage on the runner, cached between runs: a computer image or disk is keyed by its
+      # inputs, so one an earlier run pushed is reused rather than built again.
+      - name: Restore the local registry's storage
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/registry
+          key: registry-slow-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: registry-slow-${{ matrix.shard }}-
       - name: Start the local registry
         run: |
-          docker run --detach --name registry --publish 5000:5000 mirror.gcr.io/library/registry:2
+          mkdir -p "$RUNNER_TEMP/registry"
+          docker run --detach --name registry --publish 5000:5000 --volume "$RUNNER_TEMP/registry:/var/lib/registry" \
+            mirror.gcr.io/library/registry:2
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
       # x64 hosted runners have /dev/kvm; the disk form's tests boot under it, and skip without it, which fails below.
       - name: Let the local provider boot disks with KVM
@@ -180,6 +190,15 @@ jobs:
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
             tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
+      - name: Size of the local registry's storage
+        if: always()
+        run: du -sh "$RUNNER_TEMP/registry"
+      - name: Save the local registry's storage
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/registry
+          key: registry-slow-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Skips must be declared capability gaps
         if: always()
         run: |
