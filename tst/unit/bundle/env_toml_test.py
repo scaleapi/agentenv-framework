@@ -183,7 +183,7 @@ def test_a_website_takes_an_inline_spec_table(bundle_dir, builds):
 @pytest.mark.parametrize("toml, spec, problem", [
     ('health = "/other"\n', SPEC, "envs/mail: env.toml: health '/other' isn't the spec's '/healthz'"),
     ('environment_name = "post"\n', SPEC, "envs/mail: env.toml: environment_name 'post' isn't the spec's 'mail'"),
-    ("", SPEC + '[source.live]\nallow_hosts = ["cdn.test"]\n[users]\nsign_in = "live"\n[state]\nread = "diff"\n',
+    ("", SPEC + '[source.live]\nallow_hosts = ["cdn.test"]\n[users]\nsign_in = "live"\n',
      "envs/mail: env.toml: spec: a live source isn't served by a server image, so a website env can't deploy it"),
     ("", '[site]\ndomains = ["Mail.test"]\n', "site.domains: ['Mail.test'] aren't host names in lower case"),
 ], ids=["health", "name", "live", "invalid"])
