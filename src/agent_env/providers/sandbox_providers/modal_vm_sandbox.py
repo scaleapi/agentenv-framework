@@ -123,7 +123,7 @@ _MOUNTED_DISK = "/disk/disk.img.zst"
 #: The memory a disk's sandbox has beyond its VM's: QEMU's own, and the sandbox's.
 _DISK_HOST_MEMORY_MB = 2048
 #: How long a disk's sandbox stays up with no connection open and no command running, when the config sets no
-#: ``idle_timeout``: a running QEMU isn't activity. Modal Budgets ends a sandbox whose idle timeout is over 30 minutes.
+#: ``idle_timeout``: a running QEMU isn't activity, so without one a computer nobody uses lasts its whole timeout.
 _DISK_IDLE_TIMEOUT_S = 30 * 60
 
 

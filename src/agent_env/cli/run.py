@@ -47,7 +47,8 @@ _DRY_RUN = "Dry run: nothing is written or run."
               help="The sandbox provider envs, agents, sandboxes and the judge deploy on, which picks the forms "
                    "computer envs compose on this machine; comma-separated for a fallback chain.")
 @click.option("--keep", is_flag=True,
-              help="Keep the sandboxes up after the runs, print their endpoints, and tear them down on Ctrl-C.")
+              help="Keep the sandboxes up after the runs, print their endpoints, and tear them down on Ctrl-C; a "
+                   "provider's idle timeout still ends one nothing is connected to.")
 @click.option("--dry-run", is_flag=True,
               help="Check the bundle as the run does and show what it would write and run; write and run nothing.")
 @click.option("--no-emulate", is_flag=True,
