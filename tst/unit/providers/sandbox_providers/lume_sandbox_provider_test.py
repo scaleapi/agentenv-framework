@@ -80,7 +80,7 @@ SSH = textwrap.dedent('''\
     *_, login, command = args
     with open(path + ".ssh", "a") as calls:
         calls.write(json.dumps({"args": args, "askpass": os.environ.get("SSH_ASKPASS_REQUIRE") == "force"
-                                and os.environ.get("AGENTENV_LUME_SSH_PASSWORD") == "lume"}) + "\\n")
+                                and os.environ.get("AGENTENV_LUME_SSH_PASSWORD") == "s3cret-pw"}) + "\\n")
     print(command)
     if "shutdown -h now" in command:
         state = json.load(open(path))
@@ -106,7 +106,7 @@ def mac(tmp_path, monkeypatch):
     monkeypatch.setattr(lume, "_free_port", lambda: 48123)
     monkeypatch.setattr(lume, "_POLL_S", 0.05)
     provider = LumeSandboxProvider(lume=str(bin_ / "lume"), ssh=str(bin_ / "ssh"), relay_python=str(bin_ / "relay"),
-                                   boot_timeout_s=10)
+                                   ssh_password="s3cret-pw", boot_timeout_s=10)
     provider.fake = tmp_path
     yield provider
     for vm in _state(tmp_path)["vms"]:
@@ -174,7 +174,7 @@ async def test_a_registry_bundle_is_pulled_once_by_its_tag_once_its_digest_is_ch
     pulls = [call for call in _state(mac.fake)["calls"] if call[0] == "pull"]
     assert pulls == [["pull", "macos:26-x", "agentenv-base-7c7c7c7c7c7c", "--registry", "ghcr.io", "--organization",
                       "trycua"]]
-    assert pinned == [image]
+    assert pinned == [image, image]
     with pytest.raises(ValueError, match="Lume pulls by tag"):
         await mac.create_vm(image="ghcr.io/trycua/macos@sha256:" + "ab" * 32, env={})
 
@@ -217,7 +217,7 @@ async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundl
     assert ["run", "agentenv-computer-0123", "--display", "none", "--vnc", "disabled", f"--shared-dir={build}:rw"] in calls
     assert "bash -c 'echo hi'" in said and all(call["askpass"] for call in ssh)
     assert any(call["args"][-1].startswith("sh -c 'sync; sudo -S") for call in ssh)
-    assert not any("lume" in arg for call in ssh for arg in call["args"][:-1])
+    assert not any("s3cret-pw" in arg for call in ssh for arg in call["args"])
     assert image == "local:agentenv-computer-0123" and await mac.has_vm_bundle(image)
     with pytest.raises(ValueError, match="a builder's folder is named agentenv-build"):
         await mac.open_builder("local:bench", "other", tmp_path)
