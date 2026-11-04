@@ -666,8 +666,9 @@ def test_a_plain_def_route_runs_in_a_worker_thread_and_an_async_one_on_the_loop(
         async def awaited(self) -> dict:
             return {"thread": threading.get_ident()}
 
-    client = TestClient(Threads().create_app())
-    assert client.get("/api/plain").json()["thread"] != client.get("/api/awaited").json()["thread"]
+    # One session keeps the loop's thread alive for both requests; a thread id is reused once its thread ends.
+    with TestClient(Threads().create_app()) as client:
+        assert client.get("/api/plain").json()["thread"] != client.get("/api/awaited").json()["thread"]
 
 
 def test_a_route_whose_type_hints_cant_be_resolved_fails_the_apps_build(dist: Path) -> None:
