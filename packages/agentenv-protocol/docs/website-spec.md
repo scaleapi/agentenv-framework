@@ -22,7 +22,6 @@ A spec is a TOML file. Its top-level keys are fixed and every section is optiona
 | `[users]` | `personas` (ids, or `{id, name, role}` tables); `acting_user`, who a browser with no session is; `sign_in`, which is `cookie` (the site's signed session cookie, by default), `none` or `live`; and, for a cookie sign-in by a server not built on the SDK, its `session_cookie` and `session_path`. |
 | `[roles]` | A role name mapped to the routes it may call. These roles are added to each route's own `roles`. |
 | `[routes]` | `ops`, the named operations, each `name = "METHOD /path"` or a table `{method, path, roles, served_by}`; and `openapi`, an OpenAPI document whose operations, named by `operationId` (each name once) with roles from `x-agentenv-roles`, are routes too. Triggers and records call these names `op`. |
-| `[state]` | How a grader reads the site: `read = "data_plane"` (`data/get`), `"go"` (`GET <path>`, `/go` by default, the session's `{initial_state, current_state, state_diff}`), or `"diff"` (the writes a run made, as the env's proxy recorded them). |
 | `[clock]` | How the site follows the universe's time: `follow = "header"` (`X-Universe-Now` on every answer), `"date_patch"` (its pages' `Date` is shifted too), or `"none"` (wall time). |
 | `[[uses]]` | Components: another spec mounted under a path prefix (see [Composition](#composition)). |
 
@@ -68,9 +67,6 @@ toggle_note = "POST /api/notes/{note_id}/toggle"
 delete_note = "DELETE /api/notes/{note_id}"
 all_notes = "GET /api/admin/notes"
 
-[state]
-read = "go"
-
 [clock]
 follow = "header"
 ```
@@ -113,9 +109,9 @@ checked against.
 
 For every source, `to_card_extension()` returns the `urn:agentenv:website/v1` params a server of the spec advertises:
 `domains`, `health` and `routes` (each `{method, path, name, roles}`); `session_cookie` and `session_path` for a cookie
-sign-in; and `state` and `clock` when they are declared. A WebsiteEnvironment builds its card from these params, so
+sign-in; and `clock` when it is declared. A WebsiteEnvironment builds its card from these params, so
 the card and the spec cannot drift apart. `from_card(card)` reads a running site's card back into a spec. It recovers
-the site, routes, sign-in, state and clock. A card does not carry a site's source, data, personas or the
+the site, routes, sign-in and clock. A card does not carry a site's source, data, personas or the
 `[roles]` table; roles are folded into each route.
 
 ### The SDK
@@ -133,7 +129,6 @@ domains, health path, static folder (`assets`), seed files and clock patch. If a
 - Its `@api` routes must match the spec's routes by name, verb, path and roles, whenever the spec declares routes.
 - `source.sdk` must name the class.
 - The sign-in must be the SDK's cookie.
-- The state read must be how the class is read.
 - `acting_user` must be the seed's `current_user`.
 
 If the class has no `@environment_card` name, the card is named by `site.name`. A card name that differs from
@@ -161,7 +156,7 @@ them out. If the env.toml sets one to a different value, the env is refused. The
 `python -m agentenv_protocol.website.conformance <url> --spec website.toml` runs the usual checks plus two more:
 
 - `spec` checks that the card's name, domains, health path, routes, session cookie and session path are the spec's,
-  and its `state` and `clock` too when the spec declares them.
+  and its `clock` too when the spec declares it.
 - `spec_routes` checks that every declared route is served. An `OPTIONS` to the route's path, with each path parameter
   filled in by a value the converter of the card's route of that name takes (a UUID for `uuid`, else `0`), must find
   something there; a GET route without path parameters must answer neither 404 nor 405; and each
@@ -221,9 +216,6 @@ history = "GET /api/conversations.history"
 post_message = "POST /api/chat.postMessage"
 add_reaction = "POST /api/reactions.add"
 
-[state]
-read = "diff"
-
 [clock]
 follow = "none"
 ```
@@ -267,7 +259,7 @@ into the site:
   are not merged: the site seeds the shared collections.
 - **Users.** The component's personas are added to the site's, merging the fields of a persona they share; fields
   that contradict are a conflict. A component must sign in the way the site does, or not at all (`none`).
-- **The rest.** The component's `site` (domains, health), `source`, `state` and `clock` are not merged. A mounted
+- **The rest.** The component's `site` (domains, health), `source` and `clock` are not merged. A mounted
   component lives under the site's own domains and is served by the site's source.
 
 These are conflicts, each reported as `uses[<i>]: ...`:
@@ -317,9 +309,6 @@ publish_page = "POST /api/pages"
 spec = "components/sso.toml"
 mount = "/sso"
 data = { accounts = "users" }
-
-[state]
-read = "go"
 ```
 
 Resolved, its routes are `list_pages`, `publish_page`, `sso.authorize` (`GET /sso/authorize`), `sso.login`,
@@ -364,7 +353,6 @@ These parts are only modeled: they are declared and validated, but nothing serve
 
 - The `static`, `live` and `replay` sources, and route `served_by`.
 - `[data] models` and collection schemas.
-- `state.read = "diff"`.
 - Mounting a component's implementation. An SDK class that uses a component must serve its routes itself.
 - The name table's use by the gateway.
 - Component references other than file paths.

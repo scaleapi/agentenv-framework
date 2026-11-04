@@ -1,7 +1,7 @@
 """The website spec: one declarative description of a site that every way of serving one produces or is checked
 against. A spec is a TOML file of fixed sections, each optional: ``[site]`` (name, domains, health path),
 ``[source]`` (exactly one of ``image``, ``sdk``, ``static``, ``live``, ``replay``), ``[data]``, ``[users]``,
-``[roles]``, ``[routes]``, ``[state]``, ``[clock]`` and ``[[uses]]``, with ``extends`` naming a spec it overlays.
+``[roles]``, ``[routes]``, ``[clock]`` and ``[[uses]]``, with ``extends`` naming a spec it overlays.
 
 ``load(path)`` reads one, resolves ``extends`` (a deep merge: tables merge key by key, arrays and scalars replace,
 ``[source]`` replaces whole, ``false`` removes an inherited route, role or collection, and ``[[uses]]`` entries are
@@ -47,7 +47,6 @@ except ImportError:
 
 DEFAULT_HEALTH_PATH = "/api/health"
 SESSION_PATH = "/api/session"
-STATE_PATH = "/go"
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 SOURCE_KINDS = ("image", "sdk", "static", "live", "replay")
 NameKind = Literal["synthetic", "live", "allowlist"]
@@ -296,23 +295,6 @@ class Routes(_Section):
         return ops
 
 
-class State(_Section):
-    """How a grader reads the site's state: ``data_plane`` (``data/get``), ``go`` (``GET <path>``, the
-    ``{initial_state, current_state, state_diff}`` of a session), or ``diff`` (the writes a run made, as the env's
-    proxy recorded them, for a site whose data plane isn't its own)."""
-
-    read: Literal["data_plane", "go", "diff"] = "go"
-    path: Optional[str] = None
-
-    @model_validator(mode="after")
-    def _path(self) -> State:
-        if self.path is not None and self.read != "go":
-            raise ValueError("path is where a go read reads")
-        if self.path is not None and not _PATH.fullmatch(self.path):
-            raise ValueError(f"path starts with '/', not {self.path!r}")
-        return self
-
-
 class Clock(_Section):
     """How the site follows the universe's time: ``header`` (its answers carry ``X-Universe-Now`` and its pages read
     it), ``date_patch`` (its pages' ``Date`` is shifted too), or ``none`` (wall time)."""
@@ -357,7 +339,6 @@ class WebsiteSpec(_Section):
     users: Users = Users()
     roles: dict[str, tuple[str, ...]] = {}
     routes: Routes = Routes()
-    state: Optional[State] = None
     clock: Optional[Clock] = None
     uses: tuple[Use, ...] = ()
 
@@ -420,24 +401,16 @@ class WebsiteSpec(_Section):
 
     def to_card_extension(self) -> dict:
         """The ``urn:agentenv:website/v1`` params a server of this spec advertises: its domains, health path and
-        routes by name, its session cookie and path for a cookie sign-in, and how its state is read and its clock
-        followed, when declared."""
+        routes by name, its session cookie and path for a cookie sign-in, and how its clock is followed, when
+        declared."""
         params: dict = {"domains": list(self.site.domains), "health": self.health,
                         "routes": [route.advertised(name) for name, route in self.route_table().items()]}
         if self.users.sign_in == "cookie":
             params["session_cookie"] = self.users.session_cookie or session_cookie_name(self.site.name)
             params["session_path"] = self.users.session_path or SESSION_PATH
-        if self.state is not None:
-            params["state"] = {"read": self.state.read, **({"path": self.state_path} if self.state.read == "go" else {})}
         if self.clock is not None:
             params["clock"] = {"follow": self.clock.follow}
         return params
-
-    @property
-    def state_path(self) -> Optional[str]:
-        if self.state is None or self.state.read != "go":
-            return None
-        return self.state.path or STATE_PATH
 
 
 def load(path: str | Path) -> WebsiteSpec:
@@ -784,10 +757,6 @@ def _check(spec: WebsiteSpec) -> list[str]:
     kind = spec.source.kind if spec.source is not None else None
     if spec.users.sign_in == "live" and kind not in ("live", "replay"):
         problems.append("users.sign_in: live is the sign-in of a live or replayed source")
-    if spec.state is not None and spec.state.read == "diff" and kind not in ("live", "replay", None):
-        problems.append(f"state.read: diff is how a live or replayed site is read, not a site of source {kind}")
-    if kind in ("live", "replay") and spec.state is not None and spec.state.read != "diff":
-        problems.append(f"state.read: a {kind} site has no data plane of its own; its state is read as diff")
     if kind == "sdk" and spec.clock is not None and spec.clock.follow == "none":
         problems.append("clock.follow: an sdk site follows the universe's clock; none is a live site's")
     if kind == "static" and table:
@@ -818,8 +787,8 @@ def _is_schema(at: tuple[str, ...]) -> bool:
 
 
 def from_card(card: dict) -> WebsiteSpec:
-    """The spec a running site's card declares: its name, domains, health path, routes and sign-in, and its state
-    and clock when the card says them. A card says nothing of a site's source, data or personas."""
+    """The spec a running site's card declares: its name, domains, health path, routes and sign-in, and its clock
+    when the card says it. A card says nothing of a site's source, data or personas."""
     extension = find_extension(card, WEBSITE_EXTENSION_URI)
     if extension is None:
         raise SpecError([f"the card declares no {WEBSITE_EXTENSION_URI}"])
@@ -837,8 +806,6 @@ def from_card(card: dict) -> WebsiteSpec:
             raw["users"]["session_path"] = params["session_path"]
     else:
         raw["users"] = {"sign_in": "none"}
-    if isinstance(params.get("state"), dict):
-        raw["state"] = {k: v for k, v in params["state"].items() if k != "path" or v != STATE_PATH}
     if isinstance(params.get("clock"), dict):
         raw["clock"] = params["clock"]
     return resolve(_pruned(raw), Path.cwd(), origin=f"card {card.get('name')!r}", declared_routes=True)
@@ -846,8 +813,7 @@ def from_card(card: dict) -> WebsiteSpec:
 
 def from_environment(cls: type) -> WebsiteSpec:
     """The spec a WebsiteEnvironment class's decorators declare: ``@environment_card``'s name, ``@website``'s
-    domains, health path, static folder, seed and clock patch, its ``@api`` routes, a cookie sign-in, and its state
-    read at ``/go`` when it keeps the default store or serves ``/go`` itself, else through the data plane."""
+    domains, health path, static folder, seed and clock patch, its ``@api`` routes and a cookie sign-in."""
     declaration = cls.declaration()
     if declaration.spec is not None:
         base = declaration.spec
@@ -856,7 +822,6 @@ def from_environment(cls: type) -> WebsiteSpec:
         base, raw = None, {}
     card_name = (getattr(cls, _CARD_CONFIG_ATTR, None) or {}).get("name")
     routes = cls.routes()
-    serves_go = any(r.method == "GET" and openapi_path(r.path) == STATE_PATH for r in routes)
     site_file = Path(inspect.getfile(cls)).resolve().parent
     raw["site"] = {**raw.get("site", {}), "domains": [d.lower() for d in declaration.domains],
                    "health": declaration.health}
@@ -874,7 +839,6 @@ def from_environment(cls: type) -> WebsiteSpec:
     raw["routes"] = {"ops": {r.name: {"method": r.method, "path": openapi_path(r.path), "roles": list(r.roles)}
                              for r in routes}}
     raw.pop("roles", None)
-    raw["state"] = {"read": "go"} if cls._store_get is not None or serves_go else {"read": "data_plane"}
     raw["clock"] = {"follow": "date_patch" if declaration.clock_patch else "header"}
     return resolve(raw, base.base_dir if base is not None else site_file, origin=cls.__qualname__, declared_routes=True)
 
@@ -895,7 +859,7 @@ def _seed_user(paths: Iterable[str | Path]) -> Optional[str]:
 
 def problems_with_environment(spec: WebsiteSpec, cls: type) -> list[str]:
     """Where a WebsiteEnvironment class doesn't serve what ``spec`` declares: its source, routes by name, verb,
-    path and roles, sign-in, state read and clock."""
+    path and roles, sign-in and clock."""
     problems = []
     if spec.source is not None and spec.source.kind != "sdk":
         problems.append(f"source: a WebsiteEnvironment is an sdk source, and the spec names {spec.source.kind}")
@@ -919,9 +883,6 @@ def problems_with_environment(spec: WebsiteSpec, cls: type) -> list[str]:
     cookie = session_cookie_name(spec.site.name)
     if spec.users.session_cookie not in (None, cookie) or spec.users.session_path not in (None, SESSION_PATH):
         problems.append(f"users: a WebsiteEnvironment's session is {cookie} at {SESSION_PATH}")
-    if spec.state is not None and (spec.state.read, spec.state_path) != (derived.state.read, derived.state_path):
-        problems.append(f"state: the spec reads {spec.state.read} {spec.state_path or ''}".rstrip()
-                        + f", the class is read by {derived.state.read}")
     acting = _seed_user(cls._seed_files())
     if spec.users.acting_user is not None and acting is not None and spec.users.acting_user != acting:
         problems.append(f"users.acting_user: the spec says {spec.users.acting_user}, the seed's current_user {acting}")

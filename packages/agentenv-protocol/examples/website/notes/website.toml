@@ -34,8 +34,5 @@ toggle_note = "POST /api/notes/{note_id}/toggle"
 delete_note = "DELETE /api/notes/{note_id}"
 all_notes = "GET /api/admin/notes"
 
-[state]
-read = "go"
-
 [clock]
 follow = "header"

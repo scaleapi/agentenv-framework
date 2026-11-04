@@ -16,8 +16,5 @@ history = "GET /api/conversations.history"
 post_message = "POST /api/chat.postMessage"
 add_reaction = "POST /api/reactions.add"
 
-[state]
-read = "diff"
-
 [clock]
 follow = "none"

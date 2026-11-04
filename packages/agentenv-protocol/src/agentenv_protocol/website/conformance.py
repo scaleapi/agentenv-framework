@@ -305,7 +305,7 @@ class _Checker:
                                 f"{_shown(_route_key(route))}")
         if extra := sorted(set(theirs) - {r["name"] for r in declared["routes"]}):
             problems.append(f"the card has routes the spec doesn't declare: {', '.join(map(str, extra))}")
-        for key in ("session_cookie", "session_path", "state", "clock"):
+        for key in ("session_cookie", "session_path", "clock"):
             if key in declared and site.get(key) != declared[key]:
                 problems.append(f"the card's {key} is {site.get(key)!r}, the spec's {declared[key]!r}")
         if spec.users.sign_in != "cookie":

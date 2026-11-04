@@ -77,7 +77,7 @@ def test_the_notes_spec_loads_with_its_routes_roles_personas_and_data() -> None:
     assert list(table)[:3] == ["list_users", "sign_in", "list_notes"]
     assert (table["get_note"].method, table["get_note"].path) == ("GET", "/api/notes/{note_id}")
     assert table["all_notes"].roles == ("admin",) and table["list_notes"].roles == ()
-    assert (spec.state.read, spec.state_path, spec.clock.follow) == ("go", "/go", "header")
+    assert spec.clock.follow == "header"
 
 
 def test_every_section_is_optional_and_a_route_takes_a_table_or_a_shorthand(tmp_path: Path) -> None:
@@ -149,7 +149,6 @@ def test_false_removes_an_operation_of_the_openapi_document(tmp_path: Path) -> N
     ('[roles]\nadmin = ["nope"]\n', "roles.admin: names no route ['nope']"),
     ('[source]\nsdk = "a:B"\n[users]\nsign_in = "live"\n', "users.sign_in: live is the sign-in of a live or replayed"),
     ('[source]\nsdk = "a:B"\n[clock]\nfollow = "none"\n', "clock.follow: an sdk site follows the universe's clock"),
-    ('[source.live]\n[users]\nsign_in = "live"\n[state]\nread = "go"\n', "state.read: a live site has no data plane"),
     ('[source]\nstatic = "dist"\n[routes.ops]\na = "GET /a"\n', "routes: a static site serves no routes"),
     ('[source]\nsdk = "a:B"\n[routes.ops]\na = { method = "GET", path = "/a", served_by = "x:Y" }\n',
      "routes.ops: served_by swaps a route of a live or replayed site"),
@@ -157,7 +156,6 @@ def test_false_removes_an_operation_of_the_openapi_document(tmp_path: Path) -> N
     ('[data]\nmodels = "mail"\n', "data.models: models is mcp:<server>, not 'mail'"),
     ('[users]\nsign_in = "none"\n[data.collections.notes]\nowner = "owner"\n',
      "data.collections.notes: owner names a user, and the site signs nobody in"),
-    ('[state]\nread = "data_plane"\npath = "/x"\n', "state: path is where a go read reads"),
     ('[[uses]]\nspec = "c.toml"\nmount = "/.well-known/agent-env.json"\n', "uses[0].mount: mount is a plain path"),
     ("[site\n", "isn't TOML"),
 ], ids=lambda value: value[:24] if isinstance(value, str) else value)
@@ -485,7 +483,7 @@ def _site(name: str, domains: list[str], source: dict | None = None) -> website_
     if source is not None:
         raw["source"] = source
         if "live" in source or "replay" in source:
-            raw["users"], raw["state"] = {"sign_in": "live"}, {"read": "diff"}
+            raw["users"] = {"sign_in": "live"}
     return resolve(raw, Path.cwd())
 
 
@@ -546,7 +544,7 @@ def test_a_spec_round_trips_through_the_card_it_advertises() -> None:
         {"uri": website_spec.WEBSITE_EXTENSION_URI, "params": spec.to_card_extension()}]}}
     back = from_card(card)
     assert back.to_card_extension() == spec.to_card_extension()
-    assert (back.site, back.users.sign_in, back.state, back.clock) == (spec.site, "cookie", spec.state, spec.clock)
+    assert (back.site, back.users.sign_in, back.clock) == (spec.site, "cookie", spec.clock)
     assert back.source is None and back.data.collections == {}
 
 
@@ -554,7 +552,7 @@ def test_from_card_reads_a_running_sites_card_and_a_card_without_a_session() -> 
     card = {"name": "docs", "capabilities": {"extensions": [{"uri": website_spec.WEBSITE_EXTENSION_URI, "params": {
         "domains": ["docs.test"], "health": "/up", "routes": [{"method": "GET", "path": "/a", "name": "a"}]}}]}}
     spec = from_card(card)
-    assert (spec.site.name, spec.health, spec.users.sign_in, spec.state) == ("docs", "/up", "none", None)
+    assert (spec.site.name, spec.health, spec.users.sign_in, spec.clock) == ("docs", "/up", "none", None)
     assert spec.to_card_extension() == card["capabilities"]["extensions"][0]["params"] | {
         "routes": [{"method": "GET", "path": "/a", "name": "a", "roles": None}]}
     with pytest.raises(SpecError, match="declares no urn:agentenv:website/v1"):
@@ -597,7 +595,7 @@ def test_from_environment_derives_a_spec_from_decorators_alone(tmp_path: Path) -
     spec = from_environment(Shop)
     assert (spec.site.name, spec.site.domains, spec.health, spec.users.acting_user) == ("shop", ("shop.test",), "/up",
                                                                                          "zoe")
-    assert (spec.state.read, spec.clock.follow, spec.route_table()["items"].roles) == ("go", "date_patch", ("admin",))
+    assert (spec.clock.follow, spec.route_table()["items"].roles) == ("date_patch", ("admin",))
     assert website_params(card_of(TestClient(Shop().create_app()))) == spec.to_card_extension()
 
 
@@ -787,7 +785,7 @@ def test_the_spec_check_fails_a_cookie_sign_in_when_the_spec_signs_nobody_in() -
     assert "the card's session_path is" in results["spec"].detail
 
 
-def test_the_spec_check_fails_a_card_with_another_session_path_or_without_a_declared_state(
+def test_the_spec_check_fails_a_card_with_another_session_path(
         notes_client: TestClient, monkeypatch) -> None:
     def change(path: str, response: httpx.Response) -> httpx.Response:
         if path != "/.well-known/agent-env.json":
@@ -796,15 +794,13 @@ def test_the_spec_check_fails_a_card_with_another_session_path_or_without_a_decl
         params = next(e for e in card["capabilities"]["extensions"]
                       if e["uri"] == website_spec.WEBSITE_EXTENSION_URI)["params"]
         params["session_path"] = "/api/login"
-        del params["state"]
         return httpx.Response(200, json=card, request=response.request)
 
     answering(notes_client, monkeypatch, change)
     results = {r.name: r for r in conformance.check("http://testserver", client=notes_client,
                                                     spec=load(NOTES_DIR / "website.toml"))}
     assert results["spec"].status == "failed"
-    assert results["spec"].detail == ("the card's session_path is '/api/login', the spec's '/api/session'; "
-                                      "the card's state is None, the spec's {'read': 'go', 'path': '/go'}")
+    assert results["spec"].detail == "the card's session_path is '/api/login', the spec's '/api/session'"
 
 
 def test_spec_routes_fails_a_server_whose_advertised_openapi_document_cannot_be_read(notes_client: TestClient,
@@ -903,8 +899,7 @@ def test_conformance_main_takes_a_spec_and_refuses_one_that_does_not_load(monkey
 
 def test_the_composed_examples_load() -> None:
     slack = load(SPECS_DIR / "slack.toml")
-    assert (slack.source.kind, slack.users.sign_in, slack.state.read, slack.clock.follow) == ("replay", "live", "diff",
-                                                                                              "date_patch")
+    assert (slack.source.kind, slack.users.sign_in, slack.clock.follow) == ("replay", "live", "date_patch")
     assert slack.route_table()["post_message"].served_by == "slack_synthetic:SlackChat"
     assert slack.route_table()["post_message"].path == "/api/chat.postMessage"
     assert load(SPECS_DIR / "slack-live.toml").source.live.credentials == {"token": "secret:SLACK_USER_TOKEN"}
@@ -927,8 +922,8 @@ def test_the_command_line_validates_shows_and_describes_a_spec(capsys, tmp_path:
     assert "source: sdk is module:Class" in capsys.readouterr().err
     assert website_spec.main(["schema"]) == 0
     schema = json.loads(capsys.readouterr().out)
-    assert set(schema["properties"]) == {"extends", "site", "source", "data", "users", "roles", "routes", "state",
-                                         "clock", "uses"}
+    assert set(schema["properties"]) == {"extends", "site", "source", "data", "users", "roles", "routes", "clock",
+                                         "uses"}
     assert schema["$defs"]["Routes"]["properties"]["ops"]["additionalProperties"]["anyOf"][1]["type"] == "string"
     assert schema["$defs"]["Use"]["properties"]["as"]
 

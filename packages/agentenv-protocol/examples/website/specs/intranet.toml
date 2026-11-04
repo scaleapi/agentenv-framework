@@ -25,6 +25,3 @@ publish_page = "POST /api/pages"
 spec = "components/sso.toml"
 mount = "/sso"
 data = { accounts = "users" }
-
-[state]
-read = "go"
