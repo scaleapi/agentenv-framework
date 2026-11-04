@@ -240,8 +240,10 @@ class PromptAgentTaskStep(TaskStep):
             raise ValueError("max_conversation_turns must be >= 1")
         if post_turn_hooks is not None:
             validate_hook_specs(post_turn_hooks)
-        if user_message_template is not None and _REPLY_PLACEHOLDER not in user_message_template:
-            raise ValueError(f"user_message_template must contain {_REPLY_PLACEHOLDER} for the agent's reply")
+        if user_message_template is not None and (
+            not isinstance(user_message_template, str) or _REPLY_PLACEHOLDER not in user_message_template
+        ):
+            raise ValueError(f"user_message_template must be a string containing {_REPLY_PLACEHOLDER} for the agent's reply")
         if user_sim_guard is not None:
             _validate_user_sim_guard(user_sim_guard)
         if model_params:
@@ -1226,6 +1228,9 @@ class _UserSide:
             )
         except Exception as e:
             logger.warning(f"user-sim trajectory fetch at turn {number} failed (continuing): {e}")
+            return
+        if url is None:
+            logger.warning(f"user-sim trajectory fetch at turn {number} returned no trajectory; nothing stored")
             return
         self._record("usersim_trajectories", {"turn": number, "a2a_task_id": user_a2a_task_id, "url": url})
 

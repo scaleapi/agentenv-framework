@@ -597,8 +597,24 @@ async def test_a_failed_user_sim_trajectory_fetch_is_not_recorded_and_the_conver
     assert "usersim_trajectories" not in ctx.metadata
 
 
+@pytest.mark.asyncio
+async def test_a_user_sim_trajectory_fetch_that_stores_nothing_is_not_recorded(monkeypatch):
+    async def empty_fetch(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", empty_fetch)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter")]})
+    ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
+
+    await _step(turns=2).execute(ctx)
+
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter"), "<id3>", "<ctx>")
+    assert "usersim_trajectories" not in ctx.metadata
+
+
 @pytest.mark.parametrize("kw, error", [
-    ({"user_message_template": "no placeholder"}, "must contain {reply}"),
+    ({"user_message_template": "no placeholder"}, "containing {reply}"),
+    ({"user_message_template": ["{reply}"]}, "must be a string"),
     ({"user_sim_guard": {}}, "checks nothing"),
     ({"user_sim_guard": {"reject_markdown": False}}, "checks nothing"),
     ({"user_sim_guard": {"max_chars": 0}}, "positive int"),
