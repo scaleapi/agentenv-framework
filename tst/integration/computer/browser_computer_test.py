@@ -8,7 +8,9 @@ saying why and the tools answering with it. Through its cdp address, Playwright 
 each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
 one; one client's close leaves the browser up for the other, which can't open file: URLs; the address outlives a
 relaunch, and the computer's reset ends it. browser_connect_cdp hands the echo agent its address, with the computer's
-tools hidden from its role, and after reset_env a fresh one, which its next turn opens the site through. Needs Docker and the local registry on
+tools hidden from its role; after reset_env that address fails until the task runs browser_connect_cdp again, whose
+fresh one its next turn opens the site through. Through an app server and a driver restart and a relaunch, the agent's
+address keeps working, and two agents connected at once each drive the browser through their own. Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
@@ -41,7 +43,6 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps import browser_connect_cdp
 from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdpTaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
@@ -428,7 +429,7 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
 
 
 @pytest.mark.asyncio
-async def test_browser_connect_cdp_hands_an_agent_its_address_with_the_tools_hidden_and_a_reset_gives_a_fresh_one(
+async def test_browser_connect_cdp_hands_an_agent_its_address_with_the_tools_hidden_which_a_reset_ends_till_it_reruns(
         browser_computer):
     with namespace_routing():
         agent = put_test_agent(f"cdp-agent-{uuid.uuid4().hex[:8]}")
@@ -450,6 +451,9 @@ async def test_browser_connect_cdp_hands_an_agent_its_address_with_the_tools_hid
                                    fail_task_on_error=True).execute(context)
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
             await asyncio.sleep(SERVE_START_S)
+            stale = await _opened_over_cdp(context, "stale")
+            await BrowserConnectCdpTaskStep(id="reconnect", version=None, env_id=browser_computer.id,
+                                            agent_name="solver").execute(context)
             second, tools_after = await _opened_over_cdp(context, "second"), await _tool_names(deployed)
         finally:
             if serving is not None:
@@ -458,16 +462,17 @@ async def test_browser_connect_cdp_hands_an_agent_its_address_with_the_tools_hid
 
     (first_address, first_title), (second_address, second_title) = first, second
     assert first_title == second_title == "Home" and first_address != second_address, (first, second)
+    assert stale[0] == first_address and stale[1].startswith("failed: "), stale
     assert tools == tools_after == []
     assert context.metadata["browser_connections"] == [{
-        "step_id": "connect", "env_id": browser_computer.id, "agent_name": "solver", "browser": "chromium",
+        "step_id": "reconnect", "env_id": browser_computer.id, "agent_name": "solver", "browser": "chromium",
         "name": "chromium", "keep_tools": False, "role": "default", "tools_hidden": "*"}]
     assert not report.failed
 
 
 @pytest.mark.asyncio
-async def test_a_cdp_agent_keeps_its_address_through_restarts_and_a_relaunch_and_a_failed_reconnect_fails_it_closed(
-        browser_computer, monkeypatch):
+async def test_a_cdp_agent_keeps_its_address_through_an_app_server_and_a_driver_restart_and_a_browser_relaunch(
+        browser_computer):
     with namespace_routing():
         agent = put_test_agent(f"cdp-chaos-{uuid.uuid4().hex[:8]}")
         deployed = await Env.get(browser_computer.id).deploy(
@@ -484,20 +489,11 @@ async def test_a_cdp_agent_keeps_its_address_through_restarts_and_a_relaunch_and
             after_driver = await _opened_over_cdp(context, "after-driver", url=DATA_PAGE)
             await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium", headers=deployed.control_headers)
             after_relaunch = await _opened_over_cdp(context, "after-relaunch", url=DATA_PAGE)
-            monkeypatch.setattr(browser_connect_cdp, "invoke_extension", _unanswered)
-            with pytest.raises(RuntimeError, match="couldn't be made again and were removed from their agents"):
-                await ResetEnvTaskStep(id="reset", version=None, env_id=browser_computer.id).execute(context)
-            with pytest.raises(RuntimeError, match="error_code=cdp.no_endpoint"):
-                await _opened_over_cdp(context, "after-failed-reconnect", url=DATA_PAGE)
-            monkeypatch.undo()
-            await BrowserConnectCdpTaskStep(id="reconnect", version=None, env_id=browser_computer.id,
-                                            agent_name="solver").execute(context)
-            reconnected = await _opened_over_cdp(context, "reconnected", url=DATA_PAGE)
         finally:
             report = await teardown_run(context)
 
-    assert [title for _, title in (first, after_server, after_driver, after_relaunch, reconnected)] == ["Home"] * 5
-    assert first[0] == after_server[0] == after_driver[0] == after_relaunch[0] != reconnected[0]
+    assert [title for _, title in (first, after_server, after_driver, after_relaunch)] == ["Home"] * 4
+    assert first[0] == after_server[0] == after_driver[0] == after_relaunch[0]
     assert not report.failed
 
 
@@ -534,21 +530,17 @@ async def _connected(context: TaskStepContext, agent, env_id: str, name: str) ->
     await BrowserConnectCdpTaskStep(id=f"connect-{name}", version=None, env_id=env_id, agent_name=name).execute(context)
 
 
-async def _unanswered(*args, **kwargs):
-    raise ConnectionError("the browser isn't answering (injected)")
-
-
 async def _opened_over_cdp(context: TaskStepContext, prompt_id: str, agent_name: str = "solver",
                            url: str = SITE) -> tuple[str, str]:
-    """``agent_name``'s turn opening ``url`` over its ``chromium`` CDP address: that address's digest and the title
-    it saw."""
+    """``agent_name``'s turn opening ``url`` over its ``chromium`` CDP address: that address's digest, and the title
+    it saw or, when it couldn't open it, ``failed: <why>``."""
     await PromptAgentTaskStep(id=prompt_id, version=None, prompt_id=prompt_id, agent_name=agent_name,
                               prompt=f"cdp chromium {url}", poll_interval_seconds=1).execute(context)
     reply = conversation_store.get_conversation(context.metadata["a2a_conversations"][prompt_id])["messages"][1]
     line = "\n".join(part["text"] for part in reply["parts"] if part["kind"] == "text").splitlines()[-1]
-    match = re.fullmatch(r"cdp chromium (\w+): (.*)", line)
+    match = re.fullmatch(r"cdp chromium (\w+)( failed)?: (.*)", line)
     assert match, line
-    return match.group(1), match.group(2)
+    return match.group(1), f"failed: {match.group(3)}" if match.group(2) else match.group(3)
 
 
 async def _tool_names(deployed) -> list[str]:

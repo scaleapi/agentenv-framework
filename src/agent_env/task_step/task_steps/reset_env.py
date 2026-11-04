@@ -3,9 +3,7 @@
 Env-agnostic: looks up the deployed env in context and calls its ``reset()``.
 Best-effort by default — a reset failure (including an env that doesn't support
 it) is logged and the run continues. Place right before prompt_agent in a
-warm-reuse task. After a reset, each browser_connect_cdp connection to the env is
-made again, since a reset ends its address. One that can't be is removed from its
-agent, whose next turn then fails closed, and the step fails naming it.
+warm-reuse task.
 """
 from __future__ import annotations
 
@@ -15,7 +13,6 @@ from typing import Optional
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps.browser_connect_cdp import CONNECTIONS_KEY, connect, disconnect
 
 logger = logging.getLogger(__name__)
 
@@ -67,22 +64,8 @@ class ResetEnvTaskStep(TaskStep):
         except NotImplementedError:
             # Env doesn't support reset — not an error.
             logger.info("reset_env: env '%s' does not support reset; skipping", self.env_id)
-            return context
         except Exception as e:
             logger.warning("reset_env: reset failed (%s); continuing", repr(e)[:160])
             if self.fail_task_on_error:
                 raise
-            return context
-        failed = []
-        for connection in context.metadata.get(CONNECTIONS_KEY, []):
-            if connection["env_id"] != self.env_id:
-                continue
-            try:
-                connection.update(await connect(context, connection))
-            except Exception as e:
-                await disconnect(context, connection)
-                failed.append(f"{connection['agent_name']}'s {connection['name']!r} ({type(e).__name__}: {e})")
-        if failed:
-            raise RuntimeError(f"env {self.env_id!r} was reset, but these CDP connections to it couldn't be made again "
-                               f"and were removed from their agents: {'; '.join(failed)}")
         return context

@@ -1,5 +1,6 @@
 """Task step that hands a deployed agent a CDP address to an env's website browser, through the agent's cdp-config/v1,
-and hides that browser's MCP tools from the agent; reset_env hands it a fresh one after a reset."""
+and hides that browser's MCP tools from the agent. A reset ends the address, so a task connects the agent again after
+reset_env, or with a retry_config that reruns this step."""
 
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
-#: Where each connection the step makes is recorded, for reset_env to make again.
+#: Where the step records each connection it makes, one per agent and name: the role its tools were hidden from.
 CONNECTIONS_KEY = "browser_connections"
 #: The name the address is added to the agent's cdp-config under when the step names none.
 DEFAULT_NAME = "chromium"
@@ -87,58 +88,34 @@ class BrowserConnectCdpTaskStep(TaskStep):
         )
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        connection = {"step_id": self.id, "env_id": self.env_id, "agent_name": self.agent_name,
-                      "browser": self.browser, "name": self.name, "keep_tools": self.keep_tools}
-        connection.update(await connect(context, connection))
+        deployed = _deployed_env(context, self.env_id)
+        agent = _deployed_agent(context, self.agent_name)
+        cdp_config = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_CDP_CONFIG)
+        if cdp_config is None or not agent.a2a_url:
+            raise RuntimeError(f"agent {agent.agent_name!r} can't take a CDP address: its card has no "
+                               f"{A2AAgent.EXT_CDP_CONFIG}")
+        browser, card = _browser(deployed, self.browser)
+        address = await invoke_extension(deployed.environment_url, card, BROWSER, {"user": agent.agent_name},
+                                         CDP_TIMEOUT_S, method="cdp", headers=deployed.control_headers)
+        http_url, ws_url = _as_agent_reaches(address, deployed, agent)
+        async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
+            added = await client.post(agent.a2a_url + cdp_config["params"]["endpoint"], json={
+                "name": self.name, "http_url": http_url, "ws_url": ws_url,
+                "metadata": {"browser": browser or deployed.environment_card.get("name")}})
+        added.raise_for_status()
+        role = agent.role or DEFAULT_ROLE
+        hidden = None if self.keep_tools else WILDCARD
+        if hidden:
+            await deployed.invoke(DISABLE_TOOL_EXTENSION_URI, DISABLE, {"role": role, "tools": hidden})
+        logger.info(f"agent {agent.agent_name!r} has {self.name!r}, a CDP address to {browser or 'the env'} in env "
+                    f"{deployed.env_id!r}" + (f"; the env's tools are hidden from role {role!r}" if hidden else ""))
         # The agent's cdp-config now holds this address under its name, so it replaces any connection recorded so.
         records = context.metadata.setdefault(CONNECTIONS_KEY, [])
         records[:] = [record for record in records
-                      if (record["agent_name"], record["name"]) != (self.agent_name, self.name)] + [connection]
+                      if (record["agent_name"], record["name"]) != (self.agent_name, self.name)] + [{
+            "step_id": self.id, "env_id": self.env_id, "agent_name": self.agent_name, "browser": browser,
+            "name": self.name, "keep_tools": self.keep_tools, "role": role, "tools_hidden": hidden}]
         return context
-
-
-async def connect(context: TaskStepContext, connection: dict) -> dict:
-    """``connection`` made: the browser's address for its agent added to the agent's cdp-config, and every tool the
-    env serves, which on a browser computer all drive its browser, hidden from the agent's role unless kept. What was
-    done: the browser, the role and the tools hidden."""
-    deployed = _deployed_env(context, connection["env_id"])
-    agent = _deployed_agent(context, connection["agent_name"])
-    cdp_config = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_CDP_CONFIG)
-    if cdp_config is None or not agent.a2a_url:
-        raise RuntimeError(f"agent {agent.agent_name!r} can't take a CDP address: its card has no "
-                           f"{A2AAgent.EXT_CDP_CONFIG}")
-    browser, card = _browser(deployed, connection.get("browser"))
-    address = await invoke_extension(deployed.environment_url, card, BROWSER, {"user": agent.agent_name},
-                                     CDP_TIMEOUT_S, method="cdp", headers=deployed.control_headers)
-    http_url, ws_url = _as_agent_reaches(address, deployed, agent)
-    async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
-        added = await client.post(agent.a2a_url + cdp_config["params"]["endpoint"], json={
-            "name": connection["name"], "http_url": http_url, "ws_url": ws_url,
-            "metadata": {"browser": browser or deployed.environment_card.get("name")}})
-    added.raise_for_status()
-    role = agent.role or DEFAULT_ROLE
-    hidden = None if connection["keep_tools"] else WILDCARD
-    if hidden:
-        await deployed.invoke(DISABLE_TOOL_EXTENSION_URI, DISABLE, {"role": role, "tools": hidden})
-    logger.info(f"agent {agent.agent_name!r} has {connection['name']!r}, a CDP address to {browser or 'the env'} in "
-                f"env {deployed.env_id!r}" + (f"; the env's tools are hidden from role {role!r}" if hidden else ""))
-    return {"browser": browser, "role": role, "tools_hidden": hidden}
-
-
-async def disconnect(context: TaskStepContext, connection: dict) -> None:
-    """``connection``'s endpoint removed from its agent's cdp-config, so the agent's next turn fails closed rather than
-    drive an address that has ended. Best-effort: the agent may be what failed."""
-    agent = next((a for a in context.deployed_agents if a.agent_name == connection["agent_name"]), None)
-    cdp_config = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_CDP_CONFIG) if agent else None
-    if cdp_config is None or not agent.a2a_url:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
-            removed = await client.request("DELETE", agent.a2a_url + cdp_config["params"]["endpoint"],
-                                           json={"name": connection["name"]})
-        removed.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.warning(f"agent {agent.agent_name!r} still holds {connection['name']!r}: removing it failed: {e}")
 
 
 def _deployed_env(context: TaskStepContext, env_id: str) -> DeployedEnv:
