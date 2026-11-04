@@ -45,6 +45,8 @@ BLOCK = 2
 AGENTENV, UNKNOWN, EXIT, STOP = "agentenv", "unknown", "exit", "stop"
 #: How long the active tab's check waits on each page.
 ACTIVE_CHECK_TIMEOUT_S = 2.0
+#: How long a tab opened headless may take to be attached and held to its window's size.
+PIN_TIMEOUT_S = 10.0
 #: How much of a download each read hashes.
 HASH_CHUNK_BYTES = 1 << 20
 
@@ -214,6 +216,7 @@ class BrowserControl:
         #: input sent there waits on to learn a dialog opened.
         self._shots: dict[str, str] = {}
         self._dialog_opened: dict[str, asyncio.Event] = {}
+        self._pinned: dict[str, asyncio.Event] = {}
         self._tasks: set[asyncio.Future] = set()
         devtools.listen(self._event)
 
@@ -238,6 +241,7 @@ class BrowserControl:
         self._choosers.clear()
         self._shots.clear()
         self._dialog_opened.clear()
+        self._pinned.clear()
 
     async def close_tab(self, target: str) -> None:
         """Close the tab ``target``, which the record says agentenv closed."""
@@ -252,8 +256,15 @@ class BrowserControl:
                 for tab in self.tabs.values()]
 
     async def open_tab(self, url: Optional[str] = None) -> str:
-        """A new tab at ``url``, else blank, brought to the front; its id."""
-        target = (await self.devtools.call("Target.createTarget", {"url": url or "about:blank"}))["targetId"]
+        """A new tab at ``url``, else blank, brought to the front; its id. Headless, it opens blank and goes to ``url``
+        once it's held to the window's size, so its page loads at that size."""
+        held = self.viewport is not None and url
+        start = "about:blank" if held else url or "about:blank"
+        target = (await self.devtools.call("Target.createTarget", {"url": start}))["targetId"]
+        if held:
+            await asyncio.wait_for(self._pinned.setdefault(target, asyncio.Event()).wait(), PIN_TIMEOUT_S)
+            session = next(s for s, t in self._sessions.items() if t == target)
+            await self.devtools.call("Page.navigate", {"url": url}, session_id=session)
         await self._bring_to_front(target)
         return target
 
@@ -502,6 +513,7 @@ class BrowserControl:
     async def _let_run(self, session: str) -> None:
         """A page it attached to, enabled and, headless, held to its window's size, then told to run: a page attached as
         it opens, a popup say, or any new page headless, waits for that before it runs."""
+        target = self._sessions.get(session)
         try:
             await self.devtools.call("Page.enable", session_id=session)
             if self.viewport is not None:
@@ -510,11 +522,16 @@ class BrowserControl:
                     "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session_id=session)
                 await self.devtools.call("Page.setInterceptFileChooserDialog", {"enabled": True}, session_id=session)
         finally:
-            await self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=session)
+            try:
+                await self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=session)
+            finally:
+                if target is not None:
+                    self._pinned.setdefault(target, asyncio.Event()).set()
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
         if (target := self._sessions.pop(params["sessionId"], None)) is not None:
             self._shots.pop(target, None)
+            self._pinned.pop(target, None)
         self._choosers.pop(params["sessionId"], None)
         self._dialog_opened.pop(params["sessionId"], None)
 
