@@ -46,9 +46,11 @@ class Part:
     steps: tuple[tuple[str, str], ...] = ()
 
 
-def write(build: Path, base: ComputerArtifact, parts: list[Part], password: str) -> str:
-    """Write ``build`` for ``parts`` on ``base``, and the password its sudo reads; the text of its provision script,
-    which, with the context, a VM bundle's key covers."""
+def write(build: Path, base: ComputerArtifact, parts: list[Part], password: str,
+          build_settings: dict[str, Any]) -> str:
+    """Write ``build`` for ``parts`` on ``base``, with the values of the base's build-phase settings the VM bundle fixes,
+    which every service gets as ``AGENTENV_SETTING_<NAME>``, and the password its sudo reads; the text of its provision
+    script, which, with the context and the LaunchAgents, a VM bundle's key covers."""
     shutil.copytree(PREPARE, build / "prepare")
     (build / "agents").mkdir()
     home, lines = f"/Users/{base.session.user}", ["#!/bin/bash", "set -euo pipefail",
@@ -69,7 +71,9 @@ def write(build: Path, base: ComputerArtifact, parts: list[Part], password: str)
             (build / "agents" / f"{label}.plist").write_bytes(plistlib.dumps(
                 _agent(label, arguments, part.prefix, home, environment=direct)))
     lines += ['cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"',
-              'as_root cp "$build/image.json" /etc/agentenv/image.json', "sync"]
+              'as_root cp "$build/image.json" "$build/build-settings.json" /etc/agentenv/', "sync"]
+    (build / "build-settings.json").write_text(json.dumps(
+        {f"AGENTENV_SETTING_{name.upper()}": str(value) for name, value in build_settings.items()}, sort_keys=True))
     (build / "image.json").write_text(json.dumps({"base": base.forms.vm_bundle.image,
                                                   "layers": [part.folder for part in parts]}, sort_keys=True))
     script = "\n".join(lines) + "\n"

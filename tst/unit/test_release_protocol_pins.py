@@ -121,6 +121,7 @@ def test_each_shipped_requirements_file_the_release_pins_holds_one_protocol_line
               for path in shipped_bundles.requirements_files()}
 
     assert "src/agent_env/examples/echo-mcp/envs/echo/requirements.txt" in pinned
+    assert "src/agent_env/drivers/envs/cua-driver/requirements-macos.txt" in pinned
     assert "src/agent_env/examples/mail-mcp/envs/mail/requirements.txt" not in pinned
     assert all(len(lines) == 1 for lines in pinned.values()), pinned
 

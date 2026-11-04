@@ -71,11 +71,23 @@ FAKE = textwrap.dedent('''\
         vms[name].update(status="stopped", ipAddress=None)
     elif command == "delete":
         vms.pop(name, None)
-    elif command == "ssh":
-        print(" ".join(args))
-        if "shutdown -h now" in args[-1]:
-            vms[args[-2]].update(status="stopped", ipAddress=None)
     save(state)
+''')
+SSH = textwrap.dedent('''\
+    import json, os, sys
+    path = os.environ["FAKE_LUME_STATE"]
+    args = sys.argv[1:]
+    *_, login, command = args
+    with open(path + ".ssh", "a") as calls:
+        calls.write(json.dumps({"args": args, "askpass": os.environ.get("SSH_ASKPASS_REQUIRE") == "force"
+                                and os.environ.get("AGENTENV_LUME_SSH_PASSWORD") == "lume"}) + "\\n")
+    print(command)
+    if "shutdown -h now" in command:
+        state = json.load(open(path))
+        for vm in state["vms"].values():
+            if vm.get("ipAddress") == login.split("@")[1]:
+                vm.update(status="stopped", ipAddress=None)
+        json.dump(state, open(path, "w"))
 ''')
 
 
@@ -85,14 +97,16 @@ def mac(tmp_path, monkeypatch):
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     (bin_ / "lume").write_text(f"#!{sys.executable}\n{FAKE}")
+    (bin_ / "ssh").write_text(f"#!{sys.executable}\n{SSH}")
     (bin_ / "relay").write_text(f"#!/bin/sh\necho \"$@\" > {tmp_path}/relay.args\nexec sleep 60\n")
-    for name in ("lume", "relay"):
+    for name in ("lume", "ssh", "relay"):
         (bin_ / name).chmod(0o755)
     monkeypatch.setenv("FAKE_LUME_STATE", str(tmp_path / "lume.json"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(lume, "_free_port", lambda: 48123)
     monkeypatch.setattr(lume, "_POLL_S", 0.05)
-    provider = LumeSandboxProvider(lume=str(bin_ / "lume"), relay_python=str(bin_ / "relay"), boot_timeout_s=10)
+    provider = LumeSandboxProvider(lume=str(bin_ / "lume"), ssh=str(bin_ / "ssh"), relay_python=str(bin_ / "relay"),
+                                   boot_timeout_s=10)
     provider.fake = tmp_path
     yield provider
     for vm in _state(tmp_path)["vms"]:
@@ -199,10 +213,11 @@ async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundl
     _, said, _ = await builder.exec_with_output("bash", "-c", "echo hi")
     image = await mac.keep_builder(builder)
 
-    calls = _state(mac.fake)["calls"]
+    calls, ssh = _state(mac.fake)["calls"], [json.loads(line) for line in (mac.fake / "lume.json.ssh").read_text().splitlines()]
     assert ["run", "agentenv-computer-0123", "--display", "none", "--vnc", "disabled", f"--shared-dir={build}:rw"] in calls
-    shutdown = next(call for call in calls if call[0] == "ssh" and "shutdown -h now" in call[-1])
-    assert "bash -c 'echo hi'" in said and shutdown[-1].startswith("sh -c 'sync; echo")
+    assert "bash -c 'echo hi'" in said and all(call["askpass"] for call in ssh)
+    assert any(call["args"][-1].startswith("sh -c 'sync; sudo -S") for call in ssh)
+    assert not any("lume" in arg for call in ssh for arg in call["args"][:-1])
     assert image == "local:agentenv-computer-0123" and await mac.has_vm_bundle(image)
     with pytest.raises(ValueError, match="a builder's folder is named agentenv-build"):
         await mac.open_builder("local:bench", "other", tmp_path)

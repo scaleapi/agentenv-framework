@@ -271,9 +271,15 @@ def _built_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerD
             f"venv/bin/python -m agentenv_protocol.computer.serve_app {staged.served}",
             *(service.command for service in staged.install.services)])), {"ENVIRONMENT_NAME": app.environment_name},
             protocol, True) for app, staged in apps]
-        script = vm_bundle.write(build, base, parts, link.ssh_password)
+        # A VM bundle's base bakes none in, as a Linux base's image does its defaults, so each value is the env's or the
+        # setting's default.
+        values = env.computer_values()
+        settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
+                    if setting.phase == "build"}
+        script = vm_bundle.write(build, base, parts, link.ssh_password, settings)
         key = attempt.key = _key(base=base.forms.vm_bundle.image, provision=script, context=_digest(context),
-                                 prepare=_digest(vm_bundle.PREPARE), form="vm_bundle", arch=arch, format=FORMAT)
+                                 agents=_digest(build / "agents"), prepare=_digest(vm_bundle.PREPARE),
+                                 build_settings=settings, form="vm_bundle", arch=arch, format=FORMAT)
         image = f"{LOCAL_IMAGE_PREFIX}agentenv-computer-{key[7:23]}"
         if asyncio.run(link.has_vm_bundle(image)):
             progress.at(pair, "reusing", "reusing the VM bundle of the same key, composed on this Mac earlier")

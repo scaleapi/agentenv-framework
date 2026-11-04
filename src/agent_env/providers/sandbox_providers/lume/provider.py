@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -25,7 +24,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
@@ -42,6 +41,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     refuse_unenforceable_policy,
 )
 from agent_env.store.image_store.registry_api import pin_digest
+from agent_env.store.local_state import awaiting_lock
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,8 @@ SANDBOX_PREFIX, BASE_PREFIX = "agentenv-", "agentenv-base-"
 _POLL_S = 2.0
 #: What Virtualization.framework says when it's asked to run a VM outside a logged-in session.
 _NO_SESSION = "security information"
+#: The variable the ssh password reaches ssh's askpass in.
+ASKPASS_VARIABLE = "AGENTENV_LUME_SSH_PASSWORD"
 #: A log line lume prints among its output.
 _LOG_LINE = re.compile(r"^\[\d{4}-\d\d-\d\dT[^\]]*\] [A-Z]+: ")
 
@@ -91,21 +93,22 @@ class LumeSandbox(VmSandbox):
 class LumeSandboxProvider(SandboxProvider):
     """VM bundles of macOS on this Mac, run by Lume, configured under ``[sandbox.providers.lume.config]``: the session
     user's ``ssh_user`` and ``ssh_password`` (an ``env:`` or ``secret:`` reference), which composing and exec log in
-    with; ``max_running``, at most ``MAX_RUNNING``; ``relay_host``, the address the relays listen on, this Mac's
-    loopback unless something off it must reach the computers, since a computer's MCP endpoint takes no token; and the
-    ``lume`` and ``relay_python`` executables."""
+    with, the password handed to ssh through its environment, never on a command line; ``max_running``, at most
+    ``MAX_RUNNING``; ``relay_host``, the address the relays listen on, this Mac's loopback unless something off it must
+    reach the computers, since a computer's MCP endpoint takes no token; and the ``lume``, ``ssh`` and ``relay_python``
+    executables, Apple's own ssh and Python, which Local Network privacy lets reach a VM."""
 
     ON_THIS_MACHINE: ClassVar[bool] = True
 
     def __init__(self, *, ssh_user: str = "lume", ssh_password: str = "lume", max_running: int = MAX_RUNNING,
-                 relay_host: str = "127.0.0.1", lume: str = "lume", relay_python: str = "/usr/bin/python3",
-                 boot_timeout_s: float = 600) -> None:
+                 relay_host: str = "127.0.0.1", lume: str = "lume", ssh: str = "/usr/bin/ssh",
+                 relay_python: str = "/usr/bin/python3", boot_timeout_s: float = 600) -> None:
         if not 1 <= max_running <= MAX_RUNNING:
             raise ValueError(f"max_running is 1 to {MAX_RUNNING}, the macOS VMs Apple's licence allows on a Mac, not "
                              f"{max_running}")
         self.ssh_user, self.ssh_password, self.max_running = ssh_user, ssh_password, max_running
         self.relay_host = relay_host
-        self.lume, self.relay_python, self.boot_timeout_s = lume, relay_python, boot_timeout_s
+        self.lume, self.ssh, self.relay_python, self.boot_timeout_s = lume, ssh, relay_python, boot_timeout_s
 
     @classmethod
     def from_config(cls, **config: Any) -> LumeSandboxProvider:
@@ -140,17 +143,17 @@ class LumeSandboxProvider(SandboxProvider):
             raise ValueError("lume boots a computer's VM bundle, and was given none")
         source = await self._source(image)
         sandbox_id = f"{SANDBOX_PREFIX}{uuid.uuid4().hex[:12]}"
-        with self._admitting():
+        async with self._admitting():
             await self._refuse_over_limit()
             await self._lume("clone", source, sandbox_id)
-        try:
-            state = {"source": source, "image": image, "mac": (await self._get(sandbox_id))["macAddress"],
-                     "cpu": cpu, "memory": memory, "ports": {str(port): _free_port() for port in exposed_ports or []}}
-            self._save(sandbox_id, state)
-            await self._started(sandbox_id, state, env or {})
-        except BaseException:
-            await self.terminate_sandbox(sandbox_id)
-            raise
+            try:
+                state = {"source": source, "image": image, "mac": (await self._get(sandbox_id))["macAddress"],
+                         "cpu": cpu, "memory": memory, "ports": {str(port): _free_port() for port in exposed_ports or []}}
+                self._save(sandbox_id, state)
+                await self._started(sandbox_id, state, env or {})
+            except BaseException:
+                await self.terminate_sandbox(sandbox_id)
+                raise
         sandbox = self._sandbox(sandbox_id, state)
         sandbox.network_policy = self.effective_network_policy(network_policy)
         return sandbox
@@ -188,13 +191,17 @@ class LumeSandboxProvider(SandboxProvider):
         source = await self._source(image)
         with contextlib.suppress(RuntimeError):
             await self._lume("delete", name, "--force")
-        with self._admitting():
+        state = {"source": source, "image": image, "ports": {}, "build": str(build)}
+        async with self._admitting():
             await self._refuse_over_limit()
             await self._lume("clone", source, name)
-        state = {"source": source, "image": image, "ports": {}, "build": str(build)}
+            try:
+                self._save(name, state)
+                await self._started(name, state, {})
+            except BaseException:
+                await self.terminate_sandbox(name)
+                raise
         try:
-            self._save(name, state)
-            await self._started(name, state, {})
             await self._answering(name)
         except BaseException:
             await self.terminate_sandbox(name)
@@ -205,8 +212,9 @@ class LumeSandboxProvider(SandboxProvider):
         """``builder`` shut down from inside, once what it wrote is on its disk, and kept as the VM bundle of its name:
         its ``local:`` image. A VM stopped from outside can lose its last writes, as it was before it shut down."""
         name = builder.sandbox_id
-        shutdown = await self._ssh(name, ["sh", "-c", f"sync; echo {shlex.quote(self.ssh_password)} | "
-                                                    "sudo -S -p '' shutdown -h now"], timeout=60)
+        password = f"{SHARED_FILES}/{BUILD_FOLDER}/.password"
+        shutdown = await self._ssh(name, ["sh", "-c", f"sync; sudo -S -p '' shutdown -h now < {shlex.quote(password)}"],
+                                   timeout=60)
         await shutdown.wait()
         deadline = time.monotonic() + self.boot_timeout_s
         while (await self._get(name)).get("status") != "stopped":
@@ -216,6 +224,11 @@ class LumeSandboxProvider(SandboxProvider):
         await self._stopped(name, self._state(name))
         shutil.rmtree(self._folder(name), ignore_errors=True)
         return f"{LOCAL_IMAGE_PREFIX}{name}"
+
+    async def delete_vm_bundle(self, image: str) -> None:
+        """``image``'s VM bundle deleted from this Mac, as one that failed its probe is."""
+        with contextlib.suppress(RuntimeError):
+            await self._lume("delete", image.removeprefix(LOCAL_IMAGE_PREFIX), "--force")
 
     async def has_vm_bundle(self, image: str) -> bool:
         """Whether this Mac holds ``image``'s VM bundle, as a composed one is reused by its name."""
@@ -240,7 +253,7 @@ class LumeSandboxProvider(SandboxProvider):
             return name
         repository, _, digest = image.partition("@")
         name = f"{BASE_PREFIX}{digest.removeprefix('sha256:')[:12]}"
-        with self._admitting():
+        async with self._admitting():
             try:
                 await self._get(name)
                 return name
@@ -254,6 +267,11 @@ class LumeSandboxProvider(SandboxProvider):
             organization, _, tagged = path.rpartition("/")
             logger.info("lume: pulling %s into %s, once", image, name)
             await self._lume("pull", tagged, name, "--registry", host, "--organization", organization, timeout=None)
+            try:
+                await asyncio.to_thread(pin_digest, image, None)
+            except ValueError as e:
+                await self._lume("delete", name, "--force")
+                raise ValueError(f"{image}: its tag moved while it was pulled, so what was pulled is deleted: {e}") from None
         return name
 
     async def _started(self, name: str, state: dict, env: dict[str, str]) -> None:
@@ -345,13 +363,20 @@ class LumeSandboxProvider(SandboxProvider):
         return stdout.decode()
 
     async def _ssh(self, name: str, command: list[str], timeout: int = 0) -> asyncio.subprocess.Process:
-        """``command`` run in ``name`` over ``lume ssh`` as the session user, its output piped."""
+        """``command`` run in ``name`` over ssh as the session user, its output piped; the password reaches ssh through
+        ``ASKPASS``, which reads it from the environment. ``timeout`` bounds the connection, when it's given."""
+        address = (await self._get(name)).get("ipAddress") or "0.0.0.0"
+        options = ["StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null", "LogLevel=ERROR",
+                   "NumberOfPasswordPrompts=1", *((f"ConnectTimeout={timeout}",) if timeout else ())]
         return await asyncio.create_subprocess_exec(
-            self.lume, "ssh", "--user", self.ssh_user, "--password", self.ssh_password, "--timeout", str(timeout), name,
-            shlex.join(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.ssh, *(part for option in options for part in ("-o", option)), f"{self.ssh_user}@{address}",
+            shlex.join(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, env={**os.environ, "SSH_ASKPASS": str(_askpass()), "SSH_ASKPASS_REQUIRE": "force",
+                                         ASKPASS_VARIABLE: self.ssh_password})
 
     def _sandbox(self, name: str, state: dict) -> LumeSandbox:
-        return LumeSandbox(self, name, {int(port): f"http://127.0.0.1:{local}" for port, local in state["ports"].items()})
+        host = "127.0.0.1" if self.relay_host in ("0.0.0.0", "::") else self.relay_host
+        return LumeSandbox(self, name, {int(port): f"http://{host}:{local}" for port, local in state["ports"].items()})
 
     @staticmethod
     def _seed(folder: Path, env: dict[str, str]) -> Path:
@@ -380,20 +405,25 @@ class LumeSandboxProvider(SandboxProvider):
     def _save(self, name: str, state: dict) -> None:
         _private(self._folder(name) / "state.json", json.dumps(state))
 
-    @contextlib.contextmanager
-    def _admitting(self) -> Iterator[None]:
-        """Held while a VM is counted and cloned, or a base pulled, so two deploys on this Mac don't both pass the limit
-        or pull one base twice."""
-        lock = state_root() / "lume" / ".admitting"
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock, "a") as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
-            yield
+    def _admitting(self) -> AbstractAsyncContextManager[None]:
+        """Held while a VM is counted, cloned and started, or a base pulled, by every agent-env on this Mac, so two
+        deploys don't both take its last slot or pull one base twice; waited for on the event loop."""
+        return awaiting_lock("lume-admitting")
 
 
 def _json(text: str) -> Any:
     """The JSON ``lume`` printed, past the log lines it prints on the same stream (``[<time>] INFO: ...``)."""
     return json.loads("\n".join(line for line in text.splitlines() if not _LOG_LINE.match(line)) or "null")
+
+
+def _askpass() -> Path:
+    """The program ssh asks for the password, which prints it from the environment."""
+    path = state_root() / "lume" / "askpass"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _private(path, f'#!/bin/sh\nprintf \'%s\\n\' "${ASKPASS_VARIABLE}"\n')
+        path.chmod(0o700)
+    return path
 
 
 def _private(path: Path, text: str) -> None:

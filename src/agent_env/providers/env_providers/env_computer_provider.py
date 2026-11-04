@@ -16,7 +16,7 @@ from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.utils import params as computer_params
-from agent_env.env.envs.computer.utils.probing import probe_first_boot
+from agent_env.env.envs.computer.utils.probing import checked, probe_first_boot
 from agent_env.env.envs.computer.utils.boot import (
     app_settings_environment,
     boot,
@@ -34,6 +34,7 @@ from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
+from agent_env.store.local_state import awaiting_lock
 from agent_env.utils.progress import current_progress
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         if refusal := env.disk_size_refusal(form, disk_size_gb):
             raise ValueError(refusal)
         if form == "vm_bundle" and not await sandbox_provider.has_vm_bundle(build["image"]):
-            await asyncio.to_thread(composer.compose_here, env, arch, sandbox_provider, current_progress())
+            await self._composed_here(env, arch, build, sandbox_provider)
         if build["status"] == "unverified":
             build = await probe_first_boot(env, form, arch, sandbox_provider)
             if build["status"] != "ready":
@@ -142,6 +143,20 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             await discard(booted.sandbox)
             raise
         return record
+
+    async def _composed_here(self, env: ComputerEnv, arch: str, build: dict, sandbox_provider: SandboxProvider) -> None:
+        """The VM bundle ``build`` names composed on ``sandbox_provider``, the Mac a deploy boots it on, which doesn't
+        hold it, once for deploys at once, and probed there at full (gate 3), since a VM bundle composed on one Mac
+        isn't checked by another's probe."""
+        async with awaiting_lock(f"vm-bundle-compose:{build['image']}"):
+            if await sandbox_provider.has_vm_bundle(build["image"]):
+                return
+            await asyncio.to_thread(composer.compose_here, env, arch, sandbox_provider, current_progress())
+            probed = await checked([sandbox_provider], env, env.driver, "vm_bundle", arch, build)
+            if probed["status"] != "ready":
+                await sandbox_provider.delete_vm_bundle(build["image"])
+                raise RuntimeError(f"{env.id}'s vm_bundle/{arch}, composed on this Mac, failed its probe: "
+                                   f"{probed.get('reason')}")
 
     async def reboot(self, env: ComputerEnv, deployed: DeployedSandboxEnv) -> None:
         """Replace the computer ``deployed`` records with a fresh container of the image it booted, or its disk booted

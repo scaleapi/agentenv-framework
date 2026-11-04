@@ -1,13 +1,16 @@
 """agentenv-service PREFIX [NAME=VALUE ...] -- COMMAND ...: a layer's service as its LaunchAgent starts it in the login
-session: in PREFIX, its program under PREFIX when it's a relative path, with the deploy's environment, read from the
-seed the VM shares (agentenv_protocol.computer.seed, version 1), and NAME=VALUE over it. It waits for the seed, which
-the VM mounts at login, and refuses one that carries only versions it doesn't read, as an init does."""
+session: in PREFIX, its program under PREFIX when it's a relative path, with the build-phase settings the VM bundle
+fixes, the deploy's environment over them, read from the seed the VM shares (agentenv_protocol.computer.seed, version
+1), and NAME=VALUE over that. It waits for the seed, which the VM mounts at login, and refuses one that carries only
+versions it doesn't read, as an init does."""
 import base64
+import json
 import os
 import sys
 import time
 
 SEED = "/Volumes/My Shared Files/agentenv-seed"
+BUILD_SETTINGS = "/etc/agentenv/build-settings.json"
 #: The seed versions this reads, oldest first.
 READS = (1,)
 HEADER = "#agentenv-environment"
@@ -49,7 +52,8 @@ def main(argv):
         if time.monotonic() > deadline:
             raise SystemExit(f"agentenv-service: no seed at {SEED} after {WAIT_S} s")
         time.sleep(1)
-    env = {**os.environ, "PATH": PATH, **environment(SEED), **given}
+    fixed = json.load(open(BUILD_SETTINGS)) if os.path.isfile(BUILD_SETTINGS) else {}
+    env = {**os.environ, "PATH": PATH, **fixed, **environment(SEED), **given}
     program = command[0] if "/" not in command[0] or command[0].startswith("/") else os.path.join(prefix, command[0])
     os.chdir(prefix)
     os.execve(program if "/" in program else _which(program, env["PATH"]), [program, *command[1:]], env)

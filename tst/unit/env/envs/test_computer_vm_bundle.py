@@ -5,6 +5,7 @@ same inputs reuses; the env's computer is that VM bundle. The service runner rea
 
 import importlib.machinery
 import importlib.util
+import json
 import plistlib
 import stat
 from pathlib import Path
@@ -36,6 +37,7 @@ class FakeBuilder:
         mac.provisioned.append((name, (build / "provision.sh").read_text(), {
             path.name: plistlib.loads(path.read_bytes()) for path in (build / "agents").iterdir()},
             stat.S_IMODE((build / ".password").stat().st_mode)))
+        mac.settings.append(json.loads((build / "build-settings.json").read_text()))
 
     async def exec_with_output(self, *command):
         self.mac.ran.append(command)
@@ -52,6 +54,7 @@ class FakeMac(SandboxProvider):
 
     def __init__(self):
         self.opened, self.provisioned, self.ran, self.terminated, self.kept, self.exit = [], [], [], [], set(), 0
+        self.settings = []
 
     @classmethod
     def native_platforms(cls):
@@ -83,7 +86,8 @@ def mac(local_stores, cli_routing, monkeypatch):
 def _base() -> ComputerArtifact:
     return ComputerArtifact.put(**{
         "id": "@local/~/kit/macos-26", "arch": ["arm64"], "os": {"type": "macos", "version": "26"},
-        "session": {"user": "lume"}, "config": {"resolution": {"default": "1280x800", "phase": "deploy"}},
+        "session": {"user": "lume"}, "config": {"resolution": {"default": "1280x800", "phase": "deploy"},
+                                                "theme": {"default": "light", "phase": "build"}},
         "forms": {"vm_bundle": {"image": BASE_IMAGE, "format": "lume", "input_channel": "shared_folder",
                                 "min_disk_gb": 150}}})
 
@@ -109,9 +113,9 @@ def _driver(folder: Path, macos: MacInstall | None = None) -> ComputerDriverEnv:
     return Env.get(put.id, put.version)
 
 
-def _put(driver: ComputerDriverEnv, mac: FakeMac) -> ComputerEnv:
+def _put(driver: ComputerDriverEnv, mac: FakeMac, **settings) -> ComputerEnv:
     return ComputerEnv.put(id="@local/~/kit/desktop", computer=_base(), driver=driver, environment_name="desktop",
-                           composing=Composing(sandbox_provider=mac))
+                           composing=Composing(sandbox_provider=mac), computer_settings=settings or None)
 
 
 def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_provision_script(mac, tmp_path):
@@ -129,7 +133,7 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
                  f"/opt/agentenv/bin/python3 -m venv {prefix}/venv",
                  f"as_root env PREFIX={prefix} bash -c 'cd {prefix} && ./install-app.sh'",
                  f"grant {APP} accessibility screen_capture", 'cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"',
-                 "sync"]:
+                 'as_root cp "$build/image.json" "$build/build-settings.json" /etc/agentenv/', "sync"]:
         assert line in script.splitlines()
     assert any(line.startswith(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check -r "
                                f"{prefix}/requirements.txt") for line in script.splitlines())
@@ -151,6 +155,15 @@ def test_a_compose_of_the_same_inputs_reuses_the_vm_bundle_this_mac_keeps(mac, t
     composer.compose(first, composing=Composing(sandbox_provider=mac))
 
     assert len(mac.opened) == 1 and first.metadata["composed"]["vm_bundle"]["arm64"]["reused"]
+
+
+def test_the_build_settings_a_vm_bundle_fixes_reach_its_services_and_another_value_composes_another(mac, tmp_path):
+    driver = _driver(tmp_path / "desk")
+    dark = _put(driver, mac, theme="dark").metadata["composed"]["vm_bundle"]["arm64"]["image"]
+    light = _put(driver, mac).metadata["composed"]["vm_bundle"]["arm64"]["image"]
+
+    assert mac.settings == [{"AGENTENV_SETTING_THEME": "dark"}, {"AGENTENV_SETTING_THEME": "light"}]
+    assert dark != light
 
 
 def test_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_under_that_name(mac, tmp_path):
