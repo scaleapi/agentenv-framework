@@ -222,6 +222,22 @@ def _composed_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDri
     return _probed(env, driver, "disk", arch, result, builds.provider, progress)
 
 
+def compose_here(env: ComputerEnv, arch: str, link: SandboxProvider,
+                 on_progress: Callable[[str], None] | None = None) -> None:
+    """The VM bundle of ``arch`` the env's record names, composed on ``link``, the Mac a deploy boots it on, which
+    doesn't hold it: from the same inputs, so under the same name, which the record keeps. Refused when it composes
+    something else, as when the inputs it reads have changed."""
+    recorded = env.metadata["composed"]["vm_bundle"][arch]["image"]
+    with _Progress(env, on_progress) as progress:
+        progress.say(f"vm_bundle/{arch}: {type(link).__name__} doesn't hold {recorded}; composing it there first")
+        result = _built_vm_bundle(env, env.computer, env.driver, arch, link, progress)
+    if result.get("status") != "unverified":
+        raise RuntimeError(f"{env.id}'s vm_bundle/{arch} couldn't be composed on this Mac: {result.get('reason')}")
+    if result["image"] != recorded:
+        raise RuntimeError(f"{env.id}'s vm_bundle/{arch} composed on this Mac as {result['image']}, not the "
+                           f"{recorded} its record names; compose it again with agent-env env build")
+
+
 def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
                         provider: SandboxProvider, progress: _Progress) -> dict:
     """The VM bundle of ``arch`` composed or reused, then probed when it was (gate 3)."""

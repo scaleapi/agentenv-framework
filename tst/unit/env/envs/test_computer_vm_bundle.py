@@ -152,6 +152,19 @@ def test_a_compose_of_the_same_inputs_reuses_the_vm_bundle_this_mac_keeps(mac, t
     assert len(mac.opened) == 1 and first.metadata["composed"]["vm_bundle"]["arm64"]["reused"]
 
 
+def test_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_under_that_name(mac, tmp_path):
+    env = _put(_driver(tmp_path / "desk"), mac)
+    recorded = env.metadata["composed"]["vm_bundle"]["arm64"]["image"]
+    other = FakeMac()
+
+    composer.compose_here(env, "arm64", other)
+
+    assert other.kept == {recorded} and env.metadata["composed"]["vm_bundle"]["arm64"]["image"] == recorded
+    env.metadata["composed"]["vm_bundle"]["arm64"]["image"] = "local:agentenv-computer-elsewhere"
+    with pytest.raises(RuntimeError, match="not the local:agentenv-computer-elsewhere its record names"):
+        composer.compose_here(env, "arm64", FakeMac())
+
+
 def test_a_failed_provisioning_deletes_its_builder_and_fails_the_pair_with_what_it_said(mac, tmp_path):
     mac.exit = 1
 
