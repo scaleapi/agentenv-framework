@@ -14,7 +14,7 @@ from agentenv_protocol.computer.driver import DriverDeclaration
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils.install import Install, folder_problems, installs
+from agent_env.env.envs.computer.utils.install import DRIVER_INSTALLS, Install, folder_problems, installs
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
@@ -52,7 +52,8 @@ class ComputerDriverEnv(Env):
     @classmethod
     def from_dict(cls, data: dict) -> ComputerDriverEnv:
         files = Artifact.get(data["files"]["id"], version=data["files"]["version"])
-        install = {os_type: Install.model_validate(table) for os_type, table in (data.get("install") or {}).items()}
+        install = {os_type: DRIVER_INSTALLS[os_type].model_validate(table)
+                   for os_type, table in (data.get("install") or {}).items()}
         return cls(id=data["id"], version=data.get("version"), module=data["module"], files=files,
                    declaration=DriverDeclaration.model_validate(data["declaration"]), install=install,
                    port=data.get("port", DEFAULT_PORT), metadata=data.get("metadata") or {})

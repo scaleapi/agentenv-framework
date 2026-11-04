@@ -16,6 +16,7 @@ from agentenv_protocol.computer.app import Download, RunScript
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
+from agent_env.env.env import Env
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import composer, install, vm_bundle
@@ -99,12 +100,13 @@ def _driver(folder: Path, macos: MacInstall | None = None) -> ComputerDriverEnv:
         services=[MacService(name="daemon", command=f"{APP}/Contents/MacOS/desk serve", direct=True,
                              environment={"DO_NOT_TRACK": "1"}),
                   MacService(name="driver", command=SERVE)])
-    return ComputerDriverEnv.put(
+    put = ComputerDriverEnv.put(
         id="@local/~/kit/desk", module="driver.py:Desk", files=files, port=18765, install={"macos": macos},
         declaration=DriverDeclaration.model_validate({
             "name": "desk", "supports": [{"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}],
             "platforms": [{"platform": {"os": "macos", "arch": "arm64", "display": "aqua"}, "provides": [],
                            "tools": ["computer_screenshot"], "features": {}}]}))
+    return Env.get(put.id, put.version)
 
 
 def _put(driver: ComputerDriverEnv, mac: FakeMac) -> ComputerEnv:
