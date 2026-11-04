@@ -37,7 +37,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
-from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, packages, probing, vm_bundle
+from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, macos_vm_bundle, packages, probing
 from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
@@ -276,7 +276,7 @@ def _built_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerD
             raise builder.Unbuildable(f"no link of {' or '.join(type(link).__name__ for link in provider.links)} "
                                       f"boots macos/{arch} VM bundles, so it can't be composed here: compose it on a Mac "
                                       "with the lume provider")
-        link, build = links[0], Path(work) / vm_bundle.BUILD_FOLDER
+        link, build = links[0], Path(work) / macos_vm_bundle.BUILD_FOLDER
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
@@ -293,9 +293,9 @@ def _built_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerD
         values = env.computer_values()
         settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
                     if setting.phase == "build"}
-        script = vm_bundle.write(build, base, parts, link.ssh_password, settings)
+        script = macos_vm_bundle.write(build, base, parts, link.ssh_password, settings)
         key = attempt.key = _key(base=base.forms.vm_bundle.image, provision=script, context=_digest(context),
-                                 agents=_digest(build / "agents"), prepare=_digest(vm_bundle.PREPARE),
+                                 agents=_digest(build / "agents"), prepare=_digest(macos_vm_bundle.PREPARE),
                                  build_settings=settings, form="vm_bundle", arch=arch, format=FORMAT)
         image = f"{LOCAL_IMAGE_PREFIX}agentenv-computer-{key[7:23]}"
         with holding_locks([f"vm-bundle-build:{image}"], lambda: progress.at(
@@ -316,7 +316,7 @@ async def _provisioned(link: SandboxProvider, source: str, name: str, build: Pat
     builder_vm = await link.open_builder(source, name, build)
     try:
         code, stdout, stderr = await builder_vm.exec_with_output(
-            "bash", f"{vm_bundle.SHARED_FILES}/{vm_bundle.BUILD_FOLDER}/provision.sh")
+            "bash", f"{macos_vm_bundle.SHARED_FILES}/{macos_vm_bundle.BUILD_FOLDER}/provision.sh")
         if code != 0:
             raise RuntimeError(f"provisioning exited {code}: {(stderr or stdout).strip()[-2000:]}")
         await link.keep_builder(builder_vm)
@@ -326,7 +326,7 @@ async def _provisioned(link: SandboxProvider, source: str, name: str, build: Pat
 
 
 def _part(layer: _Layer, programs: dict[str, str], environment: dict[str, Any], protocol: bool,
-          app: bool) -> vm_bundle.Part:
+          app: bool) -> macos_vm_bundle.Part:
     """``layer`` as a VM bundle installs it: its programs, each run directly with its own variables when its service
     says so, and a venv's protocol as on Linux: this checkout's source, else an app's pinned to this release, which a
     driver's requirements name themselves."""
@@ -334,7 +334,7 @@ def _part(layer: _Layer, programs: dict[str, str], environment: dict[str, Any], 
     extra = "[app]" if app else ""
     spec = (f'"$build/context/protocol{extra}"' if protocol else
             f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if app else None)
-    return vm_bundle.Part(layer.folder, layer.prefix, layer.install,
+    return macos_vm_bundle.Part(layer.folder, layer.prefix, layer.install,
                           {name: (command, direct.get(command)) for name, command in programs.items()},
                           environment, _venv(layer), spec if _venv(layer) else None, layer.served, layer.steps)
 

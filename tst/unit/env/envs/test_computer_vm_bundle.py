@@ -28,7 +28,7 @@ from agent_env.cli import cli
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer.utils import composer, install, vm_bundle
+from agent_env.env.envs.computer.utils import composer, install, macos_vm_bundle
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.install import Grant, MacInstall, MacService
 from agent_env.providers.env_providers import env_computer_provider
@@ -141,7 +141,7 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
     name = built["image"].removeprefix("local:")
     assert built["status"] == "ready" and name.startswith("agentenv-computer-") and not built["reused"]
     assert mac.opened == [(BASE_IMAGE, name)] and mac.ran == [
-        ("bash", f"{vm_bundle.SHARED_FILES}/{vm_bundle.BUILD_FOLDER}/provision.sh")]
+        ("bash", f"{macos_vm_bundle.SHARED_FILES}/{macos_vm_bundle.BUILD_FOLDER}/provision.sh")]
     _, script, agents, mode = mac.provisioned[0]
     prefix = "/opt/agentenv/drivers/desk"
     for line in ['bash "$build/prepare/prepare.sh"', f"curl -fsSL --retry 3 -o {prefix}/desk.tar.gz {URL}",
@@ -304,7 +304,7 @@ def test_a_macos_base_refuses_a_driver_that_declares_no_install_for_it(mac, tmp_
 
 
 def test_the_service_runner_reads_the_protocols_seed_byte_for_byte(tmp_path):
-    loader = importlib.machinery.SourceFileLoader("agentenv_service", str(vm_bundle.PREPARE / "agentenv-service"))
+    loader = importlib.machinery.SourceFileLoader("agentenv_service", str(macos_vm_bundle.PREPARE / "agentenv-service"))
     module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(module)
     (tmp_path / "user-data").write_text(seed.SAMPLE_USER_DATA)

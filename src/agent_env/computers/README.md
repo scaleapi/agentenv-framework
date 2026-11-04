@@ -94,7 +94,7 @@ agent-env (`vm_bundle/macos/prepare.sh`): `/opt/agentenv` for the layers; a Pyth
 service with the deploy's environment; `set-display`, which puts the display in the virtual display's size at login,
 since a guest boots in the mode its disk was last in, with the sRGB colour profile, so a screenshot holds the pixels as
 drawn; and Cua Spacesd and the Login Items banner off. Then each layer, the driver's and each app's, installs as its
-`[install.macos]` says, by a script composing writes (`env/envs/computer/utils/vm_bundle.py`): its files under its
+`[install.macos]` says, by a script composing writes (`env/envs/computer/utils/macos_vm_bundle.py`): its files under its
 prefix, its downloads checked by sha256, its venv (its requirements and this release's protocol in one resolve), its
 run scripts and install steps, as root or the session user, its `grants`, the TCC permissions of an app bundle it
 installs, bound to the bundle's code signature, and its services as LaunchAgents of the login session. A service runs
