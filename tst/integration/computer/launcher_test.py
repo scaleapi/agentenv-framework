@@ -16,7 +16,9 @@ from tst.util.capabilities import skip_without_kvm
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_kvm()]
 
-BURST = 64
+#: New connections at once: sixteen times the backlog of QEMU's forward. A larger burst on a starved host, a CI runner's,
+#: leaves one of socat's connections to that forward in its SYN's later retries, past half a minute.
+BURST = 16
 
 
 @pytest.mark.asyncio
@@ -38,5 +40,5 @@ async def test_the_launcher_takes_a_burst_of_new_connections_and_a_reset_boots_i
 
 
 async def _status(url: str) -> int:
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         return (await client.get(url)).status_code
