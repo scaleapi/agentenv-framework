@@ -205,13 +205,13 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         if self._computer is None:
             raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")
 
-    # The Linux defaults for the OS operations.
+    # The defaults for the OS operations on Linux and macOS, POSIX alike.
 
-    @default_for("run_in_session", os="linux")
+    @default_for("run_in_session", os=["linux", "macos"])
     async def _computer_linux_run_in_session(self, argv: list, cwd: str | None, env: dict | None, timeout_s: float):
         return await _linux.run_in_session(argv, cwd, env, timeout_s, output_bytes=self.settings.exec_output_bytes)
 
-    @default_for("write_files", os="linux")
+    @default_for("write_files", os=["linux", "macos"])
     async def _computer_linux_write_files(self, files: dict) -> None:
         await asyncio.to_thread(_linux.write_files, files)
 

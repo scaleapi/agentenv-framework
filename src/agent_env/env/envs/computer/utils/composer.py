@@ -2,7 +2,8 @@
 put's sandbox provider gives (``builder``), tagged in the env's image store by a key of everything that goes into it, so
 an image of that key, built for any env and on any builder, is reused. A disk form is made from its arch's container
 once that has built: its root filesystem as the disk's, on the base disk's EFI system partition, by a build that runs
-only on the builder's own platform.
+only on the builder's own platform. A VM bundle, macOS's, is composed on a Mac: its base's booted, given each layer
+over ssh and kept on that Mac by a name of its key (``vm_bundle``).
 Each result is recorded in the env's metadata as it finishes (``composed``), and the arches that built are written as
 the env's computer, a ``computer`` artifact over an index of their images."""
 
@@ -31,12 +32,12 @@ from typing import TYPE_CHECKING, Any, Literal
 from agentenv_protocol.computer import apps as installed_apps
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 
-from agent_env.artifact.artifacts.computer import ComputerArtifact
+from agent_env.artifact.artifacts.computer import LOCAL_IMAGE_PREFIX, ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
-from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, packages, probing
+from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, macos_vm_bundle, packages, probing
 from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
@@ -45,6 +46,7 @@ from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, write_index
+from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError
 
 if TYPE_CHECKING:
@@ -106,16 +108,18 @@ class Composing:
         return gate.forms(env.computer) if self.forms_of == "base" else booted_forms(env, self.deploys_on or provider)
 
 
-def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, composing: Composing = Composing()) -> None:
+def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
+            composing: Composing = Composing()) -> dict[tuple[str, str], dict]:
     """Build each of ``pairs``, by default each of ``composing``'s forms in each arch the env composes, and the container
     each disk among them is made from unless it's built, in parallel, as ``composing`` says, and probe each one its
     provider runs natively (gate 3), recording each as it starts and finishes, then write the env's computer over every
-    pair built so far. Each pair's stages and how it ended go to the log too (``_Progress``)."""
+    pair built so far. Each pair's stages and how it ended go to the log too (``_Progress``). What each pair came to,
+    which the record keeps unless the one it holds got further, as a ready one does over a rebuild that failed."""
     base, driver, provider = env.computer, env.driver, composing.provider()
     builds = builder.Builds(provider, env.stored_id, REPOSITORY, composing.emulate)
     pairs = _with_containers(env, pairs if pairs is not None else [
         (form, arch) for form in composing.forms(env, provider) for arch in env.composed_arches()])
-    record = Record(env)
+    record, results = Record(env), {}
     record.started(pairs)
     with _Progress(env, composing.on_progress) as progress, ThreadPoolExecutor(max_workers=max(len(pairs), 1)) as pool:
         progress.say(f"composing {', '.join(f'{form}/{arch}' for form, arch in pairs)} on "
@@ -125,12 +129,15 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None, compos
         futures = {future: ("container", arch) for arch, future in containers.items()}
         futures |= {pool.submit(_composed_disk, env, base, driver, arch, containers.get(arch), builds, progress):
                     ("disk", arch) for form, arch in pairs if form == "disk"}
+        futures |= {pool.submit(_composed_vm_bundle, env, base, driver, arch, provider, progress): ("vm_bundle", arch)
+                    for form, arch in pairs if form == "vm_bundle"}
         for future in as_completed(futures):
             form, arch = futures[future]
-            result = future.result()
+            results[form, arch] = result = future.result()
             progress.ended(f"{form}/{arch}", result)
             record.finished(form, arch, result)
-    record.computer(_computer(env, base, record.built(), record.built("disk")))
+    record.computer(_computer(env, base, record.built(), record.built("disk"), record.built("vm_bundle")))
+    return results
 
 
 def current(env: ComputerEnv) -> bool:
@@ -138,22 +145,29 @@ def current(env: ComputerEnv) -> bool:
     leaves it not."""
     computer, record = env.metadata.get("computer"), Record(env)
     return computer is not None and computer.get("images") == record.built() and computer.get(
-        "disks", {}) == record.built("disk")
+        "disks", {}) == record.built("disk") and computer.get("vm_bundles", {}) == record.built("vm_bundle")
 
 
 def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
             forms: list[str] | None = None) -> list[tuple[str, str]]:
     """The pairs of ``forms``, by default every form of the base, left to compose in ``env``: never started, failed,
-    left building by a put that stopped, or built but unprobed though ``sandbox_provider``, by default the env's, runs
-    the arch natively."""
+    left building by a put that stopped, built but unprobed though ``sandbox_provider``, by default the env's, runs the
+    arch natively, or a VM bundle the Mac it would compose on doesn't hold, which this agent-env composes and records
+    there, as one that composes differently names it."""
     from agent_env.providers import get_env_sandbox_provider
 
     provider = sandbox_provider or get_env_sandbox_provider()
 
     def left(form: str, arch: str, record: dict | None) -> bool:
         status = (record or {}).get("status")
-        return status not in BUILT or (status == "unverified" and bool(boot.native_links(provider, arch, form,
-                                                                                        env.stored_id)))
+        if status not in BUILT:
+            return True
+        if status == "unverified":
+            return bool(boot.native_links(provider, arch, form, env.stored_id))
+        if form != "vm_bundle":
+            return False
+        links = boot.native_links(provider, arch, form, env.stored_id)
+        return bool(links) and not asyncio.run(links[0].has_vm_bundle(record["image"]))
 
     return _pairs(env, gate.forms(env.computer) if forms is None else forms, left)
 
@@ -219,12 +233,126 @@ def _composed_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDri
     return _probed(env, driver, "disk", arch, result, builds.provider, progress)
 
 
+def held_or_composed_here(env: ComputerEnv, arch: str, link: SandboxProvider,
+                          on_progress: Callable[[str], None] | None = None) -> None:
+    """The VM bundle of ``arch`` the env's record names, on ``link``, the Mac a deploy boots it on: held there, or
+    composed there first, from the same inputs and so under the same name, and probed at full (gate 3), since one
+    composed on another Mac isn't checked by its probe. Looked for holding the lock its compose and probe hold, so a
+    deploy waits for one under way and boots none before its probe passed. Refused, composing nothing, when this
+    agent-env would compose it under another name."""
+    recorded = env.metadata["composed"]["vm_bundle"][arch]["image"]
+    with _Progress(env, on_progress) as progress, holding_locks([_bundle_lock(recorded)], lambda: progress.say(
+            f"vm_bundle/{arch}: waiting for the compose or probe of {recorded} under way on this Mac")):
+        if asyncio.run(link.has_vm_bundle(recorded)):
+            return
+        progress.say(f"vm_bundle/{arch}: {type(link).__name__} doesn't hold {recorded}; composing it there first")
+        result = _composed_vm_bundle(env, env.computer, env.driver, arch, link, progress, held=recorded)
+    if result["status"] != "ready":
+        raise RuntimeError(f"{env.id}'s vm_bundle/{arch} couldn't be composed and probed on this Mac: "
+                           f"{result.get('reason')}")
+
+
+def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
+                        provider: SandboxProvider, progress: _Progress, held: str | None = None) -> dict:
+    """The VM bundle of ``arch`` composed on the first link of ``provider`` that boots macOS VM bundles: its base's
+    cloned and booted with a build folder of everything that goes into it (``macos_vm_bundle``), given each layer over
+    ssh, shut down and kept on that Mac by a name of its key; or one of that key reused, kept there already. Then probed
+    at full (gate 3), and deleted from that Mac when it fails, so no deploy there boots it, though a record of another
+    of its name says ready. All of it holds a lock of its name on that Mac, which a deploy takes to look for it, and
+    which keeps two composes of one name from breaking each other, as a builder of a name deletes an earlier one: the
+    other waits, then reuses it. ``held`` names the VM bundle whose lock the caller holds, composed only under that
+    name."""
+    pair = f"vm_bundle/{arch}"
+    with (_attempting(env, "vm_bundle", arch) as attempt,
+          tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work):
+        if not (links := boot.native_links(provider, arch, "vm_bundle", env.stored_id)):
+            raise builder.Unbuildable(f"no link of {' or '.join(type(link).__name__ for link in provider.links)} "
+                                      f"boots macos/{arch} VM bundles, so it can't be composed here: compose it on a Mac "
+                                      "with the lume provider")
+        link, build = links[0], Path(work) / macos_vm_bundle.BUILD_FOLDER
+        context = build / "context"
+        context.mkdir(parents=True)
+        protocol = _stage_protocol(context)
+        layer = _stage_driver(context, driver, base, {})
+        apps = [(app, _stage_app(context, app, base, {})) for app in env.composed_apps()]
+        parts = [_part(layer, _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install),
+                       {"MCP_PORT": driver.port}, protocol, False)]
+        parts += [_part(staged, dict(zip(gate.programs(app, base.os.type), [
+            f"venv/bin/python -m agentenv_protocol.computer.serve_app {staged.served}",
+            *(service.command for service in staged.install.services)])), {"ENVIRONMENT_NAME": app.environment_name},
+            protocol, True) for app, staged in apps]
+        # A VM bundle's base bakes none in, as a Linux base's image does its defaults, so each value is the env's or the
+        # setting's default.
+        values = env.computer_values()
+        settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
+                    if setting.phase == "build"}
+        script = macos_vm_bundle.write(build, base, parts, link.ssh_password, settings)
+        key = attempt.key = _key(base=base.forms.vm_bundle.image, provision=script, context=_digest(context),
+                                 agents=_digest(build / "agents"), prepare=_digest(macos_vm_bundle.PREPARE),
+                                 build_settings=settings, form="vm_bundle", arch=arch, format=FORMAT)
+        image = f"{LOCAL_IMAGE_PREFIX}agentenv-computer-{key[7:23]}"
+        if held is not None and image != held:
+            raise RuntimeError(f"this agent-env composes it as {image}, not the {held} its record names, as another "
+                               "agent-env composed it; compose it on this Mac with agent-env run or agent-env env "
+                               "build, which record what this one composes")
+        with contextlib.nullcontext() if held else holding_locks([_bundle_lock(image)], lambda: progress.at(
+                pair, "waiting", f"waiting for the compose or probe of {image} under way on this Mac")):
+            if asyncio.run(link.has_vm_bundle(image)):
+                progress.at(pair, "reusing", "reusing the VM bundle of the same key, composed on this Mac earlier")
+                result = {"status": "unverified", "key": key, "image": image, "reused": True, "built_at": now()}
+            else:
+                progress.at(pair, "composing", f"composing on {type(link).__name__}")
+                asyncio.run(_provisioned(link, base.forms.vm_bundle.image, image.removeprefix(LOCAL_IMAGE_PREFIX),
+                                         build))
+                result = {"status": "unverified", "key": key, "image": image, "reused": False,
+                          "builder": type(link).__name__, "built_at": now()}
+            probed = _probed(env, driver, "vm_bundle", arch, result, link, progress)
+            if probed["status"] == "failed":
+                asyncio.run(link.delete_vm_bundle(image))
+            return probed
+    return attempt.result
+
+
+def _bundle_lock(image: str) -> str:
+    return f"vm-bundle:{image}"
+
+
+async def _provisioned(link: SandboxProvider, source: str, name: str, build: Path) -> None:
+    """``name`` composed from ``source`` on ``link``: its builder booted with ``build`` shared, ``provision.sh`` run in it,
+    and kept; a builder whose provisioning failed, its output in the error, or that couldn't be kept, deleted."""
+    builder_vm = await link.open_builder(source, name, build)
+    try:
+        code, stdout, stderr = await builder_vm.exec_with_output(
+            "bash", f"{macos_vm_bundle.SHARED_FILES}/{macos_vm_bundle.BUILD_FOLDER}/provision.sh")
+        if code != 0:
+            raise RuntimeError(f"provisioning exited {code}: {(stderr or stdout).strip()[-2000:]}")
+        await link.keep_builder(builder_vm)
+    except BaseException:
+        await builder_vm.terminate()
+        raise
+
+
+def _part(layer: _Layer, programs: dict[str, str], environment: dict[str, Any], protocol: bool,
+          app: bool) -> macos_vm_bundle.Part:
+    """``layer`` as a VM bundle installs it: its programs, each run directly with its own variables when its service
+    says so, and a venv's protocol as on Linux: this checkout's source, else an app's pinned to this release, which a
+    driver's requirements name themselves."""
+    direct = {service.command: service.environment or {} for service in layer.install.services if service.direct}
+    extra = "[app]" if app else ""
+    spec = (f'"$build/context/protocol{extra}"' if protocol else
+            f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if app else None)
+    return macos_vm_bundle.Part(layer.folder, layer.prefix, layer.install,
+                          {name: (command, direct.get(command)) for name, command in programs.items()},
+                          environment, _venv(layer), spec if _venv(layer) else None, layer.served, layer.steps)
+
+
 def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,
             sandbox_provider: SandboxProvider, progress: _Progress) -> dict:
     """Gate 3: the build of ``result`` booted on the first link of ``sandbox_provider`` that runs ``arch``'s ``form``
     natively, and probed at ``full`` (``probing.checked``). Still unverified, saying why, when no link does."""
     if not (links := boot.native_links(sandbox_provider, arch, form, env.stored_id)):
-        how = f"boots linux/{arch} disks" if form == "disk" else f"runs linux/{arch}"
+        how = {"disk": f"boots linux/{arch} disks", "vm_bundle": f"boots macos/{arch} VM bundles"}.get(
+            form, f"runs linux/{arch}")
         return {**result, "reason": f"no link of the sandbox provider {how} natively to probe it"}
     progress.at(f"{form}/{arch}", "probing", f"probing on {type(links[0]).__name__}")
     return asyncio.run(probing.checked(links, env, driver, form, arch, result))
@@ -659,22 +787,35 @@ def _served(ref: str, store) -> str | None:
         return None
 
 
-def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], disks: dict[str, str]) -> dict | None:
+def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], disks: dict[str, str],
+              bundles: dict[str, str]) -> dict | None:
     """Write the env's computer over the images ``built``, by arch, joined into one index in the env's image store, signed
     in to it: its arches those, its OS and session the base's, its settings the base's with the env's values as their
-    defaults; with a disk form over ``disks`` when there's one for each of those arches. None when nothing built."""
+    defaults; with a disk form over ``disks`` when there's one for each of those arches; for a macOS base, over its VM
+    bundles alone. None when nothing built."""
+    config = {name: setting.model_dump() for name, setting in base.config.items()}
+    for name, value in env.computer_values().items():
+        config[name]["default"] = value
+    if base.forms.vm_bundle is not None:
+        if not bundles:
+            return None
+        arches = [arch for arch in base.arch if arch in bundles]
+        forms = {"vm_bundle": {**base.forms.vm_bundle.model_dump(), "image": bundles[arches[0]]}}
+        return _written(env, base, arches, config, forms)
     if not built:
         return None
     arches = [arch for arch in base.arch if arch in built]
     image = _joined(env, "computer_image", "composed computer", built, arches)
-    config = {name: setting.model_dump() for name, setting in base.config.items()}
-    for name, value in env.computer_values().items():
-        config[name]["default"] = value
     forms = {"container": {"image": {"id": image.id, "version": image.version}, "init": base.forms.container.init,
                            "input_channel": base.forms.container.input_channel}}
     if base.forms.disk is not None and all(arch in disks for arch in arches):
         disk = _joined(env, "computer_disk", "composed computer's disk", disks, arches)
         forms["disk"] = {**base.forms.disk.model_dump(exclude={"image"}), "image": {"id": disk.id, "version": disk.version}}
+    return _written(env, base, arches, config, forms)
+
+
+def _written(env: ComputerEnv, base: ComputerArtifact, arches: list[str], config: dict, forms: dict) -> dict:
+    """The env's computer of ``forms``, written, with what each form's probe found as its ``validated_boot``."""
     computer = ComputerArtifact.put(
         id=derive_id(env.stored_id, "computer"), description=f"{base.id} composed with {env.driver.id} for {env.stored_id}",
         arch=arches, os=base.os.model_dump(), session=base.session.model_dump(), config=config, forms=forms)

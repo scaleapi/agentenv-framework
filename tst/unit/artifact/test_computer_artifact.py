@@ -13,6 +13,11 @@ from agent_env.artifact.store import get_artifact_store
 from agent_env.store.image_store import image_contents
 from tst.util.oci_registry import MANIFEST, UBUNTU, UBUNTU_LAYER, Registry, layer
 
+MACOS = {"type": "macos", "version": "26", "display": "aqua"}
+BUNDLE = {"image": "ghcr.io/trycua/macos:26-20261021-fca2193@sha256:" + "7c" * 32, "format": "lume",
+          "input_channel": "shared_folder", "min_disk_gb": 150}
+
+
 @pytest.fixture
 def registry(local_stores, monkeypatch):
     return Registry().serve(monkeypatch)
@@ -145,12 +150,35 @@ def test_an_image_the_store_has_no_image_artifact_for_refuses_the_put_inspected_
     ({"config": {"theme": {"default": "dark", "phase": "build", "scope": "user"}}}, "a build-phase setting is task-scoped"),
     ({"config": {"token": {"default": "", "phase": "build", "generate": True}}}, "a generated setting is minted"),
     ({"ports": [8080]}, "ports"),
+    ({"os": MACOS, "arch": ["arm64"]}, "forms.container: a macos computer's forms are vm_bundle"),
+    ({"os": MACOS, "arch": ["arm64"], "forms": {}}, "forms.vm_bundle is required: every macos computer has one"),
+    ({"os": MACOS, "forms": {"vm_bundle": BUNDLE}}, "a macOS VM bundle runs on Apple silicon, arm64 alone"),
+    ({"forms": {"vm_bundle": BUNDLE}}, "forms.vm_bundle: a linux computer's forms are container and disk"),
+    ({"os": MACOS, "arch": ["arm64"], "forms": {"vm_bundle": {**BUNDLE, "image": "ghcr.io/trycua/macos:26"}}},
+     "pinned by digest"),
+    ({"os": MACOS, "arch": ["arm64"], "forms": {"vm_bundle": {**BUNDLE, "image": "local:a bundle"}}},
+     "a local VM bundle's name is letters"),
 ], ids=["os-type", "form", "arch-twice", "arch-unknown", "user", "setting-name", "build-user-scope", "build-generate",
-        "unknown-key"])
+        "unknown-key", "macos-container", "macos-no-bundle", "macos-amd64", "linux-bundle", "bundle-unpinned",
+        "bundle-local-name"])
 def test_what_a_computer_declares_is_checked(registry, changes, message):
     image = _image(f"ghcr.io/acme/desktop:1@{registry.index(amd64=registry.image(UBUNTU_LAYER))}")
     with pytest.raises(ValueError, match=message):
         _put(image, **changes)
+
+
+@pytest.mark.parametrize("image", [BUNDLE["image"], "local:agentenv-computer-0123456789abcdef"],
+                         ids=["registry", "local"])
+def test_a_macos_computer_is_a_vm_bundle_written_unread_as_the_mac_that_boots_it_reads_it(registry, image):
+    computer = ComputerArtifact.put(**{**_fields(), "os": MACOS, "arch": ["arm64"],
+                                       "forms": {"vm_bundle": {**BUNDLE, "image": image}}})
+
+    assert computer.os.type == "macos" and computer.forms.container is None
+    assert computer.forms.vm_bundle.local_name() == (image.removeprefix("local:") if image.startswith("local:") else None)
+    assert computer.metadata["validated_images"] == {"vm_bundle": {"arm64": {
+        "status": "uninspected", "reason": "a VM bundle is read by the host that boots it",
+        "checked_at": computer.metadata["validated_images"]["vm_bundle"]["arm64"]["checked_at"]}}}
+    assert registry.fetched == []
 
 
 def test_an_absolute_link_is_followed_and_an_image_without_os_release_or_not_linux_or_unreadable_fails(registry):

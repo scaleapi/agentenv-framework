@@ -331,6 +331,12 @@ class SandboxProvider(ABC):
         return frozenset()
 
     @classmethod
+    def vm_bundle_platforms(cls) -> frozenset[str]:
+        """The platforms whose VM bundles (a computer's vm_bundle form) its create_vm boots, as ``<os>/<arch>``: none
+        here."""
+        return frozenset()
+
+    @classmethod
     def effective_network_policy(cls, policy: Optional[NetworkPolicy]) -> NetworkPolicy:
         """``policy`` with the platform's own hosts unioned in; identity unless it allowlists."""
         if policy is None:
@@ -358,6 +364,7 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "coreweave": "agent_env.providers.sandbox_providers.coreweave.provider:CoreWeaveSandboxProvider",
     "agent37": "agent_env.providers.sandbox_providers.agent37.provider:Agent37SandboxProvider",
     "local": "agent_env.providers.sandbox_providers.local_docker.provider:LocalSandboxProvider",
+    "lume": "agent_env.providers.sandbox_providers.lume.provider:LumeSandboxProvider",
 }
 
 

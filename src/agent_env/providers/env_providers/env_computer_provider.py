@@ -3,6 +3,7 @@ on a sandbox provider that runs its arch natively; the driver's card is the env 
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
+from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.utils.probing import probe_first_boot
 from agent_env.env.envs.computer.utils.boot import (
@@ -32,6 +34,7 @@ from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
+from agent_env.utils.progress import current_progress
 
 if TYPE_CHECKING:
     from agent_env.env.env import Env
@@ -100,6 +103,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         build = next(build for name, at, build in builds if (name, at) == picked)
         if refusal := env.disk_size_refusal(form, disk_size_gb):
             raise ValueError(refusal)
+        if form == "vm_bundle":
+            await asyncio.to_thread(composer.held_or_composed_here, env, arch, sandbox_provider, current_progress())
         if build["status"] == "unverified":
             build = await probe_first_boot(env, form, arch, sandbox_provider)
             if build["status"] != "ready":
@@ -151,7 +156,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
         environment = {**_environment(env, computer, values, params), **control_environment(deployed.control_token)}
         try:
-            if record.get("form") == "disk":
+            if record.get("form") in ("disk", "vm_bundle"):
                 await sandbox_provider.reset_vm(sandbox, image=record["image"], env=environment)
             else:
                 await sandbox_provider.reset_container(sandbox, image_name=record["image"], port=env.driver.port,

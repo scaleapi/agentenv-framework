@@ -48,6 +48,8 @@ MINIMUM_TOOLS = ("computer_screenshot", "computer_click", "computer_drag", "comp
 DATA_PLANE = (INTAKE_EXTENSION_URI, DATA_OBJECTS_EXTENSION_URI)
 #: Where the fixture is staged and keeps its state, relative to the session user's home.
 STAGE = ".agentenv-probe"
+#: How the probe reads a staged file's owner: through the python3 the fixture runs on, the same on every OS.
+OWNER = ("python3", "-c", "import os, sys; print(os.stat(sys.argv[1]).st_uid)")
 #: Where a page driver's computer_upload takes files from, relative to the session user's home.
 UPLOADS = "Uploads"
 #: What the probe answers the page fixture's prompt with.
@@ -605,7 +607,7 @@ class Probe:
     async def _security(self) -> None:
         async def one_user() -> str | None:
             uid = (await self.driver.run("id", "-u"))["stdout"].strip()
-            owner = (await self.driver.run("stat", "-c", "%u", f"{STAGE}/{self.fixture}"))["stdout"].strip()
+            owner = (await self.driver.run(*OWNER, f"{STAGE}/{self.fixture}"))["stdout"].strip()
             if uid == "0":
                 return "commands run as root"
             return None if owner == uid else f"data/add wrote as uid {owner}, commands run as uid {uid}"

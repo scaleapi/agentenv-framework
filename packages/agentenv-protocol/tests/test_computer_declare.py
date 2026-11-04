@@ -264,6 +264,9 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.fonts runs on 'windows', which Changed declares no install for; it declares freebsd, linux"),
     ('@ready_check(os="macos")\n    def window_shown(self): return True',
      "Changed.window_shown runs on 'macos', which Changed declares no install for"),
+    ('@install("macos", FreeBSD(), launch=Launch(command=["mail"], window={"class": "Mail"}, '
+     'ready=Ready(window=True)))',
+     "on macos an app's launch can't wait on its window, which is read from X11"),
     ('class BuildSettings(BaseModel): key: SecretStr = SecretStr("")',
      "Changed.BuildSettings holds a secret at properties.key, which its computer's image would keep; declare it in "
      "Settings"),
@@ -273,9 +276,9 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.BuildSettings holds a secret at $defs.Settings.properties.password, which"),
 ], ids=["no-wait", "no-window", "window-key", "download-sha", "script-escape", "os-skill-twice", "os-build-secret",
         "step-os",
-        "check-os", "build-secret", "build-secrets-listed", "build-secret-nested"])
+        "check-os", "macos-window-wait", "build-secret", "build-secrets-listed", "build-secret-nested"])
 def test_an_app_whose_declaration_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
-    decorator, body = (change, "pass") if change.startswith("@linux") else ("", change)
+    decorator, body = (change, "pass") if change.startswith(("@linux", "@install(")) else ("", change)
     (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64) + f"""
 
 @computer_app(supports={LINUX})

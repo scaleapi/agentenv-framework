@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import os
 import shlex
 import signal
@@ -108,6 +109,16 @@ async def test_an_apps_server_is_ready_once_it_launched_the_app_and_each_check_p
     assert unsynced["problems"] == ["@ready_check inbox_synced returned False"] and unsynced["launched"] is True
     assert after["ready"] is True and after["problems"] == []
 
+
+
+@pytest.mark.parametrize("platform, folder", [("linux", "/run/agentenv/apps"), ("darwin", "/tmp/agentenv/apps")])
+def test_a_launch_is_marked_in_a_folder_a_boot_clears_and_the_session_user_writes(monkeypatch, platform, folder):
+    monkeypatch.setattr(sys, "platform", platform)
+    spec = importlib.util.spec_from_file_location(f"agentenv_protocol.computer._app_runtime_on_{platform}",
+                                                  app_runtime.__file__)
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    assert loaded.LAUNCHED == Path(folder)
 
 @pytest.mark.asyncio
 async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_the_server(desktop, monkeypatch):

@@ -45,6 +45,8 @@ from agentenv_protocol.computer.settings import load_settings  # noqa: E402
 from agentenv_protocol.computer.tools import _modifiers  # noqa: E402
 
 MACOS = Platform(os="macos", arch="arm64")
+#: A platform the base class has no OS defaults for.
+WINDOWS = Platform(os="windows", arch="amd64")
 
 
 def _required(namespace: dict) -> dict:
@@ -130,7 +132,8 @@ def test_set_display_without_modes_is_refused():
 def test_a_driver_method_replaces_the_linux_default():
     Driver = _define({"run": run_in_session(lambda self, *a: None)})
     assert declared(Driver)["run_in_session"] == [("run", {})]
-    assert declared(MinimalDriver)["run_in_session"] == [("_computer_linux_run_in_session", {"os": frozenset({"linux"})})]
+    assert declared(MinimalDriver)["run_in_session"] == [("_computer_linux_run_in_session",
+                                                         {"os": frozenset({"linux", "macos"})})]
 
 
 def test_the_platform_is_detected(tmp_path, monkeypatch):
@@ -143,7 +146,8 @@ def test_the_platform_is_detected(tmp_path, monkeypatch):
     assert detect({"WAYLAND_DISPLAY": "wayland-0"}, release).display == "wayland"
     assert detect({}, tmp_path / "missing").as_dict() == {"os": "linux", "arch": "arm64"}
     monkeypatch.setattr("agentenv_protocol.computer.platform.sys.platform", "darwin")
-    assert detect({"DISPLAY": ":0"}, release) == Platform("macos", None, None, "arm64", None)
+    monkeypatch.setattr("agentenv_protocol.computer.platform._platform.mac_ver", lambda: ("26.5.2", ("", "", ""), ""))
+    assert detect({"DISPLAY": ":0"}, release) == Platform("macos", None, "26.5.2", "arm64", "aqua")
 
 
 def test_settings_come_from_one_json_value():
@@ -222,7 +226,7 @@ async def test_a_driver_whose_software_ships_a_skill_leads_with_it_and_the_compu
 
 @pytest.mark.asyncio
 async def test_a_minimal_driver_declares_only_what_it_has():
-    async with http_client(MinimalDriver(platform=MACOS)) as http:
+    async with http_client(MinimalDriver(platform=WINDOWS)) as http:
         card = (await http.get("/.well-known/agent-env.json")).json()
         display_set = await http.post("/agentenv/ext/computer-display/set", json={"width": 1, "height": 1})
         exec_run = await http.post("/agentenv/ext/computer-exec/run", json={"argv": ["true"], "request_id": "r"})
@@ -449,14 +453,14 @@ def test_a_driver_class_declares_what_it_serves_on_each_platform(monkeypatch):
             raise AssertionError("declaration builds the card without the subclass's __init__")
 
     linux = Declared.declaration(LINUX)
-    elsewhere = MinimalDriver.declaration(Platform(os="macos"))
+    elsewhere = MinimalDriver.declaration(Platform(os="windows"))
     uris = lambda card: {e.uri for e in card.capabilities.extensions}  # noqa: E731
     assert linux.name == "declared" and len(linux.capabilities.tools) == 14
     assert {"urn:agentenv:computer-pointer/v1", "urn:agentenv:computer-exec/v1"} <= uris(linux)
     assert elsewhere.name == "MinimalDriver" and len(elsewhere.capabilities.tools) == 7
     assert "urn:agentenv:computer-exec/v1" not in uris(elsewhere)
     computer = next(e for e in elsewhere.capabilities.extensions if e.uri == "urn:agentenv:computer/v1")
-    assert computer.params["platform"] == {"os": "macos"}
+    assert computer.params["platform"] == {"os": "windows"}
 
 
 def test_a_supports_entry_names_each_platform_it_covers():

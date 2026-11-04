@@ -52,8 +52,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_DESTINATION = "Downloads"
 #: The computer app env's type: an app composed into a computer env, and a computer env of its own.
 APP_TYPE = "computer_app"
-#: The statuses of a build a deploy boots, by form: a disk may also boot unprobed, as KVM is where a disk is probed.
-_DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified")}
+#: The statuses of a build a deploy boots, by form: a disk may also boot unprobed, as KVM is where a disk is probed, and
+#: so may a VM bundle, which a Mac probes.
+_DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified"), "vm_bundle": ("ready", "unverified")}
 
 
 class ComputerEnv(Env):
@@ -232,7 +233,7 @@ class ComputerEnv(Env):
     def disk_size_refusal(self, form: str, disk_size_gb: float) -> Optional[str]:
         """Why a deploy of ``form`` can't have ``disk_size_gb``: a disk is the size its base makes it, which a deploy
         doesn't enlarge."""
-        if form == "disk" and disk_size_gb > (size := self.computer.forms.disk.min_disk_gb):
+        if form in ("disk", "vm_bundle") and disk_size_gb > (size := getattr(self.computer.forms, form).min_disk_gb):
             return f"{self.id}'s disk is {size} GB, which a deploy doesn't enlarge, and it asks for {disk_size_gb:g} GB"
         return None
 

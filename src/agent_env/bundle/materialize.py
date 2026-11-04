@@ -319,8 +319,8 @@ def _write_agent(plan: Plan, write: Write) -> int:
 
 def _compose_reused(write: Write, version: int, composing: Composing, dry_run: bool) -> bool:
     """Whether the computer env ``write`` reuses has pairs of ``composing``'s forms left to compose on its provider
-    (``pending``: never started, failed, stopped, or built but unprobed though it runs their arch natively) or its
-    computer to write again; composed unless ``dry_run``, which says what it would compose."""
+    (``pending``: never started, failed, stopped, built but unprobed though it runs their arch natively, or a VM bundle
+    its Mac doesn't hold) or its computer to write again; composed unless ``dry_run``, which says what it would compose."""
     env = Env.get(write.id, version)
     if not isinstance(env, ComputerEnv) or env.computer is None:
         return False

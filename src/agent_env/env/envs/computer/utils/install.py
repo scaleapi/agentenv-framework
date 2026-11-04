@@ -5,7 +5,9 @@ packages, as apt takes them; ``python``, a requirements file in that folder inst
 ``run``, scripts of the folder run once those are installed; ``services``, the programs the base's init runs from the
 prefix; and ``ports``, those it listens on. Everything but the files is resolved and fetched once at put, and every
 build installs only what was stored then (``packages`` module). The models of packages, sources, downloads and run
-scripts are the protocol's, which an app's ``@linux(...)`` uses too."""
+scripts are the protocol's, which an app's ``@linux(...)`` uses too. ``[install.macos]`` takes the same, but apt's
+packages and sources; its services are LaunchAgents of the login session, and its ``grants`` the TCC permissions an app
+bundle it installs needs."""
 
 from __future__ import annotations
 
@@ -34,6 +36,33 @@ class Service(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,31}$")
     command: str = Field(min_length=1)
     scope: Literal["session", "system"] = "session"
+
+
+class MacService(Service):
+    """A program launchd runs in the login session, as a LaunchAgent: through agent-env's service runner, which gives it
+    the deploy's settings, or, when ``direct``, as its own command, with no settings. macOS attributes an app bundle's
+    TCC permissions to its executable only when launchd starts the executable itself, so a service that needs them is
+    direct."""
+
+    scope: Literal["session"] = "session"
+    direct: bool = False
+    environment: dict[str, str] | None = Field(default=None, description="a direct service's variables")
+
+    @model_validator(mode="after")
+    def _environment_is_direct(self) -> MacService:
+        if self.environment and not self.direct:
+            raise ValueError("a service gets the deploy's environment, so only a direct one names its own")
+        return self
+
+
+class Grant(BaseModel):
+    """The TCC permissions macOS gives an app bundle the layer installs, by its path on the computer, granted to the
+    bundle's identifier and the code signature it has when it's composed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    app: str = Field(pattern=r"^/.+\.app$")
+    services: list[Literal["accessibility", "post_event", "screen_capture"]] = Field(min_length=1)
 
 
 class Install(BaseModel):
@@ -82,9 +111,32 @@ class AppInstall(Install):
     services: list[Service] = Field(default_factory=list)
 
 
-def installs(data: Any, model: type[Install] = Install) -> tuple[dict[str, Install], list[str]]:
-    """The installs ``data``, an ``install`` table, declares by OS type, each a ``model``, and the problems with it,
-    each named by its key."""
+class MacInstall(Install):
+    """How a macOS computer installs a layer: as on Linux, but with no apt, its services LaunchAgents and its
+    ``grants`` the TCC permissions of the app bundles it installs."""
+
+    services: list[MacService] = Field(min_length=1)
+    grants: list[Grant] | None = None
+
+    @model_validator(mode="after")
+    def _no_apt(self) -> MacInstall:
+        if self.packages is not None or self.sources:
+            raise ValueError("macOS has no apt: fetch what the layer needs with downloads, checked by sha256")
+        return self
+
+
+class MacAppInstall(MacInstall):
+    services: list[MacService] = Field(default_factory=list)
+
+
+#: The install model of each OS type, for a driver and for an app.
+DRIVER_INSTALLS: dict[str, type[Install]] = {"linux": Install, "macos": MacInstall}
+APP_INSTALLS: dict[str, type[Install]] = {"linux": AppInstall, "macos": MacAppInstall}
+
+
+def installs(data: Any, models: dict[str, type[Install]] = DRIVER_INSTALLS) -> tuple[dict[str, Install], list[str]]:
+    """The installs ``data``, an ``install`` table, declares by OS type, each its type's model of ``models``, and the
+    problems with it, each named by its key."""
     if not isinstance(data, dict):
         return {}, [f"install must be a table of OS types ({', '.join(OS_TYPES)}), not {data!r}"]
     found, problems = {}, []
@@ -93,7 +145,7 @@ def installs(data: Any, model: type[Install] = Install) -> tuple[dict[str, Insta
             problems.append(f"install.{os_type}: an install is for an OS type agent-env composes: {', '.join(OS_TYPES)}")
             continue
         try:
-            found[os_type] = model.model_validate(table)
+            found[os_type] = models[os_type].model_validate(table)
         except ValidationError as e:
             problems.extend(f"install.{'.'.join(map(str, (os_type, *error['loc'])))}: {error['msg']}"
                             for error in e.errors())
