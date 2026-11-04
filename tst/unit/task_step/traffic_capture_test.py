@@ -218,6 +218,27 @@ async def test_what_teardown_collects_is_saved_to_the_runs_stored_instance(gatew
 
 
 @pytest.mark.asyncio
+async def test_what_teardown_collected_before_its_time_ran_out_is_still_saved_to_the_run(gateway, monkeypatch):
+    instance = get_task_instance_store().create_instance("task-1", 1, total_steps=1)
+    context = _context(_deployed(), _deployed("slow-env"))
+    context.instance_id = instance.instance_id
+    real = traffic_capture_module.collect_captures
+
+    async def collect(context, deployed, *, key=None):
+        if deployed.env_id == "slow-env":
+            await asyncio.sleep(30)
+        return await real(context, deployed, key=key)
+
+    monkeypatch.setattr(traffic_capture_module, "collect_captures", collect)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(1):
+            await collect_uncollected_captures(context, context.deployed_envs)
+
+    stored = find_task_instance(instance.instance_id).context["metadata"][TRAFFIC_KEY]
+    assert stored["notes-env"]["state"] == "collected" and "slow-env" not in stored
+
+
+@pytest.mark.asyncio
 async def test_tear_down_collects_a_retrys_rolled_back_deployment_under_its_own_key_before_its_vm_goes(gateway):
     rolled_back, live = _deployed(sandbox_id="vm-1"), _deployed(sandbox_id="vm-2")
     gone = _rolled_back_sandboxes(TaskStepContext(deployed_envs=[rolled_back]).to_dict(), TaskStepContext().to_dict(), {})

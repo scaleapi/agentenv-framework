@@ -6,7 +6,6 @@ didn't, a retry's rolled-back ones included, before the env closes (``collect_un
 isn't lost with its VM, and saves what it recorded to the run's stored instance."""
 from __future__ import annotations
 
-import asyncio
 import functools
 import logging
 import os
@@ -92,18 +91,20 @@ async def collect_uncollected_captures(context: TaskStepContext, envs: Sequence[
     """Collect the captures of each of ``envs`` that serves traffic/v1 and whose captures the run hasn't collected, a
     collection that failed tried again, as teardown does before the envs close, and of each ``rolled_back`` deployment,
     a retry's, under its own key (``rolled_back_deployments``); ``collect_captures`` records what happened to each, and
-    the entries are saved to the run's stored instance, since teardown runs after its steps saved theirs."""
+    the entries are saved to the run's stored instance, since teardown runs after its steps saved theirs, even when
+    teardown's time runs out partway, so what was collected by then stays linked to the run."""
     entries = context.metadata.get(TRAFFIC_KEY) or {}
     tried = False
-    for key, deployed in [*((deployed.env_id, deployed) for deployed in envs), *rolled_back]:
-        if captures_traffic(deployed) and (entries.get(key) or {}).get("state") != "collected":
-            await collect_captures(context, deployed, key=key)
-            tried = True
-    if tried and context.instance_id:
-        from agent_env.task.store import record_context_metadata
+    try:
+        for key, deployed in [*((deployed.env_id, deployed) for deployed in envs), *rolled_back]:
+            if captures_traffic(deployed) and (entries.get(key) or {}).get("state") != "collected":
+                tried = True
+                await collect_captures(context, deployed, key=key)
+    finally:
+        if tried and context.instance_id and TRAFFIC_KEY in context.metadata:
+            from agent_env.task.store import record_context_metadata
 
-        await asyncio.to_thread(record_context_metadata, context.instance_id, TRAFFIC_KEY,
-                                context.metadata[TRAFFIC_KEY])
+            record_context_metadata(context.instance_id, TRAFFIC_KEY, context.metadata[TRAFFIC_KEY])
 
 
 def rolled_back_deployments(context: TaskStepContext) -> list[tuple[str, DeployedEnv]]:
