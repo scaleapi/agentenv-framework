@@ -138,7 +138,8 @@ class Tables:
 def _parents_first(table: Any, rows: list[dict]) -> list[dict]:
     """``rows`` in their order, but each row that refers to another row of ``table`` through a foreign key of the table's
     own after that row, each key matched whole, every column of a composite one together, so a constraint that isn't
-    deferred holds at each insert; rows in a cycle keep their order."""
+    deferred holds at each insert; rows in a cycle keep their order. The walk keeps its own stack, so a chain of any
+    length is ordered."""
     links = [([element.parent.name for element in constraint.elements],
               [element.column.name for element in constraint.elements])
              for constraint in table.foreign_key_constraints if constraint.referred_table is table]
@@ -152,21 +153,31 @@ def _parents_first(table: Any, rows: list[dict]) -> list[dict]:
                 by_key[(n, key)] = index
     ordered, placed, visiting = [], set(), set()
 
-    def place(index: int) -> None:
-        if index in placed or index in visiting:
-            return
-        visiting.add(index)
+    def parents(index: int) -> list[int]:
+        found = []
         for n, (local, _) in enumerate(links):
             key = tuple(rows[index].get(column) for column in local)
             parent = by_key.get((n, key)) if None not in key else None
             if parent is not None and parent != index:
-                place(parent)
-        visiting.discard(index)
-        placed.add(index)
-        ordered.append(rows[index])
+                found.append(parent)
+        return found
 
-    for index in range(len(rows)):
-        place(index)
+    for start in range(len(rows)):
+        if start in placed:
+            continue
+        visiting.add(start)
+        stack = [(start, iter(parents(start)))]
+        while stack:
+            index, pending = stack[-1]
+            parent = next((p for p in pending if p not in placed and p not in visiting), None)
+            if parent is not None:
+                visiting.add(parent)
+                stack.append((parent, iter(parents(parent))))
+                continue
+            stack.pop()
+            visiting.discard(index)
+            placed.add(index)
+            ordered.append(rows[index])
     return ordered
 
 

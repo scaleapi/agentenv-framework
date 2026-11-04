@@ -162,6 +162,22 @@ def test_an_export_whose_child_row_sorts_before_its_parent_loads_back_with_forei
         sqlalchemy.event.remove(sqlalchemy.engine.Engine, "connect", enforce)
 
 
+def test_a_chain_longer_than_the_recursion_limit_is_ordered_parents_first() -> None:
+    import sys
+
+    from agentenv_protocol.website.database import _parents_first
+
+    metadata = sqlalchemy.MetaData()
+    table = sqlalchemy.Table("notes", metadata, sqlalchemy.Column("id", Integer, primary_key=True),
+                             sqlalchemy.Column("parent_id", Integer, ForeignKey("notes.id"), nullable=True))
+    count = sys.getrecursionlimit() * 2
+    rows = [{"id": i, "parent_id": i + 1 if i + 1 < count else None} for i in range(count)]
+    ordered = _parents_first(table, rows)
+    assert [row["id"] for row in ordered] == list(range(count - 1, -1, -1))
+    cycle = [{"id": 1, "parent_id": 2}, {"id": 2, "parent_id": 1}]
+    assert sorted(row["id"] for row in _parents_first(table, cycle)) == [1, 2]
+
+
 def test_a_composite_self_reference_loads_back_parents_first_matching_the_whole_key(dist: Path, database: str) -> None:
     class Tenants(DeclarativeBase):
         pass
