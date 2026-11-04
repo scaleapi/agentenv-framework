@@ -1,7 +1,7 @@
 """The lume provider against a fake ``lume``, which keeps its VMs in a file: a VM is cloned from its VM bundle, sized,
 given the deploy's environment as the protocol's seed in the folder it shares, run, and relayed from this Mac's
 loopback; a reset clones it afresh under its MAC address; a registry image is pulled once by its tag, checked against
-its digest; two VMs run at most, a reset holding its slot; and a builder shares its build folder and is kept as a local VM bundle."""
+its digest before and after, a pull its tag moved under deleted; two VMs run at most, a reset holding its slot; and a builder shares its build folder and is kept as a local VM bundle."""
 
 import asyncio
 import json
@@ -162,7 +162,8 @@ async def test_a_reset_clones_the_vm_afresh_under_its_mac_address_with_the_new_s
 
 
 @pytest.mark.asyncio
-async def test_a_registry_bundle_is_pulled_once_by_its_tag_once_its_digest_is_checked(mac, monkeypatch):
+async def test_a_registry_bundle_is_pulled_once_by_its_tag_checked_before_and_after_and_one_whose_tag_moved_deleted(
+        mac, monkeypatch):
     pinned = []
     monkeypatch.setattr(lume, "pin_digest", lambda ref, auth: pinned.append(ref) or ref)
     image = "ghcr.io/trycua/macos:26-x@sha256:" + "7c" * 32
@@ -178,6 +179,17 @@ async def test_a_registry_bundle_is_pulled_once_by_its_tag_once_its_digest_is_ch
     assert pinned == [image, image]
     with pytest.raises(ValueError, match="Lume pulls by tag"):
         await mac.create_vm(image="ghcr.io/trycua/macos@sha256:" + "ab" * 32, env={})
+    checks = iter([None, ValueError("its tag names sha256:" + "cd" * 32)])
+
+    def moved(ref, auth):
+        if (raised := next(checks)) is not None:
+            raise raised
+        return ref
+
+    monkeypatch.setattr(lume, "pin_digest", moved)
+    with pytest.raises(ValueError, match="its tag moved while it was pulled, so what was pulled is deleted"):
+        await mac.create_vm(image="ghcr.io/trycua/macos:26-y@sha256:" + "ab" * 32, env={})
+    assert "agentenv-base-abababababab" not in _state(mac.fake)["vms"]
 
 
 @pytest.mark.asyncio

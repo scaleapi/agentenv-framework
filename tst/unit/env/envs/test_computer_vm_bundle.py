@@ -1,8 +1,10 @@
 """A macOS computer env, composed on a Mac: its VM bundle's build folder holds the base's readying, each layer's files,
 its LaunchAgents and the provision script that installs each layer as its ``[install.macos]`` says; a builder of the
 base is booted on a link that boots macOS VM bundles, provisioned, and kept by a name of its key, which a compose of the
-same inputs reuses; the env's computer is that VM bundle. The service runner reads the protocol's seed."""
+same inputs reuses; the env's computer is that VM bundle. Deploys on a Mac that lacks it compose it there once and
+probe it. The service runner reads the protocol's seed."""
 
+import asyncio
 import importlib.machinery
 import importlib.util
 import json
@@ -23,6 +25,8 @@ from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import composer, install, vm_bundle
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.install import Grant, MacInstall, MacService
+from agent_env.providers.env_providers import env_computer_provider
+from agent_env.providers.env_providers.env_computer_provider import EnvironmentComputerProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 BASE_IMAGE = "ghcr.io/trycua/macos:26-x@sha256:" + "7c" * 32
@@ -67,6 +71,9 @@ class FakeMac(SandboxProvider):
     async def has_vm_bundle(self, image):
         return image in self.kept
 
+    async def delete_vm_bundle(self, image):
+        self.kept.discard(image)
+
     async def open_builder(self, image, name, build):
         self.opened.append((image, name))
         return FakeBuilder(self, name, build)
@@ -92,7 +99,7 @@ def _base() -> ComputerArtifact:
                                 "min_disk_gb": 150}}})
 
 
-def _driver(folder: Path, macos: MacInstall | None = None) -> ComputerDriverEnv:
+def _driver(folder: Path, macos: MacInstall | None = None, daemon: dict[str, str] | None = None) -> ComputerDriverEnv:
     folder.mkdir(parents=True, exist_ok=True)
     for name, text in (("driver.py", "class Desk: ...\n"), ("requirements.txt", "mss\n"), ("install-app.sh", "true\n")):
         (folder / name).write_text(text)
@@ -102,7 +109,7 @@ def _driver(folder: Path, macos: MacInstall | None = None) -> ComputerDriverEnv:
         python="requirements.txt", downloads=[Download(url=URL, sha256="ab" * 32, to="desk.tar.gz", arch="arm64")],
         run=[RunScript(script="install-app.sh")], grants=[Grant(app=APP, services=["accessibility", "screen_capture"])],
         services=[MacService(name="daemon", command=f"{APP}/Contents/MacOS/desk serve", direct=True,
-                             environment={"DO_NOT_TRACK": "1"}),
+                             environment=daemon or {"DO_NOT_TRACK": "1"}),
                   MacService(name="driver", command=SERVE)])
     put = ComputerDriverEnv.put(
         id="@local/~/kit/desk", module="driver.py:Desk", files=files, port=18765, install={"macos": macos},
@@ -149,12 +156,16 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
     assert env.metadata["computer"]["vm_bundles"] == {"arm64": built["image"]}
 
 
-def test_a_compose_of_the_same_inputs_reuses_the_vm_bundle_this_mac_keeps(mac, tmp_path):
+def test_a_compose_of_the_same_inputs_reuses_the_vm_bundle_this_mac_keeps_and_a_changed_service_composes_another(
+        mac, tmp_path):
     driver = _driver(tmp_path / "desk")
     first = _put(driver, mac)
     composer.compose(first, composing=Composing(sandbox_provider=mac))
 
     assert len(mac.opened) == 1 and first.metadata["composed"]["vm_bundle"]["arm64"]["reused"]
+    other = _put(_driver(tmp_path / "desk", daemon={"DO_NOT_TRACK": "0"}), mac)
+    assert len(mac.opened) == 2 and (other.metadata["composed"]["vm_bundle"]["arm64"]["image"]
+                                     != first.metadata["composed"]["vm_bundle"]["arm64"]["image"])
 
 
 def test_the_build_settings_a_vm_bundle_fixes_reach_its_services_and_another_value_composes_another(mac, tmp_path):
@@ -177,6 +188,30 @@ def test_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_under
     env.metadata["composed"]["vm_bundle"]["arm64"]["image"] = "local:agentenv-computer-elsewhere"
     with pytest.raises(RuntimeError, match="not the local:agentenv-computer-elsewhere its record names"):
         composer.compose_here(env, "arm64", FakeMac())
+
+
+@pytest.mark.asyncio
+async def test_deploys_on_a_mac_that_lacks_the_vm_bundle_compose_it_once_and_probe_it_and_a_failed_probe_deletes_it(
+        mac, tmp_path, monkeypatch):
+    env = _put(_driver(tmp_path / "desk"), mac)
+    build = env.metadata["composed"]["vm_bundle"]["arm64"]
+    probed, outcome = [], {"status": "ready"}
+
+    async def checked(links, env, driver, form, arch, result):
+        probed.append((links, form, result["image"]))
+        return outcome
+
+    monkeypatch.setattr(env_computer_provider, "checked", checked)
+    other, provider = FakeMac(), EnvironmentComputerProvider()
+
+    await asyncio.gather(*(provider._composed_here(env, "arm64", build, other) for _ in range(2)))
+
+    assert len(other.opened) == 1 and other.kept == {build["image"]}
+    assert probed == [([other], "vm_bundle", build["image"])]
+    outcome, failing = {"status": "failed", "reason": "P1 failed"}, FakeMac()
+    with pytest.raises(RuntimeError, match="composed on this Mac, failed its probe: P1 failed"):
+        await provider._composed_here(env, "arm64", build, failing)
+    assert len(failing.opened) == 1 and not failing.kept
 
 
 def test_a_failed_provisioning_deletes_its_builder_and_fails_the_pair_with_what_it_said(mac, tmp_path):
