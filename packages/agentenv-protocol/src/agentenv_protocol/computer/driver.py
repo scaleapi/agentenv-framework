@@ -4,6 +4,7 @@ computer's apps as child environments, each reached at ``/svc/<name>/`` through 
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -13,7 +14,8 @@ from starlette.responses import Response
 from starlette.websockets import WebSocket
 
 from ..agent_env_environment import (_CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
-                                     _error_response, control_guard, environment_card)
+                                     AgentEnvError, _error_response, add_websocket_route, control_check,
+                                     environment_card)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
 from . import _linux, apps, card, svc
@@ -97,6 +99,9 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         self.settings = settings if settings is not None else load_settings()
         self.platform = platform if platform is not None else detect()
         self._computer = ComputerRuntime(self)
+        #: The routes each app's card opens to agents, by app, read once it answers.
+        self._computer_agent_routes: dict[str, list[str]] = {}
+        self._computer_redaction = svc.AgentRouteRedaction(self._computer_agent_routes)
 
     @classmethod
     def declaration(cls, platform: Platform) -> EnvironmentCard:
@@ -139,25 +144,42 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return await apps.children(self._computer.apps) if self._computer.apps else None
 
     def _computer_front_apps(self, app: Any) -> Any:
-        app.custom_route("/svc/{name}/{path:path}", methods=svc.METHODS)(control_guard()(self._computer_forward))
-        svc.websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
+        app.custom_route("/svc/{name}/{path:path}", methods=svc.METHODS)(self._computer_forward)
+        add_websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
+        for logger in svc.SERVER_LOGGERS:
+            logging.getLogger(logger).addFilter(self._computer_redaction)
+        logging.getLogger(svc.FORWARDER_LOGGER).setLevel(logging.WARNING)
         return app
 
     def _computer_app_folder(self, name: str) -> Optional[Path]:
         return next((folder for folder in self._computer.apps if folder.name == name), None)
+
+    async def _computer_allows(self, folder: Path, connection: Request | WebSocket) -> bool:
+        """Whether a call under ``/svc/<name>/`` may go on to the app in ``folder``: with the control token, or on a
+        route the app's card says agents reach without it, which the app checks itself. The card is read on the app's
+        first call, whoever makes it, since the log's redaction needs its routes too."""
+        if folder.name not in self._computer_agent_routes and (card := await apps.served_card(folder)) is not None:
+            self._computer_agent_routes[folder.name] = apps.agent_routes(card)
+        if control_check()(connection.headers):
+            return True
+        routes = self._computer_agent_routes.get(folder.name)
+        return routes is not None and svc.open_to_agents(routes, svc.target(connection))
 
     async def _computer_forward(self, request: Request) -> Response:
         """A request under ``/svc/<name>/``, sent on to the app named so: its own server answers it."""
         name = request.path_params["name"]
         if (folder := self._computer_app_folder(name)) is None:
             return _error_response(TargetUnavailable(f"this computer has no app named {name!r}"))
+        if not await self._computer_allows(folder, request):
+            return _error_response(AgentEnvError(
+                "unauthorized", "this route is agent-env's own: it takes the env's control token", status=401))
         return await svc.forward(folder, name, request)
 
     async def _computer_relay(self, websocket: WebSocket) -> None:
         """A WebSocket under ``/svc/<name>/``, relayed both ways to the app named so; refused, before it opens, with no
-        such app."""
+        such app, or without the control token off the routes the app opens to agents."""
         name = websocket.path_params["name"]
-        if (folder := self._computer_app_folder(name)) is None:
+        if (folder := self._computer_app_folder(name)) is None or not await self._computer_allows(folder, websocket):
             await websocket.close(code=1008)
             return
         await svc.relay(folder, name, websocket)

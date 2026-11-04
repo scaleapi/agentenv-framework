@@ -21,10 +21,15 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.websockets import WebSocket
 
-from .agent_env_environment import agent_skill, extension
+from .agent_env_environment import add_websocket_route, agent_skill, extension
+from .browser_cdp import ROUTE, Relay, Tokens, reached, websocket_form
 from .computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from .computer import app as computer_app
+from .computer.app import SOCKET
 from .computer.errors import DeviceUnavailable, InvalidArgument
 
 logger = logging.getLogger(__name__)
@@ -45,6 +50,8 @@ BLOCK = 2
 AGENTENV, UNKNOWN, EXIT, STOP = "agentenv", "unknown", "exit", "stop"
 #: How long the active tab's check waits on each page.
 ACTIVE_CHECK_TIMEOUT_S = 2.0
+#: How often a call that waits for the browser to be ready checks it.
+READY_POLL_S = 0.5
 #: How long a tab opened headless may take to be attached and held to its window's size.
 PIN_TIMEOUT_S = 10.0
 #: How much of a download each read hashes.
@@ -134,6 +141,19 @@ class DevToolsPipe:
     async def call(self, method: str, params: Optional[dict] = None, *, session_id: Optional[str] = None,
                    timeout_s: Optional[float] = None) -> dict:
         """``method``'s result, or DevToolsError with the browser's message."""
+        answered = await self._answer(method, params, session_id,
+                                      self.call_timeout_s if timeout_s is None else timeout_s)
+        if "error" in answered:
+            raise DevToolsError(f"{method}: {answered['error'].get('message', answered['error'])}")
+        return answered.get("result", {})
+
+    async def request(self, method: str, params: Optional[dict] = None, *, session_id: Optional[str] = None) -> dict:
+        """The browser's whole answer to ``method``, its ``result`` or its ``error``, however long it takes: what a
+        relay passes on as it is."""
+        return await self._answer(method, params, session_id, None)
+
+    async def _answer(self, method: str, params: Optional[dict], session_id: Optional[str],
+                      timeout_s: Optional[float]) -> dict:
         if self._writer is None or self._writer.is_closing():
             raise ConnectionError("no browser is connected over its debugging pipe")
         message_id = next(self._ids)
@@ -143,12 +163,9 @@ class DevToolsPipe:
                    **({"sessionId": session_id} if session_id else {})}
         self._writer.write(json.dumps(message).encode() + b"\0")
         try:
-            answered = await asyncio.wait_for(answer, self.call_timeout_s if timeout_s is None else timeout_s)
+            return await asyncio.wait_for(answer, timeout_s)
         finally:
             self._waiting.pop(message_id, None)
-        if "error" in answered:
-            raise DevToolsError(f"{method}: {answered['error'].get('message', answered['error'])}")
-        return answered.get("result", {})
 
     def close(self) -> None:
         if self._reading is not None:
@@ -486,9 +503,12 @@ class BrowserControl:
                 tab.update(url=info.get("url", tab["url"]), title=info.get("title", tab["title"]))
 
     def _event(self, message: dict) -> None:
+        """An event on this connection's own sessions; one on a session an agent's CDP connection holds is the
+        agent's."""
+        session = message.get("sessionId")
         handler = getattr(self, "_on_" + message.get("method", "").replace(".", "_"), None)
-        if handler is not None:
-            handler(message.get("params", {}), message.get("sessionId"))
+        if handler is not None and (session is None or session in self._sessions):
+            handler(message.get("params", {}), session)
 
     def _on_Target_targetCreated(self, params: dict, session: Optional[str]) -> None:
         info = params["targetInfo"]
@@ -658,6 +678,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     profile: ClassVar[str] = ".config/chromium"
     #: How long its ready check waits on the browser's answer over its pipe.
     devtools_timeout_s: ClassVar[float] = 5.0
+    agent_routes = (ROUTE,)
 
     def __init__(self) -> None:
         #: Its CDP connection, over the pipe its server launches it with.
@@ -670,6 +691,9 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.control = BrowserControl(self.devtools, self.settings.dialogs,
                                       (self.settings.window.width, self.settings.window.height) if _alone()
                                       else None)
+        #: The CDP addresses it has handed out, and the relay agents' connections to them go through.
+        self.cdp_tokens = Tokens(SOCKET.parent / "cdp-tokens.json")
+        self.relay = Relay(self.devtools)
         self.devtools.on_close(self._pipe_closed)
 
     @classmethod
@@ -747,6 +771,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         """The browser closed its pipe: its tabs closed by its exit when it ended on its own, else by its server's
         stop."""
         self.control.ended(EXIT if self._computer_app.exited() else STOP)
+        self.relay.ended()
 
     async def _follow(self, urls: list[str]) -> None:
         """Its control attached, then each of ``urls`` in a tab behind the active one, in order."""
@@ -811,9 +836,66 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "the active tab, or go back, forward or reload; tabs/list, tabs/open, tabs/activate and tabs/close manage "
         "its tabs by their ids; dialog/answer answers the dialog open on the active tab; files/choose gives the file "
         "chooser open on it files in ~/Uploads, headless; and page/state is the active tab's id, URL and title and "
-        "what is open on it."))
+        "what is open on it. cdp returns a user's CDP address, http_url to discover from and ws_url to connect to, "
+        "with a token agentenv mints in its path: each connection to it gets its own browser-level session, and "
+        "record lists them as cdp_connections."))
     async def browser_record(self) -> dict:
-        return {**await self.control.record(), "launches": self._computer_app.launches()}
+        return {**await self.control.record(), "launches": self._computer_app.launches(),
+                "cdp_connections": list(self.relay.connections)}
+
+    @extension(BROWSER, op="cdp")
+    async def browser_cdp(self, user: str, request: Request) -> dict:
+        """``user``'s CDP address at the address this call reached the browser at, once it's ready: the same one each
+        time it's asked for, as the server that minted it keeps it."""
+        await self._until_ready()
+        address = self.cdp_tokens.mint(user, reached(request))
+        return {"http_url": address.http_url, "ws_url": address.ws_url}
+
+    def create_app(self) -> Any:
+        app = super().create_app()
+        for path in ("", "/", "/version", "/version/", "/list", "/list/"):
+            app.custom_route(f"{ROUTE}{{token}}/json{path}", methods=["GET"])(self._cdp_discovery)
+        for path in ("", "/{browser}"):
+            add_websocket_route(app, f"{ROUTE}{{token}}/devtools/browser{path}", self._cdp_connect)
+        return app
+
+    async def _cdp_discovery(self, request: Request) -> Response:
+        """``json/version`` and ``json/list`` under a CDP address, answered from the browser, with its WebSocket at the
+        address the client reached: a browser on a pipe has no endpoints of its own. 403 for a token agentenv didn't
+        mint."""
+        token = request.path_params["token"]
+        if self.cdp_tokens.address(token) is None:
+            return JSONResponse({"error": "agentenv didn't mint this CDP address"}, status_code=403)
+        try:
+            version = await self.devtools.call("Browser.getVersion")
+            if request.url.path.rstrip("/").endswith("/json/version"):
+                return JSONResponse({
+                    "Browser": version.get("product"), "Protocol-Version": version.get("protocolVersion"),
+                    "User-Agent": version.get("userAgent"), "V8-Version": version.get("jsVersion"),
+                    "WebKit-Version": version.get("revision"),
+                    "webSocketDebuggerUrl": f"{websocket_form(reached(request))}{ROUTE}{token}/devtools/browser"})
+            tabs = await self.control.tab_list()
+        except (ConnectionError, DevToolsError, asyncio.TimeoutError) as e:
+            return JSONResponse({"error": f"the browser isn't answering: {e}"}, status_code=503)
+        return JSONResponse([{"id": tab["id"], "type": "page", "title": tab["title"], "url": tab["url"],
+                              "description": "", "devtoolsFrontendUrl": ""} for tab in tabs])
+
+    async def _cdp_connect(self, websocket: WebSocket) -> None:
+        address = self.cdp_tokens.address(websocket.path_params["token"])
+        if address is None:
+            await websocket.close(code=1008)
+            return
+        await self.relay.serve(websocket, address.user)
+
+    async def _until_ready(self) -> None:
+        """Back once it's ready, as ``computer-app/v1``'s ``ready`` says, or DeviceUnavailable after its ready
+        timeout."""
+        timeout_s = self._computer_app.timeout_s
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while not (await self._computer_app.readiness()).ready:
+            if asyncio.get_running_loop().time() > deadline:
+                raise DeviceUnavailable(f"the browser isn't ready after {timeout_s:g} s")
+            await asyncio.sleep(READY_POLL_S)
 
     @extension(BROWSER, op="page/viewport", method="GET")
     async def browser_page_viewport(self) -> dict:
