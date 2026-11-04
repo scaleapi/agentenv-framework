@@ -54,6 +54,14 @@ def _pick(own: Any, chosen: Any, default: Any) -> tuple[Any, Source]:
     return default, "default"
 
 
+def with_default_memory(attribution: Optional[Attribution]) -> Optional[Attribution]:
+    """``attribution`` for a sandbox created without the step's memory, which gets its provider's: its memory source
+    is ``default`` whatever the step's was."""
+    if not attribution or MEMORY_SOURCE_KEY not in attribution:
+        return attribution
+    return {**attribution, MEMORY_SOURCE_KEY: "default"}
+
+
 def resolve(step: Any, attribution: Attribution, default: SandboxSize = SandboxSize()) -> tuple[SandboxSize, Attribution]:
     """The size ``step`` reserves, from its ``cpu`` and ``memory_mb``, and ``attribution`` with where each came from."""
     own = SandboxSize(step.cpu, step.memory_mb)

@@ -56,6 +56,7 @@ from agent_env.providers.env_providers.env_provider import (
     _tool_names,
 )
 from agent_env.providers.sandbox_providers.local_docker.provider import remove_local_work_dir
+from agent_env.providers.sandbox_providers import sizing
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox, port_bindings
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_CONTAINER,
@@ -968,7 +969,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         deploy = _ContainerDeploy(
             sandbox_provider=sandbox_provider, cpu=cpu, disk_size_gb=disk_size_gb, ttl_seconds=ttl_seconds,
-            attribution=attribution,
+            attribution=sizing.with_default_memory(attribution),
         )
 
         try:

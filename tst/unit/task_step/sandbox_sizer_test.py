@@ -113,3 +113,14 @@ async def test_deploy_sandbox_falls_back_to_its_own_default_when_the_sizer_choos
     kwargs = provider.create_vm.call_args.kwargs
     assert (kwargs["cpu"], kwargs["memory"]) == (1.0, 8192)
     assert (kwargs["attribution"]["cpu_source"], kwargs["attribution"]["memory_source"]) == ("default", "default")
+
+
+@pytest.mark.parametrize("attribution, expected", [
+    ({"run_id": "r", "cpu_source": "sizer", "memory_source": "sizer"},
+     {"run_id": "r", "cpu_source": "sizer", "memory_source": "default"}),
+    ({"run_id": "r", "memory_source": "step"}, {"run_id": "r", "memory_source": "default"}),
+    ({"run_id": "r"}, {"run_id": "r"}),
+    (None, None),
+], ids=["sized", "step-memory", "no-sources", "none"])
+def test_a_sandbox_made_without_the_steps_memory_says_its_memory_is_the_default(attribution, expected):
+    assert sizing.with_default_memory(attribution) == expected
