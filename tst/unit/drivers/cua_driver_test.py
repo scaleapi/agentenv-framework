@@ -9,6 +9,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
+import types
 import stat
 import tempfile
 from pathlib import Path
@@ -100,10 +102,32 @@ class FakeDaemon:
                 and (session is None or r["session_id"] == session)]
 
 
+class FakeKeymap:
+    """An X display's keymap: printable ASCII on keycodes 8 to 102, and 103 and 104 spare."""
+
+    def __init__(self):
+        self.display = types.SimpleNamespace(info=types.SimpleNamespace(min_keycode=8, max_keycode=104))
+        self.keys = {8 + i: (0x20 + i, 0x20 + i) for i in range(0x5F)} | {103: (0, 0), 104: (0, 0)}
+
+    def get_keyboard_mapping(self, first, count):
+        return [self.keys[code] for code in range(first, first + count)]
+
+    def change_keyboard_mapping(self, code, keysyms):
+        self.keys[code] = tuple(keysyms[0])
+
+    def sync(self):
+        pass
+
+
 @pytest.fixture
 def module(monkeypatch):
     monkeypatch.delenv("ENVIRONMENT_NAME", raising=False)
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
+    xlib = types.ModuleType("Xlib")
+    xlib.display = types.ModuleType("Xlib.display")
+    xlib.display.Display = FakeKeymap
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setitem(sys.modules, "Xlib.display", xlib.display)
     spec = importlib.util.spec_from_file_location("cua_driver_driver", DRIVER)
     loaded = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loaded)
@@ -164,6 +188,25 @@ async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_s
         ("drag", {"scope": "desktop", "from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40, "button": "left",
                   "duration_ms": 300, "modifier": [], "steps": 20, "delivery_mode": "foreground"}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_characters_off_x11s_keymap_are_kept_on_spare_keycodes_before_cua_driver_types_them(
+        module, daemon, monkeypatch):
+    monkeypatch.setattr(module, "MACOS", False)
+    monkeypatch.setattr(module, "x_display", sys.modules["Xlib.display"], raising=False)
+    driver = module.CuaDriver()
+    oe, east, capital = 0xF6, 0x1000000 | ord("東"), 0x1000000 | ord("京")
+
+    await driver.type_in("Wörld")
+    keymap = driver._keymap.d
+    assert keymap.keys[103] == (oe, oe) and keymap.keys[104] == (0, 0)
+    await driver.type_in("東")
+    await driver.type_in("京")
+    assert keymap.keys[103] == (capital, capital) and keymap.keys[104] == (east, east)
+    await driver.type_in("東京ö")
+    assert keymap.keys[103] == keymap.keys[104] == (0, 0) and not driver._keymap.ours
+    assert [r["text"] for name, r in daemon.calls() if name == "type_text"] == ["Wörld", "東", "京", "東京ö"]
 
 
 @pytest.mark.asyncio
