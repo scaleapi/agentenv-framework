@@ -448,110 +448,7 @@ async def test_with_no_agent_trigger_fired_the_llm_user_sim_answers(monkeypatch)
     assert ctx.metadata["agent_trigger_firings"] == {"talk": [{"turn": 1, "fired": []}]}
 
 
-# ---- framing the agent's reply, the role guard and the user-sim's own trajectory ---------------------------------------
-
-FRAME = "The assistant replied:\n<reply>\n{reply}\n</reply>\nWrite your next message."
-GUARD = {"max_chars": 40, "reject_markdown": True}
-RETRY = ("Your last reply reads like the assistant's work, not like the user's next message. Write it again as the "
-         "user: only the user's own next message to the assistant, short and in plain text.")
-
-
-def framed(reply: str) -> list[dict]:
-    return text(FRAME.replace("{reply}", reply))
-
-
-@pytest.mark.asyncio
-async def test_a_template_frames_the_agents_reply_for_the_user_sim_and_the_agent_gets_the_sims_message_as_it_is(
-        monkeypatch):
-    file_part = {"kind": "file", "file": {"uri": "https://files.test/a.png", "mimeType": "image/png"}}
-    peers = Peers(monkeypatch, {AGENT: [[*text("draft one"), file_part], text("draft two")],
-                                USER: [sim("make it {shorter}")]})
-    ctx = _context(user_card=_USER_SIM_CARD)
-
-    await _step(turns=2, user_message_template=FRAME).execute(ctx)
-
-    assert peers.requests(ctx) == [
-        USER_SIM_CONFIG,
-        *exchange(AGENT, text("plan my week"), "<id1>", "<ctx>", "task-1"),
-        *exchange(USER, [*framed("draft one"), file_part], "<id2>", "<ctx>", "task-2"),
-        *exchange(AGENT, text("make it {shorter}"), "<id3>", "<ctx>", "task-3"),
-    ]
-    # The conversation keeps what each side said, not the framing.
-    assert _stored(ctx, peers)["messages"][1] == {"role": "agent", "parts": [*text("draft one"), file_part]}
-
-
-@pytest.mark.asyncio
-async def test_a_human_peer_is_never_sent_the_framing(monkeypatch):
-    peers = Peers(monkeypatch, {AGENT: [text("one"), text("two")], HUMAN: [text("go on")]})
-    ctx = _context(user_card=_USER_SIM_CARD)
-
-    await _step(turns=2, user_a2a_url=HUMAN, user_message_template=FRAME, user_sim_guard=GUARD).execute(ctx)
-
-    assert peers.requests(ctx)[2] == send(HUMAN, text("one"), "<id2>", "<ctx>")
-
-
-@pytest.mark.asyncio
-async def test_a_user_sim_message_that_passes_the_guard_goes_on_with_no_retry_and_no_record(monkeypatch):
-    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter please")]})
-    ctx = _context(user_card=_USER_SIM_CARD)
-
-    await _step(turns=2, user_sim_guard=GUARD).execute(ctx)
-
-    assert [r[2]["params"]["message"]["parts"] for r in peers.requests(ctx)
-            if r[1] == f"{USER}/a2a" and r[2]["method"] == "message/send"] == [text("draft one")]
-    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter please"), "<id3>", "<ctx>")
-    assert _user_side_metadata(ctx) == {}
-
-
-@pytest.mark.parametrize("bad, rejected", [
-    ("x" * 41, "over 40 chars (41)"),
-    ("Here's where it stands:\n- **done**", "markdown"),
-    ("| a | b |", "markdown"),
-])
-@pytest.mark.asyncio
-async def test_a_user_sim_message_that_reads_like_the_assistant_is_asked_for_again_once_in_the_same_conversation(
-        monkeypatch, bad, rejected):
-    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
-                                USER: [sim(bad), sim("ok, shorter")]})
-    ctx = _context(user_card=_USER_SIM_CARD)
-
-    await _step(turns=2, user_sim_guard=GUARD).execute(ctx)
-
-    assert peers.requests(ctx) == [
-        USER_SIM_CONFIG,
-        *exchange(AGENT, text("plan my week"), "<id1>", "<ctx>", "task-1"),
-        *exchange(USER, text("draft one"), "<id2>", "<ctx>", "task-2"),
-        *exchange(USER, text(RETRY), "<id3>", "<ctx>", "task-3"),
-        *exchange(AGENT, text("ok, shorter"), "<id4>", "<ctx>", "task-4"),
-    ]
-    assert ctx.metadata["usersim_guard"] == {"talk": [
-        {"turn": 1, "rejected": rejected, "retry_rejected": None, "retry_ended": None}]}
-
-
-@pytest.mark.asyncio
-async def test_a_retry_that_still_fails_the_guard_goes_on_and_is_recorded_as_failing(monkeypatch):
-    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
-                                USER: [sim("x" * 50), sim("y" * 60)]})
-    ctx = _context(user_card=_USER_SIM_CARD)
-
-    await _step(turns=2, user_sim_guard={"max_chars": 40, "retry_message": "be the user"}).execute(ctx)
-
-    assert peers.requests(ctx)[5] == send(USER, text("be the user"), "<id3>", "<ctx>")
-    assert peers.requests(ctx)[-2] == send(AGENT, text("y" * 60), "<id4>", "<ctx>")
-    assert ctx.metadata["usersim_guard"] == {"talk": [
-        {"turn": 1, "rejected": "over 40 chars (50)", "retry_rejected": "over 40 chars (60)", "retry_ended": None}]}
-
-
-@pytest.mark.asyncio
-async def test_a_retry_that_says_done_ends_the_conversation(monkeypatch):
-    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [sim("x" * 50), sim("thanks", done=True)]})
-    ctx = _context(user_card=_USER_SIM_CARD)
-
-    await _step(turns=3, user_sim_guard=GUARD).execute(ctx)
-
-    assert _stored(ctx, peers)["status"] == "closed"
-    assert ctx.metadata["usersim_guard"]["talk"][0]["retry_ended"] == "user_done"
-
+# ---- the user-sim's own trajectory -----------------------------------------------------------------------------------
 
 _TRAJ = {"uri": "urn:agentenv:trajectory/v1", "params": {"endpoint": "/ext/trajectory"}}
 _USER_SIM_CARD_WITH_TRAJ = {"capabilities": {"extensions": [_AGENT_CONFIG, _TRAJ]}}
@@ -566,19 +463,20 @@ async def test_the_user_sims_own_trajectory_is_stored_per_answer_under_the_steps
         return f"{prefix}{name}.json"
 
     monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", fake_fetch)
-    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("x" * 50), sim("ok")]})
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two"), text("draft three")], USER: [sim("one"), sim("two")]})
     ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
 
-    await _step(turns=2, user_sim_guard=GUARD, trajectory_output_prefix="s3://bucket/traj").execute(ctx)
+    await _step(turns=3, trajectory_output_prefix="s3://bucket/traj").execute(ctx)
 
     peers.requests(ctx)
     assert fetched == [(USER, "task-2", "s3://bucket/traj/usersim/", "local"),
-                       (USER, "task-3", "s3://bucket/traj/usersim/", "local")]
+                       (USER, "task-4", "s3://bucket/traj/usersim/", "local")]
     # Stored under the id the conversation's user-side message was sent with.
     sent_ids = [r[2]["params"]["message"]["messageId"] for r in peers.raw
                 if r[1] == f"{USER}/a2a" and r[2]["method"] == "message/send"]
     assert ctx.metadata["usersim_trajectories"] == {"talk": [
-        {"turn": 1, "a2a_task_id": i, "url": f"s3://bucket/traj/usersim/{i}.json"} for i in sent_ids]}
+        {"turn": turn, "a2a_task_id": i, "url": f"s3://bucket/traj/usersim/{i}.json"}
+        for turn, i in enumerate(sent_ids, start=1)]}
     assert len(sent_ids) == 2
 
 
@@ -610,29 +508,6 @@ async def test_a_user_sim_trajectory_fetch_that_stores_nothing_is_not_recorded(m
 
     assert peers.requests(ctx)[-2] == send(AGENT, text("shorter"), "<id3>", "<ctx>")
     assert "usersim_trajectories" not in ctx.metadata
-
-
-@pytest.mark.parametrize("kw, error", [
-    ({"user_message_template": "no placeholder"}, "containing {reply}"),
-    ({"user_message_template": ["{reply}"]}, "must be a string"),
-    ({"user_sim_guard": {}}, "checks nothing"),
-    ({"user_sim_guard": {"reject_markdown": False}}, "checks nothing"),
-    ({"user_sim_guard": {"max_chars": 0}}, "positive int"),
-    ({"user_sim_guard": {"max_chars": True}}, "positive int"),
-    ({"user_sim_guard": {"max_chars": 10, "temperature": 0}}, "unknown keys"),
-    ({"user_sim_guard": {"reject_markdown": "yes"}}, "must be a bool"),
-    ({"user_sim_guard": {"max_chars": 10, "retry_message": " "}}, "non-empty string"),
-])
-def test_bad_framing_or_guard_settings_are_rejected_when_the_step_is_built(kw, error):
-    with pytest.raises(ValueError, match=re.escape(error)):
-        _step(**kw)
-
-
-def test_framing_and_guard_round_trip_and_are_left_out_when_unset():
-    step = _step(user_message_template=FRAME, user_sim_guard=GUARD)
-    again = PromptAgentTaskStep.from_dict(step.to_dict())
-    assert (again.user_message_template, again.user_sim_guard) == (FRAME, GUARD)
-    assert {"user_message_template", "user_sim_guard"}.isdisjoint(_step().to_dict())
 
 
 # ---- a human peer ---------------------------------------------------------------------------------------------------
