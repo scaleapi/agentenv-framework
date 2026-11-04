@@ -1,7 +1,9 @@
-"""cua-driver as a computer driver, for an X11 desktop on Linux: trycua's cua-driver runs on the computer as a daemon,
-which this file starts when run as a script, agents get what its own MCP server serves at its pinned version
-(``mcp.json``): its instructions, its tools beside the ``computer_*`` tools, and its skill resources, read from it. The
-computer/v1 operations are its desktop-scope calls. The daemon takes
+"""cua-driver as a computer driver, for an X11 desktop on Linux and for macOS: trycua's cua-driver runs on the computer
+as a daemon, which this file starts when run as a script on Linux and CuaDriver.app's LaunchAgent starts on macOS, so
+macOS gives it the app's TCC permissions. Agents get what its own MCP server serves at its pinned version (``mcp.json``,
+``mcp-macos.json``): its instructions, its tools beside the ``computer_*`` tools, and its skill resources, read from it.
+The computer/v1 operations are its desktop-scope calls, the pointer's and typing in the foreground on macOS, where
+cua-driver otherwise keeps from moving a person's pointer over a background app. The daemon takes
 line-delimited JSON on a Unix socket, and each call goes on a connection of its own, as cua-driver's own MCP server sends
 them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
 cua-driver starts again after ending it for idling, where a named one stays ended. A call the daemon can't take, as
@@ -17,6 +19,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -48,16 +51,27 @@ from agentenv_protocol.computer import (
     type_text,
 )
 
+MACOS = sys.platform == "darwin"
 #: Where cua-driver's daemon listens.
-SOCKET = Path("/run/agentenv/cua-driver.sock")
-#: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version: its
+SOCKET = Path("/tmp/agentenv-cua-driver.sock" if MACOS else "/run/agentenv/cua-driver.sock")
+#: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version on each OS: its
 #: instructions, its tools, which the running daemon must list the same, and its skill resources.
-MANIFEST = Path(__file__).with_name("mcp.json")
-#: The sha256 of the cua-driver executable each arch's pinned wheel installs.
+MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp.json")
+#: CuaDriver.app's executable, which macOS runs the daemon as.
+APP_EXECUTABLE = Path("/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
+#: The sha256 of the cua-driver executable each arch's pinned wheel installs, and on macOS, CuaDriver.app's.
 EXECUTABLES = {
     "amd64": "bf57b2f3778a0a7daa9388e241f20ce948b32a7a2f4dd102e497f34e54137934",
     "arm64": "26e9eee8165e9ce7b614b5e3d68e5d963231385a82b65236406718b5ce1ff936",
+    "macos/arm64": "b4d974a9c1c92a700cd7be7ede987aea4a1e6835e37039ce3d628b71bd5f0ca8",
 }
+#: How the daemon delivers the pointer's actions and typing: in the foreground on macOS, where it doesn't by default.
+FOREGROUND = {"delivery_mode": "foreground"} if MACOS else {}
+#: On macOS, how long the pointer rests on a drag's start before the press, since an app such as Tk reads where the
+#: pointer is when it handles the press; and the drag's steps, about one a pixel, within cua-driver's 1 to 200.
+DRAG_SETTLE_S, DRAG_STEPS = 0.2, (20, 200)
+#: The TCC permissions cua-driver reports on macOS, which it needs.
+PERMISSIONS = ("accessibility", "screen_recording")
 #: What keeps cua-driver from reaching trycua: no telemetry and no update checks.
 QUIET = {"DO_NOT_TRACK": "1", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false", "CUA_DRIVER_RS_UPDATE_CHECK": "false"}
 #: W3C modifier keys and the names cua-driver holds them by.
@@ -75,7 +89,8 @@ REPLY_LIMIT = 64 << 20
 
 
 @computer_driver(name="cua-driver",
-                 supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
+                 supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]},
+                           {"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}])
 class CuaDriver(ComputerDriverEnvironment):
     buttons = ("left", "right", "middle")
     max_click_count = 3
@@ -131,23 +146,29 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @click
     async def click_at(self, x, y, button, count, modifiers) -> None:
-        await self._send("click", x=x, y=y, button=button, count=count, modifier=_modifiers(modifiers))
+        await self._send("click", x=x, y=y, button=button, count=count, modifier=_modifiers(modifiers),
+                         **FOREGROUND)
 
     @drag
     async def drag_along(self, path, button, duration_ms, modifiers) -> None:
         (x0, y0), (x1, y1) = path[0], path[-1]
+        steps = {}
+        if MACOS:
+            await self._send("move_cursor", x=x0, y=y0, **FOREGROUND)
+            await asyncio.sleep(DRAG_SETTLE_S)
+            steps = {"steps": min(DRAG_STEPS[1], max(DRAG_STEPS[0], abs(x1 - x0), abs(y1 - y0)))}
         await self._send("drag", from_x=x0, from_y=y0, to_x=x1, to_y=y1, button=button, duration_ms=duration_ms,
-                         modifier=_modifiers(modifiers))
+                         modifier=_modifiers(modifiers), **steps, **FOREGROUND)
 
     @scroll
     async def scroll_at(self, x, y, direction, amount, modifiers) -> None:
         if modifiers:
             raise Unsupported("cua-driver scrolls with no keys held")
-        await self._send("scroll", x=x, y=y, direction=direction, amount=amount)
+        await self._send("scroll", x=x, y=y, direction=direction, amount=amount, **FOREGROUND)
 
     @type_text
     async def type_in(self, text) -> None:
-        await self._send("type_text", text=text)
+        await self._send("type_text", text=text, **FOREGROUND)
 
     @press
     async def press_keys(self, keys) -> None:
@@ -187,14 +208,26 @@ class CuaDriver(ComputerDriverEnvironment):
             listed = (await _request({"method": "list"}))["result"]["tools"]
         except DeviceUnavailable:
             return [ReadyCheck("cua-driver", False, "its daemon isn't answering yet")]
-        digest, expected = await asyncio.to_thread(_executable_sha256), EXECUTABLES.get(self.platform.arch or "")
+        arch = self.platform.arch or ""
+        digest, expected = await asyncio.to_thread(_executable_sha256), EXECUTABLES.get(f"macos/{arch}" if MACOS else arch)
         running = {t["name"]: t["input_schema"] for t in listed}
         pinned = {t["name"]: t["inputSchema"] for t in _manifest()["tools"]}
         differ = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
-        return [ReadyCheck("cua-driver", digest == expected, "the pinned executable" if digest == expected else
-                           f"its executable's sha256 is {digest}, not the pinned {expected}"),
-                ReadyCheck("cua-driver tools", not differ, f"{len(running)} tools, as pinned" if not differ else
-                           f"these tools differ from mcp.json: {', '.join(differ)}")]
+        checks = [ReadyCheck("cua-driver", digest == expected, "the pinned executable" if digest == expected else
+                             f"its executable's sha256 is {digest}, not the pinned {expected}"),
+                  ReadyCheck("cua-driver tools", not differ, f"{len(running)} tools, as pinned" if not differ else
+                             f"these tools differ from {MANIFEST.name}: {', '.join(differ)}")]
+        return [*checks, await self._permitted()] if MACOS else checks
+
+    async def _permitted(self) -> ReadyCheck:
+        """That cua-driver holds the TCC permissions it needs, without which every action fails quietly."""
+        try:
+            held = (await self._call("check_permissions", DeviceUnavailable))["structuredContent"]
+        except DeviceUnavailable as e:
+            return ReadyCheck("cua-driver permissions", False, e.message)
+        missing = [name for name in PERMISSIONS if held.get(name) is False]
+        return ReadyCheck("cua-driver permissions", not missing, "accessibility and screen recording granted"
+                          if not missing else f"macOS hasn't granted it {', '.join(missing)}")
 
 
 class _ReplyLost(DeviceUnavailable):
@@ -253,7 +286,10 @@ def _text(result: dict) -> str:
 
 
 def _executable() -> Path:
-    """cua-driver's executable in the driver's venv, found without importing its package, which loads its SDK."""
+    """cua-driver's executable: CuaDriver.app's on macOS, else the one in the driver's venv, found without importing its
+    package, which loads its SDK."""
+    if MACOS:
+        return APP_EXECUTABLE
     return Path(importlib.util.find_spec("cua_driver").submodule_search_locations[0]) / "bin" / "cua-driver"
 
 

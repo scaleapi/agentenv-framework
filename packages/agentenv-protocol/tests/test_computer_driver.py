@@ -130,7 +130,8 @@ def test_set_display_without_modes_is_refused():
 def test_a_driver_method_replaces_the_linux_default():
     Driver = _define({"run": run_in_session(lambda self, *a: None)})
     assert declared(Driver)["run_in_session"] == [("run", {})]
-    assert declared(MinimalDriver)["run_in_session"] == [("_computer_linux_run_in_session", {"os": frozenset({"linux"})})]
+    assert declared(MinimalDriver)["run_in_session"] == [("_computer_linux_run_in_session",
+                                                         {"os": frozenset({"linux", "macos"})})]
 
 
 def test_the_platform_is_detected(tmp_path, monkeypatch):
@@ -143,7 +144,8 @@ def test_the_platform_is_detected(tmp_path, monkeypatch):
     assert detect({"WAYLAND_DISPLAY": "wayland-0"}, release).display == "wayland"
     assert detect({}, tmp_path / "missing").as_dict() == {"os": "linux", "arch": "arm64"}
     monkeypatch.setattr("agentenv_protocol.computer.platform.sys.platform", "darwin")
-    assert detect({"DISPLAY": ":0"}, release) == Platform("macos", None, None, "arm64", None)
+    monkeypatch.setattr("agentenv_protocol.computer.platform._platform.mac_ver", lambda: ("26.5.2", ("", "", ""), ""))
+    assert detect({"DISPLAY": ":0"}, release) == Platform("macos", None, "26.5.2", "arm64", "aqua")
 
 
 def test_settings_come_from_one_json_value():

@@ -62,6 +62,8 @@ def native_links(sandbox_provider: SandboxProvider, arch: str, form: str, store_
     it from the env's image store."""
     if form == "disk":
         return [link for link in sandbox_provider.links if f"linux/{arch}" in link.disk_image_platforms()]
+    if form == "vm_bundle":
+        return [link for link in sandbox_provider.links if f"macos/{arch}" in link.vm_bundle_platforms()]
     return [link for link in sandbox_provider.links if f"linux/{arch}" in link.native_platforms()
             and pulls_containers(link, store_id)]
 
@@ -146,7 +148,11 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
     caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that
     token, says the computer is ready; a boot that fails is torn down."""
     environment = {**environment, **control_environment(token)}
-    if form == "disk":
+    if form == "vm_bundle":
+        sandbox = await sandbox_provider.create_vm(
+            image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
+            disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}), cpu=cpu, memory=memory_mb)
+    elif form == "disk":
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
             disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}),

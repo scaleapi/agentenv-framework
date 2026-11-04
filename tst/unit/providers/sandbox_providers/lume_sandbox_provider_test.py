@@ -1,0 +1,212 @@
+"""The lume provider against a fake ``lume``, which keeps its VMs in a file: a VM is cloned from its VM bundle, sized,
+given the deploy's environment as the protocol's seed in the folder it shares, run, and relayed from this Mac's
+loopback; a reset clones it afresh under its MAC address; a registry image is pulled once by its tag, checked against
+its digest; two VMs run at most; and a builder shares its build folder and is kept as a local VM bundle."""
+
+import json
+import os
+import signal
+import sys
+import textwrap
+import time
+from pathlib import Path
+
+import pytest
+
+from agentenv_protocol.computer import seed
+
+from agent_env.providers.sandbox_providers.lume import provider as lume
+from agent_env.providers.sandbox_providers.lume.provider import LumeSandboxProvider
+
+FAKE = textwrap.dedent('''\
+    import json, os, signal, sys, time
+    path = os.environ["FAKE_LUME_STATE"]
+    def load():
+        try:
+            return json.load(open(path))
+        except FileNotFoundError:
+            return {"vms": {"bench": {"status": "stopped", "macAddress": "aa:00:00:00:00:00"}}, "calls": []}
+    def save(state):
+        json.dump(state, open(path + ".part", "w"))
+        os.replace(path + ".part", path)
+    args = sys.argv[1:]
+    state = load()
+    state["calls"].append(args)
+    save(state)
+    vms = state["vms"]
+    command, name = args[0], args[1] if len(args) > 1 else None
+    if command == "get":
+        if name not in vms:
+            sys.exit(f"VM not found: {name}")
+        print(json.dumps([{"name": name, **vms[name]}]))
+    elif command == "ls":
+        print(json.dumps([{"name": key, **vm} for key, vm in vms.items()]))
+    elif command in ("clone", "pull"):
+        vms[args[2]] = {"status": "stopped", "macAddress": "aa:00:00:00:00:%02x" % len(vms)}
+    elif command == "set":
+        for flag, value in zip(args[2::2], args[3::2]):
+            vms[name][flag.lstrip("-")] = value
+    elif command == "run":
+        if os.environ.get("FAKE_LUME_NO_SESSION"):
+            sys.exit("Unable to access security information. The virtual machine encountered a security error")
+        vms[name].update(status="running", ipAddress="192.168.64.%d" % len(vms))
+        save(state)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        while True:
+            time.sleep(0.05)
+    elif command == "stop":
+        vms[name].update(status="stopped", ipAddress=None)
+    elif command == "delete":
+        vms.pop(name, None)
+    elif command == "ssh":
+        print(" ".join(args))
+    save(state)
+''')
+
+
+@pytest.fixture
+def mac(tmp_path, monkeypatch):
+    """A fake lume and a relay that records its routes, with the provider's state under this test's state root."""
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "lume").write_text(f"#!{sys.executable}\n{FAKE}")
+    (bin_ / "relay").write_text(f"#!/bin/sh\necho \"$@\" > {tmp_path}/relay.args\nexec sleep 60\n")
+    for name in ("lume", "relay"):
+        (bin_ / name).chmod(0o755)
+    monkeypatch.setenv("FAKE_LUME_STATE", str(tmp_path / "lume.json"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(lume, "_free_port", lambda: 48123)
+    monkeypatch.setattr(lume, "_POLL_S", 0.05)
+    provider = LumeSandboxProvider(lume=str(bin_ / "lume"), relay_python=str(bin_ / "relay"), boot_timeout_s=10)
+    provider.fake = tmp_path
+    yield provider
+    for vm in _state(tmp_path)["vms"]:
+        try:
+            pid = json.loads((tmp_path / "state" / "agent-env" / "lume" / vm / "state.json").read_text())["run"]
+            os.killpg(pid, signal.SIGTERM)
+        except (FileNotFoundError, KeyError, ProcessLookupError):
+            pass
+
+
+def _state(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "lume.json").read_text()) if (tmp_path / "lume.json").exists() else {"vms": {}}
+
+
+@pytest.mark.asyncio
+async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_and_relayed_and_terminating_it_deletes_it(mac):
+    env = {"ENVIRONMENT_NAME": "desk", "AGENTENV_SETTING_RESOLUTION": "1280x800"}
+
+    sandbox = await mac.create_vm(image="local:bench", env=env, exposed_ports=[18765], cpu=4, memory=8192)
+
+    calls, folder = _state(mac.fake)["calls"], mac.fake / "state" / "agent-env" / "lume" / sandbox.sandbox_id
+    assert ["clone", "bench", sandbox.sandbox_id] in calls
+    assert ["set", sandbox.sandbox_id, "--cpu", "4", "--memory", "8192MB", "--display", "1280x800"] in calls
+    assert ["run", sandbox.sandbox_id, "--display", "none", "--vnc", "disabled",
+            f"--shared-dir={folder / lume.SEED_FOLDER}:ro"] in calls
+    assert (folder / lume.SEED_FOLDER / "user-data").read_text() == seed.user_data(env)
+    assert (folder / lume.SEED_FOLDER / seed.OLDEST).read_text() == "1\n"
+    assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:48123"}
+    address = _state(mac.fake)["vms"][sandbox.sandbox_id]["ipAddress"]
+    assert _waited(lambda: (mac.fake / "relay.args").read_text().split()) == ["-I", str(lume.RELAY),
+                                                                             f"48123={address}:18765"]
+
+    await sandbox.terminate()
+
+    assert sandbox.sandbox_id not in _state(mac.fake)["vms"] and not folder.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_reset_clones_the_vm_afresh_under_its_mac_address_with_the_new_seed(mac):
+    sandbox = await mac.create_vm(image="local:bench", env={"N": "1"}, exposed_ports=[18765])
+    mac_address = _state(mac.fake)["vms"][sandbox.sandbox_id]["macAddress"]
+
+    await mac.reset_vm(sandbox, image="local:bench", env={"N": "2"})
+
+    calls = _state(mac.fake)["calls"]
+    reset = calls[calls.index(["stop", sandbox.sandbox_id, "--force"]) + 1:]
+    assert reset[:3] == [["delete", sandbox.sandbox_id, "--force"], ["clone", "bench", sandbox.sandbox_id],
+                         ["set", sandbox.sandbox_id, "--mac-address", mac_address]]
+    folder = mac.fake / "state" / "agent-env" / "lume" / sandbox.sandbox_id
+    assert seed.read_user_data((folder / lume.SEED_FOLDER / "user-data").read_text()) == {"N": "2"}
+    await sandbox.terminate()
+
+
+@pytest.mark.asyncio
+async def test_a_registry_bundle_is_pulled_once_by_its_tag_once_its_digest_is_checked(mac, monkeypatch):
+    pinned = []
+    monkeypatch.setattr(lume, "pin_digest", lambda ref, auth: pinned.append(ref) or ref)
+    image = "ghcr.io/trycua/macos:26-x@sha256:" + "7c" * 32
+
+    first = await mac.create_vm(image=image, env={})
+    await first.terminate()
+    second = await mac.create_vm(image=image, env={})
+    await second.terminate()
+
+    pulls = [call for call in _state(mac.fake)["calls"] if call[0] == "pull"]
+    assert pulls == [["pull", "macos:26-x", "agentenv-base-7c7c7c7c7c7c", "--registry", "ghcr.io", "--organization",
+                      "trycua"]]
+    assert pinned == [image]
+    with pytest.raises(ValueError, match="Lume pulls by tag"):
+        await mac.create_vm(image="ghcr.io/trycua/macos@sha256:" + "ab" * 32, env={})
+
+
+@pytest.mark.asyncio
+async def test_a_local_bundle_this_mac_lacks_is_refused_and_a_third_vm_is_refused_naming_the_limit(mac):
+    with pytest.raises(ValueError, match="no VM bundle named 'gone'"):
+        await mac.create_vm(image="local:gone", env={})
+    sandboxes = [await mac.create_vm(image="local:bench", env={}) for _ in range(2)]
+
+    with pytest.raises(RuntimeError, match="at most 2 .Apple's licence allows 2."):
+        await mac.create_vm(image="local:bench", env={})
+
+    for sandbox in sandboxes:
+        await sandbox.terminate()
+    with pytest.raises(ValueError, match="max_running is 1 to 2"):
+        LumeSandboxProvider(max_running=3)
+
+
+@pytest.mark.asyncio
+async def test_a_vm_lume_cant_run_outside_a_login_session_fails_saying_so_and_leaves_nothing(mac, monkeypatch):
+    monkeypatch.setenv("FAKE_LUME_NO_SESSION", "1")
+
+    with pytest.raises(RuntimeError, match="runs a VM only in a logged-in session"):
+        await mac.create_vm(image="local:bench", env={})
+
+    assert list(_state(mac.fake)["vms"]) == ["bench"]
+
+
+@pytest.mark.asyncio
+async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundle(mac, tmp_path):
+    build = tmp_path / lume.BUILD_FOLDER
+    build.mkdir()
+
+    builder = await mac.open_builder("local:bench", "agentenv-computer-0123", build)
+    _, said, _ = await builder.exec_with_output("bash", "-c", "echo hi")
+    image = await mac.keep_builder(builder)
+
+    calls = _state(mac.fake)["calls"]
+    assert ["run", "agentenv-computer-0123", "--display", "none", "--vnc", "disabled", f"--shared-dir={build}:rw"] in calls
+    assert "bash -c 'echo hi'" in said and ["stop", "agentenv-computer-0123", "--timeout", "120"] in calls
+    assert image == "local:agentenv-computer-0123" and await mac.has_vm_bundle(image)
+    with pytest.raises(ValueError, match="a builder's folder is named agentenv-build"):
+        await mac.open_builder("local:bench", "other", tmp_path)
+
+
+def test_it_boots_macos_vm_bundles_on_apple_silicon_alone(monkeypatch):
+    monkeypatch.setattr(lume.sys, "platform", "darwin")
+    monkeypatch.setattr(lume.platform, "machine", lambda: "arm64")
+    assert LumeSandboxProvider.vm_bundle_platforms() == {"macos/arm64"}
+    assert LumeSandboxProvider.native_platforms() == frozenset()
+    monkeypatch.setattr(lume.sys, "platform", "linux")
+    assert LumeSandboxProvider.vm_bundle_platforms() == frozenset()
+
+
+def _waited(read, timeout: float = 5):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return read()
+        except FileNotFoundError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)

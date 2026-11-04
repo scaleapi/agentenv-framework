@@ -151,7 +151,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
         environment = {**_environment(env, computer, values, params), **control_environment(deployed.control_token)}
         try:
-            if record.get("form") == "disk":
+            if record.get("form") in ("disk", "vm_bundle"):
                 await sandbox_provider.reset_vm(sandbox, image=record["image"], env=environment)
             else:
                 await sandbox_provider.reset_container(sandbox, image_name=record["image"], port=env.driver.port,
