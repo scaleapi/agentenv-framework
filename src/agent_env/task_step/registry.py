@@ -27,6 +27,7 @@ def get_task_step_registry() -> dict[str, type["TaskStep"]]:
 
 
 def _builtin_registry() -> dict[str, type["TaskStep"]]:
+    from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdpTaskStep
     from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
     from agent_env.task_step.task_steps.computer_recording import (
         EndComputerRecordingTaskStep,
@@ -88,6 +89,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     return {
         _get_type(ReviewTaskStep): ReviewTaskStep,
         _get_type(BuildMcpCliTaskStep): BuildMcpCliTaskStep,
+        _get_type(BrowserConnectCdpTaskStep): BrowserConnectCdpTaskStep,
         _get_type(CollectArtifactsTaskStep): CollectArtifactsTaskStep,
         _get_type(StartComputerRecordingTaskStep): StartComputerRecordingTaskStep,
         _get_type(EndComputerRecordingTaskStep): EndComputerRecordingTaskStep,
