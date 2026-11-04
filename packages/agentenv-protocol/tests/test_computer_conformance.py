@@ -289,14 +289,24 @@ async def test_a_fixture_that_doesnt_start_leaves_full_unverified_and_is_cleaned
 @pytest.mark.parametrize("delta, steps", [(1, 1), (-3, -3), (120, 1), (-360, -3), (240, 2)],
                          ids=["aqua-up", "aqua-down-3", "scaled-up", "scaled-down-3", "scaled-up-2"])
 def test_the_fixture_counts_a_wheel_events_steps_whether_tk_scales_them_by_120_or_not(delta, steps, monkeypatch):
-    """Aqua's Tk 8.6 reports a step as a delta of 1; Windows, and Tk 9 everywhere, as 120. The fixture runs in the
-    computer, so it's read here with Tk stood in for, as this Python may have none."""
+    """Aqua's Tk 8.6 reports a step as a delta of 1; Windows, and Tk 9 everywhere, as 120."""
+    assert _fixture(monkeypatch).wheel_steps(delta) == steps
+
+
+@pytest.mark.parametrize("delta, steps", [(10, (False, 1)), (65526, (False, -1)), (65516, (False, -2)),
+                                          (655360, (True, 1)), (-655360, (True, -1)), (0, None)],
+                         ids=["up", "down", "down-2-coalesced", "left", "right", "still"])
+def test_the_fixture_counts_a_scroll_tk_9_reports_in_pixels_by_the_lines_it_moves(delta, steps, monkeypatch):
+    """The deltas Tk 9 on macOS gave cua-driver's scrolls: 10 pixels a line, two lines at once where macOS coalesced
+    them."""
+    assert _fixture(monkeypatch).touchpad_steps(delta) == steps
+
+
+def _fixture(monkeypatch):
+    """The fixture module, which runs in the computer, read with Tk stood in for, as this Python may have none."""
     monkeypatch.setitem(sys.modules, "tkinter", ModuleType("tkinter"))
     monkeypatch.delitem(sys.modules, "agentenv_protocol.computer.conformance.fixture", raising=False)
-
-    fixture = importlib.import_module("agentenv_protocol.computer.conformance.fixture")
-
-    assert fixture.wheel_steps(delta) == steps
+    return importlib.import_module("agentenv_protocol.computer.conformance.fixture")
 
 
 def test_a_refusal_must_carry_the_code_and_applied_no():

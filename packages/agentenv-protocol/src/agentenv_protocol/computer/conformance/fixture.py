@@ -22,6 +22,8 @@ CLIPBOARD = "agentenv-probe clipboard"
 MIN_SIZE = (1280, 800)
 #: X11's keysyms for the keys Aqua's Tk names by their character.
 KEYSYMS = {",": "comma", " ": "space"}
+#: The pixels of a scrolled line, macOS's for a scroll posted in lines.
+LINE_PX = 10
 
 
 def main(state_dir: Path) -> None:
@@ -168,19 +170,25 @@ def main(state_dir: Path) -> None:
     wheel = tk.Canvas(root, width=200, height=120, bg="#e6f0ff", highlightthickness=0)
     wheel.place(x=840, y=500)
 
-    def wheeled(event, steps: int) -> None:
-        # Tk delivers a horizontal scroll as a vertical one with Shift held, X's buttons 6 and 7 as 4 and 5.
-        horizontal = bool(event.state & 1)
+    def wheeled(horizontal: bool, steps: int) -> None:
         way = ("left" if horizontal else "up") if steps > 0 else ("right" if horizontal else "down")
         state["wheel"][way] += abs(steps)
         save()
 
-    # Tk 8.6 on X11 reports the wheel as buttons 4 and 5; Aqua, Windows and Tk 9 everywhere as <MouseWheel>.
+    def scrolled(delta: int) -> None:
+        if steps := touchpad_steps(delta):
+            wheeled(*steps)
+
+    # Tk 8.6 on X11 reports the wheel as buttons 4 and 5, Aqua, Windows and Tk 9 as <MouseWheel>, a horizontal scroll
+    # (X's buttons 6 and 7) as a vertical one with Shift held. Tk 9 reports a scroll in pixels, a trackpad's or one a
+    # driver posts as Aqua's do, as <TouchpadScroll>.
     if root.tk.call("tk", "windowingsystem") == "x11" and tk.TkVersion < 8.7:
-        wheel.bind("<Button-4>", lambda e: wheeled(e, 1))
-        wheel.bind("<Button-5>", lambda e: wheeled(e, -1))
+        wheel.bind("<Button-4>", lambda e: wheeled(bool(e.state & 1), 1))
+        wheel.bind("<Button-5>", lambda e: wheeled(bool(e.state & 1), -1))
     else:
-        wheel.bind("<MouseWheel>", lambda e: wheeled(e, wheel_steps(e.delta)))
+        wheel.bind("<MouseWheel>", lambda e: wheeled(bool(e.state & 1), wheel_steps(e.delta)))
+    if tk.TkVersion >= 8.7:
+        wheel.bind("<TouchpadScroll>", lambda e: scrolled(e.delta))
 
     field = tk.Canvas(root, width=48, height=48, bg="#000000", highlightthickness=0, bd=0)
     field.place(x=1080, y=500)
@@ -218,6 +226,17 @@ def wheel_steps(delta: int) -> int:
     """The wheel steps a <MouseWheel> event's ``delta`` holds, up positive: whole notches of 120 where Tk scales them
     so (Windows, and Tk 9 everywhere), else one a unit (Aqua's Tk 8.6)."""
     return int(delta / 120) if abs(delta) >= 120 else delta
+
+
+def touchpad_steps(delta: int) -> tuple[bool, int] | None:
+    """The steps a <TouchpadScroll> event's ``delta`` holds, as horizontal or not and up or left positive, or None
+    when it moves nothing. Tk packs the x distance in its high 16 bits and the y distance, signed, in its low 16; a
+    step is a line, LINE_PX, and macOS may coalesce several into one event."""
+    dx, dy = delta >> 16, (delta & 0xFFFF) - (0x10000 if delta & 0x8000 else 0)
+    if not (dx or dy):
+        return None
+    distance = dy or dx
+    return not dy, (1 if distance > 0 else -1) * max(1, round(abs(distance) / LINE_PX))
 
 
 def _clipboard(root: tk.Tk) -> str | None:
