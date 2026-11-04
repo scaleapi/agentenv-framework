@@ -16,6 +16,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         host, _, port = self.path.rpartition(":")
+        host = host.removeprefix("[").removesuffix("]")
         try:
             upstream = socket.create_connection((host, int(port)), timeout=10)
         except (OSError, ValueError):

@@ -499,6 +499,8 @@ async def test_each_page_it_attaches_to_is_told_to_run_so_a_popup_it_attached_to
     assert ("Page.enable", {}, "s-popup") in devtools.calls
     assert ("Runtime.runIfWaitingForDebugger", {}, "s-popup") in devtools.calls
     assert not any(method == "Emulation.setDeviceMetricsOverride" for method, _, _ in devtools.calls)
+    assert next(params for method, params, _ in devtools.calls if method == "Target.setAutoAttach")[
+        "waitForDebuggerOnStart"] is False
 
 
 @pytest.mark.asyncio
@@ -510,9 +512,26 @@ async def test_alone_each_page_it_attaches_to_is_held_to_its_window_before_it_ru
     await asyncio.sleep(0)
 
     sent = [method for method, _, session in devtools.calls if session == "s-popup"]
+    assert next(params for method, params, _ in devtools.calls if method == "Target.setAutoAttach")[
+        "waitForDebuggerOnStart"] is True
     assert sent == ["Page.enable", "Emulation.setDeviceMetricsOverride", "Runtime.runIfWaitingForDebugger"]
     assert ("Emulation.setDeviceMetricsOverride", {"width": 1024, "height": 768, "deviceScaleFactor": 1,
                                                    "mobile": False}, "s-popup") in devtools.calls
+
+
+@pytest.mark.asyncio
+async def test_a_page_it_couldnt_prepare_is_still_told_to_run_so_it_never_stays_held():
+    def refused(params, session):
+        raise DevToolsError("Target closed")
+
+    devtools = StubDevTools({"Page.enable": refused})
+    control = BrowserControl(devtools, "agent", (1024, 768))
+    await control.attach()
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.sleep(0)
+
+    assert [method for method, _, session in devtools.calls if session == "s-popup"] == [
+        "Page.enable", "Runtime.runIfWaitingForDebugger"]
 
 
 class Painting(StubDevTools):

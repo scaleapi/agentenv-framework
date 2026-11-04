@@ -213,7 +213,8 @@ class BrowserControl:
         downloads unattended: into ``~/Downloads``, a name downloaded again kept beside the first."""
         self.ended(STOP)
         await self.devtools.call("Target.setDiscoverTargets", {"discover": True, "filter": PAGES})
-        await self.devtools.call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": False,
+        await self.devtools.call("Target.setAutoAttach", {"autoAttach": True,
+                                                          "waitForDebuggerOnStart": self.viewport is not None,
                                                           "flatten": True, "filter": PAGES})
         await self.devtools.call("Browser.setDownloadBehavior", {"behavior": "default", "eventsEnabled": True})
 
@@ -341,14 +342,19 @@ class BrowserControl:
     def _on_Target_attachedToTarget(self, params: dict, session: Optional[str]) -> None:
         if params["targetInfo"].get("type") == "page":
             self._sessions[params["sessionId"]] = params["targetInfo"]["targetId"]
-            self._spawn(self.devtools.call("Page.enable", session_id=params["sessionId"]))
+            self._spawn(self._let_run(params["sessionId"]))
+
+    async def _let_run(self, session: str) -> None:
+        """A page it attached to, enabled and, headless, held to its window's size, then told to run: a page attached as
+        it opens, a popup say, or any new page headless, waits for that before it runs."""
+        try:
+            await self.devtools.call("Page.enable", session_id=session)
             if self.viewport is not None:
                 width, height = self.viewport
-                self._spawn(self.devtools.call("Emulation.setDeviceMetricsOverride", {
-                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
-                    session_id=params["sessionId"]))
-            # A page attached as it opens, a popup say, waits for this before it navigates.
-            self._spawn(self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=params["sessionId"]))
+                await self.devtools.call("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session_id=session)
+        finally:
+            await self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=session)
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
         self._sessions.pop(params["sessionId"], None)

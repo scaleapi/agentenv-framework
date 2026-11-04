@@ -116,7 +116,7 @@ class PageDriver(ComputerDriverEnvironment):
 
     @click
     async def click_at(self, x, y, button, count, modifiers) -> None:
-        mask = _modifiers(modifiers)
+        mask = _modifiers(modifiers) | self._mask()
         events = [_mouse("mouseMoved", x, y, modifiers=mask)]
         for n in range(1, count + 1):
             events += [_mouse("mousePressed", x, y, button, BUTTONS[button], n, mask),
@@ -126,7 +126,7 @@ class PageDriver(ComputerDriverEnvironment):
 
     @drag
     async def drag_along(self, path, button, duration_ms, modifiers) -> None:
-        mask, held = _modifiers(modifiers), BUTTONS[button]
+        mask, held = _modifiers(modifiers) | self._mask(), BUTTONS[button]
         steps = _steps(path)
         pause = duration_ms / 1000 / len(steps)
         await self._input([_mouse("mouseMoved", *path[0], modifiers=mask),
@@ -145,7 +145,8 @@ class PageDriver(ComputerDriverEnvironment):
         dy = {"up": -1, "down": 1}.get(direction, 0) * amount * WHEEL_PX
         self._pointer = (x, y)
         await self._input([{"method": "Input.dispatchMouseEvent", "params": {
-            "type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy, "modifiers": _modifiers(modifiers)}}])
+            "type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy,
+            "modifiers": _modifiers(modifiers) | self._mask()}}])
 
     @pointer_move
     async def move(self, x, y) -> None:
@@ -168,11 +169,14 @@ class PageDriver(ComputerDriverEnvironment):
 
     @type_text
     async def type_in(self, text) -> None:
-        events = []
+        """Each character as the keystroke that types it, with the keys held down still held: Shift held types ``a`` as
+        ``A``, and Control held makes it a shortcut; a character no key types is inserted as text."""
+        held, events = self._mask(), []
         for ch in text:
             key = TYPED.get(ch, ch)
             if key in NAMED or _printable(key):
-                events += _keystroke(key, MODIFIERS["Shift"] if key in SHIFTED or key.isupper() else 0)
+                mask = held | (MODIFIERS["Shift"] if key in SHIFTED or key.isupper() else 0)
+                events += _keystroke(_shifted(key) if mask & MODIFIERS["Shift"] else key, mask)
             else:
                 events.append({"method": "Input.insertText", "params": {"text": ch}})
         await self._input(events)
@@ -206,8 +210,10 @@ class PageDriver(ComputerDriverEnvironment):
 
     async def _call(self, op: str, params: Optional[dict] = None) -> Any:
         """``browser/v1``'s ``op`` on the browser's server; DeviceUnavailable when it can't answer or says why not, and
-        why the browser can't come back once it has ended on its own."""
+        once the browser has ended on its own, why, even after its server has launched another."""
         folder, card = await self._found()
+        if (failed := _ended(folder)) is not None:
+            raise DeviceUnavailable(failed)
         method = client.find_extension_method(card, BROWSER, op)
         if method is None:
             raise Unsupported(f"the browser in {folder.name} serves no {op}")
@@ -284,6 +290,15 @@ def _codes(key: str) -> tuple[str, int, str]:
         code, vk, _ = _codes(SHIFTED[key])
         return code, vk, key
     raise Unsupported(f"this driver has no key {key!r}")
+
+
+def _shifted(key: str) -> str:
+    """The key Shift makes of ``key`` on a US layout: a letter's capital, a digit's or punctuation's symbol."""
+    if len(key) == 1 and key in string.ascii_lowercase:
+        return key.upper()
+    if key in PUNCTUATION:
+        return PUNCTUATION[key][2]
+    return {digit: symbol for symbol, digit in SHIFTED_DIGITS.items()}.get(key, key)
 
 
 def _printable(key: str) -> bool:

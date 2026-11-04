@@ -91,6 +91,23 @@ async def test_a_key_held_down_then_let_go_is_released_with_its_own_modifier_off
 
 
 @pytest.mark.asyncio
+async def test_with_shift_held_typed_text_is_shifted_and_with_control_held_a_click_carries_it(page):
+    await page.keys_down(["Shift"])
+    await page.type_in("a1;")
+    await page.keys_up(["Shift"])
+    await page.keys_down(["Control"])
+    await page.click_at(10, 20, "left", 1, [])
+    await page.scroll_at(10, 20, "down", 1, ["Alt"])
+
+    events = _events(page)
+    typed = [(e["params"]["key"], e["params"]["modifiers"], e["params"]["text"]) for e in events
+             if e["params"].get("type") == "keyDown"]
+    assert typed == [("A", 8, "A"), ("!", 8, "!"), (":", 8, ":")]
+    assert {e["params"]["modifiers"] for e in events if e["params"]["type"] in ("mousePressed", "mouseReleased")} == {2}
+    assert events[-1]["params"]["type"] == "mouseWheel" and events[-1]["params"]["modifiers"] == 3
+
+
+@pytest.mark.asyncio
 async def test_typed_text_is_keystrokes_with_shift_where_it_takes_one_and_inserted_text_for_the_rest(page):
     await page.type_in("Hi!\né")
 
@@ -132,7 +149,7 @@ async def test_its_browser_check_passes_until_the_browser_ends_on_its_own_then_f
 
 
 @pytest.mark.asyncio
-async def test_once_the_browser_has_ended_its_calls_say_why_rather_than_what_its_server_answered(page, tmp_path):
+async def test_once_the_browser_has_ended_its_calls_say_why_and_send_nothing_though_its_server_answers(page, tmp_path):
     page.served["page/capture"] = httpx.Response(503, text="the browser has no tab open")
     with pytest.raises(DeviceUnavailable, match="couldn't page/capture: the browser has no tab open"):
         await page.page()
@@ -140,3 +157,9 @@ async def test_once_the_browser_has_ended_its_calls_say_why_rather_than_what_its
 
     with pytest.raises(DeviceUnavailable, match=f"the browser in {tmp_path.name} has failed: .*by signal SIGKILL"):
         await page.page()
+    page.served["page/capture"] = {"blank": True}
+    sent = len(page.sent)
+
+    with pytest.raises(DeviceUnavailable, match="has failed"):
+        await page.click_at(1, 2, "left", 1, [])
+    assert len(page.sent) == sent
