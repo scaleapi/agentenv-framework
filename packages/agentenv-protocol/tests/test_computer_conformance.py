@@ -32,6 +32,7 @@ from agentenv_protocol.computer import (  # noqa: E402
 )
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run_probe  # noqa: E402
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
+from agentenv_protocol.computer.conformance import fixture  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
 from agentenv_protocol.computer.conformance.__main__ import main  # noqa: E402
 from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
@@ -282,6 +283,13 @@ async def test_a_fixture_that_doesnt_start_leaves_full_unverified_and_is_cleaned
     assert len(unverified) == len(checks.FULL_CHECKS) and why in unverified[0].detail
     assert not (home / checks.STAGE).exists()
     assert (["kill", "4243"] in probed.commands) is (driver is SilentFixture)
+
+
+@pytest.mark.parametrize("delta, steps", [(1, 1), (-3, -3), (120, 1), (-360, -3), (240, 2)],
+                         ids=["aqua-up", "aqua-down-3", "scaled-up", "scaled-down-3", "scaled-up-2"])
+def test_the_fixture_counts_a_wheel_events_steps_whether_tk_scales_them_by_120_or_not(delta, steps):
+    """Aqua's Tk 8.6 reports a step as a delta of 1; Windows, and Tk 9 everywhere, as 120."""
+    assert fixture.wheel_steps(delta) == steps
 
 
 def test_a_refusal_must_carry_the_code_and_applied_no():

@@ -1,7 +1,8 @@
-"""The Linux fixture the conformance probe stages with data/add and launches with computer-exec: a Tk window, the
-Fixture Desk, whose widgets' screen boxes are written to <state-dir>/layout.json and every effect that reaches it,
-with whatever lands in <state-dir>/inbox.txt, to <state-dir>/state.json, so the probe can aim at it and read back
-what arrived. Run as ``python3 fixture.py <state-dir>``; it needs a 1280x800 screen or larger."""
+"""The fixture the conformance probe stages with data/add and launches with computer-exec: a Tk window, the Fixture
+Desk, whose widgets' screen boxes are written to <state-dir>/layout.json and every effect that reaches it, with
+whatever lands in <state-dir>/inbox.txt, to <state-dir>/state.json, so the probe can aim at it and read back what
+arrived. It records the same effects under X11, macOS's Aqua and Windows, whose Tk names keys, binds select-all and
+reports the wheel differently. Run as ``python3 fixture.py <state-dir>``; it needs a 1280x800 screen or larger."""
 from __future__ import annotations
 
 import json
@@ -19,6 +20,8 @@ MARKERS = ((11, 11, "#ff0000"), (12, 11, "#00ff00"), (11, 12, "#0000ff"), (12, 1
            (20, 37, "#00ffff"))
 CLIPBOARD = "agentenv-probe clipboard"
 MIN_SIZE = (1280, 800)
+#: X11's keysyms for the keys Aqua's Tk names by their character.
+KEYSYMS = {",": "comma", " ": "space"}
 
 
 def main(state_dir: Path) -> None:
@@ -32,7 +35,7 @@ def main(state_dir: Path) -> None:
     state: dict = {"name": "", "notes": "", "keys": [], "saved_count": 0, "subscribed": False, "selected": None,
                    "scroll_top": 0.0, "cells": {}, "right_clicks": 0, "double_clicks": 0, "drags": [],
                    "wheel": {"up": 0, "down": 0, "left": 0, "right": 0}, "clipboard": None, "loaded": None,
-                   "screen": [width, height]}
+                   "screen": [width, height], "windowing": root.tk.call("tk", "windowingsystem")}
 
     def save() -> None:
         part = state_dir / ".state.json.part"
@@ -52,11 +55,19 @@ def main(state_dir: Path) -> None:
 
     def key(event) -> None:
         state["name"] = name.get()
-        state["keys"] = (state["keys"] + [event.keysym])[-100:]
+        state["keys"] = (state["keys"] + [KEYSYMS.get(event.keysym, event.keysym)])[-100:]
         state["clipboard"] = _clipboard(root)
         save()
 
     name.bind("<KeyRelease>", key)
+
+    def select_all(event) -> str:
+        name.selection_range(0, "end")
+        name.icursor("end")
+        return "break"
+
+    # Tk binds Ctrl+/ to select-all on X11 alone; Aqua's is Cmd+A.
+    name.bind("<Control-slash>", select_all)
 
     def on_save() -> None:
         state["saved_count"] += 1
@@ -157,14 +168,19 @@ def main(state_dir: Path) -> None:
     wheel = tk.Canvas(root, width=200, height=120, bg="#e6f0ff", highlightthickness=0)
     wheel.place(x=840, y=500)
 
-    def wheeled(event, button: int) -> None:
-        # Tk 8.6 delivers X buttons 6 and 7 (horizontal) as 4 and 5 with Shift held.
+    def wheeled(event, steps: int) -> None:
+        # Tk delivers a horizontal scroll as a vertical one with Shift held, X's buttons 6 and 7 as 4 and 5.
         horizontal = bool(event.state & 1)
-        state["wheel"][("left" if horizontal else "up") if button == 4 else ("right" if horizontal else "down")] += 1
+        way = ("left" if horizontal else "up") if steps > 0 else ("right" if horizontal else "down")
+        state["wheel"][way] += abs(steps)
         save()
 
-    wheel.bind("<Button-4>", lambda e: wheeled(e, 4))
-    wheel.bind("<Button-5>", lambda e: wheeled(e, 5))
+    # Tk 8.6 on X11 reports the wheel as buttons 4 and 5; Aqua, Windows and Tk 9 everywhere as <MouseWheel>.
+    if root.tk.call("tk", "windowingsystem") == "x11" and tk.TkVersion < 8.7:
+        wheel.bind("<Button-4>", lambda e: wheeled(e, 1))
+        wheel.bind("<Button-5>", lambda e: wheeled(e, -1))
+    else:
+        wheel.bind("<MouseWheel>", lambda e: wheeled(e, wheel_steps(e.delta)))
 
     field = tk.Canvas(root, width=48, height=48, bg="#000000", highlightthickness=0, bd=0)
     field.place(x=1080, y=500)
@@ -196,6 +212,12 @@ def main(state_dir: Path) -> None:
     root.after(300, write_layout)
     root.after(500, poll_inbox)
     root.mainloop()
+
+
+def wheel_steps(delta: int) -> int:
+    """The wheel steps a <MouseWheel> event's ``delta`` holds, up positive: whole notches of 120 where Tk scales them
+    so (Windows, and Tk 9 everywhere), else one a unit (Aqua's Tk 8.6)."""
+    return int(delta / 120) if abs(delta) >= 120 else delta
 
 
 def _clipboard(root: tk.Tk) -> str | None:
