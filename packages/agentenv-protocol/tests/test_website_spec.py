@@ -627,6 +627,8 @@ def test_from_environment_keeps_any_name_an_api_route_takes() -> None:
     card = card_of(TestClient(Shop().create_app()))
     assert [r["name"] for r in website_params(card)["routes"]] == ["items:list"]
     assert list(from_card(card).route_table()) == ["items:list"]
+    for derived in (from_environment(Shop), from_card(card)):
+        assert derived.overlay({"site": {"domains": ["shop.example"]}}).site.domains == ("shop.example",)
     assert "routes.ops: route names ['items:list'] aren't names" in problems(
         {"routes": {"ops": {"items:list": "GET /api/items"}}}, Path.cwd())[0]
 

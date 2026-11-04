@@ -345,6 +345,7 @@ class WebsiteSpec(_Section):
     _base_dir: Path = PrivateAttr(default_factory=Path.cwd)
     _components: tuple[Component, ...] = PrivateAttr(default=())
     _declared: Optional[dict] = PrivateAttr(default=None)
+    _declared_routes: bool = PrivateAttr(default=False)
 
     def __eq__(self, other: object) -> bool:
         """Two specs are equal when they resolve to the same site in the same folder, however each was declared."""
@@ -393,11 +394,12 @@ class WebsiteSpec(_Section):
         """This spec with ``changes`` merged over it as an ``extends`` overlay merges, then resolved again; paths in
         ``changes`` are relative to ``base_dir``, this spec's own when left out. A spec ``resolve`` or ``load`` made
         is merged into as it was declared, its ``[[uses]]`` not yet mounted, so a component of the same ``as``
-        replaces the mounted one as it would in a file overlay."""
+        replaces the mounted one as it would in a file overlay. A spec read from a class or a card keeps the route
+        names its server serves, as it was read."""
         here = Path(base_dir) if base_dir is not None else self._base_dir
         declared = self._declared if self._declared is not None else self.to_dict()
         merged = _merge(declared, _expanded(_rebased(changes, here, self._base_dir)))
-        return resolve(merged, self._base_dir)
+        return resolve(merged, self._base_dir, declared_routes=self._declared_routes)
 
     def to_card_extension(self) -> dict:
         """The ``urn:agentenv:website/v1`` params a server of this spec advertises: its domains, health path and
@@ -473,6 +475,7 @@ def _resolve(raw: dict, base_dir: Path, origin: str, stack: tuple[Path, ...], *,
         raise SpecError(f"{origin}: {p}" for p in problems)
     resolved = _validated(raw, origin, declared_routes=declared_routes)
     resolved._base_dir, resolved._components, resolved._declared = base_dir, tuple(components), declared
+    resolved._declared_routes = declared_routes
     problems = _check(resolved)
     if problems:
         raise SpecError(f"{origin}: {p}" for p in problems)
