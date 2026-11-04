@@ -126,10 +126,6 @@ class LumeSandboxProvider(SandboxProvider):
         """``macos/arm64`` on a Mac with Apple silicon, the one machine a macOS VM bundle boots on."""
         return frozenset({"macos/arm64"} if sys.platform == "darwin" and platform.machine() == "arm64" else ())
 
-    @classmethod
-    def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
-        return not policy.restricts_egress()
-
     async def create_vm(self, *, image: Optional[str] = None, boot_mode: Optional[str] = None,
                         cpu: Optional[float] = None, memory: Optional[int] = None, disk_size_gb: float = 10,
                         timeout: int = 3600 * 2, exposed_ports: Optional[list[int]] = None,

@@ -4,12 +4,12 @@ base is booted on a link that boots macOS VM bundles, provisioned, and kept by a
 same inputs reuses; the env's computer is that VM bundle. Deploys on a Mac that lacks it compose it there once and
 probe it. The service runner reads the protocol's seed."""
 
-import asyncio
 import importlib.machinery
 import importlib.util
 import json
 import logging
 import plistlib
+import shlex
 import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -31,8 +31,6 @@ from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import composer, install, macos_vm_bundle
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.install import Grant, MacInstall, MacService
-from agent_env.providers.env_providers import env_computer_provider
-from agent_env.providers.env_providers.env_computer_provider import EnvironmentComputerProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 BASE_IMAGE = "ghcr.io/trycua/macos:26-x@sha256:" + "7c" * 32
@@ -163,6 +161,10 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
     computer = env.computer_artifact()
     assert computer.os.type == "macos" and computer.forms.vm_bundle.image == built["image"]
     assert env.metadata["computer"]["vm_bundles"] == {"arm64": built["image"]}
+    spaced = MacInstall(run=[RunScript(script="install app.sh")], services=[MacService(name="app", command="app")])
+    ran = next(line for line in macos_vm_bundle._installed(macos_vm_bundle.Part("x", "/opt/x", spaced, {}, {}, False))
+               if "PREFIX=" in line)
+    assert shlex.split(shlex.split(ran)[-1])[-1] == "./install app.sh"
 
 
 def test_a_compose_of_the_same_inputs_reuses_the_vm_bundle_this_mac_keeps_and_a_changed_service_composes_another(
@@ -189,15 +191,16 @@ def test_the_build_settings_a_vm_bundle_fixes_reach_its_services_and_another_val
 def test_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_under_that_name(mac, tmp_path):
     env = _put(_driver(tmp_path / "desk"), mac)
     recorded = env.metadata["composed"]["vm_bundle"]["arm64"]["image"]
-    other = FakeMac()
+    other, elsewhere = FakeMac(), FakeMac()
 
-    composer.compose_here(env, "arm64", other)
+    composer.held_or_composed_here(env, "arm64", other)
 
     assert other.kept == {recorded} and env.metadata["composed"]["vm_bundle"]["arm64"]["image"] == recorded
     env.metadata["composed"]["vm_bundle"]["arm64"]["image"] = "local:agentenv-computer-elsewhere"
     with pytest.raises(RuntimeError, match="not the local:agentenv-computer-elsewhere its record names, as another "
                                            "agent-env composed it; compose it on this Mac with agent-env run"):
-        composer.compose_here(env, "arm64", FakeMac())
+        composer.held_or_composed_here(env, "arm64", elsewhere)
+    assert not elsewhere.opened
 
 
 def test_a_sync_on_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_there_once_and_records_what_it_composed(
@@ -230,27 +233,32 @@ def test_a_sync_on_a_mac_that_lacks_the_vm_bundle_its_record_names_composes_it_t
     assert len(flaky.opened) == 1 and not flaky.kept
 
 
-@pytest.mark.asyncio
-async def test_deploys_on_a_mac_that_lacks_the_vm_bundle_compose_it_once_and_probe_it_and_a_failed_probe_deletes_it(
+def test_deploys_on_a_mac_that_lacks_the_vm_bundle_compose_it_once_and_none_boots_it_before_its_probe_passed(
         mac, tmp_path, monkeypatch):
     env = _put(_driver(tmp_path / "desk"), mac)
-    build = env.metadata["composed"]["vm_bundle"]["arm64"]
+    image = env.metadata["composed"]["vm_bundle"]["arm64"]["image"]
     probed, outcome = [], {"status": "ready"}
 
-    async def checked(links, env, driver, form, arch, result):
-        probed.append((links, form, result["image"]))
-        return outcome
+    def probe(env, driver, form, arch, result, provider, progress):
+        time.sleep(0.3)
+        probed.append((provider, result["image"], time.monotonic()))
+        return {**result, **outcome}
 
-    monkeypatch.setattr(env_computer_provider, "checked", checked)
-    other, provider = FakeMac(), EnvironmentComputerProvider()
+    monkeypatch.setattr(composer, "_probed", probe)
+    other = FakeMac()
 
-    await asyncio.gather(*(provider._composed_here(env, "arm64", build, other) for _ in range(2)))
+    def deploy(_):
+        composer.held_or_composed_here(env, "arm64", other)
+        return time.monotonic()
 
-    assert len(other.opened) == 1 and other.kept == {build["image"]}
-    assert probed == [([other], "vm_bundle", build["image"])]
-    outcome, failing = {"status": "failed", "reason": "P1 failed"}, FakeMac()
-    with pytest.raises(RuntimeError, match="composed on this Mac, failed its probe: P1 failed"):
-        await provider._composed_here(env, "arm64", build, failing)
+    with ThreadPoolExecutor(2) as pool:
+        booted = list(pool.map(deploy, range(2)))
+
+    assert len(other.opened) == 1 and other.kept == {image} and [p[:2] for p in probed] == [(other, image)]
+    assert min(booted) >= probed[0][2]
+    outcome, failing = {"status": "failed", "stage": "probe", "reason": "the probe failed: P4"}, FakeMac()
+    with pytest.raises(RuntimeError, match="couldn't be composed and probed on this Mac: the probe failed: P4"):
+        composer.held_or_composed_here(env, "arm64", failing)
     assert len(failing.opened) == 1 and not failing.kept
 
 

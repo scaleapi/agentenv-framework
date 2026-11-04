@@ -107,7 +107,7 @@ def _installed(part: Part) -> list[str]:
         lines.append(f"{prefix}/venv/bin/pip list --format=json > {quoted}/installed.json")
     if part.served is not None:
         lines.append(f"mkdir -p {shlex.quote(f'{prefix}/{SOCKET.parent}')}")
-    commands = [*((run.scope, f"./{run.script}") for run in install.run or []),
+    commands = [*((run.scope, shlex.quote(f"./{run.script}")) for run in install.run or []),
                 *((scope, f"venv/bin/python -m agentenv_protocol.computer.run_install_step {part.served} {step}")
                   for step, scope in part.steps)]
     for scope, command in commands:

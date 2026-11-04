@@ -18,6 +18,7 @@ from agentenv_protocol.computer import seed
 
 from agent_env.providers.sandbox_providers.lume import provider as lume
 from agent_env.providers.sandbox_providers.lume.provider import LumeSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, NetworkPolicyUnsupportedError
 
 FAKE = textwrap.dedent('''\
     import contextlib, fcntl, json, os, signal, sys, time
@@ -126,11 +127,11 @@ def _state(tmp_path: Path) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_and_relayed_where_configured_and_terminating_it_deletes_it(
-        mac):
+async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_relayed_and_policed_and_terminating_it_deletes_it(mac):
     env = {"ENVIRONMENT_NAME": "desk", "AGENTENV_SETTING_RESOLUTION": "1280x800"}
 
-    sandbox = await mac.create_vm(image="local:bench", env=env, exposed_ports=[18765], cpu=4, memory=8192)
+    sandbox = await mac.create_vm(image="local:bench", env=env, exposed_ports=[18765], cpu=4, memory=8192,
+                                  network_policy=NetworkPolicy.from_dict({"mode": "allow_all"}))
 
     calls, folder = _state(mac.fake)["calls"], mac.fake / "state" / "agent-env" / "lume" / sandbox.sandbox_id
     assert ["clone", "bench", sandbox.sandbox_id] in calls
@@ -140,6 +141,7 @@ async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_and_relayed_where_co
     assert (folder / lume.SEED_FOLDER / "user-data").read_text() == seed.user_data(env)
     assert (folder / lume.SEED_FOLDER / seed.OLDEST).read_text() == "1\n"
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:48123"}
+    assert sandbox.network_policy.mode is NetworkMode.ALLOW_ALL
     address = _state(mac.fake)["vms"][sandbox.sandbox_id]["ipAddress"]
     assert _waited(lambda: (mac.fake / "relay.args").read_text().split()) == ["-I", str(lume.RELAY),
                                                                              f"127.0.0.1:48123={address}:18765"]
@@ -147,6 +149,9 @@ async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_and_relayed_where_co
     await sandbox.terminate()
 
     assert sandbox.sandbox_id not in _state(mac.fake)["vms"] and not folder.exists()
+    with pytest.raises(NetworkPolicyUnsupportedError, match="cannot enforce network policy mode 'allowlist'"):
+        await mac.create_vm(image="local:bench", env={}, network_policy=NetworkPolicy.from_dict(
+            {"mode": "allowlist", "allow_hosts": ["example.com"]}))
     (mac.fake / "relay.args").unlink()
     mac.relay_host = "10.0.0.5"
     other = await mac.create_vm(image="local:bench", env={}, exposed_ports=[18765])

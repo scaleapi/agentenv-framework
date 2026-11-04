@@ -233,42 +233,35 @@ def _composed_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDri
     return _probed(env, driver, "disk", arch, result, builds.provider, progress)
 
 
-def compose_here(env: ComputerEnv, arch: str, link: SandboxProvider,
-                 on_progress: Callable[[str], None] | None = None) -> None:
-    """The VM bundle of ``arch`` the env's record names, composed on ``link``, the Mac a deploy boots it on, which
-    doesn't hold it: from the same inputs, so under the same name, which the record keeps. Refused when it composes
-    something else, as when the inputs it reads have changed."""
+def held_or_composed_here(env: ComputerEnv, arch: str, link: SandboxProvider,
+                          on_progress: Callable[[str], None] | None = None) -> None:
+    """The VM bundle of ``arch`` the env's record names, on ``link``, the Mac a deploy boots it on: held there, or
+    composed there first, from the same inputs and so under the same name, and probed at full (gate 3), since one
+    composed on another Mac isn't checked by its probe. Looked for holding the lock its compose and probe hold, so a
+    deploy waits for one under way and boots none before its probe passed. Refused, composing nothing, when this
+    agent-env would compose it under another name."""
     recorded = env.metadata["composed"]["vm_bundle"][arch]["image"]
-    with _Progress(env, on_progress) as progress:
+    with _Progress(env, on_progress) as progress, holding_locks([_bundle_lock(recorded)], lambda: progress.say(
+            f"vm_bundle/{arch}: waiting for the compose or probe of {recorded} under way on this Mac")):
+        if asyncio.run(link.has_vm_bundle(recorded)):
+            return
         progress.say(f"vm_bundle/{arch}: {type(link).__name__} doesn't hold {recorded}; composing it there first")
-        result = _built_vm_bundle(env, env.computer, env.driver, arch, link, progress)
-    if result.get("status") != "unverified":
-        raise RuntimeError(f"{env.id}'s vm_bundle/{arch} couldn't be composed on this Mac: {result.get('reason')}")
-    if result["image"] != recorded:
-        raise RuntimeError(f"{env.id}'s vm_bundle/{arch} composed on this Mac as {result['image']}, not the "
-                           f"{recorded} its record names, as another agent-env composed it; compose it on this Mac "
-                           "with agent-env run or agent-env env build, which record what this one composes")
+        result = _composed_vm_bundle(env, env.computer, env.driver, arch, link, progress, held=recorded)
+    if result["status"] != "ready":
+        raise RuntimeError(f"{env.id}'s vm_bundle/{arch} couldn't be composed and probed on this Mac: "
+                           f"{result.get('reason')}")
 
 
 def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
-                        provider: SandboxProvider, progress: _Progress) -> dict:
-    """The VM bundle of ``arch`` composed or reused, then probed when it was (gate 3); one that fails its probe deleted
-    from its Mac, so no deploy there boots it, though a record of another of its name says ready."""
-    result = _built_vm_bundle(env, base, driver, arch, provider, progress)
-    if result["status"] != "unverified":
-        return result
-    probed = _probed(env, driver, "vm_bundle", arch, result, provider, progress)
-    if probed["status"] == "failed":
-        asyncio.run(boot.native_links(provider, arch, "vm_bundle", env.stored_id)[0].delete_vm_bundle(result["image"]))
-    return probed
-
-
-def _built_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
-                     provider: SandboxProvider, progress: _Progress) -> dict:
+                        provider: SandboxProvider, progress: _Progress, held: str | None = None) -> dict:
     """The VM bundle of ``arch`` composed on the first link of ``provider`` that boots macOS VM bundles: its base's
-    cloned and booted with a build folder of everything that goes into it (``vm_bundle``), given each layer over ssh,
-    shut down and kept on that Mac by a name of its key; or one of that key reused, kept there already. One compose of
-    a name runs on a Mac at once, as a builder of that name deletes an earlier one; another waits, then reuses it."""
+    cloned and booted with a build folder of everything that goes into it (``macos_vm_bundle``), given each layer over
+    ssh, shut down and kept on that Mac by a name of its key; or one of that key reused, kept there already. Then probed
+    at full (gate 3), and deleted from that Mac when it fails, so no deploy there boots it, though a record of another
+    of its name says ready. All of it holds a lock of its name on that Mac, which a deploy takes to look for it, and
+    which keeps two composes of one name from breaking each other, as a builder of a name deletes an earlier one: the
+    other waits, then reuses it. ``held`` names the VM bundle whose lock the caller holds, composed only under that
+    name."""
     pair = f"vm_bundle/{arch}"
     with (_attempting(env, "vm_bundle", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work):
@@ -298,16 +291,30 @@ def _built_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerD
                                  agents=_digest(build / "agents"), prepare=_digest(macos_vm_bundle.PREPARE),
                                  build_settings=settings, form="vm_bundle", arch=arch, format=FORMAT)
         image = f"{LOCAL_IMAGE_PREFIX}agentenv-computer-{key[7:23]}"
-        with holding_locks([f"vm-bundle-build:{image}"], lambda: progress.at(
-                pair, "waiting", "waiting for the compose of the same VM bundle under way on this Mac")):
+        if held is not None and image != held:
+            raise RuntimeError(f"this agent-env composes it as {image}, not the {held} its record names, as another "
+                               "agent-env composed it; compose it on this Mac with agent-env run or agent-env env "
+                               "build, which record what this one composes")
+        with contextlib.nullcontext() if held else holding_locks([_bundle_lock(image)], lambda: progress.at(
+                pair, "waiting", f"waiting for the compose or probe of {image} under way on this Mac")):
             if asyncio.run(link.has_vm_bundle(image)):
                 progress.at(pair, "reusing", "reusing the VM bundle of the same key, composed on this Mac earlier")
-                return {"status": "unverified", "key": key, "image": image, "reused": True, "built_at": now()}
-            progress.at(pair, "composing", f"composing on {type(link).__name__}")
-            asyncio.run(_provisioned(link, base.forms.vm_bundle.image, image.removeprefix(LOCAL_IMAGE_PREFIX), build))
-        return {"status": "unverified", "key": key, "image": image, "reused": False, "builder": type(link).__name__,
-                "built_at": now()}
+                result = {"status": "unverified", "key": key, "image": image, "reused": True, "built_at": now()}
+            else:
+                progress.at(pair, "composing", f"composing on {type(link).__name__}")
+                asyncio.run(_provisioned(link, base.forms.vm_bundle.image, image.removeprefix(LOCAL_IMAGE_PREFIX),
+                                         build))
+                result = {"status": "unverified", "key": key, "image": image, "reused": False,
+                          "builder": type(link).__name__, "built_at": now()}
+            probed = _probed(env, driver, "vm_bundle", arch, result, link, progress)
+            if probed["status"] == "failed":
+                asyncio.run(link.delete_vm_bundle(image))
+            return probed
     return attempt.result
+
+
+def _bundle_lock(image: str) -> str:
+    return f"vm-bundle:{image}"
 
 
 async def _provisioned(link: SandboxProvider, source: str, name: str, build: Path) -> None:
