@@ -15,6 +15,7 @@ from agent_env.providers.sandbox_providers.daytona.config import Settings as Day
 from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm.provider import SailVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -201,6 +202,19 @@ def test_modal_builtins_accept_an_environment_name(monkeypatch, tmp_path, name):
     """)
     monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
     assert build_sandbox_provider(name)._environment_name == "rl-prod"
+
+
+def test_modal_vm_takes_a_region_and_an_idle_timeout_unset_by_default(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, """
+        [sandbox.providers.modal_vm.config]
+        region = "us-west"
+        idle_timeout = 600
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    provider = build_sandbox_provider("modal_vm")
+
+    assert (provider._region, provider._idle_timeout) == ("us-west", 600)
+    assert (ModalVmSandboxProvider()._region, ModalVmSandboxProvider()._idle_timeout) == (None, None)
 
 
 def test_e2b_builtin_receives_interpolated_key_and_versioned_base(monkeypatch, tmp_path):

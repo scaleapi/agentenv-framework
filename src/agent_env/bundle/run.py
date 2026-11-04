@@ -224,9 +224,10 @@ def run_bundle(
     """Write what the tasks and evals selected in ``root`` need, as ``plan_bundle`` selects them, then run
     each of their tasks once. ``model``, ``user_model`` and ``judge_model`` replace the models the solver, the
     user simulator and the judges run on, and ``agent`` the agent the solver runs as (``Plan.agent``), leaving the
-    tasks as written; ``sandbox`` is the provider that computer envs compose on and that envs,
-    agents, sandboxes and the judge deploy on; a computer env composing there emulates an arch no link runs natively
-    unless ``emulate`` is False, which leaves it skipped. ``on_progress`` is given a line of text
+    tasks as written; ``sandbox`` is the provider that envs, agents, sandboxes and the judge deploy on, whose deploys
+    pick the forms a computer env composes, on the env's default provider, this machine unless the config names
+    another; that compose emulates an arch no link of it runs natively unless ``emulate`` is False, which leaves it
+    skipped. ``on_progress`` is given a line of text
     at each write and step. ``id_root`` roots the ids of a bundle an installed package provides
     (``InstalledBundle.id_root``) or one downloaded from the Hub (``HubBundle.id_root``); a folder's ids otherwise come
     from its path. ``source`` says where a Hub bundle came from (``HubBundle.source``), which each run's context
@@ -310,9 +311,9 @@ def _write_bundle(
 
 
 def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None],
-                        composing: Composing = Composing()) -> Materialization:
-    """Write ``plan``, its computer envs composed as ``composing`` says, then set up the infra envs its runs deploy
-    on."""
+                        composing: Composing = Composing(), sandbox: str | None = None) -> Materialization:
+    """Write ``plan``, its computer envs composed as ``composing`` says and its steps preflighted for ``sandbox``,
+    then set up the infra envs its runs deploy on."""
     materialization = materialize(
         plan,
         on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
@@ -321,6 +322,7 @@ def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], N
         build_here=preflight.built_here,
         composing=composing,
         on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"),
+        sandbox=sandbox,
     )
     if preflight.infra:
         ensure_default_envs(preflight.infra_kinds, say=say)
@@ -353,7 +355,7 @@ def dry_run_bundle(
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
         _say_plan(plan, say, declaring_for(Path(root), installed=id_root is not None, dry_run=True))
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
-                                      composing=composing,
+                                      composing=composing, sandbox=sandbox,
                                       on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"))
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
@@ -387,7 +389,7 @@ def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandb
     plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played,
                                solver_endpoint=solver_endpoint)
     _say_plan(plan, say, declaring)
-    materialization = _written_with_infra(plan, preflight, say, composing)
+    materialization = _written_with_infra(plan, preflight, say, composing, sandbox)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
     return PreparedBundle(plan, materialization, to_run)
 
@@ -406,8 +408,9 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
 
 
 def _composing(sandbox: str | None, emulate: bool = True) -> Composing:
-    """How a run composes its computer envs: on the provider ``sandbox`` names, emulating unless ``emulate`` is False,
-    only the forms its deploys there boot. Raises ValueError when ``sandbox`` names no provider."""
+    """How a run composes its computer envs: on the env's default provider, emulating unless ``emulate`` is False, only
+    the forms its deploys on the provider ``sandbox`` names boot. Raises ValueError when ``sandbox`` names no
+    provider."""
     return Composing.for_run(build_sandbox_provider(sandbox) if sandbox else None, emulate)
 
 

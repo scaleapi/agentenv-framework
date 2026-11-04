@@ -13,6 +13,11 @@ of ModalSandboxProvider, `EnvironmentGatewayProvider._deploy_gateway` routes it 
 east-west concern and is irrelevant here (one sandbox, one docker bridge).
 
 Only the pure, stateless helpers are reused from modal_sandbox (no class coupling).
+
+With a computer's disk form as its image, ``create_vm`` makes a VM sandbox with nested virtualization whose own image
+is the QEMU launcher, with no Docker in it, booting the disk mounted at create from its export on this machine
+(``local_docker.disk.exported_disk``); ``reset_vm`` boots it afresh in the same sandbox. ``[sandbox.providers.modal_vm]``
+takes ``region``, where every sandbox it makes goes, and ``idle_timeout``, in seconds, after which an idle one ends.
 """
 
 from __future__ import annotations
@@ -38,7 +43,10 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
 )
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox, push_object_over_stdin
+from agent_env.env.published_images import LAUNCHER_IMAGE, published_digest
+from agent_env.providers.sandbox_providers.disk_launcher import LAUNCH, RESET, launcher_variables, reset_input
+from agent_env.providers.sandbox_providers.local_docker.disk import exported_disk
+from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox, VmSandbox, push_object_over_stdin
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM, SandboxProvider
 
 if TYPE_CHECKING:
@@ -105,6 +113,13 @@ _MAIN_SCRIPT = r'''
 while true; do sleep 3600; done
 '''
 _KEEPALIVE_CMD = ("sh", "-c", _MAIN_SCRIPT)
+#: Where a computer's disk is mounted on the launcher's image, compressed; the launcher expands it onto the sandbox's disk.
+_MOUNTED_DISK = "/disk/disk.img.zst"
+#: The memory a disk's sandbox has beyond its VM's: QEMU's own, and the sandbox's.
+_DISK_HOST_MEMORY_MB = 2048
+#: How long a disk's sandbox stays up with no connection open and no command running, when the config sets no
+#: ``idle_timeout``: a running QEMU isn't activity, so without one a computer nobody uses lasts its whole timeout.
+_DISK_IDLE_TIMEOUT_S = 30 * 60
 
 
 class ModalVmSandbox(VmSandbox):
@@ -274,17 +289,27 @@ class ModalVmSandbox(VmSandbox):
 
 
 class ModalVmSandboxProvider(SandboxProvider):
+    """Provisions a single Modal VM sandbox per env (the VM-mode Modal backend), or one booting a computer's disk."""
+
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.modal.host", "*.w.modal.host")
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
         return True
 
-    """Provisions a single Modal VM sandbox per env (the VM-mode Modal backend)."""
+    @classmethod
+    def disk_image_platforms(cls) -> frozenset[str]:
+        """Modal's VM sandboxes are amd64, and run QEMU with KVM under nested virtualization."""
+        return frozenset({"linux/amd64"})
 
-    def __init__(self, app_name: Optional[str] = None, environment_name: Optional[str] = None):
+    def __init__(self, app_name: Optional[str] = None, environment_name: Optional[str] = None,
+                 region: Optional[str] = None, idle_timeout: Optional[int] = None):
+        """``region`` places every sandbox it creates, a computer's, an agent's and a gateway's alike, there; Modal
+        places them anywhere by default. ``idle_timeout`` ends each once it has been idle that many seconds."""
         self._app_name = _resolve_app_base_name(app_name)
         self._environment_name = environment_name
+        self._region = region
+        self._idle_timeout = idle_timeout
         self._client: Optional[modal.Client] = None
         # Per-attribution-scope Modal App, looked up on demand (billing aggregates per App).
         # Self-contained copy of ModalSandboxProvider's client/app handling — intentionally
@@ -326,10 +351,40 @@ class ModalVmSandboxProvider(SandboxProvider):
         setup_for_gateway: bool = True,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        env: Optional[dict[str, str]] = None,
     ) -> ModalVmSandbox:
-        # image/boot_mode/disk_size_gb accepted for interface parity but inert here.
-        # disk_size_gb: Modal has no disk-size knob on Sandbox.create; a VM sandbox's rootfs is
-        # fixed at the 512 GiB max. https://modal.com/docs/guide/vm-sandboxes
+        """A VM sandbox running Docker, or with ``image``, a computer's disk form, one whose image is the QEMU launcher,
+        with nested virtualization, booting the disk, mounted at create from its export on this machine, at ``cpu``
+        and ``memory`` with ``env`` in its seed. ``boot_mode`` and ``disk_size_gb`` have no effect: a VM sandbox's
+        root filesystem is Modal's fixed size."""
+        ports = list(exposed_ports or [])
+        if image is None:
+            return await self._created(_KEEPALIVE_CMD, _VM_IMAGE, cpu=cpu, memory=memory, timeout=timeout, ports=ports,
+                                       attribution=attribution, network_policy=network_policy,
+                                       setup_for_gateway=setup_for_gateway, idle_timeout=self._idle_timeout,
+                                       experimental_options={"vm_runtime": True})
+        disk = await asyncio.to_thread(exported_disk, image)
+        variables = {**launcher_variables(ports, env or {}, cpu, memory), "VM_DISK": _MOUNTED_DISK}
+        return await self._created(
+            (LAUNCH,), (await _launcher()).add_local_file(disk, _MOUNTED_DISK, copy=False), cpu=cpu,
+            memory=memory + _DISK_HOST_MEMORY_MB, timeout=timeout, ports=ports, attribution=attribution,
+            network_policy=network_policy, setup_for_gateway=False, runtime="vm",
+            experimental_options={"enable_nested_virt": True}, secrets=[modal.Secret.from_dict(variables)],
+            idle_timeout=self._idle_timeout or _DISK_IDLE_TIMEOUT_S)
+
+    async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
+        """The launcher in the sandbox booting its disk afresh with ``env``, at the same URLs."""
+        code, _, stderr = await sandbox._exec_with_stdin(shlex.join(RESET), _chunks(reset_input(env)))
+        if code:
+            raise RuntimeError(f"the launcher in Modal sandbox {sandbox.sandbox_id} didn't boot its disk afresh "
+                               f"(exit {code}): {stderr.strip()[-500:]}")
+
+    async def _created(self, command: tuple[str, ...], image: modal.Image, *, cpu: float, memory: int, timeout: int,
+                       ports: list[int], attribution: Optional[Attribution], network_policy: Optional[NetworkPolicy],
+                       setup_for_gateway: bool, idle_timeout: Optional[int], **create) -> ModalVmSandbox:
+        """A sandbox of ``image`` running ``command``, in the configured region, its ports' tunnels up, ended once idle
+        ``idle_timeout`` seconds when given, set up for a gateway when ``setup_for_gateway``; one that fails before
+        it's returned is terminated."""
         attribution = dict(attribution or {})
         app_tags = _attribution_tags({})
         sandbox_tags = _attribution_tags(attribution)
@@ -337,11 +392,9 @@ class ModalVmSandboxProvider(SandboxProvider):
         app = await self._get_app(app_name, app_tags)
         client = await self._get_client()
         effective = self.effective_network_policy(network_policy)
-        ports = list(exposed_ports or [])
         logger.info(
-            f"Creating Modal VM sandbox (vm_runtime; app={app_name}, tags={app_tags}, "
-            f"sandbox_tags={sandbox_tags}, "
-            f"ports={ports}, cpu={cpu}, memory={memory}MB, timeout={timeout}s, "
+            f"Creating Modal VM sandbox (app={app_name}, tags={app_tags}, sandbox_tags={sandbox_tags}, ports={ports}, "
+            f"cpu={cpu}, memory={memory}MB, timeout={timeout}s, idle_timeout={idle_timeout}, region={self._region}, "
             f"policy={effective.mode.value})"
         )
 
@@ -350,11 +403,14 @@ class ModalVmSandboxProvider(SandboxProvider):
         # retries RESOURCE_EXHAUSTED / queueing internally, which is the real high-load case.
         try:
             sb = await modal.Sandbox._experimental_create.aio(
-                *_KEEPALIVE_CMD,
-                app=app, image=_VM_IMAGE, cpu=cpu, memory=memory, timeout=timeout,
-                encrypted_ports=ports, experimental_options={"vm_runtime": True}, client=client,
+                *command,
+                app=app, image=image, cpu=cpu, memory=memory, timeout=timeout,
+                encrypted_ports=ports, client=client,
                 tags=sandbox_tags or None,
+                **({"region": self._region} if self._region else {}),
+                **({"idle_timeout": idle_timeout} if idle_timeout else {}),
                 **_modal_network_kwargs(effective),
+                **create,
             )
         except Exception as e:
             raise RuntimeError(f"Modal VM sandbox create failed [{type(e).__name__}: {e}]") from e
@@ -415,6 +471,19 @@ class ModalVmSandboxProvider(SandboxProvider):
 
     async def terminate_sandbox(self, sandbox_id: str) -> None:
         await _terminate_by_id(await self._get_client(), sandbox_id)
+
+
+async def _launcher() -> modal.Image:
+    """The QEMU launcher, its ENTRYPOINT cleared, as Modal runs an image's before the sandbox's command: the image
+    published for the sources installed, else built by Modal from its folder."""
+    if (digest := await asyncio.to_thread(published_digest, LAUNCHER_IMAGE)) is not None:
+        return modal.Image.from_registry(f"{LAUNCHER_IMAGE.repository}@{digest}").entrypoint([])
+    return modal.Image.from_dockerfile(str(LAUNCHER_IMAGE.dockerfile),
+                                       context_dir=str(LAUNCHER_IMAGE.dockerfile.parent)).entrypoint([])
+
+
+async def _chunks(text: str) -> AsyncIterator[bytes]:
+    yield text.encode()
 
 
 # ── Object downloads (internal) ────────────────────────────────────────────────────

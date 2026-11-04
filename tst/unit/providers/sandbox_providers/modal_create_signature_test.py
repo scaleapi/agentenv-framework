@@ -14,7 +14,7 @@ import pytest
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.attribution import PIPELINE_STEP_KEY
 from agent_env.config import get_config, reset_config
-from agent_env.providers.sandbox_providers import modal_image_build
+from agent_env.providers.sandbox_providers import modal_image_build, modal_vm_sandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
@@ -50,7 +50,20 @@ _CREATES = {
         image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
     "vm": (ModalVmSandboxProvider, {}, "_experimental_create", lambda p: p.create_vm(
         exposed_ports=[8000], network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
+    "vm in a region": (ModalVmSandboxProvider, {"region": "us-west", "idle_timeout": 600}, "_experimental_create",
+                       lambda p: p.create_vm(exposed_ports=[8000], attribution=_ATTRIBUTION)),
+    "disk": (ModalVmSandboxProvider, {"region": "us-west"}, "_experimental_create", lambda p: p.create_vm(
+        image="localhost:5000/disk@sha256:" + "a" * 64, env={"ENVIRONMENT_NAME": "desk"}, exposed_ports=[18765],
+        cpu=2, memory=4096, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
 }
+
+
+@pytest.fixture(autouse=True)
+def _exported_disk(tmp_path, monkeypatch):
+    """A disk's export on this machine, and the launcher's image, without Docker or a registry."""
+    (tmp_path / "disk.img.zst").write_bytes(b"disk")
+    monkeypatch.setattr(modal_vm_sandbox, "exported_disk", lambda image: tmp_path / "disk.img.zst")
+    monkeypatch.setattr(modal_vm_sandbox, "published_digest", lambda image: "sha256:" + "b" * 64)
 
 
 @pytest.mark.asyncio

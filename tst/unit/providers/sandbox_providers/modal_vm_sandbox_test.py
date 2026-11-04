@@ -412,3 +412,126 @@ async def test_terminate_sandbox_terminates_a_vm_by_id_and_counts_one_modal_no_l
 
     assert sb.terminate.aio.await_count == (1 if found else 0)
     sb.tunnels.aio.assert_not_called()
+
+
+# ── a computer's disk form: the launcher as the sandbox's image, under nested virtualization ──
+
+from pathlib import Path  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from agent_env.providers.sandbox_providers.disk_launcher import launcher_variables  # noqa: E402
+
+DISK_IMAGE = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
+
+
+@pytest.fixture
+def modal_fake(monkeypatch):
+    """Modal's create, with each call's command and arguments, a sandbox's tunnel, the disk's export and the launcher's
+    image recorded; and each secret's variables."""
+    made = SimpleNamespace(creates=[], secrets=[], exported=[], launcher=MagicMock(name="launcher"))
+
+    async def create(*command, **kwargs):
+        made.creates.append((command, kwargs))
+        sb = MagicMock()
+        sb.object_id = f"sb-{len(made.creates)}"
+        sb.tunnels.aio = AsyncMock(return_value={port: SimpleNamespace(host=f"{sb.object_id}-{port}.w.modal.host",
+                                                                       port=443) for port in kwargs["encrypted_ports"]})
+        sb.exec.aio = AsyncMock(side_effect=AssertionError("a disk's sandbox runs nothing at create"))
+        return sb
+
+    monkeypatch.setattr(mvs.modal.Sandbox, "_experimental_create", SimpleNamespace(aio=create))
+    monkeypatch.setattr(mvs.modal.Secret, "from_dict", lambda variables: made.secrets.append(variables) or variables)
+    monkeypatch.setattr(mvs, "exported_disk", lambda image: made.exported.append(image) or Path("/cache/disk.img.zst"))
+    monkeypatch.setattr(mvs, "_launcher", AsyncMock(return_value=made.launcher))
+    monkeypatch.setattr(mvs, "_log_sandbox_started", AsyncMock())
+    return made
+
+
+def _vm_provider(**config) -> ModalVmSandboxProvider:
+    provider = ModalVmSandboxProvider(app_name="agent-env-test", **config)
+    provider._get_app = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+    provider._get_client = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+    return provider
+
+
+def test_modal_vm_boots_amd64_disks():
+    assert ModalVmSandboxProvider.disk_image_platforms() == frozenset({"linux/amd64"})
+
+
+@pytest.mark.asyncio
+async def test_a_disk_boots_in_a_vm_sandbox_whose_image_is_the_launcher_with_the_disk_mounted_at_create(modal_fake):
+    """No Docker in it, nested virtualization, KVM required, the seed and the driver's port handed to the launcher, and
+    the VM's size plus the launcher's own memory."""
+    sandbox = await _vm_provider().create_vm(image=DISK_IMAGE, env={"ENVIRONMENT_NAME": "desk"}, exposed_ports=[18765],
+                                             cpu=2, memory=4096, timeout=3600)
+
+    ((command, kwargs),) = modal_fake.creates
+    assert modal_fake.exported == [DISK_IMAGE]
+    modal_fake.launcher.add_local_file.assert_called_once_with(Path("/cache/disk.img.zst"), "/disk/disk.img.zst",
+                                                               copy=False)
+    assert command == ("/usr/local/bin/launch",) and kwargs["image"] is modal_fake.launcher.add_local_file.return_value
+    assert {key: kwargs[key] for key in ("runtime", "experimental_options", "cpu", "memory", "timeout", "idle_timeout",
+                                         "encrypted_ports")} == {
+        "runtime": "vm", "experimental_options": {"enable_nested_virt": True}, "cpu": 2, "memory": 6144,
+        "timeout": 3600, "idle_timeout": 1800, "encrypted_ports": [18765]}
+    assert "region" not in kwargs and kwargs["secrets"] == modal_fake.secrets
+    assert modal_fake.secrets == [{**launcher_variables([18765], {"ENVIRONMENT_NAME": "desk"}, 2, 4096),
+                                   "VM_DISK": "/disk/disk.img.zst"}]
+    assert modal_fake.secrets[0]["VM_REQUIRE_KVM"] == "1" and modal_fake.secrets[0]["VM_PORTS"] == "18765"
+    assert sandbox.tunnel_urls == {18765: "https://sb-1-18765.w.modal.host"} and sandbox.type == "modal_vm"
+
+
+@pytest.mark.asyncio
+async def test_a_configured_region_and_idle_timeout_hold_for_every_sandbox_the_provider_makes(modal_fake):
+    """A computer's, an agent's and a gateway's alike, so they land together; neither is passed by default."""
+    provider = _vm_provider(region="us-west", idle_timeout=600)
+
+    with patch.object(ModalVmSandbox, "setup_vm_for_gateway", AsyncMock()):
+        await provider.create_vm(image=DISK_IMAGE, env={}, exposed_ports=[18765])
+        await provider.create_sandbox(image_name="agent:1", port=8000, env={})
+        await provider.create_vm(exposed_ports=[8080])
+        await _vm_provider().create_vm(exposed_ports=[8080])
+
+    (_, disk), (_, agent), (_, gateway), (_, default) = modal_fake.creates
+    assert [(kwargs.get("region"), kwargs.get("idle_timeout")) for kwargs in (disk, agent, gateway, default)] == [
+        ("us-west", 600), ("us-west", 600), ("us-west", 600), (None, None)]
+    assert agent["experimental_options"] == gateway["experimental_options"] == {"vm_runtime": True}
+
+
+@pytest.mark.asyncio
+async def test_a_reset_runs_the_launchers_reset_in_the_sandbox_with_the_new_environment_on_its_stdin():
+    sandbox = _sandbox()
+    sent = []
+
+    async def with_stdin(script, stdin):
+        sent.append((script, b"".join([piece async for piece in stdin])))
+        return 0, "", ""
+
+    sandbox._exec_with_stdin = with_stdin
+    await ModalVmSandboxProvider().reset_vm(sandbox, image=DISK_IMAGE, env={"ENVIRONMENT_NAME": "again"})
+    sandbox._exec_with_stdin = AsyncMock(return_value=(1, "", "launch reset: no computer is running here\n"))
+
+    assert sent == [("/usr/local/bin/launch reset", b"VM_ENV_ENVIRONMENT_NAME=YWdhaW4=\n")]
+    with pytest.raises(RuntimeError, match="didn't boot its disk afresh .exit 1.: launch reset: no computer is running"):
+        await ModalVmSandboxProvider().reset_vm(sandbox, image=DISK_IMAGE, env={})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("digest", ["sha256:" + "b" * 64, None], ids=["published", "unpublished"])
+async def test_the_launcher_is_the_published_image_when_its_sources_are_published_else_built_from_its_folder(
+        monkeypatch, digest):
+    monkeypatch.setattr(mvs, "published_digest", lambda image: digest)
+    from_registry, from_dockerfile = MagicMock(), MagicMock()
+    monkeypatch.setattr(mvs.modal.Image, "from_registry", from_registry)
+    monkeypatch.setattr(mvs.modal.Image, "from_dockerfile", from_dockerfile)
+
+    image = await mvs._launcher()
+
+    if digest:
+        from_registry.assert_called_once_with(f"{mvs.LAUNCHER_IMAGE.repository}@{digest}")
+    else:
+        from_dockerfile.assert_called_once_with(str(mvs.LAUNCHER_IMAGE.dockerfile),
+                                                context_dir=str(mvs.LAUNCHER_IMAGE.dockerfile.parent))
+    built = (from_registry if digest else from_dockerfile).return_value
+    built.entrypoint.assert_called_once_with([])
+    assert image is built.entrypoint.return_value and (from_dockerfile if digest else from_registry).called is False

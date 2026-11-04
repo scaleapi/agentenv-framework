@@ -129,7 +129,8 @@ _SMOKES = {
                             "command -v disk image-env mkfs.ext4 mkfs.vfat mcopy sfdisk qemu-img"],
     "agentenv-qemu-launcher": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                                "qemu-system-x86_64 --version && qemu-system-aarch64 --version"
-                               " && test -f /usr/share/OVMF/OVMF_CODE_4M.fd && test -f /usr/share/AAVMF/AAVMF_CODE.fd"],
+                               " && test -f /usr/share/OVMF/OVMF_CODE_4M.fd && test -f /usr/share/AAVMF/AAVMF_CODE.fd"
+                               " && command -v socat zstd"],
 }
 
 

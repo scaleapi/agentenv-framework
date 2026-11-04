@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 # A pair's statuses once its image is in the store.
 BUILT = ("unverified", "ready")
+#: The image store repository composed computers are pushed to, tagged by their keys.
+REPOSITORY = "agentenv-computers"
 _WRITE_TRIES = 4
 
 

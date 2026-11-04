@@ -11,6 +11,8 @@ import subprocess
 import tarfile
 import urllib.parse
 
+import httpx
+
 from agentenv_protocol.computer import AppDeclaration, DriverDeclaration
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 
@@ -56,6 +58,7 @@ class FakeDocker:
     def __init__(self, registry: Registry):
         self.registry, self.builds, self.fail, self.emulates, self.labels = registry, [], {}, {"linux/amd64"}, {}
         self.probed, self.probe_fails, self.resolved, self.timeouts = [], {}, [], {}
+        self.probe_drops: dict[str, int] = {}
         self.writes, self.saved, self.disk_builds, self.disk_sizes = {}, [], [], {}
 
     def resolve(self, request, context, source, arch, work):
@@ -87,6 +90,10 @@ class FakeDocker:
     async def probe(self, links, env, driver, image, form="container"):
         arch = self._arch(self.registry.manifests[image.rpartition("@")[2]]["config"]["digest"])
         self.probed.append((arch, image) if form == "container" else (form, arch, image))
+        if self.probe_drops.get(arch):
+            self.probe_drops[arch] -= 1
+            raise ExceptionGroup("unhandled errors in a TaskGroup", [
+                httpx.RemoteProtocolError("Server disconnected without sending a response.")])
         if arch in self.probe_fails:
             checks = [CheckResult(check="P4", name="clicks show their effect", status="failed", detail=self.probe_fails[arch])]
         else:
