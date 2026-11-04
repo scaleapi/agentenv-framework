@@ -1,5 +1,5 @@
-"""A deploy_sandbox step that sets no cpu reserves one vCPU, whether built in code or loaded from a stored dict, and
-a stored cpu is kept as written."""
+"""A deploy_sandbox step that sets no cpu or memory reserves one vCPU and 8 GiB, whether built in code or loaded from a
+stored dict, while keeping them unset on the step and in its stored dict; a stored size is kept as written."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -29,12 +29,16 @@ def _stored(**fields) -> dict:
     DeploySandboxTaskStep(id="s", version=1, sandbox_name="box", sandbox_mode="vm"),
     DeploySandboxTaskStep.from_dict(_stored()),
 ], ids=["constructed", "from-dict"])
-def test_an_unsized_step_reserves_one_cpu(step):
-    assert step.cpu == 1.0
+def test_an_unsized_step_stays_unsized(step):
+    assert (step.cpu, step.memory_mb) == (None, None)
+    stored = step.to_dict()
+    assert (stored["cpu"], stored["memory_mb"]) == (None, None)
+    assert DeploySandboxTaskStep.from_dict(stored).cpu is None
 
 
-def test_a_stored_cpu_is_kept():
-    assert DeploySandboxTaskStep.from_dict(_stored(cpu=2.0)).cpu == 2.0
+def test_a_stored_size_is_kept():
+    step = DeploySandboxTaskStep.from_dict(_stored(cpu=2.0, memory_mb=8192))
+    assert (step.cpu, step.memory_mb) == (2.0, 8192)
 
 
 @pytest.mark.asyncio
@@ -42,14 +46,18 @@ def test_a_stored_cpu_is_kept():
     ("vm", "create_vm", {}),
     ("container", "create_container", {"image": "example.com/box:v1", "port": 80}),
 ], ids=["vm", "container"])
-@pytest.mark.parametrize("step_cpu, requested", [(None, 1.0), (4.0, 4.0)], ids=["unsized", "sized"])
-async def test_the_provider_is_asked_for_the_steps_cpu(mode, create, extra, step_cpu, requested):
-    sized = {} if step_cpu is None else {"cpu": step_cpu}
+@pytest.mark.parametrize("size, requested", [
+    ({}, (1.0, 8192)),
+    ({"cpu": 4.0, "memory_mb": 2048}, (4.0, 2048)),
+    ({"memory_mb": 2048}, (1.0, 2048)),
+], ids=["unsized", "sized", "memory-only"])
+async def test_the_provider_is_asked_for_the_steps_size(mode, create, extra, size, requested):
     step = DeploySandboxTaskStep(id="s", version=1, sandbox_name="box", sandbox_mode=mode, sandbox_type="any",
-                                 **sized, **extra)
+                                 **size, **extra)
     provider = _provider()
 
     with patch("agent_env.providers.sandbox_providers.sandbox_provider.build_sandbox_provider", return_value=provider):
         await step.execute(TaskStepContext())
 
-    assert getattr(provider, create).call_args.kwargs["cpu"] == requested
+    kwargs = getattr(provider, create).call_args.kwargs
+    assert (kwargs["cpu"], kwargs["memory"]) == requested
