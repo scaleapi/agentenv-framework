@@ -177,6 +177,19 @@ async def test_the_fallback_polls_capture_and_draws_the_pointer(home):
 
 
 @pytest.mark.asyncio
+async def test_a_start_answers_once_its_recording_has_its_first_frame_however_slow_the_capture(home):
+    driver = Recorded()
+    driver.slow["capture"] = 0.5
+    async with http_client(driver) as http:
+        began = time.monotonic()
+        started = (await http.post(START, json={"request_id": "r", "fps": 10})).json()
+        took = time.monotonic() - began
+        recording = driver._computer.recordings.running[started["recording_id"]]
+        assert took >= 0.5 and recording.encoder is not None and recording.encoder.frames >= 1
+        await http.post(END, json={"recording_id": started["recording_id"]})
+
+
+@pytest.mark.asyncio
 async def test_a_driver_without_the_pointer_group_records_without_a_cursor(home):
     _, manifest = await _record(MinimalDriver(), 0.4)
     assert manifest["cursor"] is False and manifest["segments"][0]["width"] == 640
