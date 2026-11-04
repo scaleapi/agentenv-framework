@@ -472,6 +472,31 @@ async def test_an_episode_is_in_the_run_index_running_then_ended_in_the_group_it
 
 
 @pytest.mark.asyncio
+async def test_an_episode_whose_step_fails_without_failing_the_task_is_recorded_failed_as_a_runner_would(teardowns):
+    spare = {"id": "spare", "type": "episode_test_env", "env_id": "spare", "fail": True, "fail_task_on_error": False}
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES, spare).start()
+    await (await episode.next_turn()).end("Added a crate.")
+
+    assert await episode.result() == {"replies": 1.0}
+    run = run_store.get_run(f"episode-{episode.id}")
+    assert run.status == "FAILED" and "the env didn't come up" in run.error
+
+
+@pytest.mark.asyncio
+async def test_a_run_record_that_cant_be_written_is_the_runs_error_and_leaves_no_live_episode(teardowns, monkeypatch):
+    def refused(record):
+        raise RuntimeError("the run index is down")
+
+    monkeypatch.setattr(episode_run.run_store, "insert_run", refused)
+    episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
+
+    with pytest.raises(RuntimeError, match="the run index is down"):
+        await episode.next_turn()
+    assert episode.id not in episode_run._live
+    assert len(teardowns.finished) == 1
+
+
+@pytest.mark.asyncio
 async def test_an_episode_abandoned_mid_turn_drops_the_turn(teardowns):
     episode = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
     turn = await episode.next_turn()
