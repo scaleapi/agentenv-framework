@@ -1583,6 +1583,12 @@ async def test_gateway_with_multi_env_including_website(multi_env_with_website, 
         logger.info(f"browser_navigate result: {content_text[:500]}")
         assert "Slack Workspace" in content_text, f"Expected 'Slack Workspace' in navigate result, got {content_text}"
 
+        for url in ("http://slack/", "http://email/", "http://slack-website-backend:8000/api/health",
+                    "http://servicedb:5432/", "http://pgweb:8081/", "http://db-mcp:8000/mcp"):
+            result = await session.call_tool("browser_navigate", {"url": url})
+            content_text = "".join(c.text for c in result.content if hasattr(c, "text"))
+            assert "ERR_NAME_NOT_RESOLVED" in content_text, f"The browser reached {url}: {content_text[:300]}"
+
         await session.call_tool("browser_close", {})
 
     async def assert_loaded_data(session, tools_result, tool_names):

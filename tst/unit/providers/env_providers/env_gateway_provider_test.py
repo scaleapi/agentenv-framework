@@ -1103,6 +1103,33 @@ def test_compose_reads_every_servers_card_and_mcp_on_its_mcp_port_the_website_br
     assert "18765" in services["website-browser"]["healthcheck"]["test"][1]
 
 
+@pytest.mark.parametrize("browsing", [True, False], ids=["with-browser", "without"])
+def test_the_website_browser_reaches_only_the_gateway_and_the_sites(browsing):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = yaml.safe_load(EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
+                     MCPServerConfig(image="browser", environment_name="website-browser", website_browser=browsing)],
+        gateway_image="agent-gateway",
+        gateway_port=18765,
+        website_configs=[WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop"),
+                         WebsiteConfig(backend_image="notes-be", frontend_image=None, environment_name="notes")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig(db_web_image="pgweb", db_mcp_image="db-mcp")),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    ))
+
+    networks = {name: service["networks"] for name, service in compose["services"].items()}
+    sites = ["website-network"] if browsing else []
+    assert networks == {
+        "servicedb": ["env-network"], "pgweb": ["env-network"], "db-mcp": ["env-network"],
+        "slack": ["env-network"], "website-browser": sites or ["env-network"],
+        GATEWAY_SERVICE_NAME: ["env-network", *sites],
+        "shop-website-backend": ["env-network"], "shop-website-frontend": ["env-network", *sites],
+        "notes-website-backend": ["env-network", *sites],
+    }
+    assert list(compose["networks"]) == ["env-network", *sites]
+
+
 # --- sidecar rendering --------------------------------------------------------
 
 class _FakeImageArtifact:
@@ -1382,7 +1409,8 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser(override
     assert set(names) == {"slack", "shop", browser_name}
     assert compose.call_args.kwargs["mcp_server_name"] == "crm"
     browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == browser_name)
-    assert browser == MCPServerConfig(image=browser.image, environment_name=browser_name)  # like any MCP server
+    assert browser == MCPServerConfig(image=browser.image, environment_name=browser_name, website_browser=True)
+    assert [s.environment_name for s in compose.call_args.kwargs["mcp_servers"] if s.website_browser] == [browser_name]
 
 
 @pytest.mark.asyncio
