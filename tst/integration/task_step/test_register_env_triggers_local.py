@@ -204,6 +204,7 @@ async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(items_env):
     assert bob.instructions == ["ESCALATE-1"]
     [cancelled] = [e for e in state["events"] if e["kind"] == "cancelled"]
     assert (cancelled["trigger_id"], cancelled["provoking"]["role"]) == ("deadline-2", "default")
+    assert cancelled["provoking"]["args"] == {"item": {"redacted": {"type": "str", "len": 7}}}
 
 
 @pytest.mark.asyncio
