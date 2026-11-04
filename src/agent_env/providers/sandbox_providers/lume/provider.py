@@ -147,7 +147,9 @@ class LumeSandboxProvider(SandboxProvider):
         except BaseException:
             await self.terminate_sandbox(sandbox_id)
             raise
-        return self._sandbox(sandbox_id, state)
+        sandbox = self._sandbox(sandbox_id, state)
+        sandbox.network_policy = self.effective_network_policy(network_policy)
+        return sandbox
 
     async def reset_vm(self, sandbox: Any, *, image: str, env: dict[str, str]) -> None:
         """The VM cloned afresh from the bundle it was cloned from, under its MAC address, so it takes the same
