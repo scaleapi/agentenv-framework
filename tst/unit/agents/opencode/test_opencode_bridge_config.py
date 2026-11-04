@@ -97,14 +97,23 @@ def test_the_runs_role_replaces_the_role_a_server_is_registered_with_in_any_case
     assert "headers" not in without_role["peer_agents"]
 
 
+class _Spawns(list):
+    """Each spawn's argv and environment; ``clis`` has the CLI that answered each, with what it read on stdin."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clis: list[FakeCLI] = []
+
+
 @pytest.fixture
 def spawned(monkeypatch):
     """Every spawn's argv and environment, each answered by a CLI that finishes its turn."""
-    calls: list[tuple[list[str], dict]] = []
+    calls = _Spawns()
 
     async def _exec(*cmd, **kwargs):
         calls.append((list(cmd), kwargs["env"]))
-        return FakeCLI(json.dumps(_STOP).encode() + b"\n")
+        calls.clis.append(FakeCLI(json.dumps(_STOP).encode() + b"\n"))
+        return calls.clis[-1]
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
     monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {"XDG_DATA_HOME": "/ctx/share"})
@@ -121,7 +130,7 @@ def test_a_turn_runs_in_its_workspace_with_tls_checks_on(monkeypatch, spawned):
         attachment_paths=["/w/a.png"], workspace="/w"))
 
     ((argv, env),) = spawned
-    assert argv == ["opencode", "run", "--format", "json", "--model", "litellm/m", "--dir", "/w", "-s", "ses_0", "go",
+    assert argv == ["opencode", "run", "--format", "json", "--model", "litellm/m", "--dir", "/w", "-s", "ses_0",
                     "--file", "/w/a.png"]
     assert "NODE_TLS_REJECT_UNAUTHORIZED" not in env and env["XDG_DATA_HOME"] == "/ctx/share"
     options = json.loads(env["OPENCODE_CONFIG_CONTENT"])["provider"]["litellm"]["options"]
@@ -150,8 +159,8 @@ def test_the_system_prompt_reaches_the_model_as_instructions_and_the_output_form
         prompt="go", context_id="ctx", system_prompt="be brief", output_format={"type": "json_schema", "schema": schema}))
 
     ((argv, env),) = spawned
-    assert argv[-1] == ('go\n\nReturn only a JSON object matching this schema, with no Markdown or '
-                        'surrounding text: {"type":"object"}')
+    assert spawned.clis[0].stdin.data == (b'go\n\nReturn only a JSON object matching this schema, with no Markdown or '
+                                          b'surrounding text: {"type":"object"}')
     (instructions,) = json.loads(env["OPENCODE_CONFIG_CONTENT"])["instructions"]
     assert Path(instructions) == opencode_bridge.context_data_dir("ctx") / "system-prompt.md"
     assert Path(instructions).read_text() == "be brief"

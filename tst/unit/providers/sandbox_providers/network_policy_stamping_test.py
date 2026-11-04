@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_env.providers.sandbox_providers.agent37.provider import Agent37SandboxProvider
 from agent_env.providers.sandbox_providers.boat.provider import BoatSandboxProvider
 from agent_env.providers.sandbox_providers.boxd.provider import BoxdSandboxProvider
 from agent_env.providers.sandbox_providers.coreweave.provider import CoreWeaveSandboxProvider
@@ -157,6 +158,12 @@ async def _boat() -> Sandbox:
     return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _agent37() -> Sandbox:
+    from tst.unit.providers.sandbox_providers.agent37_fakes import API_KEY, FakeAgent37
+    provider = Agent37SandboxProvider(api_key=API_KEY, transport=FakeAgent37().transport())
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
 async def _smol_vm() -> Sandbox:
     pytest.importorskip("smol")
     from agent_env.providers.sandbox_providers.smol_vm import provider as smol_module
@@ -193,6 +200,7 @@ FACTORIES = {
     "coreweave": _coreweave,
     "daytona": _daytona,
     "boat": _boat,
+    "agent37": _agent37,
     "smol_vm": _smol_vm,
     "local": _local,
     "lume": _lume,

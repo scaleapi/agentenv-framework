@@ -150,7 +150,8 @@ app without one, so a server that mounted is a server whose tool calls are bound
 To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
 it proceed, or an `mcp.types.CallToolResult` (`isError=True` for a refusal) to send that as the
 tool's reply. An `@extension` method may declare the same parameter; it is filled from the request's
-`AgentEnv-Role` header. Code that acts as a caller outside any dispatch, such as a test calling a
+`AgentEnv-Role` header. It may also declare a parameter annotated `starlette.requests.Request`, which
+gets the HTTP request itself, its headers say, and stays out of the advertised schema. Code that acts as a caller outside any dispatch, such as a test calling a
 handler directly or a seeding script, binds a context it builds:
 `with bound(ToolContext.as_caller("alice")): ...`.
 
@@ -781,6 +782,11 @@ requests to the app's server, taking the control token:
   closes, the other then closed with its code; refused before they open without the token, or with no
   such app or one not answering. The `computer` extra brings `websockets` for this.
 
+An app's `agent_routes` (`/cdp/` for a website browser) are path prefixes of its own server that
+agents reach this way without the control token: the driver reads them from the app's card
+(`computer-app/v1`'s `agent_routes`) and lets a call under one through, while the app checks it
+itself. A path with a `.` or `..` segment, escaped or not, never counts as under one.
+
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores (`browser: true` for a website browser), and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
 JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
@@ -860,6 +866,38 @@ are the profile's template. The base class adds:
   - `files/choose {paths}`, files in `~/Uploads` for the file chooser open on it, which headless, and so
     alone, it intercepts;
   - `page/state`, the active tab's id, URL and title and the dialog or file chooser open on it.
+  - `cdp {user}`, `user`'s CDP address once the browser is ready, `http_url` to discover from and
+    `ws_url` to connect to, both at the address the call reached it at with a token agentenv mints in
+    the path: the same one each time it's asked for. Through the driver they're under
+    `/svc/<app>/cdp/<token>/`. `user` is a name the caller chooses, an agent's `deploy_agent` step id.
+    The server keeps each token in memory and only its SHA-256, with its user and base address, in
+    `.agentenv/cdp-tokens.json`, which code in the computer's session can read but not use; an address
+    outlives a relaunch of the browser and of the server, and the computer's reset ends it.
+- **Its CDP relay**, at those addresses: `json/version` and `json/list` (also with a trailing slash,
+  and `json`) answered from the browser, since a browser on a pipe has none, with its WebSocket at the
+  address the client reached it at; and `devtools/browser`, where each WebSocket connection gets a
+  browser-level session of its own over the pipe (`Target.attachToBrowserTarget`), with its answers
+  and the events of its sessions and those it attaches, and no one else's. Only flattened sessions are
+  served, as Playwright, Puppeteer and Browser Use use. A token agentenv didn't mint is refused, and
+  when the browser goes, each connection is closed with 1012 so its client can connect again.
+  A guard sits on every command, a guardrail, since the sandbox's network is the boundary:
+  - `Browser.close`, `Browser.crash` and `Browser.crashGpuProcess` are answered `{}` and end only that
+    connection, with 1000;
+  - `Target.exposeDevToolsProtocol`, `Target.sendMessageToTarget` (only flattened sessions are
+    served, whose commands the guard sees), a `Target.createBrowserContext` with its own proxy, and a
+    `Page.navigate` or `Target.createTarget` to the browser's own pages (`file:`, `chrome:`,
+    `chrome-extension:`, `chrome-untrusted:`, `view-source:`, `devtools:`, and `about:` but
+    `about:blank` and `about:srcdoc`) get a CDP error, `agentenv refuses …`;
+  - `Browser.setDownloadBehavior` and `Page.setDownloadBehavior` are sent on as agentenv's own, the
+    browser's default into `~/Downloads`, keeping only the context and whether to send events;
+  - when the deploy answers dialogs, an agent's `Page.handleJavaScriptDialog` is answered `{}` and not
+    sent on;
+  - a message that isn't a command, an object with a string `method`, and object `params` and a string
+    `sessionId` if any, gets a CDP error with code -32600.
+
+  `record` lists each connection as `cdp_connections`: its user, when it opened and when it closed,
+  and the first 100 commands the guard refused, changed, answered or closed it on.
+  Puppeteer connects by `ws_url`: its `browserURL` drops the address's path.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 

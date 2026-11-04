@@ -29,7 +29,7 @@ disk:
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `OpenCodeConfig`: `model`, `effort` (the provider's `reasoningEffort`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default) |
+| `agent-config/v1` | `OpenCodeConfig`: `model`, `effort` (the provider's `reasoningEffort`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default), `builtin_tools` (below) |
 | `mcp-config/v1` | SDK default; each server passed to the task's CLI |
 | `skill-config/v1` | inline and bundle skills installed as `$XDG_CONFIG_HOME/opencode/skills/<name>/`, where OpenCode finds them |
 | `trajectory/v1` | the task's `opencode run --format json` events, live while it runs (format `opencode-events/1`) |
@@ -40,3 +40,13 @@ disk:
 
 The image is `python:3.11-slim` with Node, `pdftoppm`, the CLI and the agent, running as the `agent` user. OpenCode's
 state is under `/data`, its `HOME`, whatever the uid.
+
+A `deploy_agent` `builtin_tools` selection picks the CLI's own tools through the config's `permission`, which leaves a
+denied tool out of the model's tool list rather than refusing it when called. `{"disable": "*"}` and `{"only": [...]}`
+deny every tool but those named and the tools of the MCP servers agent-env gives the agent (`<server>_*`), a list to
+turn off denies those alone, and `question` is denied in every case. The CLI's checks that aren't tools stay
+allowed, as they are without a selection: `external_directory`, which a file tool asks before it touches a path outside
+the workspace, and `doom_loop`. The names are `OpenCodeTool`'s in
+`opencode_bridge.py`, the CLI's permission names: `edit` also covers `write` and `apply_patch`, which can't be selected
+alone, and `read` covers the MCP resource tools. A test fails when package.json's `opencode-ai` moves, until
+`OpenCodeTool` and `TOOLS_CLI_VERSION` move with it.

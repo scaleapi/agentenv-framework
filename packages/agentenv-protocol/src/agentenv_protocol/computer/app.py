@@ -374,6 +374,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     skill: ClassVar[Optional[str]] = None
     #: How long one of its data calls may take, a hook or its paths' default, before it fails.
     data_timeout_s: ClassVar[float] = 300.0
+    #: Path prefixes of its own server's routes, each ending in ``/``, that agents reach through the driver without the
+    #: computer's control token; the app checks a call to one itself.
+    agent_routes: ClassVar[tuple[str, ...]] = ()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Take the class's data hooks over, for the base class's handlers to serve around its contract; and serve its
@@ -473,7 +476,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     def extension_params(self, uri: str) -> dict:
         if uri == COMPUTER_APP:
             return {"launch": self.launch.model_dump(mode="json", exclude_none=True) if self.launch else None,
-                    "paths": self.paths}
+                    "paths": self.paths, **({"agent_routes": list(self.agent_routes)} if self.agent_routes else {})}
         return super().extension_params(uri)
 
     def served_operations(self, operations: list[str]) -> list[str]:

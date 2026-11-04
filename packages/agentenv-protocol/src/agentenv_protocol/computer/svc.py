@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
-from typing import Any, Callable
 from urllib.parse import quote, unquote
 
 import httpx
@@ -16,11 +16,10 @@ import websockets
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
-from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection, unix_connect
 
-from ..agent_env_environment import _error_response, control_check
+from ..agent_env_environment import _error_response
 from .app import SOCKET
 from .errors import DeliveryFailed
 
@@ -37,6 +36,12 @@ UNSENDABLE_CLOSES = (1005, 1006, 1015)
 HOST = re.compile(r"(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
 #: What a path's segments may hold unescaped, besides letters, digits and ``_.-~``.
 PATH_SAFE = "/:@!$&'()*+,;="
+#: The loggers the driver's server writes each request's path to: HTTP requests, and WebSocket handshakes.
+SERVER_LOGGERS = ("uvicorn.access", "uvicorn.error")
+#: What a logged path shows past a route an app opens to agents.
+REDACTED = "<redacted>"
+#: The logger of the client requests are forwarded with, which logs each one's URL, an agent's token in it, at INFO.
+FORWARDER_LOGGER = "httpx"
 
 
 def passed_on(headers: Iterable[tuple[str, str]], *dropped: str) -> list[tuple[str, str]]:
@@ -76,14 +81,36 @@ def _bytes(headers: Iterable[tuple[str, str]]) -> list[tuple[bytes, bytes]]:
     return [(name.encode("latin-1"), value.encode("latin-1")) for name, value in headers]
 
 
-def websocket_route(app: Any, path: str, endpoint: Callable) -> None:
-    """``endpoint`` served at ``path`` as a WebSocket route of ``app``, an mcp or a standalone fastmcp FastMCP, which
-    have no API for one."""
-    for routes in ("_custom_starlette_routes", "_additional_http_routes"):
-        if isinstance(getattr(app, routes, None), list):
-            getattr(app, routes).append(WebSocketRoute(path, endpoint))
-            return
-    raise TypeError(f"a driver's app takes WebSocket routes on an mcp or a fastmcp FastMCP, not a {type(app).__name__}")
+def open_to_agents(routes: list[str], path: str) -> bool:
+    """Whether ``path``, a request's target, is under one of the app's ``routes`` agents reach without the control
+    token, and has no ``.`` or ``..`` segment, escaped or not, that could step out of it."""
+    path = path.partition("?")[0]
+    if any(segment in (".", "..") for segment in unquote(path).split("/")):
+        return False
+    return any(path.startswith(route) for route in routes)
+
+
+class AgentRouteRedaction(logging.Filter):
+    """The paths the driver's server logs, cut short past a route an app opens to agents, with ``routes`` each app's
+    by name: what follows such a route, as a CDP token does, is a secret the app checks, and the computer's session can
+    read the driver's log."""
+
+    def __init__(self, routes: dict[str, list[str]]) -> None:
+        super().__init__()
+        self.routes = routes
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self.redacted(arg) if isinstance(arg, str) else arg for arg in record.args)
+        return True
+
+    def redacted(self, path: str) -> str:
+        parts = path.split("/", 3)
+        if len(parts) < 4 or parts[0] or parts[1] != "svc":
+            return path
+        route = next((route for route in self.routes.get(unquote(parts[2]), []) if f"/{parts[3]}".startswith(route)),
+                     None)
+        return path if route is None else f"/svc/{parts[2]}{route}{REDACTED}"
 
 
 async def forward(folder: Path, name: str, request: Request) -> Response:
@@ -123,10 +150,9 @@ async def forward(folder: Path, name: str, request: Request) -> Response:
 
 async def relay(folder: Path, name: str, websocket: WebSocket) -> None:
     """``websocket`` relayed both ways to the app ``name``'s server in ``folder`` until either side closes; refused,
-    before it opens, without the control token, with a Host that isn't a host and port, or with the app's server not
-    answering."""
+    before it opens, with a Host that isn't a host and port, or with the app's server not answering."""
     host = websocket.headers.get("host", "")
-    if not control_check()(websocket.headers) or (host and not HOST.fullmatch(host)):
+    if host and not HOST.fullmatch(host):
         await websocket.close(code=1008)
         return
     headers = [(key, _utf8(value)) for key, value in to_app(
