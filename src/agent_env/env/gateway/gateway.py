@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -47,6 +48,7 @@ from .constants import (
     CHANGES_PAGE_DEFAULT,
     CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
+    CONTROL_ROUTES,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
     GATEWAY_COMPOSE_HOST,
@@ -119,6 +121,7 @@ class Gateway:
         rest_proxy_urls: dict[str, str] | None = None,
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
+        control_token: str | None = None,
     ):
         self.host = host
         self.port = port
@@ -128,6 +131,7 @@ class Gateway:
         self.rest_proxy_urls = rest_proxy_urls or {}
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
+        self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
             self._db_conn = psycopg2.connect(service_db_url)
@@ -413,14 +417,19 @@ class Gateway:
     # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
 
     def _asgi_app(self):
-        """The served app: FastMCP's Starlette app with the request's caller bound around it, and the process
-        lifespan wrapped around the MCP session manager's."""
+        """The served app: FastMCP's Starlette app with the request's caller bound around it, the control routes behind
+        the deploy's token when it has one, and the process lifespan wrapped around the MCP session manager's."""
         inner = self._mcp.streamable_http_app()
         inner.router.lifespan_context = self._process_lifespan(inner.router.lifespan_context)
 
         async def app(scope, receive, send):
             if scope["type"] != "http":
                 await inner(scope, receive, send)
+                return
+            if self._control_bearer and scope["path"] in CONTROL_ROUTES and not hmac.compare_digest(
+                    dict(scope.get("headers", ())).get(b"authorization", b""), self._control_bearer):
+                response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
+                await response(scope, receive, send)
                 return
             role = DEFAULT_ROLE
             for name, value in scope.get("headers", ()):

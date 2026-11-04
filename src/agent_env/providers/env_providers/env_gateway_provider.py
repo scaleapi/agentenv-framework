@@ -38,6 +38,8 @@ from agent_env.env.envs.service_db import (
     DB_WEB_PORT,
     PGWEB_SERVICE_NAME,
 )
+from agent_env.env.envs.computer.utils.boot import control_environment
+from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_RECORDER_PORT
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
@@ -119,6 +121,8 @@ class DeployedGateway:
     # The env card the readiness probe read, and when (ISO 8601, UTC).
     environment_card: dict | None = None
     environment_card_read_at_utc: str | None = None
+    # The token the gateway's control routes take, which the record keeps; None for a gateway started without one.
+    control_token: str | None = None
 
 
 @dataclass
@@ -283,6 +287,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         host_ips: tuple[str, ...] = (),
         extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
+        control_token: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
 
@@ -491,6 +496,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_env.append(f"      - REST_PROXY_URLS={','.join(rest_proxy_urls)}")
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
+        gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
         publish = host_port or (lambda port: port)
         exposed_gateway_ports = []
         if expose_gateway_port:
@@ -625,6 +631,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             mcp_server_images=topology.mcp_server_images, website_configs=topology.website_configs,
             website_images=topology.website_images, mcp_server_name=topology.mcp_server_name, gateway_mode=gateway_mode,
             ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
+            control_token=new_control_token(),
         )
         return DeployedGatewayEnv(
             env_id=env.id,
@@ -641,6 +648,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             website_frontend_urls=deployed.website_frontend_urls,
             gateway_mode=gateway_mode.value,
             env_state_instance_ids=deployed.env_state_instance_ids,
+            control_token=deployed.control_token,
         )
 
     async def create_gateway(
@@ -663,6 +671,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
         *,
         attribution: Optional[Attribution] = None,
+        control_token: str | None = None,
     ) -> DeployedGateway:
         """Create and start a gateway from explicit topology, for a caller that builds its own record rather than calling ``deploy()``.
 
@@ -676,13 +685,16 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         ``mcp_server_name`` is the name the gateway presents on its card and as its MCP server; drawn as ``env`` +
         4 random digits when the env declares none; the record takes it from the gateway's card.
+
+        ``control_token`` is the token the gateway's control routes take, which the caller's record must keep; without one
+        they stay open.
         """
         return await self._launch(
             sandbox_provider, env_id, state_instance=state_instance, mcp_servers=mcp_servers, mcp_server_images=mcp_server_images,
             gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
             gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             existing_sandbox=existing_sandbox, sidecars=sidecars, mcp_server_name=mcp_server_name,
-            attribution=attribution,
+            attribution=attribution, control_token=control_token,
         )
 
     async def _launch(self, sandbox_provider: SandboxProvider, env_id: str | None, *, mcp_server_name: str | None = None, **gateway) -> DeployedGateway:
@@ -741,6 +753,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
+        control_token: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
         from agent_env.config import gateway_env_id, get_config, website_browser_env_id
@@ -832,6 +845,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
+            control_token=control_token,
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
 
@@ -925,7 +939,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_url=gateway_url, mcp_url=mcp_url, db_web_url=db_web_url, db_mcp_url=db_mcp_url,
             website_frontend_urls=website_frontend_urls, mcp_server_name=mcp_server_name,
             env_state_instance_ids=[state_instance.instance_id],
-            environment_card=card, environment_card_read_at_utc=card_read_at_utc,
+            environment_card=card, environment_card_read_at_utc=card_read_at_utc, control_token=control_token,
         )
 
     async def _deploy_via_containers(
@@ -942,6 +956,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
         mcp_server_name: str | None = None,
+        control_token: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
         from agent_env.config import gateway_env_id, get_config
@@ -1038,6 +1053,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "GATEWAY_MODE": gateway_mode.value,
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
+                **control_environment(control_token),
             }
             gateway_sb = await sandbox_provider.create_container(
                 image_name=gateway_env.docker_image_artifact.image_name,
@@ -1071,6 +1087,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 env_state_instance_ids=[state_instance.instance_id],
                 environment_card=card,
                 environment_card_read_at_utc=card_read_at_utc,
+                control_token=control_token,
             )
         except Exception:
             await self.close()
@@ -1371,6 +1388,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
+        control_token: str | None = None,
         attribution: Optional[Attribution] = None,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
@@ -1396,7 +1414,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 sandbox_provider, mcp_servers, mcp_server_images,
                 gateway_port=gateway_port, website_configs=website_configs, gateway_mode=gateway_mode,
                 ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
-                cpu=cpu, memory_mb=memory_mb, mcp_server_name=mcp_server_name, **deploy_kwargs,
+                cpu=cpu, memory_mb=memory_mb, mcp_server_name=mcp_server_name, control_token=control_token,
+                **deploy_kwargs,
             )
         earlier_sandbox = self._sandbox
         try:
@@ -1405,7 +1424,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
                 gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
                 cpu=cpu, memory_mb=memory_mb, existing_sandbox=existing_sandbox, sidecars=sidecars,
-                mcp_server_name=mcp_server_name, **deploy_kwargs,
+                mcp_server_name=mcp_server_name, control_token=control_token, **deploy_kwargs,
             )
         except BaseException:
             await self._terminate_new_sandbox(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)
