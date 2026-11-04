@@ -289,6 +289,8 @@ def test_the_acting_user_is_signed_in_until_a_session_says_else(client: TestClie
     assert client.get("/api/session").json()["user"] == "bob"
     assert client.delete("/api/session").json() == {"user": None, "role": "default", "signed_in": False}
     assert client.get("/api/session").json()["user"] is None
+    # The jar holds the site's signed-out cookie under its own domain; a second cookie of the name would race it.
+    client.cookies.clear()
     client.cookies.set(SESSION_COOKIE, "forged.signature")
     assert client.get("/api/session").json()["user"] == "alice"
 
