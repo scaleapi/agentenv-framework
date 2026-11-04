@@ -123,7 +123,8 @@ def _state(tmp_path: Path) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_and_relayed_and_terminating_it_deletes_it(mac):
+async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_and_relayed_where_configured_and_terminating_it_deletes_it(
+        mac):
     env = {"ENVIRONMENT_NAME": "desk", "AGENTENV_SETTING_RESOLUTION": "1280x800"}
 
     sandbox = await mac.create_vm(image="local:bench", env=env, exposed_ports=[18765], cpu=4, memory=8192)
@@ -143,6 +144,13 @@ async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_and_relayed_and_term
     await sandbox.terminate()
 
     assert sandbox.sandbox_id not in _state(mac.fake)["vms"] and not folder.exists()
+    (mac.fake / "relay.args").unlink()
+    mac.relay_host = "10.0.0.5"
+    other = await mac.create_vm(image="local:bench", env={}, exposed_ports=[18765])
+    address = _state(mac.fake)["vms"][other.sandbox_id]["ipAddress"]
+    assert other.tunnel_urls == {18765: "http://10.0.0.5:48123"}
+    assert _waited(lambda: (mac.fake / "relay.args").read_text().split())[-1] == f"10.0.0.5:48123={address}:18765"
+    await other.terminate()
 
 
 @pytest.mark.asyncio
