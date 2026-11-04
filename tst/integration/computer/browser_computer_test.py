@@ -1,10 +1,10 @@
 """The browser as a computer: agentenv's chromium deployed alone, on the ubuntu-24.04-headless base with no display
-and the page driver, whose screen is chromium's active tab, headless. Gate 3 makes this machine's arch ready with it;
-deployed through the computer provider like any computer, its computer_* tools see and drive the page, and its page
-tools navigate, move in history, answer a dialog, use tabs and upload; nothing runs X and nothing listens but the driver
-and the site proxy; a killed app server or driver is started again by supervisord and the computer is ready again; and
-chromium killed fails it for good, computer-ready/v1 saying why and the tools answering with it. Needs Docker and the
-local registry on localhost:5000."""
+and the page driver, whose screen is chromium's active tab, headless. Gate 3 makes this machine's arch ready with it,
+its input checks and page tools verified on the HTML desk; deployed through the computer provider like any computer,
+its computer_* tools see and drive the page, and its page tools navigate, move in history, answer a dialog, use tabs
+and upload; nothing runs X and nothing listens but the driver and the site proxy; a killed app server or driver is
+started again by supervisord and the computer is ready again; and chromium killed fails it for good, computer-ready/v1
+saying why and the tools answering with it. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import json
@@ -20,7 +20,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from PIL import Image
 
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer import COMPUTER_READY
+from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
 from agentenv_protocol.computer.conformance.client import image
 from agentenv_protocol.website_browser import BROWSER
 
@@ -94,7 +94,7 @@ print(sorted(ports), bool(x))
 """
 
 
-def test_gate_3_makes_this_machines_arch_ready_with_the_page_driver(browser_computer):
+def test_gate_3_makes_this_machines_arch_ready_with_the_page_driver_its_input_and_page_tools_verified(browser_computer):
     results = browser_computer.metadata["composed"]["container"]
     probe = results[ARCH]["probe"]
 
@@ -104,6 +104,7 @@ def test_gate_3_makes_this_machines_arch_ready_with_the_page_driver(browser_comp
                       "not passed": [(c["check"], c["name"], c["status"], c["detail"][:160]) for c in report["checks"]
                                      if c["status"] != "passed"]}, indent=1))
     assert results[ARCH]["status"] == "ready" and probe["passed"], results[ARCH]
+    assert probe["checks"]["unverified"] == 0 and probe["extensions"][COMPUTER_PAGE] == "verified", probe
     assert [app.environment_name for app in browser_computer.composed_apps()] == ["chromium"]
 
 

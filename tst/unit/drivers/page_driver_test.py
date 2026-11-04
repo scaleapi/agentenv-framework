@@ -111,6 +111,15 @@ async def test_with_shift_held_typed_text_is_shifted_and_with_control_held_a_cli
 
 
 @pytest.mark.asyncio
+async def test_a_scroll_is_one_wheel_event_a_notch_sent_together(page):
+    await page.scroll_at(10, 20, "left", 3, [])
+
+    assert [op for op, _ in page.sent] == ["page/input"]
+    assert [(e["params"]["type"], e["params"]["deltaX"], e["params"]["deltaY"]) for e in _events(page)] == [
+        ("mouseWheel", -100, 0)] * 3
+
+
+@pytest.mark.asyncio
 async def test_typed_text_is_keystrokes_with_shift_where_it_takes_one_and_inserted_text_for_the_rest(page):
     await page.type_in("Hi!\né")
 
