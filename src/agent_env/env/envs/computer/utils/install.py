@@ -61,7 +61,7 @@ class Grant(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    app: str = Field(pattern=r"^/[^\0]+\.app$")
+    app: str = Field(pattern=r"^/.+\.app$")
     services: list[Literal["accessibility", "post_event", "screen_capture"]] = Field(min_length=1)
 
 
