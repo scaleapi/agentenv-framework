@@ -120,8 +120,9 @@ Reference: `enable(MCP_CONFIG_V1, ...)`, and `claude_bridge.py` where it builds 
 ### `cdp-config/v1`, `/ext/cdp-config`
 
 For an agent that drives a browser itself. A browser reaches the agent as an endpoint `{name, http_url, ws_url,
-headers?, metadata?}` sent to `add`, and adding a name again replaces it; nothing in agent-env sends one yet (the
-`browser_connect_cdp` task step will). The SDK implements `add`, `list` and `remove`, and passes the endpoints in
+headers?, metadata?}` sent to `add`, and adding a name again replaces it. The `browser_connect_cdp` task step sends
+one, `chromium` by default, with `metadata {browser}`, and `reset_env` sends a fresh one under the same name after a
+reset. The SDK implements `add`, `list` and `remove`, and passes the endpoints in
 `request.cdp_endpoints` every turn. Take yours with `request.cdp_endpoint()`, or `request.cdp_endpoint(name)` when
 the task gives several, and connect afresh each turn, since an address can change between turns. With no endpoint, or
 several and no name, it fails the turn as an `infra_error` (`cdp.no_endpoint`, `cdp.ambiguous`), so the agent never

@@ -7,7 +7,8 @@ started again by supervisord and the computer is ready again; and chromium kille
 saying why and the tools answering with it. Through its cdp address, Playwright and Puppeteer drive it two at once,
 each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
 one; one client's close leaves the browser up for the other, which can't open file: URLs; the address outlives a
-relaunch, and the computer's reset ends it. Needs Docker and the local registry on
+relaunch, and the computer's reset ends it. browser_connect_cdp hands the echo agent its address, with the computer's
+tools hidden from its role, and after reset_env a fresh one, which its next turn opens the site through. Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import time
 import urllib.parse
+import uuid
 from pathlib import Path
 
 import httpx
@@ -32,13 +34,18 @@ from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
 from agentenv_protocol.computer.conformance.client import image
 from agentenv_protocol.website_browser import BROWSER
 
+from agent_env.a2a_agent import conversation_store
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdpTaskStep
+from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+from tst.util.a2a_test_agent import put_test_agent
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -415,6 +422,64 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
     assert relaunched_address == ada
     assert "error" in after_reset["playwright"] and "error" in after_reset["puppeteer"], after_reset
     assert fresh != ada and not report.failed
+
+
+@pytest.mark.asyncio
+async def test_browser_connect_cdp_hands_an_agent_its_address_with_the_tools_hidden_and_a_reset_gives_a_fresh_one(
+        browser_computer):
+    with namespace_routing():
+        agent = put_test_agent(f"cdp-agent-{uuid.uuid4().hex[:8]}")
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        serving = None
+        try:
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
+            await asyncio.sleep(SERVE_START_S)
+            await DeployAgentTaskStep(id="deploy-solver", version=None, env_ids=[], a2a_agent_id=agent.id,
+                                      a2a_agent_version=agent.version, agent_name="solver",
+                                      sandbox_type="local").execute(context)
+            await BrowserConnectCdpTaskStep(id="connect", version=None, env_id=browser_computer.id,
+                                            agent_name="solver").execute(context)
+            first, tools = await _opened_over_cdp(context, "first"), await _tool_names(deployed)
+            serving.cancel()
+            await ResetEnvTaskStep(id="reset", version=None, env_id=browser_computer.id,
+                                   fail_task_on_error=True).execute(context)
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
+            await asyncio.sleep(SERVE_START_S)
+            second, tools_after = await _opened_over_cdp(context, "second"), await _tool_names(deployed)
+        finally:
+            if serving is not None:
+                serving.cancel()
+            report = await teardown_run(context)
+
+    (first_address, first_title), (second_address, second_title) = first, second
+    assert first_title == second_title == "Home" and first_address != second_address, (first, second)
+    assert tools == tools_after == []
+    assert context.metadata["browser_connections"] == [{
+        "step_id": "connect", "env_id": browser_computer.id, "agent_name": "solver", "browser": "chromium",
+        "name": "chromium", "keep_tools": False, "role": "default", "tools_hidden": "*"}]
+    assert not report.failed
+
+
+async def _opened_over_cdp(context: TaskStepContext, prompt_id: str) -> tuple[str, str]:
+    """The echo agent's turn opening the site over its ``chromium`` CDP address: that address's digest and the title
+    it saw."""
+    await PromptAgentTaskStep(id=prompt_id, version=None, prompt_id=prompt_id, agent_name="solver",
+                              prompt=f"cdp chromium {SITE}", poll_interval_seconds=1).execute(context)
+    reply = conversation_store.get_conversation(context.metadata["a2a_conversations"][prompt_id])["messages"][1]
+    line = "\n".join(part["text"] for part in reply["parts"] if part["kind"] == "text").splitlines()[-1]
+    match = re.fullmatch(r"cdp chromium (\w+): (.*)", line)
+    assert match, line
+    return match.group(1), match.group(2)
+
+
+async def _tool_names(deployed) -> list[str]:
+    """The tools the env's MCP lists to a caller with no role."""
+    async with streamablehttp_client(deployed.mcp_url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return [tool.name for tool in (await session.list_tools()).tools]
 
 
 async def _cdp(deployed, user: str) -> dict:

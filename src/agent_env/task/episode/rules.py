@@ -133,6 +133,7 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "deploy_agent": _deploy_agent,
     "deploy_human_agent": _deploys_an_agent,
     "register_agent_triggers": _needs_the_agent,
+    "browser_connect_cdp": _needs_the_agent,
     "snapshot_agent_state": _needs_the_agent,
     "collect_artifacts": _collect_artifacts,
     "register_env_triggers": _register_env_triggers,
