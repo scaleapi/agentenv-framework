@@ -12,6 +12,7 @@ from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
+from agent_env.providers.sandbox_providers import sizing
 
 if TYPE_CHECKING:
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -130,9 +131,9 @@ class DeploySandboxTaskStep(TaskStep):
 
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
-        attribution = deploy_attribution(self, context)
-        cpu = self.cpu if self.cpu is not None else self.DEFAULT_CPU
-        memory_mb = self.memory_mb if self.memory_mb is not None else self.DEFAULT_MEMORY_MB
+        size, attribution = sizing.resolve(self, deploy_attribution(self, context),
+                                           sizing.SandboxSize(self.DEFAULT_CPU, self.DEFAULT_MEMORY_MB))
+        cpu, memory_mb = size.cpu, size.memory_mb
         logger.info(
             f"Deploying sandbox '{self.sandbox_name}' (mode={self.sandbox_mode}, "
             f"image={self.image}, cpu={cpu}, memory_mb={memory_mb}, "

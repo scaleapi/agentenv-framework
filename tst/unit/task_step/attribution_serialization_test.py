@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_env.attribution import attribution_of
+from agent_env.providers.sandbox_providers.sizing import CPU_SOURCE_KEY, MEMORY_SOURCE_KEY
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
@@ -78,6 +79,9 @@ def test_a_top_level_key_in_a_document_is_not_attribution(factory):
 
 # --- the dict is what reaches the env --------------------------------------------
 
+# What deploy_env adds to a step's attribution: where its unset cpu and memory came from.
+UNSIZED = {CPU_SOURCE_KEY: "default", MEMORY_SOURCE_KEY: "default"}
+
 
 @pytest.mark.asyncio
 async def test_deploying_an_env_passes_the_attribution_dict():
@@ -98,11 +102,11 @@ async def test_deploying_an_env_passes_the_attribution_dict():
         Env.get.return_value = env
         await step.execute(TaskStepContext())
 
-    assert passed["attribution"] == ATTRIBUTION
+    assert passed["attribution"] == {**ATTRIBUTION, **UNSIZED}
 
 
 @pytest.mark.asyncio
-async def test_deploying_an_env_with_no_attribution_passes_an_empty_dict():
+async def test_deploying_an_env_with_no_attribution_passes_only_its_size_sources():
     passed = {}
 
     async def deploy(*, attribution=None, **kwargs):
@@ -119,4 +123,4 @@ async def test_deploying_an_env_with_no_attribution_passes_an_empty_dict():
         Env.get.return_value = env
         await _deploy_env().execute(TaskStepContext())
 
-    assert passed["attribution"] == {}
+    assert passed["attribution"] == UNSIZED
