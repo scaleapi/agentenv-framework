@@ -191,9 +191,8 @@ def test_the_seed_loads_exports_and_resets_through_the_data_plane(client: TestCl
     assert client.get("/api/session").json()["user"] == "ann"
 
     client.post("/api/notes/1/toggle")
-    state = client.get("/go").json()
-    assert state["initial_state"] == SEED
-    assert state["state_diff"]["notes"]["changed"][0]["after"]["done"] is True
+    toggled = rpc(client, "data/get")["parts"][0]["data"]["notes"]
+    assert next(note for note in toggled if note["id"] == 1)["done"] is True
 
 
 GATEWAY_PREFIX = "/website/notes"

@@ -26,8 +26,8 @@ them. The page shows the universe's time.
   store's `current_user`), and `GET /api/session` signs that user in. `POST /api/sign-in` switches to another seeded
   user. A user's notes are invisible to every other user, and another user's note answers 404.
 - **State.** The site writes no data hooks, so it uses the default store. `data/add` loads the seed (as a data part, or
-  as a file part by bytes or `file://`), `data/get` exports it, `data/reset` empties it, and `/go` returns
-  `{initial_state, current_state, state_diff}`.
+  as a file part by bytes or `file://`), `data/get` exports it, and `data/reset` empties it. `data/get` is how
+  agentenv reads what a task left the site with.
 - **Time.** Notes are stamped with `self.now()`, which follows the gateway's clock once `clock/v1`'s `sync_time` names
   it. The frontend reads `X-Universe-Now` from every API response into `universeNow()` and shows it in the header.
   It uses this helper rather than `clock_patch=True`, so the page works the same against a server written without the
