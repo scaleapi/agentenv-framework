@@ -311,9 +311,9 @@ def _write_bundle(
 
 
 def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], None],
-                        composing: Composing = Composing()) -> Materialization:
-    """Write ``plan``, its computer envs composed as ``composing`` says, then set up the infra envs its runs deploy
-    on."""
+                        composing: Composing = Composing(), sandbox: str | None = None) -> Materialization:
+    """Write ``plan``, its computer envs composed as ``composing`` says and its steps preflighted for ``sandbox``,
+    then set up the infra envs its runs deploy on."""
     materialization = materialize(
         plan,
         on_wait=lambda: say("waiting for another agent-env run to finish writing this bundle's ids"),
@@ -322,6 +322,7 @@ def _written_with_infra(plan: Plan, preflight: Preflight, say: Callable[[str], N
         build_here=preflight.built_here,
         composing=composing,
         on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"),
+        sandbox=sandbox,
     )
     if preflight.infra:
         ensure_default_envs(preflight.infra_kinds, say=say)
@@ -354,7 +355,7 @@ def dry_run_bundle(
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent)
         _say_plan(plan, say, declaring_for(Path(root), installed=id_root is not None, dry_run=True))
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
-                                      composing=composing,
+                                      composing=composing, sandbox=sandbox,
                                       on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"))
         runs = _to_run(plan)
         return DryRun(materialization, runs, _skipped(plan, runs, every=not tasks and not evals), preflight.infra,
@@ -388,7 +389,7 @@ def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandb
     plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played,
                                solver_endpoint=solver_endpoint)
     _say_plan(plan, say, declaring)
-    materialization = _written_with_infra(plan, preflight, say, composing)
+    materialization = _written_with_infra(plan, preflight, say, composing, sandbox)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
     return PreparedBundle(plan, materialization, to_run)
 

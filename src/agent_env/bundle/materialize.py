@@ -89,6 +89,7 @@ def materialize(
     ledger: Ledger | None = None,
     composing: Composing = Composing(),
     on_progress: Callable[[Write, str], None] | None = None,
+    sandbox: str | None = None,
 ) -> Materialization:
     """Write ``plan``'s entities, tasks and evals. The first write that fails stops it, and every earlier
     one stays: they're in the ledger, so the next run reuses them. ``on_wait`` is called when another run
@@ -99,6 +100,8 @@ def materialize(
     sources (``Plan.published``) is never built here: a deploy pulls it.
 
     ``dry_run`` checks and preflights what a run would, and writes nothing: no entity, ledger row or lock.
+    ``sandbox``, the provider ``agent-env run --sandbox`` names, is where each step's preflight checks its deploys,
+    as the run deploys them there.
     Each write gets the version it would reuse or the store's next, which another run can take first. A step
     reading what the run would write first isn't preflighted, since the store doesn't hold it yet.
 
@@ -153,7 +156,7 @@ def materialize(
         for write in tasks:
             with _noted(plan, write, "preflighting"):
                 built[write.id] = _build(write, plan, written)
-                found, skipped = _preflight(plan, write, built[write.id], unwritten)
+                found, skipped = _preflight(plan, write, built[write.id], unwritten, sandbox)
             problems.extend(f"{_path(plan, write)}: {problem}" for problem in found)
             unchecked.extend((write, step) for step in skipped)
         if problems:
@@ -434,18 +437,26 @@ def pinned_steps(plan: Plan, write: Write, written: Mapping[tuple[str, str], Mat
     return steps
 
 
-def _preflight(plan: Plan, write: Write, task: Task,
-               unwritten: set[tuple[str, str]]) -> tuple[list[str], list[TaskStep]]:
+#: The fields a step names the provider it deploys on in, which a run's ``--sandbox`` overrides (``sandbox_overrides``).
+_SANDBOX_FIELDS = ("sandbox_type", "judge_sandbox_type")
+
+
+def _preflight(plan: Plan, write: Write, task: Task, unwritten: set[tuple[str, str]],
+               sandbox: str | None = None) -> tuple[list[str], list[TaskStep]]:
     """``task``'s preflight problems, and the steps with a preflight left unchecked because they read a
     (store, id) in ``unwritten``, which a dry run would write first; an artifact and an agent can share an id.
     A step reading one of the task's own outputs is skipped too, and not listed: the output only exists once the
-    task runs. A step the solver deploys or installs at is checked for the agent the run gives it (``Plan.agent``)."""
+    task runs. A step the solver deploys or installs at is checked for the agent the run gives it (``Plan.agent``), and
+    a step that deploys on a provider for the run's ``sandbox``, which overrides it."""
     outputs = {output.id for output in write.source.outputs}
     solver = plan.agent.steps.get(write.id, ()) if plan.agent is not None else ()
     problems, unchecked = [], []
     for config, step in zip(write.source.config, task.steps):
+        overrides = {key: sandbox for key in _SANDBOX_FIELDS if sandbox is not None and hasattr(step, key)}
         if step.id in solver:
-            config = {**config, "a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": plan.agent.version}
+            overrides |= {"a2a_agent_id": plan.agent.agent_id, "a2a_agent_version": plan.agent.version}
+        if overrides:
+            config = {**config, **overrides}
             step = build_step(config)
         problems.extend(step.config_problems())
         reads = _reads(config)

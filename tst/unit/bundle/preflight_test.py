@@ -659,6 +659,28 @@ def test_an_env_type_that_deploys_itself_is_left_to_its_own_deploy(bundle_dir, m
     assert dry_run_bundle(bundle_dir, sandbox="modal").infra == ()
 
 
+class _BootsOnlyOnModalVm(_DeploysItself):
+    """One that only a provider elsewhere deploys, as a computer whose disk this machine can't boot."""
+
+    type: ClassVar[str] = "boots_only_on_modal_vm_preflight_test"
+
+    def deploy_refusal(self, *, sandbox_type=None, **options):
+        return None if sandbox_type == "modal_vm" else f"{sandbox_type or 'the default provider'} boots none of its disks"
+
+
+def test_a_steps_own_refusal_is_checked_on_the_sandbox_the_run_deploys_it_on(bundle_dir, monkeypatch):
+    registry = Config.env_registry
+    monkeypatch.setattr(Config, "env_registry",
+                        lambda self: {**registry(self), _BootsOnlyOnModalVm.type: _BootsOnlyOnModalVm})
+    with namespace_routing():
+        get_env_store().put_document(_BootsOnlyOnModalVm(id="disk", version=None))
+    _task(bundle_dir, [{"id": "env", "type": "deploy_env", "env_id": "disk"}])
+
+    dry_run_bundle(bundle_dir, sandbox="modal_vm")
+    assert _problems(lambda: dry_run_bundle(bundle_dir)) == [
+        "tasks/t.json: deploy_env 'env': the default provider boots none of its disks"]
+
+
 def test_a_multi_env_on_the_server_provider_is_left_to_deploy_envs_own_refusal(bundle_dir):
     crm = _env("crm")
     with namespace_routing():
