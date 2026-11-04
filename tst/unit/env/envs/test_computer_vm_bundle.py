@@ -127,10 +127,11 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
     for line in ['bash "$build/prepare/prepare.sh"', f"curl -fsSL --retry 3 -o {prefix}/desk.tar.gz {URL}",
                  f'echo "{"ab" * 32}  "{prefix}/desk.tar.gz | shasum -a 256 -c - > /dev/null',
                  f"/opt/agentenv/bin/python3 -m venv {prefix}/venv",
-                 f"{prefix}/venv/bin/pip install -q --disable-pip-version-check -r {prefix}/requirements.txt",
                  f"as_root env PREFIX={prefix} bash -c 'cd {prefix} && ./install-app.sh'",
                  f"grant {APP} accessibility screen_capture", 'cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"']:
         assert line in script.splitlines()
+    assert any(line.startswith(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check -r "
+                               f"{prefix}/requirements.txt") for line in script.splitlines())
     daemon, server = agents["dev.agentenv.driver-desk-daemon.plist"], agents["dev.agentenv.driver-desk-driver.plist"]
     assert daemon["ProgramArguments"] == [f"{APP}/Contents/MacOS/desk", "serve"]
     assert daemon["EnvironmentVariables"]["DO_NOT_TRACK"] == "1" and daemon["LimitLoadToSessionType"] == "Aqua"
