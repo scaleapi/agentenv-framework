@@ -167,9 +167,10 @@ jobs:
       # starts afterwards.
       - name: Pull the base images from mirror.gcr.io
         run: python3 .github/scripts/mirror_base_images.py src tst
-      # A computer image or disk is keyed by what it is built from, and the composer reuses one the image store already
-      # holds for its key. The registry keeps its storage on the runner, restored from the computer images main saved
-      # this week, so a run reuses them rather than building them again. A shard that runs no computer tests misses.
+      # A computer image or disk is tagged with a key of everything it is built from, and the composer reuses one the
+      # image store already holds for its key. The registry keeps its storage on the runner, restored from the computer
+      # images main saved latest this week, so a run reuses them rather than building them again. A shard that runs no
+      # computer tests misses.
       - name: Week of the computer images' cache
         id: week
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
@@ -178,7 +179,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/registry
-          key: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-${{ hashFiles('src/agent_env/env/envs/computer/**', 'tst/integration/computer/**', 'packages/agentenv-protocol/src/**') }}
+          key: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}
           restore-keys: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-
       - name: Start the local registry
         run: |
@@ -190,14 +191,17 @@ jobs:
       - name: Let the local provider boot disks with KVM
         run: sudo chmod 666 /dev/kvm
       - name: Slow integration tier on the local defaults
+        id: tests
         env:
           AGENTENV_TEST_SHARD: ${{ matrix.shard }}/12
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
             tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
-      # Only the computer images are kept, and only main saves them, so pull requests reuse main's without filling the
-      # repository's cache. The garbage collection frees what only the deleted repositories referenced; with
-      # --delete-untagged it would also delete the untagged platform manifests of an image index, and their layers.
+      # Only the computer images are kept, and only main saves them, once its tests pass, so pull requests reuse main's
+      # without filling the repository's cache. The entry is named by the image keys the registry holds, so a run that
+      # built any new image saves a new one. The garbage collection frees what only the deleted repositories
+      # referenced; with --delete-untagged it would also delete the untagged platform manifests of an image index, and
+      # their layers.
       - name: Keep only the computer images
         id: kept
         if: always()
@@ -209,15 +213,17 @@ jobs:
           docker run --rm --volume "$RUNNER_TEMP/registry:/var/lib/registry" mirror.gcr.io/library/registry:2 \
             garbage-collect /etc/docker/registry/config.yml > /dev/null
           du -sh "$RUNNER_TEMP/registry"
+          tags=$(sudo ls "$repositories/agentenv-computers/_manifests/tags" | sort | sha256sum | cut -c1-16)
+          echo "key=computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-$tags" >> "$GITHUB_OUTPUT"
           echo "computers=true" >> "$GITHUB_OUTPUT"
       - name: Save the computer images
         if: >-
-          always() && github.event_name == 'push' && steps.kept.outputs.computers == 'true'
-          && steps.computers.outputs.cache-hit != 'true'
+          always() && github.event_name == 'push' && steps.tests.outcome == 'success'
+          && steps.kept.outputs.computers == 'true' && steps.kept.outputs.key != steps.computers.outputs.cache-matched-key
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/registry
-          key: ${{ steps.computers.outputs.cache-primary-key }}
+          key: ${{ steps.kept.outputs.key }}
       - name: Skips must be declared capability gaps
         if: always()
         run: |
