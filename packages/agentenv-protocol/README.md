@@ -883,14 +883,17 @@ are the profile's template. The base class adds:
   A guard sits on every command, a guardrail, since the sandbox's network is the boundary:
   - `Browser.close`, `Browser.crash` and `Browser.crashGpuProcess` are answered `{}` and end only that
     connection, with 1000;
-  - `Target.exposeDevToolsProtocol`, a `Target.createBrowserContext` with its own proxy, and a
+  - `Target.exposeDevToolsProtocol`, `Target.sendMessageToTarget` (only flattened sessions are
+    served, whose commands the guard sees), a `Target.createBrowserContext` with its own proxy, and a
     `Page.navigate` or `Target.createTarget` to the browser's own pages (`file:`, `chrome:`,
     `chrome-extension:`, `chrome-untrusted:`, `view-source:`, `devtools:`, and `about:` but
     `about:blank` and `about:srcdoc`) get a CDP error, `agentenv refuses …`;
   - `Browser.setDownloadBehavior` and `Page.setDownloadBehavior` are sent on as agentenv's own, the
     browser's default into `~/Downloads`, keeping only the context and whether to send events;
   - when the deploy answers dialogs, an agent's `Page.handleJavaScriptDialog` is answered `{}` and not
-    sent on.
+    sent on;
+  - a message that isn't a command, an object with a string `method`, and object `params` and a string
+    `sessionId` if any, gets a CDP error with code -32600.
 
   `record` lists each connection as `cdp_connections`: its user, when it opened and when it closed,
   and the first 100 commands the guard refused, changed, answered or closed it on.

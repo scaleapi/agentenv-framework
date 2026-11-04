@@ -40,6 +40,9 @@ CLOSED = (1000, "the browser stays up for the env: only this connection ended")
 NO_SESSION = {"code": -32001, "message": "Session with given id not found."}
 #: The code of a CDP error for a command not carried out, as Chromium answers its own refusals.
 SERVER_ERROR = -32000
+#: The answer to a message that isn't a command the relay can read, with JSON-RPC's code for an invalid request.
+MALFORMED = {"code": -32600, "message": "a command is an object with a string method, and object params and a "
+                                        "string sessionId if any"}
 #: The commands that would end the browser every connection shares: each ends only the connection that sends it.
 ENDS_BROWSER = frozenset({"Browser.close", "Browser.crash", "Browser.crashGpuProcess"})
 #: The commands that set how and where downloads are saved, which agentenv keeps as its own.
@@ -140,6 +143,8 @@ def guard(method: str, params: dict, *, dialogs_answered: bool) -> Verdict:
         return Verdict("close", params)
     if method == "Target.exposeDevToolsProtocol":
         return Verdict("refuse", params, "it would give a page's script the browser's own CDP channel")
+    if method == "Target.sendMessageToTarget":
+        return Verdict("refuse", params, "only flattened sessions are served, whose commands the guard sees")
     if method == "Target.createBrowserContext" and {"proxyServer", "proxyBypassList"} & params.keys():
         return Verdict("refuse", params, "a context's traffic goes through the env's site proxy")
     if method in ("Page.navigate", "Target.createTarget") and (scheme := _own_scheme(params.get("url"))):
@@ -234,10 +239,13 @@ class Relay:
         for connection in list(self._open):
             self._close(connection, RELAUNCHED)
 
-    async def _command(self, connection: _Connection, message: dict) -> None:
+    async def _command(self, connection: _Connection, message: Any) -> None:
         if connection.closing:
             return
-        method, params = message.get("method", ""), message.get("params") or {}
+        if not _well_formed(message):
+            self._put(connection, {"id": message.get("id") if isinstance(message, dict) else None, "error": MALFORMED})
+            return
+        method, params = message["method"], message.get("params") or {}
         session = message.get("sessionId") or connection.session
         verdict = guard(method, params, dialogs_answered=self.dialogs_answered)
         if session not in connection.sessions:
@@ -318,6 +326,13 @@ class Relay:
                     return
                 connection.waiting_bytes -= len(message)
                 await connection.websocket.send_text(message)
+
+
+def _well_formed(message: Any) -> bool:
+    """Whether ``message`` is a command the relay can read: an object with a string ``method``, and object ``params``
+    and a string ``sessionId`` if any."""
+    return isinstance(message, dict) and isinstance(message.get("method"), str) and \
+        isinstance(message.get("params") or {}, dict) and isinstance(message.get("sessionId") or "", str)
 
 
 def _now() -> str:

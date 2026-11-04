@@ -196,6 +196,7 @@ async def test_each_connection_gets_its_own_browser_session_its_own_answers_and_
     ("Target.createBrowserContext", {"disposeOnDetach": True}, "send"),
     ("Page.handleJavaScriptDialog", {"accept": True}, "send"),
     ("Browser.crash", {}, "close"),
+    ("Target.sendMessageToTarget", {"sessionId": "s", "message": "{}"}, "refuse"),
 ])
 def test_the_guard_reads_a_url_as_the_browser_does_and_lets_through_what_it_doesnt_guard(method, params, action):
     assert guard(method, params, dialogs_answered=False).action == action
@@ -216,6 +217,14 @@ async def test_the_guard_keeps_the_browser_up_its_traffic_and_downloads_its_own_
             older = await _ask(ada, {"id": 6, "method": "Page.setDownloadBehavior",
                                      "params": {"behavior": "allow", "downloadPath": "/tmp/elsewhere"}})
             dialog = await _ask(ada, {"id": 7, "method": "Page.handleJavaScriptDialog", "params": {"accept": False}})
+            wrapped = await _ask(ada, {"id": 9, "method": "Target.sendMessageToTarget", "params": {
+                "sessionId": "b1-c", "message": json.dumps({"id": 1, "method": "Page.navigate",
+                                                            "params": {"url": "file:///etc/passwd"}})}})
+            malformed = [await _ask(ada, {"id": 10, "method": "Page.navigate", "params": [1]}),
+                         await _ask(ada, {"id": 11, "params": {}}),
+                         await _ask(ada, {"id": 12, "method": "Browser.getVersion", "sessionId": ["b1"]})]
+            await ada.send("[1]")
+            not_a_command = json.loads(await ada.recv())
             closed = await _ask(bob, {"id": 1, "method": "Browser.close"})
             with pytest.raises(ConnectionClosedOK) as ended:
                 await bob.recv()
@@ -232,11 +241,16 @@ async def test_the_guard_keeps_the_browser_up_its_traffic_and_downloads_its_own_
     assert dialog == {"id": 7, "result": {}} and closed == {"id": 1, "result": {}}
     assert (ended.value.rcvd.code, ended.value.rcvd.reason) == browser_cdp.CLOSED
     assert still["result"] == {"method": "Browser.getVersion", "session": "b1"}
-    assert not {"Page.navigate", "Target.exposeDevToolsProtocol", "Page.handleJavaScriptDialog", "Browser.close"} & sent
+    assert wrapped["error"]["message"].startswith("agentenv refuses Target.sendMessageToTarget: ")
+    assert [answer["error"]["code"] for answer in malformed] == [-32600] * 3
+    assert not_a_command == {"id": None, "error": browser_cdp.MALFORMED}
+    assert not {"Page.navigate", "Target.exposeDevToolsProtocol", "Target.sendMessageToTarget",
+                "Page.handleJavaScriptDialog", "Browser.close"} & sent
     assert [(entry["method"], entry["did"]) for entry in relay.connections[0]["guarded"]] == [
         ("Page.navigate", "refused"), ("Target.exposeDevToolsProtocol", "refused"),
         ("Target.createBrowserContext", "refused"), ("Browser.setDownloadBehavior", "changed"),
-        ("Page.setDownloadBehavior", "changed"), ("Page.handleJavaScriptDialog", "answered")]
+        ("Page.setDownloadBehavior", "changed"), ("Page.handleJavaScriptDialog", "answered"),
+        ("Target.sendMessageToTarget", "refused")]
     assert [(entry["method"], entry["did"]) for entry in relay.connections[1]["guarded"]] == [
         ("Browser.close", "closed")]
 
