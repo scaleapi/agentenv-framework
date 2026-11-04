@@ -150,7 +150,8 @@ app without one, so a server that mounted is a server whose tool calls are bound
 To answer a call before the tool runs, override `on_tool_call(self, context)`: return `None` to let
 it proceed, or an `mcp.types.CallToolResult` (`isError=True` for a refusal) to send that as the
 tool's reply. An `@extension` method may declare the same parameter; it is filled from the request's
-`AgentEnv-Role` header. Code that acts as a caller outside any dispatch, such as a test calling a
+`AgentEnv-Role` header. It may also declare a parameter annotated `starlette.requests.Request`, which
+gets the HTTP request itself, its headers say, and stays out of the advertised schema. Code that acts as a caller outside any dispatch, such as a test calling a
 handler directly or a seeding script, binds a context it builds:
 `with bound(ToolContext.as_caller("alice")): ...`.
 
@@ -473,6 +474,7 @@ pixels), at the display's size times its scale. Input operations may return an `
 | `@set_display` | no, with `display_modes` | `computer-display/v1` `set` (`get` is always served) |
 | `@pointer_move`, `@pointer_down`, `@pointer_up`, `@pointer_position` | all or none | `computer-pointer/v1` and its five tools; click and scroll at the pointer |
 | `@key_down`, `@key_up` | both or none | `computer-keyboard/v1` and its two tools |
+| `@navigate`, `@history`, `@tabs`, `@dialog`, `@upload`, `@page_state` | all or none, for a screen that is a website browser's page | `computer-page/v1` and its five tools; the `page` of every frame |
 | `@run_in_session` | no; a Linux default | `computer-exec/v1` |
 | `@write_files` | no; a Linux default | `data/add` |
 | `@record` | no | the stream `computer-recording/v1` records from; without it the base class polls `@capture` |
@@ -497,15 +499,24 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   group tools. Every result is structured, with a one-line summary as its text block; input results
   carry `applied`, `delivery` and `others_since_frame`, and `screenshot: true` returns a fresh frame
   after acting. Click and scroll leave out `x` and `y` to act at the pointer on a computer with
-  `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`.
+  `computer-pointer/v1`; elsewhere a call without them is refused `invalid_argument`. With the page
+  group, `computer_navigate` opens a URL in the active tab, `computer_history` goes `back`, `forward`
+  or `reload`s, `computer_tabs` lists, opens, switches and closes tabs by the browser's own ids and
+  answers with the tabs after it, `computer_dialog` answers the page's open dialog and
+  `computer_upload` gives its open file chooser files in `~/Uploads`.
 - **Frames and spaces.** Points are pixels of a named frame (your latest by default), or a
   0..`norm_scale` grid over it with `space: "norm"`. A point outside the frame or the range is
   refused (`out_of_bounds`), never clamped. The last 64 frames are kept, and a frame goes stale
-  (`stale_frame`) when the display geometry it was captured at changes.
+  (`stale_frame`) when the display geometry it was captured at changes. With the page group, every
+  frame carries `page`: the active tab's `tab`, `url` and `title`, and the `dialog` (`type`, `message`,
+  `default_text`) or `file_chooser` (`multiple`) open on it, which its summary names too.
 - **The input queue.** Input calls run one at a time in arrival order; one that waits past
-  `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue.
+  `queue_wait_s` is refused `input_busy`. Screenshots and waits never queue. While a dialog is open
+  on the page, input it blocks (all but `computer_tabs`, `computer_dialog` and `computer_upload`) is
+  refused `dialog_open`, with `applied: "no"`.
 - **The computer skill.** `computer/v1` declares the seven tools, its params the driver's
-  features. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
+  features, among them `screen`: `desktop`, or `page` for a driver whose screen is a website
+  browser's active tab, which a computer env pairs with exactly one website browser. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
   the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
   class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
@@ -513,7 +524,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
   capture, the driver's own `ready_checks()`, and one per app on the computer, asked of the app's
-  own server (see Computer apps); tools refuse `device_unavailable` until they pass once), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
+  own server (see Computer apps); tools refuse `device_unavailable` until they pass once; a check
+  that can't pass again is `final`, and while one fails the status carries `failed`, saying why,
+  which `boot.ready()` raises at once rather than waiting out its timeout), `computer-display/v1`, `computer-spaces/v1` (the default space, written into the tool
   descriptions), `computer-keyboard/v1`, `computer-exec/v1` (`run {argv, cwd?, env?, timeout_s?,
   request_id}`: output capped per stream, a repeated `request_id` answered with the first result) and,
   with `recording`, `computer-recording/v1` (below).
@@ -613,16 +626,35 @@ driver booted with a control token is probed with it: `--token`, by default
 | Level | Checks | Needs on the computer |
 |---|---|---|
 | `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
-| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held | Linux, `python3` with Tk, a 1280x800 screen or larger, `computer-exec` and `data/add` |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
 
 At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
 `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
 window's widgets report, reads back what reached them, and then removes the fixture. When the
-fixture can't be staged, the `full` checks are unverified rather than failed. The probe leaves out
+fixture can't be staged, the `full` checks are unverified rather than failed.
+
+On a driver whose card says `screen: "page"`, the desk is an HTML page with the same widgets at the
+same places (`conformance/page_fixture.py`). The probe starts its server on loopback, which writes
+what the page reports to the same files, and opens the desk with `computer_tabs` in a tab of its
+own. "Typing leaves the clipboard as it was" fails there when typing arrives as a paste. After the
+input checks it checks the page tools against the desk; a browser that answers dialogs itself makes
+the dialog check not applicable. It then closes its tab and removes the desk, and the file it put in
+`~/Uploads`. The tab that was open before keeps its page and history. The probe leaves out
 the checks for an extension the card doesn't declare. P8 is not applicable to a driver without
 leasing, and unverified for one with it until the probe has lease checks. The probe calls as the
 default role; the tool-access check hides a tool from a role of its own, `agentenv-probe-<random>`,
 and gives it back.
+
+### A disk's boot seed
+
+A Linux computer's disk form gets the deploy's environment at boot from a NoCloud seed, a FAT filesystem labelled
+`CIDATA` that the launcher writes and the disk's init reads. `agentenv_protocol.computer.seed` defines it. A disk
+composed by one agent-env version boots under another's launcher, so the seed carries every version its launcher
+writes: version 1 in `user-data`, a later version N in `user-data.vN`, and the oldest it carries in
+`agentenv-seed-oldest`. An init reads the newest version it knows, and stops the boot when the seed carries none of
+them. Version 1 is `#agentenv-environment`, then `NAME=<value, base64'd>` a line, in byte order; `SAMPLE` and
+`SAMPLE_USER_DATA` pin it, for a launcher's writer and an init's reader, wherever either is written, to be tested
+against. A change an older init would misread is a new version; one it ignores, such as a new file on the seed, isn't.
 
 ## Computer apps
 
@@ -739,10 +771,24 @@ launches one at a time, runs a load and a reset with the app stopped and relaunc
 follows a failed load with a reset, and fails a call that runs past `data_timeout_s` (300 s); a sync
 hook runs in a thread, which the reset and relaunch after it wait for. The driver fronts its apps:
 its card lists each one's card as a child environment, rooted at `/svc/<app>/`, where it forwards
-requests to the app's server.
+requests to the app's server, taking the control token:
+
+- every method, its body and the answer's streamed both ways, so a large answer isn't held whole;
+- headers passed on but the hop-by-hop ones, those a `Connection` header names and the control token's
+  `Authorization`; `Host` as the caller sent it, and in place of any address the caller forwarded,
+  the one it reached the driver at: `X-Forwarded-Host`, `X-Forwarded-Proto` and `X-Forwarded-Prefix`
+  (`/svc/<app>`), as the gateway sets them;
+- WebSockets, relayed to the app's server both ways with the subprotocol it picks until either side
+  closes, the other then closed with its code; refused before they open without the token, or with no
+  such app or one not answering. The `computer` extra brings `websockets` for this.
+
+An app's `agent_routes` (`/cdp/` for a website browser) are path prefixes of its own server that
+agents reach this way without the control token: the driver reads them from the app's card
+(`computer-app/v1`'s `agent_routes`) and lets a call under one through, while the app checks it
+itself. A path with a `.` or `..` segment, escaped or not, never counts as under one.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
-env stores, and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
+env stores (`browser: true` for a website browser), and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
 JSON, or a driver's `DriverDeclaration`, without the class's own dependencies installed.
 
 ### Website browsers
@@ -769,8 +815,8 @@ are the profile's template. The base class adds:
   `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
   Alone it bypasses nothing, loopback included; in a computer it bypasses loopback (`127.0.0.1`,
   `[::1]`, `localhost`), so the apps beside it stay reachable while `*.localhost` names still go
-  through. Alone (`AGENTENV_BROWSER_ALONE=1`) it also takes `--window-size` and `--headless=new`,
-  except on the open web (`AGENTENV_BROWSER_OPEN_WEB=1`), and refuses to start with no proxy.
+  through. Alone, on a computer with no display (`XDG_SESSION_TYPE=none`, a browser computer's), it
+  also takes `--window-size` and `--headless=new`, and refuses to start with no proxy.
   `declaration()` refuses a subclass whose command carries any of these, or `--remote-allow-origins`, or
   any other way to open a debugging port.
 - **Before each launch** it empties its cache, so no launch inherits another's, and writes the deploy's
@@ -792,18 +838,50 @@ are the profile's template. The base class adds:
 - **Its control connection**, `self.control`, a `BrowserControl` over the pipe. At each launch it attaches
   to every page with flattened sessions, telling each page it attached to as it opened, a popup say, to run, and keeps a
   record, `since` its server started: open tabs in opened order, each with its URL and title as the browser has them
-  when the record is read (Chrome sends no event for a title), the one whose page has focus `active`; `closed_tabs`,
+  when the record is read (Chrome sends no event for a title), the visible one whose page has focus `active`;
+  `closed_tabs`,
   each as of its page's last load, with `closed_at` and
   `closed_by` (`agentenv`, over this connection; `unknown`, anyone else; `exit` or `stop`, when the browser
   ended on its own or its server stopped it); `downloads`, into `~/Downloads`, each with its state
-  and, completed, its size and sha256; and `dialogs`, each with its type, message, answer and who gave it.
+  and, completed, its size and sha256; and `dialogs`, each with its type, message, default text, answer
+  and who gave it.
   `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
 - **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
   `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
   launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
   and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.
   Nothing relaunches a browser that exits on its own: in a computer the agent can, and alone it's an infra
-  failure, its ready check false.
+  failure, its ready check false. `page/viewport`, `page/capture` and `page/input`, framework-only, are
+  its active tab's page as a page driver sees it: its size, which headless is its window's; a PNG of it,
+  or `blank` for a tab that paints nothing within 3 s (1 s with no URL yet), its last capture while
+  a dialog keeps it from painting; and CDP input calls (`Input.dispatchMouseEvent`,
+  `Input.dispatchKeyEvent`, `Input.insertText`), sent to it in order. Also framework-only, for page
+  drivers and agentenv's own steps alike:
+  - `navigate {url}` and `history {direction}` (`back`, `forward` or `reload`), in the active tab;
+  - `tabs/list`, `tabs/open {url?}`, `tabs/activate {tab}` and `tabs/close {tab}`, by the browser's own tab
+    ids. The active tab is the one a dialog is open on, else the visible one whose page has focus (a hidden
+    tab's page that had input still says it has focus), else the one agentenv last brought to the front.
+    Headless, a tab opened at a URL opens blank and goes there once it's held to the window's size;
+  - `dialog/answer {accept, text?}`, the agent's answer to the dialog open on the active tab;
+  - `files/choose {paths}`, files in `~/Uploads` for the file chooser open on it, which headless, and so
+    alone, it intercepts;
+  - `page/state`, the active tab's id, URL and title and the dialog or file chooser open on it.
+  - `cdp {user}`, `user`'s CDP address once the browser is ready, `http_url` to discover from and
+    `ws_url` to connect to, both at the address the call reached it at with a token agentenv mints in
+    the path: the same one each time it's asked for. Through the driver they're under
+    `/svc/<app>/cdp/<token>/`. `user` is a name the caller chooses, an agent's `deploy_agent` step id.
+    The server keeps each token in memory and only its SHA-256, with its user and base address, in
+    `.agentenv/cdp-tokens.json`, which code in the computer's session can read but not use; an address
+    outlives a relaunch of the browser and of the server, and the computer's reset ends it.
+- **Its CDP relay**, at those addresses: `json/version` and `json/list` (also with a trailing slash,
+  and `json`) answered from the browser, since a browser on a pipe has none, with its WebSocket at the
+  address the client reached it at; and `devtools/browser`, where each WebSocket connection gets a
+  browser-level session of its own over the pipe (`Target.attachToBrowserTarget`), with its answers
+  and the events of its sessions and those it attaches, and no one else's. Only flattened sessions are
+  served, as Playwright, Puppeteer and Browser Use use. A token agentenv didn't mint is refused, and
+  when the browser goes, each connection is closed with 1012 so its client can connect again.
+  `record` lists each connection as `cdp_connections`: its user, when it opened and when it closed.
+  Puppeteer connects by `ws_url`: its `browserURL` drops the address's path.
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 

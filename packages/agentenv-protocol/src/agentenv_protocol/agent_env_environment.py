@@ -22,7 +22,7 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 
 from .errors import AgentEnvError
 from .tool_access import DISABLE as TOOL_DISABLE, ENABLE as TOOL_ENABLE, PATHS as TOOL_ACCESS_PATHS, ToolAccess, caller_role
@@ -797,6 +797,19 @@ def _is_tool_context_annotation(annotation: Any) -> bool:
     return any(t is ToolContext for t in _unwrap_annotation(annotation))
 
 
+def _is_request_annotation(annotation: Any) -> bool:
+    if isinstance(annotation, str):
+        return Request.__name__ in _string_annotation_names(annotation)
+    return any(t is Request for t in _unwrap_annotation(annotation))
+
+
+def _request_slot(fn: Callable) -> str | None:
+    """Name of an extension handler's parameter annotated ``Request``, which receives the HTTP request, or None."""
+    hints = _resolved_hints(fn)
+    return next((name for name, param in inspect.signature(fn).parameters.items() if name not in ("self", "cls")
+                 and _is_request_annotation(hints.get(name, param.annotation))), None)
+
+
 def _fastmcp_context_type() -> type | None:
     """FastMCP's Context class when mcp is loaded, else None. mcp is an optional dependency, so it is
     looked up rather than imported; a Context-annotated handler has necessarily imported it already."""
@@ -1034,7 +1047,8 @@ def _schema_from_signature(fn: Callable) -> dict:
         if name in ("self", "cls") or param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
         annotation = hints.get(name, param.annotation)
-        if _is_tool_context_annotation(annotation) or _is_fastmcp_context_annotation(annotation):
+        if _is_tool_context_annotation(annotation) or _is_fastmcp_context_annotation(annotation) or \
+                _is_request_annotation(annotation):
             continue
         prop = _schema_for_annotation(annotation)
         if param.default is inspect.Parameter.empty:
@@ -1505,12 +1519,12 @@ def _coerce_params(fn: Callable, params: dict) -> dict:
 
 def _extension_handler(fn: Callable, http_method: str) -> Callable:
     """REST handler for an @extension route: bind request params to the handler and return JSON. A
-    ``ToolContext`` parameter is filled from the request headers and never bound
-    from the params."""
-    slot = _tool_context_slot(fn)
+    ``ToolContext`` parameter is filled from the request headers, and a ``Request`` one with the request itself;
+    neither is bound from the params."""
+    slot, request_slot = _tool_context_slot(fn), _request_slot(fn)
     signature = inspect.signature(fn)
-    if slot:
-        signature = signature.replace(parameters=[p for p in signature.parameters.values() if p.name != slot])
+    signature = signature.replace(parameters=[p for p in signature.parameters.values()
+                                              if p.name not in (slot, request_slot)])
     op = fn.__name__ or "invoke"
 
     async def handler(request: Request) -> Response:
@@ -1530,7 +1544,8 @@ def _extension_handler(fn: Callable, http_method: str) -> Callable:
         except TypeError as e:
             return _error_response(AgentEnvError("invalid_params", str(e)))
         with bound(context_from_http(request, op, params)) as tool_context:
-            call_kwargs = {**params, slot: tool_context} if slot else params
+            call_kwargs = {**params, **({slot: tool_context} if slot else {}),
+                           **({request_slot: request} if request_slot else {})}
             try:
                 result = await _maybe_await(fn(**call_kwargs))
             except AgentEnvError as e:
@@ -1546,23 +1561,42 @@ def _error_response(error: AgentEnvError) -> Response:
     return _json_response(error_body(**error.fields()), error.status)
 
 
+def control_check() -> Callable[[Any], bool]:
+    """Whether a call's headers carry the env's control token as their bearer, with ``CONTROL_TOKEN_ENV`` set; without
+    it, any do."""
+    token = os.environ.get(CONTROL_TOKEN_ENV)
+    if not token:
+        return lambda headers: True
+    expected = f"Bearer {token}".encode()
+    return lambda headers: hmac.compare_digest(headers.get("authorization", "").encode(), expected)
+
+
 def control_guard() -> Callable[[Callable], Callable]:
     """What wraps a framework-only route, everything an env serves but its MCP endpoint and its card: with
     ``CONTROL_TOKEN_ENV`` set, a call that doesn't carry that token as its bearer is refused before the route runs;
     without it, nothing."""
-    token = os.environ.get(CONTROL_TOKEN_ENV)
-    if not token:
+    if not os.environ.get(CONTROL_TOKEN_ENV):
         return lambda handler: handler
-    expected = f"Bearer {token}".encode()
+    allowed = control_check()
 
     def guard(handler: Callable) -> Callable:
         async def guarded(request: Request) -> Response:
-            if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected):
+            if not allowed(request.headers):
                 return _error_response(AgentEnvError(
                     "unauthorized", "this route is agent-env's own: it takes the env's control token", status=401))
             return await handler(request)
         return guarded
     return guard
+
+
+def add_websocket_route(app: Any, path: str, endpoint: Callable) -> None:
+    """``endpoint`` served at ``path`` as a WebSocket route of ``app``, an mcp or a standalone fastmcp FastMCP, which
+    have no API for one."""
+    for routes in ("_custom_starlette_routes", "_additional_http_routes"):
+        if isinstance(getattr(app, routes, None), list):
+            getattr(app, routes).append(WebSocketRoute(path, endpoint))
+            return
+    raise TypeError(f"WebSocket routes go on an mcp or a fastmcp FastMCP, not a {type(app).__name__}")
 
 
 def _tool_access_handler(access: ToolAccess, action: str) -> Callable:

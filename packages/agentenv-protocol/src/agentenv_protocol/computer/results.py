@@ -16,6 +16,25 @@ class DisplayData(BaseModel):
     scale: float
 
 
+class DialogData(BaseModel):
+    type: str
+    message: str
+    default_text: str = ""
+
+
+class FileChooserData(BaseModel):
+    multiple: bool
+
+
+class PageData(BaseModel):
+    """The page a frame shows, on a computer whose screen is a website browser's active tab."""
+    tab: str
+    url: str
+    title: str
+    dialog: Optional[DialogData] = None
+    file_chooser: Optional[FileChooserData] = None
+
+
 class FrameData(BaseModel):
     frame_id: str
     width: int
@@ -23,6 +42,7 @@ class FrameData(BaseModel):
     display: DisplayData
     parent_frame_id: Optional[str] = None
     captured_at: str
+    page: Optional[PageData] = None
 
 
 class ScreenshotResult(FrameData):
@@ -51,6 +71,17 @@ class InputResult(BaseModel):
     others_since_frame: int
     effect: Optional[EffectData] = None
     frame: Optional[FrameData] = None
+
+
+class TabData(BaseModel):
+    tab: str
+    url: str
+    title: str
+    active: bool
+
+
+class TabsResult(InputResult):
+    tabs: list[TabData]
 
 
 class WaitResult(BaseModel):

@@ -1,46 +1,128 @@
-#!/bin/sh
-# launch: boot /disk/disk.img, a Linux computer's disk form, under QEMU until it powers off, on a copy-on-write overlay
-# so the disk stays as it is: with KVM when /dev/kvm is here and the disk is this machine's arch, else with TCG, from
-# UEFI firmware. The guest's console is this container's output.
+#!/bin/bash
+# launch: boot a Linux computer's disk form under QEMU until it powers off, on a copy-on-write overlay so the disk stays
+# as it is: with KVM when /dev/kvm is here and the disk is this machine's arch, else with TCG, from UEFI firmware. The
+# guest's console is this process's output.
+#   VM_DISK        the disk, /disk/disk.img by default; one ending .zst is expanded onto this machine's disk first
 #   VM_ENV_<NAME>  the computer's variable NAME, its value base64'd, for its NoCloud seed (CIDATA; see seed)
-#   VM_PORTS       guest TCP ports, each forwarded from the same port here
+#   VM_PORTS       guest TCP ports, each served on the same port here by socat, whose listen backlog takes a burst of
+#                  connections, in front of QEMU's forward on 127.0.0.1 at the port plus 10000, whose backlog is 1;
+#                  socat retries a connection that forward drops every half second, not on the kernel's SYN backoff
 #   VM_ARCH        the disk's arch, amd64 or arm64; this machine's by default
 #   VM_CPUS, VM_MEMORY_MB   its size: 2 and 4096 by default
-set -eu
+#   VM_REQUIRE_KVM when set, fail rather than emulate where KVM can't run the disk
+#   VM_STATE       where its overlay, its seed and an expanded disk go: /var/lib/agentenv-vm by default
+# launch reset: boot the running computer afresh on a new overlay, its environment the VM_ENV_<NAME>=<base64> lines on
+# stdin, returning once its new QEMU has started; its ports stay up throughout.
+set -euo pipefail
+state=${VM_STATE:-/var/lib/agentenv-vm}
+# A reset and the boot loop meet here: the reset writes next.env, creates reset and stops the QEMU qemu.pid names; the
+# loop, finding reset, takes next.env's environment, removes reset and boots afresh; the reset returns once qemu.pid
+# names the new QEMU.
+control=$state/control
+
+if [ "${1:-}" = reset ]; then
+    [ -s "$control/qemu.pid" ] || { echo "launch reset: no computer is running here" >&2; exit 1; }
+    old=$(cat "$control/qemu.pid")
+    grep -E '^VM_ENV_[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9+/=]*$' > "$control/next.env" || true
+    touch "$control/reset"
+    kill "$old"
+    for _ in $(seq 600); do
+        if [ ! -e "$control/reset" ] && [ "$(cat "$control/qemu.pid")" != "$old" ]; then
+            exit 0
+        fi
+        sleep 0.1
+    done
+    echo "launch reset: the computer didn't start again within 60 s" >&2
+    exit 1
+fi
+
 here=$(dpkg --print-architecture)
 arch=${VM_ARCH:-$here}
-work=/run/vm
-rm -rf "$work"
-mkdir -p "$work"
-qemu-img create -q -f qcow2 -b /disk/disk.img -F qcow2 "$work/disk.qcow2"
-seed "$work"
-mkfs.vfat -C -n CIDATA "$work/seed.img" 2048 >/dev/null
-mcopy -i "$work/seed.img" "$work/user-data" "$work/meta-data" ::/
-forwards=""
-for port in ${VM_PORTS:-}; do
-    forwards="$forwards,hostfwd=tcp::$port-:$port"
-done
+disk=${VM_DISK:-/disk/disk.img}
+work=$state/boot
+mkdir -p "$control"
+rm -f "$control/qemu.pid" "$control/reset" "$control/next.env"
 accel=tcg cpu=max
 if [ -w /dev/kvm ] && [ "$arch" = "$here" ]; then
     accel=kvm cpu=host
+elif [ -n "${VM_REQUIRE_KVM:-}" ]; then
+    echo "launch: KVM can't run this $arch disk on this $here machine, and VM_REQUIRE_KVM refuses to emulate it" \
+         "($([ -e /dev/kvm ] && echo "/dev/kvm isn't writable" || echo "there's no /dev/kvm"))" >&2
+    exit 3
 fi
 case "$arch" in
-    amd64)
-        cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
-        set -- qemu-system-x86_64 -machine "q35,accel=$accel" \
-            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd ;;
-    arm64)
-        cp /usr/share/AAVMF/AAVMF_CODE.fd "$work/code.fd"
-        truncate -s 64M "$work/code.fd" "$work/vars.fd"
-        set -- qemu-system-aarch64 -machine "virt,accel=$accel" \
-            -drive if=pflash,format=raw,readonly=on,file="$work/code.fd" ;;
+    amd64) machine=(qemu-system-x86_64 -machine "q35,accel=$accel"
+                    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd) ;;
+    arm64) machine=(qemu-system-aarch64 -machine "virt,accel=$accel"
+                    -drive if=pflash,format=raw,readonly=on,file="$work/code.fd") ;;
     *)
         echo "launch: no architecture $arch" >&2
         exit 2 ;;
 esac
-exec "$@" -cpu "$cpu" -smp "${VM_CPUS:-2}" -m "${VM_MEMORY_MB:-4096}" \
-    -drive if=pflash,format=raw,file="$work/vars.fd" \
-    -drive file="$work/disk.qcow2",format=qcow2,if=virtio \
-    -drive file="$work/seed.img",format=raw,if=virtio,readonly=on \
-    -netdev "user,id=net$forwards" -device virtio-net-pci,netdev=net -device virtio-rng-pci \
-    -display none -serial stdio -no-reboot
+forwards="" fronts=()
+for port in ${VM_PORTS:-}; do
+    behind=$((port + 10000))
+    if [ "$behind" -gt 65535 ] || [[ " $VM_PORTS " == *" $behind "* ]]; then
+        echo "launch: port $port can't be forwarded: QEMU's forward behind its proxy would take port $behind, which" \
+             "is $([ "$behind" -gt 65535 ] && echo "above 65535" || echo "another of VM_PORTS")" >&2
+        exit 2
+    fi
+    forwards="$forwards,hostfwd=tcp:127.0.0.1:$behind-:$port"
+    socat "TCP-LISTEN:$port,fork,reuseaddr,backlog=1024" "TCP:127.0.0.1:$behind,connect-timeout=0.5,retry=600,interval=0.05" &
+    fronts+=("$!")
+done
+trap 'kill "${fronts[@]}" 2>/dev/null || true' EXIT
+trap 'kill "$(cat "$control/qemu.pid" 2>/dev/null)" 2>/dev/null; exit 143' TERM INT
+if [[ "$disk" == *.zst ]]; then
+    zstd -q -d -f "$disk" -o "$state/disk.img"
+    disk=$state/disk.img
+fi
+
+boot() {
+    rm -rf "$work"
+    mkdir -p "$work"
+    qemu-img create -q -f qcow2 -b "$disk" -F qcow2 "$work/disk.qcow2"
+    seed "$work/seed"
+    mkfs.vfat -C -n CIDATA "$work/seed.img" 2048 >/dev/null
+    mcopy -i "$work/seed.img" "$work/seed/"* ::/
+    if [ "$arch" = amd64 ]; then
+        cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
+    else
+        cp /usr/share/AAVMF/AAVMF_CODE.fd "$work/code.fd"
+        truncate -s 64M "$work/code.fd" "$work/vars.fd"
+    fi
+    "${machine[@]}" -cpu "$cpu" -smp "${VM_CPUS:-2}" -m "${VM_MEMORY_MB:-4096}" \
+        -drive if=pflash,format=raw,file="$work/vars.fd" \
+        -drive file="$work/disk.qcow2",format=qcow2,if=virtio \
+        -drive file="$work/seed.img",format=raw,if=virtio,readonly=on \
+        -netdev "user,id=net$forwards" -device virtio-net-pci,netdev=net -device virtio-rng-pci \
+        -display none -serial stdio -no-reboot &
+    echo "$!" > "$control/qemu.pid"
+}
+
+while true; do
+    boot
+    qemu=$(cat "$control/qemu.pid")
+    while kill -0 "$qemu" 2>/dev/null; do
+        for front in "${fronts[@]}"; do
+            if ! kill -0 "$front" 2>/dev/null; then
+                status=0
+                wait "$front" || status=$?
+                echo "launch: the proxy in front of a forwarded port exited ($status), so the computer is stopped" >&2
+                kill "$qemu" 2>/dev/null || true
+                exit 1
+            fi
+        done
+        sleep 0.2
+    done
+    status=0
+    wait "$qemu" || status=$?
+    [ -e "$control/reset" ] || exit "$status"
+    for name in $(compgen -e); do
+        case "$name" in VM_ENV_*) unset "$name" ;; esac
+    done
+    while IFS= read -r line; do
+        export "$line"
+    done < "$control/next.env"
+    rm -f "$control/reset"
+done

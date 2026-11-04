@@ -4,8 +4,10 @@ full needs gets those checks unverified; a driver broken one way fails the check
 fronts that exports is asked for its export once; the report's verdicts and the CLI."""
 from __future__ import annotations
 
+import importlib
 import json
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -282,6 +284,29 @@ async def test_a_fixture_that_doesnt_start_leaves_full_unverified_and_is_cleaned
     assert len(unverified) == len(checks.FULL_CHECKS) and why in unverified[0].detail
     assert not (home / checks.STAGE).exists()
     assert (["kill", "4243"] in probed.commands) is (driver is SilentFixture)
+
+
+@pytest.mark.parametrize("delta, steps", [(1, 1), (-3, -3), (120, 1), (-360, -3), (240, 2)],
+                         ids=["aqua-up", "aqua-down-3", "scaled-up", "scaled-down-3", "scaled-up-2"])
+def test_the_fixture_counts_a_wheel_events_steps_whether_tk_scales_them_by_120_or_not(delta, steps, monkeypatch):
+    """Aqua's Tk 8.6 reports a step as a delta of 1; Windows, and Tk 9 everywhere, as 120."""
+    assert _fixture(monkeypatch).wheel_steps(delta) == steps
+
+
+@pytest.mark.parametrize("delta, steps", [(10, (False, 1)), (65526, (False, -1)), (65516, (False, -2)),
+                                          (655360, (True, 1)), (-655360, (True, -1)), (0, None)],
+                         ids=["up", "down", "down-2-coalesced", "left", "right", "still"])
+def test_the_fixture_counts_a_scroll_tk_9_reports_in_pixels_by_the_lines_it_moves(delta, steps, monkeypatch):
+    """The deltas Tk 9 on macOS gave cua-driver's scrolls: 10 pixels a line, two lines at once where macOS coalesced
+    them."""
+    assert _fixture(monkeypatch).touchpad_steps(delta) == steps
+
+
+def _fixture(monkeypatch):
+    """The fixture module, which runs in the computer, read with Tk stood in for, as this Python may have none."""
+    monkeypatch.setitem(sys.modules, "tkinter", ModuleType("tkinter"))
+    monkeypatch.delitem(sys.modules, "agentenv_protocol.computer.conformance.fixture", raising=False)
+    return importlib.import_module("agentenv_protocol.computer.conformance.fixture")
 
 
 def test_a_refusal_must_carry_the_code_and_applied_no():

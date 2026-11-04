@@ -28,6 +28,7 @@ from ..card import (
     COMPUTER_DISPLAY,
     COMPUTER_EXEC,
     COMPUTER_KEYBOARD,
+    COMPUTER_PAGE,
     COMPUTER_POINTER,
     COMPUTER_READY,
     COMPUTER_RECORDING,
@@ -39,6 +40,7 @@ from ..manifest import RecordingManifest
 from ..recording import RECORDINGS_DIR
 from .client import Driver, image
 from .mp4 import read_mp4
+from .page_fixture import QUESTION, TITLE, TWO, TWO_TITLE
 from .report import CheckResult
 
 MINIMUM_TOOLS = ("computer_screenshot", "computer_click", "computer_drag", "computer_scroll", "computer_type",
@@ -46,6 +48,10 @@ MINIMUM_TOOLS = ("computer_screenshot", "computer_click", "computer_drag", "comp
 DATA_PLANE = (INTAKE_EXTENSION_URI, DATA_OBJECTS_EXTENSION_URI)
 #: Where the fixture is staged and keeps its state, relative to the session user's home.
 STAGE = ".agentenv-probe"
+#: Where a page driver's computer_upload takes files from, relative to the session user's home.
+UPLOADS = "Uploads"
+#: What the probe answers the page fixture's prompt with.
+WORD = "tangerine"
 #: What the tool-access check's role, new each run, and the probe's request ids start with.
 PROBE_ROLE = "agentenv-probe"
 #: How long the probe waits for an effect to reach the fixture, and how often it looks.
@@ -72,6 +78,10 @@ FULL_CHECKS = (("P3", "fixture colours land where the mapping says"), ("P4", "cl
 Test = Callable[[], Awaitable[str | None]]
 
 
+class NotApplicable(Exception):
+    """Raised by a test whose check doesn't apply to this driver, with why."""
+
+
 class Probe:
     """One probe run: the driver, an MCP session on its tools, and the results so far. A test returns what went
     wrong, or None when its check passes; a test that raises fails with what it raised."""
@@ -84,6 +94,12 @@ class Probe:
         self.features = driver.params(COMPUTER)
         self.layout: dict = {}
         self.fixture_pid: str | None = None
+        self.page = self.features.get("screen") == "page"
+        self.fixture = "page_fixture.py" if self.page else "fixture.py"
+        self.desk = ""
+        self.tab: str | None = None
+        self.opened: list[str] = []
+        self.upload: str | None = None
 
     async def basic(self) -> None:
         for check, section in (("P0", self._ready), ("P1", self._card), ("P2", self._frame), ("P5", self._refusals),
@@ -95,11 +111,14 @@ class Probe:
         self._grants()
 
     async def full(self) -> None:
-        missing = [uri for uri in (COMPUTER_EXEC,) if not self.driver.declares(uri)]
+        needs = (COMPUTER_EXEC, COMPUTER_PAGE) if self.page else (COMPUTER_EXEC,)
+        missing = [uri for uri in needs if not self.driver.declares(uri)]
         if not (protocol.intake_declaration(self.driver.card) or {}).get("add"):
             missing.append("data/add")
         if missing:
-            return self._skip_full(f"the fixture is staged with data/add and computer-exec; the driver lacks {missing}")
+            how = "data/add and computer-exec, and opened with computer-page/v1" if self.page else \
+                "data/add and computer-exec"
+            return self._skip_full(f"the fixture is staged with {how}; the driver lacks {missing}")
         try:
             try:
                 problem = await self._stage()
@@ -109,7 +128,8 @@ class Probe:
                 return self._skip_full(f"the fixture didn't start: {problem}")
             for check, section in (("P9", self._security), ("P3", self._geometry), ("P4", self._effects),
                                    ("P5", self._unchanged), ("P6", self._typing), ("P7", self._scroll_and_drag),
-                                   ("X", self._pointer_input), ("X", self._data_add), ("X", self._recording)):
+                                   ("X", self._pointer_input), ("X", self._data_add), ("X", self._recording),
+                                   ("X", self._page_tools)):
                 await self._guarded(check, section)
         finally:
             await self._unstage()
@@ -119,6 +139,9 @@ class Probe:
     async def check(self, check: str, name: str, test: Test, *extensions: str) -> bool:
         try:
             problem = await test()
+        except NotApplicable as e:
+            self._record(check, name, "not_applicable", str(e), extensions)
+            return True
         except Exception as e:
             problem = f"{type(e).__name__}: {e}"
         self._record(check, name, "failed" if problem else "passed", problem or "", extensions)
@@ -180,6 +203,14 @@ class Probe:
     async def settled(self, holds: Callable[[dict], bool], show: Callable[[dict], object]) -> str | None:
         ok, state = await self.until(holds)
         return None if ok else f"the fixture shows {show(state)!r}"
+
+    async def page_now(self) -> dict:
+        """The page a new frame names, or {} for a frame that names none."""
+        return (await self.shot())[0].structuredContent.get("page") or {}
+
+    async def showing(self, holds: Callable[[dict], bool]) -> str | None:
+        ok, page = await self.until(holds, self.page_now)
+        return None if ok else f"the frame's page is {page!r}"
 
     @staticmethod
     def refused(result: CallToolResult, code: str) -> str | None:
@@ -507,16 +538,20 @@ class Probe:
     # full: the fixture
 
     async def _stage(self) -> str | None:
-        source = resources.files(__package__).joinpath("fixture.py").read_bytes()
-        added = await self.driver.add_file(f"{STAGE}/fixture.py", source)
+        """The Fixture Desk started, or what stopped it: the Tk desk, or on a page, the HTML desk's server, with the
+        desk opened in a tab of the probe's own."""
+        source = resources.files(__package__).joinpath(self.fixture).read_bytes()
+        added = await self.driver.add_file(f"{STAGE}/{self.fixture}", source)
         if "error" in added:
             return f"data/add refused it: {added['error'].get('message')}"
         await self.driver.run("sh", "-c", f"rm -rf {STAGE}/state")
         started = await self.driver.run(
-            "sh", "-c", f"python3 {STAGE}/fixture.py {STAGE}/state > {STAGE}/fixture.log 2>&1 & echo $!")
+            "sh", "-c", f"python3 {STAGE}/{self.fixture} {STAGE}/state > {STAGE}/fixture.log 2>&1 & echo $!")
         self.fixture_pid = started["stdout"].strip() or None
         deadline = time.monotonic() + FIXTURE_START_S
         while time.monotonic() < deadline:
+            if self.page and self.tab is None and (problem := await self._open_desk()):
+                return problem
             layout = await self.driver.run("cat", f"{STAGE}/state/layout.json")
             if layout.get("exit_code") == 0 and layout["stdout"].strip():
                 self.layout = json.loads(layout["stdout"])
@@ -528,10 +563,33 @@ class Probe:
         log = await self.driver.run("tail", "-n", "5", f"{STAGE}/fixture.log")
         return f"no layout after {FIXTURE_START_S:g} s: {log['stdout'].strip() or log['stderr'].strip()}"
 
+    async def _open_desk(self) -> str | None:
+        """Once the page fixture's server has its port, the desk opened in a new tab, which is the probe's."""
+        port = await self.driver.run("cat", f"{STAGE}/state/port")
+        if port.get("exit_code") != 0 or not port["stdout"].strip():
+            return None
+        self.desk = f"http://127.0.0.1:{port['stdout'].strip()}/"
+        opened = await self.tool("computer_tabs", {"action": "open", "url": self.desk})
+        if opened.isError:
+            return f"computer_tabs couldn't open it: {opened.content[0].text}"
+        self.tab = next((t["tab"] for t in opened.structuredContent["tabs"] if t["active"]), None)
+        self.opened += [self.tab] if self.tab else []
+        return None if self.tab else f"the tab computer_tabs opened isn't active: {opened.structuredContent['tabs']}"
+
     async def _unstage(self) -> None:
+        if self.opened:
+            with contextlib.suppress(Exception):
+                listed = await self.tool("computer_tabs", {"action": "list"})
+                left = [t["tab"] for t in listed.structuredContent["tabs"]]
+                for tab in [t for t in left if t in self.opened]:
+                    if len(left) > 1:
+                        await self.tool("computer_tabs", {"action": "close", "tab": tab})
+                        left.remove(tab)
         if self.fixture_pid:
             await self.driver.run("kill", self.fixture_pid)
         await self.driver.run("rm", "-rf", STAGE)
+        if self.upload:
+            await self.driver.run("rm", "-f", f"{UPLOADS}/{self.upload}")
 
     async def _base(self) -> tuple[str, float, object]:
         """A fresh frame of the fixture: its id, the display's scale, and its image."""
@@ -547,7 +605,7 @@ class Probe:
     async def _security(self) -> None:
         async def one_user() -> str | None:
             uid = (await self.driver.run("id", "-u"))["stdout"].strip()
-            owner = (await self.driver.run("stat", "-c", "%u", f"{STAGE}/fixture.py"))["stdout"].strip()
+            owner = (await self.driver.run("stat", "-c", "%u", f"{STAGE}/{self.fixture}"))["stdout"].strip()
             if uid == "0":
                 return "commands run as root"
             return None if owner == uid else f"data/add wrote as uid {owner}, commands run as uid {uid}"
@@ -708,7 +766,11 @@ class Probe:
 
         async def clipboard() -> str | None:
             state = await self.state()
-            return None if state["clipboard"] == self.layout["clipboard"] else f"the clipboard is {state['clipboard']!r}"
+            if pasted := state.get("pasted"):
+                return f"typing arrived as a paste of {pasted!r}"
+            if state["clipboard"] != self.layout["clipboard"]:
+                return f"the clipboard is {state['clipboard']!r}"
+            return None
 
         async def held() -> str | None:
             await clear()
@@ -788,6 +850,100 @@ class Probe:
             return await self.settled(lambda s: s["loaded"] == message, lambda s: s["loaded"])
 
         await self.check("X", "a file data/add writes is there for an app to read", picked_up, *DATA_PLANE)
+
+    async def _page_tools(self) -> None:
+        """The page tools against the HTML desk, each confirmed on the desk or in the page a new frame names; those
+        that leave the desk run last."""
+        if not self.page:
+            return
+        frame, scale, _ = await self._base()
+        two = self.desk + TWO.lstrip("/")
+
+        async def dialog() -> str | None:
+            before = (await self.state())["saved_count"]
+            await self.act("computer_click", {"x": self._at("ask", scale)[0], "y": self._at("ask", scale)[1],
+                                              "frame_id": frame})
+
+            async def seen() -> tuple[dict, dict]:
+                return await self.page_now(), await self.state()
+
+            ok, (page, state) = await self.until(lambda s: bool(s[0].get("dialog")) or s[1]["prompts"] > 0, seen)
+            if not page.get("dialog"):
+                if state["prompts"]:
+                    raise NotApplicable(f"the browser answers dialogs itself: the prompt returned {state['prompted']!r}")
+                return f"no dialog shows in the frame's page: {page!r}"
+            if page["dialog"] != {"type": "prompt", "message": QUESTION, "default_text": ""}:
+                return f"the frame's page shows the dialog as {page['dialog']!r}"
+            x, y = self._at("save", scale)
+            latest = (await self.shot())[0].structuredContent["frame_id"]
+            if problem := self.refused(await self.tool("computer_click", {"x": x, "y": y, "frame_id": latest}),
+                                       "dialog_open"):
+                return f"a click while it's open: {problem}"
+            await self.act("computer_dialog", {"accept": True, "text": WORD})
+            return await self.settled(lambda s: s["prompted"] == WORD and s["saved_count"] == before,
+                                      lambda s: {"prompted": s["prompted"], "saved_count": s["saved_count"]})
+
+        async def upload() -> str | None:
+            self.upload = f"{PROBE_ROLE}-{uuid.uuid4().hex[:8]}.txt"
+            text = f"uploaded by the probe {time.time_ns()}"
+            added = await self.driver.add_file(f"{UPLOADS}/{self.upload}", text.encode())
+            if "error" in added:
+                return f"data/add refused it: {added['error'].get('message')}"
+            x, y = self._at("file", scale, dx=40)
+            await self.act("computer_click", {"x": x, "y": y, "frame_id": frame})
+            if problem := await self.showing(lambda p: p.get("file_chooser") is not None):
+                return f"no file chooser shows: {problem}"
+            outside = await self.tool("computer_upload", {"paths": [f"../{STAGE}/page_fixture.py"]})
+            if problem := self.refused(outside, "invalid_argument"):
+                return f"a file outside ~/{UPLOADS}: {problem}"
+            await self.act("computer_upload", {"paths": [self.upload]})
+            return await self.settled(lambda s: s["uploaded"] == {"name": self.upload, "content": text},
+                                      lambda s: s["uploaded"])
+
+        async def reload() -> str | None:
+            loads = (await self.state())["loads"]
+            await self.act("computer_history", {"direction": "reload"})
+            return await self.settled(lambda s: s["loads"] == loads + 1, lambda s: f"{s['loads'] - loads} loads")
+
+        async def navigate() -> str | None:
+            await self.act("computer_navigate", {"url": two})
+            return await self.showing(lambda p: p.get("url") == two and p.get("title") == TWO_TITLE)
+
+        async def back_and_forth() -> str | None:
+            for direction, url, title in (("back", self.desk, TITLE), ("forward", two, TWO_TITLE)):
+                await self.act("computer_history", {"direction": direction})
+                if problem := await self.showing(lambda p: p.get("url") == url and p.get("title") == title):
+                    return f"after {direction}: {problem}"
+            return None
+
+        async def tabs() -> str | None:
+            opened = await self.tool("computer_tabs", {"action": "open", "url": self.desk})
+            if opened.isError:
+                return f"open: {opened.content[0].text}"
+            active = [t["tab"] for t in opened.structuredContent["tabs"] if t["active"]]
+            if len(active) != 1 or active[0] == self.tab:
+                return f"the opened tab isn't the one active: {opened.structuredContent['tabs']}"
+            other = active[0]
+            self.opened.append(other)
+            if problem := await self.showing(lambda p: p.get("tab") == other and p.get("url") == self.desk):
+                return f"after open: {problem}"
+            await self.act("computer_tabs", {"action": "switch", "tab": self.tab})
+            if problem := await self.showing(lambda p: p.get("tab") == self.tab):
+                return f"after switching back: {problem}"
+            closed = await self.tool("computer_tabs", {"action": "close", "tab": other})
+            if closed.isError or any(t["tab"] == other for t in closed.structuredContent["tabs"]):
+                return f"close: {closed.content[0].text if closed.isError else closed.structuredContent['tabs']}"
+            return await self.showing(lambda p: p.get("tab") == self.tab)
+
+        for name, test in (
+                ("computer_dialog answers a prompt the frame's page shows, and input waits for it", dialog),
+                (f"computer_upload gives the page's file chooser a file from ~/{UPLOADS}, and refuses one outside it",
+                 upload),
+                ("computer_history reload loads the page again", reload),
+                ("computer_navigate opens a page, and the frame's page names it", navigate),
+                ("computer_history goes back and forward through the tab's pages", back_and_forth),
+                ("computer_tabs opens, switches to and closes a tab, and the frame shows the active one", tabs)):
+            await self.check("X", name, test, COMPUTER_PAGE)
 
     async def _recording(self) -> None:
         if not self.driver.declares(COMPUTER_RECORDING):

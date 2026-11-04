@@ -150,23 +150,25 @@ def test_a_disk_is_probed_on_a_provider_that_boots_its_arch_natively(disk_base, 
     assert env.computer_artifact().metadata["validated_boot"]["disk"] == {"arm64": disks["arm64"]["probe"]}
 
 
-def _link(containers=(), disks=()):
-    """A sandbox provider that runs containers of ``containers`` and boots disks of ``disks`` natively."""
+def _link(containers=(), disks=(), here=True):
+    """A sandbox provider that runs containers of ``containers`` and boots disks of ``disks`` natively, on this machine
+    unless ``here`` is False."""
     link = SimpleNamespace(native_platforms=lambda: frozenset(f"linux/{arch}" for arch in containers),
-                           disk_image_platforms=lambda: frozenset(f"linux/{arch}" for arch in disks))
+                           disk_image_platforms=lambda: frozenset(f"linux/{arch}" for arch in disks), ON_THIS_MACHINE=here)
     link.links = (link,)
     return link
 
 
 _SANDBOXES = {"local": [_link(["arm64"])], "local-with-kvm": [_link(["arm64"], ["arm64"])],
               "vm": [_link(disks=["amd64"])], "chain": [_link(["arm64"]), _link(disks=["amd64"])],
-              "chain-of-containers": [_link(["arm64"]), _link(["amd64"])], "none-native": [_link(["riscv64"], ["riscv64"])]}
+              "chain-of-containers": [_link(["arm64"]), _link(["amd64"])], "none-native": [_link(["riscv64"], ["riscv64"])],
+              "vm-elsewhere": [_link(["amd64"], ["amd64"], here=False)]}
 
 
 @pytest.mark.parametrize("sandbox, form, forms", [
     ("local", None, ["container"]), ("local-with-kvm", None, ["container"]), ("local-with-kvm", "disk", ["disk"]),
     ("vm", None, ["disk"]), ("chain", None, ["container", "disk"]), ("chain-of-containers", None, ["container"]),
-    ("none-native", None, []),
+    ("none-native", None, []), ("vm-elsewhere", None, ["disk"]),
 ])
 def test_the_forms_composed_for_a_sandbox_are_those_its_deploys_boot(disk_base, driver, docker, sandbox, form, forms):
     """On each link the first form it boots natively, as a deploy picks, unless the deploy names one."""
@@ -175,7 +177,7 @@ def test_the_forms_composed_for_a_sandbox_are_those_its_deploys_boot(disk_base, 
     assert composer.booted_forms(env, SimpleNamespace(links=tuple(_SANDBOXES[sandbox])), form) == forms
 
 
-@pytest.mark.parametrize("sandbox", ["local", "vm", "chain"])
+@pytest.mark.parametrize("sandbox", ["local", "vm", "chain", "vm-elsewhere"])
 def test_what_a_run_composes_is_what_each_link_of_its_sandbox_then_boots(disk_base, driver, docker, sandbox):
     """Whatever the deploy's link, its pick of the run's builds is of a form the run composed, and each form the run
     composed is one a link picks: the two share ``boot.first_native``."""
@@ -185,7 +187,7 @@ def test_what_a_run_composes_is_what_each_link_of_its_sandbox_then_boots(disk_ba
     composed = composer.pending(env, forms=Composing.for_run(sandbox).forms(env, sandbox))
     with_containers = composer._with_containers(env, composed)
 
-    picked = {boot.first_native(link, with_containers) for link in links}
+    picked = {boot.first_native(link, with_containers, env.stored_id) for link in links}
 
     assert None not in picked and {form for form, _ in picked} == {form for form, _ in composed}
 
@@ -448,11 +450,30 @@ async def test_a_deploy_that_composes_first_tells_the_run_why_and_each_stage_as_
         context = await task.run(context=TaskStepContext())
 
     assert context.deployed_envs[0].metadata["computer"]["form"] == "disk"
-    assert said[:2] == [f"{env.id}: composing disk/amd64, disk/arm64 before this deploy (no compose built them for "
-                        "LocalSandboxProvider yet); later deploys reuse them",
+    assert said[:2] == [f"{env.id}: composing disk/amd64, disk/arm64 before this deploy on LocalSandboxProvider (no "
+                        "compose built them for LocalSandboxProvider yet); later deploys reuse them",
                         f"{env.id}: composing disk/amd64, disk/arm64 on LocalSandboxProvider"]
     assert any(line.startswith(f"{env.id}: disk/arm64: ready (") for line in said)
     assert any(line.startswith(f"{env.id}: disk/amd64: making the disk") for line in said)
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_on_a_sandbox_that_boots_only_disks_composes_them_on_this_machine_and_says_so(disk_base, driver,
+                                                                                                    docker,
+                                                                                                    monkeypatch):
+    """Never on the deploy's own sandbox: the env's default provider, this machine's Docker, builds them."""
+    env = _put(disk_base, driver, compose=False)
+    composed, said = [], []
+    monkeypatch.setattr(composer, "compose", lambda env, pairs, composing: composed.append((pairs, composing)))
+
+    with run_progress(said.append):
+        await Env.get(env.id).compose_unstarted(_link(disks=["amd64"]))
+
+    ((pairs, composing),) = composed
+    assert pairs == [("disk", "amd64"), ("disk", "arm64")]
+    assert isinstance(composing.provider(), local_sandbox.LocalSandboxProvider)
+    assert said == [f"{env.id}: composing disk/amd64, disk/arm64 before this deploy on LocalSandboxProvider (no compose "
+                    "built them for SimpleNamespace yet); later deploys reuse them"]
 
 
 @pytest.mark.asyncio
@@ -484,6 +505,22 @@ async def test_an_unverified_disk_is_probed_on_its_first_boot_with_kvm_before_it
     assert [probe[0] for probe in docker.probed if probe[0] == "disk"] == ["disk", "disk"]
     assert Env.get(failing.id).metadata["composed"]["disk"]["arm64"]["status"] == "failed"
     assert len(vms.created) == 1
+
+
+def test_a_sandbox_elsewhere_boots_the_disk_it_carries_not_a_container_in_this_machines_registry(base, disk_base,
+                                                                                                 driver, docker,
+                                                                                                 monkeypatch):
+    """The container form is in the image store's registry on this machine, which such a sandbox can't pull from; the
+    disk it carries itself, as a Modal VM does, so a deploy there passes its preflight with the disk form."""
+    elsewhere = _link(["amd64"], ["amd64"], here=False)
+    monkeypatch.setattr(providers, "build_sandbox_provider", lambda spec: elsewhere)
+    with_disk = Env.get(_put(disk_base, driver, compose=False).id)
+    containers = Env.get(_put(base, driver, compose=False, id="@local/~/kit/containers", environment_name="c").id)
+
+    assert composer.booted_forms(with_disk, elsewhere) == ["disk"] and with_disk.deploy_refusal(sandbox_type="x") is None
+    assert containers.deploy_refusal(sandbox_type="x") == (
+        f"computer env {containers.id!r}: SimpleNamespace runs none of its arches (amd64, arm64) natively as container, "
+        "and SimpleNamespace can't pull its containers from the image store's registry on this machine")
 
 
 def test_a_disk_form_is_refused_at_save_where_no_provider_boots_its_disk_natively(disk_base, driver, docker):

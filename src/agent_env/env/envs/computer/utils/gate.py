@@ -38,6 +38,18 @@ def check(base: ComputerArtifact, driver: ComputerDriverEnv, *, environment_name
     return values, problems + invalid
 
 
+def check_screen(driver: ComputerDriverEnv, apps: Sequence[ComputerAppEnv], at: str = "apps") -> list[str]:
+    """Why ``apps`` don't fit ``driver`` when its screen is a website browser's page: that needs exactly one website
+    browser among them."""
+    if not any(platform.features.get("screen") == "page" for platform in driver.declaration.platforms):
+        return []
+    browsers = [app.id for app in apps if app.declaration.browser]
+    if len(browsers) == 1:
+        return []
+    return [f"{at}: {driver.id}'s screen is a website browser's page, so its computer takes exactly one website "
+            f"browser; it has {len(browsers)}{': ' + ', '.join(browsers) if browsers else ''}"]
+
+
 def forms(base: ComputerArtifact) -> list[str]:
     """The forms a composition of ``base`` builds: every one the base has."""
     return [form for form in FORMS if getattr(base.forms, form, None)]

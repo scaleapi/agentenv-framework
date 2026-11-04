@@ -92,7 +92,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
-        if (picked := first_native(sandbox_provider, [(form, arch) for form, arch, _ in builds])) is None:
+        pairs = [(form, arch) for form, arch, _ in builds]
+        if (picked := first_native(sandbox_provider, pairs, env.stored_id)) is None:
             raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
         form, arch = picked

@@ -118,6 +118,7 @@ class ComputerEnv(Env):
         apps, app_settings = list(apps), app_settings or {}
         values, problems = gate.check(computer, driver, environment_name=environment_name, apps=apps, display=display,
                                       network=network, computer_settings=computer_settings or {})
+        problems += gate.check_screen(driver, apps)
         by_name = {app.environment_name: app for app in apps}
         for name, defaults in app_settings.items():
             problems += ([f"apps.{name}.settings: {id} has no app {name!r}"] if name not in by_name else
@@ -184,6 +185,7 @@ class ComputerEnv(Env):
 
     async def compose_unstarted(self, sandbox_provider: SandboxProvider, form: Optional[str] = None) -> None:
         """Compose first what a deploy on ``sandbox_provider`` boots that no compose started, once for deploys at once,
+        on the env's default sandbox provider, this machine unless the config names another, never on the deploy's,
         unless the run's fence would refuse the record (rules in ``computers/README.md``). A cancelled deploy holds the
         lock until its compose's thread, which no cancel stops, ends, so the next deploy waits for what it builds."""
         if get_config().local_run_refuses_write(self.stored_id):
@@ -204,10 +206,11 @@ class ComputerEnv(Env):
             self.metadata = (await asyncio.to_thread(Env.get, self.stored_id, self.version)).metadata
             if pairs := composer.unstarted(self, sandbox_provider, form):
                 them = "it" if len(pairs) == 1 else "them"
-                say(f"composing {_pairs(pairs)} before this deploy (no compose built {them} for "
+                on = Composing(on_progress=progress)
+                say(f"composing {_pairs(pairs)} before this deploy on "
+                    f"{' or '.join(type(link).__name__ for link in on.provider().links)} (no compose built {them} for "
                     f"{' or '.join(type(link).__name__ for link in sandbox_provider.links)} yet); later deploys reuse {them}")
-                composing = asyncio.ensure_future(asyncio.to_thread(
-                    composer.compose, self, pairs, Composing(sandbox_provider, on_progress=progress)))
+                composing = asyncio.ensure_future(asyncio.to_thread(composer.compose, self, pairs, on))
                 try:
                     await asyncio.shield(composing)
                 except asyncio.CancelledError:
@@ -262,9 +265,13 @@ class ComputerEnv(Env):
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
         links, arches = sandbox_provider.links, self.composed_arches()
         forms = [params.form] if params.form else gate.forms(self.computer)
-        if not any(boot.native_links(sandbox_provider, arch, form) for form in forms for arch in arches):
+        if not any(boot.native_links(sandbox_provider, arch, form, self.stored_id) for form in forms
+                   for arch in arches):
+            unpulled = [type(link).__name__ for link in links if not boot.pulls_containers(link, self.stored_id)]
             problems.append(f"{', '.join(type(link).__name__ for link in links)} runs none of its arches "
-                            f"({', '.join(arches)}) natively as {' or '.join(forms)}")
+                            f"({', '.join(arches)}) natively as {' or '.join(forms)}" + (
+                                f", and {', '.join(unpulled)} can't pull its containers from the image store's registry "
+                                "on this machine" if "container" in forms and unpulled else ""))
         policy = NetworkPolicy.from_dict(self.network) if self.network else None
         if policy is not None and not any(link.supports_network_policy(policy) for link in links):
             problems.append(f"{', '.join(type(link).__name__ for link in links)} can't enforce its network")

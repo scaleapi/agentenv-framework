@@ -39,6 +39,11 @@ agent_default = "local"   # agents too
 # [sandbox.providers.boat.config]
 # api_key = "secret:boat_api_key"     # or "env:BOAT_API_KEY"
 
+# Optional Agent37 VMs (no extra needed):
+# [sandbox.providers.agent37.config]
+# api_key = "secret:agent37_api_key"  # or "env:AGENT37_API_KEY"
+# region = "us"                       # or "eu", "ap-south"
+
 # Optional CoreWeave Sandboxes (install the 'coreweave' extra):
 # [sandbox.providers.coreweave.config]
 # api_key = "secret:cwsandbox_api_key"   # or wandb_api_key, with optional wandb_entity and wandb_project

@@ -67,6 +67,7 @@ from starlette.exceptions import HTTPException
 
 from opencode_bridge import (
     ERROR_MESSAGE_LIMIT,
+    OpenCodeTools,
     event_session_id,
     export_session,
     get_last_attribution_snapshot,
@@ -138,6 +139,8 @@ class OpenCodeConfig(AgentConfig):
     project_id: str | None = None
     task_id: str | None = None
     timeout_seconds: int = Field(default=1800, gt=0)
+    # Which of the CLI's own tools it may use. With any selection, the tools of the MCP servers agent-env gives it stay.
+    builtin_tools: OpenCodeTools | None = None
 
     @field_validator("output_format")
     @classmethod
@@ -378,6 +381,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                         task_id=request.config.task_id,
                         role=request.config.role,
                         attachment_paths=attachments,
+                        builtin_tools=request.config.builtin_tools,
                         event_callback=record,
                         workspace=str(WORKSPACE_DIR),
                     )

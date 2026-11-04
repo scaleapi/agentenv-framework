@@ -1,0 +1,10 @@
+{
+  "name": "agentenv-cdp-clients",
+  "private": true,
+  "type": "module",
+  "description": "Playwright and Puppeteer, connecting to a website browser's CDP address in browser_cdp_test.py.",
+  "dependencies": {
+    "playwright-core": "1.64.1",
+    "puppeteer-core": "24.43.1"
+  }
+}

@@ -2,3 +2,4 @@
 [envs]
 reference = ["reference"]
 cua-driver = ["cua-driver"]
+page = ["page"]

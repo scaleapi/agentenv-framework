@@ -56,6 +56,7 @@ IMAGES = {
     "agentenv-pydantic-ai": "src/agent_env/agents/agents/pydantic-ai/Dockerfile",
     "agentenv-mail-mcp": "src/agent_env/examples/mail-mcp/envs/mail/Dockerfile",
     "agentenv-ubuntu-24.04": "src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile",
+    "agentenv-ubuntu-24.04-headless": "src/agent_env/computers/artifacts/ubuntu-24.04-headless/Dockerfile",
     "agentenv-disk-tools": "src/agent_env/computers/disk/linux/tools/Dockerfile",
     "agentenv-qemu-launcher": "src/agent_env/computers/disk/linux/launcher/Dockerfile",
     "agentenv-ubuntu-24.04-disk": "src/agent_env/computers/disk/linux/boot/Dockerfile",
@@ -118,11 +119,18 @@ _SMOKES = {
                               " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
                               " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
                               " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
+    "agentenv-ubuntu-24.04-headless": [
+        "docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+        "start-computer & for _ in $(seq 60); do sleep 1;"
+        " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
+        " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
+        " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
     "agentenv-disk-tools": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                             "command -v disk image-env mkfs.ext4 mkfs.vfat mcopy sfdisk qemu-img"],
     "agentenv-qemu-launcher": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                                "qemu-system-x86_64 --version && qemu-system-aarch64 --version"
-                               " && test -f /usr/share/OVMF/OVMF_CODE_4M.fd && test -f /usr/share/AAVMF/AAVMF_CODE.fd"],
+                               " && test -f /usr/share/OVMF/OVMF_CODE_4M.fd && test -f /usr/share/AAVMF/AAVMF_CODE.fd"
+                               " && command -v socat zstd"],
 }
 
 

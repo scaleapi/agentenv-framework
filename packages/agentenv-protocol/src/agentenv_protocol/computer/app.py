@@ -236,7 +236,7 @@ class AppDeclaration(BaseModel):
     """What a ComputerAppEnvironment class declares, as a ``computer_app`` env stores it: the platforms it ``supports``,
     as a driver names them; ``os``, what it declares for each OS type; ``settings`` and ``build_settings``, the JSON
     schemas of its ``Settings`` and of its ``BuildSettings`` when it declares any; its ``skill``; and the ``data``
-    methods, ``install_steps`` and ``ready_checks`` it serves, by name."""
+    methods, ``install_steps`` and ``ready_checks`` it serves, by name; and ``browser``, true for a website browser."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -249,6 +249,7 @@ class AppDeclaration(BaseModel):
     data: list[str]
     install_steps: list[InstallStep]
     ready_checks: list[AppReadyCheck]
+    browser: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -373,6 +374,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     skill: ClassVar[Optional[str]] = None
     #: How long one of its data calls may take, a hook or its paths' default, before it fails.
     data_timeout_s: ClassVar[float] = 300.0
+    #: Path prefixes of its own server's routes, each ending in ``/``, that agents reach through the driver without the
+    #: computer's control token; the app checks a call to one itself.
+    agent_routes: ClassVar[tuple[str, ...]] = ()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Take the class's data hooks over, for the base class's handlers to serve around its contract; and serve its
@@ -472,7 +476,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     def extension_params(self, uri: str) -> dict:
         if uri == COMPUTER_APP:
             return {"launch": self.launch.model_dump(mode="json", exclude_none=True) if self.launch else None,
-                    "paths": self.paths}
+                    "paths": self.paths, **({"agent_routes": list(self.agent_routes)} if self.agent_routes else {})}
         return super().extension_params(uri)
 
     def served_operations(self, operations: list[str]) -> list[str]:
