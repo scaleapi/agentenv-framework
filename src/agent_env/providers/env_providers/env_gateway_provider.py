@@ -77,6 +77,9 @@ logger = logging.getLogger(__name__)
 
 _TRAJECTORY_READ_ATTEMPTS = 3
 
+# The network the website browser shares with the gateway and the sites, and with nothing else in the env.
+_SITES_NETWORK = "website-network"
+
 # How much of a service's output a failed deploy's error carries: enough for the end of a traceback.
 _LOG_TAIL_LINES = 30
 _LOG_LINE_CHARS = 300
@@ -101,6 +104,7 @@ class MCPServerConfig:
     environment_name: str
     extra_env_vars: dict[str, str] | None = None
     card_port: int | None = None  # where its env card is served, when not on the MCP port (the website browser's recorder)
+    website_browser: bool = False  # the env's website browser, which joins only the gateway and the sites
 
 
 @dataclass
@@ -287,7 +291,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
 
         Supports MCP servers, websites, or both. Website containers (backend + frontend) are added
-        to the same docker network. The gateway receives WEBSITE_URLS env var for discovery.
+        to the same docker network. The gateway receives WEBSITE_URLS env var for discovery. The website
+        browser sits on a network of its own with the gateway and each site's frontend (its backend when it
+        has none), so it reaches no backing server and no database by name.
 
         Args:
             mcp_servers: List of MCP server configurations for internal servers.
@@ -400,6 +406,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         # Add internal server services
         website_configs = website_configs or []
+        sites_network = [_SITES_NETWORK] if any(s.website_browser for s in mcp_servers) else []
         website_backend_servers = {
             wc.environment_name: f"{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}"
             for wc in website_configs
@@ -441,8 +448,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "      timeout: 5s",
                 f"      retries: {MCP_HC_RETRIES}",
                 f"      start_period: {MCP_HC_START_PERIOD}",
-                "    networks:",
-                "      - env-network",
+                *_network_lines(*([_SITES_NETWORK] if server.website_browser else ["env-network"])),
                 "",
             ])
 
@@ -512,8 +518,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             "      timeout: 5s",
             "      retries: 10",
             "      start_period: 15s",
-            "    networks:",
-            "      - env-network",
+            *_network_lines("env-network", *sites_network),
             "",
         ])
 
@@ -543,8 +548,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "      timeout: 5s",
                 "      start_period: 30s",
                 "      retries: 3",
-                "    networks:",
-                "      - env-network",
+                *_network_lines("env-network", *([] if wc.frontend_image else sites_network)),
                 "",
             ])
             if not wc.frontend_image:
@@ -555,8 +559,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "    depends_on:",
                 f"      {backend_name}:",
                 "        condition: service_healthy",
-                "    networks:",
-                "      - env-network",
+                *_network_lines("env-network", *sites_network),
                 "",
             ])
 
@@ -585,6 +588,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             "networks:",
             "  env-network:",
             "    driver: bridge",
+            *(line for network in sites_network for line in (f"  {network}:", "    driver: bridge")),
         ])
         return "\n".join(lines)
 
@@ -759,6 +763,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 image=website_browser_env.docker_image_artifact.image_name,
                 environment_name=website_browser_env.environment_name,
                 card_port=PLAYWRIGHT_MCP_RECORDER_PORT,
+                website_browser=True,
             )
             mcp_servers = list(mcp_servers) + [browser_server]
             mcp_server_images = list(mcp_server_images) + [website_browser_env.docker_image_artifact]
@@ -1596,6 +1601,10 @@ def _why_down(row: dict) -> str | None:
     if health == "unhealthy":
         return "failed its health check"
     return None
+
+
+def _network_lines(*networks: str) -> list[str]:
+    return ["    networks:", *(f"      - {network}" for network in networks)]
 
 
 def _redact_compose_secrets(compose_content: str) -> str:
