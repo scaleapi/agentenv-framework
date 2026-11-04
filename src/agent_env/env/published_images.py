@@ -71,18 +71,19 @@ AGENT_IMAGES = tuple(PublishedImage(f"agentenv-{folder.name}", folder / "Dockerf
 # The example env `a2a-agent validate` deploys, so a remote sandbox pulls its image rather than building it.
 EXAMPLE_IMAGES = (PublishedImage("agentenv-mail-mcp", _EXAMPLES / "mail-mcp" / "envs" / "mail" / "Dockerfile"),)
 # The base computers the computers bundle ships, so a run pulls a base rather than building its desktop.
-COMPUTER_IMAGES = (PublishedImage("agentenv-ubuntu-24.04", _COMPUTERS / "ubuntu-24.04" / "Dockerfile"),)
+COMPUTER_IMAGES = (PublishedImage("agentenv-ubuntu-24.04", _COMPUTERS / "ubuntu-24.04" / "Dockerfile"),
+                   PublishedImage("agentenv-browser-24.04", _COMPUTERS / "browser-24.04" / "Dockerfile"))
 # The shipped bundles' published images, whose requirements keep a protocol floor.
 BUNDLE_IMAGES = AGENT_IMAGES + EXAMPLE_IMAGES + COMPUTER_IMAGES
 # What makes and boots a Linux disk form: the disk tools a build runs on its own platform, and the QEMU launcher.
 DISK_TOOLS_IMAGE = PublishedImage("agentenv-disk-tools", DISK / "tools" / "Dockerfile")
 LAUNCHER_IMAGE = PublishedImage("agentenv-qemu-launcher", DISK / "launcher" / "Dockerfile")
-# Each base computer's disk form: its container form's root filesystem on the boot recipe, at the size its [forms.disk]
-# declares, so a run pulls it rather than building it from the two.
+# Each base computer's disk form, for a base that has one: its container form's root filesystem on the boot recipe, at
+# the size its [forms.disk] declares, so a run pulls it rather than building it from the two.
 DISK_IMAGES = tuple(PublishedImage(
     f"{image.name}-disk", DISK / "boot" / "Dockerfile", (("ROOTFS", image), ("TOOLS", DISK_TOOLS_IMAGE)),
-    (("SIZE_GB", str(tomllib.loads((image.dockerfile.parent / "artifact.toml").read_text())["forms"]["disk"][
-        "min_disk_gb"])),)) for image in COMPUTER_IMAGES)
+    (("SIZE_GB", str(disk["min_disk_gb"])),)) for image in COMPUTER_IMAGES
+    if (disk := tomllib.loads((image.dockerfile.parent / "artifact.toml").read_text())["forms"].get("disk")))
 
 
 def source_tag(digest: str) -> str:
