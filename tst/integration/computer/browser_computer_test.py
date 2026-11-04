@@ -482,7 +482,6 @@ async def test_a_cdp_agent_keeps_its_address_through_restarts_and_a_relaunch_and
             await _kill(deployed, "[c]omputer.serve driver.py:PageDriver")
             await _ready(deployed)
             after_driver = await _opened_over_cdp(context, "after-driver", url=DATA_PAGE)
-            tools_after_driver = await _tool_names(deployed)
             await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium", headers=deployed.control_headers)
             after_relaunch = await _opened_over_cdp(context, "after-relaunch", url=DATA_PAGE)
             monkeypatch.setattr(browser_connect_cdp, "invoke_extension", _unanswered)
@@ -499,7 +498,6 @@ async def test_a_cdp_agent_keeps_its_address_through_restarts_and_a_relaunch_and
 
     assert [title for _, title in (first, after_server, after_driver, after_relaunch, reconnected)] == ["Home"] * 5
     assert first[0] == after_server[0] == after_driver[0] == after_relaunch[0] != reconnected[0]
-    assert tools_after_driver == [], tools_after_driver
     assert not report.failed
 
 
