@@ -192,7 +192,8 @@ async def test_a_start_answers_once_its_recording_has_its_first_frame_however_sl
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(recordings.start("cancelled", "display", None, 10, None, True, None), 0.1)
         retried = await recordings.start("cancelled", "display", None, 10, None, True, None)
-        assert [rid for rid, r in recordings.running.items() if not r.done] == [retried["recording_id"]]
+        running = [r for r in recordings.running.values() if not r.done]
+        assert [r.id for r in running] == [retried["recording_id"]] and running[0].encoder.frames >= 1
         await http.post(END, json={"recording_id": retried["recording_id"]})
 
 

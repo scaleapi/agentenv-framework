@@ -149,7 +149,8 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @capture
     async def grab(self) -> Image:
-        result = await self._call("get_desktop_state", DeviceUnavailable)
+        """The whole display at its size, whose long edge cua-driver caps by default on macOS."""
+        result = await self._call("get_desktop_state", DeviceUnavailable, max_image_dimension=0)
         shot, state = next(c for c in result["content"] if c["type"] == "image"), result["structuredContent"]
         return Image(state["screenshot_width"], state["screenshot_height"], base64.b64decode(shot["data"]), "png")
 

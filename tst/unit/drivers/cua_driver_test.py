@@ -170,7 +170,7 @@ async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_s
 
     assert (size.width, size.height, shot.width, shot.height, shot.mode) == (1280, 800, 1280, 800, "png")
     assert daemon.calls() == [
-        ("get_screen_size", {}), ("get_desktop_state", {}),
+        ("get_screen_size", {}), ("get_desktop_state", {"max_image_dimension": 0}),
         ("click", {"scope": "desktop", "x": 100, "y": 200, "button": "right", "count": 2, "modifier": ["ctrl"]}),
         ("drag", {"scope": "desktop", "from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40, "button": "left",
                   "duration_ms": 300, "modifier": ["shift"]}),

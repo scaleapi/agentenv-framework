@@ -147,7 +147,9 @@ class Recordings:
             raise InvalidArgument("request_id is a non-empty string")
         async with self._lock:
             if request_id in self.started:
-                return self.started[request_id]
+                answer = self.started[request_id]
+                await self._live(self.running.get(answer["recording_id"]))
+                return answer
             hints, grant = self._hints(features, scope, window, fps, max_edge, cursor, upload)
             stopped = [rid for rid, r in self.running.items() if r.done]
             for rid in stopped[:max(0, len(stopped) - KEEP_ENDED)]:  # stopped by itself and never ended
@@ -167,9 +169,15 @@ class Recordings:
             self.started[request_id] = answer
             while len(self.started) > KEEP_STARTED:
                 self.started.popitem(last=False)
+            await self._live(recording)
+            return answer
+
+    @staticmethod
+    async def _live(recording: Optional[_Recording]) -> None:
+        """Wait up to FIRST_FRAME_S for ``recording``, one still running, to have its first frame."""
+        if recording is not None:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(recording.live.wait(), FIRST_FRAME_S)
-            return answer
 
     async def end(self, recording_id: str, upload: Optional[dict], reason: str) -> dict:
         if reason not in REASONS:
