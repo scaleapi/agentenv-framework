@@ -161,6 +161,8 @@ async def test_each_connection_gets_its_own_browser_session_its_own_answers_and_
             refused = await _ask(bob, {"id": 4, "method": "Runtime.evaluate", "sessionId": "b1-c"})
             failed = await _ask(ada, {"id": 5, "method": "Boom"})
             await ada.send(json.dumps({"id": 6, "method": "Hang"}))
+            while ("Hang", "b1") not in pipe.sent:
+                await asyncio.sleep(0.01)
             pipe.emit({"method": "Page.loadEventFired", "sessionId": "b1-c", "params": {}})
             pipe.emit({"method": "Target.targetCreated", "sessionId": "b2", "params": {}})
             pipe.emit({"method": "Page.frameNavigated", "params": {}})
