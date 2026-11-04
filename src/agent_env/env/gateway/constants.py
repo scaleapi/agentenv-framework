@@ -279,7 +279,7 @@ GATEWAY_EXTENSIONS = [
 ]
 TRAFFIC_EXTENSION = {
     "uri": EXT_TRAFFIC_URI,
-    "description": "Traffic (urn:agentenv:traffic/v1): the packets each website's server and frontend containers sent and received, captured by tcpdump in each container's network namespace as rotating classic pcap files. list names each capture file with the container it holds, its size and when it was last written, oldest first; get streams one as application/vnd.tcpdump.pcap. A container's oldest file is overwritten once its rotation is full. Harness control path: with a control token, each call takes it as its bearer.",
+    "description": "Traffic (urn:agentenv:traffic/v1): the packets each website's server and frontend containers sent and received, captured by tcpdump in each container's network namespace, from just after the container starts, as rotating classic pcap files. list names each capture file with the container it holds, its size and when it was last written, oldest first; get streams one as application/vnd.tcpdump.pcap. A container's oldest file is overwritten once its rotation is full. Harness control path: with a control token, each call takes it as its bearer.",
     "params": {"endpoint": "/traffic/captures", "format": "pcap", "methods": {
         TRAFFIC_LIST_OP: {"method": "GET", "endpoint": "/traffic/captures", "request": {"type": "object", "properties": {}}},
         TRAFFIC_GET_OP: {"method": "GET", "endpoint": "/traffic/capture", "request": {"type": "object", "properties": {

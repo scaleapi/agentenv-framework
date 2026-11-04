@@ -1,5 +1,5 @@
 """Collect a website env's traffic captures. A website or multi env deployed with ``capture_traffic`` records every
-packet its websites' containers send and receive as rotating pcap files, which its gateway's card serves as traffic/v1
+packet its websites' containers send and receive, from just after each starts, as rotating pcap files, which its gateway's card serves as traffic/v1
 behind the deploy's control token. ``collect_traffic_capture`` stores each as a FileArtifact and registers them as one
 FileArtifactUniverse, recorded in ``context.metadata[TRAFFIC_KEY][env_id]``. Teardown collects any capturing env a run
 didn't, a retry's rolled-back ones included, before the env closes (``collect_uncollected_captures``), so a capture
