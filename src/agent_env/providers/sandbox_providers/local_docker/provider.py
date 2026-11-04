@@ -39,8 +39,8 @@ from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
-from agent_env.providers.sandbox_providers.disk_launcher import RESET, reset_input
-from agent_env.providers.sandbox_providers.local_docker.cli import docker
+from agent_env.providers.sandbox_providers.disk_launcher import RESET, UNRESETTABLE, reset_input, unresettable
+from agent_env.providers.sandbox_providers.local_docker.cli import DockerFailed, docker
 from agent_env.providers.sandbox_providers.local_docker.disk import kvm_platforms, launcher_args, machine_image
 from agent_env.providers.sandbox_providers.local_docker.relay import relay_image
 from agent_env.providers.sandbox_providers.sandbox import (
@@ -714,9 +714,15 @@ class LocalSandboxProvider(SandboxProvider):
         return sandbox
 
     async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
-        """The launcher in the sandbox's container booting its disk afresh with ``env``."""
-        await asyncio.to_thread(docker, "exec", "-i", sandbox.container_name, *RESET, input=reset_input(env),
-                                timeout=_RESET_SECONDS)
+        """The launcher in the sandbox's container booting its disk afresh with ``env``; refused for a container an
+        agent-env older than reset in place started, before an upgrade."""
+        try:
+            await asyncio.to_thread(docker, "exec", "-i", sandbox.container_name, *RESET, input=reset_input(env),
+                                    timeout=_RESET_SECONDS)
+        except DockerFailed as e:
+            if e.returncode == UNRESETTABLE:
+                raise RuntimeError(unresettable(f"the computer in container {sandbox.container_name}")) from None
+            raise
 
     async def _boot_disk(self, sandbox: LocalSandbox, *, image: str, env: dict[str, str]) -> None:
         """The launcher booting ``image`` as the sandbox's container, its ports published as a container's are."""

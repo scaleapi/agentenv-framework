@@ -9,8 +9,13 @@ ENV_PREFIX = "VM_ENV_"
 #: The launch script's path in the launcher image, its ENTRYPOINT, which boots the computer; a provider that clears the
 #: ENTRYPOINT runs it as the command.
 LAUNCH = "/usr/local/bin/launch"
-#: Its command that boots the computer afresh, with the environment ``reset_input`` gives on its stdin.
-RESET = (LAUNCH, "reset")
+#: Where the launcher keeps what a reset and its boot loop share: a launcher older than reset in place has none.
+CONTROL = "/var/lib/agentenv-vm/control"
+#: The status ``RESET`` ends with in a sandbox whose launcher is older than reset in place.
+UNRESETTABLE = 75
+#: The command that boots the computer afresh, with the environment ``reset_input`` gives on its stdin: the launcher's
+#: ``launch reset``, which a launcher older than it would take for a second boot, so it isn't run there.
+RESET = ("sh", "-c", f"[ -d {CONTROL} ] || exit {UNRESETTABLE}; exec {LAUNCH} reset")
 
 
 def launcher_variables(ports: list[int], env: dict[str, str], cpu: float, memory: int) -> dict[str, str]:
@@ -23,6 +28,11 @@ def launcher_variables(ports: list[int], env: dict[str, str], cpu: float, memory
 def reset_input(env: dict[str, str]) -> str:
     """What ``RESET`` reads on its stdin: the computer's new environment ``env``, a variable a line."""
     return "".join(f"{name}={value}\n" for name, value in _computer_variables(env).items())
+
+
+def unresettable(computer: str) -> str:
+    """Why ``computer``, booted by a launcher older than reset in place, isn't reset."""
+    return f"{computer} was booted by an older agent-env, whose launcher can't reset it in place; redeploy it"
 
 
 def _computer_variables(env: dict[str, str]) -> dict[str, str]:

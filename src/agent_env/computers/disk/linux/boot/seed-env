@@ -1,0 +1,34 @@
+# seed-env, sourced by init: the deploy's environment from the launcher's NoCloud seed, as
+# agentenv_protocol.computer.seed defines it. This init reads the seed versions in $reads; a seed carries the ones its
+# launcher writes, from the one its agentenv-seed-oldest names, 1 without it.
+reads=1
+
+# decode VALUE: VALUE's base64 decoded into $decoded, its trailing newlines kept, which $(...) alone would drop.
+decode() { decoded=$(echo "$1" | base64 -d; echo .); decoded=${decoded%.}; }
+
+# seed_environment DIR: export each variable of the newest version this init reads that the seed mounted at DIR
+# carries; with none, return 1, the reason in $refused.
+seed_environment() {
+    oldest=$(cat "$1/agentenv-seed-oldest" 2>/dev/null || echo 1)
+    newest=${reads##* }
+    case "$oldest" in ''|*[!0-9]*) oldest=1 ;; esac
+    if [ "$oldest" -gt "$newest" ]; then
+        refused="this disk reads seed v$newest; this agent-env writes v$oldest or later;"
+        refused="$refused recompose it with agent-env env build"
+        return 1
+    fi
+    file=
+    for version in $reads; do
+        [ "$version" -ge "$oldest" ] || continue
+        name=user-data
+        [ "$version" -gt 1 ] && name=user-data.v$version
+        [ -f "$1/$name" ] && file=$1/$name
+    done
+    [ -n "$file" ] || return 0
+    while read -r line; do
+        key=${line%%=*} value=${line#*=}
+        case "$key" in ''|\#*) continue ;; esac
+        decode "$value"
+        export "$key=$decoded"
+    done < "$file"
+}

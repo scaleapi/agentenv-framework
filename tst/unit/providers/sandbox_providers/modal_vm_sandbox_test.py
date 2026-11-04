@@ -416,10 +416,11 @@ async def test_terminate_sandbox_terminates_a_vm_by_id_and_counts_one_modal_no_l
 
 # ── a computer's disk form: the launcher as the sandbox's image, under nested virtualization ──
 
+import shlex  # noqa: E402
 from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
-from agent_env.providers.sandbox_providers.disk_launcher import launcher_variables  # noqa: E402
+from agent_env.providers.sandbox_providers.disk_launcher import RESET, launcher_variables  # noqa: E402
 
 DISK_IMAGE = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
 
@@ -511,7 +512,7 @@ async def test_a_reset_runs_the_launchers_reset_in_the_sandbox_with_the_new_envi
     await ModalVmSandboxProvider().reset_vm(sandbox, image=DISK_IMAGE, env={"ENVIRONMENT_NAME": "again"})
     sandbox._exec_with_stdin = AsyncMock(return_value=(1, "", "launch reset: no computer is running here\n"))
 
-    assert sent == [("/usr/local/bin/launch reset", b"VM_ENV_ENVIRONMENT_NAME=YWdhaW4=\n")]
+    assert sent == [(shlex.join(RESET), b"VM_ENV_ENVIRONMENT_NAME=YWdhaW4=\n")]
     with pytest.raises(RuntimeError, match="didn't boot its disk afresh .exit 1.: launch reset: no computer is running"):
         await ModalVmSandboxProvider().reset_vm(sandbox, image=DISK_IMAGE, env={})
 

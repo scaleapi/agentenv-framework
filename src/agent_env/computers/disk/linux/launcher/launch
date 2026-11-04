@@ -82,9 +82,9 @@ boot() {
     rm -rf "$work"
     mkdir -p "$work"
     qemu-img create -q -f qcow2 -b "$disk" -F qcow2 "$work/disk.qcow2"
-    seed "$work"
+    seed "$work/seed"
     mkfs.vfat -C -n CIDATA "$work/seed.img" 2048 >/dev/null
-    mcopy -i "$work/seed.img" "$work/user-data" "$work/meta-data" ::/
+    mcopy -i "$work/seed.img" "$work/seed/"* ::/
     if [ "$arch" = amd64 ]; then
         cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
     else

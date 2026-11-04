@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         linux-image-virtual busybox-static kmod zstd cpio systemd-boot-efi systemd-ukify python3-pefile \
     && rm -rf /var/lib/apt/lists/*
-COPY init udhcpc.script uki.sh /build/
+COPY init seed-env udhcpc.script uki.sh /build/
 RUN sh /build/uki.sh /uki
 
 FROM scratch AS uki

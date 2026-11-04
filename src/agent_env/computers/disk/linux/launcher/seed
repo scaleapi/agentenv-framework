@@ -1,10 +1,13 @@
 #!/bin/sh
-# seed DIR: the NoCloud seed's files for the computer launch boots, in DIR: user-data holding each VM_ENV_<NAME> variable
-# as NAME and its value, base64'd as the variable already holds it, a line each, as the disk's init reads them, and
-# meta-data naming the instance. A base64 value has no newline, so no line env prints can pass for another variable.
+# seed DIR: the NoCloud seed's files for the computer launch boots, in DIR, as agentenv_protocol.computer.seed defines
+# them: version 1's user-data, holding each VM_ENV_<NAME> variable as NAME and its value, base64'd as the variable
+# already holds it, a line each in byte order; agentenv-seed-oldest, the oldest version written; and meta-data naming
+# the instance. A base64 value has no newline, so no line env prints can pass for another variable.
 set -eu
+mkdir -p "$1"
 {
     echo "#agentenv-environment"
-    env | sed -n 's/^VM_ENV_\([A-Za-z_][A-Za-z0-9_]*\)=\([A-Za-z0-9+/=]*\)$/\1=\2/p' | sort
+    env | sed -n 's/^VM_ENV_\([A-Za-z_][A-Za-z0-9_]*\)=\([A-Za-z0-9+/=]*\)$/\1=\2/p' | LC_ALL=C sort
 } > "$1/user-data"
+echo 1 > "$1/agentenv-seed-oldest"
 printf 'instance-id: %s\nlocal-hostname: computer\n' "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" > "$1/meta-data"
