@@ -22,6 +22,7 @@ from starlette.testclient import TestClient
 from agentenv_protocol import DataPart, add_data, get_data, reset_data
 from agentenv_protocol.website import (
     SESSION_COOKIE,
+    SESSION_SECRET_ENV,
     UNIVERSE_NOW_HEADER,
     WEBSITE_EXTENSION_URI,
     WEBSITE_READY_OP,
@@ -314,21 +315,28 @@ def test_the_acting_user_is_signed_in_until_a_session_says_else(client: TestClie
     assert client.get("/api/session").json()["user"] == "alice"
 
 
-def test_the_session_cookie_expires_when_the_session_does(client: TestClient) -> None:
-    from email.utils import parsedate_to_datetime
+def test_the_session_cookie_lasts_a_max_age_not_until_an_absolute_time(client: TestClient) -> None:
+    attributes = [a.strip().lower() for a in client.get("/api/session").headers["set-cookie"].split(";")[1:]]
+    assert f"max-age={7 * 24 * 3600}" in attributes and not any(a.startswith("expires") for a in attributes)
 
-    cookie = client.get("/api/session").headers["set-cookie"]
-    expires = next(a.split("=", 1)[1] for a in cookie.split(";") if a.strip().lower().startswith("expires="))
-    ahead = parsedate_to_datetime(expires) - datetime.datetime.now(datetime.timezone.utc)
-    assert datetime.timedelta(days=7) - datetime.timedelta(minutes=1) < ahead <= datetime.timedelta(days=7)
+
+def test_a_site_restarted_under_its_deploys_secret_keeps_its_sessions(dist: Path, monkeypatch) -> None:
+    monkeypatch.setenv(SESSION_SECRET_ENV, "the-deploys-secret")
+    before, after = (site(dist)() for _ in range(2))
+    before.data = after.data = copy.deepcopy(SEED)
+    browser = TestClient(before.create_app())
+    browser.post("/api/sign-in", json={"user": "bob"})
+    restarted = TestClient(after.create_app(), cookies={SESSION_COOKIE: browser.cookies[SESSION_COOKIE]})
+    assert restarted.get("/api/session").json()["user"] == "bob"
 
 
 def test_the_session_operation_mints_cookies_for_a_user_or_signed_out(shop: WebsiteEnvironment) -> None:
     client = TestClient(shop.create_app())
     minted = client.post("/agentenv/ext/website/session", json={"user": "bob"}).json()
-    assert minted["user"] == "bob" and minted["expires_at"].endswith("Z")
+    assert minted.keys() == {"cookies", "local_storage"} and minted["local_storage"] == []
     (cookie,) = minted["cookies"]
-    assert cookie["name"] == SESSION_COOKIE and "domain" not in cookie and cookie["path"] == "/"
+    assert cookie["name"] == SESSION_COOKIE and cookie["path"] == "/" and cookie["max_age"] == 7 * 24 * 3600
+    assert "domain" not in cookie and "expires" not in cookie
     browser = TestClient(shop.asgi, cookies={SESSION_COOKIE: cookie["value"]})
     assert browser.get("/api/session").json()["user"] == "bob"
     signed_out = client.post("/agentenv/ext/website/session", json={}).json()["cookies"][0]["value"]

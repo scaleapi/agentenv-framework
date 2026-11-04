@@ -19,13 +19,13 @@ from .environment import (
 from .errors import ApiError, BadRequest, Conflict, Forbidden, NotFound, Unauthorized
 from .readiness import READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness, env_readiness, website_readiness
 from .routes import ROLE_KEY_ENV, ROLE_KEY_HEADER, ApiContext, ApiRoute, api, reserved_path
-from .session import SESSION_COOKIE, SessionSigner
+from .session import SESSION_COOKIE, SESSION_SECRET_ENV, SessionSigner
 
 __all__ = [
     "WebsiteEnvironment", "WebsiteDeclaration", "website", "api", "ApiContext", "ApiRoute", "ready_check",
     "ApiError", "BadRequest", "Unauthorized", "Forbidden", "NotFound", "Conflict",
     "UniverseClock", "ClockUnavailable", "SessionSigner", "reserved_path",
     "WEBSITE_EXTENSION_URI", "CLOCK_EXTENSION_URI", "UNIVERSE_NOW_HEADER", "DEFAULT_HEALTH_PATH", "SESSION_PATH",
-    "SESSION_COOKIE", "ROLE_KEY_ENV", "ROLE_KEY_HEADER",
+    "SESSION_COOKIE", "SESSION_SECRET_ENV", "ROLE_KEY_ENV", "ROLE_KEY_HEADER",
     "WEBSITE_READY_OP", "READY_TIMEOUT_S", "WebsiteReadiness", "website_readiness", "env_readiness",
 ]

@@ -21,7 +21,7 @@ from starlette.testclient import TestClient
 import pytest
 import uvicorn
 import yaml
-from agentenv_protocol.website import WebsiteReadiness
+from agentenv_protocol.website import SESSION_SECRET_ENV, WebsiteReadiness
 from mcp.server.fastmcp import FastMCP
 from pytest_socket import enable_socket
 
@@ -1489,6 +1489,17 @@ def test_website_backend_gets_both_service_name_and_environment_name():
     frontend = _service_block(compose, f"{_SITE_NAME}-website-frontend")
     assert _env_values(frontend, "SERVICE_NAME") == []
     assert _env_values(frontend, "ENVIRONMENT_NAME") == []
+
+
+def test_each_website_backend_gets_a_session_secret_of_its_own_which_the_logged_compose_masks():
+    compose = _compose_for([], website_configs=[
+        WebsiteConfig(backend_image="ecr/shop-be:1", frontend_image=None, environment_name="shop"),
+        WebsiteConfig(backend_image="ecr/notes-be:1", frontend_image=None, environment_name="notes"),
+    ])
+    (shop,) = _env_values(_service_block(compose, "shop-website-backend"), SESSION_SECRET_ENV)
+    (notes,) = _env_values(_service_block(compose, "notes-website-backend"), SESSION_SECRET_ENV)
+    assert re.fullmatch(r"[0-9a-f]{64}", shop) and re.fullmatch(r"[0-9a-f]{64}", notes) and shop != notes
+    assert shop not in _redact_compose_secrets(compose) and notes not in _redact_compose_secrets(compose)
 
 
 def test_injected_names_are_the_environment_name_not_the_image_or_container_name():

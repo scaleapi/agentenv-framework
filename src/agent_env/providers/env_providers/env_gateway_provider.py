@@ -7,6 +7,7 @@ import functools
 import json
 import logging
 import re
+import secrets
 import shlex
 import time
 from collections import Counter
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
-from agentenv_protocol.website import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, website_readiness
+from agentenv_protocol.website import SESSION_SECRET_ENV, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, website_readiness
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
@@ -533,6 +534,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - SERVICE_NAME={wc.environment_name}",
                 f"      - ENVIRONMENT_NAME={wc.environment_name}",
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
+                f"      - {SESSION_SECRET_ENV}={secrets.token_hex(32)}",
                 "      - PYTHONUNBUFFERED=1",
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'

@@ -72,7 +72,7 @@ def test_an_sdk_site_passes_every_check(sdk_site: TestClient) -> None:
         "parts"][0]["data"] == {"notes": [{"id": 1, "text": "hello"}]}
 
 
-def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock: bool = True,
+def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, dated_cookie: bool = False, clock: bool = True,
                  clock_ops_first: tuple[str, ...] = (),
                  leak_redirect: bool = False, stamp_rpc: bool = True, reset_keeps: bool = False,
                  get_fails_after_reset: bool = False, rpc_reply: tuple[int, dict] | None = None,
@@ -93,7 +93,7 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, clock:
     async def page(request: Request) -> Response:
         host = request.headers["host"] if leak_host else request.headers.get("x-forwarded-host", request.headers["host"])
         response = stamp(HTMLResponse(f'<html><a href="https://{host}/x">x</a></html>'))
-        response.set_cookie("s", "1", domain="example.com" if domain_cookie else None)
+        response.set_cookie("s", "1", domain="example.com" if domain_cookie else None, expires=3600 if dated_cookie else None)
         return response
 
     async def health(request: Request) -> Response:
@@ -211,6 +211,11 @@ def test_a_server_breaking_the_contract_fails_those_checks() -> None:
     assert results["card"] == results["health"] == results["data_plane"] == "passed"
 
 
+def test_a_cookie_with_an_absolute_expires_warns_without_failing_the_run() -> None:
+    cookies = {r.name: r for r in conformance.check("http://testserver", client=TestClient(_handwritten(dated_cookie=True)))}["cookies"]
+    assert (cookies.status, cookies.passed) == ("warned", True) and cookies.detail.endswith(": s")
+
+
 def test_the_forwarded_check_follows_no_redirect_and_reads_its_location(sdk_site: TestClient) -> None:
     forwarded = {r.name: r for r in conformance.check("http://testserver", client=sdk_site)}["forwarded"]
     assert forwarded.status == "passed" and "/api/notes/" in forwarded.detail
@@ -313,10 +318,12 @@ def test_a_server_with_no_card_health_or_header_fails_them() -> None:
 
 def test_main_prints_each_check_and_exits_by_outcome(monkeypatch, capsys) -> None:
     monkeypatch.setattr(conformance, "check", lambda url, **options: [conformance.Result("card", "passed"),
+                                                                       conformance.Result("cookies", "warned", "dated"),
                                                                        conformance.Result("clock", "failed", "late")])
     assert conformance.main(["http://site"]) == 1
     printed = capsys.readouterr().out
-    assert "PASS card" in printed and "FAIL clock: late" in printed
+    assert "PASS card" in printed and "WARN cookies: dated" in printed and "FAIL clock: late" in printed
+    assert "2 passed, warned or skipped, 1 failed" in printed
 
 
 def test_main_exits_2_when_the_server_cannot_be_reached(capsys) -> None:

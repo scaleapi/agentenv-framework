@@ -36,7 +36,7 @@ from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, ClockUnavailable, U
 from .errors import ApiError, NotFound
 from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 from .routes import ApiContext, ApiRoute, endpoint, error_response, openapi, openapi_path, request_role, reserved_path, routes_of
-from .session import SESSION_COOKIE, SessionSigner, expires_at
+from .session import SESSION_COOKIE, SessionSigner
 
 DEFAULT_HEALTH_PATH = "/api/health"
 SESSION_PATH = "/api/session"
@@ -181,8 +181,9 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @extension(WEBSITE_EXTENSION_URI, op="openapi", method="GET", description=(
         "A site's server: domains, its health path and its @api routes by name; openapi returns the OpenAPI document "
-        "of its routes, ready whether the site is usable now and why not, and session the cookies a browser adds to "
-        "start signed in as user, or signed out without one."))
+        "of its routes, ready whether the site is usable now and why not, and session the storage state a browser adds "
+        "to start signed in as user, or signed out without one: {cookies, local_storage}, each cookie's lifetime a "
+        "max_age."))
     async def _website_openapi(self) -> dict:
         name = self._application.environment_card.name if self._application is not None else type(self).__name__
         return openapi(name, self.routes())
@@ -196,8 +197,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @extension(WEBSITE_EXTENSION_URI, op="session")
     async def _website_session(self, user: Optional[str] = None) -> dict:
-        cookie = self._session_signer().cookie(user)
-        return {"user": user, "cookies": [cookie], "expires_at": expires_at(cookie["expires"])}
+        return {"cookies": [self._session_signer().cookie(user)], "local_storage": []}
 
     async def _not_ready(self) -> list[str]:
         return [check.__name__ for check, _marker in _marked_members(self, _READY_ATTR) if not await _ready(check)]

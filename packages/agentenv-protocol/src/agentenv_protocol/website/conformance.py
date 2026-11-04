@@ -1,12 +1,13 @@
 """Check a running site's server against ``urn:agentenv:website/v1``, whatever it's written in:
-``python -m agentenv_protocol.website.conformance <url>`` prints each check and exits 1 when one failed, 2 when the
-server couldn't be reached. Everything goes over HTTP: the card, ``/`` under a made-up host, readiness by the card's
+``python -m agentenv_protocol.website.conformance <url>`` prints each check and exits 1 when one failed (a warning
+doesn't), 2 when the server couldn't be reached. Everything goes over HTTP: the card, ``/`` under a made-up host, readiness by the card's
 ``website/v1`` ``ready``, whose answer must be a ``WebsiteReadiness`` (by the declared health path, deprecated, for a
 card without it), ``X-Universe-Now`` on every answer the other checks got, a data-plane round trip at the card's ``url``
 (data/get, data/reset, data/get, which no longer returns the exported data, data/add of what the first data/get
 returned, data/get again), ``clock/v1``'s
 ``sync_time`` against a clock the checker serves, and the forwarded headers wherever an answer shows them, on ``/`` and
-on a GET route with its trailing slash toggled, which a server may redirect.
+on a GET route with its trailing slash toggled, which a server may redirect, and the cookies those answers set:
+none tied to a domain, and a warning for one whose lifetime is an absolute ``Expires`` with no ``Max-Age``.
 
 Every request goes to the server under check: a card's path or URL naming another scheme, host or port fails the check
 that would have used it, with nothing sent there. The round trip leaves the server's data as it found it, adding the
@@ -37,7 +38,7 @@ from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, iso, parse_time
 from .environment import DEFAULT_HEALTH_PATH
 from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 
-Status = Literal["passed", "failed", "skipped"]
+Status = Literal["passed", "failed", "skipped", "warned"]
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
 CLOCK_SLACK_S = 120
 
@@ -242,10 +243,19 @@ class _Checker:
         cookies = [c for r in self.responses for c in r.headers.get_list("set-cookie")]
         if not cookies:
             return "skipped", "no answer set a cookie"
-        scoped = [c.split("=", 1)[0] for c in cookies if any(a.strip().lower().startswith("domain=") for a in c.split(";"))]
+        scoped = sorted({c.split("=", 1)[0] for c in cookies if "domain" in _attributes(c)})
         if scoped:
-            return "failed", f"cookies tied to a domain: {', '.join(sorted(set(scoped)))}"
+            return "failed", f"cookies tied to a domain: {', '.join(scoped)}"
+        absolute = sorted({c.split("=", 1)[0] for c in cookies if "expires" in _attributes(c) and "max-age" not in _attributes(c)})
+        if absolute:
+            return "warned", (f"cookies with an absolute Expires and no Max-Age, which a browser on another clock "
+                              f"misjudges: {', '.join(absolute)}")
         return "passed", f"{len(cookies)} cookie(s), none tied to a domain"
+
+
+def _attributes(set_cookie: str) -> set[str]:
+    """The attribute names of a Set-Cookie header, lowercased."""
+    return {a.split("=", 1)[0].strip().lower() for a in set_cookie.split(";")[1:]}
 
 
 class OffServer(ValueError):
@@ -322,7 +332,7 @@ def _clock_server(host: str) -> Iterator[tuple[str, Callable[[], datetime.dateti
         server.server_close()
 
 
-_MARK = {"passed": "PASS", "failed": "FAIL", "skipped": "----"}
+_MARK = {"passed": "PASS", "failed": "FAIL", "skipped": "----", "warned": "WARN"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -340,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     for result in results:
         print(f"{_MARK[result.status]} {result.name}{': ' + result.detail if result.detail else ''}")
     failed = sum(not r.passed for r in results)
-    print(f"{args.url}: {len(results) - failed} passed or skipped, {failed} failed")
+    print(f"{args.url}: {len(results) - failed} passed, warned or skipped, {failed} failed")
     return 1 if failed else 0
 
 

@@ -9,7 +9,6 @@ loop."""
 from __future__ import annotations
 
 import dataclasses
-import datetime
 import hmac
 import inspect
 import json
@@ -29,7 +28,7 @@ from ..agent_env_environment import _coerce_scalar, _maybe_await, _schema_for_an
 from ..tool_context import DEFAULT_ROLE, caller_from_request
 from ..types import RPC_PATH, WELL_KNOWN_PATH
 from .errors import ApiError, BadRequest, Forbidden
-from .session import SESSION_COOKIE, SessionSigner
+from .session import SESSION_COOKIE, SESSION_TTL_S, SessionSigner
 
 logger = logging.getLogger(__name__)
 
@@ -149,14 +148,12 @@ class ApiContext:
         self._set_session(None)
 
     def _set_session(self, user: str | None) -> None:
-        value, expires = self._signer.encode(user)
-        self._set_cookie.append((value, expires))
+        self._set_cookie.append(self._signer.encode(user))
         self.user, self.session = user, {"user": user}
 
     def apply(self, response: Response) -> Response:
-        for value, expires in self._set_cookie:
-            at = datetime.datetime.fromtimestamp(expires, datetime.timezone.utc)
-            response.set_cookie(SESSION_COOKIE, value, expires=at, path="/", httponly=True, samesite="lax")
+        for value in self._set_cookie:
+            response.set_cookie(SESSION_COOKIE, value, max_age=SESSION_TTL_S, path="/", httponly=True, samesite="lax")
         return response
 
 
