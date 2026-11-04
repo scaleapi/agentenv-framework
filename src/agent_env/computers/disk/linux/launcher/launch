@@ -5,7 +5,8 @@
 #   VM_DISK        the disk, /disk/disk.img by default; one ending .zst is expanded onto this machine's disk first
 #   VM_ENV_<NAME>  the computer's variable NAME, its value base64'd, for its NoCloud seed (CIDATA; see seed)
 #   VM_PORTS       guest TCP ports, each served on the same port here by socat, whose listen backlog takes a burst of
-#                  connections, in front of QEMU's forward on 127.0.0.1 at the port plus 10000, whose backlog is 1
+#                  connections, in front of QEMU's forward on 127.0.0.1 at the port plus 10000, whose backlog is 1;
+#                  socat retries a connection that forward drops every half second, not on the kernel's SYN backoff
 #   VM_ARCH        the disk's arch, amd64 or arm64; this machine's by default
 #   VM_CPUS, VM_MEMORY_MB   its size: 2 and 4096 by default
 #   VM_REQUIRE_KVM when set, fail rather than emulate where KVM can't run the disk
@@ -64,7 +65,7 @@ for port in ${VM_PORTS:-}; do
         exit 2
     fi
     forwards="$forwards,hostfwd=tcp:127.0.0.1:$behind-:$port"
-    socat "TCP-LISTEN:$port,fork,reuseaddr,backlog=1024" "TCP:127.0.0.1:$behind" &
+    socat "TCP-LISTEN:$port,fork,reuseaddr,backlog=1024" "TCP:127.0.0.1:$behind,connect-timeout=0.5,retry=600,interval=0.05" &
     fronts+=("$!")
 done
 trap 'kill "${fronts[@]}" 2>/dev/null || true' EXIT

@@ -156,14 +156,16 @@ def _logged(calls: Path, what: str, count: int = 1) -> list[str]:
 
 
 def test_the_launcher_serves_each_port_through_socat_in_front_of_qemus_forward_on_loopback(launcher):
-    """socat's listen backlog takes a burst of connections, which QEMU's own forward, with a backlog of 1, drops."""
+    """socat's listen backlog takes a burst of connections, which QEMU's own forward, with a backlog of 1, drops, and
+    socat retries its connection to that forward rather than wait out the kernel's SYN backoff."""
     launch, calls = launcher
 
     running = launch(VM_PORTS="18765 6080")
 
+    retry = "connect-timeout=0.5,retry=600,interval=0.05"
     assert sorted(_logged(calls, "socat", 2)) == [
-        "socat TCP-LISTEN:18765,fork,reuseaddr,backlog=1024 TCP:127.0.0.1:28765",
-        "socat TCP-LISTEN:6080,fork,reuseaddr,backlog=1024 TCP:127.0.0.1:16080"]
+        f"socat TCP-LISTEN:18765,fork,reuseaddr,backlog=1024 TCP:127.0.0.1:28765,{retry}",
+        f"socat TCP-LISTEN:6080,fork,reuseaddr,backlog=1024 TCP:127.0.0.1:16080,{retry}"]
     (qemu,) = _logged(calls, "qemu-system-x86_64")
     assert "-netdev user,id=net,hostfwd=tcp:127.0.0.1:28765-:18765,hostfwd=tcp:127.0.0.1:16080-:6080 " in qemu
     assert "-machine q35,accel=tcg" in qemu or "-machine q35,accel=kvm" in qemu
