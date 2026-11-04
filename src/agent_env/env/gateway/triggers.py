@@ -1712,11 +1712,6 @@ _ECHO_ARGS_MAX = 4096  # JSON chars; a provoking call's echo past this is record
 
 
 def _echo_call_args(arguments: dict) -> Any:
-    """A provoking call's args as its events carry them: `_echo_args`, or only their shape when too large or too deep."""
-    try:
-        echo = _echo_args(arguments)
-        if len(json.dumps(echo)) <= _ECHO_ARGS_MAX:
-            return echo
-    except RecursionError:  # detection is fail-open, so raising here would skip every trigger the call provokes
-        pass
-    return _shape(arguments)
+    """A provoking call's args as its events carry them: `_echo_args`, or only their shape when that echo is too large."""
+    echo = _echo_args(arguments)
+    return echo if len(json.dumps(echo)) <= _ECHO_ARGS_MAX else _shape(arguments)

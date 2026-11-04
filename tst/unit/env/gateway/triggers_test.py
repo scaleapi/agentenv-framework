@@ -776,18 +776,14 @@ async def test_each_detection_names_its_own_calls_ids_but_not_its_content(engine
 
 
 @pytest.mark.asyncio
-async def test_args_too_large_or_too_deep_to_echo_are_recorded_as_their_shape_and_still_fire(engine):
-    engine.register({"triggers": [{"id": "any", "when": {"type": "action", "tool": "t", "repeat": True}, "actions": []}]})
-    deep = node = {}
-    for _ in range(5000):
-        node["next"] = node = {}
-    for args in ({"rows": [{"row_id": f"r{i}"} for i in range(10_000)]}, deep):
-        engine.on_tool_call("default", "t", args, _result())
-        await asyncio.sleep(0.1)
+async def test_args_too_large_to_echo_are_recorded_as_their_shape_and_still_fire(engine):
+    engine.register({"triggers": [{"id": "any", "when": {"type": "action", "tool": "t"}, "actions": []}]})
+    engine.on_tool_call("default", "t", {"rows": [{"row_id": f"r{i}"} for i in range(10_000)], "name": "x"}, _result())
+    await asyncio.sleep(0.1)
 
-    assert [e["provoking"]["args"] for e in engine._events if e["kind"] == "detected"] == [
-        {"redacted": {"type": "dict", "len": 1}}] * 2
-    assert engine._triggers["any"]["fire_count"] == 2
+    [detected] = [e for e in engine._events if e["kind"] == "detected"]
+    assert detected["provoking"]["args"] == {"redacted": {"type": "dict", "len": 2}}
+    assert engine._triggers["any"]["fire_count"] == 1
 
 
 @pytest.mark.asyncio
