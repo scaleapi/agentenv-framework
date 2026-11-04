@@ -458,13 +458,16 @@ async def run_opencode(
     # has no session_id, so OpenCode mints one, which the caller captures from the
     # result and passes back on the next turn.
     #
-    # The message is a variadic positional and --file is an array flag; if
-    # --file comes before the message, yargs greedily swallows the message into
-    # the file array ("File not found: <prompt>"). So: message first, files last.
+    # The prompt goes on stdin, not argv: Linux caps one argument at 128 KiB (MAX_ARG_STRLEN), and a longer prompt
+    # fails exec with E2BIG before the CLI starts. `opencode run` reads stdin when it isn't a TTY and sends it
+    # unchanged. A positional message it would put before stdin ("<message>\n<stdin>"), quoted if it has a space, so
+    # there is none.
+    #
+    # Were a positional message added, it must come before --file: the message is a variadic positional and --file
+    # is an array flag, so yargs would swallow a message after --file into the file array ("File not found: <prompt>").
     cmd = ["opencode", "run", "--format", "json", "--model", f"litellm/{model}", "--dir", workspace]
     if session_id:
         cmd += ["-s", session_id]
-    cmd.append(prompt)
     for path in (attachment_paths or []):
         cmd += ["--file", path]
 
@@ -480,7 +483,7 @@ async def run_opencode(
 
     proc = await _started(asyncio.create_subprocess_exec(
         *cmd,
-        stdin=asyncio.subprocess.DEVNULL,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -489,7 +492,7 @@ async def run_opencode(
     _RUNNING.add(proc)
     parser = _EventParser(event_callback)
     try:
-        stderr = await asyncio.wait_for(_stream_cli(proc, parser.on_line), timeout=timeout_s)
+        stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), parser.on_line), timeout=timeout_s)
     except asyncio.CancelledError:
         _kill_cli(proc)
         await _reap(proc)
@@ -527,12 +530,25 @@ async def run_opencode(
 _STDOUT_READ_BYTES = 64 * 1024
 
 
-async def _stream_cli(proc, on_line: Callable[[str], None]) -> bytes:
-    """``proc.communicate()``, handing ``on_line`` each stdout line as it arrives.
+async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -> bytes:
+    """``proc.communicate(stdin_data)``, handing ``on_line`` each stdout line as it arrives.
 
     Lines are split as ``stdout.decode(errors="replace").splitlines()`` splits
     the whole output, so they are the same lines; a line has no length limit,
     as with ``communicate``. Returns stderr once the CLI has exited."""
+
+    async def feed_stdin() -> None:
+        try:
+            proc.stdin.write(stdin_data)
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # A CLI that exits before reading its input, as on a config it rejects, closes stdin; its stderr says why.
+            pass
+        finally:
+            proc.stdin.close()
+
+    # Fed while stdout is read, so a CLI that prints before it has read its whole input never deadlocks the turn.
+    stdin_task = asyncio.create_task(feed_stdin())
     stderr_task = asyncio.create_task(proc.stderr.read())
     try:
         # A line's pieces, joined once when its newline arrives: re-joining them on every read
@@ -548,10 +564,12 @@ async def _stream_cli(proc, on_line: Callable[[str], None]) -> bytes:
             pieces.append(rest)
         for line in b"".join(pieces).decode(errors="replace").splitlines():
             on_line(line)
+        await stdin_task
         stderr = await stderr_task
         await proc.wait()
         return stderr
     finally:
+        stdin_task.cancel()
         stderr_task.cancel()
 
 
