@@ -24,6 +24,8 @@ from agentenv_protocol import browser_cdp  # noqa: E402
 from agentenv_protocol.browser_cdp import NO_SESSION, Relay, Tokens  # noqa: E402
 from agentenv_protocol.computer import Launch, Platform, Ready, app, computer_app, linux  # noqa: E402
 from agentenv_protocol.computer.app import APP_SETTINGS_ENV  # noqa: E402
+from agentenv_protocol.computer.app_runtime import AppReadiness  # noqa: E402
+from agentenv_protocol.computer.errors import DeviceUnavailable  # noqa: E402
 from agentenv_protocol.website_browser import SITE_PROXY_ENV, WebsiteBrowserEnvironment  # noqa: E402
 
 FORWARDED = {"x-forwarded-host": "computer.test:443", "x-forwarded-proto": "https",
@@ -199,16 +201,40 @@ async def test_a_client_that_falls_too_far_behind_is_closed_and_what_waited_for_
     assert "closed_at" in relay.connections[0] and ("Target.detachFromTarget", None) in pipe.sent
 
 
-@pytest.mark.asyncio
-async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and_refuse_other_tokens_or_a_gone_browser(
-        monkeypatch, tmp_path):
+def _browser(monkeypatch, tmp_path) -> Browser:
+    """The browser alone, in ``tmp_path``."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(app, "detect", lambda: Platform(os="linux", display="none"))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
     monkeypatch.setenv(SITE_PROXY_ENV, "http://127.0.0.1:3128")
     monkeypatch.delenv(APP_SETTINGS_ENV, raising=False)
-    browser = Browser()
+    return Browser()
+
+
+@pytest.mark.asyncio
+async def test_cdp_waits_for_what_computer_app_ready_reports_up_to_its_declared_ready_timeout(monkeypatch, tmp_path):
+    browser = _browser(monkeypatch, tmp_path)
+    answers = iter([False, False, True])
+
+    async def readiness():
+        return AppReadiness(ready=next(answers, False), problems=[], launched=True, waited_s=0, timeout_s=30)
+
+    monkeypatch.setattr(browser._computer_app, "readiness", readiness)
+    monkeypatch.setattr("agentenv_protocol.website_browser.READY_POLL_S", 0.01)
+    timeout_s = browser._computer_app.timeout_s
+    await browser._until_ready()
+    browser._computer_app.timeout_s = 0.05
+    with pytest.raises(DeviceUnavailable):
+        await browser._until_ready()
+
+    assert timeout_s == 30
+
+
+@pytest.mark.asyncio
+async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and_refuse_other_tokens_or_a_gone_browser(
+        monkeypatch, tmp_path):
+    browser = _browser(monkeypatch, tmp_path)
 
     async def ready():
         return None

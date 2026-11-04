@@ -888,11 +888,11 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         await self.relay.serve(websocket, address.user)
 
     async def _until_ready(self) -> None:
-        """Back once it's ready, or DeviceUnavailable after its launch's ready timeout."""
-        ready = self.launch.ready if self.launch is not None else None
-        timeout_s = ready.timeout_s if ready is not None else computer_app.DEFAULT_TIMEOUT_S
+        """Back once it's ready, as ``computer-app/v1``'s ``ready`` says, or DeviceUnavailable after its ready
+        timeout."""
+        timeout_s = self._computer_app.timeout_s
         deadline = asyncio.get_running_loop().time() + timeout_s
-        while not await self.devtools_answers():
+        while not (await self._computer_app.readiness()).ready:
             if asyncio.get_running_loop().time() > deadline:
                 raise DeviceUnavailable(f"the browser isn't ready after {timeout_s:g} s")
             await asyncio.sleep(READY_POLL_S)

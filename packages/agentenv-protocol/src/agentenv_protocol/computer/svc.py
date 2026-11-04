@@ -40,6 +40,8 @@ PATH_SAFE = "/:@!$&'()*+,;="
 SERVER_LOGGERS = ("uvicorn.access", "uvicorn.error")
 #: What a logged path shows past a route an app opens to agents.
 REDACTED = "<redacted>"
+#: The logger of the client requests are forwarded with, which logs each one's URL, an agent's token in it, at INFO.
+FORWARDER_LOGGER = "httpx"
 
 
 def passed_on(headers: Iterable[tuple[str, str]], *dropped: str) -> list[tuple[str, str]]:

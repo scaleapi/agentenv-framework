@@ -217,10 +217,14 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
 
 
 @pytest.mark.asyncio
-async def test_the_drivers_server_logs_a_path_under_a_route_open_to_agents_only_up_to_the_route(monkeypatch):
+async def test_the_drivers_server_logs_a_path_under_a_route_open_to_agents_only_up_to_the_route(monkeypatch, caplog):
+    for logger in svc.SERVER_LOGGERS:
+        monkeypatch.setattr(logging.getLogger(logger), "filters", [])
     async with _computer(monkeypatch) as (_, url):
-        async with httpx.AsyncClient(base_url=url) as tokenless:
-            opened = await tokenless.get("/svc/echo/raw/a-secret/open")
+        async with httpx.AsyncClient(base_url=url, headers=client.control_headers(TOKEN)) as http:
+            with caplog.at_level(logging.INFO):
+                opened = await http.get("/svc/echo/raw/a-secret/open")
+        forwarded = [record.getMessage() for record in caplog.records if "a-secret" in record.getMessage()]
         logged = []
         for logger, message, path in [("uvicorn.access", '%s - "%s %s HTTP/%s" %d', "/svc/echo/raw/a-secret/open"),
                                       ("uvicorn.error", '%s - "WebSocket %s" [accepted]', "/svc/echo/raw/a-secret"),
@@ -230,7 +234,7 @@ async def test_the_drivers_server_logs_a_path_under_a_route_open_to_agents_only_
             logging.getLogger(logger).filter(record)
             logged.append(record.getMessage())
 
-    assert opened.status_code == 200
+    assert opened.status_code == 200 and forwarded == []
     assert logged == ['127.0.0.1:1 - "GET /svc/echo/raw/<redacted> HTTP/1.1" 200',
                       '127.0.0.1:1 - "WebSocket /svc/echo/raw/<redacted>" [accepted]',
                       '127.0.0.1:1 - "GET /svc/echo/headers HTTP/1.1" 200']

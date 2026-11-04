@@ -148,6 +148,7 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         add_websocket_route(app, "/svc/{name}/{path:path}", self._computer_relay)
         for logger in svc.SERVER_LOGGERS:
             logging.getLogger(logger).addFilter(self._computer_redaction)
+        logging.getLogger(svc.FORWARDER_LOGGER).setLevel(logging.WARNING)
         return app
 
     def _computer_app_folder(self, name: str) -> Optional[Path]:
@@ -155,15 +156,14 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
 
     async def _computer_allows(self, folder: Path, connection: Request | WebSocket) -> bool:
         """Whether a call under ``/svc/<name>/`` may go on to the app in ``folder``: with the control token, or on a
-        route the app's card says agents reach without it, which the app checks itself."""
+        route the app's card says agents reach without it, which the app checks itself. The card is read on the app's
+        first call, whoever makes it, since the log's redaction needs its routes too."""
+        if folder.name not in self._computer_agent_routes and (card := await apps.served_card(folder)) is not None:
+            self._computer_agent_routes[folder.name] = apps.agent_routes(card)
         if control_check()(connection.headers):
             return True
-        if folder.name not in self._computer_agent_routes:
-            card = await apps.served_card(folder)
-            if card is None:
-                return False
-            self._computer_agent_routes[folder.name] = apps.agent_routes(card)
-        return svc.open_to_agents(self._computer_agent_routes[folder.name], svc.target(connection))
+        routes = self._computer_agent_routes.get(folder.name)
+        return routes is not None and svc.open_to_agents(routes, svc.target(connection))
 
     async def _computer_forward(self, request: Request) -> Response:
         """A request under ``/svc/<name>/``, sent on to the app named so: its own server answers it."""
