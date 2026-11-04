@@ -128,7 +128,8 @@ async def mcp_session(driver):
 
 
 @pytest.mark.asyncio
-async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_session(module, daemon):
+async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_session_and_rest_the_pointer_on_macos(
+        module, daemon, monkeypatch):
     driver = module.CuaDriver()
 
     size, shot = await driver.screen(), await driver.grab()
@@ -151,6 +152,18 @@ async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_s
         ("press_key", {"scope": "desktop", "key": "enter", "modifiers": []}),
     ]
     assert len({r["session_id"] for _, r in daemon.requests}) == 1
+    for name, value in (("MACOS", True), ("FOREGROUND", {"delivery_mode": "foreground"}), ("SETTLE_S", 0)):
+        monkeypatch.setattr(module, name, value)
+    await driver.click_at(100, 200, "left", 1, [])
+    await driver.drag_along([(10, 20), (30, 40)], "left", 300, [])
+    assert daemon.calls()[-4:] == [
+        ("move_cursor", {"scope": "desktop", "x": 100, "y": 200, "delivery_mode": "foreground"}),
+        ("click", {"scope": "desktop", "x": 100, "y": 200, "button": "left", "count": 1, "modifier": [],
+                   "delivery_mode": "foreground"}),
+        ("move_cursor", {"scope": "desktop", "x": 10, "y": 20, "delivery_mode": "foreground"}),
+        ("drag", {"scope": "desktop", "from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40, "button": "left",
+                  "duration_ms": 300, "modifier": [], "steps": 20, "delivery_mode": "foreground"}),
+    ]
 
 
 @pytest.mark.asyncio

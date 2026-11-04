@@ -67,9 +67,10 @@ EXECUTABLES = {
 }
 #: How the daemon delivers the pointer's actions: in the foreground on macOS, where it doesn't by default.
 FOREGROUND = {"delivery_mode": "foreground"} if MACOS else {}
-#: On macOS, how long the pointer rests on a drag's start before the press, since an app such as Tk reads where the
-#: pointer is when it handles the press; and the drag's steps, about one a pixel, within cua-driver's 1 to 200.
-DRAG_SETTLE_S, DRAG_STEPS = 0.2, (20, 200)
+#: On macOS, how long the pointer rests where a click or a drag presses before the press, since an app such as Tk reads
+#: where the pointer is when it handles the press, and a button the pointer hasn't yet entered loses the click; and a
+#: drag's steps, about one a pixel, within cua-driver's 1 to 200.
+SETTLE_S, DRAG_STEPS = 0.2, (20, 200)
 #: The TCC permissions cua-driver reports on macOS, which it needs.
 PERMISSIONS = ("accessibility", "screen_recording")
 #: What keeps cua-driver from reaching trycua: no telemetry and no update checks.
@@ -146,6 +147,8 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @click
     async def click_at(self, x, y, button, count, modifiers) -> None:
+        if MACOS:
+            await self._rest(x, y)
         await self._send("click", x=x, y=y, button=button, count=count, modifier=_modifiers(modifiers),
                          **FOREGROUND)
 
@@ -154,8 +157,7 @@ class CuaDriver(ComputerDriverEnvironment):
         (x0, y0), (x1, y1) = path[0], path[-1]
         steps = {}
         if MACOS:
-            await self._send("move_cursor", x=x0, y=y0, **FOREGROUND)
-            await asyncio.sleep(DRAG_SETTLE_S)
+            await self._rest(x0, y0)
             steps = {"steps": min(DRAG_STEPS[1], max(DRAG_STEPS[0], abs(x1 - x0), abs(y1 - y0)))}
         await self._send("drag", from_x=x0, from_y=y0, to_x=x1, to_y=y1, button=button, duration_ms=duration_ms,
                          modifier=_modifiers(modifiers), **steps, **FOREGROUND)
@@ -185,6 +187,10 @@ class CuaDriver(ComputerDriverEnvironment):
         if not reply.get("ok"):
             return _refused(reply.get("error") or "daemon reported failure", reply.get("exit_code") or 1)
         return CallToolResult.model_validate(reply["result"])
+
+    async def _rest(self, x: int, y: int) -> None:
+        await self._send("move_cursor", x=x, y=y, **FOREGROUND)
+        await asyncio.sleep(SETTLE_S)
 
     async def _send(self, name: str, **args: Any) -> None:
         await self._call(name, DeliveryFailed, scope="desktop", **args)
