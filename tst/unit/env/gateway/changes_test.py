@@ -17,6 +17,7 @@ from agent_env.env.gateway import rest_proxy as rest_proxy_module
 from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway.changes import ChangeAttribution
 from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway
+from agent_env.env.gateway.triggers import _in_flight_fire
 
 URL = "http://backing/mcp"
 TOOL = MCPTool(name="mail_send_message", description="", inputSchema={"type": "object", "properties": {}})
@@ -271,7 +272,7 @@ async def test_a_request_keeps_the_trigger_fire_it_started_under(monkeypatch):
     changelog = _Changelog()
     cause = {"trigger_id": "reply", "action_index": 0, "fire": 1}
     gw = _gateway(changelog, rest_proxy_urls={"mail": "http://mail-backend"})
-    gw._trigger_engine._in_flight["bob@example.com"] = [cause]
+    gw._trigger_engine._in_flight["bob@example.com"] = [_in_flight_fire(cause)]
 
     async def body():
         yield b"a"
@@ -304,7 +305,7 @@ async def test_a_write_through_the_rest_proxy_is_a_logged_window_and_a_read_is_n
     transport = httpx.MockTransport(website)
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"}, rest_proxy_urls={"mail": "http://mail-backend"})
-    gw._trigger_engine._in_flight["bob@example.com"] = [{"trigger_id": "reply", "action_index": 0, "fire": 2}]
+    gw._trigger_engine._in_flight["bob@example.com"] = [_in_flight_fire({"trigger_id": "reply", "action_index": 0, "fire": 2})]
     before = len(_trajectory())
 
     assert (await _http(gw, "GET", "/website/mail/inbox"))[0] == 200

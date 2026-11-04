@@ -427,7 +427,7 @@ class TriggerEngine:
     def __init__(self, gateway):
         self._gw = gateway
         self._executors: dict[str | None, dict] = {}  # `executor` under None, `executors` by name
-        self._in_flight: dict[str, list[dict]] = {}  # executor role -> the fires it is realizing, for attribution
+        self._in_flight: dict[str, list[dict]] = {}  # executor role -> the fires it is realizing: cause and calls made
         self._watch_roles: set[str] = set()
         self._config_set = False
         self._triggers: dict[str, dict] = {}
@@ -913,6 +913,9 @@ class TriggerEngine:
         hold the call for: the widest of their timeouts, counting an omitted one as the gateway
         default so a neighbour's tighter ask cannot cut it short.
         """
+        for fire in self._in_flight.get(role, ()):  # an executor's call counts toward the fires it is realizing
+            counts = fire["failed_calls" if getattr(result, "isError", False) else "calls"]
+            counts[name] = counts.get(name, 0) + 1
         provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
         if not provokable:
             return [], None
@@ -1418,9 +1421,12 @@ class TriggerEngine:
                     detail = {"notify": action["channel"], "to": note["to"], "notification_id": note["id"],
                               "text_len": len(text)}
             else:
-                if not await self._run_nl(tid, trig, index, action, ctx):
+                fire = await self._run_nl(tid, trig, index, action, ctx)
+                if fire is None:
                     return False
-                detail = {"nl": action["instruction"][:120], **_named_executor(action)}
+                detail = {"nl": action["instruction"][:120], **_named_executor(action), "calls": fire["calls"],
+                          **({"failed_calls": fire["failed_calls"]} if fire["failed_calls"] else {}),
+                          **({"calls_shared_with": sorted(fire["shared_with"])} if fire["shared_with"] else {})}
             if "verify" in action and action["type"] != "nl":
                 # only an action's own verify inherits its `as`; when.check state probes read as the pin
                 if not await self._run_verify(tid, index, action["verify"], ctx, role=action.get("as")):
@@ -1442,38 +1448,42 @@ class TriggerEngine:
         self._emit("verify_failed", tid, action_index=index)
         return False
 
-    async def _run_nl(self, tid: str, trig: dict, index: int, action: dict, ctx: dict | None = None) -> bool:
+    async def _run_nl(self, tid: str, trig: dict, index: int, action: dict, ctx: dict | None = None) -> dict | None:
+        """The fire with the calls its executor made for it, by tool, or None when the action failed."""
         instruction = action["instruction"]
         named = _named_executor(action)
         executor = self._executors.get(action.get("executor"))
         if executor is not None and "hours" in executor:
             await self._await_hours(tid, trig, index, executor["hours"], named)
-        cause = {"trigger_id": tid, "action_index": index, "fire": trig["attempts"]}
-        causes = self._in_flight.setdefault(executor["role"], []) if executor is not None else []
-        causes.append(cause)
+        fire = _in_flight_fire({"trigger_id": tid, "action_index": index, "fire": trig["attempts"]})
+        fires = self._in_flight.setdefault(executor["role"], []) if executor is not None else []
+        for other in fires:  # an executor's calls carry only its role, so fires it realizes at once share their counts
+            other["shared_with"].add(tid)
+            fire["shared_with"].add(other["cause"]["trigger_id"])
+        fires.append(fire)
         try:
             for attempt in (1, 2):
                 reply = await self._call_executor(executor, instruction, context_id=f"trigger-{tid}")
                 if reply is None:
                     self._emit("action_failed", tid, action_index=index,
                                detail=f"executor attempt {attempt} did not complete", **named)
-                    return False
+                    return None
                 if "verify" not in action:
-                    return True
+                    return fire
                 if await self._run_verify(tid, index, action["verify"], ctx):
-                    return True
+                    return fire
                 if attempt == 1:
                     instruction = (f"{action['instruction']}\n\nYour previous attempt did not pass verification — "
                                    f"the expected change is not observable in the environment. Do it again exactly as described.")
         finally:
-            causes.remove(cause)
+            fires.remove(fire)
         self._emit("action_failed", tid, action_index=index, detail="verification failed after retry", **named)
-        return False
+        return None
 
     def caused_by(self, role: str) -> list[dict]:
         """The fires in flight for the executor with ``role``, all of them when several overlap; its tool calls are
         attributed to them. A fire is the trigger's n-th, failed ones counted."""
-        return list(self._in_flight.get(role, ()))
+        return [fire["cause"] for fire in self._in_flight.get(role, ())]
 
     async def _delay(self, tid: str, trig: dict, index: int, action: dict, since: float) -> None:
         """Wait until the action's delay has run since ``since``, the Clock.elapsed() reading of its cause."""
@@ -1588,6 +1598,11 @@ def _result_text(result: CallToolResult) -> str:
 def _named_executor(action: dict) -> dict:
     """``{"executor": name}`` for an nl action that names its executor, for its firing-log events; else empty."""
     return {"executor": action["executor"]} if action.get("executor") is not None else {}
+
+
+def _in_flight_fire(cause: dict) -> dict:
+    """An nl fire as `_in_flight` holds it: its cause, its executor's calls by tool, and the triggers it overlapped."""
+    return {"cause": cause, "calls": {}, "failed_calls": {}, "shared_with": set()}
 
 
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")

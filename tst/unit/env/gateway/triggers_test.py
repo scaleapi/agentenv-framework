@@ -350,8 +350,8 @@ async def test_each_nl_action_goes_to_the_executor_it_names(engine, executor_cal
     assert sorted((e["a2a_url"], i, c) for e, i, c in executor_calls) == [
         ("http://alice", "as a", "trigger-a"), ("http://bob", "as b", "trigger-b"), ("http://default", "as d", "trigger-d")]
     details = {e["trigger_id"]: e["detail"] for e in engine._events if e["kind"] == "action_ok"}
-    assert details == {"d": {"nl": "as d"}, "a": {"nl": "as a", "executor": "alice"},
-                       "b": {"nl": "as b", "executor": "bob"}}
+    assert details == {"d": {"nl": "as d", "calls": {}}, "a": {"nl": "as a", "executor": "alice", "calls": {}},
+                       "b": {"nl": "as b", "executor": "bob", "calls": {}}}
 
 
 @pytest.mark.asyncio
@@ -901,6 +901,54 @@ async def test_each_fire_is_numbered_failed_ones_included(engine, monkeypatch):
     assert [causes[0]["fire"] for causes in seen] == [1, 2, 3] and engine._triggers["x"]["fire_count"] == 2
 
 
+@pytest.mark.asyncio
+async def test_an_nl_action_ok_counts_the_calls_its_executor_made_for_the_fire(engine, monkeypatch):
+    acts = iter([[("slack_conversations_history", False), ("slack_send_message", True), ("slack_send_message", False)],
+                 []])
+
+    async def executor(self, executor, instruction, context_id):
+        for tool, failed in next(acts):
+            engine.on_tool_call("bob", tool, {}, _result(is_error=failed))
+        engine.on_tool_call("default", "gdocs_search_documents", {}, _result())  # someone else's call
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "repeat": True},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    for _ in range(2):
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.05)
+    engine.on_tool_call("bob", "slack_send_message", {}, _result())  # after its fires ended
+
+    oks = [e["detail"] for e in engine._events if e["kind"] == "action_ok"]
+    assert [(d["calls"], d.get("failed_calls")) for d in oks] == [
+        ({"slack_conversations_history": 1, "slack_send_message": 1}, {"slack_send_message": 1}), ({}, None)]
+    assert engine.caused_by("bob") == [] and not any("calls_shared_with" in d for d in oks)
+
+
+@pytest.mark.asyncio
+async def test_fires_one_executor_realizes_at_once_name_each_other_beside_the_calls_they_share(engine, monkeypatch):
+    started, called = _Gate(2), _Gate(2)
+
+    async def executor(self, executor, instruction, context_id):
+        await started.arrive()  # both fires are in flight before either executor calls
+        engine.on_tool_call("bob", "slack_send_message", {}, _result())
+        await called.arrive()  # and neither ends before both calls are made
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}}, "triggers": [
+        {"id": tid, "when": {"type": "action", "tool": "t"}, "actions": [{"type": "nl", "executor": "bob", "instruction": tid}]}
+        for tid in ("chan", "dm")]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    oks = {e["trigger_id"]: e["detail"] for e in engine._events if e["kind"] == "action_ok"}
+    assert {tid: (d["calls"], d["calls_shared_with"]) for tid, d in oks.items()} == {
+        "chan": ({"slack_send_message": 2}, ["dm"]), "dm": ({"slack_send_message": 2}, ["chan"])}
+
+
 def test_generated_id_on_omit(engine):
     r = engine.register({"watch_roles": ["default"], "triggers": [
         {"when": {"type": "action", "tool": "t"}, "actions": []}]})
@@ -1128,6 +1176,19 @@ async def test_step_path_respects_watch_roles(monkeypatch):
 
 class _ExecutorCalls(list):
     reply: object = "done"
+
+
+class _Gate:
+    """Holds each arrival until ``n`` have arrived."""
+
+    def __init__(self, n: int) -> None:
+        self.n, self.arrived, self.open = n, 0, asyncio.Event()
+
+    async def arrive(self) -> None:
+        self.arrived += 1
+        if self.arrived == self.n:
+            self.open.set()
+        await self.open.wait()
 
 
 

@@ -18,6 +18,7 @@ from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway.constants import DEFAULT_ROLE
 from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway, _call_never_reached_child, _is_dead_session
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_NAME
+from agent_env.env.gateway.triggers import _in_flight_fire
 
 URL = "http://backing/mcp"
 TOOL = MCPTool(name="svc_thing", description="", inputSchema={"type": "object", "properties": {}})
@@ -88,7 +89,7 @@ def test_mcp_tool_calls_record_who_made_them_and_the_fires_in_flight_for_that_ex
     gw._clock.set_time("2019-06-15T12:00:00Z", 1)
     gw._register_get_time_tool()
     cause = {"trigger_id": "x", "action_index": 0, "fire": 1}
-    gw._trigger_engine._in_flight["bob@example.com"] = [cause]
+    gw._trigger_engine._in_flight["bob@example.com"] = [_in_flight_fire(cause)]
     before = len(_trajectory(gw))
 
     for role in ("bob@example.com", "alice@example.com"):
