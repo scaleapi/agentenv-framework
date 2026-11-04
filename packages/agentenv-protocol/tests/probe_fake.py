@@ -322,6 +322,8 @@ class PageFixtureDriver(FixtureDriver):
             return ExecResult(0, json.dumps(PAGE_LAYOUT).encode())
         if argv == ["stat", "-c", "%u", f"{STAGE}/page_fixture.py"]:
             return ExecResult(0, b"1000\n")
+        if argv == ["stat", "-c", "%u", f"{STAGE}/fixture.py"]:
+            return ExecResult(1, b"", b"stat: cannot statx: No such file or directory")
         return super()._fixture(argv)
 
 

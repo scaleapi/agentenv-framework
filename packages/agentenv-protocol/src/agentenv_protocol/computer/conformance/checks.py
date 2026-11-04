@@ -95,8 +95,10 @@ class Probe:
         self.layout: dict = {}
         self.fixture_pid: str | None = None
         self.page = self.features.get("screen") == "page"
+        self.fixture = "page_fixture.py" if self.page else "fixture.py"
         self.desk = ""
         self.tab: str | None = None
+        self.opened: list[str] = []
         self.upload: str | None = None
 
     async def basic(self) -> None:
@@ -538,14 +540,13 @@ class Probe:
     async def _stage(self) -> str | None:
         """The Fixture Desk started, or what stopped it: the Tk desk, or on a page, the HTML desk's server, with the
         desk opened in a tab of the probe's own."""
-        fixture = "page_fixture.py" if self.page else "fixture.py"
-        source = resources.files(__package__).joinpath(fixture).read_bytes()
-        added = await self.driver.add_file(f"{STAGE}/{fixture}", source)
+        source = resources.files(__package__).joinpath(self.fixture).read_bytes()
+        added = await self.driver.add_file(f"{STAGE}/{self.fixture}", source)
         if "error" in added:
             return f"data/add refused it: {added['error'].get('message')}"
         await self.driver.run("sh", "-c", f"rm -rf {STAGE}/state")
         started = await self.driver.run(
-            "sh", "-c", f"python3 {STAGE}/{fixture} {STAGE}/state > {STAGE}/fixture.log 2>&1 & echo $!")
+            "sh", "-c", f"python3 {STAGE}/{self.fixture} {STAGE}/state > {STAGE}/fixture.log 2>&1 & echo $!")
         self.fixture_pid = started["stdout"].strip() or None
         deadline = time.monotonic() + FIXTURE_START_S
         while time.monotonic() < deadline:
@@ -572,14 +573,18 @@ class Probe:
         if opened.isError:
             return f"computer_tabs couldn't open it: {opened.content[0].text}"
         self.tab = next((t["tab"] for t in opened.structuredContent["tabs"] if t["active"]), None)
+        self.opened += [self.tab] if self.tab else []
         return None if self.tab else f"the tab computer_tabs opened isn't active: {opened.structuredContent['tabs']}"
 
     async def _unstage(self) -> None:
-        if self.tab:
+        if self.opened:
             with contextlib.suppress(Exception):
                 listed = await self.tool("computer_tabs", {"action": "list"})
-                if len(listed.structuredContent["tabs"]) > 1:
-                    await self.tool("computer_tabs", {"action": "close", "tab": self.tab})
+                left = [t["tab"] for t in listed.structuredContent["tabs"]]
+                for tab in [t for t in left if t in self.opened]:
+                    if len(left) > 1:
+                        await self.tool("computer_tabs", {"action": "close", "tab": tab})
+                        left.remove(tab)
         if self.fixture_pid:
             await self.driver.run("kill", self.fixture_pid)
         await self.driver.run("rm", "-rf", STAGE)
@@ -600,7 +605,7 @@ class Probe:
     async def _security(self) -> None:
         async def one_user() -> str | None:
             uid = (await self.driver.run("id", "-u"))["stdout"].strip()
-            owner = (await self.driver.run("stat", "-c", "%u", f"{STAGE}/fixture.py"))["stdout"].strip()
+            owner = (await self.driver.run("stat", "-c", "%u", f"{STAGE}/{self.fixture}"))["stdout"].strip()
             if uid == "0":
                 return "commands run as root"
             return None if owner == uid else f"data/add wrote as uid {owner}, commands run as uid {uid}"
@@ -919,6 +924,7 @@ class Probe:
             if len(active) != 1 or active[0] == self.tab:
                 return f"the opened tab isn't the one active: {opened.structuredContent['tabs']}"
             other = active[0]
+            self.opened.append(other)
             if problem := await self.showing(lambda p: p.get("tab") == other and p.get("url") == self.desk):
                 return f"after open: {problem}"
             await self.act("computer_tabs", {"action": "switch", "tab": self.tab})

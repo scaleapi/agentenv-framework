@@ -1,6 +1,7 @@
 """The probe on a driver whose screen is a page: it stages the HTML desk in a tab of its own, verifies the input checks
-and the page tools on it and leaves the tab it was given as it was; without the page tools the input checks are
-unverified; a browser that answers dialogs itself makes the dialog check not applicable; typing that pastes fails."""
+and the page tools on it and leaves the tab it was given as it was, closing the tabs it opened even when a check
+fails; without the page tools the input checks are unverified; a browser that answers dialogs itself makes the dialog
+check not applicable; typing that pastes fails."""
 from __future__ import annotations
 
 import pytest
@@ -10,7 +11,7 @@ pytest.importorskip("PIL")
 
 from probe_fake import FixtureDriver, PageFixtureDriver, served  # noqa: E402
 
-from agentenv_protocol.computer import COMPUTER_PAGE, type_text  # noqa: E402
+from agentenv_protocol.computer import COMPUTER_PAGE, InvalidArgument, tabs, type_text  # noqa: E402
 from agentenv_protocol.computer.conformance import ProbeReport, run_probe  # noqa: E402
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
 
@@ -44,6 +45,22 @@ async def test_a_page_driver_passes_every_check_on_the_html_desk_and_the_probe_c
     assert [(t["id"], t["urls"]) for t in driver.tabs] == [("start", ["about:blank"])]
     assert not (home / ".agentenv-probe").exists() and not list((home / "Uploads").iterdir())
     assert ["kill", "4343"] in driver.commands and driver.desk.state["prompted"] == checks.WORD
+
+
+@pytest.mark.asyncio
+async def test_a_tab_the_probe_opened_is_closed_though_the_check_that_opened_it_failed():
+    class NoSwitch(PageFixtureDriver):
+        @tabs
+        async def tab_action(self, action, tab, url):
+            if action == "switch":
+                raise InvalidArgument("this browser can't switch tabs")
+            return await super().tab_action(action, tab, url)
+
+    driver = NoSwitch()
+    report = await _probe(driver)
+
+    assert _status(report, "computer_tabs")[0] == "failed"
+    assert [t["id"] for t in driver.tabs] == ["start"]
 
 
 @pytest.mark.asyncio
