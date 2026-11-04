@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -57,6 +58,8 @@ SANDBOX_PREFIX, BASE_PREFIX = "agentenv-", "agentenv-base-"
 _POLL_S = 2.0
 #: What Virtualization.framework says when it's asked to run a VM outside a logged-in session.
 _NO_SESSION = "security information"
+#: A log line lume prints among its output.
+_LOG_LINE = re.compile(r"^\[\d{4}-\d\d-\d\dT[^\]]*\] [A-Z]+: ")
 
 
 class LumeSandbox(VmSandbox):
@@ -306,14 +309,14 @@ class LumeSandboxProvider(SandboxProvider):
             _kill(pid)
 
     async def _refuse_over_limit(self) -> None:
-        listed = json.loads(await self._lume("ls", "--format", "json") or "[]")
+        listed = _json(await self._lume("ls", "--format", "json")) or []
         running = [vm["name"] for vm in listed if vm.get("status") not in ("stopped", None)]
         if len(running) >= self.max_running:
             raise RuntimeError(f"this Mac runs {len(running)} macOS VMs already ({', '.join(running)}), and lume is "
                                f"configured to run at most {self.max_running} (Apple's licence allows {MAX_RUNNING})")
 
     async def _get(self, name: str) -> dict:
-        found = json.loads(await self._lume("get", name, "--format", "json"))
+        found = _json(await self._lume("get", name, "--format", "json"))
         return found[0] if isinstance(found, list) else found
 
     async def _lume(self, *args: str, timeout: Optional[float] = 300) -> str:
@@ -375,6 +378,11 @@ class LumeSandboxProvider(SandboxProvider):
         with open(lock, "a") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
             yield
+
+
+def _json(text: str) -> Any:
+    """The JSON ``lume`` printed, past the log lines it prints on the same stream (``[<time>] INFO: ...``)."""
+    return json.loads("\n".join(line for line in text.splitlines() if not _LOG_LINE.match(line)) or "null")
 
 
 def _private(path: Path, text: str) -> None:

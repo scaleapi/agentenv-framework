@@ -40,14 +40,27 @@ with `[tools]`. `requirements.txt` installs `cua-driver==0.38.0` from PyPI, whos
 `computer-ready` checks that executable's sha256 and that the daemon lists the tools `mcp.json` pins. Name it as
 `cua-driver`, the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/drivers/cua-driver`.
 
+On macOS (`arm64`, composed onto a VM bundle such as `macos-26`), cua-driver is CuaDriver.app, from the cua-driver-rs
+0.38.0 release, its tarball checked by sha256 and its app put in `/Applications` by `install-app.sh`. Its daemon is a
+direct LaunchAgent, CuaDriver.app's own executable, since macOS gives the app's TCC permissions, Accessibility, Post
+Event and Screen Recording, which `[install.macos]` grants it, only to the executable launchd starts itself; its socket
+is `/tmp/agentenv-cua-driver.sock`. `requirements-macos.txt` installs the protocol alone. Agents get the 62 tools
+`mcp-macos.json` pins, as macOS's `cua-driver mcp` lists them; `computer-ready` checks CuaDriver.app's executable's
+sha256, those tools, and that cua-driver reports Accessibility and Screen Recording granted. Its pointer's actions and
+its typing go in the foreground, where cua-driver otherwise keeps from moving a person's pointer over a background app,
+and a drag first rests the pointer on its start, since an app such as Tk reads where the pointer is when it handles the
+press.
+
 To move it to another cua-driver version:
 
 1. Pin the version in `requirements.txt`.
 2. Regenerate `mcp.json` from what that version's MCP server, `cua-driver mcp`, says at connect and lists: its
    `instructions`, each tool's `name`, `description`, `inputSchema`, `annotations` and `outputSchema`, and each
    resource's `uri`, `name`, `description` and `mimeType`. That takes a running daemon, so do it on a Linux test
-   machine.
-3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel.
+   machine, and `mcp-macos.json` the same way in a macOS computer.
+3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel, and of
+   CuaDriver.app's executable for `macos/arm64`, and the release tarball's URL and sha256 in `env.toml`'s
+   `[install.macos]` and its folder in `install-app.sh`.
 4. Run `tst/unit/drivers/cua_driver_test.py`, then `tst/integration/computer/cua_driver_test.py` on Linux, where
    `computer-ready` names any tool or executable that doesn't match its pin.
 

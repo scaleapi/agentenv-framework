@@ -54,6 +54,7 @@ FAKE = textwrap.dedent('''\
     state = load()
     state["calls"].append(args)
     vms = state["vms"]
+    print("[2026-11-04T16:56:06Z] INFO: lume logs on stdout too command=" + command)
     if command == "get":
         if name not in vms:
             save(state)
