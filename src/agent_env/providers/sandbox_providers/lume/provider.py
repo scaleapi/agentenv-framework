@@ -202,10 +202,20 @@ class LumeSandboxProvider(SandboxProvider):
         return self._sandbox(name, state)
 
     async def keep_builder(self, builder: LumeSandbox) -> str:
-        """``builder`` shut down and kept as the VM bundle of its name: its ``local:`` image."""
-        await self._stopped(builder.sandbox_id, self._state(builder.sandbox_id), graceful=True)
-        shutil.rmtree(self._folder(builder.sandbox_id), ignore_errors=True)
-        return f"{LOCAL_IMAGE_PREFIX}{builder.sandbox_id}"
+        """``builder`` shut down from inside, once what it wrote is on its disk, and kept as the VM bundle of its name:
+        its ``local:`` image. A VM stopped from outside can lose its last writes, as it was before it shut down."""
+        name = builder.sandbox_id
+        shutdown = await self._ssh(name, ["sh", "-c", f"sync; echo {shlex.quote(self.ssh_password)} | "
+                                                    "sudo -S -p '' shutdown -h now"], timeout=60)
+        await shutdown.wait()
+        deadline = time.monotonic() + self.boot_timeout_s
+        while (await self._get(name)).get("status") != "stopped":
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{name} didn't shut down within {self.boot_timeout_s:.0f} s, so it isn't kept")
+            await asyncio.sleep(_POLL_S)
+        await self._stopped(name, self._state(name))
+        shutil.rmtree(self._folder(name), ignore_errors=True)
+        return f"{LOCAL_IMAGE_PREFIX}{name}"
 
     async def has_vm_bundle(self, image: str) -> bool:
         """Whether this Mac holds ``image``'s VM bundle, as a composed one is reused by its name."""
@@ -300,17 +310,12 @@ class LumeSandboxProvider(SandboxProvider):
             await asyncio.sleep(_POLL_S)
         raise TimeoutError(f"{name} didn't answer ssh within {self.boot_timeout_s:.0f} s")
 
-    async def _stopped(self, name: str, state: dict, *, graceful: bool = False) -> None:
-        """``name``'s relays ended and the VM stopped, shut down from inside first when ``graceful``, as a VM bundle
-        to keep is."""
+    async def _stopped(self, name: str, state: dict) -> None:
+        """``name``'s relays ended and the VM stopped."""
         if pid := state.get("relay"):
             _kill(pid)
-        if graceful:
-            with contextlib.suppress(RuntimeError):
-                await self._lume("stop", name, "--timeout", "120")
-        else:
-            with contextlib.suppress(RuntimeError):
-                await self._lume("stop", name, "--force")
+        with contextlib.suppress(RuntimeError):
+            await self._lume("stop", name, "--force")
         if pid := state.get("run"):
             _kill(pid)
 

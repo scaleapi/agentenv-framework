@@ -128,7 +128,8 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
                  f'echo "{"ab" * 32}  "{prefix}/desk.tar.gz | shasum -a 256 -c - > /dev/null',
                  f"/opt/agentenv/bin/python3 -m venv {prefix}/venv",
                  f"as_root env PREFIX={prefix} bash -c 'cd {prefix} && ./install-app.sh'",
-                 f"grant {APP} accessibility screen_capture", 'cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"']:
+                 f"grant {APP} accessibility screen_capture", 'cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"',
+                 "sync"]:
         assert line in script.splitlines()
     assert any(line.startswith(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check -r "
                                f"{prefix}/requirements.txt") for line in script.splitlines())

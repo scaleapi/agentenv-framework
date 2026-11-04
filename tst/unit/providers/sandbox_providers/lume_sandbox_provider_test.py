@@ -73,6 +73,8 @@ FAKE = textwrap.dedent('''\
         vms.pop(name, None)
     elif command == "ssh":
         print(" ".join(args))
+        if "shutdown -h now" in args[-1]:
+            vms[args[-2]].update(status="stopped", ipAddress=None)
     save(state)
 ''')
 
@@ -199,7 +201,8 @@ async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundl
 
     calls = _state(mac.fake)["calls"]
     assert ["run", "agentenv-computer-0123", "--display", "none", "--vnc", "disabled", f"--shared-dir={build}:rw"] in calls
-    assert "bash -c 'echo hi'" in said and ["stop", "agentenv-computer-0123", "--timeout", "120"] in calls
+    shutdown = next(call for call in calls if call[0] == "ssh" and "shutdown -h now" in call[-1])
+    assert "bash -c 'echo hi'" in said and shutdown[-1].startswith("sh -c 'sync; echo")
     assert image == "local:agentenv-computer-0123" and await mac.has_vm_bundle(image)
     with pytest.raises(ValueError, match="a builder's folder is named agentenv-build"):
         await mac.open_builder("local:bench", "other", tmp_path)

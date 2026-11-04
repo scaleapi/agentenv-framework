@@ -69,7 +69,7 @@ def write(build: Path, base: ComputerArtifact, parts: list[Part], password: str)
             (build / "agents" / f"{label}.plist").write_bytes(plistlib.dumps(
                 _agent(label, arguments, part.prefix, home, environment=direct)))
     lines += ['cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"',
-              'as_root cp "$build/image.json" /etc/agentenv/image.json']
+              'as_root cp "$build/image.json" /etc/agentenv/image.json', "sync"]
     (build / "image.json").write_text(json.dumps({"base": base.forms.vm_bundle.image,
                                                   "layers": [part.folder for part in parts]}, sort_keys=True))
     script = "\n".join(lines) + "\n"
