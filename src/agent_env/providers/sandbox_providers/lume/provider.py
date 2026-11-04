@@ -211,18 +211,26 @@ class LumeSandboxProvider(SandboxProvider):
         return self._sandbox(name, state)
 
     async def keep_builder(self, builder: LumeSandbox) -> str:
-        """``builder`` shut down from inside, once what it wrote is on its disk, and kept as the VM bundle of its name:
-        its ``local:`` image. A VM stopped from outside can lose its last writes, as it was before it shut down."""
+        """``builder`` shut down from inside, once what it wrote is on its disk, within ``boot_timeout_s`` in all, and kept
+        as the VM bundle of its name: its ``local:`` image. A VM stopped from outside can lose its last writes, as it was
+        before it shut down."""
         name = builder.sandbox_id
         password = f"{SHARED_FILES}/{BUILD_FOLDER}/.password"
+        deadline = time.monotonic() + self.boot_timeout_s
         shutdown = await self._ssh(name, ["sh", "-c", f"sync; sudo -S -p '' shutdown -h now < {shlex.quote(password)}"],
                                    timeout=60)
-        await shutdown.wait()
-        deadline = time.monotonic() + self.boot_timeout_s
-        while (await self._get(name)).get("status") != "stopped":
-            if time.monotonic() > deadline:
-                raise TimeoutError(f"{name} didn't shut down within {self.boot_timeout_s:.0f} s, so it isn't kept")
-            await asyncio.sleep(_POLL_S)
+        try:
+            await asyncio.wait_for(shutdown.communicate(), self.boot_timeout_s)
+            while (await self._get(name)).get("status") != "stopped":
+                if time.monotonic() > deadline:
+                    raise TimeoutError
+                await asyncio.sleep(_POLL_S)
+        except TimeoutError:
+            raise TimeoutError(f"{name} didn't shut down within {self.boot_timeout_s:.0f} s, so it isn't kept") from None
+        finally:
+            if shutdown.returncode is None:
+                shutdown.kill()
+                await shutdown.wait()
         await self._stopped(name, self._state(name))
         shutil.rmtree(self._folder(name), ignore_errors=True)
         return f"{LOCAL_IMAGE_PREFIX}{name}"

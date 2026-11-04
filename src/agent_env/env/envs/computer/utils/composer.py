@@ -301,17 +301,17 @@ def _built_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: ComputerD
 
 async def _provisioned(link: SandboxProvider, source: str, name: str, build: Path) -> None:
     """``name`` composed from ``source`` on ``link``: its builder booted with ``build`` shared, ``provision.sh`` run in it,
-    and kept; a builder whose provisioning failed deleted, its output in the error."""
+    and kept; a builder whose provisioning failed, its output in the error, or that couldn't be kept, deleted."""
     builder_vm = await link.open_builder(source, name, build)
     try:
         code, stdout, stderr = await builder_vm.exec_with_output(
             "bash", f"{vm_bundle.SHARED_FILES}/{vm_bundle.BUILD_FOLDER}/provision.sh")
         if code != 0:
             raise RuntimeError(f"provisioning exited {code}: {(stderr or stdout).strip()[-2000:]}")
+        await link.keep_builder(builder_vm)
     except BaseException:
         await builder_vm.terminate()
         raise
-    await link.keep_builder(builder_vm)
 
 
 def _part(layer: _Layer, programs: dict[str, str], environment: dict[str, Any], protocol: bool,

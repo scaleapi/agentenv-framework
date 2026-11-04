@@ -75,7 +75,7 @@ FAKE = textwrap.dedent('''\
     save(state)
 ''')
 SSH = textwrap.dedent('''\
-    import json, os, sys
+    import json, os, sys, time
     path = os.environ["FAKE_LUME_STATE"]
     args = sys.argv[1:]
     *_, login, command = args
@@ -83,6 +83,8 @@ SSH = textwrap.dedent('''\
         calls.write(json.dumps({"args": args, "askpass": os.environ.get("SSH_ASKPASS_REQUIRE") == "force"
                                 and os.environ.get("AGENTENV_LUME_SSH_PASSWORD") == "s3cret-pw"}) + "\\n")
     print(command)
+    if "shutdown -h now" in command and os.environ.get("FAKE_SSH_HANG"):
+        time.sleep(60)
     if "shutdown -h now" in command:
         state = json.load(open(path))
         for vm in state["vms"].values():
@@ -229,7 +231,8 @@ async def test_a_vm_lume_cant_run_outside_a_login_session_fails_saying_so_and_le
 
 
 @pytest.mark.asyncio
-async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundle(mac, tmp_path):
+async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundle_and_a_hung_shutdown_times_out(
+        mac, tmp_path, monkeypatch):
     build = tmp_path / lume.BUILD_FOLDER
     build.mkdir()
 
@@ -245,6 +248,12 @@ async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundl
     assert image == "local:agentenv-computer-0123" and await mac.has_vm_bundle(image)
     with pytest.raises(ValueError, match="a builder's folder is named agentenv-build"):
         await mac.open_builder("local:bench", "other", tmp_path)
+    hung = await mac.open_builder("local:bench", "agentenv-computer-4567", build)
+    monkeypatch.setenv("FAKE_SSH_HANG", "1")
+    mac.boot_timeout_s = 1
+    with pytest.raises(TimeoutError, match="agentenv-computer-4567 didn't shut down within 1 s, so it isn't kept"):
+        await mac.keep_builder(hung)
+    await hung.terminate()
 
 
 def test_it_boots_macos_vm_bundles_on_apple_silicon_alone(monkeypatch):

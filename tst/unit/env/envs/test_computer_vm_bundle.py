@@ -58,7 +58,7 @@ class FakeMac(SandboxProvider):
 
     def __init__(self):
         self.opened, self.provisioned, self.ran, self.terminated, self.kept, self.exit = [], [], [], [], set(), 0
-        self.settings = []
+        self.settings, self.keep_error = [], None
 
     @classmethod
     def native_platforms(cls):
@@ -79,6 +79,8 @@ class FakeMac(SandboxProvider):
         return FakeBuilder(self, name, build)
 
     async def keep_builder(self, builder):
+        if self.keep_error is not None:
+            raise self.keep_error
         self.kept.add(f"local:{builder.sandbox_id}")
         return f"local:{builder.sandbox_id}"
 
@@ -231,7 +233,7 @@ async def test_deploys_on_a_mac_that_lacks_the_vm_bundle_compose_it_once_and_pro
     assert len(failing.opened) == 1 and not failing.kept
 
 
-def test_a_failed_provisioning_deletes_its_builder_and_fails_the_pair_with_what_it_said(mac, tmp_path):
+def test_a_failed_provisioning_or_keep_deletes_its_builder_and_fails_the_pair_with_what_it_said(mac, tmp_path):
     mac.exit = 1
 
     env = _put(_driver(tmp_path / "desk"), mac)
@@ -239,6 +241,12 @@ def test_a_failed_provisioning_deletes_its_builder_and_fails_the_pair_with_what_
     built = env.metadata["composed"]["vm_bundle"]["arm64"]
     assert built["status"] == "failed" and "provisioning exited 1: boom" in built["reason"]
     assert mac.terminated == [mac.opened[0][1]] and not mac.kept
+    stuck = FakeMac()
+    stuck.keep_error = TimeoutError("it didn't shut down within 600 s, so it isn't kept")
+    composer.compose(env, [("vm_bundle", "arm64")], Composing(sandbox_provider=stuck))
+    built = Env.get(env.id, env.version).metadata["composed"]["vm_bundle"]["arm64"]
+    assert built["status"] == "failed" and "didn't shut down within 600 s" in built["reason"]
+    assert stuck.terminated == [stuck.opened[0][1]] and not stuck.kept
 
 
 def test_a_vm_bundle_is_composed_only_where_a_link_boots_macos_vm_bundles(mac, tmp_path):
