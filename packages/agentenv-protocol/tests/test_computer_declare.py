@@ -27,8 +27,8 @@ from agentenv_protocol.computer.platform import Platform  # noqa: E402
 DRIVER = '''import not_installed_here
 from not_installed_here.input import Base, Keyboard
 
-from agentenv_protocol.computer import (ComputerDriverEnvironment, Display, capture, click, computer_driver, display,
-                                        drag, press, scroll, type_text)
+from agentenv_protocol.computer import (ComputerDriverEnvironment, ComputerSettings, Display, capture, click,
+                                        computer_driver, display, drag, press, scroll, type_text)
 
 SHIFT = Keyboard.keysym("Shift_L")[0]
 print("loading the desk driver")
@@ -62,6 +62,11 @@ class Desk(ComputerDriverEnvironment):
 
     @press
     def press_keys(self, keys): pass
+
+
+class Headed(Desk):
+    class Settings(ComputerSettings):
+        headed: bool = False
 '''
 APP = '''import not_installed_here
 from pydantic import BaseModel, SecretStr
@@ -160,6 +165,9 @@ def test_a_class_whose_imports_arent_installed_declares_what_it_serves_on_each_p
     linux = declared.platforms[0]
     assert {"urn:agentenv:computer/v1", "urn:agentenv:computer-exec/v1"} <= set(linux.provides)
     assert len(linux.tools) == 7 and linux.features["buttons"] == ["left", "right"]
+    assert declared.settings is None
+    assert declare(folder, "driver.py", "Headed").settings["properties"]["headed"] == {"default": False, "title": "Headed",
+                                                                                      "type": "boolean"}
 
 
 def test_a_stub_is_itself_again_except_for_dunders(folder):

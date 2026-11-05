@@ -30,11 +30,13 @@ class ComputerSettings(BaseModel):
     exec_timeout_s: float = Field(default=60.0, gt=0, le=3600)
 
 
-def load_settings(environ: dict | None = None) -> ComputerSettings:
+def load_settings(environ: dict | None = None, model: type[ComputerSettings] = ComputerSettings) -> ComputerSettings:
+    """The settings in ``environ`` (this process's environment by default), read as ``model``: a driver's ``Settings``,
+    the base ones and those it adds."""
     raw = (os.environ if environ is None else environ).get(SETTINGS_ENV)
     if not raw:
-        return ComputerSettings()
+        return model()
     try:
-        return ComputerSettings.model_validate(json.loads(raw))
+        return model.model_validate(json.loads(raw))
     except (ValueError, ValidationError) as e:
         raise ValueError(f"{SETTINGS_ENV} is not valid computer settings: {e}") from None
