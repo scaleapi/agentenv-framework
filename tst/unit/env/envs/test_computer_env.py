@@ -911,6 +911,26 @@ def test_a_deploy_its_sandbox_provider_cant_carry_out_is_refused_at_save(base, d
     assert problem in refusal
 
 
+def test_a_chain_with_no_one_link_that_both_carries_websockets_and_enforces_the_network_is_refused_at_save(
+        base, driver, docker, monkeypatch, tmp_path):
+    class Enforces(local_sandbox.LocalSandboxProvider):
+        WEBSOCKETS = False
+
+        @classmethod
+        def supports_network_policy(cls, policy):
+            return True
+
+    class Carries(local_sandbox.LocalSandboxProvider):
+        pass
+
+    monkeypatch.setattr(providers, "build_sandbox_provider",
+                        lambda spec: ChainedSandboxProvider([Enforces(), Carries()]))
+    env = _put(base, driver, network={"mode": "allowlist", "allow_hosts": ["example.com"]},
+               apps=[_app(None, None, tmp_path / "chromium", compose=False, name="chromium", browser=True)])
+
+    assert Env.get(env.id).deploy_refusal(sandbox_type="chain") == f"computer env {env.id!r}: Carries can't enforce its network"
+
+
 @pytest.mark.asyncio
 async def test_a_deploy_with_a_website_browser_skips_a_link_that_carries_no_websockets_and_boots_on_the_next(
         base, driver, docker, boots, monkeypatch, tmp_path):

@@ -259,8 +259,9 @@ class ComputerEnv(Env):
     def deploy_refusal(self, *, sandbox_type: str | None = None, env_params: Optional[dict] = None,
                        **options) -> str | None:
         """Why deploy() would refuse before booting anything, or None: an option the computer provider doesn't take, a
-        problem with ``env_params``, or a sandbox provider that runs none of the env's arches natively, carries no
-        WebSockets to a website browser among its apps where it does, or can't enforce its network."""
+        problem with ``env_params``, or a sandbox provider with no one link that runs one of the env's arches natively,
+        carries WebSockets when a website browser is among its apps, and can enforce its network, as a deploy needs of
+        the link it boots on."""
         from agent_env.providers import build_sandbox_provider, get_env_sandbox_provider
         from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 
@@ -272,7 +273,8 @@ class ComputerEnv(Env):
         forms = [params.form] if params.form else gate.forms(self.computer)
         native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id) for form in forms
                                                 for arch in arches)]
-        if native and self.serves_website_browser() and not any(link.WEBSOCKETS for link in native):
+        usable = [link for link in native if link.WEBSOCKETS] if self.serves_website_browser() else native
+        if native and not usable:
             problems.append(f"{', '.join(type(link).__name__ for link in native)} carries no WebSockets, which its "
                             "website browser's CDP address needs")
         if not native:
@@ -282,8 +284,8 @@ class ComputerEnv(Env):
                                 f", and {', '.join(unpulled)} can't pull its containers from the image store's registry "
                                 "on this machine" if "container" in forms and unpulled else ""))
         policy = NetworkPolicy.from_dict(self.network) if self.network else None
-        if policy is not None and not any(link.supports_network_policy(policy) for link in links):
-            problems.append(f"{', '.join(type(link).__name__ for link in links)} can't enforce its network")
+        if policy is not None and usable and not any(link.supports_network_policy(policy) for link in usable):
+            problems.append(f"{', '.join(type(link).__name__ for link in usable)} can't enforce its network")
         return f"computer env {self.id!r}: " + "; ".join(problems) if problems else None
 
     @classmethod
