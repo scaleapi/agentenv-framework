@@ -53,6 +53,12 @@ a deploy waiting for another's compose says what it waits for and since when. A 
 env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the
 deploy refuses for want of a ready build and names `agent-env env build`.
 
+Each build's record names the digest of the code that composed it: the composer, these build files, the Lume provider
+and the protocol's `computer` package. A build an agent-env with other composing code recorded, or one from before
+records named it, isn't deployed: a deploy that boots its form composes it again first, saying so, as `env build` and
+a put do, and its record says `by another composer` until then. So upgrading agent-env never boots a computer composed
+the old way.
+
 Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAME>`, read as it starts:
 
 | Setting | Default | What it does |

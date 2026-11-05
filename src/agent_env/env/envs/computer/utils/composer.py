@@ -38,7 +38,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
 from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, macos_vm_bundle, packages, probing
-from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now
+from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now, stale
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
 from agent_env.providers.sandbox_providers.host_images import platform_tag
@@ -151,16 +151,16 @@ def current(env: ComputerEnv) -> bool:
 def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
             forms: list[str] | None = None) -> list[tuple[str, str]]:
     """The pairs of ``forms``, by default every form of the base, left to compose in ``env``: never started, failed,
-    left building by a put that stopped, built but unprobed though ``sandbox_provider``, by default the env's, runs the
-    arch natively, or a VM bundle the Mac it would compose on doesn't hold, which this agent-env composes and records
-    there, as one that composes differently names it."""
+    left building by a put that stopped, recorded by an agent-env that composes differently, built but unprobed though
+    ``sandbox_provider``, by default the env's, runs the arch natively, or a VM bundle the Mac it would compose on
+    doesn't hold, which this agent-env composes and records there, as one that composes differently names it."""
     from agent_env.providers import get_env_sandbox_provider
 
     provider = sandbox_provider or get_env_sandbox_provider()
 
     def left(form: str, arch: str, record: dict | None) -> bool:
         status = (record or {}).get("status")
-        if status not in BUILT:
+        if status not in BUILT or stale(record):
             return True
         if status == "unverified":
             return bool(boot.native_links(provider, arch, form, env.stored_id))
@@ -174,15 +174,16 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
 
 def unstarted(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[tuple[str, str]]:
     """The pairs a deploy on ``sandbox_provider`` boots that no compose has started, as a run for another sandbox
-    leaves them."""
-    return _pairs(env, booted_forms(env, sandbox_provider, form), lambda form, arch, record: record is None)
+    leaves them, or that an agent-env that composes differently recorded."""
+    return _pairs(env, booted_forms(env, sandbox_provider, form),
+                  lambda form, arch, record: record is None or stale(record))
 
 
 def unstarted_or_building(env: ComputerEnv, sandbox_provider: SandboxProvider,
                           form: str | None = None) -> list[tuple[str, str]]:
     """Those, and the ones a compose is building now, which a deploy waits for."""
     return _pairs(env, booted_forms(env, sandbox_provider, form),
-                  lambda form, arch, record: record is None or record.get("status") == "building")
+                  lambda form, arch, record: record is None or stale(record) or record.get("status") == "building")
 
 
 def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[str]:
@@ -202,10 +203,11 @@ def _pairs(env: ComputerEnv, forms: list[str], left: Callable[[str, str, dict | 
 
 
 def _with_containers(env: ComputerEnv, pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """``pairs`` and the container each disk among them is made from, unless it's built, in the base's order."""
+    """``pairs`` and the container each disk among them is made from, unless it's built by this agent-env's composer, in
+    the base's order."""
     containers = env.metadata.get("composed", {}).get("container", {})
     wanted = {*pairs, *(("container", arch) for form, arch in pairs if form == "disk"
-                        and containers.get(arch, {}).get("status") not in BUILT)}
+                        and (containers.get(arch, {}).get("status") not in BUILT or stale(containers.get(arch))))}
     return [(form, arch) for form in gate.forms(env.computer) for arch in env.composed_arches() if (form, arch) in wanted]
 
 
