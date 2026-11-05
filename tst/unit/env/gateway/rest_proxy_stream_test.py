@@ -14,12 +14,11 @@ from urllib.parse import unquote, urlsplit
 import httpx
 import pytest
 from starlette.testclient import TestClient
-from agentenv_protocol.website import ROLE_KEY_ENV, ApiContext, WebsiteEnvironment, api, website
+from agentenv_protocol.website import ApiContext, WebsiteEnvironment, api, website
 
 from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY
 from agent_env.env.gateway import gateway as gateway_module
 from agent_env.env.gateway import rest_proxy as rest_proxy_module
-from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway.gateway import Gateway
 
 UPSTREAM = "http://upstream"
@@ -484,78 +483,6 @@ async def test_bodies_that_are_not_a_child_mcp_request_are_forwarded_untouched(m
     assert [r.content for r in up.requests] == [body for _, _, body in cases]
 
 
-ROLE_KEY = "deploy-secret"
-
-
-def _role_and_key(request: httpx.Request) -> tuple[list[str], list[str]]:
-    return request.headers.get_list("agentenv-role"), request.headers.get_list("agentenv-role-key")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/svc/mcp-svc/x", "/website/web/x"])
-async def test_with_a_role_key_a_role_is_believed_only_beside_it_and_the_key_goes_upstream_only_with_it(monkeypatch, path):
-    up = _Upstream([b"{}"])
-    up.install(monkeypatch)
-    gw = _gateway(website_urls={"web": "http://web"}, role_key=ROLE_KEY)
-    for headers in ({"AgentEnv-Role": "admin"}, {"AgentEnv-Role": "admin", "AgentEnv-Role-Key": "guess"},
-                    {"AgentEnv-Role": "admin", "AgentEnv-Role-Key": ROLE_KEY}, {"AgentEnv-Role-Key": ROLE_KEY}):
-        status, _, _ = await _call(gw, path, headers=headers)
-        assert status == 200
-    assert [_role_and_key(r) for r in up.forwarded] == [
-        (["default"], []), (["default"], []), (["admin"], [ROLE_KEY]), (["default"], [])]
-
-
-@pytest.mark.asyncio
-async def test_without_a_role_key_the_role_header_alone_is_believed_and_a_client_s_key_never_goes_upstream(monkeypatch):
-    up = _Upstream([b"{}"])
-    up.install(monkeypatch)
-    gw = _gateway(website_urls={"web": "http://web"})
-    await _call(gw, "/website/web/x", headers={"AgentEnv-Role": "admin"})
-    await _call(gw, "/svc/mcp-svc/x", headers={"AgentEnv-Role": "admin", "AgentEnv-Role-Key": "forged"})
-    assert [_role_and_key(r) for r in up.forwarded] == [(["admin"], []), (["admin"], [])]
-
-
-@pytest.mark.asyncio
-async def test_with_a_role_key_step_attributes_a_role_sent_without_it_to_default(monkeypatch):
-    gw = _gateway(role_key=ROLE_KEY)
-    seen: list[str] = []
-    monkeypatch.setattr(gw, "_step_list_tools", lambda role: (seen.append(role), gw._json_response({"tools": []}, 200))[1])
-    try:
-        for headers in ({"AgentEnv-Role": "admin"}, {"AgentEnv-Role": "admin", "AgentEnv-Role-Key": ROLE_KEY}):
-            status, _, _ = await _call(gw, "/step", method="POST", body=b'{"action": "list_tools"}', headers=headers)
-            assert status == 200
-    finally:
-        await gw._close_child_sessions()
-    assert seen == ["default", "admin"]
-
-
-class _CallerRecorder:
-    """Stands in for FastMCP's app under the gateway's ASGI wrapper: records the caller bound for each request."""
-
-    def __init__(self) -> None:
-        self.router = type("Router", (), {"lifespan_context": None})()
-        self.roles: list[str] = []
-
-    async def __call__(self, scope, receive, send) -> None:
-        self.roles.append(Caller.current().role)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("role_key, expected", [
-    (ROLE_KEY, ["default", "default", "admin", "default"]),
-    (None, ["admin", "admin", "admin", "default"]),
-], ids=["keyed", "legacy"])
-async def test_the_mcp_path_binds_the_role_the_key_vouches_for(monkeypatch, role_key, expected):
-    gw = _gateway(role_key=role_key)
-    recorder = _CallerRecorder()
-    monkeypatch.setattr(gw._mcp, "streamable_http_app", lambda: recorder)
-    app = gw._asgi_app()
-    for headers in ([(b"agentenv-role", b"admin")], [(b"agentenv-role", b"admin"), (b"agentenv-role-key", b"guess")],
-                    [(b"agentenv-role-key", ROLE_KEY.encode()), (b"agentenv-role", b"admin")], []):
-        await app({"type": "http", "method": "POST", "path": "/mcp", "headers": headers}, None, None)
-    assert recorder.roles == expected
-
-
 def _forwarded(request: httpx.Request) -> tuple[list[str], list[str], list[str]]:
     return tuple(request.headers.get_list(name) for name in ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix"))
 
@@ -596,27 +523,24 @@ async def test_a_front_s_own_forwarded_host_and_scheme_win_and_reach_the_upstrea
 
 
 @pytest.mark.asyncio
-async def test_an_sdk_site_behind_the_gateway_believes_only_a_keyed_role_and_names_the_gateway_s_address(monkeypatch):
+async def test_an_sdk_site_behind_the_gateway_names_the_gateway_s_address(monkeypatch):
     @website(domains=["notes.example"])
     class Notes(WebsiteEnvironment):
         @api.get("/api/whoami")
         def whoami(self, ctx: ApiContext) -> dict:
-            return {"role": ctx.role, "base_url": ctx.base_url}
+            return {"base_url": ctx.base_url}
 
-    monkeypatch.setenv(ROLE_KEY_ENV, ROLE_KEY)
     transport = httpx.ASGITransport(app=Notes().create_app())
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
-    gw = _gateway(website_urls={"notes": "http://notes"}, role_key=ROLE_KEY)
+    gw = _gateway(website_urls={"notes": "http://notes"})
 
-    async def whoami(path: str, **headers) -> tuple[int, dict, bytes]:
-        status, answered, chunks = await _call(gw, path, headers={"host": "gw.example", **headers})
+    async def whoami(path: str) -> tuple[int, dict, bytes]:
+        status, answered, chunks = await _call(gw, path, headers={"host": "gw.example"})
         return status, answered, b"".join(chunks)
 
-    _, _, spoofed = await whoami("/website/notes/api/whoami", **{"AgentEnv-Role": "admin"})
-    _, _, keyed = await whoami("/website/notes/api/whoami", **{"AgentEnv-Role": "admin", "AgentEnv-Role-Key": ROLE_KEY})
+    _, _, answer = await whoami("/website/notes/api/whoami")
     status, redirect, _ = await whoami("/website/notes/api/whoami/")
-    assert json.loads(spoofed) == {"role": "default", "base_url": "http://gw.example/website/notes"}
-    assert json.loads(keyed)["role"] == "admin"
+    assert json.loads(answer) == {"base_url": "http://gw.example/website/notes"}
     assert (status, redirect["location"]) == (307, "http://gw.example/website/notes/api/whoami")
 
 

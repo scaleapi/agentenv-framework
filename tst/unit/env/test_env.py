@@ -284,7 +284,7 @@ def test_a_gateway_record_is_filled_the_way_it_always_was():
                        sandbox_type="modal_vm", sandbox_ids={"gateway_server": "gw"}, db_web_url="https://pg/", db_mcp_url="https://dm/mcp",
                        website_frontend_urls={"shop": "https://gw/shop/"}, vnc_url="https://vnc", env_state_instance_ids=["st-1"],
                        environment_card_url=_CARD_URL, environment_card=_CARD, environment_card_read_at_utc="2026-09-28T00:00:00+00:00",
-                       metadata={"k": "v"}, instance_id="i1", created_at_utc="c", expires_at_utc="x", role_key="deploy-secret"),
+                       metadata={"k": "v"}, instance_id="i1", created_at_utc="c", expires_at_utc="x"),
 ], ids=["base", "sandbox", "gateway"])
 def test_a_record_round_trips_through_its_stored_form(record):
     assert DeployedEnv.from_dict(dataclasses.asdict(record)) == record
@@ -293,14 +293,6 @@ def test_a_record_round_trips_through_its_stored_form(record):
 @pytest.mark.parametrize("cls", [DeployedEnv, DeployedSandboxEnv, DeployedGatewayEnv])
 def test_each_record_class_loads_every_one_of_its_fields(cls):
     assert set(cls._fields_from({"env_id": "e", "env_version": 1})) == {f.name for f in dataclasses.fields(cls)}
-
-
-def test_a_record_s_role_headers_carry_its_role_key_beside_the_role_and_an_older_record_s_only_the_role():
-    keyed = DeployedEnv.from_dict({"env_id": "e", "env_version": 1, "gateway_url": "https://gw", "sandbox_id": "sb",
-                                   "role_key": "deploy-secret"})
-    older = DeployedEnv.from_dict({"env_id": "e", "env_version": 1, "gateway_url": "https://gw", "sandbox_id": "sb"})
-    assert keyed.role_headers("admin") == {"AgentEnv-Role": "admin", "AgentEnv-Role-Key": "deploy-secret"}
-    assert (older.role_key, older.role_headers("admin")) == (None, {"AgentEnv-Role": "admin"})
 
 
 def test_the_gateway_only_fields_are_the_gateway_classs_own():

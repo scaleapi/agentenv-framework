@@ -12,6 +12,7 @@ import pytest
 import agent_env
 from agent_env.a2a_agent import conversation_store
 from agent_env.artifact import FileArtifact
+from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
@@ -64,7 +65,7 @@ async def _run(label: str, triggers: list[dict], params: dict) -> tuple:
             state = (await client.get("/triggers/state")).raise_for_status().json()
             clock = (await client.get("/clock/state")).raise_for_status().json()
             stored = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}},
-                                       headers=deployed.role_headers("harness"))
+                                       headers={AGENT_ENV_ROLE_HEADER: "harness"})
     finally:
         await env.close()
     items = json.loads(stored.json()["content"][0]["text"])["items"]

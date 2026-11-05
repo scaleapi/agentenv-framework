@@ -185,8 +185,7 @@ ROLE_KEY_HEADER = "AgentEnv-Role-Key"
 
 def request_role(request: Request) -> str:
     """The role ``AgentEnv-Role`` names, believed only from a caller that also sends ``AgentEnv-Role-Key`` equal to
-    ``WEBSITE_ROLE_KEY``; every other caller, and every caller of a site with no key set, is ``default``. A deploy with
-    ``keyed_roles`` sets the key and its gateway sends it on beside a role it verified the same way; any other gateway
+    ``WEBSITE_ROLE_KEY``; every other caller, and every caller of a site with no key set, is ``default``. The gateway
     forwards whatever role a browser sends, so without the key a page could claim any role."""
     claimed = caller_from_request(None, request.headers).role or DEFAULT_ROLE
     key = os.environ.get(ROLE_KEY_ENV, "")

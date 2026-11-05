@@ -788,7 +788,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             cli_list = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "list_tools"},
-                headers=result.role_headers("cli"),
+                headers={AGENT_ENV_ROLE_HEADER: "cli"},
                 timeout=30,
             )
             cli_list.raise_for_status()
@@ -805,7 +805,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             cli_call = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "call_tool", "tool_name": "list_emails", "arguments": {"folder_name": "INBOX"}},
-                headers=result.role_headers("cli"),
+                headers={AGENT_ENV_ROLE_HEADER: "cli"},
                 timeout=30,
             )
             assert cli_call.status_code == 200, f"cli call failed: {cli_call.status_code} {cli_call.text}"
@@ -822,7 +822,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
 
         async with streamable_http_client(
             result.mcp_url,
-            http_client=httpx.AsyncClient(headers=result.role_headers("cli")),
+            http_client=httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "cli"}),
         ) as (read_stream, write_stream, _):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -834,7 +834,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             assert "list_emails" not in [t.name for t in await default_session.list_tools()]
             hidden = await default_session.call_tool("list_emails", {"folder_name": "INBOX"})
             assert hidden.isError and "is disabled for role 'default'" in hidden.text, hidden
-        async with ToolSession(mcp_url=result.mcp_url, headers=result.role_headers("cli")) as cli_session:
+        async with ToolSession(mcp_url=result.mcp_url, role="cli") as cli_session:
             assert "list_emails" in [t.name for t in await cli_session.list_tools()]
             assert "alex.chen@techcorp.com" in (await cli_session.call_tool("list_emails", {"folder_name": "INBOX"})).text
 
@@ -877,7 +877,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             assert state_resp.json()["roles"]["*"] == {"disabled": ["list_emails"], "allowed": []}
 
             for role in (None, "cli", "marketing"):
-                headers = result.role_headers(role) if role else {}
+                headers = {AGENT_ENV_ROLE_HEADER: role} if role else {}
                 lst = await client.post(
                     f"{result.gateway_url}/step", json={"action": "list_tools"}, headers=headers, timeout=30,
                 )
@@ -887,14 +887,14 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             blocked = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "call_tool", "tool_name": "list_emails", "arguments": {"folder_name": "INBOX"}},
-                headers=result.role_headers("marketing"),
+                headers={AGENT_ENV_ROLE_HEADER: "marketing"},
                 timeout=30,
             )
             assert blocked.status_code == 403, f"expected 403 for never-seen role under global disable, got {blocked.status_code} {blocked.text}"
 
         async with streamable_http_client(
             result.mcp_url,
-            http_client=httpx.AsyncClient(headers=result.role_headers("cli")),
+            http_client=httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "cli"}),
         ) as (read_stream, write_stream, _):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -934,7 +934,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             mkt_lst = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "list_tools"},
-                headers=result.role_headers("marketing"),
+                headers={AGENT_ENV_ROLE_HEADER: "marketing"},
                 timeout=30,
             )
             mkt_lst.raise_for_status()
@@ -952,7 +952,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             cli_lst = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "list_tools"},
-                headers=result.role_headers("cli"),
+                headers={AGENT_ENV_ROLE_HEADER: "cli"},
                 timeout=30,
             )
             cli_lst.raise_for_status()
@@ -963,7 +963,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             mkt_lst = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "list_tools"},
-                headers=result.role_headers("marketing"),
+                headers={AGENT_ENV_ROLE_HEADER: "marketing"},
                 timeout=30,
             )
             mkt_lst.raise_for_status()
@@ -978,7 +978,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             cli_lst_after_reset = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "list_tools"},
-                headers=result.role_headers("cli"),
+                headers={AGENT_ENV_ROLE_HEADER: "cli"},
                 timeout=30,
             )
             cli_lst_after_reset.raise_for_status()
@@ -1010,7 +1010,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             blocked = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "call_tool", "tool_name": "list_emails", "arguments": {"folder_name": "INBOX"}},
-                headers=result.role_headers("step-role"),
+                headers={AGENT_ENV_ROLE_HEADER: "step-role"},
                 timeout=30,
             )
             assert blocked.status_code == 403, f"expected 403 after step-driven disable, got {blocked.status_code} {blocked.text}"
@@ -1028,7 +1028,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             unblocked = await client.post(
                 f"{result.gateway_url}/step",
                 json={"action": "call_tool", "tool_name": "list_emails", "arguments": {"folder_name": "INBOX"}},
-                headers=result.role_headers("step-role"),
+                headers={AGENT_ENV_ROLE_HEADER: "step-role"},
                 timeout=30,
             )
             assert unblocked.status_code == 200, f"expected 200 after step-driven enable, got {unblocked.status_code} {unblocked.text}"
@@ -1824,7 +1824,7 @@ async def test_gateway_changes_name_the_role_behind_each_write(mcp_server_envs, 
             seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
             after_id = seen[-1]["id"] if seen else 0
             for role, subject in (("default", "first"), ("alice@example.com", "second")):
-                resp = await client.post(f"{gw}/step", headers=result.role_headers(role), timeout=60, json={
+                resp = await client.post(f"{gw}/step", headers={AGENT_ENV_ROLE_HEADER: role}, timeout=60, json={
                     "action": "call_tool", "tool_name": "send_email",
                     "arguments": {"recipients": ["dana@example.com"], "subject": subject, "content": "body"}})
                 assert resp.status_code == 200, resp.text
@@ -1858,7 +1858,7 @@ async def test_gateway_changes_name_the_request_behind_a_write_through_the_rest_
         async with httpx.AsyncClient() as client:
             seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
             after_id = seen[-1]["id"] if seen else 0
-            async with httpx.AsyncClient(headers=result.role_headers("carol@example.com"), timeout=60) as as_carol:
+            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "carol@example.com"}, timeout=60) as as_carol:
                 async with streamable_http_client(f"{gw}/svc/mcp-email/mcp", http_client=as_carol) as (read, write, _):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
@@ -2178,7 +2178,7 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch
         await _verify_list_tools(mcp_url=result.mcp_url, tool_verifier_callback=assert_tool_sees_items)
 
         # The role a ToolSession sends reaches the child's tool as its caller, with the gateway's key for each session
-        async with (ToolSession(mcp_url=result.mcp_url, headers=result.role_headers("alice@example.com")) as alice,
+        async with (ToolSession(mcp_url=result.mcp_url, role="alice@example.com") as alice,
                     ToolSession(mcp_url=result.mcp_url) as anonymous):
             seen = [json.loads((await session.call_tool("items_whoami")).text) for session in (alice, alice, anonymous)]
         assert [caller["role"] for caller in seen] == ["alice@example.com", "alice@example.com", None]
@@ -2556,7 +2556,7 @@ async def test_gateway_triggers_extension(sandbox_provider, mcp_server_envs, ema
             hr = await client.post(f"{gw}/step",
                                    json={"action": "call_tool", "tool_name": "search_emails",
                                          "arguments": {"query": "alex.chen", "folder_name": "INBOX"}},
-                                   headers=result.role_headers("harness"), timeout=60)
+                                   headers={AGENT_ENV_ROLE_HEADER: "harness"}, timeout=60)
             assert hr.status_code == 200, f"harness /step failed: {hr.text}"
             await asyncio.sleep(4)
             assert {t["id"]: t["status"] for t in (await _state(client, gw))["triggers"]}["decoy"] == "armed", (
@@ -3072,7 +3072,7 @@ async def test_gateway_triggers_nl_executor(sandbox_provider, mcp_server_envs, e
 
             # The one-tool constraint really held (determinism lever, verified live).
             lt = await client.post(f"{gw}/step", json={"action": "list_tools"},
-                                   headers=result.role_headers("executor"), timeout=30)
+                                   headers={AGENT_ENV_ROLE_HEADER: "executor"}, timeout=30)
             exec_tools = [t["name"] for t in lt.json()["tools"]]
             assert exec_tools == ["send_email"], f"executor tool surface not locked to one tool: {exec_tools}"
 
@@ -3113,7 +3113,7 @@ async def test_gateway_triggers_nl_executor(sandbox_provider, mcp_server_envs, e
             se = await client.post(f"{gw}/step",
                                    json={"action": "call_tool", "tool_name": "search_emails",
                                          "arguments": {"query": marker, "folder_name": "SENT"}},
-                                   headers=result.role_headers("harness"), timeout=30)
+                                   headers={AGENT_ENV_ROLE_HEADER: "harness"}, timeout=30)
             assert marker in se.text, f"marker email not found in SENT: {se.text[:400]}"
 
             # Cascade-safety: nlact was detected exactly once (from the provoke), NOT from the
@@ -3359,17 +3359,17 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
             await client.post(f"{gw}/tools/{TOOL_DISABLE_ACTION}",
                               json={"role": "locked", "tools": ["*"]}, timeout=30)
             locked = await client.post(f"{gw}/step", json={"action": "list_tools"},
-                                       headers=result.role_headers("locked"), timeout=30)
+                                       headers={AGENT_ENV_ROLE_HEADER: "locked"}, timeout=30)
             assert GET_TIME not in [t["name"] for t in locked.json()["tools"]], "wildcard deny did not hide get_time"
             denied = await client.post(f"{gw}/step",
                                        json={"action": "call_tool", "tool_name": GET_TIME, "arguments": {}},
-                                       headers=result.role_headers("locked"), timeout=30)
+                                       headers={AGENT_ENV_ROLE_HEADER: "locked"}, timeout=30)
             assert denied.status_code == 403, denied.text
             assert GET_TIME in (await _get_time_surfaces(client, gw, result.mcp_url)).step, "default role lost it"
             await client.post(f"{gw}/tools/{TOOL_ENABLE_ACTION}",
                               json={"role": "locked", "tools": [GET_TIME]}, timeout=30)
             relocked = await client.post(f"{gw}/step", json={"action": "list_tools"},
-                                         headers=result.role_headers("locked"), timeout=30)
+                                         headers={AGENT_ENV_ROLE_HEADER: "locked"}, timeout=30)
             assert GET_TIME in [t["name"] for t in relocked.json()["tools"]], "re-enable did not restore it"
     finally:
         await env.close()

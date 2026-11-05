@@ -31,7 +31,7 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
-from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, AGENT_ENV_ROLE_KEY_HEADER
+from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
 from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT, unwritten_local_agent
 from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -70,11 +70,9 @@ def _mcp_add_request(mcp_ext: dict) -> dict:
     return request if isinstance(request, dict) else {}
 
 
-def _mcp_add_body(mcp_ext: dict, url: str, headers: dict | None, card_name: str | None, role: str | None = None,
-                  role_key: str | None = None) -> dict:
+def _mcp_add_body(mcp_ext: dict, url: str, headers: dict | None, card_name: str | None, role: str | None = None) -> dict:
     """Body for the agent's mcp-config `add`. The card name and the role header ride along only when the card's `add`
-    takes them, judged on the exact field set sent, the deploy's `role_key` beside the role so its gateway believes
-    it; what an env does with the role is the env's business."""
+    takes them, judged on the exact field set sent; what an env does with the role is the env's business."""
     request = _mcp_add_request(mcp_ext)
     body: dict = {"url": url}
     if headers:
@@ -83,8 +81,6 @@ def _mcp_add_body(mcp_ext: dict, url: str, headers: dict | None, card_name: str 
         body["name"] = card_name
     if role and card_request_accepts(request, {*body, "headers"}):
         body.setdefault("headers", {})[AGENT_ENV_ROLE_HEADER] = role
-        if role_key:
-            body["headers"][AGENT_ENV_ROLE_KEY_HEADER] = role_key
     return body
 
 
@@ -437,8 +433,7 @@ class DeployAgentTaskStep(TaskStep):
                 url = host_url_for(live_mcp_url(env_id), deployed.sandbox_type)
                 card_name = None
             if mcp_ext:
-                body = _mcp_add_body(mcp_ext, url, sandbox_request_headers_for_url(url), card_name, self.role,
-                                     deployed_env.role_key if deployed_env is not None else None)
+                body = _mcp_add_body(mcp_ext, url, sandbox_request_headers_for_url(url), card_name, self.role)
                 registrations.append((env_id, body))
 
         identity_payload: dict[str, str] = {"name": self.agent_name}

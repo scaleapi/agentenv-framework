@@ -47,7 +47,6 @@ class EnvPeers(Peers):
         self.clock = clock or {"armed": False}
         self.engine = engine
         self.steps: list[tuple[str, dict]] = []
-        self.step_keys: list[str | None] = []
 
     def _answer(self, request: httpx.Request) -> httpx.Response:
         origin = f"{request.url.scheme}://{request.url.host}"
@@ -63,7 +62,6 @@ class EnvPeers(Peers):
             return httpx.Response(200, json={"to": body.get("to", "default"), "items": [], "until": None})
         if origin == ENV and request.url.path == "/step":
             self.steps.append((request.headers.get("AgentEnv-Role"), json.loads(request.content)))
-            self.step_keys.append(request.headers.get("AgentEnv-Role-Key"))
             return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}], "changelog_id": 7})
         return super()._answer(request)
 
@@ -477,26 +475,6 @@ async def test_a_hook_calls_a_tool_through_step_as_the_role_it_names_tagged_as_t
                                        "arguments": {"to": "a@example.com"}, "source": "post_turn_hook",
                                        "hook_artifact_id": "mailer"})]
     assert _recorded(ctx)[0]["result"]["changelog_id"] == 7
-    assert peers.step_keys == [None]
-
-
-@pytest.mark.asyncio
-async def test_a_hook_s_tool_call_carries_the_deploy_s_role_key_beside_its_role(monkeypatch):
-    peers = EnvPeers(monkeypatch, {AGENT: [text("one")]})
-    ctx = _context()
-    env = _env(EXT_STEP_URI)
-    env.role_key = "deploy-secret"
-    ctx.deployed_envs.append(env)
-    hook = _hook("keyed", """
-        async def post_turn(turn, params):
-            [env] = turn.envs
-            await env.call_tool("send_email", {}, role="school")
-            return None
-    """)
-
-    await _step(hook, turns=1).execute(ctx)
-
-    assert [role for role, _ in peers.steps] == ["school"] and peers.step_keys == ["deploy-secret"]
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.utils.paths import validate_relative_filename
 
-from .gateway import AGENT_ENV_ROLE_HEADER, AGENT_ENV_ROLE_KEY_HEADER, GatewayMode
+from .gateway import GatewayMode
 from .gateway.constants import WELL_KNOWN_PATH
 from .store import get_env_store
 
@@ -83,7 +83,6 @@ class DeployedEnv:
     # The provider that made the record, so the class it loads as (see from_dict); capabilities still come from the card.
     env_provider_type: Optional[str] = None
     environment_card_url: Optional[str] = None
-    role_key: Optional[str] = None
     # The env card as last read, and when (ISO 8601, UTC); written at deploy from the readiness probe.
     environment_card: Optional[dict] = None
     environment_card_read_at_utc: Optional[str] = None
@@ -123,11 +122,6 @@ class DeployedEnv:
         """What a call to ``url`` sends of the env's control token: ``control_headers`` when ``url`` is the env's
         address or under it, as a step's grant gives them, and none anywhere else, an override's address say."""
         return protocol_v1.granted_headers(url, {self.environment_url: self.control_headers})
-    def role_headers(self, role: str) -> dict[str, str]:
-        """The headers a request to the env sends to act as `role`: the role, and the deploy's `role_key` beside it,
-        without which a gateway that has one takes the request for `default`'s. A record from before the key, of a deploy without
-        `keyed_roles`, or of one with no gateway, has none, and its role header alone is believed."""
-        return {AGENT_ENV_ROLE_HEADER: role, **({AGENT_ENV_ROLE_KEY_HEADER: self.role_key} if self.role_key else {})}
 
     def supports(self, uri: str, method: str) -> bool:
         """Whether the stored env card offers `method` on the extension at `uri`; no network."""
@@ -206,7 +200,6 @@ class DeployedEnv:
             created_at_utc=data.get("created_at_utc"),
             expires_at_utc=data.get("expires_at_utc"),
             control_token=data.get("control_token"),
-            role_key=data.get("role_key"),
         )
 
 

@@ -17,9 +17,9 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from agent_env.env.env import DeployedEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.env.gateway.constants import METHOD_RESET, RPC_PATH, TRIGGER_IN_FLIGHT_STATUSES
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
@@ -66,8 +66,8 @@ async def test_each_nl_action_reaches_the_executor_it_names(items_env):
         {"id": "on-add", "when": {"type": "action", "tool": "items_add_item", "repeat": True}, "actions": []},
     ]
     try:
-        alice = _Executor("alice", "alice@example.com", deployed, host, started)
-        bob = _Executor("bob", "bob@example.com", deployed, host, started)
+        alice = _Executor("alice", "alice@example.com", deployed.gateway_url, host, started)
+        bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[alice.agent, bob.agent], metadata={})
         await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers,
                                       watch_roles=["default"], executor_timeout_seconds=60).execute(context)
@@ -76,7 +76,7 @@ async def test_each_nl_action_reaches_the_executor_it_names(items_env):
             assert provoke.status_code == 200, provoke.text
             state = await _quiet(client, {"to-alice": 1, "to-bob": 1, "on-add": 0})
             stored = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}},
-                                       headers=deployed.role_headers("harness"))
+                                       headers={AGENT_ENV_ROLE_HEADER: "harness"})
     finally:
         for executor in started:
             executor.stop()
@@ -111,8 +111,8 @@ async def test_personas_react_to_each_other_until_one_stays_quiet(items_env):
          "actions": [{"type": "nl", "executor": "denise", "instruction": "DENISE-TO-BOB"}]},
     ]
     try:
-        denise = _Executor("denise", "denise@example.com", deployed, host, started)
-        bob = _Executor("bob", "bob@example.com", deployed, host, started, replies=1)
+        denise = _Executor("denise", "denise@example.com", deployed.gateway_url, host, started)
+        bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started, replies=1)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[denise.agent, bob.agent], metadata={})
         await RegisterEnvTriggersStep(id="reg", version=None, env_id=env.id, triggers=triggers,
                                       watch_roles=["default"], executor_timeout_seconds=60).execute(context)
@@ -121,7 +121,7 @@ async def test_personas_react_to_each_other_until_one_stays_quiet(items_env):
             assert provoke.status_code == 200, provoke.text
             state = await _quiet(client, {"denise-hears-solver": 1, "bob-hears-denise": 2, "denise-hears-bob": 1})
             stored = await client.post("/step", json={"action": "call_tool", "tool_name": "list_items", "arguments": {}},
-                                       headers=deployed.role_headers("harness"))
+                                       headers={AGENT_ENV_ROLE_HEADER: "harness"})
     finally:
         for executor in started:
             executor.stop()
@@ -143,7 +143,7 @@ async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(it
     triggers = [{"id": "bob-hears-solver", "when": {"type": "action", "tool": "list_items"},
                  "actions": [{"type": "nl", "executor": "bob", "instruction": "BOB-ACTS", "delay": "PT2M"}]}]
     try:
-        bob = _Executor("bob", "bob@example.com", deployed, host, started)
+        bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[bob.agent], metadata={})
         async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
             # The env is shared, so its trajectory holds the earlier tests' calls: read this test's, after them.
@@ -188,7 +188,7 @@ async def test_a_deadline_fires_on_silence_and_a_reply_cancels_it(items_env):
                                                                  "where": {"item": {"regex": f"^REPLY-{n}"}}}},
                       "actions": [{"type": "nl", "executor": "bob", "instruction": f"ESCALATE-{n}"}]}]
     try:
-        bob = _Executor("bob", "bob@example.com", deployed, host, started)
+        bob = _Executor("bob", "bob@example.com", deployed.gateway_url, host, started)
         context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[bob.agent], metadata={})
         async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=60) as client:
             await _arm_clock(client, "2026-10-14T10:00:00Z", 60)
@@ -243,10 +243,9 @@ class _Executor:
     """An A2A executor on this machine that acts on each instruction through the gateway, under its own role; with
     ``replies``, it stops acting after that many."""
 
-    def __init__(self, name: str, role: str, deployed: DeployedEnv, host: str, started: list,
+    def __init__(self, name: str, role: str, gateway_url: str, host: str, started: list,
                  replies: int | None = None) -> None:
-        self.role, self.gateway_url, self.replies = role, deployed.gateway_url, replies
-        self.headers = deployed.role_headers(role)
+        self.role, self.gateway_url, self.replies = role, gateway_url, replies
         self.instructions: list[str] = []
         self.acted_as: list[str] = []
         self._server = ThreadingHTTPServer((host, 0), functools.partial(_ExecutorHandler, self))
@@ -270,7 +269,7 @@ class _Executor:
     def _call(self, tool: str, arguments: dict) -> dict:
         response = httpx.post(f"{self.gateway_url}/step", json={"action": "call_tool", "tool_name": tool,
                                                                 "arguments": arguments},
-                              headers=self.headers, timeout=60)
+                              headers={AGENT_ENV_ROLE_HEADER: self.role}, timeout=60)
         response.raise_for_status()
         return response.json()
 

@@ -444,21 +444,6 @@ async def test_a_failing_trigger_evaluation_still_answers_the_request(monkeypatc
     assert await _request(gw, "GET", "/website/mail/inbox") == 200
 
 
-@pytest.mark.asyncio
-async def test_with_a_role_key_the_engine_sees_a_role_only_beside_it_so_a_page_cannot_pose_as_the_executor(monkeypatch):
-    _Website(status=200).install(monkeypatch)
-    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
-                 website_urls={"mail": "http://mail-frontend"}, role_key="deploy-secret")
-    gw._trigger_engine.register({"triggers": [REPLY]})
-    seen: list[str] = []
-    gw._trigger_engine.on_website_request = lambda role, *a: seen.append(role) or ([], None)
-
-    await _request(gw, "GET", "/website/mail/inbox", headers={"AgentEnv-Role": "executor"})
-    await _request(gw, "GET", "/website/mail/inbox", headers={"AgentEnv-Role": "executor", "AgentEnv-Role-Key": "deploy-secret"})
-
-    assert seen == ["default", "executor"]
-
-
 NOTES_CARD = {"name": "notes", "capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {"routes": [
     {"method": "GET", "path": "/api/notes", "name": "list_notes", "roles": None},
     {"method": "POST", "path": "/api/notes", "name": "create_note", "roles": None},

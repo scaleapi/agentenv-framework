@@ -275,25 +275,21 @@ class A2AAgent:
     @staticmethod
     async def install_cli(
         deployed: "DeployedA2AAgent", cli_artifact: "CliArtifact", gateway_url: str, container: str | None = None,
-        on_host: bool = False, role_key: str | None = None,
+        on_host: bool = False,
     ) -> str:
         """Install a CliArtifact bundle into the agent's filesystem at /opt/cli/<command>/, in ``container`` when
         install_agent put the agent in one, or on the VM host, ``on_host``, when it put it there. Writes a sidecar
-        bin/.env with the gateway URL, and with ``role_key``, the key of that gateway's deploy, when it has one, so
-        each installed CLI sends its own deploy's key beside its role; then chmod +x's the entrypoint. Idempotent.
-        Returns the path to the entrypoint."""
+        bin/.env with the gateway URL and chmod +x's the entrypoint. Idempotent. Returns the path to the entrypoint."""
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox, into_container, stage_files_into_container
-        from agent_env.task_step.task_steps.mcp_cli_builder.codegen import GATEWAY_URL_ENV_VAR, ROLE_KEY_ENV_VAR
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
         provider = build_sandbox_provider(deployed.sandbox_type) if deployed.sandbox_type else get_agent_sandbox_provider()
         sandbox = await provider.get_sandbox(deployed.sandbox_id)
         target_root = f"/opt/cli/{cli_artifact.command_name}"
         entrypoint_path = f"{target_root}/{cli_artifact.entrypoint}"
         env_dir = posixpath.dirname(entrypoint_path)
-        sidecar = f"{GATEWAY_URL_ENV_VAR}={gateway_url}\n" + (f"{ROLE_KEY_ENV_VAR}={role_key}\n" if role_key else "")
 
         if on_host:
-            await sandbox.write_host_file(sidecar.encode(), f"{env_dir}/{GATEWAY_ENV_FILE}")
+            await sandbox.write_host_file(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n".encode(), f"{env_dir}/{GATEWAY_ENV_FILE}")
             await stage_files_into_container(
                 sandbox, cli_artifact.get_cli_files().get_file_artifacts(), target_root, on_host=True)
             await sandbox.exec_script(f"chmod +x {shlex.quote(entrypoint_path)}")
@@ -301,7 +297,7 @@ class A2AAgent:
             return entrypoint_path
 
         # write .env first — write_file_from_text creates the parent dir; write_file_from_object does not.
-        await sandbox.write_file_from_text(sidecar, f"{env_dir}/{GATEWAY_ENV_FILE}",
+        await sandbox.write_file_from_text(f"AGENT_ENV_GATEWAY_URL={gateway_url}\n", f"{env_dir}/{GATEWAY_ENV_FILE}",
                                            **into_container(container))
 
         for rel_path, file_artifact in cli_artifact.get_cli_files().get_file_artifacts().items():

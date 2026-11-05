@@ -3,7 +3,6 @@ target ``load_artifact`` supports, through each target's real loader."""
 
 from __future__ import annotations
 
-import base64
 import re
 from types import SimpleNamespace
 
@@ -276,18 +275,3 @@ async def test_a_cli_installs_on_the_vm_host_of_an_agent_installed_there(monkeyp
         "pull s3://bucket/check.py /opt/cli/tool/bin/tool", "chmod +x /opt/cli/tool/bin/tool"]
     assert [s.split("\n")[0] for s in sandbox.scripts if s.startswith("base64 -d")] == [
         "base64 -d <<'ENDB64' > /opt/cli/tool/bin/.env"]
-
-
-@pytest.mark.asyncio
-async def test_each_installed_cli_carries_its_own_deploy_s_role_key_beside_its_gateway(monkeypatch):
-    async def _sidecar(role_key: str | None) -> str:
-        sandbox = _Vm()
-        monkeypatch.setattr(sandbox_provider, "get_agent_sandbox_provider", _provider(sandbox))
-        await A2AAgent.install_cli(SimpleNamespace(sandbox_type=None, sandbox_id="sb-agent"), TOOL, "https://gateway",
-                                   on_host=True, role_key=role_key)
-        (written,) = [s for s in sandbox.scripts if s.startswith("base64 -d <<'ENDB64' > /opt/cli/tool/bin/.env")]
-        return base64.b64decode("".join(written.split("\n")[1:-1])).decode()
-
-    assert await _sidecar("key-a") == "AGENT_ENV_GATEWAY_URL=https://gateway\nAGENT_ENV_ROLE_KEY=key-a\n"
-    assert await _sidecar("key-b") == "AGENT_ENV_GATEWAY_URL=https://gateway\nAGENT_ENV_ROLE_KEY=key-b\n"
-    assert await _sidecar(None) == "AGENT_ENV_GATEWAY_URL=https://gateway\n"

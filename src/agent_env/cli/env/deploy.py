@@ -48,10 +48,7 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
 @click.option("--env-state-instance-id", default=None,
               help="Attach against an EXISTING env state instance instead of creating a fresh store "
                    "(its own type selects the provider).")
-@click.option("--keyed-roles", is_flag=True, default=False,
-              help="Draw a role key for the deploy: its gateway then believes a role other than default only from a "
-                   "caller that sends the key beside it.")
-def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode: str, sandbox: str, service_db_env_id: str | None, gateway_env_id: str | None, website_browser_env_id: str | None, disk_size_gb: float, cpu: float | None, memory_mb: int | None, env_state_type: str | None, env_state_instance_id: str | None, keyed_roles: bool):
+def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode: str, sandbox: str, service_db_env_id: str | None, gateway_env_id: str | None, website_browser_env_id: str | None, disk_size_gb: float, cpu: float | None, memory_mb: int | None, env_state_type: str | None, env_state_instance_id: str | None):
     """Deploy an MCP server environment."""
     from agent_env.providers import build_sandbox_provider
     from agent_env.config import get_config
@@ -92,8 +89,6 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
     if env_state_instance_id:
         deploy_kwargs["env_state_instance_id"] = env_state_instance_id
         click.echo(f"Env state instance id: {env_state_instance_id}")
-    if keyed_roles:
-        deploy_kwargs["keyed_roles"] = True
     try:
         with run_scope(env.id):
             deployed_env = asyncio.run(env.deploy(**deploy_kwargs))

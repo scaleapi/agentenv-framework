@@ -283,11 +283,9 @@ class Episode:
         if (error := self._run.exception()) is not None:
             raise error
 
-    async def _serve_in_process(self, agent: str, role: str | None, mcp_urls: dict[str, str],
-                                role_keys: dict[str, str | None] | None = None) -> DeployedAgent:
+    async def _serve_in_process(self, agent: str, role: str | None, mcp_urls: dict[str, str]) -> DeployedAgent:
         """A proxy served in this process for ``agent``, which works in no sandbox, with each env server registered as
-        ``deploy_agent`` registers them with any agent, at the URL this process reaches, with its deploy's role key
-        from ``role_keys``: played as the others are."""
+        ``deploy_agent`` registers them with any agent, at the URL this process reaches: played as the others are."""
         server = InProcessProxy()
         self._in_process.append(server)
         url = await server.start()
@@ -297,8 +295,7 @@ class Episode:
             card = response.json()
             mcp_config = A2AAgent.find_extension(card, A2AAgent.EXT_MCP_CONFIG)
             for env_id, mcp_url in mcp_urls.items():
-                body = _mcp_add_body(mcp_config, mcp_url, sandbox_request_headers_for_url(mcp_url), env_id, role,
-                                     (role_keys or {}).get(env_id))
+                body = _mcp_add_body(mcp_config, mcp_url, sandbox_request_headers_for_url(mcp_url), env_id, role)
                 (await client.post(url + mcp_config["params"]["endpoint"], json=body)).raise_for_status()
         deployed = DeployedAgent(agent_name=agent, api_url=url, a2a_url=url, a2a_card=card, role=role)
         await self._attach(agent, deployed)

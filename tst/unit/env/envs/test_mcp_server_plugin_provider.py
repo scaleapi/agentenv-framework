@@ -230,7 +230,7 @@ async def test_a_multi_env_child_of_a_plugin_type_is_still_the_gateways():
     multi = MultiEnv(id="multi", version=1, mcp_server_envs=[child])
     record = SimpleNamespace(env_id="multi", env_version=1, sandbox_id="gw", sandbox_type="modal", sandbox_ids={},
                              env_state_instance_ids=[], instance_id="i", mcp_server_name="m", environment_card=None,
-                             environment_card_url=None, gateway_url="https://gw.example", role_key=None)
+                             environment_card_url=None, gateway_url="https://gw.example")
     gw = MagicMock(sandbox_id="gw", mode="vm", type="modal")
     with patch("agent_env.env.env.Env.get", return_value=multi), \
          patch("agent_env.providers.build_sandbox_provider", return_value=MagicMock(get_sandbox=AsyncMock(return_value=gw))), \

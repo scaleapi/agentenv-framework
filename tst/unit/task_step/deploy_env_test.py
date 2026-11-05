@@ -242,36 +242,6 @@ async def test_execute_merges_annotations_into_metadata_deploy_set():
 
 
 
-@pytest.mark.parametrize("keyed_roles", [True, False], ids=["keyed", "unkeyed"])
-def test_keyed_roles_roundtrips_and_an_older_step_is_unkeyed(keyed_roles):
-    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", keyed_roles=keyed_roles)
-    assert DeployEnvTaskStep.from_dict(step.to_dict()).keyed_roles is keyed_roles
-    older = {k: v for k, v in step.to_dict().items() if k != "keyed_roles"}
-    assert DeployEnvTaskStep.from_dict(older).keyed_roles is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("keyed_roles", [True, False], ids=["keyed", "unkeyed"])
-async def test_execute_asks_for_a_role_key_only_for_a_keyed_step(keyed_roles):
-    """An unkeyed step passes no keyed_roles, so an env type or plugin provider that doesn't name it isn't broken."""
-    env = _fake_env(_deployed_env(None))
-    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", keyed_roles=keyed_roles)
-    with patch("agent_env.env.env.Env") as Env:
-        Env.get.return_value = env
-        await step.execute(TaskStepContext())
-    assert env.deploy.await_args.kwargs.get("keyed_roles") is (True if keyed_roles else None)
-
-
-@pytest.mark.asyncio
-async def test_execute_refuses_keyed_roles_for_an_env_whose_deploy_does_not_take_them():
-    env = _env_with_fixed_deploy(_deployed_env(None))
-    env.type = "fixed"
-    step = DeployEnvTaskStep(id="d", version=None, env_id="art-1", keyed_roles=True)
-    with patch("agent_env.env.env.Env") as Env, pytest.raises(ValueError, match="fixed envs take no keyed_roles"):
-        Env.get.return_value = env
-        await step.execute(TaskStepContext())
-
-
 # --- preflight: an option the step's env would refuse at deploy is a save-time problem ---
 
 
@@ -304,12 +274,6 @@ def test_preflight_passes_what_the_env_takes(kind, options):
 def test_preflight_refuses_env_params_an_env_doesnt_take(kind, refusal):
     env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
     assert _preflight(env, env_params={"form": "container"}) == [f"deploy_env 'd': {refusal}"]
-
-
-def test_preflight_passes_keyed_roles_for_a_gateway_env_and_refuses_them_for_a_server_env():
-    assert _preflight(_mcp_env("gateway"), keyed_roles=True) == []
-    assert _preflight(_mcp_env("server"), keyed_roles=True) == [
-        "deploy_env 'd': env 'mcp-email' has env_provider_type 'server', which doesn't take keyed_roles"]
 
 
 @pytest.mark.parametrize("kind", ["server", "gateway", "other"])

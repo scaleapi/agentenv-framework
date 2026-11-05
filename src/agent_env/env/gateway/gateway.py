@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
-import hmac
 import json
 import logging
 import os
@@ -42,7 +41,6 @@ if TYPE_CHECKING:
 from .constants import (
     AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
-    AGENT_ENV_ROLE_KEY_HEADER,
     AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
     CARD_FETCH_TIMEOUT_S,
@@ -76,7 +74,6 @@ from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .rest_proxy import (
     ROLE_HEADER_BYTES,
-    ROLE_KEY_HEADER_BYTES,
     UpstreamResponse,
     WebsiteRoute,
     fetch_child_card,
@@ -133,10 +130,7 @@ class Gateway:
         rest_proxy_urls: dict[str, str] | None = None,
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
-        role_key: str | None = None,
     ):
-        """`role_key` is the deploy's secret: with one, a request is believed to act as a role other than `default`
-        only when it carries the key beside the role; without one, as before it, the role header alone is believed."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -146,7 +140,6 @@ class Gateway:
         self._site_reserved: dict[str, frozenset[str]] = {}
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
-        self._role_key = role_key or None
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
@@ -429,7 +422,7 @@ class Gateway:
             anyio.run(server.serve)
 
     # The three scopes a Caller is bound in, innermost first. Request: the served app binds the role the
-    # AgentEnv-Role header named, as `_attributed_role` believes it. Session: mcp's Server.run enters the session lifespan once per inbound MCP
+    # AgentEnv-Role header named. Session: mcp's Server.run enters the session lifespan once per inbound MCP
     # session, in the session's server task before any handler task is spawned, so the key bound there is inherited
     # by every tools/call of that session (and the role is the one its initialize request carried, which that task
     # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
@@ -444,13 +437,11 @@ class Gateway:
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
-            claimed, given_key = None, None
+            role = DEFAULT_ROLE
             for name, value in scope.get("headers", ()):
-                if name == ROLE_HEADER_BYTES and claimed is None:
-                    claimed = value.decode(errors="ignore")
-                elif name == ROLE_KEY_HEADER_BYTES and given_key is None:
-                    given_key = value.decode(errors="ignore")
-            role = self._attributed_role(claimed or "", given_key or "")
+                if name == ROLE_HEADER_BYTES:
+                    role = value.decode(errors="ignore").strip() or DEFAULT_ROLE
+                    break
             token = Caller(role=role, session=Caller.current().session).bind()
             try:
                 await inner(scope, receive, send)
@@ -626,8 +617,7 @@ class Gateway:
         role = self._request_role(request)
         mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
         if request.method in _SAFE_METHODS:
-            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                                 role_key=self._role_key)
+            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server)
         changelog_before = self._query_changelog_id()
         attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
@@ -652,7 +642,7 @@ class Gateway:
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                             role_key=self._role_key, on_done=log_write)
+                             on_done=log_write)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
@@ -692,19 +682,10 @@ class Gateway:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
-    def _request_role(self, request: Request) -> str:
-        """The role the gateway attributes a REST request to: the first AgentEnv-Role header, as `_attributed_role`
-        believes it, else the default role."""
-        return self._attributed_role(request.headers.get(AGENT_ENV_ROLE_HEADER, ""),
-                                     request.headers.get(AGENT_ENV_ROLE_KEY_HEADER, ""))
-
-    def _attributed_role(self, claimed: str, given_key: str) -> str:
-        """The role a request claiming `claimed` acts as: `default` when it claims none, and when the deploy has a
-        role key the request did not send. Without a key (a deploy without keyed_roles) the claim alone is believed."""
-        role = claimed.strip() or DEFAULT_ROLE
-        if self._role_key is None or role == DEFAULT_ROLE:
-            return role
-        return role if hmac.compare_digest(given_key.encode(), self._role_key.encode()) else DEFAULT_ROLE
+    @staticmethod
+    def _request_role(request: Request) -> str:
+        """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
+        return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
 
     async def _read_trigger_website_routes(self, body: Any) -> None:
         """Read the routes of each website a website trigger in a register `body` names an `op` of, so registration
