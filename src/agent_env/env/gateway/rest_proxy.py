@@ -134,15 +134,21 @@ def upstream_url(base_url: str, request: HTTPConnection) -> str:
     return url
 
 
+def client_headers(connection: HTTPConnection, withheld: frozenset[bytes] = frozenset()) -> list[tuple[bytes, bytes]]:
+    """What any route of the gateway may pass on of a connection's headers: one entry per raw header, so repeated
+    fields (cookie, x-forwarded-for) keep their multiplicity, minus the hop-by-hop set and the headers named in
+    `withheld` (lower case), the credentials of the provider in front of the gateway, so no service behind it reads
+    them."""
+    return [(k, v) for k, v in connection.headers.raw if k.lower() not in HOP_BY_HOP and k.lower() not in withheld]
+
+
 def upstream_headers(request: HTTPConnection, role: str, *, withheld: frozenset[bytes] = frozenset()) -> httpx.Headers:
-    """One entry per raw header, so repeated fields (cookie, x-forwarded-for) keep their multiplicity. The role
-    header is the gateway's to set: the client's copies are dropped and the role the gateway attributed the
-    request to goes in their place, so the upstream never reads a value the gateway did not write. So are the
-    forwarded-address headers (`forwarded_address`). The headers named in `withheld` (lower case), the credentials of
-    the provider in front of the gateway, are dropped, so no service behind it reads them."""
-    headers = httpx.Headers([(k, v) for k, v in request.headers.raw
-                             if k.lower() not in HOP_BY_HOP and k.lower() != ROLE_HEADER_BYTES
-                             and k.lower() not in _FORWARDED and k.lower() not in withheld])
+    """The client's headers (``client_headers``) as a proxied request sends them. The role header is the gateway's to
+    set: the client's copies are dropped and the role the gateway attributed the request to goes in their place, so
+    the upstream never reads a value the gateway did not write. So are the forwarded-address headers
+    (`forwarded_address`)."""
+    headers = httpx.Headers([(k, v) for k, v in client_headers(request, withheld)
+                             if k.lower() != ROLE_HEADER_BYTES and k.lower() not in _FORWARDED])
     headers[AGENT_ENV_ROLE_HEADER] = role
     headers.update(forwarded_address(request))
     # Bytes are forwarded undecoded, so only ask upstream for encodings the caller can take.
