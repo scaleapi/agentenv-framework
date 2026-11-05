@@ -900,30 +900,58 @@ async def test_a_held_boot_waits_for_the_driver_to_answer_and_still_fails_as_soo
 
 
 @pytest.mark.asyncio
-async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_routed_then_waits_until_ready(monkeypatch):
+async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_listed_then_keeps_its_ready_card(monkeypatch):
     order = []
     apps = [SimpleNamespace(environment_name=name, launch=lambda os_type, at=at: SimpleNamespace(at=at))
             for name, at in [("mail", "boot"), ("music", "demand"), ("notes", "boot")]]
     env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
 
     async def invoke(uri, method, params=None, *, environment_name=None):
-        order.append((uri, method, environment_name))
+        order.append((uri, method, environment_name, record.environment_card))
+
+    async def listed(url, names, timeout):
+        order.append(("listed", url, names))
+        return {"name": "listed"}
 
     async def ready(url, timeout, token):
         order.append(("ready", url, token))
-        return {}
+        return {"name": "ready"}
 
+    monkeypatch.setattr(env_computer_provider, "listed", listed)
     monkeypatch.setattr(env_computer_provider, "ready", ready)
     monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
-    record = SimpleNamespace(invoke=invoke, control_token="t0ken")
+    record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={"name": "booted"})
     await env_computer_provider._launch_held_apps(env, record, "http://computer")
 
-    assert order == [(COMPUTER_APP, "launch", "mail"), (COMPUTER_APP, "launch", "notes"),
-                     ("ready", "http://computer", "t0ken")]
+    assert order == [("listed", "http://computer", ["mail", "notes"]),
+                     (COMPUTER_APP, "launch", "mail", {"name": "listed"}),
+                     (COMPUTER_APP, "launch", "notes", {"name": "listed"}), ("ready", "http://computer", "t0ken")]
+    assert record.environment_card == {"name": "ready"} and record.environment_card_read_at_utc
     order.clear()
     apps[:] = [apps[1]]
     await env_computer_provider._launch_held_apps(env, record, "http://computer")
     assert order == [("ready", "http://computer", "t0ken")]
+
+
+@pytest.mark.asyncio
+async def test_a_held_app_is_awaited_until_the_driver_lists_it_with_its_server(monkeypatch):
+    """A page driver answers before its browser's server does, and lists the browser by its name alone until then."""
+    named_only = {"name": "browser", "children_environments": [{"name": "chromium", "url": "/svc/chromium/agentenv"}]}
+    served = {"name": "browser", "children_environments": [{"name": "chromium", "url": "/svc/chromium/agentenv",
+        "capabilities": {"extensions": [{"uri": COMPUTER_APP, "params": {"endpoint": "/svc/chromium/agentenv/ext/app",
+                                                                         "methods": {"launch": {}}}}]}}]}
+    cards = [named_only, named_only, served]
+
+    async def get_card(url, timeout=5):
+        return cards.pop(0) if len(cards) > 1 else cards[0]
+
+    monkeypatch.setattr(boot.protocol_v1, "get_card", get_card)
+    monkeypatch.setattr(boot, "_POLL_S", 0.01)
+
+    assert await boot.listed("http://computer", ["chromium"], 5) == served
+    cards[:] = [named_only]
+    with pytest.raises(TimeoutError, match="didn't list chromium with its server"):
+        await boot.listed("http://computer", ["chromium"], 0.2)
 
 
 @pytest.mark.asyncio

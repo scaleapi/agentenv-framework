@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV
+from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
 
 from agent_env.config import get_config
@@ -216,3 +217,24 @@ async def ready(url: str, timeout: float, token: Optional[str] = None, *, answer
     except TimeoutError:
         raise TimeoutError(f"the computer at {url} wasn't ready within {timeout:.0f} s ({last})") from None
     raise ComputerFailed(f"the computer at {url} failed: {failed}")
+
+
+async def listed(url: str, apps: list[str], timeout: float) -> dict:
+    """The card of the driver at ``url`` once it lists each of ``apps`` with its own server's card, which offers
+    ``computer-app/v1`` ``launch``: a driver names an app whose server isn't answering yet by its name alone. Raises
+    TimeoutError, naming the apps it last lacked, when that takes longer than ``timeout`` seconds."""
+    lacking = list(apps)
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                with contextlib.suppress(Exception):
+                    card = await protocol_v1.get_card(url, timeout=5)
+                    offered = {child.name for child in protocol_v1.children(card)
+                               if protocol_v1.find_extension_method(child.card, COMPUTER_APP, "launch") is not None}
+                    lacking = [app for app in apps if app not in offered]
+                    if not lacking:
+                        return card
+                await asyncio.sleep(_POLL_S)
+    except TimeoutError:
+        raise TimeoutError(f"the computer at {url} didn't list {', '.join(lacking)} with its server within "
+                           f"{timeout:.0f} s") from None

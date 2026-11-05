@@ -27,6 +27,7 @@ from agent_env.env.envs.computer.utils.boot import (
     control_token,
     discard,
     first_native,
+    listed,
     ready,
     ready_timeout,
     recorded_app_settings,
@@ -199,13 +200,18 @@ async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_para
 
 async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: str) -> None:
     """Launch each app that starts with the computer, whose launch a deploy routing sites holds until the sites' names,
-    CA and proxy are in place, through its ``computer-app/v1`` ``launch``, then wait until the computer is ready, which
-    its boot only waited to answer."""
+    CA and proxy are in place, through its ``computer-app/v1`` ``launch`` once the computer lists it with its server,
+    then wait until the computer is ready, which its boot only waited to answer; the record keeps the card the computer
+    answers then, as its boot's card may list an app by its name alone."""
     os_type = env.computer.os.type
+    timeout = ready_timeout(env.composed_apps(), os_type)
     held = [app for app in env.composed_apps() if (launch := app.launch(os_type)) is not None and launch.at == "boot"]
+    if held:
+        record.environment_card = await listed(url, [app.environment_name for app in held], timeout)
     for app in held:
         await record.invoke(COMPUTER_APP, "launch", environment_name=app.environment_name)
-    await ready(url, ready_timeout(env.composed_apps(), os_type), record.control_token)
+    record.environment_card = await ready(url, timeout, record.control_token)
+    record.environment_card_read_at_utc = datetime.now(timezone.utc).isoformat()
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
