@@ -43,12 +43,25 @@ def test_a_sites_mcp_endpoint_is_its_internal_servers_path_under_its_svc_base():
     ("http://shop:8000", "/mcp", "http://shop:8000/mcp"),
     ("http://shop:8000", "http://shop:8001/mcp", None),
     ("http://shop:8000", "https://shop:8000/mcp", None),
+    ("http://shop/base", "http://shop/base/mcp", "http://shop/base/mcp"),
+    ("http://shop/base", "/mcp", "http://shop/base/mcp"),
 ])
 def test_a_declared_mcp_url_on_the_sites_server_keeps_the_sites_own_spelling(base, declared, mcp_url):
     assert entrypoint_module._site_mcp_url(base, declared) == mcp_url
     if mcp_url is not None:
         servers = [InternalMCPServer("shop", mcp_url)]
         assert site_mcp_endpoints(servers, {"shop": base}, {"shop": base}) == {"shop": "/mcp"}
+
+
+@pytest.mark.asyncio
+async def test_a_site_behind_a_path_prefix_is_found_at_the_full_url_its_card_declares(monkeypatch):
+    def site(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/base" + CARD
+        return httpx.Response(200, json={"additionalInterfaces": [{"url": "http://shop/base/mcp", "transport": "mcp"}]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(entrypoint_module.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(site), **kw))
+    assert await website_mcp_servers({"shop": "http://shop/base"}) == [InternalMCPServer("shop", "http://shop/base/mcp")]
 
 
 @pytest.mark.asyncio
