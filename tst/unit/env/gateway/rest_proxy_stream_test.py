@@ -521,6 +521,26 @@ async def test_a_client_serving_the_route_at_its_own_root_is_told_no_prefix_and_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("root, expected", [
+    ("https://notes.test", (["notes.test"], ["https"], [])),
+    ("http://notes.test:8080/", (["notes.test:8080"], ["http"], [])),
+    ("javascript://notes.test", (["front.example"], ["https"], [])),
+    ("https://notes.test/elsewhere", (["front.example"], ["https"], [])),
+    ("https://user@notes.test", (["front.example"], ["https"], [])),
+], ids=["origin", "port", "not-http", "a-path", "userinfo"])
+async def test_a_site_root_naming_an_origin_is_the_address_though_a_front_rewrote_the_forwarded_host(
+        monkeypatch, root, expected):
+    """A front between a computer's site proxy and the gateway, as a provider's ingress is, may set its own
+    X-Forwarded-Host; the origin the proxy names in AgentEnv-Site-Root is the site's address all the same."""
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"})
+    await _call(gw, "/website/web/api/x", headers={"host": "gw.example", "x-forwarded-host": "front.example",
+                                                   "x-forwarded-proto": "https", "agentenv-site-root": root})
+    assert [_forwarded(r) for r in up.forwarded] == [expected]
+
+
+@pytest.mark.asyncio
 async def test_a_front_s_own_forwarded_host_and_scheme_win_and_reach_the_upstream_once(monkeypatch):
     up = _Upstream([b"ok"])
     up.install(monkeypatch)

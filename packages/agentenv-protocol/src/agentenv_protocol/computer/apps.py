@@ -1,9 +1,10 @@
 """The apps composed onto a computer, as its driver finds them, whether each is ready, and how the driver fronts them.
 Each app's own server answers on its folder's socket (``serve_app``): its card says how the app launches and which
 paths it owns, and its ``computer-app/v1`` ``ready`` whether it's ready. Every app's server must answer before the
-computer is ready; an app that starts with the computer must also be ready, and a ``demand`` app is checked once
-something launches it. The driver lists each app as a child environment named for its folder, its card's paths under
-``/svc/<name>/``, where it forwards each request to the app's server (``svc``)."""
+computer is ready; an app that starts with the computer must also be ready, and a ``demand`` app, or a boot app
+while the computer holds its launch (``boot_launch_held``), is checked once something launches it. The driver lists
+each app as a child environment named for its folder, its card's paths under ``/svc/<name>/``, where it forwards each
+request to the app's server (``svc``)."""
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +18,7 @@ import httpx
 from .. import client
 from ..types import RPC_PATH, WELL_KNOWN_PATH, EnvironmentCard
 from .app import COMPUTER_APP, FAILURE, SOCKET
-from .app_runtime import CHECK_TIMEOUT_S, LAUNCHES, AppReadiness
+from .app_runtime import CHECK_TIMEOUT_S, LAUNCHES, AppReadiness, boot_launch_held
 from .operations import ReadyCheck
 
 #: Where a composed computer installs its apps, a folder each.
@@ -45,6 +46,8 @@ async def check(folder: Path) -> ReadyCheck:
         return ReadyCheck(f"app {name}", False, _unanswered(folder))
     if launch is not None and launch["at"] == "demand" and not answer.launched:
         return ReadyCheck(f"app {name}", True, "its server answers; it launches on demand")
+    if launch is not None and boot_launch_held() and not answer.launched:
+        return ReadyCheck(f"app {name}", True, "its server answers; its boot launch is held")
     if answer.ready:
         return ReadyCheck(f"app {name}", True, "ready")
     when = (f"not ready after {answer.timeout_s:.0f} s" if answer.waited_s > answer.timeout_s

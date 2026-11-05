@@ -27,7 +27,7 @@ from agent_env.env.envs._deployment import (
     deploy_through_provider,
     provider_or_class,
 )
-from agent_env.env.envs.computer.utils import boot, composer, gate, inside
+from agent_env.env.envs.computer.utils import boot, composer, gate, inside, sites
 from agent_env.env.envs.computer.utils.composed import stale
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
@@ -263,6 +263,22 @@ class ComputerEnv(Env):
             disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
             env_params=env_params)
+
+    async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
+        """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
+        before the computer: all of them, or those of the env ids ``site_routing`` lists."""
+        routing = (env_params or {}).get("site_routing")
+        if routing is not None and routing is not False and routing is not True and not (
+                isinstance(routing, list) and all(isinstance(env_id, str) for env_id in routing)):
+            raise ValueError(f"computer env {self.id!r}: env_params.site_routing is true or a list of env ids, not "
+                             f"{routing!r}")
+        if not routing or env_params.get("sites"):
+            return env_params
+        found = await sites.deployed_sites(deployed_envs, None if routing is True else list(routing))
+        if not found:
+            raise ValueError(f"computer env {self.id!r}: env_params.site_routing reaches the run's websites, and the "
+                             "run deployed none before the computer")
+        return {**env_params, "sites": found}
 
     def deploy_refusal(self, *, sandbox_type: str | None = None, env_params: Optional[dict] = None,
                        **options) -> str | None:

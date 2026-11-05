@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV
+from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
 
 from agent_env.config import get_config
@@ -37,6 +38,8 @@ APP_READY_MARGIN_S = 30.0
 #: How long one computer-ready status may take: the driver's own checks, then every app's server at once.
 _STATUS_TIMEOUT_S = int(ANSWER_TIMEOUT_S) + 15
 _POLL_S = 0.5
+#: How long one read of the driver's card may take.
+_CARD_TIMEOUT_S = 5
 #: How a setting a record keeps shows a secret's or a generated one's value, which it never holds.
 WITHHELD = "<withheld>"
 
@@ -143,10 +146,11 @@ def control_environment(token: Optional[str]) -> dict[str, str]:
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
-               ready_s: float = READY_TIMEOUT_S, form: str = "container") -> Booted:
+               ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False) -> Booted:
     """``image``, of ``form``, booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the
     caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that
-    token, says the computer is ready; a boot that fails is torn down."""
+    token, says the computer is ready, or with ``held``, its boot apps' launch held, once it answers (``ready``); a boot
+    that fails is torn down."""
     environment = {**environment, **control_environment(token)}
     if form == "vm_bundle":
         sandbox = await sandbox_provider.create_vm(
@@ -163,7 +167,7 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
             timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
     try:
         url = sandbox.tunnel_urls[port]
-        return Booted(sandbox, url, await ready(url, ready_s, token))
+        return Booted(sandbox, url, await ready(url, ready_s, token, answering=held))
     except BaseException:
         await discard(sandbox)
         raise
@@ -188,22 +192,23 @@ def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
                                    if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
 
 
-async def ready(url: str, timeout: float, token: Optional[str] = None) -> dict:
+async def ready(url: str, timeout: float, token: Optional[str] = None, *, answering: bool = False) -> dict:
     """The card of the driver at ``url``, read once its ``computer-ready`` status, asked with its control ``token``,
-    says it's ready, so each app it fronts is on it as the app's own server serves it; raises ComputerFailed as soon
-    as the status says it failed, and TimeoutError, naming what it last saw, when it isn't ready within ``timeout``
-    seconds."""
+    says it's ready, so each app it fronts is on it as the app's own server serves it, or with ``answering``, once it
+    answers at all: a computer whose boot apps' launch is held can't be ready before they launch, as a page driver's
+    screen is its browser's page. Raises ComputerFailed as soon as the status says it failed, and TimeoutError, naming
+    what it last saw, when it isn't ready within ``timeout`` seconds."""
     last, failed = "nothing answered", None
     try:
         async with asyncio.timeout(timeout):
             while failed is None:
                 try:
-                    card = await protocol_v1.get_card(url, timeout=5)
+                    card = await protocol_v1.get_card(url, timeout=_CARD_TIMEOUT_S)
                     status = await protocol_v1.invoke_extension(url, card, COMPUTER_READY, None, _STATUS_TIMEOUT_S,
                                                                 method="status",
                                                                 headers=protocol_v1.control_headers(token))
-                    if status.get("ready"):
-                        return await protocol_v1.get_card(url, timeout=5)
+                    if status.get("ready") or (answering and not status.get("failed")):
+                        return await protocol_v1.get_card(url, timeout=_CARD_TIMEOUT_S)
                     failed = status.get("failed")
                     last = "not ready: " + "; ".join(f"{check['name']}: {check.get('detail')}"
                                                      for check in status.get("checks", []) if not check.get("ok"))
@@ -214,3 +219,24 @@ async def ready(url: str, timeout: float, token: Optional[str] = None) -> dict:
     except TimeoutError:
         raise TimeoutError(f"the computer at {url} wasn't ready within {timeout:.0f} s ({last})") from None
     raise ComputerFailed(f"the computer at {url} failed: {failed}")
+
+
+async def listed(url: str, apps: list[str], timeout: float) -> dict:
+    """The card of the driver at ``url`` once it lists each of ``apps`` with its own server's card, which offers
+    ``computer-app/v1`` ``launch``: a driver names an app whose server isn't answering yet by its name alone. Raises
+    TimeoutError, naming the apps it last lacked, when that takes longer than ``timeout`` seconds."""
+    lacking = list(apps)
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                with contextlib.suppress(Exception):
+                    card = await protocol_v1.get_card(url, timeout=_CARD_TIMEOUT_S)
+                    offered = {child.name for child in protocol_v1.children(card)
+                               if protocol_v1.find_extension_method(child.card, COMPUTER_APP, "launch") is not None}
+                    lacking = [app for app in apps if app not in offered]
+                    if not lacking:
+                        return card
+                await asyncio.sleep(_POLL_S)
+    except TimeoutError:
+        raise TimeoutError(f"the computer at {url} didn't list {', '.join(lacking)} with its server within "
+                           f"{timeout:.0f} s") from None
