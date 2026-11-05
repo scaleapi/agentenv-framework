@@ -190,12 +190,19 @@ async def test_a_local_stores_grants_reach_a_vm_at_its_loopback_through_ssh_forw
     assert forward["args"][-3:] == ["-R", "127.0.0.1:54321:127.0.0.1:54321", f"lume@{address}"]
     assert "ExitOnForwardFailure=yes" in forward["args"] and forward["askpass"]
     assert LumeSandboxProvider.REACHES_HOST_AT == "127.0.0.1"
-    tunnel = json.loads((folder.parent / "state.json").read_text())["tunnel"]
+
+    monkeypatch.setattr(lume, "_local_grants", lambda: (54322, trust))
+    await mac.get_sandbox(sandbox.sandbox_id)
+
+    assert _waited(lambda: _forwards(mac.fake, 2))[-1]["args"][-2] == "127.0.0.1:54322:127.0.0.1:54322"
+    forwards = json.loads((folder.parent / "state.json").read_text())["forwards"]
+    assert set(forwards) == {"54321", "54322"}
 
     await sandbox.terminate()
 
-    with pytest.raises(ProcessLookupError):
-        os.kill(tunnel, 0)
+    for pid in forwards.values():
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 @pytest.mark.asyncio
@@ -324,11 +331,11 @@ def test_it_boots_macos_vm_bundles_on_apple_silicon_alone(monkeypatch):
     assert LumeSandboxProvider.vm_bundle_platforms() == frozenset()
 
 
-def _forwards(fake: Path) -> list[dict]:
-    """The fake ssh's forwarding calls, a FileNotFoundError until one is logged."""
+def _forwards(fake: Path, at_least: int = 1) -> list[dict]:
+    """The fake ssh's forwarding calls, a FileNotFoundError until ``at_least`` are logged."""
     calls = [json.loads(line) for line in (fake / "lume.json.ssh").read_text().splitlines()]
-    if not (forwards := [call for call in calls if "-N" in call["args"]]):
-        raise FileNotFoundError("no forward logged yet")
+    if len(forwards := [call for call in calls if "-N" in call["args"]]) < at_least:
+        raise FileNotFoundError(f"fewer than {at_least} forwards logged yet")
     return forwards
 
 

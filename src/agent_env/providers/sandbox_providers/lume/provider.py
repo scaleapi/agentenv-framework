@@ -184,7 +184,11 @@ class LumeSandboxProvider(SandboxProvider):
                 raise
 
     async def get_sandbox(self, sandbox_id: str) -> LumeSandbox:
-        return self._sandbox(sandbox_id, self._state(sandbox_id))
+        """The VM ``sandbox_id``, with this process's grant server forwarded into it, as another process reconnects."""
+        state = self._state(sandbox_id)
+        if "address" in state and (grants := await asyncio.to_thread(_local_grants)) is not None:
+            self._forward(sandbox_id, state, grants[0])
+        return self._sandbox(sandbox_id, state)
 
     async def terminate_sandbox(self, sandbox_id: str) -> None:
         """The VM stopped and deleted, and its relays and its folder gone; one that's gone already is terminated."""
@@ -322,10 +326,18 @@ class LumeSandboxProvider(SandboxProvider):
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
             state["relay"] = relay.pid
-        if grants is not None:
-            state["tunnel"] = self._tunnel(address, grants[0]).pid
         state["address"] = address
         self._save(name, state)
+        if grants is not None:
+            self._forward(name, state, grants[0])
+
+    def _forward(self, name: str, state: dict, port: int) -> None:
+        """``port``, where this process's grant server serves, forwarded into ``name`` unless a forward of it still
+        runs: each process that hands the VM grants has a server of its own, on a port of its own."""
+        forwards = state.setdefault("forwards", {})
+        if not _alive(forwards.get(str(port))):
+            forwards[str(port)] = self._tunnel(state["address"], port).pid
+            self._save(name, state)
 
     def _tunnel(self, address: str, port: int) -> subprocess.Popen:
         """ssh forwarding ``port`` of the VM at ``address``'s loopback to this Mac's, where the grant server serves,
@@ -363,10 +375,10 @@ class LumeSandboxProvider(SandboxProvider):
         raise TimeoutError(f"{name} didn't answer ssh within {self.boot_timeout_s:.0f} s")
 
     async def _stopped(self, name: str, state: dict) -> None:
-        """``name``'s relays and forward ended and the VM stopped, the process ids it ended dropped from its state and saved, so
+        """``name``'s relays and forwards ended and the VM stopped, the process ids it ended dropped from its state and saved, so
         nothing signals them again once the system has given them to another process."""
-        relay, tunnel, run = state.pop("relay", None), state.pop("tunnel", None), state.pop("run", None)
-        for pid in (relay, tunnel):
+        relay, forwards, run = state.pop("relay", None), state.pop("forwards", {}), state.pop("run", None)
+        for pid in (relay, *forwards.values()):
             if pid:
                 _kill(pid)
         with contextlib.suppress(RuntimeError):
@@ -505,6 +517,22 @@ async def _bounded(process: asyncio.subprocess.Process, seconds: float) -> int |
         if process.returncode is None:
             process.kill()
             await process.wait()
+
+
+def _alive(pid: Optional[int]) -> bool:
+    """Whether ``pid`` runs, reaped first when it's a child of this process that has exited."""
+    if pid is None:
+        return False
+    with contextlib.suppress(ChildProcessError):
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
 
 
 def _kill(pid: int) -> None:
