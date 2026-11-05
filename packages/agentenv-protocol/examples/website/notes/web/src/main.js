@@ -245,7 +245,7 @@ async function start() {
 
   tick();
   setInterval(tick, 1000);
-  setInterval(() => fetch("healthz").then(followUniverse).catch(() => {}), CLOCK_REFRESH_MS);
+  setInterval(() => fetch("api/users").then(followUniverse).catch(() => {}), CLOCK_REFRESH_MS);
   await render();
 }
 

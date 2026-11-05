@@ -9,13 +9,13 @@ them. The page shows the universe's time.
 | `site.py` | The server: the `Notes` WebsiteEnvironment, its `@api` routes, and `serve()` on `PORT` (8000). |
 | `data/seed.json` | The seed data: two users (`ann`, `ben`), their notes, and `current_user`, the acting user. |
 | `web/` | A minimal Vite app (`index.html`, `src/main.js`, `src/style.css`). Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/notes/` alike; opened at a path without its final slash, such as `/website/notes`, the page first reloads itself with it. |
-| `Dockerfile` | The server image: Node builds `web/`, then Python installs this repo's `packages/agentenv-protocol` with uvicorn. It installs `curl`, which the gateway's compose health check runs. |
+| `Dockerfile` | The server image: Node builds `web/`, then Python installs this repo's `packages/agentenv-protocol` with uvicorn. It installs `curl`, which the gateway's compose health check runs against the card. |
 | `env.toml` | The website env as a bundle entry. |
 
 ## What it exercises
 
-- **Site declaration.** `@website(domains=["notes.test"], static="web/dist", health="/healthz", data="data/seed.json")`.
-  The card advertises website/v1 with the domains, the health path and every route by name.
+- **Site declaration.** `@website(domains=["notes.test"], static="web/dist")`. The card advertises website/v1 with
+  the domains and every route by name.
 - **Routes.** `list_users`, `sign_in`, `list_notes` (with an optional `?done=`), `create_note` (201), `get_note`,
   `edit_note`, `toggle_note` and `delete_note`. Errors are raised as `NotFound`, `BadRequest` and `Unauthorized`.
 - **Roles.** `all_notes` (`GET /api/admin/notes`) is declared with `roles=["admin"]`. It answers only a caller that
@@ -23,17 +23,17 @@ them. The page shows the universe's time.
   gets 403. The gateway passes on whatever role a browser sends, so without the key a page could claim `admin`; with no
   `WEBSITE_ROLE_KEY` set, every caller is `default` and the route is closed.
 - **Users.** `ApiContext.user` is the user in the signed session cookie. With no cookie, it is the acting user (the
-  store's `current_user`), and `GET /api/session` signs that user in. `POST /api/sign-in` switches to another seeded
+  data's `current_user`, which `acting_user()` returns), and `GET /api/session` signs that user in. `POST /api/sign-in` switches to another seeded
   user. A user's notes are invisible to every other user, and another user's note answers 404.
-- **State.** The site writes no data hooks, so it uses the default store. `data/add` loads the seed (as a data part, or
-  as a file part by bytes or `file://`), `data/get` exports it, and `data/reset` empties it. `data/get` is how
-  agentenv reads what a task left the site with.
+- **State.** The site keeps its users and notes itself, starting from `data/seed.json`, and serves them through its
+  data hooks: `data/add` adds a part's records by id (a data part, or a file part by bytes or `file://`), `data/get`
+  exports them, and `data/reset` empties them. `data/get` is how agentenv reads what a task left the site with.
 - **Time.** Notes are stamped with `self.now()`, which follows the gateway's clock once `clock/v1`'s `sync_time` names
   it. The frontend reads `X-Universe-Now` from every API response into `universeNow()` and shows it in the header.
   It uses this helper rather than `clock_patch=True`, so the page works the same against a server written without the
   SDK.
-- **Readiness.** `@ready_check seeded` holds `/healthz` at 503 until the store has users, for example after a
-  `data/reset` and before the next `data/add`.
+- **Readiness.** website/v1's `ready`, through the card, says not ready (`@ready_check seeded`) until the site has
+  users, for example after a `data/reset` and before the next `data/add`. The site serves no health path.
 
 ## Run it
 
@@ -77,13 +77,13 @@ the container before using it.
 ```bash
 agent-env env website put --id notes-site \
   --server-dockerfile packages/agentenv-protocol/examples/website/notes/Dockerfile \
-  --server-docker-context . --health-path /healthz
+  --server-docker-context .
 ```
 
 Run it from the repo root. `environment_name` comes from the card (`@environment_card(name="notes")`). The stored env
 has a server image and no frontend image. Pass `--skip-validation` to register without deploying.
 
-`env.toml` describes the same env for a bundle. Its keys are `type`, `environment_name`, `health` and
+`env.toml` describes the same env for a bundle. Its keys are `type`, `environment_name` and
 `backend_image`. Domains are not one of them: they come from the card. A bundle builds `backend_image` with this
 folder as the build context, but this Dockerfile needs the repo root. Until the protocol package is installed from a
 published release instead, register the site with `put` as above.

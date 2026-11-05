@@ -1,7 +1,7 @@
 """The Notes example site (examples/website/notes) as website/v1's reference site: it passes the conformance checker,
 and its own behavior holds: the acting user's auto sign-in and signing in as another user, notes kept per user, the
-admin-only route, timestamps from the universe's clock, and the store's seed loaded, exported and reset through the
-data plane."""
+admin-only route, timestamps from the universe's clock, and its seed loaded, exported and reset through the data
+plane, readiness following it."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def rpc(client: TestClient, method: str, params: dict | None = None) -> dict:
 def notes_class(tmp_path: Path) -> type[WebsiteEnvironment]:
     """The example's class, serving a stand-in page instead of ``web/dist``, which only a Vite build makes."""
     (tmp_path / "index.html").write_text("<!doctype html><html><head><title>Notes</title></head><body></body></html>")
-    declared = notes_site.Notes.declaration()._replace(static=str(tmp_path), data=str(NOTES_DIR / "data" / "seed.json"))
+    declared = notes_site.Notes.declaration()._replace(static=str(tmp_path))
     return website(**declared._asdict())(type("Notes", (notes_site.Notes,), {}))
 
 
@@ -101,21 +101,29 @@ def gateway_clock():
     clock.close()
 
 
+def ready(client: TestClient) -> dict:
+    """website/v1's ready, where the card says it is."""
+    card = client.get("/.well-known/agent-env.json").json()
+    site = next(e for e in card["capabilities"]["extensions"] if e["uri"] == "urn:agentenv:website/v1")
+    return client.get(site["params"]["methods"]["ready"]["endpoint"]).json()
+
+
 def test_the_example_passes_every_conformance_check(client: TestClient) -> None:
     results = conformance.check("http://testserver", client=client)
     assert {r.name: r.status for r in results} == dict.fromkeys(
         ["card", "any_host", "health", "universe_now", "data_plane", "clock", "forwarded", "cookies"], "passed"), results
 
 
-def test_the_card_declares_the_site_its_health_path_and_its_routes_by_name(client: TestClient) -> None:
+def test_the_card_declares_the_site_and_its_routes_by_name_and_it_is_ready_through_website_v1(
+        client: TestClient) -> None:
     card = client.get("/.well-known/agent-env.json").json()
     site = next(e for e in card["capabilities"]["extensions"] if e["uri"] == "urn:agentenv:website/v1")["params"]
     assert card["name"] == "notes"
-    assert (site["domains"], site["health"]) == (["notes.test"], "/healthz")
+    assert site["domains"] == ["notes.test"] and "health" not in site
     assert [r["name"] for r in site["routes"]] == ["list_users", "sign_in", "list_notes", "create_note", "get_note",
                                                    "edit_note", "toggle_note", "delete_note", "all_notes"]
     assert next(r for r in site["routes"] if r["name"] == "all_notes")["roles"] == ["admin"]
-    assert client.get("/healthz").json() == {"status": "ok"}
+    assert ready(client)["ready"] is True
 
 
 def test_a_browser_is_signed_in_as_the_acting_user_and_can_sign_in_as_another(client: TestClient) -> None:
@@ -181,12 +189,12 @@ def test_the_seed_loads_exports_and_resets_through_the_data_plane(client: TestCl
     rpc(client, "data/reset")
     assert rpc(client, "data/get")["parts"][0]["data"] == {}
     assert client.get("/api/notes").status_code == 401
-    assert client.get("/healthz").status_code == 503
+    assert ready(client)["ready"] is False
 
     seed_file = {"kind": "file", "file": {"uri": (NOTES_DIR / "data" / "seed.json").as_uri(),
                                           "mimeType": "application/json"}}
     rpc(client, "data/add", {"parts": [seed_file]})
-    assert client.get("/healthz").status_code == 200
+    assert ready(client)["ready"] is True
     assert rpc(client, "data/get")["parts"][0]["data"] == SEED
     assert client.get("/api/session").json()["user"] == "ann"
 
