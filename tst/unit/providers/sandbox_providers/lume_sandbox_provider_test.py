@@ -329,7 +329,7 @@ async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundl
     mac.boot_timeout_s = 1
     assert await mac.keep_builder(hung) == "local:agentenv-computer-4567"
     log = lume.state_root() / "lume" / "agentenv-computer-4567-shutdown.log"
-    assert "sync; log show --last 10m" in log.read_text()
+    assert "sync; log show --last 15m --style compact 2>&1 | grep -iE 'shutdown|halt" in log.read_text()
     assert ["stop", "agentenv-computer-4567", "--force"] in _state(mac.fake)["calls"]
     assert "agentenv-computer-4567 didn't shut down within 1 s, so it's stopped from outside" in caplog.text
     monkeypatch.setenv("FAKE_SSH_STALL", "1")
