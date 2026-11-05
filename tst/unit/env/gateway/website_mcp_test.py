@@ -32,6 +32,23 @@ def test_a_sites_mcp_endpoint_is_its_internal_servers_path_under_its_svc_base():
                InternalMCPServer("odd", "http://elsewhere:9/mcp")]
     sites = {"shop": "http://shop-backend:8000", "odd": "http://odd-backend:8000"}
     assert site_mcp_endpoints(servers, sites, {**sites, "mcp-slack": "http://slack:18765"}) == {"shop": "/tools/mcp"}
+    spelled = [InternalMCPServer("tls", "https://TLS.test:443/mcp"), InternalMCPServer("deep", "http://d:80/base/mcp")]
+    bases = {"tls": "https://tls.test", "deep": "http://d/base/"}
+    assert site_mcp_endpoints(spelled, bases, bases) == {"tls": "/mcp", "deep": "/mcp"}
+
+
+@pytest.mark.parametrize(("base", "declared", "mcp_url"), [
+    ("https://shop.test", "https://shop.test:443/mcp", "https://shop.test/mcp"),
+    ("https://shop.test", "https://SHOP.test/mcp?transport=http", "https://shop.test/mcp?transport=http"),
+    ("http://shop:8000", "/mcp", "http://shop:8000/mcp"),
+    ("http://shop:8000", "http://shop:8001/mcp", None),
+    ("http://shop:8000", "https://shop:8000/mcp", None),
+])
+def test_a_declared_mcp_url_on_the_sites_server_keeps_the_sites_own_spelling(base, declared, mcp_url):
+    assert entrypoint_module._site_mcp_url(base, declared) == mcp_url
+    if mcp_url is not None:
+        servers = [InternalMCPServer("shop", mcp_url)]
+        assert site_mcp_endpoints(servers, {"shop": base}, {"shop": base}) == {"shop": "/mcp"}
 
 
 @pytest.mark.asyncio

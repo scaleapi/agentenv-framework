@@ -1678,9 +1678,22 @@ def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str,
     endpoints = {}
     for server in servers:
         base = rest_proxy_urls.get(server.name, "").rstrip("/")
-        if server.name in website_urls and base and server.mcp_url.startswith(base + "/"):
-            endpoints[server.name] = _url_path(server.mcp_url[len(base):])
+        if server.name not in website_urls or not base:
+            continue
+        try:
+            given, own = urlsplit(server.mcp_url), urlsplit(base)
+            same = _address(given) == _address(own)
+        except ValueError:
+            continue
+        under = own.path.rstrip("/")
+        if same and (given.path == under or given.path.startswith(under + "/")):
+            endpoints[server.name] = given.path[len(under):] or "/"
     return endpoints
+
+
+def _address(url) -> tuple:
+    """A split URL's scheme, host and port, its scheme's default port when it names none."""
+    return url.scheme, url.hostname, url.port or {"http": 80, "https": 443}.get(url.scheme)
 
 
 def site_reserved_paths(card: dict) -> frozenset[str]:

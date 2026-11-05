@@ -131,7 +131,8 @@ async def website_mcp_servers(sites: dict[str, str], taken: frozenset[str] = fro
 
 def _site_mcp_url(base: str, declared: str) -> str | None:
     """Where the site at ``base`` serves the MCP endpoint its card declares at ``declared``: a path joined under the
-    site's address, or a full URL taken as it is when it names that same server; None for another server."""
+    site's address, or a full URL's path and query under it when the URL names that same server, so the URL keeps the
+    address's own spelling that the gateway's /svc routes use; None for another server."""
     if declared.startswith("/"):
         return f"{base}{declared}"
     try:
@@ -140,7 +141,9 @@ def _site_mcp_url(base: str, declared: str) -> str | None:
             own.scheme, own.hostname, own.port or _DEFAULT_PORTS.get(own.scheme))
     except ValueError:
         return None
-    return given.geturl() if same and given.path.startswith("/") else None
+    if not (same and given.path.startswith("/")):
+        return None
+    return f"{base}{given.path}" + (f"?{given.query}" if given.query else "")
 
 
 async def _site_card(client: httpx.AsyncClient, name: str, base: str, deadline: float) -> dict | None:
