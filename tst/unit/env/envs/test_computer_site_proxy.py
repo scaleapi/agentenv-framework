@@ -627,11 +627,16 @@ def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve
     assert private.stat().st_mode & 0o777 == 0o600 and (folder / "config.json").stat().st_mode & 0o777 == 0o600
     serving = (folder / "serve.json").read_text()
     assert "s3cret" not in serving and json.loads(serving)["upstream_headers"] == str(private)
-    private.chmod(0)
-    try:
+    read_text = Path.read_text
+
+    def refused(path, *args, **kwargs):  # what the session user meets; root, which CI may run as, reads any mode
+        if path == private:
+            raise PermissionError(13, "Permission denied", str(path))
+        return read_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", refused)
         assert Config.load(str(folder / "serve.json")).sites[0].upstream_headers == {}
-    finally:
-        private.chmod(0o600)
 
 
 def test_the_checks_are_given_each_sites_timeout_in_turn(tmp_path, monkeypatch):
