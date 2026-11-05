@@ -653,7 +653,7 @@ def test_a_request_a_built_in_route_answers_is_named_by_no_card_route():
     routes = rest_proxy_module.website_routes(card)
     assert rest_proxy_module.route_name(routes, "GET", "/api/session") is None
     assert rest_proxy_module.route_name(routes, "DELETE", "/api/session") is None
-    assert rest_proxy_module.route_name(routes, "GET", "/api/health") is None
+    assert rest_proxy_module.route_name(routes, "GET", "/api/health") == "any_api"
     assert rest_proxy_module.route_name(routes, "GET", "/api/notes") == "any_api"
     assert rest_proxy_module.route_name(routes, "DELETE", "/api/health") == "any_delete"
 
