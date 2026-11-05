@@ -14,6 +14,7 @@ import logging
 import re
 import shutil
 import urllib.parse
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -22,6 +23,8 @@ import httpx
 import pytest
 from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
+from agentenv_protocol.computer.app import COMPUTER_APP
+from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
 
@@ -763,6 +766,179 @@ async def test_a_reset_a_provider_cant_carry_out_fails_the_step_rather_than_skip
     with pytest.raises(RuntimeError, match="can't be reset on LocalSandboxProvider: its sandbox is the container"):
         await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
             TaskStepContext(deployed_envs=[deployed]))
+
+
+NOTES_CARD = {"name": "notes", "capabilities": {"extensions": [
+    {"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}}
+
+
+def _sites_gateway():
+    from agent_env.env.env import DeployedGatewayEnv
+
+    return DeployedGatewayEnv(env_id="@local/~/kit/sites", env_version=1, sandbox_id="gw", sandbox_type="local",
+                              gateway_url="http://localhost:8080",
+                              website_frontend_urls={"notes": "http://localhost:8080/website/notes/"})
+
+
+@pytest.fixture
+def routes(monkeypatch):
+    """Each site routing a deploy asks for, as (sandbox, sites, options), answering what the proxy's install would; the
+    gateway serving the notes site's card."""
+    from agentenv_protocol import client as protocol_v1
+
+    made = []
+
+    async def route(sandbox, sites, **options):
+        made.append((sandbox, sites, options))
+        return {"names": {"routes": {site.name: site.domains for site in sites}}, "ca": "CA PEM"}
+
+    async def get_card(url, timeout=10, verify=True):
+        assert url == "http://localhost:8080/svc/notes"
+        return NOTES_CARD
+
+    monkeypatch.setattr(env_computer_provider.sites, "route", route)
+    monkeypatch.setattr(protocol_v1, "get_card", get_card)
+    return made
+
+
+@pytest.mark.asyncio
+async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deployed_before_it_by_their_names(
+        base, driver, docker, boots, routes):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    context = TaskStepContext(deployed_envs=[_sites_gateway()])
+
+    step = DeployEnvTaskStep(id="d", version=None, env_id=env.id, ttl_seconds=3600, env_params={"site_routing": True})
+
+    assert step.preflight() == []
+    await step.execute(context)
+
+    ((sandbox, sites, options),) = routes
+    assert sandbox is boots.sandboxes[0]
+    assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
+                                                      "domains": ["notes.test"]}]
+    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop"}
+    assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
+    record = context.deployed_envs[-1].metadata["computer"]
+    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
+    assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routing", ["web-env", 1, ["web-env", 2], {"web-env": True}])
+async def test_a_site_routing_that_is_neither_true_nor_a_list_of_env_ids_is_refused_before_it_is_read(
+        base, driver, routing):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    with pytest.raises(ValueError, match="site_routing is true or a list of env ids"):
+        await env.run_env_params({"site_routing": routing}, [_sites_gateway()])
+
+
+@pytest.mark.asyncio
+async def test_a_computer_without_site_routing_routes_nothing_whatever_websites_the_run_deployed(
+        base, driver, docker, boots, routes):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    context = TaskStepContext(deployed_envs=[_sites_gateway()])
+
+    await DeployEnvTaskStep(id="d", version=None, env_id=env.id).execute(context)
+
+    assert routes == [] and "sites" not in context.deployed_envs[-1].metadata["computer"]
+    assert HOLD_BOOT_LAUNCH_ENV not in boots.boots[0]["environment"]
+
+
+@pytest.mark.asyncio
+async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_routed_then_waits_until_ready(monkeypatch):
+    order = []
+    apps = [SimpleNamespace(environment_name=name, launch=lambda os_type, at=at: SimpleNamespace(at=at))
+            for name, at in [("mail", "boot"), ("music", "demand"), ("notes", "boot")]]
+    env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
+
+    async def invoke(uri, method, params=None, *, environment_name=None):
+        order.append((uri, method, environment_name))
+
+    async def ready(url, timeout, token):
+        order.append(("ready", url, token))
+        return {}
+
+    monkeypatch.setattr(env_computer_provider, "ready", ready)
+    monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
+    record = SimpleNamespace(invoke=invoke, control_token="t0ken")
+    await env_computer_provider._launch_held_apps(env, record, "http://computer")
+
+    assert order == [(COMPUTER_APP, "launch", "mail"), (COMPUTER_APP, "launch", "notes"),
+                     ("ready", "http://computer", "t0ken")]
+    order.clear()
+    apps[:] = [apps[1]]
+    await env_computer_provider._launch_held_apps(env, record, "http://computer")
+    assert order == []
+
+
+@pytest.mark.asyncio
+async def test_a_reset_routes_the_fresh_computer_to_the_same_sites_under_a_ca_of_its_own(
+        base, driver, docker, boots, routes, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    context = TaskStepContext(deployed_envs=[_sites_gateway()])
+    await DeployEnvTaskStep(id="d", version=None, env_id=env.id, ttl_seconds=3600,
+                            env_params={"site_routing": True}).execute(context)
+    (sandbox,) = boots.sandboxes
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", AsyncMock())
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(context)
+
+    first, again = routes
+    assert again[0] is sandbox and again[1] == first[1] and again[2]["valid_for"] == timedelta(seconds=3600)
+    assert context.deployed_envs[-1].metadata["computer"]["sites"]["valid_for_s"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_site_routing_with_no_website_deployed_or_outside_a_run_is_refused_before_anything_boots(
+        base, driver, docker, boots, routes):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+
+    with pytest.raises(ValueError, match="the run deployed none before the computer"):
+        await DeployEnvTaskStep(id="d", version=None, env_id=env.id, env_params={"site_routing": True}).execute(
+            TaskStepContext())
+    with pytest.raises(DeployRefused, match="which a run's deploy_env names in env_params.sites"):
+        await Env.get(env.id).deploy(env_params={"site_routing": True})
+
+    assert boots.boots == [] and routes == []
+
+
+@pytest.mark.asyncio
+async def test_site_routing_on_a_disk_computer_is_refused_before_it_boots_and_a_container_form_is_kept(
+        base, driver, docker, boots, routes, monkeypatch):
+    from agent_env.env.envs.computer.env import ComputerEnv
+
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    container = ComputerEnv.deployable_builds(Env.get(env.id))
+    disk = [("disk", arch, build) for _, arch, build in container]
+    monkeypatch.setattr(ComputerEnv, "deployable_builds", lambda self, form=None: disk)
+    params = {"site_routing": True, "sites": [{"name": "a", "url": "http://gw/website/a/", "domains": ["a.test"]}]}
+
+    with pytest.raises(DeployRefused, match="a disk computer runs inside a launcher container"):
+        await Env.get(env.id).deploy(env_params=params)
+
+    assert boots.boots == [] and routes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_params, problem", [
+    ({"site_routing": True, "sites": [{"name": "a", "url": "http://gw/website/a/", "domains": ["x.test"]},
+                                      {"name": "b", "url": "http://gw/website/b/", "domains": ["x.test"]}]},
+     "env_params.sites: names claimed twice: 'x.test' (b) overlaps 'x.test' (a)"),
+    ({"sites": [{"name": "a", "url": "http://gw/website/a/"}]},
+     "env_params.sites: a computer reaches sites only with site_routing"),
+    ({"site_routing": "yes"}, "env_params.site_routing"),
+], ids=["conflict", "sites-alone", "not-a-flag"])
+async def test_sites_a_computer_cant_reach_by_their_names_are_refused_at_save_and_at_deploy(
+        base, driver, docker, boots, routes, env_params, problem):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+
+    saved = DeployEnvTaskStep(id="d", version=None, env_id=env.id, env_params=env_params).preflight()
+    with pytest.raises(DeployRefused, match=re.escape(problem)):
+        await Env.get(env.id).deploy(env_params=env_params)
+
+    assert len(saved) == 1 and problem in saved[0] and boots.boots == [] and routes == []
 
 
 @pytest.mark.asyncio

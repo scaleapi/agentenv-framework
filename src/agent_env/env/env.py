@@ -414,6 +414,11 @@ class Env(ABC):
         overrides this; one that doesn't takes no ``env_params``."""
         return f"{self.type} envs take no env_params" if env_params else None
 
+    async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
+        """``env_params`` as a run's deploy_env passes them to deploy(), once the run has deployed ``deployed_envs``:
+        as given, unless the type reads something of what the run deployed into them."""
+        return env_params
+
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> Self:
         """The env a running deployment serves, for its caller to drive. A type that can be
