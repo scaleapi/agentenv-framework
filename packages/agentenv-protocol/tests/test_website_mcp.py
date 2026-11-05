@@ -186,6 +186,30 @@ def test_a_hidden_by_default_tool_on_the_card_warns_without_failing_the_run(tmp_
     assert all(r.passed for r in results.values()), results
 
 
+def _streaming(*events: str) -> Route:
+    """An MCP endpoint answering each request with an event stream of ``events``, ``{id}`` the request's id."""
+    async def answer(request: Request) -> Response:
+        body = await request.json()
+        if "id" not in body:
+            return Response(status_code=202)
+        stream = "".join(event.replace("{id}", json.dumps(body["id"])) for event in events)
+        return Response(stream, media_type="text/event-stream")
+
+    return Route("/mcp", answer, methods=["POST"])
+
+
+def test_the_mcp_check_reads_whole_events_and_the_reply_to_its_own_request() -> None:
+    reply = '{"jsonrpc": "2.0", "id": {id},\n"result": {"serverInfo": {"name": "x"}, "tools": [{"name": "a"}]}}'
+    mcp = _streaming('event: message\ndata: {"jsonrpc": "2.0", "method": "notifications/message", "params": {}}\n\n',
+                     ": a comment\n\n",
+                     "".join(f"data: {line}\n" for line in reply.split("\n")) + "\n",
+                     'data: {"jsonrpc": "2.0", "method": "notifications/progress", "params": {}}\n\n')
+    client = TestClient(_declaring(mcp))
+    card = client.get("/.well-known/agent-env.json").json()
+    found = conformance._outcome(lambda: conformance._Checker("http://testserver", client, "127.0.0.1")._mcp(card))
+    assert found == ("passed", "x at /mcp lists the card's 1 tool(s)")
+
+
 def test_an_mcp_interface_on_another_server_fails_the_check_with_nothing_sent_there() -> None:
     sent = []
     client = httpx.Client(transport=httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(500)))

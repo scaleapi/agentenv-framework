@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 
 import anyio
@@ -1679,23 +1679,34 @@ def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str,
     for server in servers:
         base = rest_proxy_urls.get(server.name, "").rstrip("/")
         if server.name in website_urls and base and server.mcp_url.startswith(base + "/"):
-            endpoints[server.name] = server.mcp_url[len(base):]
+            endpoints[server.name] = _url_path(server.mcp_url[len(base):])
     return endpoints
 
 
 def site_reserved_paths(card: dict) -> frozenset[str]:
     """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, every interface's,
     such as the MCP endpoint of a site that is an MCP server too, and every extension's endpoint and each of its
-    methods'; each one a path of its own, not the site's root."""
-    paths = [card.get("url")]
-    paths += [i.get("url") for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)]
+    methods'; each one a path of its own, not the site's root, read from a full URL or one with a query as well as from
+    a bare path. A full URL's path is reserved whatever its host, since a site is reached under names it never sees in
+    advance."""
+    urls = [card.get("url")]
+    urls += [i.get("url") for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)]
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
         params = ext.get("params") if isinstance(ext, dict) else None
         if not isinstance(params, dict):
             continue
-        paths += [endpoint for *_, endpoint in operations(params)]
-        paths.append(params.get("endpoint"))
-    return frozenset(_normalized(p) for p in paths if isinstance(p, str) and p.startswith("/") and _normalized(p) != "/")
+        urls += [endpoint for *_, endpoint in operations(params)]
+        urls.append(params.get("endpoint"))
+    paths = (_url_path(url) for url in urls if isinstance(url, str))
+    return frozenset(_normalized(p) for p in paths if p.startswith("/") and _normalized(p) != "/")
+
+
+def _url_path(url: str) -> str:
+    """The path of ``url``, a bare path or a full URL, without its query or fragment; "" for one that has none."""
+    try:
+        return urlsplit(url).path
+    except ValueError:
+        return ""
 
 
 def site_request_path(request: HTTPConnection) -> str | None:

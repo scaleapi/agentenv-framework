@@ -62,7 +62,9 @@ _CARD = {"name": "mail", "url": "/agentenv", "capabilities": {"extensions": [
 
 def test_a_sites_reserved_paths_are_the_ones_its_card_advertises_each_a_path_of_its_own():
     assert site_reserved_paths(_CARD) == {"/agentenv", "/agentenv/ext/website/ready", "/grade", "/grading/now", "/hooks"}
-    assert site_reserved_paths({"name": "x", "url": "http://elsewhere/agentenv"}) == frozenset()
+    # a full URL's path is reserved whatever its host: the site is reached under names it never sees in advance
+    assert site_reserved_paths({"name": "x", "url": "http://elsewhere/agentenv?v=1"}) == frozenset({"/agentenv"})
+    assert site_reserved_paths({"name": "x", "url": "http://elsewhere"}) == frozenset()
     reserved = site_reserved_paths(_CARD)
     for path in ("/grade", "/grade/", "/x/../grade", "/grading/now", "/hooks/a"):
         assert reserved_site_path(path, reserved), path

@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import time
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -45,6 +46,7 @@ def parse_internal_servers(spec: str, port: int) -> list[InternalMCPServer]:
 # docker-compose `depends_on`), so the old 30s ceiling was far too short.
 _INTERNAL_SERVER_TIMEOUT_S = int(os.environ.get("GATEWAY_INTERNAL_SERVER_TIMEOUT_S", "180"))
 _INTERNAL_SERVER_POLL_S = 2
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 def _ready_url(mcp_url: str) -> str:
@@ -116,12 +118,29 @@ async def website_mcp_servers(sites: dict[str, str], taken: frozenset[str] = fro
         cards = await asyncio.gather(*(_site_card(client, name, base, deadline) for name, base in asked.items()))
     found: list[InternalMCPServer] = []
     for (name, base), card in zip(asked.items(), cards):
-        path = next((i.get("url") for i in (card or {}).get("additionalInterfaces") or []
-                     if isinstance(i, dict) and i.get("transport") == MCP_TRANSPORT and i.get("url")), None)
-        if isinstance(path, str) and path.startswith("/"):
-            logger.info(f"Site {name} is an MCP server at {path}")
-            found.append(InternalMCPServer(name=name, mcp_url=f"{base}{path}"))
+        declared = next((i.get("url") for i in (card or {}).get("additionalInterfaces") or []
+                         if isinstance(i, dict) and i.get("transport") == MCP_TRANSPORT and i.get("url")), None)
+        if isinstance(declared, str) and (mcp_url := _site_mcp_url(base, declared)) is not None:
+            logger.info(f"Site {name} is an MCP server at {mcp_url}")
+            found.append(InternalMCPServer(name=name, mcp_url=mcp_url))
+        elif declared is not None:
+            logger.warning(f"Site {name}'s card declares its MCP endpoint at {declared!r}, not on its own server; its "
+                           "tools aren't served")
     return found
+
+
+def _site_mcp_url(base: str, declared: str) -> str | None:
+    """Where the site at ``base`` serves the MCP endpoint its card declares at ``declared``: a path joined under the
+    site's address, or a full URL taken as it is when it names that same server; None for another server."""
+    if declared.startswith("/"):
+        return f"{base}{declared}"
+    try:
+        given, own = urlsplit(urljoin(base + "/", declared)), urlsplit(base)
+        same = (given.scheme, given.hostname, given.port or _DEFAULT_PORTS.get(given.scheme)) == (
+            own.scheme, own.hostname, own.port or _DEFAULT_PORTS.get(own.scheme))
+    except ValueError:
+        return None
+    return given.geturl() if same and given.path.startswith("/") else None
 
 
 async def _site_card(client: httpx.AsyncClient, name: str, base: str, deadline: float) -> dict | None:

@@ -20,13 +20,14 @@ from tst.unit.env.gateway.process_scope_socket_test import _serve
 CARD = "/.well-known/agent-env.json"
 
 
-def test_a_sites_mcp_interface_is_one_of_its_reserved_paths():
-    card = {"url": "/agentenv", "additionalInterfaces": [{"url": "/mcp", "transport": "mcp"}, {"transport": "x"}]}
+@pytest.mark.parametrize("declared", ["/mcp", "http://shop:8000/mcp", "/mcp?transport=http", "http://shop:8000/mcp/#x"])
+def test_a_sites_mcp_interface_is_one_of_its_reserved_paths_however_its_card_writes_it(declared):
+    card = {"url": "/agentenv", "additionalInterfaces": [{"url": declared, "transport": "mcp"}, {"transport": "x"}]}
     assert site_reserved_paths(card) == frozenset({"/agentenv", "/mcp"})
 
 
 def test_a_sites_mcp_endpoint_is_its_internal_servers_path_under_its_svc_base():
-    servers = [InternalMCPServer("shop", "http://shop-backend:8000/tools/mcp"),
+    servers = [InternalMCPServer("shop", "http://shop-backend:8000/tools/mcp?transport=http"),
                InternalMCPServer("slack", "http://slack:18765/mcp"),
                InternalMCPServer("odd", "http://elsewhere:9/mcp")]
     sites = {"shop": "http://shop-backend:8000", "odd": "http://odd-backend:8000"}
@@ -40,6 +41,8 @@ async def test_the_sites_whose_cards_declare_an_mcp_interface_are_internal_serve
         "shop": {"additionalInterfaces": [{"url": "/tools/mcp", "transport": "mcp"}]},
         "mail": {"additionalInterfaces": []},
         "other": {"additionalInterfaces": [{"url": "/rpc", "transport": "grpc"}]},
+        "full": {"additionalInterfaces": [{"url": "http://full:8000/tools/mcp", "transport": "mcp"}]},
+        "away": {"additionalInterfaces": [{"url": "http://elsewhere:8000/mcp", "transport": "mcp"}]},
     }
 
     def site(request: httpx.Request) -> httpx.Response:
@@ -59,11 +62,13 @@ async def test_the_sites_whose_cards_declare_an_mcp_interface_are_internal_serve
     real = httpx.AsyncClient
     monkeypatch.setattr(entrypoint_module.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(site), **kw))
     monkeypatch.setattr(entrypoint_module, "_INTERNAL_SERVER_POLL_S", 0)
-    sites = {name: f"http://{name}:8000/" for name in ("shop", "mail", "other", "late", "nocard", "html", "slack")}
+    sites = {name: f"http://{name}:8000/" for name in ("shop", "mail", "other", "late", "nocard", "html", "full", "away",
+                                                       "slack")}
 
     found = await website_mcp_servers(sites, taken=frozenset({"slack"}))
 
-    assert found == [InternalMCPServer("shop", "http://shop:8000/tools/mcp"), InternalMCPServer("late", "http://late:8000/mcp")]
+    assert found == [InternalMCPServer("shop", "http://shop:8000/tools/mcp"), InternalMCPServer("late", "http://late:8000/mcp"),
+                     InternalMCPServer("full", "http://full:8000/tools/mcp")]
     assert "slack" not in calls and calls["late"] == 2
 
 

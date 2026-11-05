@@ -222,7 +222,7 @@ class _Checker:
             "jsonrpc": "2.0", "id": "initialize", "method": "initialize",
             "params": {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {},
                        "clientInfo": {"name": "agentenv-website-conformance", "version": "1"}}})
-        server = _mcp_result(first, "initialize").get("serverInfo") or {}
+        server = _mcp_result(first, "initialize", "initialize").get("serverInfo") or {}
         if session := first.headers.get("mcp-session-id"):
             headers["Mcp-Session-Id"] = session
         try:
@@ -232,7 +232,7 @@ class _Checker:
             for _page in range(MCP_LIST_PAGES):
                 listed = _mcp_result(self.client.post(url, headers=headers, json={
                     "jsonrpc": "2.0", "id": "tools/list", "method": "tools/list",
-                    **({"params": {"cursor": cursor}} if cursor else {})}), "tools/list")
+                    **({"params": {"cursor": cursor}} if cursor else {})}), "tools/list", "tools/list")
                 served += [t.get("name") for t in listed.get("tools") or [] if isinstance(t, dict)]
                 cursor = listed.get("nextCursor")
                 if not cursor:
@@ -329,19 +329,46 @@ def _outcome(step: Callable[[], tuple[Status, str]]) -> tuple[Status, str]:
         return "failed", f"{type(e).__name__}: {e}"
 
 
-def _mcp_result(response: httpx.Response, method: str) -> dict:
-    """The JSON-RPC result of an MCP request, its answer JSON or the last event of an event stream."""
-    text = response.text
+def _mcp_result(response: httpx.Response, method: str, request_id: str) -> dict:
+    """The result of the JSON-RPC reply to request ``request_id``: the answer's JSON, or the reply among an event
+    stream's messages, each event's data lines joined, as ``ToolSession`` reads them."""
     if response.headers.get("content-type", "").startswith("text/event-stream"):
-        events = [line[len("data:"):] for line in text.splitlines() if line.startswith("data:")]
-        text = events[-1] if events else ""
-    try:
-        body = json.loads(text)
-    except ValueError:
-        raise RuntimeError(f"{method} answered {response.status_code} with no JSON-RPC answer: {text[:200]!r}") from None
-    if not isinstance(body, dict) or "result" not in body:
-        raise RuntimeError(f"{method} answered {response.status_code}: {str(body)[:200]}")
+        messages = []
+        for data in _sse_data(response.text):
+            try:
+                messages.append(json.loads(data))
+            except ValueError:
+                raise RuntimeError(f"{method} answered an event that isn't JSON: {data[:200]!r}") from None
+    else:
+        try:
+            messages = [json.loads(response.text)]
+        except ValueError:
+            raise RuntimeError(f"{method} answered {response.status_code} with no JSON-RPC answer: "
+                               f"{response.text[:200]!r}") from None
+    body = next((m for m in messages if isinstance(m, dict) and m.get("id") == request_id
+                 and ("result" in m or "error" in m)), None)
+    if body is None or "result" not in body:
+        raise RuntimeError(f"{method} answered {response.status_code}: {str(body or messages)[:200]}")
     return body["result"] or {}
+
+
+def _sse_data(text: str) -> Iterator[str]:
+    """The data of each ``message`` event in a server-sent event stream, its data lines joined; an event the stream
+    ends inside is dropped, as are events with no data."""
+    event, data = "message", []
+    for line in text.splitlines():
+        if not line:
+            payload = "\n".join(data)
+            if payload.strip() and event == "message":
+                yield payload
+            event, data = "message", []
+            continue
+        field, _, value = line.partition(":")
+        value = value[1:] if value.startswith(" ") else value
+        if field == "data":
+            data.append(value)
+        elif field == "event":
+            event = value
 
 
 def _field_error(error: dict) -> str:
