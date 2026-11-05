@@ -55,6 +55,9 @@ DNS_TIMEOUT_S = 4.0
 NAMESERVER_PORT = 53
 DATAGRAM_MAX = 65535
 LISTEN_TIMEOUT_S = 15.0
+# How long one try to connect to the proxy waiting to listen may take, the wait between tries, and how much of its
+# log the failure shows.
+LISTEN_PROBE_S, LISTEN_POLL_S, LOG_TAIL_CHARS = 1.0, 0.2, 2000
 CHECK_TIMEOUT_S = 15.0
 RESTART_DELAY_S = 1.0
 SERVE_USER = "nobody"
@@ -826,14 +829,14 @@ def start(serve_path: str, log: Optional[str]) -> None:
     deadline = time.monotonic() + LISTEN_TIMEOUT_S
     while True:
         try:
-            socket.create_connection((config.listen, port), timeout=1).close()
+            socket.create_connection((config.listen, port), timeout=LISTEN_PROBE_S).close()
             return
         except OSError:
             if time.monotonic() > deadline:
-                tail = Path(log).read_text()[-2000:] if log and Path(log).exists() else ""
+                tail = Path(log).read_text()[-LOG_TAIL_CHARS:] if log and Path(log).exists() else ""
                 raise SystemExit(f"the site proxy didn't listen on {config.listen}:{port} within "
                                  f"{LISTEN_TIMEOUT_S:.0f} s: {tail}")
-            time.sleep(0.2)
+            time.sleep(LISTEN_POLL_S)
 
 
 def open_log(log: str) -> int:

@@ -38,6 +38,8 @@ APP_READY_MARGIN_S = 30.0
 #: How long one computer-ready status may take: the driver's own checks, then every app's server at once.
 _STATUS_TIMEOUT_S = int(ANSWER_TIMEOUT_S) + 15
 _POLL_S = 0.5
+#: How long one read of the driver's card may take.
+_CARD_TIMEOUT_S = 5
 #: How a setting a record keeps shows a secret's or a generated one's value, which it never holds.
 WITHHELD = "<withheld>"
 
@@ -201,12 +203,12 @@ async def ready(url: str, timeout: float, token: Optional[str] = None, *, answer
         async with asyncio.timeout(timeout):
             while failed is None:
                 try:
-                    card = await protocol_v1.get_card(url, timeout=5)
+                    card = await protocol_v1.get_card(url, timeout=_CARD_TIMEOUT_S)
                     status = await protocol_v1.invoke_extension(url, card, COMPUTER_READY, None, _STATUS_TIMEOUT_S,
                                                                 method="status",
                                                                 headers=protocol_v1.control_headers(token))
                     if status.get("ready") or (answering and not status.get("failed")):
-                        return await protocol_v1.get_card(url, timeout=5)
+                        return await protocol_v1.get_card(url, timeout=_CARD_TIMEOUT_S)
                     failed = status.get("failed")
                     last = "not ready: " + "; ".join(f"{check['name']}: {check.get('detail')}"
                                                      for check in status.get("checks", []) if not check.get("ok"))
@@ -228,7 +230,7 @@ async def listed(url: str, apps: list[str], timeout: float) -> dict:
         async with asyncio.timeout(timeout):
             while True:
                 with contextlib.suppress(Exception):
-                    card = await protocol_v1.get_card(url, timeout=5)
+                    card = await protocol_v1.get_card(url, timeout=_CARD_TIMEOUT_S)
                     offered = {child.name for child in protocol_v1.children(card)
                                if protocol_v1.find_extension_method(child.card, COMPUTER_APP, "launch") is not None}
                     lacking = [app for app in apps if app not in offered]
