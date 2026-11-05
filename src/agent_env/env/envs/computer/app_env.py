@@ -34,6 +34,8 @@ class ComputerAppEnv(ComputerEnv):
     type: ClassVar[str] = APP_TYPE
     description = ("A computer app: software and its settings on a computer, read from its ComputerAppEnvironment "
                    "class at put; deployed alone, a computer of its own")
+    toml_keys: ClassVar[dict[str, type]] = {"environment_name": str, "module": str, "computer": object, "driver": object,
+                                            "build_settings": dict, "settings": dict}
 
     def __init__(self, id: str, version: Optional[int], environment_name: str, module: str, files: FileArtifactUniverse,
                  declaration: AppDeclaration, computer: Optional[ComputerArtifact] = None,
@@ -166,8 +168,7 @@ class ComputerAppEnv(ComputerEnv):
         its folder; ``environment_name``, the folder's when it sets none; the ``computer`` and ``driver`` it deploys
         alone on; ``build_settings``, the values of its build settings; and ``settings``, defaults for some of its
         settings that a deploy's ``env_params`` override field by field. Raises BundleError listing every problem."""
-        fields, refused = ctx.accepted(data, environment_name=str, module=str, computer=object, driver=object,
-                                       build_settings=dict, settings=dict)
+        fields, refused = ctx.accepted(data, **cls.toml_keys)
         files, module, problems = ctx.files(), fields.get("module"), []
         if module is None and "module" not in data:
             problems.append('module is required: the app\'s file and class, such as "app.py:MailApp"')

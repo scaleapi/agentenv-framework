@@ -1,4 +1,6 @@
 Base computers that come with agent-env, each a `computer` artifact a computer env composes a driver and apps onto.
+`agent-env run <bundle> --set computer=ubuntu-24.04-headless` composes a bundle's computer envs on another of them
+for one run, the bundle left as written.
 
 `artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. tini starts
 supervisord, which runs every program as the session user, `user` (uid 1000); nothing in it runs as root. Its home
