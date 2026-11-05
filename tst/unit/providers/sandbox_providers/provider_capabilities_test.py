@@ -61,9 +61,9 @@ PROVIDER_CLASSES = [LocalSandboxProvider, ModalSandboxProvider, ModalVmSandboxPr
     (TensorlakeSandboxProvider, False, True, LOADABLE, NAME, False, False),
     (TenkiSandboxProvider, False, True, LOADABLE, NAME, False, True),
     (BoxdSandboxProvider, False, True, LOADABLE, NAME, False, True),
-    (CoreWeaveSandboxProvider, False, True, NAME, NAME, False, False),
+    (CoreWeaveSandboxProvider, False, True, NAME, NAME, False, True),
     (DaytonaSandboxProvider, False, True, LOADABLE, NAME, False, False),
-    (BoatSandboxProvider, False, True, LOADABLE, NAME, False, False),
+    (BoatSandboxProvider, False, True, LOADABLE, NAME, False, True),
     (Agent37SandboxProvider, False, True, LOADABLE, NAME, False, True),
 ], ids=["local", "modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "boxd", "coreweave", "daytona", "boat",
         "agent37"])
