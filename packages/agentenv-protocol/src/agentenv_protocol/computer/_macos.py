@@ -66,6 +66,9 @@ DRAG_STEP_PX = 20
 #: The pause between a scroll's wheel notches, as a wheel turned by hand has: notches posted back to back reach an app
 #: as fewer.
 SCROLL_GAP_S = 0.05
+#: How long a posted move may take to become where macOS says the pointer is, and how often that's looked at: a press
+#: at the pointer right after a move otherwise lands where it was.
+MOVE_SETTLE_S, MOVE_POLL_S = 0.2, 0.01
 #: How long ScreenCaptureKit may take to answer.
 CAPTURE_TIMEOUT_S = 10.0
 #: The TCC permissions the driver's process needs, and how each is named to a person.
@@ -205,6 +208,9 @@ class MacOSDriver(ComputerDriverEnvironment):
                 mac.mouse(dragged, x, y, number, 1, self._mac_flags())
             else:
                 mac.mouse(MOVED, x, y, 0, 1, self._mac_flags())
+            deadline = time.monotonic() + MOVE_SETTLE_S
+            while max(abs(a - b) for a, b in zip(mac.location(), (x, y))) >= 1 and time.monotonic() < deadline:
+                time.sleep(MOVE_POLL_S)
         await self._mac_send(act)
 
     @pointer_down
