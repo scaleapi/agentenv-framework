@@ -5,6 +5,7 @@ and each connection is a trajectory event without its token."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import socket
@@ -116,15 +117,24 @@ async def _serve(app) -> tuple[uvicorn.Server, str]:
 @asynccontextmanager
 async def _gateway(tmp_path, monkeypatch, card: dict | None = None):
     """The real gateway app on loopback, its /svc child ``web`` a browser computer serving ``card``; yields the
-    gateway's base URL and the trajectory events it writes."""
+    gateway's base URL and a reader of its browser_connection events, which waits for ``at_least``: each is written
+    as its connection ends, just after the client sees the close."""
     monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
     upstream, upstream_url = await _serve(_browser_computer(_computer_card(_app_card()) if card is None else card))
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
                  rest_proxy_urls={"web": upstream_url})
     gateway, gateway_url = await _serve(gw._asgi_app())
+    async def events(at_least: int) -> list[dict]:
+        for _ in range(50):
+            found = [event for event in map(json.loads, (tmp_path / "trajectory.jsonl").read_text().splitlines())
+                     if event["event_type"] == "browser_connection"]
+            if len(found) >= at_least:
+                break
+            await asyncio.sleep(0.1)
+        return found
+
     try:
-        yield gateway_url, lambda: [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
-                                    if json.loads(line)["event_type"] == "browser_connection"]
+        yield gateway_url, events
     finally:
         await gateway.shutdown()
         await upstream.shutdown()
@@ -162,7 +172,7 @@ async def test_a_websocket_is_relayed_both_ways_and_each_connection_is_an_event_
         with pytest.raises(websockets.InvalidStatus) as refused:
             async with connect(discovered.replace(TOKEN, "forged")):
                 pass
-        recorded = events()
+        recorded = await events(3)
 
     assert echoed == "echo:hi"
     assert closed.value.rcvd.code == 4000
@@ -191,7 +201,7 @@ async def test_a_relay_that_fails_in_between_closes_both_sides_and_records_the_f
             await conn.send("secret page data")
             with pytest.raises(websockets.ConnectionClosed) as closed:
                 await conn.recv()
-        recorded = events()
+        recorded = await events(1)
 
     assert closed.value.rcvd.code == 1011
     assert [(e["closed_by"], e["close_code"], e["error"]) for e in recorded] == [("gateway", 1011, "RuntimeError")]
@@ -213,7 +223,7 @@ async def test_a_child_with_no_browser_or_several_is_refused_and_other_svc_reque
         with pytest.raises(websockets.InvalidStatus):
             async with connect(f"ws{url.removeprefix('http')}/browser/web/cdp/{TOKEN}/devtools/browser"):
                 pass
-        recorded = events()
+        recorded = await events(1)
 
     assert (discovered.status_code, unknown.status_code) == (status, 404)
     assert svc.json()["http_url"] == MINTED  # no single browser, so no rewrite: the answer goes through as it came
