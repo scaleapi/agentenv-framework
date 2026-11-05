@@ -153,6 +153,7 @@ class Gateway:
         self.internal_mcp_servers = internal_mcp_servers
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
+        self._site_mcp_endpoints = site_mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
         self._site_reserved: dict[str, frozenset[str]] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
@@ -651,12 +652,14 @@ class Gateway:
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
         role = self._request_role(request)
-        mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
+        site_mcp = self._site_mcp_endpoints.get(service_name) if url_map is self.rest_proxy_urls else None
+        mcp_server = url_map is self.rest_proxy_urls and (service_name.startswith("mcp-") or site_mcp is not None)
+        mcp_endpoint = site_mcp or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                                 withheld=self._withheld)
+                                 withheld=self._withheld, mcp_endpoint=mcp_endpoint)
         changelog_before = self._query_changelog_id()
         attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
@@ -681,7 +684,7 @@ class Gateway:
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                             on_done=log_write, withheld=self._withheld)
+                             on_done=log_write, withheld=self._withheld, mcp_endpoint=mcp_endpoint)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
@@ -1666,6 +1669,18 @@ def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> boo
     normalized = _normalized(path)
     return normalized == WELL_KNOWN_PATH or any(normalized == base or normalized.startswith(base.rstrip("/") + "/")
                                                 for base in (RPC_PATH, *reserved))
+
+
+def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str],
+                       rest_proxy_urls: dict[str, str]) -> dict[str, str]:
+    """The MCP endpoint, as a path under its /svc/<name>/ base, of each site that is an internal MCP server too, by
+    name: where a call through /svc/<name>/ gets the gateway's role in its JSON-RPC ``_meta``, as an MCP server's does."""
+    endpoints = {}
+    for server in servers:
+        base = rest_proxy_urls.get(server.name, "").rstrip("/")
+        if server.name in website_urls and base and server.mcp_url.startswith(base + "/"):
+            endpoints[server.name] = server.mcp_url[len(base):]
+    return endpoints
 
 
 def site_reserved_paths(card: dict) -> frozenset[str]:

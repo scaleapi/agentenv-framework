@@ -8,8 +8,10 @@ returned, data/get again), ``clock/v1``'s
 ``sync_time`` against a clock the checker serves, and the forwarded headers wherever an answer shows them, on ``/`` and
 on a GET route with its trailing slash toggled, which a server may redirect, and the cookies those answers set:
 none tied to a domain, and a warning for one whose lifetime is an absolute ``Expires`` with no ``Max-Age``. A site whose
-card declares an ``mcp`` interface, being an MCP server too, must answer ``initialize`` there and ``tools/list`` with
-the tools its card lists (streamable HTTP, ``MCP_PROTOCOL_VERSION``); a site without one skips that check.
+card declares an ``mcp`` interface, being an MCP server too, must answer ``initialize`` there and list, every page of
+``tools/list`` read, no tool its card doesn't (streamable HTTP, ``MCP_PROTOCOL_VERSION``); a card's tool it doesn't
+list is a warning, since a hidden-by-default tool is listed to no caller until one enables it. A site without one
+skips that check.
 
 Every request goes to the server under check: a card's path or URL naming another scheme, host or port fails the check
 that would have used it, with nothing sent there. The round trip leaves the server's data as it found it, adding the
@@ -43,6 +45,7 @@ Status = Literal["passed", "failed", "skipped", "warned"]
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
 CLOCK_SLACK_S = 120
 MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_LIST_PAGES = 100
 
 
 @dataclasses.dataclass(frozen=True)
@@ -203,8 +206,9 @@ class _Checker:
         return "passed", f"{len(exported)} part(s) round-tripped through reset and add"
 
     def _mcp(self, card: dict) -> tuple[Status, str]:
-        """The MCP endpoint the card declares answers ``initialize`` and lists the card's tools; its answers needn't
-        carry ``X-Universe-Now``, which the MCP transport doesn't promise."""
+        """The MCP endpoint the card declares answers ``initialize`` and lists no tool the card doesn't, reading up to
+        ``MCP_LIST_PAGES`` pages of ``tools/list``; its answers needn't carry ``X-Universe-Now``, which the MCP
+        transport doesn't promise."""
         interfaces = [i for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)
                       and i.get("transport") == MCP_TRANSPORT]
         if not interfaces:
@@ -223,18 +227,30 @@ class _Checker:
             headers["Mcp-Session-Id"] = session
         try:
             self.client.post(url, headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
-            listed = _mcp_result(self.client.post(url, headers=headers, json={
-                "jsonrpc": "2.0", "id": "tools/list", "method": "tools/list"}), "tools/list")
+            served: list = []
+            cursor = None
+            for _page in range(MCP_LIST_PAGES):
+                listed = _mcp_result(self.client.post(url, headers=headers, json={
+                    "jsonrpc": "2.0", "id": "tools/list", "method": "tools/list",
+                    **({"params": {"cursor": cursor}} if cursor else {})}), "tools/list")
+                served += [t.get("name") for t in listed.get("tools") or [] if isinstance(t, dict)]
+                cursor = listed.get("nextCursor")
+                if not cursor:
+                    break
+            else:
+                return "failed", f"tools/list at {path} still had a next page after {MCP_LIST_PAGES}"
         finally:
             if session:
                 with contextlib.suppress(httpx.HTTPError):
                     self.client.delete(url, headers=headers)
-        served = sorted(t.get("name") for t in listed.get("tools") or [] if isinstance(t, dict))
-        advertised = sorted(t.get("name") for t in (card.get("capabilities") or {}).get("tools") or []
-                            if isinstance(t, dict))
-        if served != advertised:
-            return "failed", f"tools/list at {path} named {served}, the card {advertised}"
-        return "passed", f"{server.get('name') or 'the server'} at {path} lists the card's {len(served)} tool(s)"
+        advertised = {t.get("name") for t in (card.get("capabilities") or {}).get("tools") or [] if isinstance(t, dict)}
+        if unadvertised := sorted(set(served) - advertised):
+            return "failed", f"tools/list at {path} named {unadvertised}, which the card doesn't list"
+        name = server.get("name") or "the server"
+        if unlisted := sorted(advertised - set(served)):
+            return "warned", (f"{name} at {path} lists {len(served)} of the card's tools, not {unlisted}: hidden by "
+                              "default, or missing")
+        return "passed", f"{name} at {path} lists the card's {len(served)} tool(s)"
 
     def _clock(self, card: dict) -> tuple[Status, str]:
         if find_extension(card, CLOCK_EXTENSION_URI) is None:

@@ -108,20 +108,19 @@ async def website_mcp_servers(sites: dict[str, str], taken: frozenset[str] = fro
     """The sites, by name at the address their server answers, that are MCP servers too: each as an internal server at
     the MCP endpoint its card declares, so the gateway serves its tools as it does an MCP env's. A site whose card
     declares no MCP interface, or that answers no card, is left out, as is one named as an internal server already
-    (``taken``). A site whose server can't be reached yet is asked again until ``timeout_s``."""
-    found: list[InternalMCPServer] = []
+    (``taken``). Every site is asked at once, and one whose server can't be reached yet is asked again until
+    ``timeout_s``."""
+    asked = {name: url.rstrip("/") for name, url in sites.items() if name not in taken}
     deadline = time.monotonic() + timeout_s
     async with httpx.AsyncClient() as client:
-        for name, base_url in sites.items():
-            if name in taken:
-                continue
-            base = base_url.rstrip("/")
-            card = await _site_card(client, name, base, deadline)
-            path = next((i.get("url") for i in (card or {}).get("additionalInterfaces") or []
-                         if isinstance(i, dict) and i.get("transport") == MCP_TRANSPORT and i.get("url")), None)
-            if isinstance(path, str) and path.startswith("/"):
-                logger.info(f"Site {name} is an MCP server at {path}")
-                found.append(InternalMCPServer(name=name, mcp_url=f"{base}{path}"))
+        cards = await asyncio.gather(*(_site_card(client, name, base, deadline) for name, base in asked.items()))
+    found: list[InternalMCPServer] = []
+    for (name, base), card in zip(asked.items(), cards):
+        path = next((i.get("url") for i in (card or {}).get("additionalInterfaces") or []
+                     if isinstance(i, dict) and i.get("transport") == MCP_TRANSPORT and i.get("url")), None)
+        if isinstance(path, str) and path.startswith("/"):
+            logger.info(f"Site {name} is an MCP server at {path}")
+            found.append(InternalMCPServer(name=name, mcp_url=f"{base}{path}"))
     return found
 
 

@@ -9,10 +9,10 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from pytest_socket import enable_socket
 
-from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, InternalMCPServer
+from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER, AGENT_ENV_ROLE_META_KEY, InternalMCPServer
 from agent_env.env.gateway import entrypoint as entrypoint_module
 from agent_env.env.gateway.entrypoint import website_mcp_servers
-from agent_env.env.gateway.gateway import Gateway, site_reserved_paths
+from agent_env.env.gateway.gateway import Gateway, site_mcp_endpoints, site_reserved_paths
 from agentenv_protocol import DataPart, ToolContext, environment_card, get_data, tool
 from agentenv_protocol.website import WebsiteEnvironment, website
 from tst.unit.env.gateway.process_scope_socket_test import _serve
@@ -23,6 +23,14 @@ CARD = "/.well-known/agent-env.json"
 def test_a_sites_mcp_interface_is_one_of_its_reserved_paths():
     card = {"url": "/agentenv", "additionalInterfaces": [{"url": "/mcp", "transport": "mcp"}, {"transport": "x"}]}
     assert site_reserved_paths(card) == frozenset({"/agentenv", "/mcp"})
+
+
+def test_a_sites_mcp_endpoint_is_its_internal_servers_path_under_its_svc_base():
+    servers = [InternalMCPServer("shop", "http://shop-backend:8000/tools/mcp"),
+               InternalMCPServer("slack", "http://slack:18765/mcp"),
+               InternalMCPServer("odd", "http://elsewhere:9/mcp")]
+    sites = {"shop": "http://shop-backend:8000", "odd": "http://odd-backend:8000"}
+    assert site_mcp_endpoints(servers, sites, {**sites, "mcp-slack": "http://slack:18765"}) == {"shop": "/tools/mcp"}
 
 
 @pytest.mark.asyncio
@@ -70,6 +78,24 @@ async def test_a_site_whose_server_never_answers_is_left_out_once_the_time_is_up
     assert await website_mcp_servers({"shop": "http://shop:8000"}, timeout_s=0) == []
 
 
+@pytest.mark.asyncio
+async def test_sites_are_asked_at_once_so_one_never_up_leaves_another_its_retries(monkeypatch):
+    calls: dict[str, int] = {}
+
+    def site(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        calls[host] = calls.get(host, 0) + 1
+        if host == "down" or calls[host] < 3:
+            raise httpx.ConnectError("not up yet")
+        return httpx.Response(200, json={"additionalInterfaces": [{"url": "/mcp", "transport": "mcp"}]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(entrypoint_module.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(site), **kw))
+    monkeypatch.setattr(entrypoint_module, "_INTERNAL_SERVER_POLL_S", 0.01)
+    found = await website_mcp_servers({"down": "http://down", "late": "http://late"}, timeout_s=1)
+    assert found == [InternalMCPServer("late", "http://late/mcp")]
+
+
 @environment_card(name="shop")
 @website(domains=["shop.test"])
 class _Shop(WebsiteEnvironment):
@@ -109,6 +135,14 @@ async def test_the_gateway_serves_a_sites_tools_and_its_route_refuses_the_sites_
                 assert "place_order" in [t.name for t in (await session.list_tools()).tools]
                 result = await session.call_tool("place_order", {"item": "milk"})
                 assert not result.isError and result.content[0].text == "order 1 placed"
+            forged = {AGENT_ENV_ROLE_META_KEY: "mallory@example.com"}
+            async with (
+                httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: "bob@example.com"}, timeout=30) as http,
+                streamable_http_client(f"{gw_url}/svc/shop/mcp", http_client=http) as (read, write, _),
+                ClientSession(read, write) as session,
+            ):
+                await session.initialize()
+                assert not (await session.call_tool("place_order", {"item": "eggs"}, meta=forged)).isError
             async with httpx.AsyncClient(timeout=30) as http:
                 browsing = await http.post(f"{gw_url}/website/shop/mcp", json={"jsonrpc": "2.0", "id": 1,
                                                                               "method": "tools/list"})
@@ -118,6 +152,6 @@ async def test_the_gateway_serves_a_sites_tools_and_its_route_refuses_the_sites_
             await gw_server.shutdown()
     finally:
         await site_server.shutdown()
-    assert site.orders == [{"item": "milk", "by": "alice@example.com"}]
+    assert site.orders == [{"item": "milk", "by": "alice@example.com"}, {"item": "eggs", "by": "bob@example.com"}]
     assert browsing.status_code == 404
     assert data.json()["result"]["parts"][0]["data"]["orders"][0]["item"] == "milk"

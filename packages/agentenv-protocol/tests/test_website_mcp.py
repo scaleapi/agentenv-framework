@@ -138,21 +138,27 @@ def _declaring(mcp: Route | None) -> Starlette:
     return Starlette(routes=routes + ([mcp] if mcp is not None else []))
 
 
-def _listing(*names: str) -> Route:
+def _listing(*pages: tuple[str, ...]) -> Route:
+    """An MCP endpoint whose tools/list answers ``pages`` in turn, each pointing at the next by its cursor."""
     async def answer(request: Request) -> Response:
         body = await request.json()
         if body.get("method") == "initialize":
             return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": {"serverInfo": {"name": "x"}}})
         if body.get("method") == "tools/list":
-            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": {"tools": [{"name": n} for n in names]}})
+            at = int((body.get("params") or {}).get("cursor") or 0)
+            result = {"tools": [{"name": n} for n in pages[at]], **({"nextCursor": str(at + 1)} if at + 1 < len(pages)
+                                                                    else {})}
+            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": result})
         return Response(status_code=202)
 
     return Route("/mcp", answer, methods=["POST"])
 
 
 @pytest.mark.parametrize(("mcp", "status", "detail"), [
-    (_listing("a"), "passed", "lists the card's 1 tool(s)"),
-    (_listing("a", "b"), "failed", "named ['a', 'b'], the card ['a']"),
+    (_listing(("a",)), "passed", "lists the card's 1 tool(s)"),
+    (_listing((), ("a",)), "passed", "lists the card's 1 tool(s)"),
+    (_listing(("a", "b")), "failed", "named ['b'], which the card doesn't list"),
+    (_listing(()), "warned", "lists 0 of the card's tools, not ['a']: hidden by default, or missing"),
     (None, "failed", "initialize answered 404"),
 ])
 def test_the_mcp_check_reads_the_endpoint_the_card_declares(mcp: Route | None, status: str, detail: str) -> None:
@@ -160,6 +166,24 @@ def test_the_mcp_check_reads_the_endpoint_the_card_declares(mcp: Route | None, s
     card = client.get("/.well-known/agent-env.json").json()
     found = conformance._outcome(lambda: conformance._Checker("http://testserver", client, "127.0.0.1")._mcp(card))
     assert found[0] == status and detail in found[1], found
+
+
+def test_a_hidden_by_default_tool_on_the_card_warns_without_failing_the_run(tmp_path: Path) -> None:
+    site = _shop(static=tmp_path)
+
+    class Gated(type(site)):
+        tool_access = True
+
+        @tool(hidden_by_default=True)
+        def refund(self, item: str) -> str:
+            """Refund an order."""
+            return "refunded"
+
+    gated = environment_card(name="shop")(Gated)()
+    with TestClient(gated.create_app()) as client:
+        results = {r.name: r for r in conformance.check("http://testserver", client=client)}
+    assert results["mcp"].status == "warned" and "['refund']" in results["mcp"].detail
+    assert all(r.passed for r in results.values()), results
 
 
 def test_an_mcp_interface_on_another_server_fails_the_check_with_nothing_sent_there() -> None:
