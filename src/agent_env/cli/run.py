@@ -43,10 +43,10 @@ _DRY_RUN = "Dry run: nothing is written or run."
 @click.option("--agent", default=None,
               help="The agent the solver runs as, whatever the tasks name: an alias such as pi, an agent of this "
                    "bundle or an installed one, or the store's.")
-@click.option("--set", "settings", multiple=True, metavar="KEY=VALUE",
-              help="Set an env key for this run, whatever the bundle's env.toml files say: in every env the tasks "
-                   "deploy whose type takes KEY, or in one as envs/NAME.KEY=VALUE. VALUE is TOML or a bare word, and "
-                   "KEY may be dotted into a table. Repeatable. Such as driver=cua-driver or tools=standard.")
+@click.option("--set", "settings", multiple=True, metavar="envs/NAME.KEY=VALUE",
+              help="Set a key of one of the bundle's envs for this run, as envs/NAME.KEY=VALUE, whatever its env.toml "
+                   "says: VALUE is TOML or a bare word, and KEY may be dotted into a table. Repeatable. Such as "
+                   "envs/desktop.driver=cua-driver or envs/desktop.tools=standard.")
 @click.option("--sandbox", default=None,
               help="The sandbox provider envs, agents, sandboxes and the judge deploy on, which picks the forms "
                    "computer envs compose on this machine; comma-separated for a fallback chain.")
@@ -84,13 +84,14 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     agent the solver runs as: each step that deploys or installs the agent a task prompts deploys it instead,
     while its user simulator and judges keep theirs.
 
-    --set sets env keys for this run, as the env.toml files would: --set driver=cua-driver runs every computer env
-    the tasks deploy with that driver, and --set envs/desktop.computer=ubuntu-24.04-headless composes one on that
-    base. The envs it changes, the envs and tasks that name them and the evals that name those tasks are written
-    under ids of their own, ending in the settings, such as desktop(driver cua-driver), and compose and reuse their
-    images as any env does, leaving the bundle as written. A key no env the tasks deploy takes, or a value the env's
-    type refuses, is refused before anything is written; a driver and computer that can't compose, as the run writes
-    the env, before any task runs.
+    --set sets a key of one of the bundle's envs for this run, as its env.toml would: --set
+    envs/desktop.driver=cua-driver runs the env in envs/desktop with that driver, and --set
+    envs/desktop.computer=ubuntu-24.04-headless composes it on that base. The envs it changes, the envs and tasks
+    that name them and the evals that name those tasks are written under ids of their own, ending in the settings,
+    such as desktop(desktop.driver cua-driver), and compose and reuse their images as any env does, leaving the
+    bundle as written. A key or value the env's type refuses, or a run whose tasks deploy no env it changes, is
+    refused before anything is written; a driver and computer that can't compose, as the run writes the env, before
+    any task runs.
 
     --dry-run makes the checks the run makes before its first task, reading the stores as the run does, and
     prints what it would write and run, writing and running nothing. It exits 1 on a problem the run would

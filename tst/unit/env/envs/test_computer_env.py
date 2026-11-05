@@ -784,17 +784,18 @@ async def test_a_computer_envs_tools_are_given_its_agents_at_deploy_and_again_af
 
 
 @pytest.mark.asyncio
-async def test_a_deploy_whose_tools_the_driver_cant_take_fails_and_tears_the_computer_down(base, driver, docker, boots,
-                                                                                          monkeypatch):
+async def test_a_deploy_whose_tools_the_driver_cant_take_fails_and_tears_down_its_computer_alone(
+        base, driver, docker, boots, monkeypatch):
+    live = Env.get(_put(base, driver, display={"width": 1600, "height": 900}, tools="standard").id)
+    first = await live.deploy()
     monkeypatch.setitem(DRIVER_CARD["capabilities"], "extensions", [
         extension for extension in DRIVER_CARD["capabilities"]["extensions"] if extension["uri"] != ENABLE_TOOL_EXTENSION_URI])
-    env = _put(base, driver, display={"width": 1600, "height": 900}, tools="standard")
 
     with pytest.raises(EnvCapabilityUnsupported):
-        await Env.get(env.id).deploy()
+        await live.deploy()
 
-    (sandbox,) = boots.sandboxes
-    assert sandbox.terminated
+    kept, failed = boots.sandboxes
+    assert failed.terminated and not kept.terminated and live._deployed is first
 
 
 @pytest.mark.asyncio

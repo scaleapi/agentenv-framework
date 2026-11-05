@@ -1,4 +1,4 @@
-"""``--set KEY=VALUE``: a run's envs with keys set for that run alone, each env that changes, each env and task naming
+"""``--set envs/NAME.KEY=VALUE``: a run's envs with keys set for that run alone, each env that changes, each env and task naming
 one and each eval naming such a task under an id ending in the settings, with the bundle as written."""
 
 import json
@@ -52,21 +52,32 @@ def _ids(bundle):
 def test_a_key_set_renames_the_env_and_what_uses_it_and_leaves_the_rest(tmp_path):
     root = _bundle(tmp_path / "desk")
 
-    bundle = _varied(root, "driver=cua-driver")
+    bundle = _varied(root, "envs/desktop.driver=cua-driver")
 
-    assert _ids(bundle) == {"desktop": f"{ROOT}/desktop(driver cua-driver)", "t": f"{ROOT}/t(driver cua-driver)",
-                            "chat": f"{ROOT}/chat", "e": f"{ROOT}/e(driver cua-driver)", "chats": f"{ROOT}/chats"}
+    label = "desktop.driver cua-driver"
+    assert _ids(bundle) == {"desktop": f"{ROOT}/desktop({label})", "t": f"{ROOT}/t({label})", "chat": f"{ROOT}/chat",
+                            "e": f"{ROOT}/e({label})", "chats": f"{ROOT}/chats"}
     assert _entry(bundle, "desktop").config == {**_entry(parse_bundle(root), "desktop").config, "driver": "cua-driver"}
     assert _entry(bundle, "t").config == [DEPLOY, AGENT, PROMPT]
+
+
+def test_an_entry_of_another_kind_with_the_envs_id_stays_as_it_is(tmp_path):
+    root = _bundle(tmp_path / "desk", files={"skills/desktop/SKILL.md": "---\nname: desktop\ndescription: d\n---\n"})
+
+    bundle = _varied(root, "envs/desktop.driver=cua-driver")
+
+    skill = next(entry for entry in bundle.entries if entry.kind.value == "skills")
+    assert skill == next(entry for entry in parse_bundle(root).entries if entry.kind.value == "skills")
+    assert _entry(bundle, "t").id == f"{ROOT}/t(desktop.driver cua-driver)"
 
 
 def test_a_reference_by_id_is_repointed_at_the_variant(tmp_path):
     steps = [{**DEPLOY, "env_id": f"{ROOT}/desktop"}, {**AGENT, "env_ids": [f"{ROOT}/desktop"]}, PROMPT]
     root = _bundle(tmp_path / "desk", steps, {"evals/e.toml": f'tasks = ["{ROOT}/t"]\n'})
 
-    bundle = _varied(root, "computer=ubuntu-24.04-headless", "tools=standard")
+    bundle = _varied(root, "envs/desktop.computer=ubuntu-24.04-headless", "envs/desktop.tools=standard")
 
-    label = "computer ubuntu-24.04-headless, tools standard"
+    label = "desktop.computer ubuntu-24.04-headless, desktop.tools standard"
     assert [step.get("env_id") or step.get("env_ids") for step in _entry(bundle, "t").config] == [
         f"{ROOT}/desktop({label})", [f"{ROOT}/desktop({label})"], None]
     assert _entry(bundle, "e").config["tasks"] == [f"{ROOT}/t({label})"]
@@ -74,7 +85,7 @@ def test_a_reference_by_id_is_repointed_at_the_variant(tmp_path):
 
 
 def test_a_value_is_toml_or_a_bare_word_and_a_key_may_be_dotted_into_a_table(tmp_path):
-    settings = ("display={ width = 1280, height = 720 }", "computer_settings.theme=dark",
+    settings = ("envs/desktop.display={ width = 1280, height = 720 }", "envs/desktop.computer_settings.theme=dark",
                 "envs/desktop.network.mode=allow_all")
 
     bundle = _varied(_bundle(tmp_path / "desk"), *settings)
@@ -83,8 +94,9 @@ def test_a_value_is_toml_or_a_bare_word_and_a_key_may_be_dotted_into_a_table(tmp
     assert (config["display"], config["computer_settings"], config["network"]) == (
         {"width": 1280, "height": 720}, {"timezone": "Europe/Paris", "theme": "dark"}, {"mode": "allow_all"})
     hashed = Variant(settings).label.split(",")[0]
-    assert hashed.startswith("display ") and len(hashed) == len("display ") + 8
-    assert _entry(bundle, "desktop").id == f"{ROOT}/desktop({hashed}, computer_settings.theme dark, desktop.network.mode allow_all)"
+    assert hashed.startswith("desktop.display ") and len(hashed) == len("desktop.display ") + 8
+    assert _entry(bundle, "desktop").id == (f"{ROOT}/desktop({hashed}, desktop.computer_settings.theme dark, "
+                                            "desktop.network.mode allow_all)")
 
 
 def test_one_env_is_set_by_its_folder_and_an_env_composing_an_app_set_is_renamed_too(tmp_path):
@@ -103,13 +115,14 @@ def test_one_env_is_set_by_its_folder_and_an_env_composing_an_app_set_is_renamed
 
 
 @pytest.mark.parametrize("setting, problem", [
-    ("drivr=x", "--set drivr=x: no env this bundle's tasks deploy takes drivr; a computer env takes apps, computer, "
-                "computer_settings, display, driver, environment_name, network, tools"),
+    ("driver=cua-driver", "--set driver=cua-driver: expected envs/NAME.KEY=VALUE, such as envs/desktop.driver=cua-driver"),
+    ("envs/desktop.driver", "--set envs/desktop.driver: expected envs/NAME.KEY=VALUE, such as "
+                            "envs/desktop.driver=cua-driver"),
+    ("envs/desktop=x", "--set envs/desktop=x: expected envs/NAME.KEY=VALUE, such as envs/desktop.driver=cua-driver"),
+    ("envs/desktop.=x", "--set envs/desktop.=x: expected envs/NAME.KEY=VALUE, such as envs/desktop.driver=cua-driver"),
     ("envs/nope.driver=x", "--set envs/nope.driver=x: envs/nope names no env of this bundle"),
-    ("driver", "--set driver: expected KEY=VALUE, such as driver=cua-driver"),
-    ("=x", "--set =x: expected KEY=VALUE, such as driver=cua-driver"),
 ])
-def test_a_setting_no_env_can_take_is_refused(tmp_path, setting, problem):
+def test_a_setting_that_names_no_envs_key_is_refused(tmp_path, setting, problem):
     with pytest.raises(BundleError) as refused:
         _varied(_bundle(tmp_path / "desk"), setting)
 
@@ -127,26 +140,31 @@ def _plan(root, *settings):
 
 
 def test_the_variant_is_written_and_composed_with_its_driver_beside_the_bundles_own(desk, composed):  # noqa: F811
-    plan = _plan(desk, "driver=cua-driver", "tools=driver")
+    plan = _plan(desk, "envs/desktop.driver=cua-driver", "envs/desktop.tools=driver")
 
     materialize(plan, build_here=local_builds(plan))
 
-    env = Env.get(f"{ROOT}/desktop(driver cua-driver, tools driver)")
+    env = Env.get(f"{ROOT}/desktop(desktop.driver cua-driver, desktop.tools driver)")
     assert (env.computer.id, env.driver.id, env.environment_name, env.tools) == (UBUNTU, CUA, "desktop", "driver")
     assert composed == [(env.id, UBUNTU, CUA, None)]
     assert (desk / "envs/desktop/env.toml").read_text() == DESKTOP
 
 
-def test_a_value_the_envs_type_refuses_is_refused_before_anything_is_written(desk, composed):  # noqa: F811
+@pytest.mark.parametrize("setting, problem", [
+    ("envs/desktop.tools=all", "tools is 'standard', 'driver' or 'both', not 'all'"),
+    ("envs/desktop.drivr=x", "unknown key 'drivr'; a computer env takes environment_name, computer, driver, apps, "
+                             "display, network, computer_settings, tools, type and id"),
+])
+def test_a_key_or_value_the_envs_type_refuses_is_refused_before_anything_is_written(desk, composed,  # noqa: F811
+                                                                                     setting, problem):
     with pytest.raises(BundleError) as refused:
-        dry_run_bundle(desk, variant=Variant(("tools=all",)))
+        dry_run_bundle(desk, variant=Variant((setting,)))
 
-    assert any(line.startswith("envs/desktop") and "tools is 'standard', 'driver' or 'both', not 'all'" in line
-               for line in refused.value.problems), refused.value
+    assert any(line.startswith("envs/desktop") and problem in line for line in refused.value.problems), refused.value
 
 
 def test_a_driver_that_cant_compose_with_the_computer_is_refused_as_its_written(desk, composed):  # noqa: F811
-    plan = _plan(desk, "driver=macos-harness")
+    plan = _plan(desk, "envs/desktop.driver=macos-harness")
 
     with pytest.raises(BundleError) as refused:
         materialize(plan, build_here=local_builds(plan))
@@ -158,18 +176,25 @@ def test_a_driver_that_cant_compose_with_the_computer_is_refused_as_its_written(
 
 def test_a_run_whose_tasks_deploy_nothing_its_settings_change_is_refused(desk, composed):  # noqa: F811
     with pytest.raises(BundleError) as refused:
-        dry_run_bundle(desk, tasks=["chat"], variant=Variant(("driver=cua-driver",)))
+        dry_run_bundle(desk, tasks=["chat"], variant=Variant(("envs/desktop.driver=cua-driver",)))
 
-    assert refused.value.problems == ("--set driver=cua-driver: none of the tasks this run selects deploys an env it "
-                                      "changes",)
+    assert refused.value.problems == ("--set envs/desktop.driver=cua-driver: none of the tasks this run selects "
+                                      "deploys an env it changes",)
+
+
+@pytest.mark.parametrize("selection", ["t", f"{ROOT}/t"], ids=["name", "id"])
+def test_a_task_is_selected_by_its_name_or_its_id_as_the_bundle_gives_it(desk, composed, selection):  # noqa: F811
+    dry = dry_run_bundle(desk, tasks=[selection], variant=Variant(("envs/desktop.driver=cua-driver",)))
+
+    assert [entry.id for entry in dry.runs] == [f"{ROOT}/t(desktop.driver cua-driver)"]
 
 
 def test_the_cli_runs_the_variant_and_says_what_it_writes_it_as(desk, composed, monkeypatch):  # noqa: F811
     monkeypatch.setenv("LITELLM_BASE_URL", "http://litellm")
 
-    result = CliRunner().invoke(cli, ["run", str(desk), "--task", "t", "--set", "driver=cua-driver", "--set",
-                                      "tools=standard", "--dry-run"])
+    result = CliRunner().invoke(cli, ["run", str(desk), "--task", "t", "--set", "envs/desktop.driver=cua-driver",
+                                      "--set", "envs/desktop.tools=standard", "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert ("--set driver=cua-driver --set tools=standard: 1 env and 1 task written under ids ending in "
-            "(driver cua-driver, tools standard)") in result.output
+    assert ("--set envs/desktop.driver=cua-driver --set envs/desktop.tools=standard: 1 env and 1 task written under ids "
+            "ending in (desktop.driver cua-driver, desktop.tools standard)") in result.output

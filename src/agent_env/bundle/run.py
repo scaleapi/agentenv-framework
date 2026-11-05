@@ -46,7 +46,7 @@ from .preflight import Preflight, preflight_run
 from .requires import Declaring, declare, declaring_for
 from .resolve import (BuiltImage, BundleImage, Reference, ReferencedImage, ResolvedEntry, resolve_bundle,
                       without_played_agents)
-from .variants import Variant, with_variant
+from .variants import Variant, selected, with_variant
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +405,11 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
              sandbox: str | None, agent: str | None = None, *, played: bool = False,
              solver_endpoint: bool = False, variant: Variant | None = None) -> tuple[Plan, Preflight]:
     bundle = parse_bundle(Path(root), id_root=id_root)
-    resolved = resolve_bundle(with_variant(bundle, variant) if variant else bundle)
+    if variant is not None:
+        varied = with_variant(bundle, variant)
+        tasks, evals = selected(bundle, varied, tasks, BundleKind.TASK), selected(bundle, varied, evals, BundleKind.EVAL)
+        bundle = varied
+    resolved = resolve_bundle(bundle)
     plan = plan_bundle(without_played_agents(resolved) if played else resolved, tasks=tasks, evals=evals,
                        installed=installed_bundles, agent=agent)
     refuse_store_tasks(plan)

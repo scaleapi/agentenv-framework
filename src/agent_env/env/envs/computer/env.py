@@ -77,8 +77,6 @@ class ComputerEnv(Env):
                                                   EntityRef.env("driver", env_type=ComputerDriverEnv.type),
                                                   EntityRef.env("apps[]", env_type=APP_TYPE,
                                                                 beside=("install", "settings")))
-    toml_keys: ClassVar[dict[str, type]] = {"environment_name": str, "computer": object, "driver": object, "apps": list,
-                                            "display": dict, "network": dict, "computer_settings": dict, "tools": str}
 
     def __init__(self, id: str, version: Optional[int], environment_name: str, computer: ComputerArtifact,
                  driver: ComputerDriverEnv, display: Optional[dict] = None, network: Optional[dict] = None,
@@ -169,7 +167,8 @@ class ComputerEnv(Env):
         """The keys of ``data``, an env.toml, a computer env takes: the ``computer`` and ``driver`` it's composed of,
         both required, its ``apps``, ``display``, ``network``, ``computer_settings`` and ``tools``, and
         ``environment_name``, the folder's when it sets none. Raises BundleError listing every problem."""
-        fields, refused = ctx.accepted(data, **cls.toml_keys)
+        fields, refused = ctx.accepted(data, environment_name=str, computer=object, driver=object, apps=list,
+                                       display=dict, network=dict, computer_settings=dict, tools=str)
         missing = [ctx.config_problem(f"{key} is required: the {what}, such as {example}") for key, what, example in (
             ("computer", "base computer", '"ubuntu-24.04"'), ("driver", "driver", '"reference"')) if key not in data]
         refused += [ctx.config_problem(problem) for problem in _tools_problems(fields.get("tools"))]

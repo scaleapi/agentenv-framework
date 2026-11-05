@@ -1,9 +1,9 @@
 Computer drivers that come with agent-env, each a `computer_driver` env a computer env serves its tools through.
 A computer env's `tools` is what its agents get: `standard`, AgentEnv's `computer_*` tools alone;
-`driver`, the driver's own alone; or `both`, the default. `agent-env run <bundle> --set driver=cua-driver` runs a
-bundle's computer envs with another driver for one run, and `--set tools=driver` gives their agents the driver's own
-tools; the bundle stays as written, and what changes is written under ids ending in the settings, such as
-`desktop(driver cua-driver)`.
+`driver`, the driver's own alone; or `both`, the default. `agent-env run <bundle> --set envs/desktop.driver=cua-driver`
+runs a bundle's `desktop` env with another driver for one run, and `--set envs/desktop.tools=driver` gives its agents
+the driver's own tools; the bundle stays as written, and what changes is written under ids ending in the settings,
+such as `desktop(desktop.driver cua-driver)`.
 
 `envs/reference/` is the reference driver, for an X11 desktop on Linux (`amd64` and `arm64`): `mss` captures the
 screen and XTEST, through `python-xlib`, sends the input, foreground only. It serves the seven `computer_*` tools, the
