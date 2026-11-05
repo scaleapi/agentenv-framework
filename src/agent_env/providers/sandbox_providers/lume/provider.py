@@ -36,7 +36,11 @@ from agent_env.artifact.artifacts.computer import LOCAL_IMAGE_PREFIX
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
 from agent_env.config.paths import state_root
-from agent_env.providers.sandbox_providers.local_docker.provider import local_grant_trust, trust_env
+from agent_env.providers.sandbox_providers.local_docker.provider import (
+    LocalSandboxProvider,
+    local_grant_trust,
+    trust_env,
+)
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxNotFoundError,
@@ -125,6 +129,12 @@ class LumeSandboxProvider(SandboxProvider):
         if "ssh_password" in config:
             config["ssh_password"] = get_config().resolve_reference(config["ssh_password"])
         return cls(**config)
+
+    @classmethod
+    def get_external_url(cls, url: str) -> str:
+        """``url``, a relay on this Mac, as a container on this machine's Docker reaches it, an agent's say: its
+        loopback host as ``host.docker.internal``."""
+        return LocalSandboxProvider.get_external_url(url)
 
     @classmethod
     def native_platforms(cls) -> frozenset[str]:

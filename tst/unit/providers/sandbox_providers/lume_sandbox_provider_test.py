@@ -21,6 +21,7 @@ from agentenv_protocol.computer import seed
 from agent_env.providers.sandbox_providers.lume import provider as lume
 from agent_env.providers.sandbox_providers.lume.provider import LumeSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, NetworkPolicyUnsupportedError
+from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 
 FAKE = textwrap.dedent('''\
     import contextlib, fcntl, json, os, signal, sys, time
@@ -148,6 +149,8 @@ async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_relayed_and_policed_
     assert (folder / lume.SEED_FOLDER / "user-data").read_text() == seed.user_data(env)
     assert (folder / lume.SEED_FOLDER / seed.OLDEST).read_text() == "1\n"
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:48123"}
+    assert reachable_url("http://127.0.0.1:48123/mcp", from_sandbox_type="lume",
+                         to_sandbox_type="local") == "http://host.docker.internal:48123/mcp"
     assert sandbox.network_policy.mode is NetworkMode.ALLOW_ALL
     address = _state(mac.fake)["vms"][sandbox.sandbox_id]["ipAddress"]
     assert _waited(lambda: (mac.fake / "relay.args").read_text().split()) == ["-I", str(lume.RELAY),
