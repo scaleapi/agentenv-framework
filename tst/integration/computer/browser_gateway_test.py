@@ -3,7 +3,9 @@ folder and run with the computer as its /svc child ``web``. Playwright and Puppe
 gateway's ``/browser/web/cdp/<token>/`` route by the ``http_url`` and the ``ws_url`` the browser's ``cdp`` answer
 gives through the gateway, an address the browser didn't mint is refused, and each connection is a trajectory event
 that, like the gateway's log, never shows its token. A gateway restart or a browser relaunch closes a live connection
-with a code, and a new one then works. Needs Docker, and Node 20 or later with npm for the CDP clients."""
+with a code, and a new one then works; so does the browser's app server or the computer's driver dying behind the
+gateway, and a browser whose app server was down when the gateway first looked is found once it's back. Needs Docker,
+and Node 20 or later with npm for the CDP clients."""
 
 import asyncio
 import json
@@ -28,7 +30,9 @@ from agent_env.providers.sandbox_providers.local_docker.provider import host_url
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
-from tst.integration.computer.browser_computer_test import DATA_PAGE, SERVE_SITE, SERVE_START_S, SITE, _clients
+from tst.integration.computer.browser_computer_test import (DATA_PAGE, SERVE_SITE, SERVE_START_S, SITE, _clients,
+                                                            _kill, _ready)
+from tst.integration.computer.browser_computer_test import _cdp as _driver_cdp
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -36,6 +40,8 @@ GATEWAY = Path(agent_env.__file__).parent / "env" / "gateway"
 EXTRA_HOSTS = ["--add-host", "host.docker.internal:host-gateway"] if platform.system() == "Linux" else []
 #: What the browser's relay closes its connections with when it relaunches.
 RELAUNCHED = 1012
+#: The supervisord program the browser app's own server runs as.
+APP_SERVER = "app-chromium"
 
 
 @pytest.fixture(scope="module")
@@ -106,6 +112,45 @@ async def test_a_gateway_restart_or_a_browser_relaunch_closes_a_live_connection_
 
     assert first.startswith("Chrome/") and first == second == third
     assert at_restart is not None and at_relaunch == RELAUNCHED
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_behind_the_gateway_a_browser_down_at_first_is_found_once_up_and_a_dying_server_or_driver_closes_a_connection(
+        browser_computer, gateway_image):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            token = (await _driver_cdp(deployed, "ada"))["http_url"].split("/cdp/")[1].strip("/")
+            await inside.run(deployed, ["supervisorctl", "stop", APP_SERVER], timeout_s=60)
+            async with _gateway(gateway_image, deployed) as (gateway, _):
+                discovery = f"{gateway}/browser/web/cdp/{token}/json/version"
+                async with httpx.AsyncClient(timeout=60) as http:
+                    while_down = (await http.get(discovery)).status_code
+                    await inside.run(deployed, ["supervisorctl", "start", APP_SERVER], timeout_s=120)
+                    await _ready(deployed)
+                    ws_url = (await http.get(discovery)).json()["webSocketDebuggerUrl"]
+                held, first = await _version(ws_url)
+                await _kill(deployed, "[s]erve_app")
+                at_server_death = await _closed(held)
+                await _ready(deployed)
+                held, after_server = await _version(ws_url)
+                await _kill(deployed, "[c]omputer.serve driver.py:PageDriver")
+                at_driver_death = await _closed(held)
+                await _ready(deployed)
+                held, after_driver = await _version(ws_url)
+                await held.close()
+                events = await _connections(gateway, at_least=3)
+        finally:
+            report = await teardown_run(context)
+
+    assert while_down == 404
+    assert ws_url == f"ws{gateway.removeprefix('http')}/browser/web/cdp/{token}/devtools/browser"
+    assert at_server_death is not None and at_driver_death is not None
+    assert first.startswith("Chrome/") and first == after_server == after_driver
+    assert [event["closed_by"] for event in events if event["opened_at"]] == ["browser", "browser", "client"], events
     assert not report.failed
 
 
