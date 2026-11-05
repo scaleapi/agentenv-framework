@@ -131,6 +131,7 @@ dev = [
     { name = "transformers" },
     { name = "urllib3" },
     { name = "vercel-sandbox" },
+    { name = "websockets" },
 ]
 gcp = [
     { name = "google-api-core" },
@@ -266,6 +267,7 @@ requires-dist = [
     { name = "urllib3", marker = "extra == 'boat'", specifier = ">=2.1.0,<3" },
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
+    { name = "websockets", marker = "extra == 'dev'", specifier = ">=13" },
 ]
 provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "miles", "slime", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
 

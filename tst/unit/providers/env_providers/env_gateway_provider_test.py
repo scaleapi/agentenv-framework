@@ -305,8 +305,10 @@ async def test_a_vm_gateway_refuses_an_image_its_vm_cant_get_before_creating_the
 
 
 @pytest.mark.asyncio
-async def test_container_mode_constructs_internal_mcp_servers_url_format():
-    """Container mode must pass INTERNAL_MCP_SERVERS as 'name=url,name=url' to the gateway."""
+async def test_container_mode_constructs_internal_mcp_servers_url_format(monkeypatch):
+    """Container mode must pass INTERNAL_MCP_SERVERS as 'name=url,name=url' to the gateway, and the names of the
+    providers' request headers, which it takes off what it forwards."""
+    monkeypatch.setattr(env_gateway_provider, "sandbox_request_header_names", lambda: ("cf-access-client-id", "x-a"))
     provider = ModalSandboxProvider()
     gp = EnvironmentGatewayProvider()
     gp._state_provider = LocalPostgresStateProvider()  # normally set by create_gateway
@@ -395,6 +397,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
     assert re.search(r"^postgresql://agentenv:agentenv@\[fdaa::fake:[0-9a-f]+\]:5432/agentenv", env["SERVICE_DB_URL"]), env["SERVICE_DB_URL"]
     assert env["MCP_SERVER_NAME"] == "crm"
     assert result.mcp_server_name == "crm"
+    assert env["AGENTENV_PROVIDER_REQUEST_HEADERS"] == "cf-access-client-id,x-a"
 
     # Each MCP got DATABASE_URL with its scoped search_path
     mcp_calls = [c for c in create_calls if c["image_name"].startswith("mcp-")]
@@ -1189,6 +1192,26 @@ def test_redact_compose_secrets_masks_only_secret_env_lines():
     assert '      - "18768:8000"' in redacted
     # the un-redacted compose still carries the real secret (only the log copy is masked)
     assert "s3cr3t-token-value" in compose
+
+
+@pytest.mark.parametrize("names", [("cf-access-client-id", "cf-access-client-secret"), ()], ids=["named", "none"])
+def test_compose_gives_the_gateway_the_names_of_the_providers_request_headers_alone(names, monkeypatch):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    monkeypatch.setattr(env_gateway_provider, "sandbox_request_header_names", lambda: names)
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+        gateway_image="agent-gateway",
+        website_configs=[WebsiteConfig(backend_image="notes-be", frontend_image=None, environment_name="notes")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    named = {name: [entry for entry in service.get("environment") or [] if "PROVIDER_REQUEST_HEADERS" in entry]
+             for name, service in services.items()}
+    expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_PROVIDER_REQUEST_HEADERS={','.join(names)}"]} if names else {}
+    assert {name: entries for name, entries in named.items() if entries} == expected
 
 
 @pytest.mark.asyncio
@@ -2016,6 +2039,40 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
 
     await gp.close()
     state_provider.teardown.assert_awaited_once_with(external)
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_with_websites_records_the_card_read_once_they_are_ready():
+    """The gateway composes its card from its children's as it reads them, so the card read before the sites were up
+    may lack them; the one recorded is read once they're ready, as what reads the sites from it expects."""
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp, external = EnvironmentGatewayProvider(), MagicMock(state_type="remote", instance_id="st-ext")
+    state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock(), teardown=AsyncMock())
+    vm = MagicMock(sandbox_id="vm-1", type="modal_vm", tunnel_urls={18765: "https://vm.example"}, host_port=lambda port: port, host_ips=(),
+                   load_docker_images=AsyncMock(), exec_script=AsyncMock(), exec_with_output=AsyncMock(return_value=(0, "gateway", "")))
+    env = WebsiteEnv(id="web-shop", version=1, backend_docker_image_artifact=_loadable("shop-be"),
+                     frontend_docker_image_artifact=_loadable("shop-fe"), environment_name="shop")
+    before, after = {"name": "env1234", "children_environments": []}, {"name": "env1234", "children_environments": [{"name": "shop"}]}
+
+    with patch("agent_env.providers.env_state.acquire_state_for_deploy", AsyncMock(return_value=external)), \
+         patch("agent_env.providers.env_state.build_state_provider", return_value=state_provider), \
+         patch("agent_env.env.env.Env.get", MagicMock(return_value=MagicMock(docker_image_artifact=_loadable("gw")))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", return_value="services: {}"), \
+         patch.object(gp, "_wait_for_gateway", AsyncMock(return_value=True)), \
+         patch.object(gp, "_get_container_id", AsyncMock(return_value=None)), \
+         patch.object(gp, "_wait_for_tunnel", AsyncMock(side_effect=[before, after])), \
+         patch.object(gp, "_refuse_tool_name_clashes", AsyncMock()), \
+         patch.object(env_gateway_provider, "_wait_for_websites", AsyncMock()) as websites_waited, \
+         patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())), \
+         patch("agent_env.providers.env_providers.env_gateway_provider.asyncio.sleep", AsyncMock()):
+        record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), ttl_seconds=60, env_state_type="remote")
+
+    websites_waited.assert_awaited_once()
+    assert record.environment_card == after
+    assert record.website_frontend_urls == {"shop": "https://vm.example/website/shop/"}
+    await gp.close()
 
 
 @pytest.mark.asyncio

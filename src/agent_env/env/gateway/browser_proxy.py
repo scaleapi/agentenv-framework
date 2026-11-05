@@ -28,7 +28,7 @@ from websockets.asyncio.client import ClientConnection, connect
 
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import EXT_BROWSER_URI, EXT_COMPUTER_APP_URI
-from .rest_proxy import HOP_BY_HOP, fetch_child_card, operations, upstream_headers, upstream_url
+from .rest_proxy import client_headers, fetch_child_card, operations, upstream_headers, upstream_url
 
 logger = logging.getLogger(__name__)
 
@@ -125,12 +125,14 @@ class TokenRedaction(logging.Filter):
 class BrowserRoutes:
     """The ``/browser/<key>/cdp/<token>/`` route over a gateway's ``/svc`` children, and the rewrite of a browser's
     ``cdp`` answer on their ``/svc`` route. ``log_event`` writes a trajectory event, ``attribution`` names a role's
-    caller for one, and ``role_of`` reads the role a connection's ``AgentEnv-Role`` header names."""
+    caller for one, and ``role_of`` reads the role a connection's ``AgentEnv-Role`` header names. The headers named in
+    ``withheld`` (lower case), the sandbox provider's credentials, reach no browser."""
 
     def __init__(self, rest_proxy_urls: dict[str, str], timeout: httpx.Timeout,
                  log_event: Callable[[dict], Awaitable[Any]], attribution: Callable[[str], dict],
-                 role_of: Callable[[Request | WebSocket], str]):
+                 role_of: Callable[[Request | WebSocket], str], *, withheld: frozenset[bytes] = frozenset()):
         self._urls = rest_proxy_urls
+        self._withheld = withheld
         self._timeout = timeout
         self._log_event = log_event
         self._attribution = attribution
@@ -168,7 +170,7 @@ class BrowserRoutes:
         base = public_base(request)
         if base is None:
             return _error(400, "the Host header isn't a host and port")
-        headers = [(name, value) for name, value in request.headers.raw if name.lower() not in HOP_BY_HOP]
+        headers = client_headers(request, self._withheld)
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 answer = await client.request(request.method, self._target(key, browser, request), headers=headers)
@@ -192,7 +194,7 @@ class BrowserRoutes:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 answer = await client.post(upstream_url(base_url, request), content=await request.body(),
-                                           headers=upstream_headers(request, role))
+                                           headers=upstream_headers(request, role, withheld=self._withheld))
         except httpx.HTTPError as e:
             return _error(502, f"the browser didn't answer: {type(e).__name__}")
         return _answered(answer, CDP_ANSWER_FIELDS, base, key)
@@ -210,8 +212,9 @@ class BrowserRoutes:
             await self._log_event({**event, "opened_at": None, "closed_at": _now(), "close_code": REFUSED,
                                    "closed_by": "gateway", "status": browser.status_code})
             return
-        headers = [(name, value) for name, value in websocket.headers.items()
-                   if name.encode() not in HOP_BY_HOP and not name.startswith("sec-websocket-")]
+        headers = [(name.decode("latin-1"), value.decode("latin-1"))
+                   for name, value in client_headers(websocket, self._withheld)
+                   if not name.lower().startswith(b"sec-websocket-")]
         offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
         try:
             upstream = await connect(

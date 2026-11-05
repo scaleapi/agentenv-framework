@@ -507,6 +507,20 @@ async def test_the_upstream_learns_the_host_scheme_and_route_prefix_the_client_r
 
 
 @pytest.mark.asyncio
+async def test_a_client_serving_the_route_at_its_own_root_is_told_no_prefix_and_its_header_stays_with_the_gateway(
+        monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"})
+    await _call(gw, "/website/web/api/x", headers={"host": "gw.example", "x-forwarded-host": "notes.test",
+                                                   "x-forwarded-proto": "https", "agentenv-site-root": "1"})
+    await _call(gw, "/website/web/api/x", headers={"host": "gw.example", "agentenv-site-root": ""})
+    assert [_forwarded(r) for r in up.forwarded] == [(["notes.test"], ["https"], []),
+                                                    (["gw.example"], ["http"], ["/website/web"])]
+    assert all("agentenv-site-root" not in r.headers for r in up.forwarded)
+
+
+@pytest.mark.asyncio
 async def test_a_front_s_own_forwarded_host_and_scheme_win_and_reach_the_upstream_once(monkeypatch):
     up = _Upstream([b"ok"])
     up.install(monkeypatch)

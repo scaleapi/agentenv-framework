@@ -267,6 +267,28 @@ async def test_serve_env_card_composes_website_backend(monkeypatch):
     assert {c["url"] for c in card["children_environments"]} == {"/svc/mcp-items/agentenv", "/svc/webitems/agentenv"}
 
 
+def test_a_website_childs_card_names_the_route_the_gateway_serves_it_to_a_browser_at():
+    """The website/v1 param naming it mirrors the protocol's, as the gateway image has no agentenv_protocol."""
+    from agentenv_protocol.website import WEBSITE_BROWSE_URL_PARAM
+
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                 website_urls={"notes": "http://notes:8000", "bare": "http://bare:8000"},
+                 rest_proxy_urls={"notes": "http://notes:8000", "bare": "http://bare:8000", "mcp-notes": "http://m"})
+    site = {"name": "notes", "url": "/agentenv", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}}
+
+    notes = gw._rewrite_child_card("notes", site)
+    mcp = gw._rewrite_child_card("mcp-notes", site)
+    bare = gw._rewrite_child_card("bare", {"name": "bare", "url": "/agentenv", "capabilities": {"extensions": []}})
+
+    assert gateway_constants.WEBSITE_BROWSE_URL_PARAM == WEBSITE_BROWSE_URL_PARAM
+    assert protocol_client.extension_params(notes, "urn:agentenv:website/v1") == {
+        "domains": ["notes.test"], WEBSITE_BROWSE_URL_PARAM: "/website/notes/"}
+    assert protocol_client.extension_params(mcp, "urn:agentenv:website/v1") == {"domains": ["notes.test"]}
+    assert bare["capabilities"]["extensions"] == []
+    assert site["capabilities"]["extensions"][0]["params"] == {"domains": ["notes.test"]}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", ["data/reset", "data/add", "data/get"])
 async def test_env_data_plane_requires_single_child(method):

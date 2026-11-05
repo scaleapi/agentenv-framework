@@ -54,14 +54,21 @@ def _computer_card(*apps: dict) -> dict:
             "children_environments": list(apps)}
 
 
-def _browser_computer(card: dict) -> Starlette:
+def _browser_computer(card: dict, seen: list[dict] | None = None) -> Starlette:
+    """A computer serving ``card`` and a browser's CDP routes; ``seen`` gets the headers of each request to a CDP route."""
+    def saw(connection) -> None:
+        if seen is not None:
+            seen.append(dict(connection.headers))
+
     async def served_card(_: Request) -> JSONResponse:
         return JSONResponse(card)
 
-    async def cdp(_: Request) -> JSONResponse:
+    async def cdp(request: Request) -> JSONResponse:
+        saw(request)
         return JSONResponse({"http_url": MINTED, "ws_url": "ws://browser-host:7000/svc/chromium/cdp/t0k3n/devtools/browser"})
 
     async def discovery(request: Request) -> JSONResponse:
+        saw(request)
         if request.path_params["token"] != TOKEN:
             return JSONResponse({"error": "agentenv didn't mint this CDP address"}, status_code=403)
         if request.path_params["rest"].rstrip("/") == "json/list":
@@ -72,6 +79,7 @@ def _browser_computer(card: dict) -> Starlette:
                              f"ws://browser-host:7000/svc/chromium/cdp/{TOKEN}/devtools/browser"})
 
     async def browser_socket(websocket: WebSocket) -> None:
+        saw(websocket)
         if websocket.path_params["token"] != TOKEN:
             await websocket.close(code=1008)
             return
@@ -115,14 +123,15 @@ async def _serve(app) -> tuple[uvicorn.Server, str]:
 
 
 @asynccontextmanager
-async def _gateway(tmp_path, monkeypatch, card: dict | None = None):
+async def _gateway(tmp_path, monkeypatch, card: dict | None = None, seen: list[dict] | None = None,
+                   provider_headers: tuple[str, ...] = ()):
     """The real gateway app on loopback, its /svc child ``web`` a browser computer serving ``card``; yields the
     gateway's base URL and a reader of its browser_connection events, which waits for ``at_least``: each is written
     as its connection ends, just after the client sees the close."""
     monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
-    upstream, upstream_url = await _serve(_browser_computer(_computer_card(_app_card()) if card is None else card))
+    upstream, upstream_url = await _serve(_browser_computer(_computer_card(_app_card()) if card is None else card, seen))
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
-                 rest_proxy_urls={"web": upstream_url})
+                 rest_proxy_urls={"web": upstream_url}, provider_headers=provider_headers)
     gateway, gateway_url = await _serve(gw._asgi_app())
     async def events(at_least: int) -> list[dict]:
         for _ in range(50):
@@ -181,6 +190,22 @@ async def test_a_websocket_is_relayed_both_ways_and_each_connection_is_an_event_
         ("buyer", "client", 1000, 0), ("default", "browser", 1008, 403), ("default", "browser", 4000, 0)]
     assert all(e["browser"] == "web" and e["path"] == "devtools/browser" and e["closed_at"] for e in recorded)
     assert all(TOKEN not in json.dumps(e) and "forged" not in json.dumps(e) for e in recorded)
+
+
+@pytest.mark.asyncio
+async def test_the_providers_headers_reach_the_browser_on_no_cdp_route(tmp_path, monkeypatch):
+    seen: list[dict] = []
+    sent = {"CF-Access-Client-Id": "id", "X-Kept": "yes"}
+    async with (_gateway(tmp_path, monkeypatch, seen=seen, provider_headers=("CF-Access-Client-Id",)) as (url, _),
+                httpx.AsyncClient() as client):
+        await client.post(f"{url}/svc/web{CDP_PATH}", json={}, headers=sent)
+        discovered = (await client.get(f"{url}/browser/web/cdp/{TOKEN}/json/version", headers=sent)).json()
+        async with connect(discovered["webSocketDebuggerUrl"], additional_headers=sent) as conn:
+            await conn.send("hi")
+            await conn.recv()
+
+    assert len(seen) == 3
+    assert [("cf-access-client-id" in headers, headers.get("x-kept")) for headers in seen] == [(False, "yes")] * 3
 
 
 @pytest.mark.asyncio

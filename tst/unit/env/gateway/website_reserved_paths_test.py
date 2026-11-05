@@ -132,3 +132,23 @@ def test_an_sdk_sites_card_reserves_every_path_it_advertises_for_agentenv(tmp_pa
     reserved = site_reserved_paths(card)
     assert find_extension_method(card, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP)["endpoint"] in reserved
     assert reserved_site_path("/agentenv/ext/website/ready", reserved) and not reserved_site_path("/", reserved)
+
+
+@pytest.mark.asyncio
+async def test_a_cors_preflight_on_a_sites_route_reaches_the_site(monkeypatch):
+    reached = []
+
+    def site(request):
+        reached.append((request.method, request.url.path))
+        if request.url.path == WELL_KNOWN_PATH:
+            return httpx.Response(404)
+        return httpx.Response(200, headers={"Access-Control-Allow-Origin": "https://app.test"}, content=_streamed())
+
+    transport = httpx.MockTransport(site)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(_Changelog(), website_urls={"api": "http://api-website-backend:8000"})
+
+    preflight = {"origin": "https://app.test", "access-control-request-method": "POST"}
+    assert (await _http(gw, "OPTIONS", "/website/api/items", headers=preflight))[0] == 200
+    assert (await _http(gw, "OPTIONS", "/website/api", headers=preflight))[0] == 200
+    assert ("OPTIONS", "/items") in reached and ("OPTIONS", "/") in reached

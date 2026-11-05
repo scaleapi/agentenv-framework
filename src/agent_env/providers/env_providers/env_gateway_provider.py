@@ -31,6 +31,7 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
 from agent_env.env.gateway.constants import (
     DEFAULT_MCP_SERVER_NAME,
+    GATEWAY_PROVIDER_HEADERS_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
@@ -68,6 +69,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     Accepts,
     SandboxProvider,
+    sandbox_request_header_names,
 )
 from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 
@@ -498,6 +500,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_env.append(f"      - REST_PROXY_URLS={','.join(rest_proxy_urls)}")
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
+        if provider_headers := sandbox_request_header_names():
+            gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
         publish = host_port or (lambda port: port)
         exposed_gateway_ports = []
         if expose_gateway_port:
@@ -912,7 +916,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         card = await self._wait_for_tunnel(gateway_url, timeout=120)
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
-        await _wait_for_websites(gateway_url, website_configs or [])
+        if website_configs:
+            await _wait_for_websites(gateway_url, website_configs)
+            card = await self._wait_for_tunnel(gateway_url, timeout=120) or card
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
         await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)
@@ -1046,6 +1052,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "GATEWAY_MODE": gateway_mode.value,
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
+                **({GATEWAY_PROVIDER_HEADERS_ENV: ",".join(names)} if (names := sandbox_request_header_names()) else {}),
             }
             gateway_sb = await sandbox_provider.create_container(
                 image_name=gateway_env.docker_image_artifact.image_name,
