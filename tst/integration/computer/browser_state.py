@@ -1,13 +1,15 @@
 """browser/v1's typed operations on a deployed chromium, inside a computer or alone: cookies set with a max_age, which
 the site gets and the browser expires an hour from the computer's clock, read for the site's URL and deleted by name;
 local storage written through a page agentenv serves, so the site sees no request, read for every origin and cleared;
-a download with its file; and an operation refused without the control token."""
+a download with its file; and an operation refused without the control token. Under chaos: calls at once each get
+their answer; the pages agentenv serves itself never show in the record; with the browser's server killed and back,
+the operations work again; and with the browser killed, they fail at once rather than wait."""
 
 import asyncio
 import base64
 import json
 import time
-from typing import Callable
+from typing import Awaitable, Callable
 
 import httpx
 
@@ -20,7 +22,8 @@ ORIGIN = SITE.rstrip("/")
 SERVE_S, WAIT_S, POLL_S, EXPIRY_SLACK_S = 600, 60.0, 0.5, 120
 SERVED = "/tmp/browser-state-served.json"
 # Serves, on loopback for the seconds it's given, a page whose title is the Cookie header it got, its document.cookie
-# and its local storage, and report.csv as a download; each path it's asked for written to SERVED.
+# and its local storage; /download, a page that goes to report.csv, which is a download; each path it's asked for
+# written to SERVED.
 SERVE_STATE = f"""import http.server, json, sys, threading, time
 served = []
 class Page(http.server.BaseHTTPRequestHandler):
@@ -30,6 +33,8 @@ class Page(http.server.BaseHTTPRequestHandler):
             json.dump(served, file)
         if self.path == "/report.csv":
             body, kind = b"a,b\\n1,2\\n", "text/csv"
+        elif self.path == "/download":
+            body, kind = b"<title>downloading</title><script>location.href = '/report.csv'</script>", "text/html"
         else:
             body = ("<title>loading</title><script>document.title = JSON.stringify({{header: %s, "
                     "cookie: document.cookie, storage: Object.assign({{}}, localStorage)}})</script>"
@@ -50,9 +55,8 @@ time.sleep(float(sys.argv[1]))
 """
 
 
-async def check_browser_state(deployed, endpoint: Callable[[str], str]) -> None:
-    """Every cookie, local storage and download operation of ``browser/v1`` on the deployed chromium, each at
-    ``endpoint(op)``, as the module says."""
+def _client(deployed, endpoint: Callable[[str], str]):
+    """``call``, an operation's response, and ``ok``, its result once it answered 200."""
     async def call(op: str, params: dict | None = None, *, method: str = "POST", headers=None) -> httpx.Response:
         headers = deployed.control_headers if headers is None else headers
         async with httpx.AsyncClient(timeout=60) as http:
@@ -64,6 +68,19 @@ async def check_browser_state(deployed, endpoint: Callable[[str], str]) -> None:
         response = await call(op, params, method=method)
         assert response.status_code == 200, f"{op}: {response.status_code} {response.text}"
         return response.json()
+
+    return call, ok
+
+
+def _serve(deployed) -> asyncio.Future:
+    return asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_STATE, str(SERVE_S)],
+                                            timeout_s=SERVE_S + 60))
+
+
+async def check_browser_state(deployed, endpoint: Callable[[str], str]) -> None:
+    """Every cookie, local storage and download operation of ``browser/v1`` on the deployed chromium, each at
+    ``endpoint(op)``, as the module says."""
+    call, ok = _client(deployed, endpoint)
 
     async def page_at(url: str) -> dict:
         await ok("navigate", {"url": url})
@@ -81,8 +98,7 @@ async def check_browser_state(deployed, endpoint: Callable[[str], str]) -> None:
         out = await inside.run(deployed, ["sh", "-c", f"cat {SERVED} 2>/dev/null || echo []"], timeout_s=30)
         return json.loads(out["stdout"])
 
-    serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_STATE, str(SERVE_S)],
-                                               timeout_s=SERVE_S + 60))
+    serving = _serve(deployed)
     try:
         await asyncio.sleep(3)
         refused = await call("cookies/get", {}, headers={})
@@ -100,7 +116,7 @@ async def check_browser_state(deployed, endpoint: Callable[[str], str]) -> None:
         cleared = (await ok("local_storage/clear", {"origins": [ORIGIN]}))["origins"]
         after_clear = (await ok("local_storage/get", {"origins": [ORIGIN]}))["origins"]
         signed_out = await page_at(f"{SITE}?again")
-        await ok("navigate", {"url": f"{SITE}report.csv"})
+        await ok("navigate", {"url": f"{SITE}download"})
         download, deadline = None, time.monotonic() + WAIT_S
         while time.monotonic() < deadline and not (download and download["sha256"]):
             download = next((d for d in (await ok("downloads/list", method="GET"))["downloads"]
@@ -122,3 +138,43 @@ async def check_browser_state(deployed, endpoint: Callable[[str], str]) -> None:
     assert "sid" not in signed_out["header"] and signed_out["storage"] == {}, signed_out
     assert got is not None and got["download"]["state"] == "completed", download
     assert base64.b64decode(got["parts"][0]["file"]["bytes"]) == b"a,b\n1,2\n", got
+
+
+async def check_browser_state_under_chaos(deployed, endpoint: Callable[[str], str], kill: Callable[[str], Awaitable],
+                                          ready: Callable[[], Awaitable]) -> dict:
+    """The chaos the module names, ``kill(pattern)`` killing the newest process matching it, or the oldest for the
+    browser, and ``ready()`` waiting for the computer to be ready. Returns whether the cookie and the item set before
+    the server was killed were still there after, which depends on what the browser had written to its profile."""
+    call, ok = _client(deployed, endpoint)
+    item = {"origin": ORIGIN, "localStorage": [{"name": "k", "value": "1"}]}
+    serving = _serve(deployed)
+    try:
+        await asyncio.sleep(3)
+        await ok("cookies/set", {"cookies": [{"name": "kept", "value": "1", "url": SITE, "max_age": 3600}]})
+        await ok("local_storage/set", {"origins": [item]})
+        at_once = await asyncio.gather(*[ok("local_storage/get", {"origins": [ORIGIN]}) for _ in range(4)],
+                                       ok("cookies/get", {"urls": [SITE]}), ok("local_storage/set", {"origins": [
+                                           {"origin": ORIGIN, "localStorage": [{"name": "k2", "value": "2"}]}]}),
+                                       ok("local_storage/clear", {"origins": ["http://127.0.0.1:8780"]}))
+        after = (await ok("local_storage/get", {"origins": [ORIGIN]}))["origins"]
+        recorded = await ok("record", method="GET")
+        await kill("[s]erve_app")
+        await ready()
+        cookies_back = [c["name"] for c in (await ok("cookies/get", {"urls": [SITE]}))["cookies"]]
+        storage_back = (await ok("local_storage/get", {"origins": [ORIGIN]}))["origins"][0]["localStorage"]
+        recorded_back = await ok("record", method="GET")
+        await kill("[-]-remote-debugging-pipe")
+        started = time.monotonic()
+        down = [await call("cookies/get", {"urls": [SITE]}), await call("local_storage/get", {"origins": [ORIGIN]})]
+        down_s = time.monotonic() - started
+    finally:
+        serving.cancel()
+
+    for answer in at_once[:4]:
+        assert {"name": "k", "value": "1"} in answer["origins"][0]["localStorage"], at_once
+    assert "kept" in [c["name"] for c in at_once[4]["cookies"]], at_once[4]
+    assert {"name": "k2", "value": "2"} in after[0]["localStorage"], after
+    for record in (recorded, recorded_back):
+        assert [tab["url"] for tab in record["tabs"]] == ["about:blank"] and record["closed_tabs"] == [], record
+    assert all(answer.status_code >= 400 for answer in down) and down_s < 30, ([a.text for a in down], down_s)
+    return {"cookie_kept": "kept" in cookies_back, "item_kept": {"name": "k", "value": "1"} in storage_back}

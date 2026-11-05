@@ -46,7 +46,7 @@ from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdp
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
-from tst.integration.computer.browser_state import check_browser_state
+from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
 from tst.util.a2a_test_agent import put_test_agent
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -296,6 +296,27 @@ async def test_its_cookies_local_storage_and_downloads_are_read_and_set_through_
         finally:
             report = await teardown_run(context)
 
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_state_operations_hold_up_at_once_through_a_server_restart_and_fail_at_once_with_the_browser_gone(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            kept = await check_browser_state_under_chaos(
+                deployed, lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)[
+                    "endpoint"], lambda pattern: _kill(deployed, pattern, oldest=pattern.startswith("[-]")),
+                lambda: _ready(deployed))
+        finally:
+            report = await teardown_run(context)
+
+    print("browser-state-kept", json.dumps(kept))
     assert not report.failed
 
 

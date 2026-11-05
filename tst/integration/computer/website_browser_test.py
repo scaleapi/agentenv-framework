@@ -131,9 +131,11 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
         policies["stdout"]).items()
     params = protocol_v1.extension_params(card, BROWSER)
     assert (params["chromium"], params["clock"], sorted(params["methods"])) == (
-        "156.0.8078.4", "real", ["cdp", "dialog/answer", "files/choose", "history", "navigate", "page/capture",
-                                 "page/input", "page/state", "page/viewport", "record", "tabs/activate", "tabs/close",
-                                 "tabs/list", "tabs/open"])
+        "156.0.8078.4", "real", ["cdp", "cookies/delete", "cookies/get", "cookies/set", "dialog/answer", "downloads/get",
+                                 "downloads/list", "files/choose", "history", "local_storage/clear",
+                                 "local_storage/get", "local_storage/set", "navigate", "page/capture", "page/input",
+                                 "page/state", "page/viewport", "record", "tabs/activate", "tabs/close", "tabs/list",
+                                 "tabs/open"])
     assert readiness["ready"] is True, readiness
     assert relaunched["pid"] != browser["pid"] and relaunched["listening"] == 0
     assert relaunched_readiness["ready"] is True, relaunched_readiness
