@@ -7,7 +7,8 @@ Docker's 64 MiB /dev/shm, answers location prompts and leaves notification ones 
 launcher, run while it runs, opens another window of it with no second copy, its cache kept and it still ready; and the
 desktop that gives it French defaults deploys with them, a deploy's time zone over them, each recorded; and the record
 its control connection keeps lists a tab an agent opened and closed, a download with its size and sha256, a confirm()
-accepted for it, and each launch, exit and stop with its cause, across a kill and a restart of its server. Needs Docker
+accepted for it, and each launch, exit and stop with its cause, across a kill and a restart of its server; and browser/v1 reads and sets its
+cookies, local storage and downloads. Needs Docker
 and the local registry on localhost:5000."""
 
 import asyncio
@@ -24,6 +25,7 @@ from agentenv_protocol import client as protocol_v1
 from agent_env.env import Env
 from agentenv_protocol.types import WELL_KNOWN_PATH
 from agentenv_protocol.website_browser import BROWSER
+from tst.integration.computer.browser_state import check_browser_state
 from tst.integration.computer.website_browser_test import _app, _browser_process, _keys, _ready
 from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
@@ -304,13 +306,29 @@ async def test_with_dialogs_left_to_the_agent_chromium_shows_one_and_records_the
     assert not report.failed
 
 
+@pytest.mark.asyncio
+async def test_its_cookies_local_storage_and_downloads_are_read_and_set_through_browser_v1(chromium_desktop):
+    with namespace_routing():
+        deployed = await Env.get(chromium_desktop.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
+            await _ready(deployed, card, "chromium")
+            await check_browser_state(deployed, lambda op: f"{deployed.environment_url}/svc/chromium"
+                                      f"{protocol_v1.find_extension_method(card, BROWSER, op)['endpoint']}")
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
 def _report(n: int) -> bytes:
     """The content SERVE_RECORDED serves at its nth request for report.bin."""
     return b"agentenv report %d\n" % n * 64
 
 
 def _hashed(record: dict) -> list[dict]:
-    return [download for download in record["downloads"] if "sha256" in download]
+    return [download for download in record["downloads"] if download["sha256"]]
 
 
 async def _record(deployed, card: dict, until) -> dict:

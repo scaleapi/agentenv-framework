@@ -907,6 +907,25 @@ are the profile's template. The base class adds:
   - `files/choose {paths}`, files in `~/Uploads` for the file chooser open on it, which headless, and so
     alone, it intercepts;
   - `page/state`, the active tab's id, URL and title and the dialog or file chooser open on it.
+  - `cookies/get {urls?}`, `cookies/set {cookies}` and `cookies/delete {name?, domain?, path?}`, on its default
+    context, each cookie as Playwright's `storageState` has it, CDP's `Network.Cookie` fields (`name`, `value`,
+    `domain`, `path`, `expires`, `httpOnly`, `secure`, `sameSite`), so a storage state exported from Playwright loads
+    as is. `get` returns the cookies a request to any of `urls` would send, as Playwright picks them, else every one;
+    `set` takes a `url`, or a `domain` and a `path` (`/` by default), and may carry `max_age` in place of `expires`:
+    seconds from when it's set, on the computer's clock, which the browser's cookies are judged by. `delete` removes
+    every cookie with all the fields it's given, every cookie with none, and says how many. A cookie refused names
+    its fields, never its value;
+  - `local_storage/get {origins?}`, `local_storage/set {origins}` and `local_storage/clear {origins?}`, each origin
+    as `storageState` has it, `{origin, localStorage: [{name, value}]}`. CDP reaches an origin's local storage only
+    through a page of it, so each goes through a hidden page agentenv sends to the origin and serves itself: the site
+    gets no request and runs no script. With no `origins`, every origin a page or frame it follows loaded since its
+    server started, and those agentenv set;
+  - `downloads/list` and `downloads/get {guid, write_namespace?}`, a download and, completed, its file: uploaded
+    under the `write_namespace` grant when there is one, else inline, as `data/get` returns files.
+
+  The record's entries are the models in `agentenv_protocol.website_browser` (`OpenTab`, with the tab that opened
+  it as `opener`; `ClosedTab`; `Download`; `Dialog`; `LaunchEntry`; `BrowserRecord`), every field present and null
+  until it's known.
   - `cdp {user}`, `user`'s CDP address once the browser is ready, `http_url` to discover from and
     `ws_url` to connect to, both at the address the call reached it at with a token agentenv mints in
     the path: the same one each time it's asked for. Through the driver they're under

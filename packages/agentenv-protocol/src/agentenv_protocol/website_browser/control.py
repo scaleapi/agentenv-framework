@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import logging
+import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Optional
+from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import urlsplit
 
 from ..computer.errors import DeviceUnavailable, InvalidArgument
 from .devtools import DevToolsError, DevToolsPipe
+from .shapes import (ClosedTab, Cookie, CookieToSet, Dialog, Download, OpenTab, OriginStorage, StorageItem,
+                     origin_of)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +39,10 @@ CAPTURE_TIMEOUT_S, UNNAVIGATED_CAPTURE_TIMEOUT_S = 3.0, 1.0
 #: Where an agent's files to upload are, and where downloads land, under the session user's home.
 UPLOADS = "Uploads"
 DOWNLOADS = "Downloads"
+#: The document agentenv serves a page of its own that it sends to an origin, so the site gets no request.
+SERVED_PAGE = base64.b64encode(b"<!doctype html>").decode()
+#: Hostnames a secure cookie is sent to over http, as browsers treat them.
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]")
 
 
 class BrowserControl:
@@ -66,6 +75,10 @@ class BrowserControl:
         self._dialog_opened: dict[str, asyncio.Event] = {}
         self._pinned: dict[str, asyncio.Event] = {}
         self._tasks: set[asyncio.Future] = set()
+        #: Every http and https origin a page or frame it follows loaded since this server started, and the sessions
+        #: of agentenv's own pages whose requests it answers itself.
+        self.origins: set[str] = set()
+        self._serving: set[str] = set()
         devtools.listen(self._event)
 
     async def attach(self) -> None:
@@ -100,8 +113,7 @@ class BrowserControl:
         """The open tabs in opened order, each with its URL and title now and whether it's active."""
         await self._refresh()
         active = await self.active_tab()
-        return [{"id": tab["id"], "url": tab["url"], "title": tab["title"], "active": tab["id"] == active}
-                for tab in self.tabs.values()]
+        return [OpenTab(**tab, active=tab["id"] == active).model_dump() for tab in self.tabs.values()]
 
     async def open_tab(self, url: Optional[str] = None) -> str:
         """A new tab at ``url``, else blank, brought to the front; its id. Headless, it opens blank and goes to ``url``
@@ -248,11 +260,108 @@ class BrowserControl:
     async def record(self) -> dict:
         """The record ``since`` it started: open ``tabs``, each with its URL and title now and whether it's ``active``,
         ``closed_tabs``, ``downloads`` and ``dialogs``."""
-        await self._refresh()
-        active = await self.active_tab()
-        return {"since": self.since, "tabs": [{**tab, "active": tab["id"] == active} for tab in self.tabs.values()],
-                "closed_tabs": list(self.closed_tabs), "downloads": list(self.downloads.values()),
-                "dialogs": list(self.dialog_log)}
+        return {"since": self.since, "tabs": await self.tab_list(),
+                "closed_tabs": [ClosedTab(**tab).model_dump() for tab in self.closed_tabs],
+                "downloads": self.download_list(), "dialogs": [Dialog(**dialog).model_dump() for dialog in self.dialog_log]}
+
+    async def cookies(self, urls: Optional[list[str]] = None) -> list[dict]:
+        """The default context's cookies, or those a request to any of ``urls`` would send, as Playwright picks them."""
+        cookies = [Cookie(**{field: raw[field] for field in Cookie.model_fields if field in raw})
+                   for raw in (await self.devtools.call("Storage.getCookies"))["cookies"]]
+        return [cookie.model_dump() for cookie in cookies if not urls or any(_sent(cookie, url) for url in urls)]
+
+    async def set_cookies(self, cookies: list[CookieToSet]) -> None:
+        """Each of ``cookies`` set in the default context, a ``max_age`` turned into an expiry on this machine's clock,
+        which the browser's cookies are judged by; InvalidArgument, naming it, for one the browser refuses."""
+        now = time.time()
+        for done, cookie in enumerate(cookies):
+            try:
+                await self.devtools.call("Storage.setCookies", {"cookies": [_cdp_cookie(cookie, now)]})
+            except DevToolsError as e:
+                raise InvalidArgument(f"the browser refused cookie {cookie.name!r}, with {done} of {len(cookies)} set "
+                                      f"before it: {e}")
+
+    async def delete_cookies(self, name: Optional[str] = None, domain: Optional[str] = None,
+                             path: Optional[str] = None) -> int:
+        """Every cookie of the default context with all of ``name``, ``domain`` and ``path`` given, every cookie with
+        none given, deleted; how many."""
+        gone = [cookie for cookie in await self.cookies() if (name is None or cookie["name"] == name)
+                and (domain is None or cookie["domain"] == domain) and (path is None or cookie["path"] == path)]
+        if gone:
+            async with self.hidden_page() as session:
+                for cookie in gone:
+                    await self.devtools.call("Network.deleteCookies", {
+                        "name": cookie["name"], "domain": cookie["domain"], "path": cookie["path"]}, session_id=session)
+        return len(gone)
+
+    async def local_storage(self, origins: Optional[list[str]] = None) -> list[dict]:
+        """The local storage of each of ``origins``, else of every origin it has seen, as ``storageState`` has it."""
+        wanted = _origins(origins) if origins is not None else sorted(self.origins)
+        found = []
+        async with self._at_origins() as visit:
+            for origin in wanted:
+                session = await visit(origin)
+                entries = (await self.devtools.call("DOMStorage.getDOMStorageItems", {"storageId": _storage(origin)},
+                                                    session_id=session))["entries"]
+                found.append(OriginStorage(origin=origin, localStorage=[StorageItem(name=name, value=value)
+                                                                        for name, value in entries]).model_dump())
+        return found
+
+    async def set_local_storage(self, origins: list[OriginStorage]) -> None:
+        """Each origin's items set in its local storage, beside those it has."""
+        async with self._at_origins() as visit:
+            for origin in origins:
+                session = await visit(origin.origin)
+                for item in origin.localStorage:
+                    await self.devtools.call("DOMStorage.setDOMStorageItem", {
+                        "storageId": _storage(origin.origin), "key": item.name, "value": item.value}, session_id=session)
+
+    async def clear_local_storage(self, origins: Optional[list[str]] = None) -> list[str]:
+        """The local storage of each of ``origins``, else of every origin it has seen, cleared; those origins."""
+        wanted = _origins(origins) if origins is not None else sorted(self.origins)
+        async with self._at_origins() as visit:
+            for origin in wanted:
+                await self.devtools.call("DOMStorage.clear", {"storageId": _storage(origin)},
+                                         session_id=await visit(origin))
+        return wanted
+
+    def download_list(self) -> list[dict]:
+        return [Download(**download).model_dump() for download in self.downloads.values()]
+
+    def download(self, guid: str) -> dict:
+        """The download ``guid``; InvalidArgument for one it hasn't seen."""
+        if guid not in self.downloads:
+            raise InvalidArgument(f"no download {guid} has begun; list the downloads for their guids")
+        return Download(**self.downloads[guid]).model_dump()
+
+    @contextlib.asynccontextmanager
+    async def _at_origins(self) -> AsyncIterator[Callable[[str], Awaitable[str]]]:
+        """A page of agentenv's own, ``visit``, that goes to an origin and returns its session once it's that origin's
+        page. agentenv serves it the document, so the site gets no request and runs no script: CDP reaches an origin's
+        local storage only through a page of that origin."""
+        async with self.hidden_page() as session:
+            self._serving.add(session)
+            try:
+                await self.devtools.call("Fetch.enable", {"patterns": [{"urlPattern": "*"}]}, session_id=session)
+                await self.devtools.call("DOMStorage.enable", session_id=session)
+
+                async def visit(origin: str) -> str:
+                    answer = await self.devtools.call("Page.navigate", {"url": f"{origin}/"}, session_id=session)
+                    if error := answer.get("errorText"):
+                        raise InvalidArgument(f"the browser couldn't open a page of {origin}: {error}")
+                    deadline = asyncio.get_running_loop().time() + PIN_TIMEOUT_S
+                    while (await self.devtools.call("Runtime.evaluate", {"expression": "location.origin",
+                                                    "returnByValue": True}, session_id=session))["result"].get(
+                            "value") != origin:
+                        if asyncio.get_running_loop().time() > deadline:
+                            raise DeviceUnavailable(f"a page of {origin} didn't open within {PIN_TIMEOUT_S:g} s")
+                        await asyncio.sleep(0.05)
+                    self.origins.add(origin)
+                    return session
+
+                yield visit
+            finally:
+                self._serving.discard(session)
 
     async def active_session(self) -> str:
         """The session of the active tab, else of the first open one; DeviceUnavailable with no tab open."""
@@ -338,19 +447,37 @@ class BrowserControl:
         agent's."""
         session = message.get("sessionId")
         handler = getattr(self, "_on_" + message.get("method", "").replace(".", "_"), None)
-        if handler is not None and (session is None or session in self._sessions):
+        if handler is not None and (session is None or session in self._sessions or session in self._serving):
             handler(message.get("params", {}), session)
 
     def _on_Target_targetCreated(self, params: dict, session: Optional[str]) -> None:
         info = params["targetInfo"]
         if info.get("type") == "page" and info["targetId"] not in self._hidden and info["targetId"] not in self.tabs:
             self.tabs[info["targetId"]] = {"id": info["targetId"], "url": info.get("url", ""),
-                                           "title": info.get("title", ""), "opened_at": _now()}
+                                           "title": info.get("title", ""), "opened_at": _now(),
+                                           "opener": info.get("openerId")}
+            self._saw(info.get("url", ""))
 
     def _on_Target_targetInfoChanged(self, params: dict, session: Optional[str]) -> None:
         info = params["targetInfo"]
         if (tab := self.tabs.get(info["targetId"])) is not None:
             tab.update(url=info.get("url", tab["url"]), title=info.get("title", tab["title"]))
+            self._saw(tab["url"])
+
+    def _on_Page_frameNavigated(self, params: dict, session: Optional[str]) -> None:
+        if session in self._sessions:
+            self._saw(params.get("frame", {}).get("url", ""))
+
+    def _on_Fetch_requestPaused(self, params: dict, session: Optional[str]) -> None:
+        if session in self._serving:
+            self._spawn(self.devtools.call("Fetch.fulfillRequest", {
+                "requestId": params["requestId"], "responseCode": 200,
+                "responseHeaders": [{"name": "Content-Type", "value": "text/html"}], "body": SERVED_PAGE},
+                session_id=session))
+
+    def _saw(self, url: str) -> None:
+        if (origin := origin_of(url)) is not None:
+            self.origins.add(origin)
 
     def _on_Target_targetDestroyed(self, params: dict, session: Optional[str]) -> None:
         target = params["targetId"]
@@ -465,4 +592,46 @@ def _size_and_sha256(path: Path) -> tuple[int, str]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _origins(origins: list[str]) -> list[str]:
+    try:
+        return [origin_of(origin, strict=True) for origin in origins]
+    except ValueError as e:
+        raise InvalidArgument(str(e))
+
+
+def _storage(origin: str) -> dict:
+    return {"storageKey": f"{origin}/", "isLocalStorage": True}
+
+
+def _cdp_cookie(cookie: CookieToSet, now: float) -> dict:
+    """``cookie`` as CDP's ``Storage.setCookies`` takes it."""
+    param: dict[str, Any] = {"name": cookie.name, "value": cookie.value, "httpOnly": cookie.httpOnly,
+                             "secure": cookie.secure}
+    if cookie.url:
+        param["url"] = cookie.url
+    if cookie.domain:
+        param["domain"] = cookie.domain
+    if cookie.path or cookie.domain:
+        param["path"] = cookie.path or "/"
+    if cookie.sameSite:
+        param["sameSite"] = cookie.sameSite
+    if cookie.max_age is not None:
+        param["expires"] = now + cookie.max_age
+    elif cookie.expires is not None and cookie.expires >= 0:
+        param["expires"] = cookie.expires
+    return param
+
+
+def _sent(cookie: Cookie, url: str) -> bool:
+    """Whether a request to ``url`` sends ``cookie``, as Playwright's ``cookies(urls)`` decides: its domain, with or
+    without a leading dot, is the URL's host or a parent of it, its path a prefix of the URL's, and a secure cookie goes
+    over https or to a local host."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    domain = cookie.domain.lower() if cookie.domain.startswith(".") else f".{cookie.domain.lower()}"
+    if not f".{host}".endswith(domain) or not (parts.path or "/").startswith(cookie.path):
+        return False
+    return not cookie.secure or parts.scheme == "https" or host in LOCAL_HOSTS or host == "::1"
 

@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.websockets import WebSocket
@@ -19,9 +19,12 @@ from ..browser_cdp import ROUTE, Relay, Tokens, reached, websocket_form
 from ..computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from ..computer import app as computer_app
 from ..computer.app import SOCKET
-from ..computer.errors import DeviceUnavailable
+from ..computer.dataplane import file_parts
+from ..computer.errors import DeviceUnavailable, InvalidArgument
+from ..transfers import WriteNamespaceGrant
 from .control import AGENT, DOWNLOADS, EXIT, STOP, UPLOADS, BrowserControl
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
+from .shapes import BrowserRecord, CookieToSet, OriginStorage
 
 logger = logging.getLogger(__name__)
 
@@ -266,12 +269,16 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "the active tab, or go back, forward or reload; tabs/list, tabs/open, tabs/activate and tabs/close manage "
         "its tabs by their ids; dialog/answer answers the dialog open on the active tab; files/choose gives the file "
         "chooser open on it files in ~/Uploads, headless; and page/state is the active tab's id, URL and title and "
-        "what is open on it. cdp returns a user's CDP address, http_url to discover from and ws_url to connect to, "
+        "what is open on it. cookies/get, cookies/set and cookies/delete, and local_storage/get, local_storage/set and "
+        "local_storage/clear, read and change its default context's cookies and local storage as Playwright's "
+        "storageState has them, a cookie's max_age set as an expiry on the browser's clock; downloads/list and "
+        "downloads/get are its downloads, get with its file, uploaded under a write_namespace grant or inline. cdp "
+        "returns a user's CDP address, http_url to discover from and ws_url to connect to, "
         "with a token agentenv mints in its path: each connection to it gets its own browser-level session behind a "
         "guard, and record lists them as cdp_connections, each with the commands the guard refused or changed."))
     async def browser_record(self) -> dict:
-        return {**await self.control.record(), "launches": self._computer_app.launches(),
-                "cdp_connections": list(self.relay.connections)}
+        return BrowserRecord(**await self.control.record(), launches=self._computer_app.launches(),
+                             cdp_connections=list(self.relay.connections)).model_dump()
 
     @extension(BROWSER, op="cdp")
     async def browser_cdp(self, user: str, request: Request) -> dict:
@@ -373,6 +380,48 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         await self.control.close(tab)
         return {}
 
+    @extension(BROWSER, op="cookies/get")
+    async def browser_cookies_get(self, urls: Optional[list[str]] = None) -> dict:
+        return {"cookies": await self.control.cookies(urls)}
+
+    @extension(BROWSER, op="cookies/set")
+    async def browser_cookies_set(self, cookies: list[dict]) -> dict:
+        await self.control.set_cookies(_parsed(CookieToSet, cookies, "cookies"))
+        return {}
+
+    @extension(BROWSER, op="cookies/delete")
+    async def browser_cookies_delete(self, name: Optional[str] = None, domain: Optional[str] = None,
+                                     path: Optional[str] = None) -> dict:
+        return {"deleted": await self.control.delete_cookies(name, domain, path)}
+
+    @extension(BROWSER, op="local_storage/get")
+    async def browser_local_storage_get(self, origins: Optional[list[str]] = None) -> dict:
+        return {"origins": await self.control.local_storage(origins)}
+
+    @extension(BROWSER, op="local_storage/set")
+    async def browser_local_storage_set(self, origins: list[dict]) -> dict:
+        await self.control.set_local_storage(_parsed(OriginStorage, origins, "origins"))
+        return {}
+
+    @extension(BROWSER, op="local_storage/clear")
+    async def browser_local_storage_clear(self, origins: Optional[list[str]] = None) -> dict:
+        return {"origins": await self.control.clear_local_storage(origins)}
+
+    @extension(BROWSER, op="downloads/list", method="GET")
+    async def browser_downloads_list(self) -> dict:
+        return {"downloads": self.control.download_list()}
+
+    @extension(BROWSER, op="downloads/get")
+    async def browser_downloads_get(self, guid: str, write_namespace: Optional[dict] = None) -> dict:
+        """The download ``guid`` and, completed, its file: uploaded under ``write_namespace``, a grant, when given,
+        else inline."""
+        download, grant = self.control.download(guid), _grant(write_namespace)
+        home = Path.home().resolve()
+        landed = Path(download["path"]).resolve() if download["state"] == "completed" and download["path"] else None
+        parts = await file_parts(home, [landed.relative_to(home).as_posix()], grant) \
+            if landed is not None and landed.is_relative_to(home) else []
+        return {"download": download, "parts": [part.model_dump(mode="json", exclude_none=True) for part in parts]}
+
     @extension(BROWSER, op="dialog/answer")
     async def browser_dialog_answer(self, accept: bool, text: Optional[str] = None) -> dict:
         await self.control.answer_dialog(accept, text)
@@ -399,6 +448,33 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 def _alone() -> bool:
     """Whether it runs on a computer with no display, a browser computer's, alone and headless."""
     return computer_app.detect().display == "none"
+
+
+def _parsed(model: type[BaseModel], items: Any, what: str) -> list:
+    """Each of ``items`` as ``model``; InvalidArgument naming the fields that don't fit and never their values, which
+    for a cookie are its credentials."""
+    if not isinstance(items, list):
+        raise InvalidArgument(f"{what} is a list")
+    parsed = []
+    for index, item in enumerate(items):
+        try:
+            parsed.append(model.model_validate(item))
+        except ValidationError as e:
+            reasons = "; ".join(f"{'.'.join(map(str, error['loc'])) or 'it'}: {error['msg']}"
+                                for error in e.errors(include_input=False, include_url=False))
+            raise InvalidArgument(f"{what}[{index}]: {reasons}")
+    return parsed
+
+
+def _grant(write_namespace: Optional[dict]) -> Optional[WriteNamespaceGrant]:
+    """``write_namespace`` as a grant; InvalidArgument naming its fields only, since its values carry a signature."""
+    if write_namespace is None:
+        return None
+    try:
+        return WriteNamespaceGrant.model_validate(write_namespace)
+    except ValidationError as e:
+        fields = ", ".join(".".join(map(str, error["loc"])) or "write_namespace" for error in e.errors())
+        raise InvalidArgument(f"write_namespace is not a valid namespace grant ({fields})")
 
 
 def _shm_bytes(path: str = "/dev/shm") -> int:
