@@ -154,15 +154,15 @@ class Gateway:
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
         self._site_reserved: dict[str, frozenset[str]] = {}
+        self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
-                                       self._attribution, self._request_role)
+                                       self._attribution, self._request_role, withheld=self._withheld)
         for name in _TOKEN_LOGGERS:  # each names a CDP address's path, its token in it, at INFO
             log = logging.getLogger(name)
             if not any(isinstance(f, TokenRedaction) for f in log.filters):
                 log.addFilter(TokenRedaction())
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
-        self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
