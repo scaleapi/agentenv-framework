@@ -137,7 +137,7 @@ def test_an_image_its_release_didnt_record_is_looked_up_and_only_what_was_served
 
 
 def test_a_shipped_agents_sources_find_its_published_image_and_other_sources_none(monkeypatch):
-    claude_code = AGENT_IMAGES[0]
+    claude_code = next(image for image in AGENT_IMAGES if image.name == "agentenv-claude-code")
     sources = BuildContext.of(claude_code.dockerfile.parent, claude_code.dockerfile).source_digest(None)
     monkeypatch.setattr(published_images, "_registry_digest", lambda ref: _DIGEST if ref == claude_code.ref() else None)
 
@@ -168,7 +168,7 @@ def test_a_recorded_image_the_registry_doesnt_serve_anonymously_isnt_published_y
 
 
 def test_a_shipped_agents_sources_whose_image_isnt_published_find_none(monkeypatch):
-    claude_code = AGENT_IMAGES[0]
+    claude_code = next(image for image in AGENT_IMAGES if image.name == "agentenv-claude-code")
     sources = BuildContext.of(claude_code.dockerfile.parent, claude_code.dockerfile).source_digest(None)
 
     assert published_bundle_image(sources) is None
