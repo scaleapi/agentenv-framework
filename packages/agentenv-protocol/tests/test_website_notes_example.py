@@ -10,6 +10,7 @@ import json
 import re
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -160,6 +161,38 @@ def test_notes_are_created_edited_toggled_and_deleted_by_their_owner_only(app, c
     assert client.post("/api/notes", json={"body": "no title"}).status_code == 400
     assert client.delete(f"/api/notes/{note['id']}").json() == {"deleted": note["id"]}
     assert client.get(f"/api/notes/{note['id']}").status_code == 404
+
+
+def test_concurrent_creates_each_get_a_note_of_their_own(env: WebsiteEnvironment) -> None:
+    barrier = threading.Barrier(8)
+    real_max = max
+
+    def slow_max(*args, **kwargs):
+        """Hold every create's id choice open together, as worker threads racing would."""
+        found = real_max(*args, **kwargs)
+        try:
+            barrier.wait(timeout=0.2)
+        except threading.BrokenBarrierError:
+            pass
+        return found
+
+    notes_site.max = slow_max
+    try:
+        with ThreadPoolExecutor(8) as pool:
+            made = list(pool.map(lambda i: env.create_note(notes_site.NewNote(title=f"n{i}"), _Signed("ann")),
+                                 range(8)))
+    finally:
+        del notes_site.max
+    ids = [note["id"] for note in made]
+    assert len(set(ids)) == 8, ids
+    assert len([n for n in env.data["notes"] if n["owner"] == "ann" and n["title"].startswith("n")]) == 8
+
+
+class _Signed:
+    """An ``ApiContext`` stand-in signed in as ``user``."""
+
+    def __init__(self, user: str) -> None:
+        self.user = user
 
 
 def test_every_users_notes_are_listed_for_an_admin_caller_only(client: TestClient,
