@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -30,6 +31,10 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
 from pydantic import AnyUrl
+
+if sys.platform != "darwin":
+    from Xlib import display as x_display
+    from Xlib.error import ConnectionClosedError, DisplayConnectionError
 
 from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, resource, server_instructions
 from agentenv_protocol.computer import (
@@ -71,6 +76,8 @@ FOREGROUND = {"delivery_mode": "foreground"} if MACOS else {}
 #: where the pointer is when it handles the press, and a button the pointer hasn't yet entered loses the click; and a
 #: drag's steps, about one a pixel, within cua-driver's 1 to 200.
 SETTLE_S, DRAG_STEPS = 0.2, (20, 200)
+#: The first code point past ASCII and its controls, where a character is off a US keymap.
+LATIN_1 = 0xA0
 #: The TCC permissions cua-driver reports on macOS, which it needs.
 PERMISSIONS = ("accessibility", "screen_recording")
 #: What keeps cua-driver from reaching trycua: no telemetry and no update checks.
@@ -105,6 +112,7 @@ class CuaDriver(ComputerDriverEnvironment):
         self._pinned: list[ReadyCheck] | None = None
         self._skill: tuple[str, str, dict[str, str]] | None = None
         self._texts: dict[str, str] | None = None
+        self._keymap: _Keymap | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
@@ -141,7 +149,8 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @capture
     async def grab(self) -> Image:
-        result = await self._call("get_desktop_state", DeviceUnavailable)
+        """The whole display at its size, whose long edge cua-driver caps by default on macOS."""
+        result = await self._call("get_desktop_state", DeviceUnavailable, max_image_dimension=0)
         shot, state = next(c for c in result["content"] if c["type"] == "image"), result["structuredContent"]
         return Image(state["screenshot_width"], state["screenshot_height"], base64.b64decode(shot["data"]), "png")
 
@@ -170,6 +179,8 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @type_text
     async def type_in(self, text) -> None:
+        if not MACOS and any(ord(ch) >= LATIN_1 for ch in text):
+            await asyncio.to_thread(self._hold, text)
         await self._send("type_text", text=text)
 
     @press
@@ -191,6 +202,20 @@ class CuaDriver(ComputerDriverEnvironment):
     async def _rest(self, x: int, y: int) -> None:
         await self._send("move_cursor", x=x, y=y, **FOREGROUND)
         await asyncio.sleep(SETTLE_S)
+
+    def _hold(self, text: str) -> None:
+        """``text``'s characters on X's keymap, through a connection opened afresh once when X dropped the last, as it
+        does when it restarts."""
+        try:
+            self._x_keymap().hold(text)
+        except (ConnectionClosedError, DisplayConnectionError, OSError):
+            self._keymap = None
+            self._x_keymap().hold(text)
+
+    def _x_keymap(self) -> _Keymap:
+        if self._keymap is None:
+            self._keymap = _Keymap()
+        return self._keymap
 
     async def _send(self, name: str, **args: Any) -> None:
         await self._call(name, DeliveryFailed, scope="desktop", **args)
@@ -273,6 +298,43 @@ async def _read_resources(uris: list[str]) -> dict[str, str]:
 @functools.cache
 def _manifest() -> dict:
     return json.loads(MANIFEST.read_text())
+
+
+class _Keymap:
+    """X's keymap, given each character typed text needs that it lacks on a spare keycode, kept there. cua-driver maps
+    such a character onto a spare keycode for its press and back at once, and an app that reads the press after the
+    mapping is back, as a busy one does, loses the character; one on the keymap it types as any other key."""
+
+    def __init__(self) -> None:
+        self.d, self.lock, self.ours = x_display.Display(), threading.Lock(), {}
+
+    def hold(self, text: str) -> None:
+        """``text``'s characters past ASCII on the keymap: on spare keycodes, then on ours its text doesn't need, oldest
+        first. When those are too few, ours are given back, so cua-driver maps the characters itself."""
+        needed = {_keysym(ch) for ch in text if ord(ch) >= LATIN_1}
+        with self.lock:
+            first = self.d.display.info.min_keycode
+            mapping = self.d.get_keyboard_mapping(first, self.d.display.info.max_keycode - first + 1)
+            width = len(mapping[0])
+            if not (wanted := needed - {sym for syms in mapping for sym in syms}):
+                return
+            free = [first + i for i, syms in enumerate(mapping) if not any(syms)]
+            free += [code for sym, code in self.ours.items() if sym not in needed]
+            if len(wanted) > len(free):
+                for code in self.ours.values():
+                    self.d.change_keyboard_mapping(code, [(0,) * width])
+                self.ours.clear()
+            else:
+                for sym, code in zip(sorted(wanted), free):
+                    self.ours = {s: c for s, c in self.ours.items() if c != code}
+                    self.d.change_keyboard_mapping(code, [(sym,) * width])
+                    self.ours[sym] = code
+            self.d.sync()
+
+
+def _keysym(ch: str) -> int:
+    """X's keysym for ``ch``: its code point in Latin-1, else in X's Unicode range."""
+    return ord(ch) if ord(ch) < 0x100 else 0x1000000 | ord(ch)
 
 
 def _modifiers(keys) -> list[str]:

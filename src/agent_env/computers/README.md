@@ -89,18 +89,24 @@ a VM bundle already on the Mac that boots it, as composing leaves one.
 
 A macOS computer env is composed on a Mac, by a sandbox provider that boots macOS VM bundles there, `lume`: the base's
 VM bundle is cloned under a name of the compose's key, booted with a build folder shared read-write, and readied for
-agent-env (`vm_bundle/macos/prepare.sh`): `/opt/agentenv` for the layers; a Python 3.12 with Tk, `python3` first on the
-`PATH` of what services run, which their venvs and the probe's fixture run on; `agentenv-service`, which starts each
+agent-env (`vm_bundle/macos/prepare.sh`): `/opt/agentenv` for the layers; a pinned Python, python-build-standalone's
+CPython 3.12 with Tk, checked by its sha256 (`vm_bundle/macos/lib.sh`), `python3` first on the `PATH` of what services
+run, which their venvs and the probe's fixture run on; `agentenv-service`, which starts each
 service with the deploy's environment; `set-display`, which puts the display in the virtual display's size at login,
 since a guest boots in the mode its disk was last in, with the sRGB colour profile, so a screenshot holds the pixels as
 drawn; and Cua Spacesd and the Login Items banner off. Then each layer, the driver's and each app's, installs as its
 `[install.macos]` says, by a script composing writes (`env/envs/computer/utils/macos_vm_bundle.py`): its files under its
-prefix, its downloads checked by sha256, its venv (its requirements and this release's protocol in one resolve), its
+prefix, its downloads checked by sha256, its venv, installed offline from the wheels of its lock, its
 run scripts and install steps, as root or the session user, its `grants`, the TCC permissions of an app bundle it
 installs, bound to the bundle's code signature, and its services as LaunchAgents of the login session. A service runs
 through `agentenv-service`, or, when `direct`, as its own command, with the variables it names, as an app bundle whose
 TCC permissions macOS gives only to the executable launchd starts itself must. macOS has no apt: a layer's
-`[install.macos]` names no `packages` or `sources`. Then the VM shuts down, is kept on that Mac as the VM bundle of its
+`[install.macos]` names no `packages` or `sources`. The venvs' wheels are locked as a Linux layer's packages are: the
+first compose of given inputs (each venv's requirements, the protocol's source, the base, the pinned Python and the
+resolve script) resolves them once in a VM of the base, which builds every venv's wheels, its requirements and the
+protocol in one resolve, into the folder it shares and is deleted; they're stored in the object store with a lock
+naming them, whose digest joins the VM bundle's key. Every compose of those inputs, on any Mac, stages them and
+installs offline, so one name is one set of wheels. Then the VM shuts down, is kept on that Mac as the VM bundle of its
 name, and gate 3 probes it at full, a check its driver declares it fails on macOS (`known_failures`) recorded and not
 failing the build; a compose of the same inputs on that Mac reuses it. A VM bundle is kept on the Mac that composed it
 alone, so a deploy on a Mac that doesn't hold the one its env's record names composes it there first, from the same

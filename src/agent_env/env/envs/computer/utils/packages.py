@@ -3,7 +3,9 @@ Python requirements and downloads) is resolved once for each arch in a container
 every file is stored in the object store by its sha256, and a lock lists them (``Lock``). The lock is stored by a
 digest of what it was resolved from (each layer's packages, sources, requirements file and downloads, the base, the
 arch, the request the resolver is given, the resolver itself and the lock's own shape), so any env with the same inputs
-reuses it. A build stages only the lock's files and installs them with the network closed (``composer``)."""
+reuses it. A build stages only the lock's files and installs them with the network closed (``composer``). A macOS VM
+bundle's venvs are locked the same way, their wheels resolved once in a VM of the base (``vm_bundle_inputs``,
+``store_resolved``, ``stage_wheels``)."""
 
 from __future__ import annotations
 
@@ -150,6 +152,62 @@ def stage(lock: Lock, builder: Builder, store_id: str, fetched: dict[str, str]) 
                   {target: (store.object_url(f"{prefix}/files/{sha256}"), sha256)
                    for target, sha256 in places.items() if sha256 not in fetched})
     builder.mark_runnable(list(downloads))
+
+
+def vm_bundle_inputs(resolver: str, prepare: str, requirements: dict[str, str | None], protocol: Path | None, base: str,
+                     arch: str) -> str | None:
+    """The digest of everything a macOS VM bundle's lock is resolved from: the script that resolves it in the base,
+    which names what each venv adds, and the digest of the readying it sources, which pins the Python they run on; each
+    venv's requirements by its sha256, the protocol's source when it's staged, the base, the arch and the lock's shape;
+    None when it has no venv."""
+    if not requirements:
+        return None
+    return "sha256:" + hashlib.sha256(json.dumps({
+        "os": "macos", "resolver": resolver, "prepare": prepare, "requirements": requirements, "base": base,
+        "arch": arch, "lock": _lock_shape(), "protocol": _folder_digest(protocol) if protocol is not None else None,
+    }, sort_keys=True).encode()).hexdigest()
+
+
+def store_resolved(inputs: str, arch: str, wheels: dict[str, Path], store_id: str) -> Lock:
+    """Store each wheel a VM resolved, ``wheels`` naming the folder of each venv's, by its sha256 unless it's there, and
+    the lock listing them; the lock stored first under ``inputs`` when another resolve stored one. A wheel that isn't a
+    plain file is refused."""
+    store, prefix = _store(store_id)
+    locked = {}
+    for folder, directory in wheels.items():
+        locked[folder] = []
+        for path in sorted(directory.iterdir()) if directory.is_dir() else []:
+            if path.is_symlink() or not path.is_file() or path.suffix != ".whl":
+                raise ResolveError(f"the resolver's {path.name!r} in {folder}'s wheels isn't a wheel it wrote")
+            sha256 = sha256_of(path)
+            key = f"{prefix}/files/{sha256}"
+            if not store.exists(key):
+                try:
+                    store.put_file(key, str(path))
+                except ObjectAlreadyExistsError:
+                    pass
+            locked[folder].append(LockedFile(file=path.name, sha256=sha256, size=path.stat().st_size))
+    lock = Lock(inputs=inputs, arch=arch, apt=[], wheels=locked, downloads={})
+    key = _lock_key(prefix, inputs)
+    try:
+        store.put(key, lock.model_dump_json().encode(), content_type="application/json")
+    except ObjectAlreadyExistsError:
+        return Lock.model_validate_json(store.read(key))
+    return lock
+
+
+def stage_wheels(lock: Lock, build: Path, store_id: str) -> None:
+    """Write each venv's wheels of ``lock`` under ``build`` at ``staged_wheels``, from the store, each refused unless
+    its sha256 is the one the lock names."""
+    store, prefix = _store(store_id)
+    for folder, wheels in lock.wheels.items():
+        staged = build / staged_wheels(folder)
+        staged.mkdir(parents=True, exist_ok=True)
+        for wheel in wheels:
+            data = store.read(f"{prefix}/files/{wheel.sha256}")
+            if hashlib.sha256(data).hexdigest() != wheel.sha256:
+                raise ResolveError(f"the stored {wheel.file} of {folder} isn't the one its lock names")
+            (staged / wheel.file).write_bytes(data)
 
 
 def staged_wheels(folder: str) -> str:

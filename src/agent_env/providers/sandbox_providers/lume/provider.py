@@ -1,8 +1,10 @@
 """``lume``: macOS computers on this Mac, as VM bundles Lume runs. A deploy's VM is an APFS clone of its computer's VM
 bundle, pulled once when that's a registry image. The deploy's environment reaches it as the protocol's seed, in a
 folder the VM shares; each exposed port is fronted by a relay on this Mac, run by Apple's ``/usr/bin/python3``, since
-macOS's Local Network privacy lets only Apple's own binaries reach a VM's address; and a reset clones it afresh under the
-same MAC address, so its address and its URLs stay. Virtualization.framework runs a VM only in a logged-in session, so
+macOS's Local Network privacy lets only Apple's own binaries reach a VM's address; a local object store's grants reach
+it at its own loopback, as ``host.docker.internal``, through ssh forwarding the grant server's port back to this Mac's,
+the local transfer CA's trust files in its seed; and a reset clones it afresh under the same MAC address, so its address
+and its URLs stay. Virtualization.framework runs a VM only in a logged-in session, so
 agent-env runs in one, and runs two macOS VMs on a Mac, as Apple's licence allows. Composing boots a builder: a clone
 under the VM bundle's name with a build folder shared read-write, its commands run over ``lume ssh``, then shut down and
 kept (``open_builder``, ``keep_builder``)."""
@@ -34,6 +36,11 @@ from agent_env.artifact.artifacts.computer import LOCAL_IMAGE_PREFIX
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
 from agent_env.config.paths import state_root
+from agent_env.providers.sandbox_providers.local_docker.provider import (
+    LocalSandboxProvider,
+    local_grant_trust,
+    trust_env,
+)
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxNotFoundError,
@@ -42,6 +49,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.store.local_state import awaiting_lock
+from agent_env.store.routing import LocalRunObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +59,8 @@ MAX_RUNNING = 2
 SHARED_FILES = "/Volumes/My Shared Files"
 SEED_FOLDER = "agentenv-seed"
 BUILD_FOLDER = "agentenv-build"
+#: The seed's folder of the local transfer CA's trust files.
+TRUST_FOLDER = "trust"
 #: The relay that fronts a VM's ports: the local provider's, which Apple's Python runs as it is.
 RELAY = Path(__file__).resolve().parent.parent / "local_docker" / "relay" / "relay.py"
 #: The prefix of the names of the VMs it clones for deploys, and of the bases it pulls.
@@ -62,6 +72,9 @@ _NO_SESSION = "security information"
 ASKPASS_VARIABLE = "AGENTENV_LUME_SSH_PASSWORD"
 #: A log line lume prints among its output.
 _LOG_LINE = re.compile(r"^\[\d{4}-\d\d-\d\dT[^\]]*\] [A-Z]+: ")
+_SSH_OPTIONS = ("StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null", "LogLevel=ERROR", "NumberOfPasswordPrompts=1")
+#: How many times a second the grant server's forward tries to reach a booting VM's ssh.
+_TUNNEL_ATTEMPTS = 300
 
 
 class LumeSandbox(VmSandbox):
@@ -99,6 +112,7 @@ class LumeSandboxProvider(SandboxProvider):
     executables, Apple's own ssh and Python, which Local Network privacy lets reach a VM."""
 
     ON_THIS_MACHINE: ClassVar[bool] = True
+    REACHES_HOST_AT: ClassVar[str] = "127.0.0.1"
 
     def __init__(self, *, ssh_user: str = "lume", ssh_password: str = "lume", max_running: int = MAX_RUNNING,
                  relay_host: str = "127.0.0.1", lume: str = "lume", ssh: str = "/usr/bin/ssh",
@@ -115,6 +129,12 @@ class LumeSandboxProvider(SandboxProvider):
         if "ssh_password" in config:
             config["ssh_password"] = get_config().resolve_reference(config["ssh_password"])
         return cls(**config)
+
+    @classmethod
+    def get_external_url(cls, url: str) -> str:
+        """``url``, a relay on this Mac, as a container on this machine's Docker reaches it, an agent's say: its
+        loopback host as ``host.docker.internal``."""
+        return LocalSandboxProvider.get_external_url(url)
 
     @classmethod
     def native_platforms(cls) -> frozenset[str]:
@@ -161,8 +181,8 @@ class LumeSandboxProvider(SandboxProvider):
         """The VM cloned afresh from the bundle it was cloned from, under its MAC address, so it takes the same
         address, with ``env`` in its seed, its relays pointed at it on the same ports; its slot held from its stop until
         it runs again, so no deploy takes it meanwhile. One that doesn't come up is stopped, freeing its slot."""
-        state = self._state(sandbox.sandbox_id)
-        async with self._admitting():
+        async with self._admitting(), self._changing(sandbox.sandbox_id):
+            state = self._state(sandbox.sandbox_id)
             await self._stopped(sandbox.sandbox_id, state)
             await self._lume("delete", sandbox.sandbox_id, "--force")
             await self._lume("clone", state["source"], sandbox.sandbox_id)
@@ -174,18 +194,26 @@ class LumeSandboxProvider(SandboxProvider):
                 raise
 
     async def get_sandbox(self, sandbox_id: str) -> LumeSandbox:
-        return self._sandbox(sandbox_id, self._state(sandbox_id))
+        """The VM ``sandbox_id``, with this process's grant server forwarded into it, as another process reconnects."""
+        grants = await asyncio.to_thread(_local_grants)
+        async with self._changing(sandbox_id):
+            state = self._state(sandbox_id)
+            if "address" in state and grants is not None:
+                self._forward(sandbox_id, state, grants[0])
+        return self._sandbox(sandbox_id, state)
 
     async def terminate_sandbox(self, sandbox_id: str) -> None:
-        """The VM stopped and deleted, and its relays and its folder gone; one that's gone already is terminated."""
-        try:
-            state = self._state(sandbox_id)
-        except SandboxNotFoundError:
-            state = {}
-        await self._stopped(sandbox_id, state)
-        with contextlib.suppress(RuntimeError):
-            await self._lume("delete", sandbox_id, "--force")
-        shutil.rmtree(self._folder(sandbox_id), ignore_errors=True)
+        """The VM stopped and deleted, and its relays and its folder gone, under its lock, so no reconnect finds it in
+        between; one that's gone already is terminated."""
+        async with self._changing(sandbox_id):
+            try:
+                state = self._state(sandbox_id)
+            except SandboxNotFoundError:
+                state = {}
+            await self._stopped(sandbox_id, state)
+            with contextlib.suppress(RuntimeError):
+                await self._lume("delete", sandbox_id, "--force")
+            shutil.rmtree(self._folder(sandbox_id), ignore_errors=True)
 
     async def open_builder(self, image: str, name: str, build: Path) -> LumeSandbox:
         """A VM to compose the VM bundle ``name`` in: a clone of ``image`` under that name, any earlier one of that name
@@ -292,7 +320,11 @@ class LumeSandboxProvider(SandboxProvider):
         if sizes:
             await self._lume("set", name, *[part for pair in zip(sizes[::2], sizes[1::2]) for part in pair])
         folder = self._folder(name)
-        share = f"{state['build']}:rw" if state.get("build") else f"{self._seed(folder, env)}:ro"
+        grants = None if state.get("build") else await asyncio.to_thread(_local_grants)
+        if grants is not None:
+            env = {**trust_env(f"{SHARED_FILES}/{SEED_FOLDER}/{TRUST_FOLDER}"), **env}
+        share = (f"{state['build']}:rw" if state.get("build")
+                 else f"{self._seed(folder, env, grants[1] if grants else None)}:ro")
         log = folder / "run.log"
         with open(log, "ab") as out:
             run = subprocess.Popen([self.lume, "run", name, "--display", "none", "--vnc", "disabled",
@@ -310,6 +342,26 @@ class LumeSandboxProvider(SandboxProvider):
             state["relay"] = relay.pid
         state["address"] = address
         self._save(name, state)
+        if grants is not None:
+            self._forward(name, state, grants[0])
+
+    def _forward(self, name: str, state: dict, port: int) -> None:
+        """``port``, where this process's grant server serves, forwarded into ``name`` unless a forward of it still
+        runs: each process that hands the VM grants has a server of its own, on a port of its own."""
+        forwards = state.setdefault("forwards", {})
+        if not _alive(forwards.get(str(port))):
+            forwards[str(port)] = self._tunnel(state["address"], port).pid
+            self._save(name, state)
+
+    def _tunnel(self, address: str, port: int) -> subprocess.Popen:
+        """ssh forwarding ``port`` of the VM at ``address``'s loopback to this Mac's, where the grant server serves,
+        while the VM runs; it keeps trying while the VM boots."""
+        options = [*_SSH_OPTIONS, "ExitOnForwardFailure=yes", f"ConnectionAttempts={_TUNNEL_ATTEMPTS}",
+                   "ServerAliveInterval=15"]
+        return subprocess.Popen([self.ssh, *(part for option in options for part in ("-o", option)), "-N", "-R",
+                                 f"127.0.0.1:{port}:127.0.0.1:{port}", f"{self.ssh_user}@{address}"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True, env=self._askpass_env())
 
     async def _address(self, name: str, run: subprocess.Popen, log: Path) -> str:
         """``name``'s address once Lume says it's running with one, within ``boot_timeout_s``; a run that exits first
@@ -337,11 +389,12 @@ class LumeSandboxProvider(SandboxProvider):
         raise TimeoutError(f"{name} didn't answer ssh within {self.boot_timeout_s:.0f} s")
 
     async def _stopped(self, name: str, state: dict) -> None:
-        """``name``'s relays ended and the VM stopped, the process ids it ended dropped from its state and saved, so
+        """``name``'s relays and forwards ended and the VM stopped, the process ids it ended dropped from its state and saved, so
         nothing signals them again once the system has given them to another process."""
-        relay, run = state.pop("relay", None), state.pop("run", None)
-        if relay:
-            _kill(relay)
+        relay, forwards, run = state.pop("relay", None), state.pop("forwards", {}), state.pop("run", None)
+        for pid in (relay, *forwards.values()):
+            if pid:
+                _kill(pid)
         with contextlib.suppress(RuntimeError):
             await self._lume("stop", name, "--force")
         if run:
@@ -390,28 +443,33 @@ class LumeSandboxProvider(SandboxProvider):
         """``command`` run in ``name`` over ssh as the session user, its output piped; the password reaches ssh through
         ``ASKPASS``, which reads it from the environment. ``timeout`` bounds the connection, when it's given."""
         address = (await self._get(name)).get("ipAddress") or "0.0.0.0"
-        options = ["StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null", "LogLevel=ERROR",
-                   "NumberOfPasswordPrompts=1", *((f"ConnectTimeout={timeout}",) if timeout else ())]
+        options = [*_SSH_OPTIONS, *((f"ConnectTimeout={timeout}",) if timeout else ())]
         return await asyncio.create_subprocess_exec(
             self.ssh, *(part for option in options for part in ("-o", option)), f"{self.ssh_user}@{address}",
             shlex.join(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True, env={**os.environ, "SSH_ASKPASS": str(_askpass()), "SSH_ASKPASS_REQUIRE": "force",
-                                         ASKPASS_VARIABLE: self.ssh_password})
+            start_new_session=True, env=self._askpass_env())
+
+    def _askpass_env(self) -> dict[str, str]:
+        """This process's environment with ssh's askpass reading the password from it."""
+        return {**os.environ, "SSH_ASKPASS": str(_askpass()), "SSH_ASKPASS_REQUIRE": "force",
+                ASKPASS_VARIABLE: self.ssh_password}
 
     def _sandbox(self, name: str, state: dict) -> LumeSandbox:
         host = "127.0.0.1" if self.relay_host in ("0.0.0.0", "::") else self.relay_host
         return LumeSandbox(self, name, {int(port): f"http://{host}:{local}" for port, local in state["ports"].items()})
 
     @staticmethod
-    def _seed(folder: Path, env: dict[str, str]) -> Path:
+    def _seed(folder: Path, env: dict[str, str], trust: Optional[Path] = None) -> Path:
         """The folder of ``env``'s seed, as the protocol writes it: each version this agent-env writes, and the oldest
-        of them."""
+        of them; with ``trust``, the local transfer CA's trust files in it, under ``TRUST_FOLDER``."""
         shared = folder / SEED_FOLDER
         shutil.rmtree(shared, ignore_errors=True)
         shared.mkdir(mode=0o700)
         for version in seed.WRITTEN:
             _private(shared / seed.user_data_file(version), seed.user_data(env))
         _private(shared / seed.OLDEST, f"{seed.WRITTEN[0]}\n")
+        if trust is not None:
+            shutil.copytree(trust, shared / TRUST_FOLDER)
         return shared
 
     @staticmethod
@@ -428,6 +486,11 @@ class LumeSandboxProvider(SandboxProvider):
 
     def _save(self, name: str, state: dict) -> None:
         _private(self._folder(name) / "state.json", json.dumps(state))
+
+    def _changing(self, name: str) -> AbstractAsyncContextManager[None]:
+        """Held while ``name``'s state is read and changed, by every agent-env on this Mac, so a reconnect, a reset and
+        a termination don't each save over the process ids another saved; after ``_admitting`` when both are held."""
+        return awaiting_lock(f"lume-vm-{name}")
 
     def _admitting(self) -> AbstractAsyncContextManager[None]:
         """Held while a VM is counted, cloned and started, or reset, or a base pulled, by every agent-env on this Mac,
@@ -475,6 +538,32 @@ async def _bounded(process: asyncio.subprocess.Process, seconds: float) -> int |
             await process.wait()
 
 
+def _alive(pid: Optional[int]) -> bool:
+    """Whether ``pid`` runs, reaped first when it's a child of this process that has exited."""
+    if pid is None:
+        return False
+    with contextlib.suppress(ChildProcessError):
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
 def _kill(pid: int) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pid, signal.SIGTERM)
+
+
+def _local_grants() -> Optional[tuple[int, Path]]:
+    """The port of the configured object store's grant server, started, and the local transfer CA's trust files, when
+    the store is a local one handing out grants; None otherwise."""
+    trust = local_grant_trust()
+    if trust is None:
+        return None
+    store = get_config().get_object_store()
+    return (store.local if isinstance(store, LocalRunObjectStore) else store).grant_port(), trust
