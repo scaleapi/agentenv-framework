@@ -36,9 +36,9 @@ BROWSER: Final[str] = "@local/agentenv-framework/browsers/chromium"
 MODEL: Final[str] = "fake-model-1"
 # The page names itself only once it runs, so its title in an answer came from the browser, not the prompt.
 PAGE: Final[str] = "data:text/html," + urllib.parse.quote("<script>document.title = 'Lantern ' + (3 + 4)</script>")
-OPEN: Final[str] = (f"page = await tabs.open({json.dumps(PAGE)});\n"
-                    "await page.waitFor(() => document.title.startsWith('Lantern'));\n"
-                    "(await page.info()).title")
+# The browser opens PAGE at boot, so the title is read only when the tab the agent drives is the browser's own.
+OPEN: Final[str] = "await page.waitFor(() => document.title.startsWith('Lantern'));\n(await page.info()).title"
+ON_PAGE: Final[dict] = {"app_settings": {"chromium": {"start_urls": [PAGE]}}}
 PROMPT: Final[str] = "Open the page and reply with its title."
 AGAIN: Final[str] = "Open it once more and reply with its title."
 
@@ -80,11 +80,11 @@ def state(monkeypatch, tmp_path, endpoint):
         reset_config()
 
 
-def test_the_smoke_tasks_shape_passes_with_the_agent_on_the_browsers_ws_url(state, endpoint):
+def test_the_smoke_tasks_shape_passes_with_the_agent_on_the_browsers_ws_url_in_its_open_tab(state, endpoint):
     root = state / "smoke"
     (root / "tasks").mkdir(parents=True)
     (root / "tasks/browse.json").write_text(json.dumps([
-        {"id": "browser", "type": "deploy_env", "env_id": "chromium", "sandbox_type": "local"},
+        {"id": "browser", "type": "deploy_env", "env_id": "chromium", "sandbox_type": "local", "env_params": ON_PAGE},
         {"id": "deploy", "type": "deploy_agent", "a2a_agent_id": "browser-use", "env_ids": [],
          "sandbox_type": "local"},
         {"id": "connect", "type": "browser_connect_cdp", "env_id": "chromium", "depends_on": ["browser", "deploy"]},
@@ -104,7 +104,8 @@ def test_it_connects_by_http_url_too_refuses_a_wrong_credential_and_without_an_a
     outcomes = {}
 
     async def steps(context):
-        await DeployEnvTaskStep(id="browser", version=None, env_id=BROWSER, sandbox_type="local").execute(context)
+        await DeployEnvTaskStep(id="browser", version=None, env_id=BROWSER, sandbox_type="local",
+                                env_params=ON_PAGE).execute(context)
         await DeployAgentTaskStep(id="deploy", version=None, env_ids=[], a2a_agent_id=AGENT,
                                   sandbox_type="local").execute(context)
         (env,), (agent,) = context.deployed_envs, context.deployed_agents
