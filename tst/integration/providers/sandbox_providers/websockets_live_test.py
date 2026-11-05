@@ -35,6 +35,18 @@ FRAME_BYTES = 10 * 1024 * 1024
 IDLE_S = 300
 PING_S = 20.0
 GET_VERSION = {"id": 1, "method": "Browser.getVersion"}
+#: What the server answers ``Browser.getVersion`` with.
+PRODUCT = "agentenv-websockets-check/1"
+SANDBOX_CPU = 1
+SANDBOX_MEMORY_MB = 2048
+SANDBOX_LIFETIME_S = 1800
+SERVED_WITHIN_S = 300
+SERVED_POLL_S = 3
+HTTP_TIMEOUT_S = 10
+OPEN_TIMEOUT_S = 60
+ANSWER_TIMEOUT_S = 60
+FRAME_TIMEOUT_S = 120
+ERROR_CHARS = 300
 
 #: A WebSocket server in the standard library alone: it answers ``Browser.getVersion`` as a browser would, echoes every
 #: other message, answers pings, and answers a plain GET with 200 for a tunnel's health check.
@@ -106,7 +118,7 @@ class Handler(socketserver.BaseRequestHandler):
             if opcode == 9:
                 send(conn, 10, payload)
             elif opcode == 1 and json.loads(payload).get("method") == "Browser.getVersion":
-                answer = {"id": json.loads(payload)["id"], "result": {"product": "agentenv-websockets-check/1"}}
+                answer = {"id": json.loads(payload)["id"], "result": {"product": sys.argv[2]}}
                 send(conn, 1, json.dumps(answer).encode())
             elif opcode in (1, 2):
                 send(conn, opcode, payload)
@@ -131,9 +143,9 @@ def _start_script() -> str:
 mkdir -p {DIR}
 echo {encoded} | base64 -d > {DIR}/server.py
 if command -v docker >/dev/null 2>&1; then
-  docker run -d --name websockets-check -p {PORT}:{PORT} -v {DIR}:/check {PYTHON_IMAGE} python /check/server.py {PORT} >/dev/null
+  docker run -d --name websockets-check -p {PORT}:{PORT} -v {DIR}:/check {PYTHON_IMAGE} python /check/server.py {PORT} {PRODUCT} >/dev/null
 else
-  setsid nohup python3 {DIR}/server.py {PORT} > {DIR}/server.log 2>&1 < /dev/null &
+  setsid nohup python3 {DIR}/server.py {PORT} {PRODUCT} > {DIR}/server.log 2>&1 < /dev/null &
 fi
 """
 
@@ -166,10 +178,11 @@ async def test_a_providers_websockets_declaration_matches_what_its_tunnel_carrie
 async def _sandbox(provider):
     """A VM, or on a provider that makes only containers, a container of a stock Python image."""
     try:
-        return await provider.create_vm(cpu=1, memory=2048, exposed_ports=[PORT], timeout=1800)
+        return await provider.create_vm(cpu=SANDBOX_CPU, memory=SANDBOX_MEMORY_MB, exposed_ports=[PORT],
+                                        timeout=SANDBOX_LIFETIME_S)
     except NotImplementedError:
-        return await provider.create_container(image_name=PYTHON_IMAGE, port=PORT, env={}, cpu=1, memory=2048,
-                                               timeout=1800)
+        return await provider.create_container(image_name=PYTHON_IMAGE, port=PORT, env={}, cpu=SANDBOX_CPU,
+                                               memory=SANDBOX_MEMORY_MB, timeout=SANDBOX_LIFETIME_S)
 
 
 async def _serve(sandbox) -> None:
@@ -180,16 +193,16 @@ async def _serve(sandbox) -> None:
     assert exit_code == 0, f"starting the server failed (exit {exit_code}): {stdout[-500:]} {stderr[-500:]}"
 
 
-async def _until_served(url: str, timeout_s: float = 300) -> None:
+async def _until_served(url: str, timeout_s: float = SERVED_WITHIN_S) -> None:
     deadline = time.monotonic() + timeout_s
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as client:
         while time.monotonic() < deadline:
             try:
                 if (await client.get(url)).status_code == 200:
                     return
             except httpx.HTTPError:
                 pass
-            await asyncio.sleep(3)
+            await asyncio.sleep(SERVED_POLL_S)
     raise TimeoutError(f"nothing answered at {url} within {timeout_s:.0f} s")
 
 
@@ -198,40 +211,56 @@ async def _checked(ws_url: str) -> dict:
     answer on a pinged connection, and how long one never pinged lasted."""
     found: dict = {}
     try:
-        async with connect(ws_url, max_size=None, open_timeout=60, ping_interval=None) as conn:
-            found["cdp"] = await _version(conn) == "agentenv-websockets-check/1"
+        async with connect(ws_url, max_size=None, open_timeout=OPEN_TIMEOUT_S, ping_interval=None) as conn:
+            found["cdp"] = await _version(conn) == PRODUCT
             frame = os.urandom(FRAME_BYTES)
             await conn.send(frame)
-            found["frame"] = await asyncio.wait_for(conn.recv(), 120) == frame
+            found["frame"] = await asyncio.wait_for(conn.recv(), FRAME_TIMEOUT_S) == frame
     except (OSError, asyncio.TimeoutError, websockets.WebSocketException) as e:
         found.setdefault("cdp", False)
         found.setdefault("frame", False)
-        found["error"] = f"{type(e).__name__}: {e}"[:300]
+        found["error"] = _error(e)
         return found
     try:
-        pinged = await connect(ws_url, max_size=None, open_timeout=60, ping_interval=PING_S, ping_timeout=PING_S)
-        silent = await connect(ws_url, max_size=None, open_timeout=60, ping_interval=None)
+        pinged = await connect(ws_url, max_size=None, open_timeout=OPEN_TIMEOUT_S, ping_interval=PING_S,
+                               ping_timeout=PING_S)
     except (OSError, asyncio.TimeoutError, websockets.WebSocketException) as e:
         found["idle_pinged"] = False
-        found["idle_pinged_error"] = f"{type(e).__name__}: {e}"[:300]
+        found["idle_pinged_error"] = _error(e)
         return found
-    started = time.monotonic()
-    silent_closed = asyncio.ensure_future(silent.wait_closed())
     try:
-        await asyncio.wait([silent_closed], timeout=IDLE_S)
-        found["idle_unpinged_s"] = round(time.monotonic() - started) if silent_closed.done() else None
+        silent = await connect(ws_url, max_size=None, open_timeout=OPEN_TIMEOUT_S, ping_interval=None)
+    except (OSError, asyncio.TimeoutError, websockets.WebSocketException) as e:
+        silent = None
+        found["idle_unpinged_error"] = _error(e)
+    started = time.monotonic()
+
+    async def lasted(conn) -> int:
+        await conn.wait_closed()
+        return round(time.monotonic() - started)
+
+    silent_lasted = asyncio.ensure_future(lasted(silent)) if silent is not None else None
+    try:
+        await asyncio.sleep(IDLE_S)
+        if silent_lasted is not None:
+            found["idle_unpinged_s"] = silent_lasted.result() if silent_lasted.done() else None
         try:
-            found["idle_pinged"] = await _version(pinged) == "agentenv-websockets-check/1"
+            found["idle_pinged"] = await _version(pinged) == PRODUCT
         except (asyncio.TimeoutError, websockets.WebSocketException) as e:
             found["idle_pinged"] = False
-            found["idle_pinged_error"] = f"{type(e).__name__}: {e}"[:300]
+            found["idle_pinged_error"] = _error(e)
     finally:
-        silent_closed.cancel()
+        if silent_lasted is not None:
+            silent_lasted.cancel()
+            await silent.close()
         await pinged.close()
-        await silent.close()
     return found
 
 
 async def _version(conn) -> str:
     await conn.send(json.dumps(GET_VERSION))
-    return json.loads(await asyncio.wait_for(conn.recv(), 60))["result"]["product"]
+    return json.loads(await asyncio.wait_for(conn.recv(), ANSWER_TIMEOUT_S))["result"]["product"]
+
+
+def _error(e: BaseException) -> str:
+    return f"{type(e).__name__}: {e}"[:ERROR_CHARS]
