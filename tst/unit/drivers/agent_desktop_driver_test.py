@@ -1,6 +1,6 @@
 """The agent-desktop driver against a fake agent-desktop: its instructions and tools are its server's as pinned, each call
-reaches a server of its own, ``--headed`` when the driver's setting says, with none of the driver's environment; a
-server that fails answers an error; readiness checks the pinned executables and the tools the server lists; and its
+reaches a server of its own, ``--headed`` when the driver's setting says, with none of the driver's environment, and
+the screenshots it saves come back beside its answer; a server that fails answers an error; readiness checks the pinned executables and the tools the server lists; and its
 skill is agent-desktop's own, with its references and its guide for macOS."""
 from __future__ import annotations
 
@@ -8,10 +8,8 @@ import base64
 import hashlib
 import importlib.util
 import json
-import os
 import sys
 import textwrap
-import time
 from pathlib import Path
 
 import pytest
@@ -43,11 +41,21 @@ FAKE = textwrap.dedent('''\
         return [types.Tool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"])
                 for t in manifest["tools"]]
 
+    def screenshot(args):
+        Path(args["output_path"]).write_bytes(b"\\x89PNG fake")
+        return {"ok": True, "command": "screenshot", "data": {"format": "png", "path": args["output_path"]}}
+
     @server.call_tool(validate_input=False)
     async def call(name, arguments):
-        if arguments.get("output_path"):
-            Path(arguments["output_path"]).write_bytes(b"\\x89PNG fake")
-        return [types.TextContent(type="text", text=json.dumps({"ok": True, "command": name, "data": arguments}))]
+        if name == "desktop_screenshot":
+            answer = screenshot(arguments)
+        elif name == "desktop_batch":
+            answer = {"ok": True, "command": "batch", "data": {"results": [
+                screenshot(c["args"]) if c["command"] == "screenshot" else {"ok": True, "command": c["command"]}
+                for c in json.loads(arguments["commands_json"])]}}
+        else:
+            answer = {"ok": True, "command": name, "data": arguments}
+        return [types.TextContent(type="text", text=json.dumps(answer))]
 
     async def main():
         async with stdio_server() as (read, write):
@@ -114,25 +122,32 @@ async def test_a_call_reaches_a_server_of_its_own_headed_when_the_setting_says_w
 
 
 @pytest.mark.asyncio
-async def test_an_image_a_call_writes_comes_back_beside_its_answer_and_no_file_it_only_names_does(module, tmp_path):
-    shot, trace = tmp_path / "a.png", tmp_path / "trace.html"
-    trace.write_text("<html>")
+async def test_each_screenshot_a_call_saves_comes_back_beside_its_answer_up_to_the_cap_and_no_other_file_does(
+        module, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    named, locked = tmp_path / "named.png", tmp_path / "locked.png"
+    named.write_bytes(b"\x89PNG named")
+    locked.write_bytes(b"")
+    locked.chmod(0o200)
     driver = module.AgentDesktop()
 
-    written = await driver._forward("desktop_screenshot", output_path=str(shot))
-    batch = await driver._forward("desktop_batch", commands_json=json.dumps([{"command": "trace export",
-                                                                              "args": {"out": str(trace)}}]))
-    unwritten = await driver._forward("desktop_snapshot", note=str(tmp_path / "never-written.png"))
-    old = tmp_path / "earlier.png"
-    old.write_bytes(b"\x89PNG earlier")
-    os.utime(old, (time.time() - 60, time.time() - 60))
-    echoed = await driver._forward("desktop_find", query=str(old))
+    saved = await driver._forward("desktop_screenshot", output_path=str(tmp_path / "a.png"))
+    relative = await driver._forward("desktop_screenshot", output_path="rel.png")
+    echoed = await driver._forward("desktop_find", name=str(named))
+    unread = await driver._forward("desktop_screenshot", output_path=str(locked))
+    monkeypatch.setattr(module, "MAX_IMAGE_BYTES", 2 * len(b"\x89PNG fake"))
+    shots = [{"command": "screenshot", "args": {"output_path": str(tmp_path / f"b{n}.png")}} for n in range(3)]
+    batch = await driver._forward("desktop_batch", commands_json=json.dumps(
+        [*shots, {"command": "trace export", "args": {"out": str(tmp_path / "trace.html")}}, shots[0]]))
 
-    text, image = written.content
-    assert json.loads(text.text)["data"] == {"output_path": str(shot)}
+    text, image = saved.content
+    assert json.loads(text.text)["data"]["path"] == str(tmp_path / "a.png")
     assert (image.type, image.mimeType, base64.b64decode(image.data)) == ("image", "image/png", b"\x89PNG fake")
-    assert [block.type for block in batch.content] == [block.type for block in unwritten.content] == ["text"]
-    assert [block.type for block in echoed.content] == ["text"] and str(old) in echoed.content[0].text
+    assert [block.type for block in relative.content] == ["text", "image"]
+    assert [block.type for block in echoed.content] == ["text"]
+    assert unread.content[-1].text == f"Saved but not readable: {locked}"
+    assert [block.type for block in batch.content] == ["text", "image", "image", "text"]
+    assert batch.content[-1].text == f"Saved but not attached, past the most one answer carries: {tmp_path / 'b2.png'}"
 
 
 @pytest.mark.asyncio

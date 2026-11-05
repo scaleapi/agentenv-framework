@@ -1,7 +1,7 @@
 """Vercel's agent-desktop as a computer driver on macOS. agent-desktop reads apps' accessibility trees and acts on what
 it finds; its own MCP server, ``agent-desktop mcp``, serves each of its commands as a tool, and agents get what that
 server serves at its pinned version (``mcp.json``): its instructions and its tools, each call forwarded to a server of
-its own and answered as the server answers it, with any image the call wrote on the computer beside the answer, since
+its own and answered as the server answers it, with each screenshot the call saved to a file beside the answer, since
 the agent can't read the computer's files; agent-desktop's skill leads the computer's. The computer/v1
 operations are MacOSDriver's. This process's Python is granted Accessibility, Post Event and Screen Recording, and
 agent-desktop, which it starts, has them as its own. A tool can't pass agent-desktop's global flags, so the server's
@@ -18,7 +18,6 @@ import functools
 import hashlib
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -43,16 +42,12 @@ KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
 PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 #: How long one of its commands that reads its skills may take.
 SKILL_TIMEOUT_S = 60
-#: The image files a call's answer may name, by suffix, and the most bytes of them one answer carries.
-IMAGES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+#: The most bytes of saved screenshots one answer carries.
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-#: How far a written file's modification time may read before the call's start, for the filesystem's timestamp
-#: resolution.
-MTIME_SLACK_S = 1.0
 #: What the instructions add to agent-desktop's: the computer's files stay on it.
-FILES = ("Files these tools write stay on this computer, which you don't share: an image a call writes, such as a "
-         "screenshot's output_path, comes back with its answer, and other files, such as a trace export, can't be read "
-         "from where you run.")
+FILES = ("Files these tools write stay on this computer, which you don't share: a screenshot saved to an output_path, "
+         "in a batch too, comes back with its answer, up to 8 MB of them an answer, and other files, such as a trace "
+         "export, can't be read from where you run.")
 
 
 @computer_driver(name="agent-desktop", supports=[{"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}])
@@ -99,14 +94,13 @@ class AgentDesktop(MacOSDriver):
     async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
         """A call to one of agent-desktop's tools, on a server of its own, answered as the server answers it. A server
         that fails before answering may have run the command."""
-        started = time.time()
         try:
             async with self._server() as session:
                 result = await session.call_tool(tool, arguments)
         except Exception as e:
             return CallToolResult(isError=True, content=[TextContent(type="text", text=(
                 f"agent-desktop's server failed before it answered, so {tool} may have run: {type(e).__name__}: {e}"))])
-        return _with_images(result, started)
+        return _with_images(result)
 
     @contextlib.asynccontextmanager
     async def _server(self) -> AsyncIterator[ClientSession]:
@@ -137,33 +131,39 @@ class AgentDesktop(MacOSDriver):
                                     else f"these tools differ from {MANIFEST.name}: {', '.join(changed)}")]
 
 
-def _with_images(result: CallToolResult, started: float) -> CallToolResult:
-    """``result`` with each image file its answer names that the call wrote, as a screenshot's ``path`` and a batch's
-    commands' are, up to ``MAX_IMAGE_BYTES`` in all: only a file modified since ``started``, so an answer that echoes
-    the path of an image the call didn't write doesn't hand that file over."""
-    images, total = [], 0
-    for path in dict.fromkeys(p for p in _named(result) if p.stat().st_mtime >= started - MTIME_SLACK_S):
-        mime, size = IMAGES[path.suffix.lower()], path.stat().st_size
-        if total + size <= MAX_IMAGE_BYTES:
-            total += size
-            images.append(ImageContent(type="image", data=base64.b64encode(path.read_bytes()).decode(), mimeType=mime))
-    return result.model_copy(update={"content": [*result.content, *images]}) if images else result
+def _with_images(result: CallToolResult) -> CallToolResult:
+    """``result`` with each screenshot its answer saved to a file, up to ``MAX_IMAGE_BYTES`` in all, and a line naming
+    the saved ones it doesn't carry."""
+    images, total, past, unread = [], 0, [], []
+    for path in dict.fromkeys(_saved(result)):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            unread.append(path)
+            continue
+        if total + len(data) > MAX_IMAGE_BYTES:
+            past.append(path)
+            continue
+        total += len(data)
+        images.append(ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType="image/png"))
+    notes = [f"{label}: {', '.join(map(str, paths))}" for label, paths in (
+        ("Saved but not attached, past the most one answer carries", past), ("Saved but not readable", unread)) if paths]
+    content = [*images, *(TextContent(type="text", text=note) for note in notes)]
+    return result.model_copy(update={"content": [*result.content, *content]}) if content else result
 
 
-def _named(result: CallToolResult) -> list[Path]:
-    """The image files on this computer that ``result``'s JSON answers name by their absolute paths."""
+def _saved(result: CallToolResult) -> list[Path]:
+    """The files ``result``'s screenshots were saved to, a batch's included: each one's ``data.path``, a relative one
+    from the server's working directory, which is this process's."""
     found: list[Path] = []
 
-    def walk(value: Any) -> None:
-        if isinstance(value, dict):
-            for item in value.values():
-                walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                walk(item)
-        elif isinstance(value, str) and value.startswith("/") and Path(value).suffix.lower() in IMAGES:
-            if Path(value).is_file():
-                found.append(Path(value))
+    def walk(answer: Any) -> None:
+        if not isinstance(answer, dict) or not isinstance(data := answer.get("data"), dict):
+            return
+        if answer.get("command") == "screenshot" and data.get("path"):
+            found.append(Path(data["path"]))
+        for each in data.get("results") or []:
+            walk(each)
 
     for block in result.content:
         if isinstance(block, TextContent):

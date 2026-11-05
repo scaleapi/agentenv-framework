@@ -75,9 +75,9 @@ To move it to another cua-driver version:
 on what it finds; its release's tarball, checked by sha256, is unpacked into the driver's `bin/` by `install.sh`.
 Agents get what its own MCP server, `agent-desktop mcp`, serves, as `mcp.json` pins it: its instructions and its 67
 `desktop_*` tools, each call forwarded to a server of its own, and its skill, its references and its guide for macOS
-leading the computer's skill. The agent doesn't share the computer's files, so each image file a call's answer names,
-such as a screenshot's `output_path`, comes back beside the answer (up to 8 MB in all), and the instructions add a line
-saying other files it writes stay on the computer. The `computer_*` tools, gate 3's probe, `computer-ready` and recording run on
+leading the computer's skill. The agent doesn't share the computer's files, so each screenshot a call saves to an
+`output_path`, in a batch too, comes back beside the answer (up to 8 MB in all, a line naming the rest), and the
+instructions add a line saying other files it writes stay on the computer. The `computer_*` tools, gate 3's probe, `computer-ready` and recording run on
 `MacOSDriver` (`agentenv_protocol.computer._macos`): ScreenCaptureKit captures the display and Quartz events, posted
 where the hardware's are, send the input, from the driver's own process. `[install.macos]` grants Accessibility, Post
 Event and Screen Recording to the driver's Python, its venv's own copy of the pinned one, and the LaunchAgent starts
