@@ -21,6 +21,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxProvider,
     _resolve_container_env,
     all_sandbox_container_env,
+    sandbox_request_header_names,
     sandbox_request_headers_for_url,
 )
 
@@ -174,6 +175,23 @@ def test_headers_union_across_providers_and_a_raising_sibling_is_skipped(monkeyp
     # The typo provider's header names a missing CONTAINER_ENV entry (KeyError);
     # the aggregator skips it without suppressing the others.
     assert "X-Typo" not in headers
+
+
+def test_the_header_names_every_provider_attaches_are_listed_without_resolving_a_credential(monkeypatch, no_cf_creds,
+                                                                                          tmp_path):
+    (tmp_path / "config.toml").write_text(textwrap.dedent(
+        """
+        [sandbox.providers.static]
+        impl = "tst.unit.providers.sandbox_providers.test_reachability_contributions:_StaticHeaderProvider"
+        [sandbox.providers.extra]
+        impl = "tst.unit.providers.sandbox_providers.test_reachability_contributions:_ExtraHeaderProvider"
+        """
+    ) + _CF_TOML)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(tmp_path / "config.toml"))
+    reset_config()
+
+    assert sandbox_request_header_names() == ("cf-access-client-id", "cf-access-client-secret", "x-extra",
+                                              "x-extra-static", "x-static")
 
 
 def test_static_headers_emit_without_any_resolution(monkeypatch, tmp_path):
