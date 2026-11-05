@@ -56,7 +56,9 @@ BUTTONS = {"left": (0, 1, 2, 6), "right": (1, 3, 4, 7), "middle": (2, 25, 26, 27
 MOVED = 5
 #: How long the pointer rests where a click or a drag presses before the press: an app such as Tk reads where the
 #: pointer is when it handles the press, and a button the pointer hasn't yet entered loses the click.
-SETTLE_S = 0.1
+SETTLE_S = 0.2
+#: How long a click holds its button down, as a hand does: a press released at once is lost now and then.
+CLICK_HOLD_S = 0.03
 #: The pause between the presses of a double or triple click.
 CLICK_GAP_S = 0.04
 #: How far apart a drag's pointer moves are, in pixels.
@@ -114,6 +116,7 @@ class MacOSDriver(ComputerDriverEnvironment):
                 time.sleep(SETTLE_S)
                 for n in range(1, count + 1):
                     mac.mouse(down, x, y, number, n, flags)
+                    time.sleep(CLICK_HOLD_S)
                     mac.mouse(up, x, y, number, n, flags)
                     if n < count:
                         time.sleep(CLICK_GAP_S)
