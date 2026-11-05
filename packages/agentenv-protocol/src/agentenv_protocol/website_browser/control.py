@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 AGENTENV, UNKNOWN, EXIT, STOP = "agentenv", "unknown", "exit", "stop"
 #: How long the active tab's check waits on each page.
 ACTIVE_CHECK_TIMEOUT_S = 2.0
-#: How long a tab opened headless may take to be attached and held to its window's size.
+#: How long a tab opened headless may take to be attached and held to its window's size, which is also how long a page
+#: of agentenv's own may take to reach an origin, and how often it's asked meanwhile.
 PIN_TIMEOUT_S = 10.0
+ARRIVAL_POLL_S = 0.05
 #: How much of a download each read hashes.
 HASH_CHUNK_BYTES = 1 << 20
 #: Who answered a dialog when agentenv didn't.
@@ -363,7 +365,7 @@ class BrowserControl:
                             "expression": ARRIVED, "returnByValue": True}, session_id=session))["result"].get("value")):
                         if asyncio.get_running_loop().time() > deadline:
                             raise DeviceUnavailable(f"a page of {origin} didn't open within {PIN_TIMEOUT_S:g} s")
-                        await asyncio.sleep(0.05)
+                        await asyncio.sleep(ARRIVAL_POLL_S)
                     self.origins.add(named)
                     return session, named
 
