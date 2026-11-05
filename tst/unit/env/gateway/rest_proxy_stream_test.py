@@ -39,6 +39,11 @@ class _Upstream:
         self.produced = 0
         self.closed = False
 
+    @property
+    def forwarded(self) -> list[httpx.Request]:
+        """What it saw but the card reads the gateway makes of a website it fronts, for the paths its card reserves."""
+        return [request for request in self.requests if request.url.path != "/.well-known/agent-env.json"]
+
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if self.error:
@@ -247,9 +252,9 @@ async def test_website_routes_use_the_same_handler(monkeypatch):
     gw = _gateway(website_urls={"web": "http://web"})
     status, headers, chunks = await _call(gw, "/website/web/assets/app.js")
     assert status == 200 and b"".join(chunks) == b"<html>hi</html>" and headers["content-type"].startswith("text/html")
-    assert str(up.requests[0].url) == "http://web/assets/app.js"
+    assert str(up.forwarded[0].url) == "http://web/assets/app.js"
     status, _, _ = await _call(gw, "/website/web")
-    assert status == 200 and str(up.requests[1].url) == "http://web"
+    assert status == 200 and str(up.forwarded[1].url) == "http://web"
 
 
 @pytest.mark.asyncio
@@ -338,7 +343,7 @@ async def test_website_paths_keep_their_encoding_and_the_bare_root_still_maps_to
     await _call(gw, "/website/web/a%2Fb/c%20d")
     await _call(gw, "/website/web")
     await _call(gw, "/website/web/")
-    assert [r.url.raw_path for r in up.requests] == [b"/a%2Fb/c%20d", b"/", b"/"]
+    assert [r.url.raw_path for r in up.forwarded] == [b"/a%2Fb/c%20d", b"/", b"/"]
 
 
 @pytest.mark.asyncio
@@ -361,7 +366,7 @@ async def test_an_escaped_slash_in_the_route_prefix_is_refused_not_misrouted(mon
     for path in ("/svc/mcp-svc%2Fx/y", "/website/web%2Findex.html"):
         status, _, chunks = await _call(gw, path)
         assert status == 400 and path.encode() in b"".join(chunks)  # names the request-target
-    assert up.requests == []  # nothing was forwarded
+    assert up.forwarded == []  # nothing was forwarded
 
 
 def test_gateway_module_doctests_pass():
@@ -427,7 +432,7 @@ async def test_the_website_proxy_stamps_the_role_too(monkeypatch):
     gw = _gateway(website_urls={"web": "http://web"})
     await _call(gw, "/website/web/assets/app.js", headers={"AgentEnv-Role": "viewer"})
     await _call(gw, "/website/web")
-    assert [r.headers.get_list("agentenv-role") for r in up.requests] == [["viewer"], ["default"]]
+    assert [r.headers.get_list("agentenv-role") for r in up.forwarded] == [["viewer"], ["default"]]
 
 
 def _rpc(**params) -> dict:
