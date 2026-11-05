@@ -1,0 +1,1762 @@
+{
+ "instructions": "agent-desktop reads native accessibility trees and operates desktop apps. Each tool runs the agent-desktop CLI command of the same name and returns its JSON envelope: ok with data, or ok false with error; a call rejected before the command runs returns plain text. Read desktop_skills_get with name \"desktop\" first for the observe-act loop, and with name \"platform\" for what differs on this OS. The skills use CLI syntax: `agent-desktop snapshot --app Finder` is desktop_snapshot with {\"app\": \"Finder\"}, and the input schema replaces --help. Global flags (--session, --agent-id, --headed, --wait-for, --trace) are fixed by how this server was started and cannot be passed per call. Refs such as @s8f3k2p9:e1 come from desktop_snapshot and go stale when the UI changes: on STALE_REF or AMBIGUOUS_TARGET, snapshot again. Repeat an action only when its disposition.retry is \"safe\".",
+ "tools": [
+  {
+   "name": "desktop_snapshot",
+   "description": "agent-desktop snapshot: Capture accessibility tree as structured JSON with @ref IDs",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "compact": {
+      "description": "Collapse single-child unnamed nodes to reduce tree depth",
+      "type": "boolean"
+     },
+     "force_electron_a11y": {
+      "description": "Assume Chromium renderer accessibility is forced (skips activation guidance)",
+      "type": "boolean"
+     },
+     "include_bounds": {
+      "description": "Include element bounds (x, y, width, height)",
+      "type": "boolean"
+     },
+     "interactive_only": {
+      "description": "Include interactive elements only",
+      "type": "boolean"
+     },
+     "max_depth": {
+      "default": 10,
+      "description": "Maximum tree depth (default 10)",
+      "type": "integer"
+     },
+     "root": {
+      "description": "Start traversal from this ref instead of window root",
+      "type": "string"
+     },
+     "skeleton": {
+      "description": "Shallow overview with children_count on truncated containers",
+      "type": "boolean"
+     },
+     "surface": {
+      "default": "window",
+      "description": "Surface to snapshot",
+      "enum": [
+       "window",
+       "focused",
+       "menu",
+       "menubar",
+       "sheet",
+       "popover",
+       "alert",
+       "desktop",
+       "taskbar",
+       "system-tray",
+       "quick-settings",
+       "notification-center",
+       "toolbar",
+       "dock",
+       "spotlight",
+       "menu-bar-extras",
+       "system-tray-overflow",
+       "start-menu",
+       "action-center"
+      ],
+      "type": "string"
+     },
+     "timeout_ms": {
+      "description": "Observation deadline in milliseconds (default 3000; raise for slow Chromium settles)",
+      "type": "integer"
+     },
+     "window_id": {
+      "description": "Scope to a single window ID (from list-windows)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_find",
+   "description": "agent-desktop find: Search elements by role, name, value, or text content",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "count": {
+      "description": "Return match count only",
+      "type": "boolean"
+     },
+     "description": {
+      "description": "Match by accessible description",
+      "type": "string"
+     },
+     "exact": {
+      "description": "Require exact (case-insensitive) name/description/value matches",
+      "type": "boolean"
+     },
+     "first": {
+      "description": "Return first match only",
+      "type": "boolean"
+     },
+     "last": {
+      "description": "Return last match only",
+      "type": "boolean"
+     },
+     "limit": {
+      "description": "Return at most N matches; defaults to 50 when omitted, use 0 for all",
+      "type": "integer"
+     },
+     "name": {
+      "description": "Match by accessible name or label",
+      "type": "string"
+     },
+     "native_id": {
+      "description": "Match by native automation id (AXIdentifier)",
+      "type": "string"
+     },
+     "nth": {
+      "description": "Return Nth match (0-indexed)",
+      "type": "integer"
+     },
+     "role": {
+      "description": "Match by accessibility role (button, textfield, checkbox ...)",
+      "type": "string"
+     },
+     "root": {
+      "description": "Search only inside this ref's subtree, not the whole window",
+      "type": "string"
+     },
+     "states": {
+      "description": "Filter by state token (repeatable); append =true or =false",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "surface": {
+      "default": "window",
+      "description": "Surface to search (menubar, menu, sheet ...) instead of the window",
+      "enum": [
+       "window",
+       "focused",
+       "menu",
+       "menubar",
+       "sheet",
+       "popover",
+       "alert",
+       "desktop",
+       "taskbar",
+       "system-tray",
+       "quick-settings",
+       "notification-center",
+       "toolbar",
+       "dock",
+       "spotlight",
+       "menu-bar-extras",
+       "system-tray-overflow",
+       "start-menu",
+       "action-center"
+      ],
+      "type": "string"
+     },
+     "text": {
+      "description": "Match by text in name, value, title, or description",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "description": "Traversal deadline in milliseconds (default 5000; raise for a large tree such as a shell file dialog)",
+      "type": "integer"
+     },
+     "value": {
+      "description": "Match by current value",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Scope to a single window ID (from list-windows)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_screenshot",
+   "description": "agent-desktop screenshot: Take a PNG screenshot of an application window",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "output_path": {
+      "description": "Save to file instead of returning base64",
+      "type": "string"
+     },
+     "screen": {
+      "description": "Capture display by index (from list-displays; 0 = primary)",
+      "type": "integer"
+     },
+     "window_id": {
+      "description": "Scope to a single window ID (from list-windows)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_get",
+   "description": "agent-desktop get: Read an element property (text, value, title, bounds, role, states)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "property": {
+      "default": "text",
+      "description": "Property: text (what a person reads: content for text-bearing roles, otherwise the name), value, title, bounds, role, states",
+      "type": "string"
+     },
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_is",
+   "description": "agent-desktop is: Check element state (visible, enabled, checked, focused, expanded, selected)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "property": {
+      "default": "visible",
+      "description": "State: visible, enabled, checked, focused, expanded, selected",
+      "type": "string"
+     },
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_click",
+   "description": "agent-desktop click: Click element via accessibility press action",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_double_click",
+   "description": "agent-desktop double-click: Physically double-click element; requires --headed",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_triple_click",
+   "description": "agent-desktop triple-click: Triple-click element; returns POLICY_DENIED when physical input is disabled",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_right_click",
+   "description": "agent-desktop right-click: Open a context menu semantically, or physically with --headed",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_type",
+   "description": "agent-desktop type: Insert text into a text target",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "interval_ms": {
+      "description": "Type one keystroke every N ms (1-2000) instead of inserting TEXT at once; --timeout-ms then applies to each keystroke, and 0 makes each keystroke try once",
+      "type": "integer"
+     },
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "text": {
+      "description": "Text to type",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "description": "Maximum wait in milliseconds, covering ref resolution, actionability and delivery of the text; default 5000 plus 30 per character of TEXT; 0 disables the wait",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_set_value",
+   "description": "agent-desktop set-value: Set element value directly via accessibility attribute",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     },
+     "value": {
+      "description": "Value to set",
+      "type": "string"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_clear",
+   "description": "agent-desktop clear: Clear element value to empty string",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_focus",
+   "description": "agent-desktop focus: Set keyboard focus on element",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_select",
+   "description": "agent-desktop select: Select an option in a list or dropdown",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     },
+     "value": {
+      "description": "Option to select",
+      "type": "string"
+     }
+    },
+    "required": [
+     "ref_id",
+     "value"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_toggle",
+   "description": "agent-desktop toggle: Toggle a checkbox or switch",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_check",
+   "description": "agent-desktop check: Set checkbox or switch to checked state (idempotent)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_uncheck",
+   "description": "agent-desktop uncheck: Set checkbox or switch to unchecked state (idempotent)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_expand",
+   "description": "agent-desktop expand: Expand a disclosure triangle or tree item",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_collapse",
+   "description": "agent-desktop collapse: Collapse a disclosure triangle or tree item",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_scroll",
+   "description": "agent-desktop scroll: Scroll element (--direction up/down/left/right, --amount N)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "amount": {
+      "default": 3,
+      "description": "Number of scroll units",
+      "type": "integer"
+     },
+     "direction": {
+      "default": "down",
+      "description": "Direction: up, down, left, right",
+      "type": "string"
+     },
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_scroll_to",
+   "description": "agent-desktop scroll-to: Scroll element into visible area",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ref_id": {
+      "description": "Qualified ref from snapshot (@<snapshot_id>:eN)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "ref_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_press",
+   "description": "agent-desktop press: Send a key combo: return, escape, cmd+c, shift+tab ...",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Target application name; keys go to its process without focusing it (--headed focuses its window first)",
+      "type": "string"
+     },
+     "combo": {
+      "description": "Key combo: return, escape, cmd+c, shift+tab ...",
+      "type": "string"
+     },
+     "force": {
+      "description": "Send the combo even if the adapter flags it as a dangerous shortcut",
+      "type": "boolean"
+     },
+     "window_id": {
+      "description": "Target the application instance that owns this window (from list-windows); use it when several instances share one name",
+      "type": "string"
+     }
+    },
+    "required": [
+     "combo"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_key_down",
+   "description": "agent-desktop key-down: Hold a key or modifier down (fails closed in stateless mode; use press)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "combo": {
+      "description": "Key or modifier to hold/release: shift, meta, ctrl ... (cmd is accepted); the command is rejected in stateless mode, use press instead",
+      "type": "string"
+     },
+     "force": {
+      "description": "Send the combo even if the adapter flags it as a dangerous shortcut",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "combo"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_key_up",
+   "description": "agent-desktop key-up: Release a held key or modifier (fails closed in stateless mode; use press)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "combo": {
+      "description": "Key or modifier to hold/release: shift, meta, ctrl ... (cmd is accepted); the command is rejected in stateless mode, use press instead",
+      "type": "string"
+     },
+     "force": {
+      "description": "Send the combo even if the adapter flags it as a dangerous shortcut",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "combo"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_hover",
+   "description": "agent-desktop hover: Move cursor to element center or coordinates (requires --headed)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "duration": {
+      "description": "Reserved for compatibility; positive values are rejected in stateless mode (run hover, then `wait <ms>` instead)",
+      "type": "integer"
+     },
+     "ref_id": {
+      "description": "Element ref to hover over; requires --headed",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Maximum ref-resolution and transient-actionability wait in milliseconds; terminal failures return immediately",
+      "type": "integer"
+     },
+     "xy": {
+      "description": "Absolute coordinates as x,y; requires --headed; write a negative value with = (--xy=-100,50)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_drag",
+   "description": "agent-desktop drag: Drag from one element or point to another (requires --headed)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "drop_delay": {
+      "description": "Hold over the destination this many ms before releasing, so the drop target activates; default 500 (150 on Linux)",
+      "type": "integer"
+     },
+     "duration": {
+      "description": "Drag duration in milliseconds",
+      "type": "integer"
+     },
+     "from": {
+      "description": "Source element ref; requires --headed",
+      "type": "string"
+     },
+     "from_xy": {
+      "description": "Source coordinates as x,y; requires --headed; write a negative value with = (--from-xy=-100,50)",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "default": 5000,
+      "description": "Drag action budget in milliseconds, including resolution, actionability, pickup, duration and drop delay; allow headroom for completion",
+      "type": "integer"
+     },
+     "to": {
+      "description": "Destination element ref; requires --headed",
+      "type": "string"
+     },
+     "to_xy": {
+      "description": "Destination coordinates as x,y; requires --headed; write a negative value with = (--to-xy=-100,50)",
+      "type": "string"
+     },
+     "wait_for_scope": {
+      "description": "Window a drag's --wait-for/--wait-for-gone verification polls: 'to' (drop target, default) or 'from' (pickup). Needed when the confirmation appears only in the destination window of a cross-window drag",
+      "enum": [
+       "from",
+       "to"
+      ],
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_mouse_move",
+   "description": "agent-desktop mouse-move: Move cursor to absolute screen coordinates (requires --headed)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "xy": {
+      "description": "Absolute coordinates as x,y; requires --headed; write a negative value with = (--xy=-100,50)",
+      "type": "string"
+     }
+    },
+    "required": [
+     "xy"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_mouse_click",
+   "description": "agent-desktop mouse-click: Click at absolute screen coordinates (requires --headed)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "button": {
+      "default": "left",
+      "description": "Mouse button: left, right, middle",
+      "type": "string"
+     },
+     "count": {
+      "default": 1,
+      "description": "Number of clicks",
+      "type": "integer"
+     },
+     "modifiers": {
+      "description": "Held modifiers: shift, meta, ctrl, alt (repeatable; cmd is accepted)",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "xy": {
+      "description": "Absolute coordinates as x,y; requires --headed; write a negative value with = (--xy=-100,50)",
+      "type": "string"
+     }
+    },
+    "required": [
+     "xy"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_mouse_down",
+   "description": "agent-desktop mouse-down: Press mouse button at coordinates (fails closed in stateless mode; use mouse-click or drag)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "button": {
+      "default": "left",
+      "description": "Mouse button: left, right, middle",
+      "type": "string"
+     },
+     "modifiers": {
+      "description": "Held modifiers: shift, meta, ctrl, alt (repeatable; cmd is accepted)",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "xy": {
+      "description": "Absolute coordinates as x,y; requires --headed; write a negative value with = (--xy=-100,50)",
+      "type": "string"
+     }
+    },
+    "required": [
+     "xy"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_mouse_up",
+   "description": "agent-desktop mouse-up: Release mouse button at coordinates (fails closed in stateless mode; use mouse-click or drag)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "button": {
+      "default": "left",
+      "description": "Mouse button: left, right, middle",
+      "type": "string"
+     },
+     "modifiers": {
+      "description": "Held modifiers: shift, meta, ctrl, alt (repeatable; cmd is accepted)",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "xy": {
+      "description": "Absolute coordinates as x,y; requires --headed; write a negative value with = (--xy=-100,50)",
+      "type": "string"
+     }
+    },
+    "required": [
+     "xy"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_mouse_wheel",
+   "description": "agent-desktop mouse-wheel: Scroll the mouse wheel at absolute coordinates (requires --headed)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "dx": {
+      "default": 0.0,
+      "description": "Horizontal wheel lines; positive scrolls right, negative scrolls left",
+      "type": "number"
+     },
+     "dy": {
+      "description": "Vertical wheel lines; positive scrolls up, negative scrolls down (default -3 when --dx is absent, else 0)",
+      "type": "number"
+     },
+     "modifiers": {
+      "description": "Held modifiers: shift, meta, ctrl, alt (repeatable; cmd is accepted)",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "x": {
+      "description": "Absolute X coordinate for wheel event; write a negative value with = (--x=-100)",
+      "type": "number"
+     },
+     "y": {
+      "description": "Absolute Y coordinate for wheel event; write a negative value with = (--y=-100)",
+      "type": "number"
+     }
+    },
+    "required": [
+     "x",
+     "y"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_launch",
+   "description": "agent-desktop launch: Launch application and return once its process is running; --activate waits for a window, --cdp verifies a DevTools endpoint",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "activate": {
+      "description": "Bring the app forward so it presents a window, and wait for one",
+      "type": "boolean"
+     },
+     "app": {
+      "description": "Application name or bundle ID",
+      "type": "string"
+     },
+     "args": {
+      "description": "Command-line argument passed to the launched app; repeatable, order preserved. For values starting with '-', use --arg=<value>",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "cdp": {
+      "description": "Expose the app's DevTools protocol endpoint on this port (0 or omitted picks a free port)",
+      "type": "integer"
+     },
+     "cwd": {
+      "description": "Working directory for the launched process",
+      "type": "string"
+     },
+     "env": {
+      "description": "Environment variable for the launched process",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "no_attach": {
+      "description": "Start a fresh instance instead of attaching to a running one (Windows fails if the app is already running)",
+      "type": "boolean"
+     },
+     "timeout": {
+      "default": 30000,
+      "description": "Upper bound in ms for the whole launch",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "app"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_close_app",
+   "description": "agent-desktop close-app: Quit an application gracefully (--force to terminate)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Application name",
+      "type": "string"
+     },
+     "force": {
+      "description": "Terminate matching app processes instead of quitting gracefully",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "app"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_list_windows",
+   "description": "agent-desktop list-windows: List all visible windows (--app to filter by application)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by exact case-insensitive name",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "description": "Inventory deadline in milliseconds (default 5000)",
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_list_displays",
+   "description": "agent-desktop list-displays: List connected displays with bounds and scale factor",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_list_apps",
+   "description": "agent-desktop list-apps: List all running GUI applications (--app to filter)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "timeout_ms": {
+      "description": "Inventory deadline in milliseconds (default 5000)",
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_focus_window",
+   "description": "agent-desktop focus-window: Bring a window to front and confirm OS focus",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Application name",
+      "type": "string"
+     },
+     "title": {
+      "description": "Window title (partial match accepted)",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Window ID from list-windows",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_resize_window",
+   "description": "agent-desktop resize-window: Resize application window",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "height": {
+      "description": "New window height in pixels",
+      "type": "number"
+     },
+     "width": {
+      "description": "New window width in pixels",
+      "type": "number"
+     },
+     "window_id": {
+      "description": "Scope to a single window ID (from list-windows)",
+      "type": "string"
+     }
+    },
+    "required": [
+     "width",
+     "height"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_move_window",
+   "description": "agent-desktop move-window: Move application window to new position",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Scope to a single window ID (from list-windows)",
+      "type": "string"
+     },
+     "x": {
+      "description": "New window X position; write a negative value with = (--x=-100)",
+      "type": "number"
+     },
+     "y": {
+      "description": "New window Y position; write a negative value with = (--y=-100)",
+      "type": "number"
+     }
+    },
+    "required": [
+     "x",
+     "y"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_minimize",
+   "description": "agent-desktop minimize: Minimize application window",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Scope to a single window ID (from list-windows)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_maximize",
+   "description": "agent-desktop maximize: Maximize or zoom application window",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Scope to a single window ID (from list-windows)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_restore",
+   "description": "agent-desktop restore: Restore minimized or maximized window",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Scope to a single window ID (from list-windows)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_list_surfaces",
+   "description": "agent-desktop list-surfaces: List accessibility surfaces for an app (window, menu, sheet ...)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to application by name",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_open_system_surface",
+   "description": "agent-desktop open-system-surface: Open a shell surface (start-menu, taskbar, dock, menu-bar-extras ...) and return the window it presents, if any",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "surface": {
+      "description": "Shell surface to open: start-menu, taskbar, system-tray, system-tray-overflow, action-center, dock, menu-bar-extras",
+      "enum": [
+       "window",
+       "focused",
+       "menu",
+       "menubar",
+       "sheet",
+       "popover",
+       "alert",
+       "desktop",
+       "taskbar",
+       "system-tray",
+       "quick-settings",
+       "notification-center",
+       "toolbar",
+       "dock",
+       "spotlight",
+       "menu-bar-extras",
+       "system-tray-overflow",
+       "start-menu",
+       "action-center"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "surface"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_list_notifications",
+   "description": "agent-desktop list-notifications: List notifications from Notification Center",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Filter to notifications from this app",
+      "type": "string"
+     },
+     "limit": {
+      "description": "Maximum number of notifications to return",
+      "type": "integer"
+     },
+     "text": {
+      "description": "Filter to notifications containing this text",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_dismiss_notification",
+   "description": "agent-desktop dismiss-notification: Dismiss a notification by index",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Require the notification at INDEX to be from this app; INDEX is its position in the unfiltered list",
+      "type": "string"
+     },
+     "expected_app": {
+      "description": "Expected app name at INDEX; one expected identity field is required",
+      "type": "string"
+     },
+     "expected_title": {
+      "description": "Expected title at INDEX; one expected identity field is required",
+      "type": "string"
+     },
+     "index": {
+      "description": "1-based notification index from list-notifications",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "index"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_dismiss_all_notifications",
+   "description": "agent-desktop dismiss-all-notifications: Dismiss all notifications (--app to filter)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "app": {
+      "description": "Only dismiss notifications from this app",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_notification_action",
+   "description": "agent-desktop notification-action: Click an action button on a notification",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "action": {
+      "description": "Name of the action button to click (e.g., Reply, Open)",
+      "type": "string"
+     },
+     "expected_app": {
+      "description": "Expected app name at INDEX; one expected identity field is required",
+      "type": "string"
+     },
+     "expected_title": {
+      "description": "Expected title at INDEX; one expected identity field is required",
+      "type": "string"
+     },
+     "index": {
+      "description": "1-based notification index from list-notifications",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "index",
+     "action"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_clipboard_get",
+   "description": "agent-desktop clipboard-get: Read plain-text or typed clipboard contents",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "format": {
+      "description": "Clipboard format to read: text (default), auto, image, file-urls",
+      "type": "string"
+     },
+     "out": {
+      "description": "Where to write image content; defaults to a private temp file under the session dir",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_clipboard_set",
+   "description": "agent-desktop clipboard-set: Write text to the clipboard",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "file_url": {
+      "description": "File path to write to the clipboard as a file reference; repeatable",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "image": {
+      "description": "Path to a PNG file to write to the clipboard",
+      "type": "string"
+     },
+     "text": {
+      "description": "Text to write to the clipboard (ignored if --image or --file-url is given)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_clipboard_clear",
+   "description": "agent-desktop clipboard-clear: Clear the clipboard",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_wait",
+   "description": "agent-desktop wait: Wait for time (ms), element presence, text, or window appearance",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "action": {
+      "description": "Action for --predicate actionable: click (default), type, set-value, or clear",
+      "type": "string"
+     },
+     "app": {
+      "description": "Scope element, window, or text wait to this application",
+      "type": "string"
+     },
+     "count": {
+      "description": "Expected match count for --text waits",
+      "type": "integer"
+     },
+     "element": {
+      "description": "Block until this element ref appears in the tree",
+      "type": "string"
+     },
+     "event": {
+      "description": "Block until a desktop lifecycle signal, detected by baseline diff without needing to know the id/title up front: window-opened, window-closed, app-launched, app-terminated, focus-changed, surface-appeared, surface-dismissed",
+      "type": "string"
+     },
+     "menu": {
+      "description": "Block until a menu surface is open",
+      "type": "boolean"
+     },
+     "menu_closed": {
+      "description": "Block until the menu surface is dismissed",
+      "type": "boolean"
+     },
+     "ms": {
+      "description": "Milliseconds to pause",
+      "type": "integer"
+     },
+     "notification": {
+      "description": "Block until a new notification arrives",
+      "type": "boolean"
+     },
+     "predicate": {
+      "description": "Element wait predicate: exists, enabled, visible, actionable, or value",
+      "type": "string"
+     },
+     "text": {
+      "description": "Block until text appears in the app's accessibility tree; with --notification, filter notification text",
+      "type": "string"
+     },
+     "timeout": {
+      "default": 30000,
+      "description": "Timeout in milliseconds for element/window/text waits",
+      "type": "integer"
+     },
+     "value": {
+      "description": "Expected value for --predicate value",
+      "type": "string"
+     },
+     "window": {
+      "description": "Block until a window with this title appears; with --event, narrows the event wait to that window title instead of selecting a mode",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Optional: narrow --event window-opened/window-closed/focus-changed to one window ID",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_status",
+   "description": "agent-desktop status: Show adapter health, platform info, and permission state",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_permissions",
+   "description": "agent-desktop permissions: Check nested permission states: accessibility/screen_recording/automation each return {state,...}",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "guide": {
+      "description": "Open System Settings with an on-screen guide for granting the missing permissions (macOS)",
+      "type": "boolean"
+     },
+     "request": {
+      "description": "Request missing permissions in the bounded isolated helper",
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_version",
+   "description": "agent-desktop version: Show version, target architecture, and OS",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_batch",
+   "description": "agent-desktop batch: Execute a bounded, sequential, non-atomic JSON command batch",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "commands_json": {
+      "description": "JSON array of {command, args} objects",
+      "type": "string"
+     },
+     "stop_on_error": {
+      "description": "Halt the batch on the first failed command",
+      "type": "boolean"
+     },
+     "timeout_ms": {
+      "default": 60000,
+      "description": "Absolute wall-clock budget for the whole non-atomic batch",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "commands_json"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_skills_list",
+   "description": "agent-desktop skills list: List bundled skills with summaries (default)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_skills_get",
+   "description": "agent-desktop skills get: Print a skill (markdown in data.content)",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "full": {
+      "description": "Append every reference file to the output",
+      "type": "boolean"
+     },
+     "name": {
+      "description": "Skill name or alias: desktop, platform, macos, windows, linux, ffi, jev",
+      "type": "string"
+     },
+     "reference": {
+      "description": "Reference filename (e.g. workflows or references/workflows.md). Omit for the main guide.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_skills_path",
+   "description": "agent-desktop skills path: Print where bundled skills live",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_session_start",
+   "description": "agent-desktop session start: Create a session directory and manifest",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "cursor": {
+      "description": "Show the visual cursor overlay with its default style",
+      "type": "boolean"
+     },
+     "multi_agent": {
+      "description": "Give each harness subagent its own cursor; requires --agent-id on desktop actions",
+      "type": "boolean"
+     },
+     "name": {
+      "description": "Optional human-readable session label",
+      "type": "string"
+     },
+     "no_trace": {
+      "description": "Create the session without automatic tracing",
+      "type": "boolean"
+     },
+     "screenshots": {
+      "description": "Capture pre/post-action screenshots and refmap copies (requires tracing; sensitive)",
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_session_end",
+   "description": "agent-desktop session end: Seal a session manifest",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "id": {
+      "description": "Session id to end; defaults to global --session or AGENT_DESKTOP_SESSION",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_session_list",
+   "description": "agent-desktop session list: List session manifests",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_session_gc",
+   "description": "agent-desktop session gc: Remove ended or provably-stale sessions",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "ended": {
+      "description": "Only consider sessions that already have ended_at set, and remove them even when their trace was written in the last few minutes",
+      "type": "boolean"
+     },
+     "older_than": {
+      "description": "Only remove sessions whose ended_at/created_at age exceeds this many seconds",
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_cursor_overlay_enable",
+   "description": "agent-desktop cursor-overlay enable: Enable and configure the cursor overlay for the selected session",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "accent": {
+      "description": "Cursor, ripple and element highlight colour as a hex value (default #4299FF)",
+      "type": "string"
+     },
+     "bow": {
+      "description": "Path curvature multiplier from 0 (straight) to 3 (default 1)",
+      "type": "number"
+     },
+     "dwell_ms": {
+      "description": "Pause on the target before the action runs, 0 to 300 (default 0)",
+      "type": "integer"
+     },
+     "fill": {
+      "description": "Cursor body colour as a hex value (default: the accent colour)",
+      "type": "string"
+     },
+     "hotspot": {
+      "description": "Point in the image, in image points from its top-left, that marks the click position (default 0,0)",
+      "type": "string"
+     },
+     "image": {
+      "description": "Draw the cursor from a PNG file instead of the built-in arrow; scaled by --size",
+      "type": "string"
+     },
+     "label": {
+      "description": "Show caller-authored intent text beside the cursor overlay",
+      "type": "string"
+     },
+     "max_words": {
+      "description": "Limit the cursor overlay label to 1-12 words (default 6)",
+      "type": "integer"
+     },
+     "motion_seed": {
+      "description": "Vary each move deterministically from this seed",
+      "type": "integer"
+     },
+     "multi_agent": {
+      "description": "Require agent IDs for desktop UI actions; use without --agent-id to configure the session",
+      "type": "boolean"
+     },
+     "no_highlight": {
+      "description": "Do not outline the element when the agent clicks",
+      "type": "boolean"
+     },
+     "no_ripple": {
+      "description": "Do not play the ripple when the agent clicks",
+      "type": "boolean"
+     },
+     "overshoot": {
+      "description": "Overshoot past the target as a fraction, 0 to 0.15 (default 0.035)",
+      "type": "number"
+     },
+     "pointer_hotspot": {
+      "description": "Click point in the pointer image, in image points from its top-left (default 0,0)",
+      "type": "string"
+     },
+     "pointer_image": {
+      "description": "PNG shown instead while the cursor rests on a button, link or other pressable control",
+      "type": "string"
+     },
+     "rim": {
+      "description": "Cursor outline colour as a hex value (default #111318)",
+      "type": "string"
+     },
+     "size": {
+      "description": "Cursor size multiplier from 0.5 to 4.0 (default 1.0)",
+      "type": "number"
+     },
+     "travel_ms": {
+      "description": "Cursor travel time range in ms, short to long moves (default 90,320)",
+      "type": "string"
+     },
+     "tremor": {
+      "description": "Hand tremor amplitude in points, 0 to 4 (default 1.1)",
+      "type": "number"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_cursor_overlay_disable",
+   "description": "agent-desktop cursor-overlay disable: Disable the cursor overlay for the selected session",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_trace_show",
+   "description": "agent-desktop trace show: Merge session trace segments into a bounded JSON timeline",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "event": {
+      "description": "Filter events by name prefix before applying --limit",
+      "type": "string"
+     },
+     "limit": {
+      "default": 500,
+      "description": "Return the last N merged events (0 for all; default 500)",
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   }
+  },
+  {
+   "name": "desktop_trace_export",
+   "description": "agent-desktop trace export: Export a self-contained HTML trace viewer",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "limit": {
+      "default": 5000,
+      "description": "Embed the last N merged events (0 for all; default 5000)",
+      "type": "integer"
+     },
+     "out": {
+      "description": "Output HTML path (default trace-<session>.html)",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  }
+ ]
+}

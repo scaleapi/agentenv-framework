@@ -1,0 +1,5 @@
+# What a composed macOS computer installs into the driver's venv: the protocol with MacOSDriver, whose screen and input
+# need its macos extra, and browser-use's macOS harness at the pinned version, whose skill's sha256 the driver checks.
+# A release pins the protocol to the version it ships.
+agentenv-framework-protocol[computer,macos]>=0.1.460
+macos-harness==0.2.1

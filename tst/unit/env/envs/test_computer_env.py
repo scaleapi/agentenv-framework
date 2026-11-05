@@ -37,8 +37,8 @@ from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
 from agent_env.env.env import DeployedEnv
-from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params, probing,
-                                               resolve_in_base)
+from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
+                                               probing, resolve_in_base)
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
