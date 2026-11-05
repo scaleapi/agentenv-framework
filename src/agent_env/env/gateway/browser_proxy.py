@@ -138,19 +138,22 @@ class BrowserRoutes:
         self._found: dict[str, list[Browser]] = {}
 
     async def browser(self, key: str) -> Browser | Response:
-        """The website browser behind the ``/svc`` child ``key``, from its card, read on first use and kept once
-        read: a 404 for a key no child has or whose card offers none, a 409 for one offering several, and a 503,
-        read again next time, while its card can't be read."""
+        """The website browser behind the ``/svc`` child ``key``, from its card, read on first use and kept once it
+        names one: a 404 for a key no child has or whose card offers none, a 409 for one offering several, and a 503
+        while its card can't be read. A card naming none is read again next time, since a computer lists an app
+        whose server isn't answering yet by its name alone."""
         base = self._urls.get(key)
         if base is None:
             return _error(404, f"no browser {key!r}")
-        if key not in self._found:
+        found = self._found.get(key)
+        if found is None:
             async with httpx.AsyncClient() as client:
                 card = await fetch_child_card(client, key, base)
             if card is None:
                 return _error(503, f"{key}'s card can't be read")
-            self._found[key] = browsers(card)
-        found = self._found[key]
+            found = browsers(card)
+            if found:
+                self._found[key] = found
         if len(found) != 1:
             return _error(409 if found else 404, f"{key} has {len(found) or 'no'} website browsers")
         return found[0]

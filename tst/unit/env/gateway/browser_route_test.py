@@ -230,6 +230,19 @@ async def test_a_child_with_no_browser_or_several_is_refused_and_other_svc_reque
     assert [(e["closed_by"], e["status"]) for e in recorded] == [("gateway", status)]
 
 
+@pytest.mark.asyncio
+async def test_a_browser_whose_server_wasnt_answering_at_the_first_read_is_found_once_its_card_names_it(
+        tmp_path, monkeypatch):
+    card = _computer_card({"name": "chromium", "url": "/svc/chromium/agentenv"})  # how a driver lists a down app
+    async with _gateway(tmp_path, monkeypatch, card) as (url, _), httpx.AsyncClient() as client:
+        before = await client.get(f"{url}/browser/web/cdp/{TOKEN}/json/version")
+        card["children_environments"] = [_app_card()]
+        after = await client.get(f"{url}/browser/web/cdp/{TOKEN}/json/version")
+
+    assert (before.status_code, after.status_code) == (404, 200)
+    assert after.json()["webSocketDebuggerUrl"] == f"ws{url.removeprefix('http')}/browser/web/cdp/{TOKEN}/devtools/browser"
+
+
 def test_an_address_is_rebased_by_its_path_and_anything_else_is_kept():
     base = "https://gw.example:8443"
     assert at_gateway("http://10.0.0.5:7000/svc/chromium/cdp/abc/", base, "b") == "https://gw.example:8443/browser/b/cdp/abc/"
