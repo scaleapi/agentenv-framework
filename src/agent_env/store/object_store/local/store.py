@@ -236,6 +236,10 @@ class LocalFilesystemObjectStore(ObjectStore):
             expires_at=expires_at,
         )
 
+    def grant_port(self) -> int:
+        """The port this store's grant server serves on, started if it isn't, for a VM here that forwards it."""
+        return grant_server(self._grant_bind_host, self._grant_advertise_host).port()
+
     def _grant(self, op: Op, expires_in: int, **scope) -> tuple[str, datetime]:
         if expires_in <= 0:
             raise ValueError(f"expires_in must be positive, got {expires_in}")

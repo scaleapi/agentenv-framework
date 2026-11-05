@@ -116,6 +116,7 @@ def mac(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(lume, "_free_port", lambda: 48123)
     monkeypatch.setattr(lume, "_POLL_S", 0.05)
+    monkeypatch.setattr(lume, "_local_grants", lambda: None)
     provider = LumeSandboxProvider(lume=str(bin_ / "lume"), ssh=str(bin_ / "ssh"), relay_python=str(bin_ / "relay"),
                                    ssh_password="s3cret-pw", boot_timeout_s=10)
     provider.fake = tmp_path
@@ -165,6 +166,36 @@ async def test_a_vm_is_a_clone_of_its_bundle_given_its_seed_relayed_and_policed_
     assert other.tunnel_urls == {18765: "http://10.0.0.5:48123"}
     assert _waited(lambda: (mac.fake / "relay.args").read_text().split())[-1] == f"10.0.0.5:48123={address}:18765"
     await other.terminate()
+
+
+@pytest.mark.asyncio
+async def test_a_local_stores_grants_reach_a_vm_at_its_loopback_through_ssh_forwarding_with_the_trust_in_its_seed(
+        mac, monkeypatch, tmp_path):
+    trust = tmp_path / "trust"
+    trust.mkdir()
+    (trust / "ca-bundle.pem").write_text("roots and the CA")
+    (trust / "ca.pem").write_text("the CA")
+    monkeypatch.setattr(lume, "_local_grants", lambda: (54321, trust))
+
+    sandbox = await mac.create_vm(image="local:bench", env={"ENVIRONMENT_NAME": "desk"}, exposed_ports=[18765])
+
+    folder = mac.fake / "state" / "agent-env" / "lume" / sandbox.sandbox_id / lume.SEED_FOLDER
+    inside = f"{lume.SHARED_FILES}/{lume.SEED_FOLDER}/{lume.TRUST_FOLDER}"
+    assert seed.read_user_data((folder / "user-data").read_text()) == {
+        "ENVIRONMENT_NAME": "desk", "SSL_CERT_FILE": f"{inside}/ca-bundle.pem",
+        "REQUESTS_CA_BUNDLE": f"{inside}/ca-bundle.pem", "NODE_EXTRA_CA_CERTS": f"{inside}/ca.pem"}
+    assert (folder / lume.TRUST_FOLDER / "ca.pem").read_text() == "the CA"
+    address = _state(mac.fake)["vms"][sandbox.sandbox_id]["ipAddress"]
+    [forward] = _waited(lambda: _forwards(mac.fake))
+    assert forward["args"][-3:] == ["-R", "127.0.0.1:54321:127.0.0.1:54321", f"lume@{address}"]
+    assert "ExitOnForwardFailure=yes" in forward["args"] and forward["askpass"]
+    assert LumeSandboxProvider.REACHES_HOST_AT == "127.0.0.1"
+    tunnel = json.loads((folder.parent / "state.json").read_text())["tunnel"]
+
+    await sandbox.terminate()
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(tunnel, 0)
 
 
 @pytest.mark.asyncio
@@ -291,6 +322,14 @@ def test_it_boots_macos_vm_bundles_on_apple_silicon_alone(monkeypatch):
     assert LumeSandboxProvider.native_platforms() == frozenset()
     monkeypatch.setattr(lume.sys, "platform", "linux")
     assert LumeSandboxProvider.vm_bundle_platforms() == frozenset()
+
+
+def _forwards(fake: Path) -> list[dict]:
+    """The fake ssh's forwarding calls, a FileNotFoundError until one is logged."""
+    calls = [json.loads(line) for line in (fake / "lume.json.ssh").read_text().splitlines()]
+    if not (forwards := [call for call in calls if "-N" in call["args"]]):
+        raise FileNotFoundError("no forward logged yet")
+    return forwards
 
 
 def _waited(read, timeout: float = 5):
