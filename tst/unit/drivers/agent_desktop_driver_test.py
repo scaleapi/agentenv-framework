@@ -42,7 +42,8 @@ FAKE = textwrap.dedent('''\
                 for t in manifest["tools"]]
 
     def screenshot(args):
-        Path(args["output_path"]).write_bytes(b"\\x89PNG fake")
+        if not Path(args["output_path"]).is_dir():
+            Path(args["output_path"]).write_bytes(b"\\x89PNG fake")
         return {"ok": True, "command": "screenshot", "data": {"format": "png", "path": args["output_path"]}}
 
     @server.call_tool(validate_input=False)
@@ -125,16 +126,15 @@ async def test_a_call_reaches_a_server_of_its_own_headed_when_the_setting_says_w
 async def test_each_screenshot_a_call_saves_comes_back_beside_its_answer_up_to_the_cap_and_no_other_file_does(
         module, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    named, locked = tmp_path / "named.png", tmp_path / "locked.png"
+    named, unreadable = tmp_path / "named.png", tmp_path / "folder.png"
     named.write_bytes(b"\x89PNG named")
-    locked.write_bytes(b"")
-    locked.chmod(0o200)
+    unreadable.mkdir()
     driver = module.AgentDesktop()
 
     saved = await driver._forward("desktop_screenshot", output_path=str(tmp_path / "a.png"))
     relative = await driver._forward("desktop_screenshot", output_path="rel.png")
     echoed = await driver._forward("desktop_find", name=str(named))
-    unread = await driver._forward("desktop_screenshot", output_path=str(locked))
+    unread = await driver._forward("desktop_screenshot", output_path=str(unreadable))
     monkeypatch.setattr(module, "MAX_IMAGE_BYTES", 2 * len(b"\x89PNG fake"))
     shots = [{"command": "screenshot", "args": {"output_path": str(tmp_path / f"b{n}.png")}} for n in range(3)]
     batch = await driver._forward("desktop_batch", commands_json=json.dumps(
@@ -145,7 +145,8 @@ async def test_each_screenshot_a_call_saves_comes_back_beside_its_answer_up_to_t
     assert (image.type, image.mimeType, base64.b64decode(image.data)) == ("image", "image/png", b"\x89PNG fake")
     assert [block.type for block in relative.content] == ["text", "image"]
     assert [block.type for block in echoed.content] == ["text"]
-    assert unread.content[-1].text == f"Saved but not readable: {locked}"
+    assert [block.type for block in unread.content] == ["text", "text"]
+    assert unread.content[-1].text == f"Saved but not readable: {unreadable}"
     assert [block.type for block in batch.content] == ["text", "image", "image", "text"]
     assert batch.content[-1].text == f"Saved but not attached, past the most one answer carries: {tmp_path / 'b2.png'}"
 

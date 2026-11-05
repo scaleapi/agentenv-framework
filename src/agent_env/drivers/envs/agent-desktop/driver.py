@@ -137,12 +137,12 @@ def _with_images(result: CallToolResult) -> CallToolResult:
     images, total, past, unread = [], 0, [], []
     for path in dict.fromkeys(_saved(result)):
         try:
+            if total + path.stat().st_size > MAX_IMAGE_BYTES:
+                past.append(path)
+                continue
             data = path.read_bytes()
         except OSError:
             unread.append(path)
-            continue
-        if total + len(data) > MAX_IMAGE_BYTES:
-            past.append(path)
             continue
         total += len(data)
         images.append(ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType="image/png"))
