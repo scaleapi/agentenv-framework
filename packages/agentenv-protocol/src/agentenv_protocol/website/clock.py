@@ -1,12 +1,14 @@
 """The universe's clock as a site reads it, the way MCP servers read it: ``clock/v1``'s ``sync_time`` hands the server
 the gateway's ``/clock/time`` URL, and each request then reads that clock's ``{"virtual_time": <RFC3339>}`` once,
 the one instant everything the request does reads (``now()``) and its answer carries as ``X-Universe-Now``, RFC3339 in
-UTC. An unsynced site reads wall time, and so does a synced one whose gateway clock isn't armed (404); one whose clock
+UTC. Requests that arrive while a read is in flight share it, over one pooled connection, so a burst costs the gateway
+one read. An unsynced site reads wall time, and so does a synced one whose gateway clock isn't armed (404); one whose clock
 can't be read raises ``ClockUnavailable``. ``sync_time`` with an empty URL goes back to wall time. ``sync_time`` may
 also name the universe's time zone, an IANA name, which the clock keeps for the site to show local times in; the time
 itself stays UTC."""
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import datetime
 import json
@@ -50,6 +52,9 @@ class UniverseClock:
         self.url: str | None = None
         self.timezone: str | None = None
         self._last: datetime.datetime | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._client: httpx.AsyncClient | None = None
+        self._reading: tuple[str, asyncio.Future] | None = None
 
     @property
     def synced(self) -> bool:
@@ -64,7 +69,7 @@ class UniverseClock:
         ``ClockUnavailable`` when it can't be read."""
         if self.url is None:
             return _wall()
-        self._last = await _read(self.url) or _wall()
+        self._last = await self._shared_read(self.url) or _wall()
         return self._last
 
     def answering_at(self, moment: datetime.datetime) -> contextvars.Token:
@@ -79,20 +84,35 @@ class UniverseClock:
         for an empty ``url``; raises ``ClockUnavailable`` when the clock can't be read, keeping the clock and zone it
         followed."""
         if not url:
-            self.url, self.timezone, self._last = None, None, None
+            self.url, self.timezone, self._last, self._reading = None, None, None, None
             return _wall()
-        virtual = await _read(url) or _wall()
-        self.url, self.timezone, self._last = url, timezone, virtual
+        virtual = await _read(self._pooled(), url) or _wall()
+        self.url, self.timezone, self._last, self._reading = url, timezone, virtual, None
         return virtual
 
+    async def _shared_read(self, url: str) -> datetime.datetime | None:
+        """The clock at ``url``'s time, from the read already in flight for it when there is one, else a new one."""
+        client = self._pooled()
+        if self._reading is None or self._reading[0] != url or self._reading[1].done():
+            reading = asyncio.ensure_future(_read(client, url))
+            reading.add_done_callback(lambda done: done.cancelled() or done.exception())
+            self._reading = (url, reading)
+        return await asyncio.shield(self._reading[1])
 
-async def _read(url: str) -> datetime.datetime | None:
+    def _pooled(self) -> httpx.AsyncClient:
+        """The client this event loop reads the clock with, kept so its connections are reused."""
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop or self._client is None:
+            self._loop, self._client, self._reading = loop, httpx.AsyncClient(timeout=READ_TIMEOUT), None
+        return self._client
+
+
+async def _read(client: httpx.AsyncClient, url: str) -> datetime.datetime | None:
     """The clock at ``url``'s time, None when it isn't armed (404); a transport error or a 5xx is tried again once."""
     failure: Exception | None = None
     for _attempt in range(READ_ATTEMPTS):
         try:
-            async with httpx.AsyncClient(timeout=READ_TIMEOUT) as client:
-                response = await client.get(url)
+            response = await client.get(url)
         except httpx.TransportError as e:
             failure = e
             continue

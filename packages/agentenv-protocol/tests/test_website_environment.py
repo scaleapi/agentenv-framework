@@ -14,6 +14,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
@@ -397,14 +398,19 @@ def test_every_answer_carries_the_universe_time(client: TestClient) -> None:
 
 
 class _Clock:
-    """A gateway-shaped /clock/time whose time a test sets; None answers 404, as an unarmed clock does."""
+    """A gateway-shaped /clock/time whose time a test sets; None answers 404, as an unarmed clock does. It counts the
+    reads it answers, each after ``delay_s``."""
 
     def __init__(self, virtual: str | None) -> None:
         self.virtual = virtual
+        self.hits = 0
+        self.delay_s = 0.0
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                outer.hits += 1
+                time.sleep(outer.delay_s)
                 if outer.virtual is None:
                     self.send_response(404)
                     self.send_header("Content-Length", "0")
@@ -433,6 +439,24 @@ def gateway_clock():
     clock = _Clock("2031-01-01T00:00:00Z")
     yield clock
     clock.close()
+
+
+def test_concurrent_requests_share_one_clock_read_and_every_one_answers(shop: WebsiteEnvironment,
+                                                                        gateway_clock: _Clock) -> None:
+    gateway_clock.delay_s = 0.05
+
+    async def burst() -> tuple[list[httpx.Response], int]:
+        transport = httpx.ASGITransport(app=shop.create_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://shop.example") as client:
+            await client.post("/agentenv/ext/sync_time", json={"env_get_time_url": gateway_clock.url})
+            before = gateway_clock.hits
+            answers = await asyncio.gather(*(client.get("/api/orders") for _ in range(200)))
+            return answers, gateway_clock.hits - before
+
+    answers, reads = asyncio.run(burst())
+    assert [a.status_code for a in answers] == [200] * 200
+    assert {a.headers[UNIVERSE_NOW_HEADER] for a in answers} == {"2031-01-01T00:00:00.000Z"}
+    assert reads < 20
 
 
 def test_sync_time_ties_now_and_the_header_to_the_gateway_clock_read_per_request(client: TestClient,
