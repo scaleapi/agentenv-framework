@@ -78,7 +78,7 @@ with `exposed_ports=[port]` and returns the VM, and the deploy then loads and st
 ### Declarations
 
 Class variables the rest of agent-env reads instead of asking which provider it has. A provider that declares nothing has its
-sandboxes off this machine, runs containers' images by name, and has no private network.
+sandboxes off this machine, runs containers' images by name, has no private network, and isn't trusted to carry WebSockets.
 
 | Variable | Set it when |
 |---|---|
@@ -86,6 +86,7 @@ sandboxes off this machine, runs containers' images by name, and has no private 
 | `CONTAINER_ACCEPTS` | `create_container` runs images other than by name: `Accepts.LOADABLE` (tar.gz, registry name or build context), `Accepts.NAME_OR_CONTEXT` |
 | `SANDBOX_ACCEPTS` | an agent's sandbox runs different images than the default (a provider that implements `create_vm` defaults to `LOADABLE`) |
 | `PRIVATE_NETWORK` | `create_container(private_network=True)` puts containers on a network they share |
+| `WEBSOCKETS` | its sandboxes' exposed ports carry WebSockets both ways, as our own tests or its tunnel's documentation show; a computer with a website browser among its apps, whose CDP address agents reach by WebSocket, refuses a provider without it at preflight, and a chain skips it at deploy |
 
 ## Sandbox handle contract
 
