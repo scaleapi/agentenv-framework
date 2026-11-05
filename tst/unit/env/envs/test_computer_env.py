@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from agentenv_protocol import CONTROL_TOKEN_ENV
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
@@ -906,12 +906,19 @@ async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_listed_
             for name, at in [("mail", "boot"), ("music", "demand"), ("notes", "boot")]]
     env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
 
-    async def invoke(uri, method, params=None, *, environment_name=None):
-        order.append((uri, method, environment_name, record.environment_card))
+    def app_card(name):
+        return {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {"extensions": [
+            {"uri": COMPUTER_APP, "params": {"endpoint": f"/svc/{name}/agentenv/ext/app", "methods": {"launch": {}}}}]}}
+
+    listed_card = {"name": "mail", "capabilities": {"extensions": [{"uri": COMPUTER_READY, "params": {}}]},
+                   "children_environments": [app_card("mail"), app_card("music"), app_card("notes")]}
+
+    async def invoke(uri, method, params=None, *, environment_name=None, child=None):
+        order.append((uri, method, child.name, child.card == app_card(child.name), record.environment_card["name"]))
 
     async def listed(url, names, timeout):
         order.append(("listed", url, names))
-        return {"name": "listed"}
+        return listed_card
 
     async def ready(url, timeout, token):
         order.append(("ready", url, token))
@@ -923,9 +930,8 @@ async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_listed_
     record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={"name": "booted"})
     await env_computer_provider._launch_held_apps(env, record, "http://computer")
 
-    assert order == [("listed", "http://computer", ["mail", "notes"]),
-                     (COMPUTER_APP, "launch", "mail", {"name": "listed"}),
-                     (COMPUTER_APP, "launch", "notes", {"name": "listed"}), ("ready", "http://computer", "t0ken")]
+    assert order == [("listed", "http://computer", ["mail", "notes"]), (COMPUTER_APP, "launch", "mail", True, "mail"),
+                     (COMPUTER_APP, "launch", "notes", True, "mail"), ("ready", "http://computer", "t0ken")]
     assert record.environment_card == {"name": "ready"} and record.environment_card_read_at_utc
     order.clear()
     apps[:] = [apps[1]]

@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, ClassVar, Optional
 
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
@@ -202,14 +203,18 @@ async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: s
     """Launch each app that starts with the computer, whose launch a deploy routing sites holds until the sites' names,
     CA and proxy are in place, through its ``computer-app/v1`` ``launch`` once the computer lists it with its server,
     then wait until the computer is ready, which its boot only waited to answer; the record keeps the card the computer
-    answers then, as its boot's card may list an app by its name alone."""
+    answers then, as its boot's card may list an app by its name alone. Each is launched as the child its card lists,
+    as a computer named for its app, a browser alone, has that name too."""
     os_type = env.computer.os.type
     timeout = ready_timeout(env.composed_apps(), os_type)
     held = [app for app in env.composed_apps() if (launch := app.launch(os_type)) is not None and launch.at == "boot"]
+    launchers: dict[str, protocol_v1.ChildEnv] = {}
     if held:
         record.environment_card = await listed(url, [app.environment_name for app in held], timeout)
+        launchers = {child.name: child for child in protocol_v1.children(record.environment_card)
+                     if protocol_v1.find_extension_method(child.card, COMPUTER_APP, "launch") is not None}
     for app in held:
-        await record.invoke(COMPUTER_APP, "launch", environment_name=app.environment_name)
+        await record.invoke(COMPUTER_APP, "launch", child=launchers[app.environment_name])
     record.environment_card = await ready(url, timeout, record.control_token)
     record.environment_card_read_at_utc = datetime.now(timezone.utc).isoformat()
 
