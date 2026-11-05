@@ -648,6 +648,7 @@ class LocalSandboxProvider(SandboxProvider):
     # a VM it creates (create_vm) loads images.
     SANDBOX_ACCEPTS = Accepts.NAME_OR_CONTEXT
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
+    WEBSOCKETS = True
 
     @property
     def _prepared(self) -> set[str]:

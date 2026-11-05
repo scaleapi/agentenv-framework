@@ -69,6 +69,7 @@ class SmolVmSandboxProvider(SandboxProvider):
     _LOCAL_REGISTRY_DEFAULT_PORT: ClassVar[int] = 5000
     ON_THIS_MACHINE: ClassVar[bool] = True
     REACHES_HOST_AT: ClassVar[str] = "127.0.0.1"
+    WEBSOCKETS = True
     CREATES_VMS: ClassVar[bool] = True
     SANDBOX_ACCEPTS: ClassVar[Accepts] = Accepts.LOADABLE
     CONTAINER_ACCEPTS: ClassVar[Accepts] = Accepts.NAME

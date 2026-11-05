@@ -47,7 +47,9 @@ from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.utils.install import Install, Service
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv, KnownFailure
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
+from agent_env import providers
 from agent_env.providers.env_providers import env_computer_provider
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
@@ -929,16 +931,59 @@ def test_a_boot_mints_a_generated_setting_resolves_a_secret_its_record_withholds
 @pytest.mark.parametrize("change, problem", [
     ("riscv64", "LocalSandboxProvider runs none of its arches (amd64, arm64) natively"),
     ("network", "LocalSandboxProvider can't enforce its network"),
+    ("websockets", "LocalSandboxProvider carries no WebSockets, which its website browser's CDP address needs"),
 ])
-def test_a_deploy_its_sandbox_provider_cant_carry_out_is_refused_at_save(base, driver, docker, monkeypatch, change,
-                                                                       problem):
-    env = _put(base, driver, network={"mode": "allowlist", "allow_hosts": ["example.com"]} if change == "network" else None)
+def test_a_deploy_its_sandbox_provider_cant_carry_out_is_refused_at_save(base, driver, docker, monkeypatch, tmp_path,
+                                                                       change, problem):
+    browser = [_app(None, None, tmp_path / "chromium", compose=False, name="chromium", browser=True)]
+    env = _put(base, driver, network={"mode": "allowlist", "allow_hosts": ["example.com"]} if change == "network" else None,
+               apps=browser if change == "websockets" else [])
     if change == "riscv64":
         monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/riscv64")
+    if change == "websockets":
+        assert DeployEnvTaskStep(id="d", version=None, env_id=env.id).preflight() == []
+        monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "WEBSOCKETS", False)
 
     (refusal,) = DeployEnvTaskStep(id="d", version=None, env_id=env.id).preflight()
 
     assert problem in refusal
+
+
+def test_a_chain_with_no_one_link_that_both_carries_websockets_and_enforces_the_network_is_refused_at_save(
+        base, driver, docker, monkeypatch, tmp_path):
+    class Enforces(local_sandbox.LocalSandboxProvider):
+        WEBSOCKETS = False
+
+        @classmethod
+        def supports_network_policy(cls, policy):
+            return True
+
+    class Carries(local_sandbox.LocalSandboxProvider):
+        pass
+
+    monkeypatch.setattr(providers, "build_sandbox_provider",
+                        lambda spec: ChainedSandboxProvider([Enforces(), Carries()]))
+    env = _put(base, driver, network={"mode": "allowlist", "allow_hosts": ["example.com"]},
+               apps=[_app(None, None, tmp_path / "chromium", compose=False, name="chromium", browser=True)])
+
+    assert Env.get(env.id).deploy_refusal(sandbox_type="chain") == f"computer env {env.id!r}: Carries can't enforce its network"
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_with_a_website_browser_skips_a_link_that_carries_no_websockets_and_boots_on_the_next(
+        base, driver, docker, boots, monkeypatch, tmp_path):
+    env = _put(base, driver, display={"width": 1600, "height": 900},
+               apps=[_app(None, None, tmp_path / "chromium", compose=False, name="chromium", browser=True)])
+
+    class NoWebSockets(local_sandbox.LocalSandboxProvider):
+        WEBSOCKETS = False
+
+    chain = ChainedSandboxProvider([NoWebSockets(), local_sandbox.LocalSandboxProvider()])
+    monkeypatch.setattr(providers, "build_sandbox_provider", lambda spec: chain)
+
+    await Env.get(env.id).deploy(sandbox_type="chain")
+
+    assert [made["provider"] for made in boots.boots] == ["LocalSandboxProvider"]
 
 
 @pytest.fixture

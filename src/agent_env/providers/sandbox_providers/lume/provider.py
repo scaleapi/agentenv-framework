@@ -120,6 +120,7 @@ class LumeSandboxProvider(SandboxProvider):
 
     ON_THIS_MACHINE: ClassVar[bool] = True
     REACHES_HOST_AT: ClassVar[str] = "127.0.0.1"
+    WEBSOCKETS = True
 
     def __init__(self, *, ssh_user: str = "lume", ssh_password: str = "lume", max_running: int = MAX_RUNNING,
                  relay_host: str = "127.0.0.1", lume: str = "lume", ssh: str = "/usr/bin/ssh",

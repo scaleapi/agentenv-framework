@@ -292,6 +292,7 @@ class ModalVmSandboxProvider(SandboxProvider):
     """Provisions a single Modal VM sandbox per env (the VM-mode Modal backend), or one booting a computer's disk."""
 
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.modal.host", "*.w.modal.host")
+    WEBSOCKETS = True
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
