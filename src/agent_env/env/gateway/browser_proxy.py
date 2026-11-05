@@ -28,7 +28,7 @@ from websockets.asyncio.client import ClientConnection, connect
 
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import EXT_BROWSER_URI, EXT_COMPUTER_APP_URI
-from .rest_proxy import HOP_BY_HOP, fetch_child_card, operations, upstream_headers, upstream_url
+from .rest_proxy import client_headers, fetch_child_card, operations, upstream_headers, upstream_url
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +170,7 @@ class BrowserRoutes:
         base = public_base(request)
         if base is None:
             return _error(400, "the Host header isn't a host and port")
-        headers = [(name, value) for name, value in request.headers.raw
-                   if name.lower() not in HOP_BY_HOP and name.lower() not in self._withheld]
+        headers = client_headers(request, self._withheld)
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 answer = await client.request(request.method, self._target(key, browser, request), headers=headers)
@@ -213,9 +212,9 @@ class BrowserRoutes:
             await self._log_event({**event, "opened_at": None, "closed_at": _now(), "close_code": REFUSED,
                                    "closed_by": "gateway", "status": browser.status_code})
             return
-        headers = [(name, value) for name, value in websocket.headers.items()
-                   if name.encode() not in HOP_BY_HOP and name.encode() not in self._withheld
-                   and not name.startswith("sec-websocket-")]
+        headers = [(name.decode("latin-1"), value.decode("latin-1"))
+                   for name, value in client_headers(websocket, self._withheld)
+                   if not name.lower().startswith(b"sec-websocket-")]
         offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
         try:
             upstream = await connect(
