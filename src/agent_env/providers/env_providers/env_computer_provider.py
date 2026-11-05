@@ -152,10 +152,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     **({"app_settings": app_settings} if app_settings else {}),
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )
-            if params.site_routing:
-                record.metadata["computer"]["sites"] = await _route_sites(env, booted.sandbox, params, ttl_seconds)
-                await _launch_held_apps(env, record, booted.url)
-            await _require_display(record, values.get("resolution"))
+            if routed := await _finish_boot(env, record, booted.sandbox, params, ttl_seconds, values.get("resolution")):
+                record.metadata["computer"]["sites"] = routed
         except BaseException:
             await discard(booted.sandbox)
             raise
@@ -184,10 +182,23 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), env.computer.os.type),
                            deployed.control_token, answering=bool(params.site_routing))
         _require_name(env, card)
-        if params.site_routing:
-            record["sites"] = await _route_sites(env, sandbox, params, record["sites"]["valid_for_s"])
-            await _launch_held_apps(env, deployed, deployed.environment_url)
-        await _require_display(deployed, values.get("resolution"))
+        valid_for_s = (record.get("sites") or {}).get("valid_for_s", 0)
+        if routed := await _finish_boot(env, deployed, sandbox, params, valid_for_s, values.get("resolution")):
+            record["sites"] = routed
+
+
+async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sandbox,
+                       params: computer_params.ComputerParams, valid_for_s: int,
+                       resolution: Optional[str]) -> Optional[dict]:
+    """What a deploy and a reset do once the computer's driver answers, in order: with ``site_routing``, the sites
+    routed and the held boot apps launched, the computer then ready; then its display checked. What the record keeps
+    of the routing, or None without it."""
+    routed = None
+    if params.site_routing:
+        routed = await _route_sites(env, sandbox, params, valid_for_s)
+        await _launch_held_apps(env, record, record.environment_url)
+    await _require_display(record, resolution)
+    return routed
 
 
 async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_params.ComputerParams,
