@@ -25,6 +25,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 from websockets.asyncio.client import connect
 
+from agent_env.env.gateway import browser_proxy
 from agent_env.env.gateway import gateway as gw_mod
 from agent_env.env.gateway.browser_proxy import (CDP_ROUTE, TokenRedaction, at_gateway, browsers, public_base,
                                                  rewritten)
@@ -170,6 +171,31 @@ async def test_a_websocket_is_relayed_both_ways_and_each_connection_is_an_event_
         ("buyer", "client", 1000, 0), ("default", "browser", 1008, 403), ("default", "browser", 4000, 0)]
     assert all(e["browser"] == "web" and e["path"] == "devtools/browser" and e["closed_at"] for e in recorded)
     assert all(TOKEN not in json.dumps(e) and "forged" not in json.dumps(e) for e in recorded)
+
+
+@pytest.mark.asyncio
+async def test_a_relay_that_fails_in_between_closes_both_sides_and_records_the_failures_type(tmp_path, monkeypatch):
+    real = browser_proxy.connect
+
+    async def failing_upstream(*args, **kwargs):
+        upstream = await real(*args, **kwargs)
+
+        async def send(message):
+            raise RuntimeError(f"lost {message}")
+        upstream.send = send
+        return upstream
+
+    monkeypatch.setattr(browser_proxy, "connect", failing_upstream)
+    async with _gateway(tmp_path, monkeypatch) as (url, events):
+        async with connect(f"ws{url.removeprefix('http')}/browser/web/cdp/{TOKEN}/devtools/browser") as conn:
+            await conn.send("secret page data")
+            with pytest.raises(websockets.ConnectionClosed) as closed:
+                await conn.recv()
+        recorded = events()
+
+    assert closed.value.rcvd.code == 1011
+    assert [(e["closed_by"], e["close_code"], e["error"]) for e in recorded] == [("gateway", 1011, "RuntimeError")]
+    assert "secret" not in json.dumps(recorded)
 
 
 @pytest.mark.asyncio

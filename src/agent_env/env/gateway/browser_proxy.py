@@ -50,7 +50,7 @@ TOKEN = re.compile(r"(/cdp/)[^/\s?#\"']+")
 UNSENDABLE_CLOSES = (1005, 1006, 1015)
 #: A close for a connection the browser can't be found for, or refuses.
 REFUSED = 1008
-#: A close for a connection the browser didn't answer.
+#: A close for a connection the browser didn't answer, or that failed in between.
 UNREACHABLE = 1011
 
 
@@ -225,14 +225,16 @@ class BrowserRoutes:
             await self._log_event({**event, "opened_at": None, "closed_at": _now(), "close_code": UNREACHABLE,
                                    "closed_by": "gateway", "error": type(e).__name__})
             return
-        opened, closed_by, code = _now(), "gateway", 1001
+        opened, closed_by, code, error = _now(), "gateway", 1001, None
         try:
             async with upstream:
                 await websocket.accept(subprotocol=upstream.subprotocol)
-                closed_by, code = await _both_ways(websocket, upstream)
+                closed_by, code, error = await _both_ways(websocket, upstream)
         finally:
+            if error is not None:
+                logger.warning(f"browser {key}: a relayed connection failed with {error}")
             await self._log_event({**event, "opened_at": opened, "closed_at": _now(), "close_code": code,
-                                   "closed_by": closed_by})
+                                   "closed_by": closed_by, **({"error": error} if error else {})})
 
     def _target(self, key: str, browser: Browser, connection: Request | WebSocket) -> str:
         """The browser's own URL for a request under ``/browser/<key>/``: the child's, the browser's prefix and the
@@ -243,9 +245,10 @@ class BrowserRoutes:
         return f"{self._urls[key].rstrip('/')}{browser.prefix}/{tail}" + (f"?{query}" if query else "")
 
 
-async def _both_ways(client: WebSocket, browser: ClientConnection) -> tuple[str, int]:
+async def _both_ways(client: WebSocket, browser: ClientConnection) -> tuple[str, int, str | None]:
     """Each message from either side sent to the other until one side closes, then the other closed with its code:
-    which side closed first, and its code."""
+    which side closed first, and its code. When neither closed but relaying failed, both are closed as ``UNREACHABLE``
+    and the failure's type is the third value, never its message, which may hold the page's data."""
     ended: list[tuple[str, int]] = []
 
     async def inbound() -> None:
@@ -272,12 +275,21 @@ async def _both_ways(client: WebSocket, browser: ClientConnection) -> tuple[str,
 
     tasks = [asyncio.ensure_future(inbound()), asyncio.ensure_future(outbound())]
     try:
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-    return ended[0] if ended else ("gateway", 1001)
+    if ended:
+        return (*ended[0], None)
+    failure = next((task.exception() for task in done if not task.cancelled() and task.exception()), None)
+    if failure is None:
+        return "gateway", 1001, None
+    with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+        await client.close(UNREACHABLE)
+    with contextlib.suppress(websockets.WebSocketException, OSError):
+        await browser.close(UNREACHABLE)
+    return "gateway", UNREACHABLE, type(failure).__name__
 
 
 def _answered(answer: httpx.Response, fields: frozenset[str], base: str, key: str) -> Response:
