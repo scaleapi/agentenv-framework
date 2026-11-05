@@ -7,7 +7,9 @@ card without it), ``X-Universe-Now`` on every answer the other checks got, a dat
 returned, data/get again), ``clock/v1``'s
 ``sync_time`` against a clock the checker serves, and the forwarded headers wherever an answer shows them, on ``/`` and
 on a GET route with its trailing slash toggled, which a server may redirect, and the cookies those answers set:
-none tied to a domain, and a warning for one whose lifetime is an absolute ``Expires`` with no ``Max-Age``.
+none tied to a domain, and a warning for one whose lifetime is an absolute ``Expires`` with no ``Max-Age``. A site whose
+card declares an ``mcp`` interface, being an MCP server too, must answer ``initialize`` there and ``tools/list`` with
+the tools its card lists (streamable HTTP, ``MCP_PROTOCOL_VERSION``); a site without one skips that check.
 
 Every request goes to the server under check: a card's path or URL naming another scheme, host or port fails the check
 that would have used it, with nothing sent there. The round trip leaves the server's data as it found it, adding the
@@ -33,13 +35,14 @@ import httpx
 from pydantic import ValidationError
 
 from ..client import find_extension, find_extension_method
-from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH
+from ..types import MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, iso, parse_time
 from .readiness import DEFAULT_HEALTH_PATH, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 
 Status = Literal["passed", "failed", "skipped", "warned"]
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
 CLOCK_SLACK_S = 120
+MCP_PROTOCOL_VERSION = "2025-06-18"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,6 +99,7 @@ class _Checker:
         health = site.get("health") if isinstance(site.get("health"), str) else DEFAULT_HEALTH_PATH
         steps = (("any_host", self._any_host), ("health", lambda: self._health(card, health)),
                  ("universe_now", self._universe_now), ("data_plane", lambda: self._data_plane(card)),
+                 ("mcp", lambda: self._mcp(card)),
                  ("clock", lambda: self._clock(card)), ("forwarded", lambda: self._forwarded(site)),
                  ("cookies", lambda: self._cookies(site)))
         outcomes = {name: _outcome(step) for name, step in steps if name != "universe_now"}
@@ -198,6 +202,40 @@ class _Checker:
             return "failed", "data/get after data/reset and data/add of its own export returned other data"
         return "passed", f"{len(exported)} part(s) round-tripped through reset and add"
 
+    def _mcp(self, card: dict) -> tuple[Status, str]:
+        """The MCP endpoint the card declares answers ``initialize`` and lists the card's tools; its answers needn't
+        carry ``X-Universe-Now``, which the MCP transport doesn't promise."""
+        interfaces = [i for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)
+                      and i.get("transport") == MCP_TRANSPORT]
+        if not interfaces:
+            return "skipped", "the card declares no mcp interface"
+        path = interfaces[0].get("url")
+        if not isinstance(path, str) or not path:
+            return "failed", f"the card's mcp interface has no url: {path!r}"
+        url = self._url(path)
+        headers = {"Accept": "application/json, text/event-stream"}
+        first = self.client.post(url, headers=headers, json={
+            "jsonrpc": "2.0", "id": "initialize", "method": "initialize",
+            "params": {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {},
+                       "clientInfo": {"name": "agentenv-website-conformance", "version": "1"}}})
+        server = _mcp_result(first, "initialize").get("serverInfo") or {}
+        if session := first.headers.get("mcp-session-id"):
+            headers["Mcp-Session-Id"] = session
+        try:
+            self.client.post(url, headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+            listed = _mcp_result(self.client.post(url, headers=headers, json={
+                "jsonrpc": "2.0", "id": "tools/list", "method": "tools/list"}), "tools/list")
+        finally:
+            if session:
+                with contextlib.suppress(httpx.HTTPError):
+                    self.client.delete(url, headers=headers)
+        served = sorted(t.get("name") for t in listed.get("tools") or [] if isinstance(t, dict))
+        advertised = sorted(t.get("name") for t in (card.get("capabilities") or {}).get("tools") or []
+                            if isinstance(t, dict))
+        if served != advertised:
+            return "failed", f"tools/list at {path} named {served}, the card {advertised}"
+        return "passed", f"{server.get('name') or 'the server'} at {path} lists the card's {len(served)} tool(s)"
+
     def _clock(self, card: dict) -> tuple[Status, str]:
         if find_extension(card, CLOCK_EXTENSION_URI) is None:
             return "failed", f"the card declares no {CLOCK_EXTENSION_URI}"
@@ -273,6 +311,21 @@ def _outcome(step: Callable[[], tuple[Status, str]]) -> tuple[Status, str]:
         return step()
     except Exception as e:
         return "failed", f"{type(e).__name__}: {e}"
+
+
+def _mcp_result(response: httpx.Response, method: str) -> dict:
+    """The JSON-RPC result of an MCP request, its answer JSON or the last event of an event stream."""
+    text = response.text
+    if response.headers.get("content-type", "").startswith("text/event-stream"):
+        events = [line[len("data:"):] for line in text.splitlines() if line.startswith("data:")]
+        text = events[-1] if events else ""
+    try:
+        body = json.loads(text)
+    except ValueError:
+        raise RuntimeError(f"{method} answered {response.status_code} with no JSON-RPC answer: {text[:200]!r}") from None
+    if not isinstance(body, dict) or "result" not in body:
+        raise RuntimeError(f"{method} answered {response.status_code}: {str(body)[:200]}")
+    return body["result"] or {}
 
 
 def _field_error(error: dict) -> str:

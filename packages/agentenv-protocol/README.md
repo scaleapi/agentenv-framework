@@ -462,6 +462,31 @@ print(env.ready, env.problems)                    # False ['shop: seeded']
   asked, or answers no `WebsiteReadiness`, is a problem itself. A card or child without `ready`, an MCP server's or an
   older site's, isn't counted, so an env with no site serving it is ready with no problems.
 
+## Websites with tools
+
+A website env may also be an MCP server, so an agent can act on a site through tools as well as its pages. Give a
+`WebsiteEnvironment` `@tool` (or `@resource`) methods, as an MCP env has; they need the `mcp` package. The site then
+serves them at `/mcp` (streamable HTTP) beside its pages, `@api` routes and data plane, and its card declares that
+endpoint as its `mcp` interface (`additionalInterfaces`) and lists the tools under `capabilities.tools`. A site without
+tools serves no `/mcp` and declares no interface; `serves_mcp()` says which a site is.
+
+```python
+@environment_card(name="shop")
+@website(domains=["shop.example"], static="dist")
+class Shop(WebsiteEnvironment):
+    @tool()
+    def place_order(self, item: str, ctx: ToolContext) -> str:
+        """Place an order for item, as the caller."""
+        ...
+```
+
+A tool runs in the site's process, so it changes what its pages show and what `data/get` returns, and it reads the
+universe's time (`self.now()`) as a page's request does. The gateway reads each site's card when it starts, and serves
+the tools of a site whose card declares an `mcp` interface as it does an MCP env's: listed to agents with the rest,
+called with the caller's role in `ToolContext`. The site's `/mcp` is one of the paths its card advertises, which its
+browsing route (`/website/<name>/`) never reaches. `python -m agentenv_protocol.website.conformance` checks a declared
+endpoint (`mcp`): it answers `initialize` and lists the tools the card does.
+
 ## Computer drivers
 
 A computer driver is what runs inside a computer an agent uses through screenshots and input. Write

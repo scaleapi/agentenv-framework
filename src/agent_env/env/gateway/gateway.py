@@ -1669,9 +1669,11 @@ def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> boo
 
 
 def site_reserved_paths(card: dict) -> frozenset[str]:
-    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, and every
-    extension's endpoint and each of its methods'; each one a path of its own, not the site's root."""
+    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, every interface's,
+    such as the MCP endpoint of a site that is an MCP server too, and every extension's endpoint and each of its
+    methods'; each one a path of its own, not the site's root."""
     paths = [card.get("url")]
+    paths += [i.get("url") for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)]
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
         params = ext.get("params") if isinstance(ext, dict) else None
         if not isinstance(params, dict):

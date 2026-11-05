@@ -7,7 +7,7 @@ import time
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
-from .constants import DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV
+from .constants import DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT, WELL_KNOWN_PATH
 from .gateway import Gateway
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,48 @@ async def wait_for_internal_servers(servers: list[InternalMCPServer]) -> None:
     logger.info(f"All {len(servers)} internal MCP server(s) ready in {time.monotonic() - t0:.1f}s")
 
 
+async def website_mcp_servers(sites: dict[str, str], taken: frozenset[str] = frozenset(),
+                              timeout_s: int = _INTERNAL_SERVER_TIMEOUT_S) -> list[InternalMCPServer]:
+    """The sites, by name at the address their server answers, that are MCP servers too: each as an internal server at
+    the MCP endpoint its card declares, so the gateway serves its tools as it does an MCP env's. A site whose card
+    declares no MCP interface, or that answers no card, is left out, as is one named as an internal server already
+    (``taken``). A site whose server can't be reached yet is asked again until ``timeout_s``."""
+    found: list[InternalMCPServer] = []
+    deadline = time.monotonic() + timeout_s
+    async with httpx.AsyncClient() as client:
+        for name, base_url in sites.items():
+            if name in taken:
+                continue
+            base = base_url.rstrip("/")
+            card = await _site_card(client, name, base, deadline)
+            path = next((i.get("url") for i in (card or {}).get("additionalInterfaces") or []
+                         if isinstance(i, dict) and i.get("transport") == MCP_TRANSPORT and i.get("url")), None)
+            if isinstance(path, str) and path.startswith("/"):
+                logger.info(f"Site {name} is an MCP server at {path}")
+                found.append(InternalMCPServer(name=name, mcp_url=f"{base}{path}"))
+    return found
+
+
+async def _site_card(client: httpx.AsyncClient, name: str, base: str, deadline: float) -> dict | None:
+    """The card the site at ``base`` serves, None when it serves none; asked again while its server can't be reached
+    or answers 5xx, until ``deadline``."""
+    while True:
+        try:
+            answer = await client.get(base + WELL_KNOWN_PATH, timeout=5)
+        except httpx.HTTPError:
+            answer = None
+        if answer is not None and answer.status_code < 500:
+            try:
+                card = answer.json() if answer.status_code == 200 else None
+            except ValueError:
+                return None
+            return card if isinstance(card, dict) else None
+        if time.monotonic() >= deadline:
+            logger.warning(f"site {name}'s card at {base} didn't answer in time; its MCP tools, if any, aren't served")
+            return None
+        await asyncio.sleep(_INTERNAL_SERVER_POLL_S)
+
+
 def parse_name_url_map(env_str: str) -> dict[str, str]:
     # Expected format: 'slack=http://slack-website-backend:8000,email=http://email-website-backend:8000'
     urls: dict[str, str] = {}
@@ -137,10 +179,13 @@ if __name__ == "__main__":
         spec=os.environ.get("INTERNAL_MCP_SERVERS", ""),
         port=int(os.environ.get("INTERNAL_MCP_PORT", str(AGENT_ENV_GATEWAY_MCP_PORT))),
     )
-    asyncio.run(wait_for_internal_servers(internal_mcp_servers))
-
     website_urls = parse_name_url_map(os.environ.get("WEBSITE_URLS", ""))
     rest_proxy_urls = parse_name_url_map(os.environ.get("REST_PROXY_URLS", ""))
+    internal_mcp_servers += asyncio.run(website_mcp_servers(
+        {name: rest_proxy_urls.get(name, url) for name, url in website_urls.items()},
+        taken=frozenset(server.name for server in internal_mcp_servers)))
+    asyncio.run(wait_for_internal_servers(internal_mcp_servers))
+
     gateway_mode = GatewayMode(os.environ.get("GATEWAY_MODE", GatewayMode.PERFORMANCE.value))
     service_db_url = os.environ.get("SERVICE_DB_URL")
     gateway = Gateway(

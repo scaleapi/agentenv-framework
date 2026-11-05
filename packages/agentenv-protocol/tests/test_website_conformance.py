@@ -19,7 +19,7 @@ from agentenv_protocol.website import WebsiteEnvironment, api, website
 from agentenv_protocol.website import conformance
 from agentenv_protocol.website.clock import UNIVERSE_NOW_HEADER, iso
 
-CHECKS = ["card", "any_host", "health", "universe_now", "data_plane", "clock", "forwarded", "cookies"]
+CHECKS = ["card", "any_host", "health", "universe_now", "data_plane", "mcp", "clock", "forwarded", "cookies"]
 
 
 def statuses(results: list[conformance.Result]) -> dict[str, str]:
@@ -67,7 +67,7 @@ def sdk_site(notes: WebsiteEnvironment) -> TestClient:
 def test_an_sdk_site_passes_every_check(sdk_site: TestClient) -> None:
     results = conformance.check("http://testserver", client=sdk_site)
     assert [r.name for r in results] == CHECKS
-    assert all(r.status == "passed" for r in results), results
+    assert all(r.status == ("skipped" if r.name == "mcp" else "passed") for r in results), results
     assert sdk_site.post("/agentenv", json={"jsonrpc": "2.0", "id": 1, "method": "data/get"}).json()["result"][
         "parts"][0]["data"] == {"notes": [{"id": 1, "text": "hello"}]}
 
@@ -168,7 +168,7 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, dated_
 
 def test_a_handwritten_server_meeting_the_contract_passes() -> None:
     results = conformance.check("http://testserver", client=TestClient(_handwritten()))
-    assert statuses(results) == dict.fromkeys(CHECKS, "passed"), results
+    assert statuses(results) == {**dict.fromkeys(CHECKS, "passed"), "mcp": "skipped"}, results
 
 
 @pytest.mark.parametrize(("answer", "status", "detail"), [
