@@ -63,18 +63,19 @@ function addTool(client, server, tool) {
 
 // The browser's one open tab, which a browser computer shows as its screen, so the agent works where it's seen; with
 // none or several, or one it can't list, Browser Use opens a tab of its own.
+const TAB_LOOKUP_MS = 15_000;
 async function onlyTab(cdpUrl) {
   try {
     let endpoint = cdpUrl;
     if (/^https?:/.test(endpoint)) {
       const url = new URL(endpoint);
       url.pathname = `${url.pathname.replace(/\/$/, '')}/json/version`;
-      endpoint = (await (await fetch(url, { signal: AbortSignal.timeout(15_000) })).json()).webSocketDebuggerUrl;
+      endpoint = (await (await fetch(url, { signal: AbortSignal.timeout(TAB_LOOKUP_MS) })).json()).webSocketDebuggerUrl;
     }
     const socket = new WebSocket(endpoint);
     let timer;
     const targets = await new Promise((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('Target.getTargets timed out')), 15_000);
+      timer = setTimeout(() => reject(new Error('Target.getTargets timed out')), TAB_LOOKUP_MS);
       socket.onopen = () => socket.send(JSON.stringify({ id: 1, method: 'Target.getTargets' }));
       socket.onmessage = ({ data }) => {
         const message = JSON.parse(data);
