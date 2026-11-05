@@ -66,6 +66,8 @@ RELAY = Path(__file__).resolve().parent.parent / "local_docker" / "relay" / "rel
 #: The prefix of the names of the VMs it clones for deploys, and of the bases it pulls.
 SANDBOX_PREFIX, BASE_PREFIX = "agentenv-", "agentenv-base-"
 _POLL_S = 2.0
+#: How long a builder may take to shut down before it's stopped from outside: one that shuts down does so in seconds.
+SHUTDOWN_WAIT_S = 120
 #: How far back a builder that didn't shut down has its guest's log searched for its shutdown, what marks a line of it,
 #: how many of its last lines are kept besides, and how long reading it may take.
 SHUTDOWN_LOG, SHUTDOWN_WORDS, SHUTDOWN_LOG_LINES, SHUTDOWN_LOG_S = "15m", "shutdown|halt|reboot|logout|sigterm|sigkill", 300, 120
@@ -246,16 +248,16 @@ class LumeSandboxProvider(SandboxProvider):
         return self._sandbox(name, state)
 
     async def keep_builder(self, builder: LumeSandbox) -> str:
-        """``builder`` shut down from inside, once what it wrote is on its disk, within ``boot_timeout_s`` in all, and kept
-        as the VM bundle of its name: its ``local:`` image. One that hasn't stopped by then is synced again and stopped
-        from outside, its guest's log of the minutes before saved and warned of, and kept as well: the compose's probe
-        judges it."""
+        """``builder`` shut down from inside, once what it wrote is on its disk, within ``SHUTDOWN_WAIT_S`` in all, and
+        kept as the VM bundle of its name: its ``local:`` image. One that hasn't stopped by then is synced again and
+        stopped from outside, its guest's log of the minutes before saved and warned of, and kept as well: the
+        compose's probe judges it."""
         name = builder.sandbox_id
         password = f"{SHARED_FILES}/{BUILD_FOLDER}/.password"
-        deadline = time.monotonic() + self.boot_timeout_s
+        deadline = time.monotonic() + SHUTDOWN_WAIT_S
         shutdown = await self._ssh(name, ["sh", "-c", f"sync; sudo -S -p '' shutdown -h now < {shlex.quote(password)}"],
                                    timeout=60)
-        ended = await _bounded(shutdown, self.boot_timeout_s) is not None
+        ended = await _bounded(shutdown, SHUTDOWN_WAIT_S) is not None
         while ended and (await self._get(name)).get("status") != "stopped":
             ended = time.monotonic() < deadline
             await asyncio.sleep(_POLL_S)
@@ -282,7 +284,7 @@ class LumeSandboxProvider(SandboxProvider):
         log.write_bytes(out or b"")
         shutdown = (out or b"").decode(errors="replace").split("\n---\n", 1)[0].splitlines()[-40:]
         logger.warning("lume: %s didn't shut down within %.0f s, so it's stopped from outside and kept for the probe to "
-                       "judge; what its guest logged of the shutdown is in %s, ending:\n%s", name, self.boot_timeout_s,
+                       "judge; what its guest logged of the shutdown is in %s, ending:\n%s", name, SHUTDOWN_WAIT_S,
                        log, "\n".join(shutdown))
 
     async def delete_vm_bundle(self, image: str) -> None:

@@ -326,6 +326,7 @@ async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundl
         await mac.open_builder("local:bench", "other", tmp_path)
     hung = await mac.open_builder("local:bench", "agentenv-computer-4567", build)
     monkeypatch.setenv("FAKE_SSH_HANG", "1")
+    monkeypatch.setattr(lume, "SHUTDOWN_WAIT_S", 1)
     mac.boot_timeout_s = 1
     assert await mac.keep_builder(hung) == "local:agentenv-computer-4567"
     log = lume.state_root() / "lume" / "agentenv-computer-4567-shutdown.log"
