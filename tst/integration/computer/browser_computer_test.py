@@ -18,8 +18,6 @@ import json
 import platform
 import re
 import shlex
-import shutil
-import subprocess
 import time
 import urllib.parse
 import uuid
@@ -54,8 +52,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 #: How long an effect may take to reach the page, or the computer to be ready again; how often it's asked meanwhile.
 WAIT_S, POLL_S = 120.0, 0.5
-#: Playwright and Puppeteer, which connect to a cdp address from Node.
-CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
 #: A WebSocket handshake for the browser's relay sent straight to its app server's socket, as code in the computer's
 #: session can, with the token it's given; prints the status line it gets.
 #: The lines of the computer's logs that hold either of two tokens, each shown masked, then one path the driver
@@ -70,22 +66,6 @@ s.sendall(("GET /cdp/" + sys.argv[1] + "/devtools/browser HTTP/1.1\\r\\nHost: ap
            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n\\r\\n").encode())
 print(s.recv(200).split(b"\\r\\n")[0].decode())
 """
-
-
-@pytest.fixture(scope="module")
-def cdp_clients(tmp_path_factory) -> Path:
-    """The CDP clients installed in a folder of their own, or the test skipped without Node 20 or later and npm."""
-    node, npm = shutil.which("node"), shutil.which("npm")
-    version = subprocess.run([node, "--version"], capture_output=True, text=True).stdout if node else ""
-    if not npm or not (match := re.match(r"v(\d+)", version)) or int(match.group(1)) < 20:
-        pytest.skip("the CDP clients need Node 20 or later and npm")
-    folder = tmp_path_factory.mktemp("cdp-clients")
-    for name in ("package.json", "connect.mjs"):
-        shutil.copy(CDP_CLIENTS / name, folder / name)
-    installed = subprocess.run([npm, "install", "--no-audit", "--no-fund", "--loglevel=error"], cwd=folder,
-                               capture_output=True, text=True, timeout=600)
-    assert installed.returncode == 0, installed.stderr
-    return folder
 
 
 # A page whose title says, as JSON, what reached it: clicks and double clicks on its red box, its input's value, how far

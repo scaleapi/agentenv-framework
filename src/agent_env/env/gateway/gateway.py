@@ -32,6 +32,7 @@ from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent,
 from pydantic import create_model
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
+from starlette.routing import WebSocketRoute
 from anyio import ClosedResourceError
 
 if TYPE_CHECKING:
@@ -67,6 +68,7 @@ from .constants import (
     GatewayMode,
     tool_name_clashes_text,
 )
+from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
 from .caller import Caller
 from .changes import ChangeAttribution
 from .child_transport import child_http_client
@@ -91,6 +93,11 @@ logger = logging.getLogger(__name__)
 
 # RFC 9110's safe methods: a request using one asks for no change, so the proxy measures no write window for it.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+# A CDP address at the gateway: the website browser behind the /svc child <key>, discovery and its WebSocket.
+BROWSER_ROUTE = "/browser/{key}/cdp/{token}/{path:path}"
+# The loggers that write a request's path or a forwarded URL: uvicorn's, for HTTP requests and WebSocket handshakes,
+# and httpx's, for each request the gateway forwards.
+_TOKEN_LOGGERS = ("uvicorn.access", "uvicorn.error", "httpx")
 _STEP_API = {"source": "step_api"}
 
 
@@ -138,6 +145,12 @@ class Gateway:
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
         self._site_reserved: dict[str, frozenset[str]] = {}
+        self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
+                                       self._attribution, self._request_role)
+        for name in _TOKEN_LOGGERS:  # each names a CDP address's path, its token in it, at INFO
+            log = logging.getLogger(name)
+            if not any(isinstance(f, TokenRedaction) for f in log.filters):
+                log.addFilter(TokenRedaction())
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
@@ -199,6 +212,10 @@ class Gateway:
             )
             async def proxy_to_service(request: Request) -> Response:
                 return await self._proxy_rest_request(request)
+
+            @self._mcp.custom_route(BROWSER_ROUTE, methods=["GET", "HEAD"])
+            async def browser_discovery(request: Request) -> Response:
+                return await self._browsers.discovery(request)
 
         if self.website_urls:
             @self._mcp.custom_route(
@@ -410,6 +427,8 @@ class Gateway:
             host=self._mcp.settings.host,
             port=self._mcp.settings.port,
             log_level=self._mcp.settings.log_level.lower(),
+            ws_ping_interval=PING_INTERVAL_S,
+            ws_ping_timeout=PING_INTERVAL_S,
         )
         server = uvicorn.Server(config)
         if self._resolve_i6pn_host():
@@ -432,6 +451,8 @@ class Gateway:
         lifespan wrapped around the MCP session manager's."""
         inner = self._mcp.streamable_http_app()
         inner.router.lifespan_context = self._process_lifespan(inner.router.lifespan_context)
+        if self.rest_proxy_urls:
+            inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
             if scope["type"] != "http":
@@ -616,6 +637,8 @@ class Gateway:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
         role = self._request_role(request)
         mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
+        if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
+            return cdp
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server)
         changelog_before = self._query_changelog_id()
