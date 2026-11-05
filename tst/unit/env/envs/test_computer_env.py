@@ -393,10 +393,29 @@ def test_a_probe_ended_by_a_dropped_connection_runs_again_on_a_fresh_boot_and_on
     ({"status": "failed", "stage": "probe"}, {"status": "ready"}, False),
     ({"status": "ready"}, {"status": "failed", "stage": "probe"}, True),
     ({"status": "building"}, {"status": "failed", "stage": "build"}, True),
+    ({"status": "building"}, {"status": "ready", "composer": "sha256:another"}, True),
+    ({"status": "failed", "stage": "build"}, {"status": "ready", "composer": None}, True),
 ], ids=["unprobed-over-ready", "build-failure-over-built", "building-over-built", "probe-failure-over-unprobed",
-        "probe-failure-over-ready", "ready-over-probe-failure", "building-over-build-failure"])
+        "probe-failure-over-ready", "ready-over-probe-failure", "building-over-build-failure",
+        "building-over-another-composers-ready", "build-failure-over-a-ready-no-composer-named"])
 def test_a_result_takes_a_pairs_place_only_when_it_got_at_least_as_far(result, stored, replaces):
-    assert (composed._rank(result) >= composed._rank(stored)) is replaces
+    mine = {"composer": composed.composition()}
+    assert (composed._rank({**mine, **result}) >= composed._rank({**mine, **stored})) is replaces
+
+
+def test_the_composers_digest_changes_with_a_files_bytes_and_with_its_executable_bit_alone(tmp_path, monkeypatch):
+    (tmp_path / "prepare.sh").write_text("echo hi\n")
+    (tmp_path / "README.md").write_text("docs")
+    monkeypatch.setattr(composed, "COMPOSING", (tmp_path,))
+    digests = [composed.composition.__wrapped__()]
+    (tmp_path / "prepare.sh").chmod(0o755)
+    digests.append(composed.composition.__wrapped__())
+    (tmp_path / "prepare.sh").write_text("echo bye\n")
+    digests.append(composed.composition.__wrapped__())
+    (tmp_path / "README.md").write_text("other docs")
+    digests.append(composed.composition.__wrapped__())
+
+    assert len(set(digests[:3])) == 3 and digests[3] == digests[2]
 
 
 def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, docker, caplog):
@@ -681,6 +700,25 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
         "computer_settings": {"resolution": "1600x900", "timezone": "Asia/Tokyo"}}
     assert record["computer"]["id"] == f"{env.id}__computer" and record["env_params"] == {
         "computer_settings": {"timezone": "Asia/Tokyo"}, "driver_settings": {"default_space": "norm"}}
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_composes_again_what_an_agent_env_that_composes_differently_built_and_boots_that(
+        base, driver, docker, boots, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    monkeypatch.setattr(composed, "composition", lambda: "sha256:a-later-agent-env")
+
+    stale = Env.get(env.id)
+    statuses, deployable = stale.build_statuses(), stale.deployable_builds()
+    await stale.deploy()
+
+    (booted,) = boots.boots
+    record = Env.get(env.id).metadata["composed"]["container"]
+    assert statuses == {"container/amd64": "unverified, by another composer",
+                        "container/arm64": "ready, by another composer"} and deployable == []
+    assert {arch: (r["status"], r["composer"]) for arch, r in record.items()} == {
+        "amd64": ("unverified", "sha256:a-later-agent-env"), "arm64": ("ready", "sha256:a-later-agent-env")}
+    assert booted["image"] == record["arm64"]["image"]
 
 
 @pytest.mark.asyncio

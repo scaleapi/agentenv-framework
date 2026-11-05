@@ -28,6 +28,7 @@ from agent_env.env.envs._deployment import (
     provider_or_class,
 )
 from agent_env.env.envs.computer.utils import boot, composer, gate, inside
+from agent_env.env.envs.computer.utils.composed import stale
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -208,9 +209,13 @@ class ComputerEnv(Env):
             if pairs := composer.unstarted(self, sandbox_provider, form):
                 them = "it" if len(pairs) == 1 else "them"
                 on = Composing(on_progress=progress)
-                say(f"composing {_pairs(pairs)} before this deploy on "
-                    f"{' or '.join(type(link).__name__ for link in on.provider().links)} (no compose built {them} for "
-                    f"{' or '.join(type(link).__name__ for link in sandbox_provider.links)} yet); later deploys reuse {them}")
+                composed = self.metadata.get("composed", {})
+                booting, building = (" or ".join(type(link).__name__ for link in provider.links)
+                                     for provider in (sandbox_provider, on.provider()))
+                why = (f"an agent-env that composes differently built {them}" if any(
+                    stale(composed.get(name, {}).get(arch)) for name, arch in pairs)
+                       else f"no compose built {them} for {booting} yet")
+                say(f"composing {_pairs(pairs)} before this deploy on {building} ({why}); later deploys reuse {them}")
                 composing = asyncio.ensure_future(asyncio.to_thread(composer.compose, self, pairs, on))
                 try:
                     await asyncio.shield(composing)
@@ -225,10 +230,12 @@ class ComputerEnv(Env):
     def deployable_builds(self, form: Optional[str] = None) -> list[tuple[str, str, dict]]:
         """Each build a deploy may boot, as (form, arch, record), in the base's order of forms and of arches; only
         ``form``'s when it's given: a ready one, or a disk no compose could probe (unverified), which its first boot on
-        a provider that boots it natively probes before it's used."""
+        a provider that boots it natively probes before it's used; never one an agent-env that composes differently
+        recorded."""
         composed, arches = self.metadata.get("composed", {}), self.computer.arch
         return [(name, arch, composed[name][arch]) for name in gate.forms(self.computer) if form in (None, name)
-                for arch in arches if composed.get(name, {}).get(arch, {}).get("status") in _DEPLOYABLE[name]]
+                for arch in arches if composed.get(name, {}).get(arch, {}).get("status") in _DEPLOYABLE[name]
+                and not stale(composed[name][arch])]
 
     def disk_size_refusal(self, form: str, disk_size_gb: float) -> Optional[str]:
         """Why a deploy of ``form`` can't have ``disk_size_gb``: a disk is the size its base makes it, which a deploy
@@ -238,7 +245,8 @@ class ComputerEnv(Env):
         return None
 
     def build_statuses(self) -> dict[str, str]:
-        return {f"{form}/{arch}": result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()
+        return {f"{form}/{arch}": f"{result.get('status')}, by another composer" if stale(result) else
+                result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()
                 for arch, result in by_arch.items()}
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10,
