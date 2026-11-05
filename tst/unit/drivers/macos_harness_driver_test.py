@@ -120,6 +120,7 @@ async def test_its_instructions_send_the_agent_to_its_skill_and_readiness_checks
     description, body, files = await driver.bundled_skill()
 
     assert instructions == module.PREFACE and len(instructions) < 4096 and 'run [["skill"]]' in instructions
+    assert "the files the harness names stay on this computer" in instructions
     assert "chain joined with `&&` is a list" in instructions
     assert [(check.name, check.ok) for check in ready] == [("macos-harness", True), ("macOS permissions", True)]
     assert not old.ok and old.detail == "version '0.3.0', not the pinned 0.2.1"

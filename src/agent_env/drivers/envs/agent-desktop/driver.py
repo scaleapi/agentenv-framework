@@ -1,7 +1,8 @@
 """Vercel's agent-desktop as a computer driver on macOS. agent-desktop reads apps' accessibility trees and acts on what
 it finds; its own MCP server, ``agent-desktop mcp``, serves each of its commands as a tool, and agents get what that
 server serves at its pinned version (``mcp.json``): its instructions and its tools, each call forwarded to a server of
-its own and answered as the server answers it, with agent-desktop's skill leading the computer's. The computer/v1
+its own and answered as the server answers it, with each screenshot the call saved to a file beside the answer, since
+the agent can't read the computer's files; agent-desktop's skill leads the computer's. The computer/v1
 operations are MacOSDriver's. This process's Python is granted Accessibility, Post Event and Screen Recording, and
 agent-desktop, which it starts, has them as its own. A tool can't pass agent-desktop's global flags, so the server's
 come from the driver's ``headed`` setting: off, agent-desktop's default, it acts through the accessibility API alone and
@@ -11,6 +12,7 @@ agent-desktop's release where it runs."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import functools
 import hashlib
@@ -21,7 +23,7 @@ from typing import Any, AsyncIterator
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from agentenv_protocol import EnvironmentTool, ForwardedTool, server_instructions
 from agentenv_protocol.computer import ComputerSettings, MacOSDriver, ReadyCheck, computer_driver
@@ -40,6 +42,12 @@ KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
 PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 #: How long one of its commands that reads its skills may take.
 SKILL_TIMEOUT_S = 60
+#: The most bytes of saved screenshots one answer carries.
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+#: What the instructions add to agent-desktop's: the computer's files stay on it.
+FILES = ("Files these tools write stay on this computer, which you don't share: a screenshot saved to an output_path, "
+         "in a batch too, comes back with its answer, up to 8 MB of them an answer, and other files, such as a trace "
+         "export, can't be read from where you run.")
 
 
 @computer_driver(name="agent-desktop", supports=[{"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}])
@@ -59,7 +67,7 @@ class AgentDesktop(MacOSDriver):
 
     @server_instructions
     def agent_desktop_instructions(self) -> str:
-        return _manifest()["instructions"]
+        return f"{_manifest()['instructions']}\n\n{FILES}"
 
     async def ready_checks(self) -> list[ReadyCheck]:
         """agent-desktop's executables and the tools its server lists, as pinned, checked until they pass once, and the
@@ -88,10 +96,11 @@ class AgentDesktop(MacOSDriver):
         that fails before answering may have run the command."""
         try:
             async with self._server() as session:
-                return await session.call_tool(tool, arguments)
+                result = await session.call_tool(tool, arguments)
         except Exception as e:
             return CallToolResult(isError=True, content=[TextContent(type="text", text=(
                 f"agent-desktop's server failed before it answered, so {tool} may have run: {type(e).__name__}: {e}"))])
+        return _with_images(result)
 
     @contextlib.asynccontextmanager
     async def _server(self) -> AsyncIterator[ClientSession]:
@@ -120,6 +129,47 @@ class AgentDesktop(MacOSDriver):
         changed = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
         return [*checks, ReadyCheck("agent-desktop tools", not changed, f"{len(running)} tools, as pinned" if not changed
                                     else f"these tools differ from {MANIFEST.name}: {', '.join(changed)}")]
+
+
+def _with_images(result: CallToolResult) -> CallToolResult:
+    """``result`` with each screenshot its answer saved to a file, up to ``MAX_IMAGE_BYTES`` in all, and a line naming
+    the saved ones it doesn't carry."""
+    images, total, past, unread = [], 0, [], []
+    for path in dict.fromkeys(_saved(result)):
+        try:
+            if total + path.stat().st_size > MAX_IMAGE_BYTES:
+                past.append(path)
+                continue
+            data = path.read_bytes()
+        except OSError:
+            unread.append(path)
+            continue
+        total += len(data)
+        images.append(ImageContent(type="image", data=base64.b64encode(data).decode(), mimeType="image/png"))
+    notes = [f"{label}: {', '.join(map(str, paths))}" for label, paths in (
+        ("Saved but not attached, past the most one answer carries", past), ("Saved but not readable", unread)) if paths]
+    content = [*images, *(TextContent(type="text", text=note) for note in notes)]
+    return result.model_copy(update={"content": [*result.content, *content]}) if content else result
+
+
+def _saved(result: CallToolResult) -> list[Path]:
+    """The files ``result``'s screenshots were saved to, a batch's included: each one's ``data.path``, a relative one
+    from the server's working directory, which is this process's."""
+    found: list[Path] = []
+
+    def walk(answer: Any) -> None:
+        if not isinstance(answer, dict) or not isinstance(data := answer.get("data"), dict):
+            return
+        if answer.get("command") == "screenshot" and data.get("path"):
+            found.append(Path(data["path"]))
+        for each in data.get("results") or []:
+            walk(each)
+
+    for block in result.content:
+        if isinstance(block, TextContent):
+            with contextlib.suppress(ValueError):
+                walk(json.loads(block.text))
+    return found
 
 
 @functools.cache
