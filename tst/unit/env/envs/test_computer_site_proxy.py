@@ -143,7 +143,7 @@ async def test_a_request_goes_to_the_sites_route_with_the_name_and_scheme_the_br
         "GET /website/notes/ ")
     assert first["host"] == f"127.0.0.1:{upstream.port}" and first["x-forwarded-host"] == "notes.test"
     assert (first["x-forwarded-proto"], first["cookie"], first["connection"]) == ("https", "s=1", "close")
-    assert "x-forwarded-prefix" not in first and first[AGENT_ENV_SITE_ROOT_HEADER.lower()] == "1"
+    assert "x-forwarded-prefix" not in first and first[AGENT_ENV_SITE_ROOT_HEADER.lower()] == "https://notes.test"
     assert site_proxy.SITE_ROOT_HEADER == AGENT_ENV_SITE_ROOT_HEADER
     assert (start, body, headers["connection"]) == ("HTTP/1.1 200 OK", b"hello", "keep-alive")
     assert again[2] == b"hello"

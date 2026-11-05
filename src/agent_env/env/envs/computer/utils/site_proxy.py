@@ -232,8 +232,8 @@ def public_cookie(value: str, site: Site) -> str:
 def upstream_request(method: str, target: str, headers: list[tuple[str, str]], site: Site, *, scheme: str,
                      host: str, peer: str, upgrade: Optional[str]) -> bytes:
     """The request head sent to the site's route: the path under its prefix, the gateway as ``Host``, the browser's
-    name and scheme in ``X-Forwarded-Host`` and ``X-Forwarded-Proto``, ``AgentEnv-Site-Root`` so the site is told it
-    is at ``/``, the headers the gateway's sandbox provider asks for (``Site.upstream_headers``) in place of any the
+    name and scheme in ``X-Forwarded-Host`` and ``X-Forwarded-Proto``, ``AgentEnv-Site-Root`` naming the same origin, so
+    the site is told it is at ``/`` there even through a front before the gateway that rewrites the others, the headers the gateway's sandbox provider asks for (``Site.upstream_headers``) in place of any the
     browser sent by those names, and a connection that closes after it, or upgrades when the browser asked to."""
     if not target.startswith("/"):
         parts = urlsplit(target)
@@ -241,7 +241,7 @@ def upstream_request(method: str, target: str, headers: list[tuple[str, str]], s
     provided = {key.lower() for key in site.upstream_headers}
     kept = [(key, value) for key, value in headers if key.lower() not in HOP_BY_HOP | FORWARDED | provided]
     kept += [("Host", site.netloc), ("X-Forwarded-Host", host), ("X-Forwarded-Proto", scheme),
-             ("X-Forwarded-For", peer), (SITE_ROOT_HEADER, "1"), *site.upstream_headers.items()]
+             ("X-Forwarded-For", peer), (SITE_ROOT_HEADER, f"{scheme}://{host}"), *site.upstream_headers.items()]
     kept += [("Connection", "Upgrade"), ("Upgrade", upgrade)] if upgrade else [("Connection", "close")]
     lines = [f"{method} {site.prefix}{target} HTTP/1.1", *(f"{key}: {value}" for key, value in kept)]
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
