@@ -750,7 +750,7 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     assert kwargs["env"][CONTROL_TOKEN_ENV] == deployed.control_token
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S,
-                                                         deployed.control_token)
+                                                         deployed.control_token, answering=False)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
 
 
@@ -798,6 +798,7 @@ def routes(monkeypatch):
 
     monkeypatch.setattr(env_computer_provider.sites, "route", route)
     monkeypatch.setattr(protocol_v1, "get_card", get_card)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
     return made
 
 
@@ -841,7 +842,59 @@ async def test_a_computer_without_site_routing_routes_nothing_whatever_websites_
     await DeployEnvTaskStep(id="d", version=None, env_id=env.id).execute(context)
 
     assert routes == [] and "sites" not in context.deployed_envs[-1].metadata["computer"]
-    assert HOLD_BOOT_LAUNCH_ENV not in boots.boots[0]["environment"]
+    assert HOLD_BOOT_LAUNCH_ENV not in boots.boots[0]["environment"] and boots.boots[0]["held"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_computer_routing_sites_boots_until_its_driver_answers_and_checks_its_display_once_ready(
+        base, driver, docker, boots, routes, monkeypatch):
+    """A page driver's screen is its browser's page, whose launch a deploy routing sites holds: the boot waits only for
+    the driver to answer, and the display is checked once the sites are routed and the computer is ready."""
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    order = []
+    routed = env_computer_provider.sites.route
+
+    async def route(sandbox, sites, **options):
+        order.append("route")
+        return await routed(sandbox, sites, **options)
+
+    async def ready(url, timeout, token, **kwargs):
+        order.append(("ready", kwargs))
+        return DRIVER_CARD
+
+    async def require_display(record, resolution):
+        order.append("display")
+
+    monkeypatch.setattr(env_computer_provider.sites, "route", route)
+    monkeypatch.setattr(env_computer_provider, "ready", ready)
+    monkeypatch.setattr(env_computer_provider, "_require_display", require_display)
+    await DeployEnvTaskStep(id="d", version=None, env_id=env.id, ttl_seconds=3600,
+                            env_params={"site_routing": True}).execute(TaskStepContext(deployed_envs=[_sites_gateway()]))
+
+    assert boots.boots[0]["held"] is True and order == ["route", ("ready", {}), "display"]
+
+
+@pytest.mark.asyncio
+async def test_a_held_boot_waits_for_the_driver_to_answer_and_still_fails_as_soon_as_it_says_it_failed(monkeypatch):
+    statuses = []
+
+    async def get_card(url, timeout=5):
+        return DRIVER_CARD
+
+    async def invoke(url, card, uri, params, timeout, *, method=None, headers=None):
+        return statuses[0]
+
+    monkeypatch.setattr(boot.protocol_v1, "get_card", get_card)
+    monkeypatch.setattr(boot.protocol_v1, "invoke_extension", invoke)
+    monkeypatch.setattr(boot, "_POLL_S", 0.01)
+    statuses[:] = [{"ready": False, "checks": [{"name": "browser", "ok": False, "detail": "no page yet"}]}]
+
+    assert await boot.ready("http://computer", 5, "t0ken", answering=True) == DRIVER_CARD
+    with pytest.raises(TimeoutError, match="browser: no page yet"):
+        await boot.ready("http://computer", 0.2, "t0ken")
+    statuses[:] = [{"ready": False, "failed": "its driver exited"}]
+    with pytest.raises(boot.ComputerFailed, match="its driver exited"):
+        await boot.ready("http://computer", 5, "t0ken", answering=True)
 
 
 @pytest.mark.asyncio
@@ -868,7 +921,7 @@ async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_routed_
     order.clear()
     apps[:] = [apps[1]]
     await env_computer_provider._launch_held_apps(env, record, "http://computer")
-    assert order == []
+    assert order == [("ready", "http://computer", "t0ken")]
 
 
 @pytest.mark.asyncio

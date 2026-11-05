@@ -128,7 +128,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
             environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
-            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form)
+            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing))
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:
@@ -147,10 +147,10 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     **({"app_settings": app_settings} if app_settings else {}),
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )
-            await _require_display(record, values.get("resolution"))
             if params.site_routing:
                 record.metadata["computer"]["sites"] = await _route_sites(env, booted.sandbox, params, ttl_seconds)
                 await _launch_held_apps(env, record, booted.url)
+            await _require_display(record, values.get("resolution"))
         except BaseException:
             await discard(booted.sandbox)
             raise
@@ -177,12 +177,12 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
         card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), env.computer.os.type),
-                           deployed.control_token)
+                           deployed.control_token, answering=bool(params.site_routing))
         _require_name(env, card)
-        await _require_display(deployed, values.get("resolution"))
         if params.site_routing:
             record["sites"] = await _route_sites(env, sandbox, params, record["sites"]["valid_for_s"])
             await _launch_held_apps(env, deployed, deployed.environment_url)
+        await _require_display(deployed, values.get("resolution"))
 
 
 async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_params.ComputerParams,
@@ -196,13 +196,13 @@ async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_para
 
 async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: str) -> None:
     """Launch each app that starts with the computer, whose launch a deploy routing sites holds until the sites' names,
-    CA and proxy are in place, through its ``computer-app/v1`` ``launch``, then wait until the computer is ready."""
+    CA and proxy are in place, through its ``computer-app/v1`` ``launch``, then wait until the computer is ready, which
+    its boot only waited to answer."""
     os_type = env.computer.os.type
     held = [app for app in env.composed_apps() if (launch := app.launch(os_type)) is not None and launch.at == "boot"]
     for app in held:
         await record.invoke(COMPUTER_APP, "launch", environment_name=app.environment_name)
-    if held:
-        await ready(url, ready_timeout(env.composed_apps(), os_type), record.control_token)
+    await ready(url, ready_timeout(env.composed_apps(), os_type), record.control_token)
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
