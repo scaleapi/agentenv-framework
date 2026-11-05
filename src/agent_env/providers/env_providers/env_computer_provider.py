@@ -99,6 +99,9 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         if (picked := first_native(sandbox_provider, pairs, env.stored_id)) is None:
             raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
+        if env.serves_website_browser() and not sandbox_provider.WEBSOCKETS:
+            raise ValueError(f"{type(sandbox_provider).__name__} carries no WebSockets, which {env.id}'s website "
+                             "browser's CDP address needs")
         form, arch = picked
         build = next(build for name, at, build in builds if (name, at) == picked)
         if refusal := env.disk_size_refusal(form, disk_size_gb):

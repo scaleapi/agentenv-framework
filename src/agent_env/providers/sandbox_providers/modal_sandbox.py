@@ -232,6 +232,7 @@ class ModalSandboxProvider(SandboxProvider):
     # containers share i6pn, Modal's private network.
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
     PRIVATE_NETWORK = True
+    WEBSOCKETS = True
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:

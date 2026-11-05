@@ -237,6 +237,9 @@ class SandboxProvider(ABC):
     _DECLARES_SANDBOX_ACCEPTS: ClassVar[bool] = False
     # Whether create_container(private_network=True) puts containers on a network they share.
     PRIVATE_NETWORK: ClassVar[bool] = False
+    # Whether its sandboxes' exposed ports carry WebSockets both ways, as a website browser's CDP address needs: on
+    # where our own tests or its tunnel's documentation say so.
+    WEBSOCKETS: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

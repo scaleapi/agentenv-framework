@@ -161,6 +161,10 @@ class ComputerEnv(Env):
             ctx.refuse([*refused, *missing])
         return {"environment_name": ctx.name, **fields}
 
+    def serves_website_browser(self) -> bool:
+        """Whether a website browser is among its apps, whose CDP address an agent reaches by WebSocket."""
+        return any(app.declaration.browser for app in self.composed_apps())
+
     def composed_apps(self) -> list[ComputerAppEnv]:
         """The computer app envs composed into the env's computer, each installed under its prefix."""
         return self.apps
@@ -255,8 +259,8 @@ class ComputerEnv(Env):
     def deploy_refusal(self, *, sandbox_type: str | None = None, env_params: Optional[dict] = None,
                        **options) -> str | None:
         """Why deploy() would refuse before booting anything, or None: an option the computer provider doesn't take, a
-        problem with ``env_params``, or a sandbox provider that runs none of the env's arches natively or can't enforce
-        its network."""
+        problem with ``env_params``, or a sandbox provider that runs none of the env's arches natively, carries no
+        WebSockets to a website browser among its apps where it does, or can't enforce its network."""
         from agent_env.providers import build_sandbox_provider, get_env_sandbox_provider
         from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 
@@ -266,8 +270,12 @@ class ComputerEnv(Env):
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
         links, arches = sandbox_provider.links, self.composed_arches()
         forms = [params.form] if params.form else gate.forms(self.computer)
-        if not any(boot.native_links(sandbox_provider, arch, form, self.stored_id) for form in forms
-                   for arch in arches):
+        native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id) for form in forms
+                                                for arch in arches)]
+        if native and self.serves_website_browser() and not any(link.WEBSOCKETS for link in native):
+            problems.append(f"{', '.join(type(link).__name__ for link in native)} carries no WebSockets, which its "
+                            "website browser's CDP address needs")
+        if not native:
             unpulled = [type(link).__name__ for link in links if not boot.pulls_containers(link, self.stored_id)]
             problems.append(f"{', '.join(type(link).__name__ for link in links)} runs none of its arches "
                             f"({', '.join(arches)}) natively as {' or '.join(forms)}" + (
