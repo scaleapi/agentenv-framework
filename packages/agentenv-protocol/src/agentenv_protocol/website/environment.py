@@ -28,7 +28,6 @@ from starlette.datastructures import MutableHeaders
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
-from starlette._utils import get_route_path
 from starlette.routing import Route
 
 from ..agent_env_environment import (
@@ -324,7 +323,7 @@ class _Universe:
         try:
             now: Any = await clock.read()
         except ClockUnavailable as e:
-            if not reserved_path(scope["path"]):
+            if not reserved_path(_route_path(scope)):
                 return await error_response(ApiError(str(e), code="clock_unavailable", status=503))(scope, receive, send)
             now = None
         token = clock.answering_at(now)
@@ -372,11 +371,18 @@ def _with_script(html: bytes, script: bytes) -> bytes:
     return html[:at] + script + html[at:]
 
 
+def _route_path(scope: dict) -> str:
+    """The site's own path of a request, as routing reads it: its path without the ``root_path`` a forwarded prefix put
+    before it (``_Forwarded``)."""
+    root, path = scope.get("root_path", ""), scope["path"]
+    return (path[len(root):] or "/") if root and path.startswith(root) else path
+
+
 def _unreserved(handler: Any) -> Any:
     """``handler``, an ``@api`` route's endpoint, answering 404 at the data plane's and card's paths, so a broad route
     (``/{rest:path}``) never serves a page there; the routes agentenv registers at those paths answer before it."""
     async def answer(request: Request) -> Response:
-        if reserved_path(request.scope["path"]):
+        if reserved_path(_route_path(request.scope)):
             return error_response(NotFound("not found"))
         return await handler(request)
     return answer
@@ -395,7 +401,7 @@ class _Fallback:
             if self.app is not None:
                 await self.app(scope, receive, send)
             return
-        path, reading = get_route_path(scope) or "/", scope["method"] in ("GET", "HEAD")
+        path, reading = _route_path(scope), scope["method"] in ("GET", "HEAD")
         if reserved_path(path):
             return await error_response(NotFound("not found"))(scope, receive, send)
         if reading and (file := self._file(path)) is not None:

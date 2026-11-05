@@ -341,6 +341,7 @@ def test_a_broad_route_never_serves_a_page_at_the_data_planes_or_cards_paths(dis
     client = TestClient(Catchall().create_app())
     for path in ("/agentenv/anything", "/agentenv/", "/x/../agentenv/y", "/.well-known/agent-env.json/"):
         assert client.get(path).status_code == 404, path
+        assert client.get(path, headers={"X-Forwarded-Prefix": "/svc/shop"}).status_code == 404, f"behind /svc: {path}"
     assert client.get("/.well-known/agent-env.json").status_code == 200
     assert client.get("/docs/a").json() == {"page": "docs/a"}
 
@@ -524,6 +525,13 @@ def test_a_clock_that_cannot_be_read_is_refused_and_a_lost_one_fails_the_sites_a
     card = client.get("/.well-known/agent-env.json")
     assert card.status_code == 200 and UNIVERSE_NOW_HEADER not in card.headers
     assert rpc(client, "data/get")["parts"][0]["data"] == SEED
+    behind = {"X-Forwarded-Prefix": "/svc/shop"}
+    assert client.get("/", headers=behind).status_code == 503
+    assert client.get("/.well-known/agent-env.json", headers=behind).status_code == 200
+    answer = client.post(RPC, json={"jsonrpc": "2.0", "id": 1, "method": "data/get", "params": {}}, headers=behind)
+    assert answer.status_code == 200 and answer.json()["result"]["parts"][0]["data"] == SEED
+    assert client.post("/agentenv/ext/sync_time", json={"env_get_time_url": ""}, headers=behind).status_code == 200
+    assert client.get("/", headers=behind).status_code == 200
 
 
 def test_clock_patch_puts_the_clock_script_in_html_only(dist: Path, gateway_clock: _Clock) -> None:
