@@ -75,7 +75,9 @@ To move it to another cua-driver version:
 on what it finds; its release's tarball, checked by sha256, is unpacked into the driver's `bin/` by `install.sh`.
 Agents get what its own MCP server, `agent-desktop mcp`, serves, as `mcp.json` pins it: its instructions and its 67
 `desktop_*` tools, each call forwarded to a server of its own, and its skill, its references and its guide for macOS
-leading the computer's skill. The `computer_*` tools, gate 3's probe, `computer-ready` and recording run on
+leading the computer's skill. The agent doesn't share the computer's files, so each image file a call's answer names,
+such as a screenshot's `output_path`, comes back beside the answer (up to 8 MB in all), and the instructions add a line
+saying other files it writes stay on the computer. The `computer_*` tools, gate 3's probe, `computer-ready` and recording run on
 `MacOSDriver` (`agentenv_protocol.computer._macos`): ScreenCaptureKit captures the display and Quartz events, posted
 where the hardware's are, send the input, from the driver's own process. `[install.macos]` grants Accessibility, Post
 Event and Screen Recording to the driver's Python, its venv's own copy of the pinned one, and the LaunchAgent starts
@@ -95,8 +97,8 @@ chaining the actions it's sure of and the read after them with `&&`. Agents get 
 the harness on a list of command lines in order, the first that fails stopping the rest, with no shell between, and a
 line that doesn't start with one of its commands running nothing; instructions that say how its shell lines map to the
 tool and send the agent to its skill, `skill.md` as pinned, which the computer's skill also leads with (Claude Code
-cuts a server's instructions at 4,096 characters, so the skill itself isn't in them); and a read's screenshot as an
-image beside its text. Its `computer_*` tools and its permissions are agent-desktop's, from
+cuts a server's instructions at 4,096 characters, so the skill itself isn't in them); and a read's screenshot, a
+`--keep` copy too, as an image beside its text, the instructions saying the files it names stay on the computer. Its `computer_*` tools and its permissions are agent-desktop's, from
 `MacOSDriver` and a grant to its own Python. The harness gets none of the driver's environment, and its telemetry is off
 (`DO_NOT_TRACK`). `computer-ready` checks its version, that it prints the pinned skill, and the TCC permissions. Name it
 as `macos-harness`.

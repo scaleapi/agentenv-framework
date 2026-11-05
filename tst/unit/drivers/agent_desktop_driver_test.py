@@ -4,6 +4,7 @@ server that fails answers an error; readiness checks the pinned executables and 
 skill is agent-desktop's own, with its references and its guide for macOS."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -42,6 +43,8 @@ FAKE = textwrap.dedent('''\
 
     @server.call_tool(validate_input=False)
     async def call(name, arguments):
+        if arguments.get("output_path"):
+            Path(arguments["output_path"]).write_bytes(b"\\x89PNG fake")
         return [types.TextContent(type="text", text=json.dumps({"ok": True, "command": name, "data": arguments}))]
 
     async def main():
@@ -88,7 +91,8 @@ def test_its_instructions_and_tools_are_its_servers_at_the_pinned_version(module
 
     assert [t.tool.name for t in driver.forwarded_tools()] == [t["name"] for t in manifest["tools"]]
     assert len(manifest["tools"]) == 67 and "desktop_skills_get" in manifest["instructions"]
-    assert driver.agent_desktop_instructions() == manifest["instructions"] and not driver.settings.headed
+    assert driver.agent_desktop_instructions() == f"{manifest['instructions']}\n\n{module.FILES}"
+    assert not driver.settings.headed
 
 
 @pytest.mark.asyncio
@@ -105,6 +109,23 @@ async def test_a_call_reaches_a_server_of_its_own_headed_when_the_setting_says_w
     (first, second) = _calls(tmp_path)
     assert first["argv"] == ["mcp"] and second["argv"] == ["mcp", "--headed"]
     assert "AGENTENV_CONTROL_TOKEN" not in first["env"] and "HOME" in first["env"]
+
+
+@pytest.mark.asyncio
+async def test_an_image_a_call_writes_comes_back_beside_its_answer_and_no_other_file_does(module, tmp_path):
+    shot, trace = tmp_path / "a.png", tmp_path / "trace.html"
+    trace.write_text("<html>")
+    driver = module.AgentDesktop()
+
+    written = await driver._forward("desktop_screenshot", output_path=str(shot))
+    batch = await driver._forward("desktop_batch", commands_json=json.dumps([{"command": "trace export",
+                                                                              "args": {"out": str(trace)}}]))
+    unwritten = await driver._forward("desktop_snapshot", note=str(tmp_path / "never-written.png"))
+
+    text, image = written.content
+    assert json.loads(text.text)["data"] == {"output_path": str(shot)}
+    assert (image.type, image.mimeType, base64.b64decode(image.data)) == ("image", "image/png", b"\x89PNG fake")
+    assert [block.type for block in batch.content] == [block.type for block in unwritten.content] == ["text"]
 
 
 @pytest.mark.asyncio

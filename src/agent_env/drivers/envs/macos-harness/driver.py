@@ -45,8 +45,9 @@ PREFACE = (f"macos-harness {VERSION} runs on this computer through the macos_har
            "guide is its skill: before your first command, run [[\"skill\"]] and follow it. Where the skill shows "
            "`macos-harness ...` in a shell, call macos_harness with the words after `macos-harness`; a chain joined "
            "with `&&` is a list of command lines in one call. Text needs no quoting or heredoc: pass it as one word, "
-           "such as [\"paste\", \"--app\", \"TextEdit\", \"--text\", \"line one\\nline two\"]. A read's screenshot "
-           "comes back as an image.")
+           "such as [\"paste\", \"--app\", \"TextEdit\", \"--text\", \"line one\\nline two\"]. A read's screenshot, "
+           "a --keep copy too, comes back as an image; the files the harness names stay on this computer, which you don't "
+           "share, so open none from where you run.")
 
 
 @computer_driver(name="macos-harness", supports=[{"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}])
