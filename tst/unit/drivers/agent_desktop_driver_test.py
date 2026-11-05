@@ -8,8 +8,10 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -112,7 +114,7 @@ async def test_a_call_reaches_a_server_of_its_own_headed_when_the_setting_says_w
 
 
 @pytest.mark.asyncio
-async def test_an_image_a_call_writes_comes_back_beside_its_answer_and_no_other_file_does(module, tmp_path):
+async def test_an_image_a_call_writes_comes_back_beside_its_answer_and_no_file_it_only_names_does(module, tmp_path):
     shot, trace = tmp_path / "a.png", tmp_path / "trace.html"
     trace.write_text("<html>")
     driver = module.AgentDesktop()
@@ -121,11 +123,16 @@ async def test_an_image_a_call_writes_comes_back_beside_its_answer_and_no_other_
     batch = await driver._forward("desktop_batch", commands_json=json.dumps([{"command": "trace export",
                                                                               "args": {"out": str(trace)}}]))
     unwritten = await driver._forward("desktop_snapshot", note=str(tmp_path / "never-written.png"))
+    old = tmp_path / "earlier.png"
+    old.write_bytes(b"\x89PNG earlier")
+    os.utime(old, (time.time() - 60, time.time() - 60))
+    echoed = await driver._forward("desktop_find", query=str(old))
 
     text, image = written.content
     assert json.loads(text.text)["data"] == {"output_path": str(shot)}
     assert (image.type, image.mimeType, base64.b64decode(image.data)) == ("image", "image/png", b"\x89PNG fake")
     assert [block.type for block in batch.content] == [block.type for block in unwritten.content] == ["text"]
+    assert [block.type for block in echoed.content] == ["text"] and str(old) in echoed.content[0].text
 
 
 @pytest.mark.asyncio

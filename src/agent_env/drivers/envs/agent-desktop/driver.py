@@ -18,6 +18,7 @@ import functools
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -45,6 +46,9 @@ SKILL_TIMEOUT_S = 60
 #: The image files a call's answer may name, by suffix, and the most bytes of them one answer carries.
 IMAGES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+#: How far a written file's modification time may read before the call's start, for the filesystem's timestamp
+#: resolution.
+MTIME_SLACK_S = 1.0
 #: What the instructions add to agent-desktop's: the computer's files stay on it.
 FILES = ("Files these tools write stay on this computer, which you don't share: an image a call writes, such as a "
          "screenshot's output_path, comes back with its answer, and other files, such as a trace export, can't be read "
@@ -95,13 +99,14 @@ class AgentDesktop(MacOSDriver):
     async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
         """A call to one of agent-desktop's tools, on a server of its own, answered as the server answers it. A server
         that fails before answering may have run the command."""
+        started = time.time()
         try:
             async with self._server() as session:
                 result = await session.call_tool(tool, arguments)
         except Exception as e:
             return CallToolResult(isError=True, content=[TextContent(type="text", text=(
                 f"agent-desktop's server failed before it answered, so {tool} may have run: {type(e).__name__}: {e}"))])
-        return _with_images(result)
+        return _with_images(result, started)
 
     @contextlib.asynccontextmanager
     async def _server(self) -> AsyncIterator[ClientSession]:
@@ -132,11 +137,12 @@ class AgentDesktop(MacOSDriver):
                                     else f"these tools differ from {MANIFEST.name}: {', '.join(changed)}")]
 
 
-def _with_images(result: CallToolResult) -> CallToolResult:
-    """``result`` with each image file its answer names beside it, as a screenshot's ``path`` and a batch's commands'
-    are, up to ``MAX_IMAGE_BYTES`` in all."""
+def _with_images(result: CallToolResult, started: float) -> CallToolResult:
+    """``result`` with each image file its answer names that the call wrote, as a screenshot's ``path`` and a batch's
+    commands' are, up to ``MAX_IMAGE_BYTES`` in all: only a file modified since ``started``, so an answer that echoes
+    the path of an image the call didn't write doesn't hand that file over."""
     images, total = [], 0
-    for path in dict.fromkeys(_named(result)):
+    for path in dict.fromkeys(p for p in _named(result) if p.stat().st_mtime >= started - MTIME_SLACK_S):
         mime, size = IMAGES[path.suffix.lower()], path.stat().st_size
         if total + size <= MAX_IMAGE_BYTES:
             total += size
