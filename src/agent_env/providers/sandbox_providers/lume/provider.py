@@ -181,8 +181,8 @@ class LumeSandboxProvider(SandboxProvider):
         """The VM cloned afresh from the bundle it was cloned from, under its MAC address, so it takes the same
         address, with ``env`` in its seed, its relays pointed at it on the same ports; its slot held from its stop until
         it runs again, so no deploy takes it meanwhile. One that doesn't come up is stopped, freeing its slot."""
-        state = self._state(sandbox.sandbox_id)
-        async with self._admitting():
+        async with self._admitting(), self._changing(sandbox.sandbox_id):
+            state = self._state(sandbox.sandbox_id)
             await self._stopped(sandbox.sandbox_id, state)
             await self._lume("delete", sandbox.sandbox_id, "--force")
             await self._lume("clone", state["source"], sandbox.sandbox_id)
@@ -195,18 +195,21 @@ class LumeSandboxProvider(SandboxProvider):
 
     async def get_sandbox(self, sandbox_id: str) -> LumeSandbox:
         """The VM ``sandbox_id``, with this process's grant server forwarded into it, as another process reconnects."""
-        state = self._state(sandbox_id)
-        if "address" in state and (grants := await asyncio.to_thread(_local_grants)) is not None:
-            self._forward(sandbox_id, state, grants[0])
+        grants = await asyncio.to_thread(_local_grants)
+        async with self._changing(sandbox_id):
+            state = self._state(sandbox_id)
+            if "address" in state and grants is not None:
+                self._forward(sandbox_id, state, grants[0])
         return self._sandbox(sandbox_id, state)
 
     async def terminate_sandbox(self, sandbox_id: str) -> None:
         """The VM stopped and deleted, and its relays and its folder gone; one that's gone already is terminated."""
-        try:
-            state = self._state(sandbox_id)
-        except SandboxNotFoundError:
-            state = {}
-        await self._stopped(sandbox_id, state)
+        async with self._changing(sandbox_id):
+            try:
+                state = self._state(sandbox_id)
+            except SandboxNotFoundError:
+                state = {}
+            await self._stopped(sandbox_id, state)
         with contextlib.suppress(RuntimeError):
             await self._lume("delete", sandbox_id, "--force")
         shutil.rmtree(self._folder(sandbox_id), ignore_errors=True)
@@ -482,6 +485,11 @@ class LumeSandboxProvider(SandboxProvider):
 
     def _save(self, name: str, state: dict) -> None:
         _private(self._folder(name) / "state.json", json.dumps(state))
+
+    def _changing(self, name: str) -> AbstractAsyncContextManager[None]:
+        """Held while ``name``'s state is read and changed, by every agent-env on this Mac, so a reconnect, a reset and
+        a termination don't each save over the process ids another saved; after ``_admitting`` when both are held."""
+        return awaiting_lock(f"lume-vm-{name}")
 
     def _admitting(self) -> AbstractAsyncContextManager[None]:
         """Held while a VM is counted, cloned and started, or reset, or a base pulled, by every agent-env on this Mac,

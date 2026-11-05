@@ -194,12 +194,14 @@ async def test_a_local_stores_grants_reach_a_vm_at_its_loopback_through_ssh_forw
     assert "ExitOnForwardFailure=yes" in forward["args"] and forward["askpass"]
     assert LumeSandboxProvider.REACHES_HOST_AT == "127.0.0.1"
 
-    monkeypatch.setattr(lume, "_local_grants", lambda: (54322, trust))
-    await mac.get_sandbox(sandbox.sandbox_id)
+    ports = iter([54322, 54323])
+    monkeypatch.setattr(lume, "_local_grants", lambda: (next(ports), trust))
+    await asyncio.gather(mac.get_sandbox(sandbox.sandbox_id), mac.get_sandbox(sandbox.sandbox_id))
 
-    assert _waited(lambda: _forwards(mac.fake, 2))[-1]["args"][-2] == "127.0.0.1:54322:127.0.0.1:54322"
+    assert {call["args"][-2] for call in _waited(lambda: _forwards(mac.fake, 3))[1:]} == {
+        "127.0.0.1:54322:127.0.0.1:54322", "127.0.0.1:54323:127.0.0.1:54323"}
     forwards = json.loads((folder.parent / "state.json").read_text())["forwards"]
-    assert set(forwards) == {"54321", "54322"}
+    assert set(forwards) == {"54321", "54322", "54323"}
 
     await sandbox.terminate()
 
