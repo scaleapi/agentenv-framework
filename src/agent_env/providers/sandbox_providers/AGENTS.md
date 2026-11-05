@@ -86,7 +86,7 @@ sandboxes off this machine, runs containers' images by name, has no private netw
 | `CONTAINER_ACCEPTS` | `create_container` runs images other than by name: `Accepts.LOADABLE` (tar.gz, registry name or build context), `Accepts.NAME_OR_CONTEXT` |
 | `SANDBOX_ACCEPTS` | an agent's sandbox runs different images than the default (a provider that implements `create_vm` defaults to `LOADABLE`) |
 | `PRIVATE_NETWORK` | `create_container(private_network=True)` puts containers on a network they share |
-| `WEBSOCKETS` | its sandboxes' exposed ports carry WebSockets both ways, as our own tests or its tunnel's documentation show; a computer with a website browser among its apps, whose CDP address agents reach by WebSocket, refuses a provider without it at preflight, and a chain skips it at deploy |
+| `WEBSOCKETS` | its sandboxes' exposed ports carry WebSockets both ways, as `tst/integration/providers/sandbox_providers/websockets_live_test.py` or its tunnel's documentation show; a computer with a website browser among its apps, whose CDP address agents reach by WebSocket, refuses a provider without it at preflight, and a chain skips it at deploy |
 
 ## Sandbox handle contract
 
