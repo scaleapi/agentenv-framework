@@ -171,7 +171,7 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
     prefix = "/opt/agentenv/drivers/desk"
     for line in ['bash "$build/prepare/prepare.sh"', f"curl -fsSL --retry 3 -o {prefix}/desk.tar.gz {URL}",
                  f'echo "{"ab" * 32}  "{prefix}/desk.tar.gz | shasum -a 256 -c - > /dev/null',
-                 f"/opt/agentenv/bin/python3 -m venv --copies {prefix}/venv",
+                 f"/opt/agentenv/python/bin/python3 -m venv --copies {prefix}/venv",
                  f"as_root env PREFIX={prefix} bash -c 'cd {prefix} && ./install-app.sh'",
                  f"grant {APP} accessibility screen_capture", f"grant_executable {prefix}/venv/bin/python post_event",
                  'cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"',

@@ -29,6 +29,9 @@ from agent_env.providers.sandbox_providers.lume.provider import BUILD_FOLDER, SH
 PREPARE = Path(__file__).resolve().parents[4] / "computers" / "vm_bundle" / "macos"
 #: Where the base's Python and agent-env's own programs are in a composed VM bundle.
 BIN = "/opt/agentenv/bin"
+#: The pinned Python itself, which BIN's python3 links to: a venv copies it from here, so the copy's ``home`` is the
+#: folder whose standard library it finds.
+PYTHON = "/opt/agentenv/python/bin/python3"
 #: The architecture a macOS VM bundle runs on.
 ARCH = "arm64"
 
@@ -104,7 +107,7 @@ def _installed(part: Part) -> list[str]:
                       f'echo "{download.sha256}  "{to} | shasum -a 256 -c - > /dev/null']
     if part.venv:
         staged = staged_wheels(part.folder)
-        lines.append(f"{BIN}/python3 -m venv --copies {quoted}/venv")
+        lines.append(f"{PYTHON} -m venv --copies {quoted}/venv")
         if part.wheels:
             lines.append(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check --no-index --no-deps "
                          + " ".join(f'"$build/{staged}/"{shlex.quote(wheel)}' for wheel in part.wheels))
