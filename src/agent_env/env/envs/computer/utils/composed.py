@@ -104,13 +104,14 @@ def stale(result: dict | None) -> bool:
 
 @functools.cache
 def composition() -> str:
-    """The digest of ``COMPOSING``'s files but their docs, by their paths under each folder."""
+    """The digest of ``COMPOSING``'s files but their docs, by their paths under each folder, bytes and whether each is
+    executable, as a build's key takes its context."""
     digest = hashlib.sha256()
     for folder in COMPOSING:
         for path in sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix != ".md"
                            and "__pycache__" not in p.parts):
             digest.update(f"{folder.name}/{path.relative_to(folder).as_posix()}\0".encode())
-            digest.update(path.read_bytes())
+            digest.update(hashlib.sha256(path.read_bytes()).digest() + (b"x" if path.stat().st_mode & 0o100 else b"-"))
     return "sha256:" + digest.hexdigest()
 
 

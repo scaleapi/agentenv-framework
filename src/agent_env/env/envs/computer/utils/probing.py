@@ -38,11 +38,15 @@ _PROBE_ATTEMPTS = 3
 async def probe_first_boot(env: ComputerEnv, form: str, arch: str, sandbox_provider: SandboxProvider) -> dict:
     """Gate 3 for a build its compose couldn't probe, on its first boot on ``sandbox_provider``, which boots it
     natively: the result, recorded. Deploys of one build at once, in this process or another, probe it once: each
-    waits for the one probing, then takes the result it recorded, a failure's too, which keeps the build's key."""
+    waits for the one probing, then takes the result it recorded, a failure's too, which keeps the build's key. A record
+    another compose has taken over since, as an agent-env that composes differently does, stays that compose's: the
+    build this deploy picked is probed for it alone."""
     build = env.metadata["composed"][form][arch]
     async with awaiting_lock(f"computer-first-boot:{env.stored_id}:{form}:{arch}:{build['image']}"):
         recorded = (await asyncio.to_thread(Env.get, env.stored_id, env.version)).metadata["composed"][form][arch]
-        if recorded.get("key") == build["key"] and recorded["status"] != "unverified":
+        if (recorded.get("key"), recorded.get("composer")) != (build["key"], build.get("composer")):
+            return await checked([sandbox_provider], env, env.driver, form, arch, build)
+        if recorded["status"] != "unverified":
             return recorded
         result = await checked([sandbox_provider], env, env.driver, form, arch, recorded)
         await asyncio.to_thread(Record(env).finished, form, arch, result)

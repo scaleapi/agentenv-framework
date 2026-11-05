@@ -403,6 +403,21 @@ def test_a_result_takes_a_pairs_place_only_when_it_got_at_least_as_far(result, s
     assert (composed._rank({**mine, **result}) >= composed._rank({**mine, **stored})) is replaces
 
 
+def test_the_composers_digest_changes_with_a_files_bytes_and_with_its_executable_bit_alone(tmp_path, monkeypatch):
+    (tmp_path / "prepare.sh").write_text("echo hi\n")
+    (tmp_path / "README.md").write_text("docs")
+    monkeypatch.setattr(composed, "COMPOSING", (tmp_path,))
+    digests = [composed.composition.__wrapped__()]
+    (tmp_path / "prepare.sh").chmod(0o755)
+    digests.append(composed.composition.__wrapped__())
+    (tmp_path / "prepare.sh").write_text("echo bye\n")
+    digests.append(composed.composition.__wrapped__())
+    (tmp_path / "README.md").write_text("other docs")
+    digests.append(composed.composition.__wrapped__())
+
+    assert len(set(digests[:3])) == 3 and digests[3] == digests[2]
+
+
 def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, docker, caplog):
     caplog.set_level(logging.ERROR, logger=composer.__name__)  # live logging would put pytest's stdout back mid-command
     docker.fail["linux/amd64"] = "boom"
