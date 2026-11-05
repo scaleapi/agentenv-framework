@@ -110,10 +110,19 @@ async def _run(words: list[str]) -> tuple[int, str]:
     try:
         out, err = await asyncio.wait_for(process.communicate(), COMMAND_TIMEOUT_S)
     except TimeoutError:
-        process.kill()
-        await process.wait()
+        await _stopped(process)
         return 124, f"macos-harness {words[0]} didn't finish within {COMMAND_TIMEOUT_S} s"
+    except BaseException:
+        await _stopped(process)
+        raise
     return process.returncode or 0, (out + err).decode(errors="replace")
+
+
+async def _stopped(process: asyncio.subprocess.Process) -> None:
+    """``process`` killed and reaped, so a call cancelled or out of time acts no more."""
+    if process.returncode is None:
+        process.kill()
+    await asyncio.shield(process.wait())
 
 
 def _image(path: Path) -> ImageContent | None:

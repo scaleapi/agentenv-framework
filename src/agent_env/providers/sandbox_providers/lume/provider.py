@@ -71,6 +71,8 @@ SHUTDOWN_WAIT_S = 120
 #: How far back a builder that didn't shut down has its guest's log searched for its shutdown, what marks a line of it,
 #: how many of its last lines are kept besides, and how long reading it may take.
 SHUTDOWN_LOG, SHUTDOWN_WORDS, SHUTDOWN_LOG_LINES, SHUTDOWN_LOG_S = "15m", "shutdown|halt|reboot|logout|sigterm|sigkill", 300, 120
+#: How long the ssh that reads that log may take to connect, and how many of its shutdown lines the warning quotes.
+SHUTDOWN_SSH_S, SHUTDOWN_WARN_LINES = 30, 40
 #: What Virtualization.framework says when it's asked to run a VM outside a logged-in session.
 _NO_SESSION = "security information"
 #: The variable the ssh password reaches ssh's askpass in.
@@ -274,7 +276,7 @@ class LumeSandboxProvider(SandboxProvider):
         log = state_root() / "lume" / f"{name}-shutdown.log"
         process = await self._ssh(name, ["sh", "-c", (
             f"sync; log show --last {SHUTDOWN_LOG} --style compact 2>&1 | grep -iE '{SHUTDOWN_WORDS}'; echo ---; "
-            f"log show --last 2m --style compact 2>&1 | tail -n {SHUTDOWN_LOG_LINES}")], timeout=30)
+            f"log show --last 2m --style compact 2>&1 | tail -n {SHUTDOWN_LOG_LINES}")], timeout=SHUTDOWN_SSH_S)
         try:
             out, _ = await asyncio.wait_for(process.communicate(), SHUTDOWN_LOG_S)
         except TimeoutError:
@@ -282,7 +284,7 @@ class LumeSandboxProvider(SandboxProvider):
             out, _ = await process.communicate()
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_bytes(out or b"")
-        shutdown = (out or b"").decode(errors="replace").split("\n---\n", 1)[0].splitlines()[-40:]
+        shutdown = (out or b"").decode(errors="replace").split("\n---\n", 1)[0].splitlines()[-SHUTDOWN_WARN_LINES:]
         logger.warning("lume: %s didn't shut down within %.0f s, so it's stopped from outside and kept for the probe to "
                        "judge; what its guest logged of the shutdown is in %s, ending:\n%s", name, SHUTDOWN_WAIT_S,
                        log, "\n".join(shutdown))

@@ -110,7 +110,8 @@ async def test_a_held_key_stays_down_on_every_event_until_released(desk, mac):
 
 
 @pytest.mark.asyncio
-async def test_a_chord_presses_its_modifiers_around_its_key_in_order_and_releases_them_in_reverse(desk, mac):
+async def test_a_chord_presses_its_modifiers_around_its_key_in_order_and_releases_them_in_reverse_shift_too(desk,
+                                                                                                            mac):
     await desk.press_keys(["Control", "Meta", "/"])
     await desk.press_keys(["Shift"])
 
@@ -122,6 +123,15 @@ async def test_a_chord_presses_its_modifiers_around_its_key_in_order_and_release
     ]
     with pytest.raises(Unsupported, match="no key on a US keyboard"):
         await desk.press_keys(["é"])
+    mac.sent.clear()
+    await desk.press_keys(["Control", "A"])
+    await desk.press_keys(["!"])
+
+    assert keys(mac.sent) == [
+        (59, True, CONTROL, None), (56, True, CONTROL | SHIFT, None), (0, True, CONTROL | SHIFT, None),
+        (0, False, CONTROL | SHIFT, None), (56, False, CONTROL, None), (59, False, 0, None),
+        (56, True, SHIFT, None), (18, True, SHIFT, None), (18, False, SHIFT, None), (56, False, 0, None),
+    ]
 
 
 @pytest.mark.asyncio

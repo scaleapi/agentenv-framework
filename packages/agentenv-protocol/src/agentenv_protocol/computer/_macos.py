@@ -169,6 +169,8 @@ class MacOSDriver(ComputerDriverEnvironment):
         *held, key = keys
         code = _code(key)
         hold = self.settings.tap_hold_ms / 1000
+        if key in SHIFTED and SHIFT not in held:
+            held.append(SHIFT)
 
         def act(mac):
             with self._mac_holding(mac, held) as flags:

@@ -4,8 +4,10 @@ image, and the harness given none of the driver's environment and no telemetry; 
 under a line that maps it to the tool; readiness checks the pinned version and skill."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -30,6 +32,10 @@ FAKE = textwrap.dedent('''\
     elif command == "get_app_state":
         print("Window: \\"BenchLab\\", App: BenchLab.\\n\\t5 button Next\\n")
         print(f"Screenshot (2x1 px): {state / 'shot.jpeg'}")
+    elif "slow" in sys.argv:
+        (state / "pid").write_text(str(os.getpid()))
+        import time
+        time.sleep(60)
     elif "fail" in sys.argv:
         print("no element 99", file=sys.stderr)
         sys.exit(3)
@@ -114,3 +120,19 @@ async def test_its_instructions_are_its_pinned_skill_and_readiness_checks_the_ve
     assert not old.ok and old.detail == "version '0.3.0', not the pinned 0.2.1"
     assert description.startswith("Read and operate the apps on this Mac") and body.startswith("# macOS Harness")
     assert files == {}
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_call_stops_the_command_it_was_running(module, tmp_path):
+    call = asyncio.create_task(module.MacosHarness().macos_harness(commands=[["scroll", "--app", "BenchLab", "slow"]]))
+    pid_file = tmp_path / "fake" / "pid"
+    for _ in range(500):
+        if pid_file.exists():
+            break
+        await asyncio.sleep(0.01)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)

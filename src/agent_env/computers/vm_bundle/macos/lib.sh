@@ -51,8 +51,9 @@ grant_executable() {
 # granted CLIENT TYPE PROGRAM SERVICE...: the TCC rows of CLIENT, a bundle identifier (TYPE 0) or a path (TYPE 1), for
 # each SERVICE, bound to PROGRAM's designated requirement.
 granted() {
-    local client=$1 type=$2 program=$3 requirement hex service now csreq approvals
+    local client=$1 type=$2 program=$3 requirement hex service now csreq approvals quoted
     shift 3
+    quoted=${client//\'/\'\'}
     requirement=$(codesign -d -r- "$program" 2>&1 | sed -n 's/^\(# *\)\{0,1\}designated => //p')
     [ -n "$requirement" ] || fail "$program has no designated requirement, so it can't be granted"
     csreq=$(mktemp)
@@ -70,7 +71,7 @@ granted() {
         as_root sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "INSERT OR REPLACE INTO access (service,
             client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type,
             indirect_object_identifier, indirect_object_code_identity, flags, last_modified, pid, pid_version, boot_uuid,
-            last_reminded) VALUES ('$service', '$client', $type, 2, 2, 1, X'$hex', NULL, 0, 'UNUSED', NULL, 0, $now, NULL,
+            last_reminded) VALUES ('$service', '$quoted', $type, 2, 2, 1, X'$hex', NULL, 0, 'UNUSED', NULL, 0, $now, NULL,
             NULL, 'UNUSED', $now);"
         if [ "$service" = kTCCServiceScreenCapture ]; then
             # macOS asks once a program, even granted, before its first direct capture, keyed by the identifier or the
