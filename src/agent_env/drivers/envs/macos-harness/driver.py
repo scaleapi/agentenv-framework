@@ -1,11 +1,12 @@
 """browser-use's macOS harness as a computer driver on macOS. macos-harness reads an app as numbered text and acts on a
 number or a pixel, in the background, through eleven commands its skill teaches an agent to run in a shell, chaining
 the actions it's sure of and the read after them with ``&&``. Agents get one tool, ``macos_harness``, which runs the
-pinned harness on a list of command lines in order, the first that fails stopping the rest, with no shell between; its
-skill, under a line that says so, as the instructions; and a read's screenshot as an image beside its text, since the
-file stays on the computer. The computer/v1 operations are MacOSDriver's. This process's Python is granted
-Accessibility, Post Event and Screen Recording, and the harness, which it starts, has them as its own. Telemetry is
-off. It needs ``agentenv-framework-protocol[computer,macos]`` and ``macos-harness`` where it runs."""
+pinned harness on a list of command lines in order, the first that fails stopping the rest, with no shell between;
+instructions that map its shell to the tool and send the agent to its skill, which it then reads whole, as the vendor's
+own setup has it load the skill, since Claude Code cuts a server's instructions at 4,096 characters; and a read's
+screenshot as an image beside its text, since the file stays on the computer. The computer/v1 operations are
+MacOSDriver's. This process's Python is granted Accessibility, Post Event and Screen Recording, and the harness, which
+it starts, has them as its own. Telemetry is off. It needs ``agentenv-framework-protocol[computer,macos]`` and ``macos-harness`` where it runs."""
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +31,7 @@ SKILL = HERE / "skill.md"
 EXECUTABLE = HERE / "venv" / "bin" / "macos-harness"
 #: The commands a line may start with: the eleven its skill teaches, the skill, and its help and version.
 COMMANDS = ("list_apps", "get_app_state", "click", "perform_secondary_action", "set_value", "select_text", "scroll",
-            "drag", "press_key", "type_text", "paste", "skill", "--help", "--version")
+            "drag", "press_key", "type_text", "paste", "skill", "help", "--help", "--version")
 #: The line a read names the screenshot it kept on, and the image type of each file it keeps.
 SCREENSHOT = re.compile(r"^Screenshot \(\d+x\d+ px\): (.+)$", re.MULTILINE)
 MIME = {".jpeg": "image/jpeg", ".jpg": "image/jpeg", ".png": "image/png"}
@@ -40,11 +41,12 @@ MAX_COMMANDS, COMMAND_TIMEOUT_S = 20, 120
 #: added: no telemetry.
 KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
 ADDED = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "DO_NOT_TRACK": "1"}
-PREFACE = (f"macos-harness {VERSION} runs on this computer through the macos_harness tool, with no shell. Where its "
-           "skill below shows `macos-harness ...` in a shell, call macos_harness with the words after `macos-harness`; "
-           "a chain joined with `&&` is a list of command lines in one call. Text needs no quoting or heredoc: pass it "
-           "as one word, such as [\"paste\", \"--app\", \"TextEdit\", \"--text\", \"line one\\nline two\"]. A read's "
-           "screenshot comes back as an image.")
+PREFACE = (f"macos-harness {VERSION} runs on this computer through the macos_harness tool, with no shell. Its whole "
+           "guide is its skill: before your first command, run [[\"skill\"]] and follow it. Where the skill shows "
+           "`macos-harness ...` in a shell, call macos_harness with the words after `macos-harness`; a chain joined "
+           "with `&&` is a list of command lines in one call. Text needs no quoting or heredoc: pass it as one word, "
+           "such as [\"paste\", \"--app\", \"TextEdit\", \"--text\", \"line one\\nline two\"]. A read's screenshot "
+           "comes back as an image.")
 
 
 @computer_driver(name="macos-harness", supports=[{"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}])
@@ -76,7 +78,7 @@ class MacosHarness(MacOSDriver):
 
     @server_instructions
     def harness_instructions(self) -> str:
-        return f"{PREFACE}\n\n{SKILL.read_text()}"
+        return PREFACE
 
     async def ready_checks(self) -> list[ReadyCheck]:
         """The pinned harness, printing the pinned skill, checked until they pass once, and the TCC permissions, every

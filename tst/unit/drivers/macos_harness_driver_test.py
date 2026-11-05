@@ -1,7 +1,8 @@
 """The macos-harness driver against a fake harness: its one tool runs a list of command lines in order, the first that
 fails stopping the rest, a line that isn't one of its commands running nothing, a read's screenshot returned as an
-image, and the harness given none of the driver's environment and no telemetry; its instructions are its pinned skill
-under a line that maps it to the tool; readiness checks the pinned version and skill."""
+image, and the harness given none of the driver's environment and no telemetry; its instructions map its shell to the
+tool and send the agent to its skill, within the length Claude Code shows; readiness checks the pinned version and
+skill."""
 from __future__ import annotations
 
 import asyncio
@@ -91,8 +92,10 @@ async def test_command_lines_run_in_order_until_one_fails_and_a_reads_screenshot
 @pytest.mark.asyncio
 async def test_a_line_that_isnt_one_of_its_commands_runs_nothing(module, tmp_path):
     result = await module.MacosHarness().macos_harness(commands=[["list_apps"], ["install"]])
+    helped = await module.MacosHarness().macos_harness(commands=[["help"]])
 
-    assert result.isError and "not ['install']. Nothing ran." in result.content[0].text and _calls(tmp_path) == []
+    assert result.isError and "not ['install']. Nothing ran." in result.content[0].text
+    assert not helped.isError and [call["argv"] for call in _calls(tmp_path)] == [["help"]]
 
 
 @pytest.mark.asyncio
@@ -106,16 +109,18 @@ async def test_the_harness_gets_none_of_the_drivers_environment_and_no_telemetry
 
 
 @pytest.mark.asyncio
-async def test_its_instructions_are_its_pinned_skill_and_readiness_checks_the_version_and_the_skill(module, tmp_path):
+async def test_its_instructions_send_the_agent_to_its_skill_and_readiness_checks_the_version_and_skill(module,
+                                                                                                       tmp_path):
     driver = module.MacosHarness()
-    instructions, skill = driver.harness_instructions(), module.SKILL.read_text()
+    instructions = driver.harness_instructions()
     ready = await driver.ready_checks()
     (tmp_path / "fake" / "version").write_text("0.3.0")
     driver._pinned = None
     (old, _) = await driver.ready_checks()
     description, body, files = await driver.bundled_skill()
 
-    assert instructions == f"{module.PREFACE}\n\n{skill}" and "chain joined with `&&` is a list" in instructions
+    assert instructions == module.PREFACE and len(instructions) < 4096 and 'run [["skill"]]' in instructions
+    assert "chain joined with `&&` is a list" in instructions
     assert [(check.name, check.ok) for check in ready] == [("macos-harness", True), ("macOS permissions", True)]
     assert not old.ok and old.detail == "version '0.3.0', not the pinned 0.2.1"
     assert description.startswith("Read and operate the apps on this Mac") and body.startswith("# macOS Harness")

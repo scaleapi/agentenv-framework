@@ -93,9 +93,10 @@ the same macOS computers. macos-harness 0.2.1, from PyPI into the driver's venv,
 on a number or a pixel, in the background, through eleven commands its skill teaches an agent to run in a shell,
 chaining the actions it's sure of and the read after them with `&&`. Agents get one tool, `macos_harness`, which runs
 the harness on a list of command lines in order, the first that fails stopping the rest, with no shell between, and a
-line that doesn't start with one of its commands running nothing; its skill, as `skill.md` pins it, under a line that
-says how its shell lines map to the tool, as the instructions and the lead of the computer's skill; and a read's
-screenshot as an image beside its text. Its `computer_*` tools and its permissions are agent-desktop's, from
+line that doesn't start with one of its commands running nothing; instructions that say how its shell lines map to the
+tool and send the agent to its skill, `skill.md` as pinned, which the computer's skill also leads with (Claude Code
+cuts a server's instructions at 4,096 characters, so the skill itself isn't in them); and a read's screenshot as an
+image beside its text. Its `computer_*` tools and its permissions are agent-desktop's, from
 `MacOSDriver` and a grant to its own Python. The harness gets none of the driver's environment, and its telemetry is off
 (`DO_NOT_TRACK`). `computer-ready` checks its version, that it prints the pinned skill, and the TCC permissions. Name it
 as `macos-harness`.
