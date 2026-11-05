@@ -126,9 +126,10 @@ TRIGGER_WEBSITE = "website"
 TRIGGER_EXECUTOR_HOURS_TIME_ZONE = "executor_hours_time_zone"
 TRIGGER_NEXT_EVENT_AT = "next_event_at"
 TRIGGER_NOTIFY = "notify"
+TRIGGER_WEBSITE_OP = "website_op"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
                     TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT,
-                    TRIGGER_NOTIFY)
+                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP)
 
 # The one `source` a /step call may name instead of step_api, with the id of the hook artifact that made it.
 STEP_SOURCE_POST_TURN_HOOK = "post_turn_hook"

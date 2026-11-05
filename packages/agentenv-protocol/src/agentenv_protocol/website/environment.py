@@ -21,6 +21,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple, Optional
+from urllib.parse import unquote
 
 from starlette.applications import Starlette
 from starlette.datastructures import MutableHeaders
@@ -39,7 +40,8 @@ from ..agent_env_environment import (
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, ClockUnavailable, UniverseClock, clock_patch_script, iso
 from .errors import ApiError, NotFound
 from .readiness import SITE_READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
-from .routes import ApiContext, ApiRoute, endpoint, error_response, openapi, openapi_path, request_role, reserved_path, routes_of
+from .routes import (ApiContext, ApiRoute, endpoint, error_response, forwarded_prefix, openapi, openapi_path, request_role,
+                     reserved_path, routes_of)
 from .session import SESSION_COOKIE, SessionSigner
 
 SESSION_PATH = "/api/session"
@@ -270,9 +272,11 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
 
 class _Forwarded:
-    """Puts the address the browser reached the site at in the scope, from ``X-Forwarded-Host`` and
-    ``X-Forwarded-Proto``, before anything routes it, so redirects, ``request.url`` and a mounted app's ``url_for``
-    name that address and not the internal one the proxy reached the server at."""
+    """Puts the address the browser reached the site at in the scope, from ``X-Forwarded-Host``,
+    ``X-Forwarded-Proto`` and ``X-Forwarded-Prefix``, before anything routes it, so redirects, ``request.url`` and a
+    mounted app's ``url_for`` name that address and not the internal one the proxy reached the server at. A prefix
+    becomes the scope's ``root_path`` and leads its ``path``, as ASGI has a mounted app's, so routing still sees the
+    site's own path."""
 
     def __init__(self, app: Any) -> None:
         self.app = app
@@ -287,6 +291,12 @@ class _Forwarded:
                 scope["headers"] = [(k, v) for k, v in scope["headers"] if k != b"host"] + [(b"host", host.encode())]
             if proto in ("http", "https"):
                 scope["scheme"] = proto if scope["type"] == "http" else {"http": "ws", "https": "wss"}[proto]
+            prefix = forwarded_prefix(_first(headers.get(b"x-forwarded-prefix")))
+            if prefix:
+                scope["root_path"] = unquote(prefix) + scope.get("root_path", "")
+                scope["path"] = unquote(prefix) + scope["path"]
+                if scope.get("raw_path") is not None:
+                    scope["raw_path"] = prefix.encode("latin-1") + scope["raw_path"]
         await self.app(scope, receive, send)
 
 
@@ -313,7 +323,7 @@ class _Universe:
         try:
             now: Any = await clock.read()
         except ClockUnavailable as e:
-            if not reserved_path(scope["path"]):
+            if not reserved_path(_route_path(scope)):
                 return await error_response(ApiError(str(e), code="clock_unavailable", status=503))(scope, receive, send)
             now = None
         token = clock.answering_at(now)
@@ -361,11 +371,18 @@ def _with_script(html: bytes, script: bytes) -> bytes:
     return html[:at] + script + html[at:]
 
 
+def _route_path(scope: dict) -> str:
+    """The site's own path of a request, as routing reads it: its path without the ``root_path`` a forwarded prefix put
+    before it (``_Forwarded``)."""
+    root, path = scope.get("root_path", ""), scope["path"]
+    return (path[len(root):] or "/") if root and path.startswith(root) else path
+
+
 def _unreserved(handler: Any) -> Any:
     """``handler``, an ``@api`` route's endpoint, answering 404 at the data plane's and card's paths, so a broad route
     (``/{rest:path}``) never serves a page there; the routes agentenv registers at those paths answer before it."""
     async def answer(request: Request) -> Response:
-        if reserved_path(request.scope["path"]):
+        if reserved_path(_route_path(request.scope)):
             return error_response(NotFound("not found"))
         return await handler(request)
     return answer
@@ -384,7 +401,7 @@ class _Fallback:
             if self.app is not None:
                 await self.app(scope, receive, send)
             return
-        path, reading = scope["path"], scope["method"] in ("GET", "HEAD")
+        path, reading = _route_path(scope), scope["method"] in ("GET", "HEAD")
         if reserved_path(path):
             return await error_response(NotFound("not found"))(scope, receive, send)
         if reading and (file := self._file(path)) is not None:

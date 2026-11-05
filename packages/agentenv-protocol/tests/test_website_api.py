@@ -320,6 +320,19 @@ def test_a_redirect_names_the_forwarded_address(client: TestClient) -> None:
     assert client.get("/api/items/", follow_redirects=False).headers["location"] == "http://testserver/api/items"
 
 
+def test_a_site_behind_a_forwarded_prefix_names_it_in_its_address_and_redirects_and_routes_its_own_paths(
+        client: TestClient) -> None:
+    behind = {"Host": "internal-x.invalid", "X-Forwarded-Host": "gw.example", "X-Forwarded-Proto": "https",
+              "X-Forwarded-Prefix": "/website/shop/"}
+    assert client.get("/api/whoami", headers=behind).json()["base_url"] == "https://gw.example/website/shop"
+    assert client.get("/api/items/1", headers=behind).json()["title"] == "mug"
+    redirected = client.get("/api/items/", follow_redirects=False, headers=behind)
+    assert (redirected.status_code, redirected.headers["location"]) == (307, "https://gw.example/website/shop/api/items")
+    for unusable in ("//evil.example", "website", ""):
+        seen = client.get("/api/whoami", headers={**behind, "X-Forwarded-Prefix": unusable}).json()
+        assert seen["base_url"] == "https://gw.example", unusable
+
+
 def test_parameterized_routes_never_take_the_data_plane_or_card() -> None:
     @website(domains=["wiki.example"])
     class Wiki(WebsiteEnvironment):

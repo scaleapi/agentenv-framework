@@ -21,6 +21,7 @@ from agent_env.env.gateway.constants import (
     TRIGGER_PROVOKING_ROLES,
     TRIGGER_UNLESS,
     TRIGGER_WEBSITE,
+    TRIGGER_WEBSITE_OP,
 )
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -146,12 +147,15 @@ class RegisterEnvTriggersStep(TaskStep):
                 f"redeploy it on a gateway image that does.")
         # An older gateway ignores what it does not declare: named actions would go to the default executor, a
         # trigger's when.roles would leave it to the watched roles, delays and hours would not wait, a deadline
-        # would fire even after its `unless` call, and hours in a time zone would be read as UTC.
+        # would fire even after its `unless` call, hours in a time zone would be read as UTC, and a website trigger
+        # naming an `op` would fire on every request to the site.
         used = {TRIGGER_NAMED_EXECUTORS: bool(named), TRIGGER_PROVOKING_ROLES: _when_has(self.triggers, "roles"),
                 TRIGGER_ACTION_DELAY: _delays(self.triggers), TRIGGER_EXECUTOR_HOURS: bool(self.executor_hours),
                 TRIGGER_UNLESS: _when_has(self.triggers, "unless"),
                 TRIGGER_WEBSITE: any(isinstance(t.get("when"), dict) and t["when"].get("type") == "website"
                                      for t in self.triggers),
+                TRIGGER_WEBSITE_OP: any(isinstance(t.get("when"), dict) and t["when"].get("type") == "website"
+                                        and t["when"].get("op") is not None for t in self.triggers),
                 TRIGGER_EXECUTOR_HOURS_TIME_ZONE: _hours_in_a_time_zone(self.executor_hours),
                 TRIGGER_NOTIFY: any(a.get("type") == "notify" for t in self.triggers
                                           for a in t.get("actions") or [] if isinstance(a, dict))}
