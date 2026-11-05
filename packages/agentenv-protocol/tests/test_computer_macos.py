@@ -67,6 +67,7 @@ def mac(monkeypatch) -> FakeMac:
     monkeypatch.setattr(_macos, "Quartz", lambda: fake)
     monkeypatch.setattr(_macos, "SETTLE_S", 0)
     monkeypatch.setattr(_macos, "CLICK_GAP_S", 0)
+    monkeypatch.setattr(_macos, "SCROLL_GAP_S", 0)
     return fake
 
 

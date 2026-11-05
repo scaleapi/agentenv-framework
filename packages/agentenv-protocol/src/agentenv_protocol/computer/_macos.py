@@ -61,6 +61,9 @@ SETTLE_S = 0.1
 CLICK_GAP_S = 0.04
 #: How far apart a drag's pointer moves are, in pixels.
 DRAG_STEP_PX = 20
+#: The pause between a scroll's wheel notches, as a wheel turned by hand has: notches posted back to back reach an app
+#: as fewer.
+SCROLL_GAP_S = 0.05
 #: How long ScreenCaptureKit may take to answer.
 CAPTURE_TIMEOUT_S = 10.0
 #: The TCC permissions the driver's process needs, and how each is named to a person.
@@ -142,7 +145,9 @@ class MacOSDriver(ComputerDriverEnvironment):
         def act(mac):
             with self._mac_holding(mac, modifiers) as flags:
                 mac.mouse(MOVED, x, y, 0, 1, flags)
-                for _ in range(amount):
+                for notch in range(amount):
+                    if notch:
+                        time.sleep(SCROLL_GAP_S)
                     mac.wheel(x, y, lines, across, flags)
         await self._mac_send(act)
 
