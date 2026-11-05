@@ -1485,7 +1485,6 @@
   "tst/unit/task_step/verifiers/test_score_parity.py": 0.1,
   "tst/unit/task_step/verifiers/test_trajectory_mistakes_format.py": 0.7,
   "tst/unit/task_step/verifiers/test_verify_sandbox.py": 0.5,
-  "tst/unit/task_step/verifiers/test_website_state_verifier_step.py": 1.3,
   "tst/unit/test_capabilities.py": 0.5,
   "tst/unit/test_check_plugin_api.py": 19.7,
   "tst/unit/test_check_skip_policy.py": 0.6,
