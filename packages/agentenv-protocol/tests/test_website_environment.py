@@ -139,6 +139,11 @@ def test_a_link_out_of_the_static_folder_is_never_served(dist: Path) -> None:
     assert "outside" not in client.get("/linked/").text
 
 
+def test_a_path_segment_longer_than_a_file_name_can_be_is_a_page_not_a_500(client: TestClient) -> None:
+    assert client.get("/" + "a" * 300).status_code == 200
+    assert client.get("/" + "a" * 300 + ".js").status_code == 404
+
+
 def test_the_fallback_never_shadows_api_or_reserved_paths(client: TestClient) -> None:
     assert client.get("/api/orders").json() == []
     assert client.put("/api/orders").status_code == 405

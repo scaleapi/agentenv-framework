@@ -403,13 +403,12 @@ class _Fallback:
             return None
         try:
             candidate = (self.root / path.lstrip("/")).resolve()
+            if candidate.is_dir():
+                candidate = (candidate / "index.html").resolve()
+            found = candidate.is_relative_to(self.root) and candidate.is_file()
         except (OSError, ValueError):
             return None
-        if candidate.is_dir():
-            candidate = (candidate / "index.html").resolve()
-        if not candidate.is_relative_to(self.root):
-            return None
-        return candidate if candidate.is_file() else None
+        return candidate if found else None
 
     async def _app_or(self, index: Path | None, scope: dict, receive: Any, send: Any) -> None:
         """The mounted app's answer, or ``index`` instead of the app's 404 when there is one."""
