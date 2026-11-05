@@ -21,7 +21,7 @@ from agentenv_protocol.computer import seed
 from agent_env.providers.sandbox_providers.lume import provider as lume
 from agent_env.providers.sandbox_providers.lume.provider import LumeSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, NetworkPolicyUnsupportedError
-from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxNotFoundError, reachable_url
 
 FAKE = textwrap.dedent('''\
     import contextlib, fcntl, json, os, signal, sys, time
@@ -78,6 +78,11 @@ FAKE = textwrap.dedent('''\
         vms[name].update(status="stopped", ipAddress=None)
     elif command == "delete":
         vms.pop(name, None)
+        if os.environ.get("FAKE_LUME_SLOW_DELETE"):
+            save(state)
+            lock.__exit__(None, None, None)
+            time.sleep(1)
+            sys.exit(0)
     save(state)
 ''')
 SSH = textwrap.dedent('''\
@@ -203,8 +208,12 @@ async def test_a_local_stores_grants_reach_a_vm_at_its_loopback_through_ssh_forw
     forwards = json.loads((folder.parent / "state.json").read_text())["forwards"]
     assert set(forwards) == {"54321", "54322", "54323"}
 
-    await sandbox.terminate()
+    monkeypatch.setattr(lume, "_local_grants", lambda: (54324, trust))
+    monkeypatch.setenv("FAKE_LUME_SLOW_DELETE", "1")
+    _, reconnect = await asyncio.gather(sandbox.terminate(), mac.get_sandbox(sandbox.sandbox_id),
+                                        return_exceptions=True)
 
+    assert isinstance(reconnect, SandboxNotFoundError) and len(_forwards(mac.fake)) == 3
     for pid in forwards.values():
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)

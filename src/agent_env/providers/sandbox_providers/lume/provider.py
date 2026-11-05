@@ -203,16 +203,17 @@ class LumeSandboxProvider(SandboxProvider):
         return self._sandbox(sandbox_id, state)
 
     async def terminate_sandbox(self, sandbox_id: str) -> None:
-        """The VM stopped and deleted, and its relays and its folder gone; one that's gone already is terminated."""
+        """The VM stopped and deleted, and its relays and its folder gone, under its lock, so no reconnect finds it in
+        between; one that's gone already is terminated."""
         async with self._changing(sandbox_id):
             try:
                 state = self._state(sandbox_id)
             except SandboxNotFoundError:
                 state = {}
             await self._stopped(sandbox_id, state)
-        with contextlib.suppress(RuntimeError):
-            await self._lume("delete", sandbox_id, "--force")
-        shutil.rmtree(self._folder(sandbox_id), ignore_errors=True)
+            with contextlib.suppress(RuntimeError):
+                await self._lume("delete", sandbox_id, "--force")
+            shutil.rmtree(self._folder(sandbox_id), ignore_errors=True)
 
     async def open_builder(self, image: str, name: str, build: Path) -> LumeSandbox:
         """A VM to compose the VM bundle ``name`` in: a clone of ``image`` under that name, any earlier one of that name
