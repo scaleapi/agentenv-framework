@@ -910,18 +910,24 @@ are the profile's template. The base class adds:
   - `cookies/get {urls?}`, `cookies/set {cookies}` and `cookies/delete {name?, domain?, path?}`, on its default
     context, each cookie as Playwright's `storageState` has it, CDP's `Network.Cookie` fields (`name`, `value`,
     `domain`, `path`, `expires`, `httpOnly`, `secure`, `sameSite`), so a storage state exported from Playwright loads
-    as is. `get` returns the cookies a request to any of `urls` would send, as Playwright picks them, else every one;
-    `set` takes a `url`, or a `domain` and a `path` (`/` by default), and may carry `max_age` in place of `expires`:
-    seconds from when it's set, on the computer's clock, which the browser's cookies are judged by. `delete` removes
-    every cookie with all the fields it's given, every cookie with none, and says how many. A cookie refused names
-    its fields, never its value;
+    as is, and a partitioned cookie's `partitionKey` (`{topLevelSite, hasCrossSiteAncestor}`), without which it would
+    be another cookie. `get` returns the cookies a request to any of `urls` would send, as Playwright picks them, else
+    every one; `set` takes a `url`, or a `domain` and a `path` (`/` by default), and may carry `max_age` in place of
+    `expires`: seconds from when it's set, on the computer's clock, which the browser's cookies are judged by. It sets
+    them all at once, so a cookie the browser refuses leaves none set. `delete` removes every cookie with all the
+    fields it's given, every cookie with none, partitioned or not, and says how many. A cookie refused names its
+    fields, never its value;
   - `local_storage/get {origins?}`, `local_storage/set {origins}` and `local_storage/clear {origins?}`, each origin
     as `storageState` has it, `{origin, localStorage: [{name, value}]}`. CDP reaches an origin's local storage only
-    through a page of it, so each goes through a hidden page agentenv sends to the origin and serves itself: the site
-    gets no request and runs no script. With no `origins`, every origin a page or frame it follows loaded since its
-    server started, and those agentenv set;
+    through a page of it, so each goes through a hidden page agentenv sends to the origin and serves itself, past any
+    service worker of the origin: the site gets no request and runs no script. The origins answered are as the browser
+    names them (`https://xn--bcher-kva.de` for `https://bücher.de`). With no `origins`, every origin a page or a
+    same-site frame loaded since its server started, and those agentenv set. A cross-site iframe's local storage is
+    partitioned under the site that embeds it, and isn't read, as Playwright's `storageState` doesn't read it either.
+    Agents' CDP connections see each hidden page come and go as a target of type `other`;
   - `downloads/list` and `downloads/get {guid, write_namespace?}`, a download and, completed, its file: uploaded
-    under the `write_namespace` grant when there is one, else inline, as `data/get` returns files.
+    under the `write_namespace` grant when there is one, else inline, as `data/get` returns files. Inline, the whole
+    file is read into memory and sent base64 in one answer, so a large one belongs under a grant.
 
   The record's entries are the models in `agentenv_protocol.website_browser` (`OpenTab`, with the tab that opened
   it as `opener`; `ClosedTab`; `Download`; `Dialog`; `LaunchEntry`; `BrowserRecord`), every field present and null

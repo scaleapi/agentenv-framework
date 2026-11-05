@@ -16,7 +16,7 @@ from agentenv_protocol.computer.errors import InvalidArgument
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.website_browser import (BrowserControl, CookieToSet, DevToolsError, OriginStorage,
                                                WebsiteBrowserEnvironment)
-from agentenv_protocol.website_browser.control import SERVED_PAGE
+from agentenv_protocol.website_browser.control import ARRIVED, LEAVING, SERVED_PAGE
 from agentenv_protocol.website_browser.environment import _parsed
 
 
@@ -95,7 +95,8 @@ async def test_a_max_age_becomes_an_expiry_on_this_machines_clock_and_a_domain_c
                                CookieToSet(name="e", value="v", domain=".shop.test", path="/a", expires=5000,
                                            sameSite="None", secure=True)])
 
-    sent = [params["cookies"][0] for params, _ in _sent(devtools, "Storage.setCookies")]
+    [(params, _)] = _sent(devtools, "Storage.setCookies")
+    sent = params["cookies"]
     assert sent[0] == {"name": "sid", "value": "v", "domain": "shop.test", "path": "/", "expires": 1060.0,
                        "httpOnly": False, "secure": False}
     assert sent[1] == {"name": "s", "value": "v", "url": "https://shop.test/cart", "httpOnly": False, "secure": False}
@@ -103,16 +104,40 @@ async def test_a_max_age_becomes_an_expiry_on_this_machines_clock_and_a_domain_c
 
 
 @pytest.mark.asyncio
-async def test_a_cookie_the_browser_refuses_is_named_with_how_many_were_set_before_it():
+async def test_cookies_are_set_in_one_call_so_one_the_browser_refuses_leaves_none_set():
     def set_cookies(params, session):
-        if params["cookies"][0]["name"] == "bad":
+        if any(cookie["name"] == "bad" for cookie in params["cookies"]):
             raise DevToolsError("Storage.setCookies: Invalid cookie fields")
         return {}
 
-    control = BrowserControl(StubDevTools({"Storage.setCookies": set_cookies}), "agent")
-    with pytest.raises(InvalidArgument, match=r"refused cookie 'bad', with 1 of 2 set before it"):
+    devtools = StubDevTools({"Storage.setCookies": set_cookies})
+    control = BrowserControl(devtools, "agent")
+    with pytest.raises(InvalidArgument, match="refused the cookies, so it set none of them: .*Invalid cookie fields") \
+            as refused:
         await control.set_cookies([CookieToSet(name="ok", value="v", domain="a.test"),
                                    CookieToSet(name="bad", value="v", domain="a.test")])
+    assert refused.value.applied == "no"
+    assert [[c["name"] for c in params["cookies"]] for params, _ in _sent(devtools, "Storage.setCookies")] == [
+        ["ok", "bad"]]
+
+
+@pytest.mark.asyncio
+async def test_a_partitioned_cookie_keeps_its_key_read_set_and_deleted_beside_an_unpartitioned_one_of_its_name():
+    key = {"topLevelSite": "https://top.test", "hasCrossSiteAncestor": True}
+    cdp = [{"name": "chip", "value": "1", "domain": "embed.test", "path": "/", "expires": -1, "httpOnly": False,
+            "secure": True, "sameSite": "None", "partitionKey": key},
+           {"name": "chip", "value": "2", "domain": "embed.test", "path": "/", "expires": -1, "httpOnly": False,
+            "secure": True, "sameSite": "None"}]
+    devtools = StubDevTools({"Storage.getCookies": {"cookies": cdp}, "Target.createTarget": {"targetId": "h"},
+                             "Target.attachToTarget": {"sessionId": "s-h"}})
+    control = BrowserControl(devtools, "agent")
+
+    read = await control.cookies()
+    assert read[0]["partitionKey"] == key and "partitionKey" not in read[1]
+    await control.set_cookies([CookieToSet.model_validate(read[0])])
+    assert _sent(devtools, "Storage.setCookies")[0][0]["cookies"][0]["partitionKey"] == key
+    assert await control.delete_cookies(name="chip") == 2
+    assert [params.get("partitionKey") for params, _ in _sent(devtools, "Network.deleteCookies")] == [key, None]
 
 
 def test_a_cookie_with_no_place_both_expiries_or_a_field_it_doesnt_take_is_refused_without_its_value():
@@ -139,22 +164,30 @@ async def test_cookies_matching_every_field_given_are_deleted_by_their_exact_dom
     assert await control.delete_cookies(name="nothing") == 0
 
 
-def _serving_browser(storage):
-    """A browser whose pages go where they're sent once agentenv answers their request, and whose local storage is
-    ``storage``, by storage key."""
+def _serving_browser(storage, names=None):
+    """A browser whose pages go where they're sent once agentenv answers their request, each origin named as ``names``
+    has it, and whose local storage is ``storage``, by storage key."""
     devtools = StubDevTools()
-    at = {}
+    at, left = {}, {}
 
     def navigate(params, session):
         devtools.send("Fetch.requestPaused", {"requestId": f"r-{params['url']}", "request": {"url": params["url"]}},
                       session)
-        at[session] = params["url"].rstrip("/")
+        asked = params["url"].rstrip("/")
+        at[session], left[session] = (names or {}).get(asked, asked), False
         return {"frameId": "f"}
+
+    def evaluate(params, session):
+        if params["expression"] == LEAVING:
+            left[session] = True
+            return {"result": {}}
+        if params["expression"] == ARRIVED:
+            return {"result": {"value": "" if left.get(session, True) else at[session]}}
+        return {"result": {"value": ["hidden", False]}}
 
     devtools.answers.update({
         "Target.createTarget": {"targetId": "h"}, "Target.attachToTarget": {"sessionId": "s-h"},
-        "Page.navigate": navigate,
-        "Runtime.evaluate": lambda params, session: {"result": {"value": at.get(session, "null")}},
+        "Page.navigate": navigate, "Runtime.evaluate": evaluate,
         "DOMStorage.getDOMStorageItems": lambda params, session: {
             "entries": [[k, v] for k, v in storage.get(params["storageId"]["storageKey"], {}).items()]},
         "DOMStorage.setDOMStorageItem": lambda params, session: storage.setdefault(
@@ -176,6 +209,9 @@ async def test_local_storage_goes_through_a_page_agentenv_serves_so_the_site_get
     await asyncio.sleep(0)
 
     assert storage["http://wiki.test:8080/"] == {"theme": "dark"}
+    first_calls = [method for method, _, session in devtools.calls if session == "s-h"][:4]
+    assert first_calls == ["Network.enable", "Network.setBypassServiceWorker", "Fetch.enable", "DOMStorage.enable"]
+    assert _sent(devtools, "Network.setBypassServiceWorker")[0] == ({"bypass": True}, "s-h")
     assert ({"patterns": [{"urlPattern": "*"}]}, "s-h") in _sent(devtools, "Fetch.enable")
     fulfilled = _sent(devtools, "Fetch.fulfillRequest")
     assert [params["requestId"] for params, _ in fulfilled] == ["r-https://shop.test/", "r-http://wiki.test:8080/"]
@@ -206,10 +242,24 @@ async def test_with_no_origins_named_it_reads_and_clears_every_origin_its_pages_
     await asyncio.sleep(0)
 
     read = await control.local_storage()
-    assert [origin["origin"] for origin in read] == ["http://frame.test", "https://a.test", "https://b.test:8443"]
+    origins = ["http://frame.test", "https://a.test", "https://b.test:8443"]
+    assert [origin["origin"] for origin in read] == origins
     assert read[0]["localStorage"] == [{"name": "f", "value": "2"}]
-    assert await control.clear_local_storage() == ["http://frame.test", "https://a.test", "https://b.test:8443"]
+    assert [tab["id"] for tab in await control.tab_list()] == ["t1", "t2"]
+    assert await control.clear_local_storage() == origins
     assert storage == {}
+
+
+@pytest.mark.asyncio
+async def test_an_origin_is_kept_as_the_browser_names_it_once_its_page_is_there():
+    storage = {"https://xn--bcher-kva.test/": {"k": "v"}}
+    devtools = _serving_browser(storage, names={"https://bücher.test": "https://xn--bcher-kva.test"})
+    control = BrowserControl(devtools, "agent")
+
+    assert await control.local_storage(["https://bücher.test", "https://a.test"]) == [
+        {"origin": "https://xn--bcher-kva.test", "localStorage": [{"name": "k", "value": "v"}]},
+        {"origin": "https://a.test", "localStorage": []}]
+    assert control.origins == {"https://xn--bcher-kva.test", "https://a.test"}
 
 
 @pytest.mark.asyncio

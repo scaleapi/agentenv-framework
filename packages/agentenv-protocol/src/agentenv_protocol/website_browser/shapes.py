@@ -10,10 +10,16 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 SameSite = Literal["Strict", "Lax", "None"]
 
 
+class PartitionKey(BaseModel):
+    """CDP's ``Network.CookiePartitionKey``: the top-level site a partitioned cookie was set under."""
+    topLevelSite: str
+    hasCrossSiteAncestor: bool
+
+
 class Cookie(BaseModel):
     """A cookie as the browser has it, CDP's ``Network.Cookie`` fields that ``storageState`` keeps: ``expires`` in
     seconds since the epoch, -1 for one that ends with the session, and a ``domain`` with a leading dot for one its
-    subdomains get too."""
+    subdomains get too; and a partitioned cookie's ``partitionKey``, without which it would be another cookie."""
     name: str
     value: str
     domain: str
@@ -22,6 +28,7 @@ class Cookie(BaseModel):
     httpOnly: bool
     secure: bool
     sameSite: SameSite = "Lax"
+    partitionKey: Optional[PartitionKey] = None
 
 
 class CookieToSet(BaseModel):
@@ -40,6 +47,7 @@ class CookieToSet(BaseModel):
     httpOnly: bool = False
     secure: bool = False
     sameSite: Optional[SameSite] = None
+    partitionKey: Optional[PartitionKey] = None
 
     @model_validator(mode="after")
     def _placed_and_timed_once(self) -> CookieToSet:

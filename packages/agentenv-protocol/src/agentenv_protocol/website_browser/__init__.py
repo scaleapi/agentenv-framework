@@ -12,7 +12,7 @@ from .devtools import MAX_MESSAGE_BYTES, PIPE_IN, PIPE_OUT, DevToolsError, DevTo
 from .environment import (ALONE_BYPASS, BLOCK, BROWSER, COMPUTER_BYPASS, OWNED_FLAGS, POLICIES, READY_POLL_S,
                           SHM_MIN_BYTES, SITE_PROXY_ENV, SKILL, BrowserSettings, WebsiteBrowserEnvironment, Window)
 from .shapes import (BrowserRecord, ClosedTab, Cookie, CookieToSet, Dialog, Download, LaunchEntry, OpenTab,
-                     OriginStorage, StorageItem, origin_of)
+                     OriginStorage, PartitionKey, StorageItem, origin_of)
 
 __all__ = ["ACTIVE_CHECK_TIMEOUT_S", "AGENT", "AGENTENV", "ALONE_BYPASS", "BLOCK", "BROWSER", "CAPTURE_TIMEOUT_S",
            "COMPUTER_BYPASS", "DOWNLOADS", "EXIT", "HASH_CHUNK_BYTES", "MAX_MESSAGE_BYTES", "OWNED_FLAGS", "PAGE_INPUT",
@@ -20,4 +20,4 @@ __all__ = ["ACTIVE_CHECK_TIMEOUT_S", "AGENT", "AGENTENV", "ALONE_BYPASS", "BLOCK
            "SITE_PROXY_ENV", "SKILL", "STOP", "UNKNOWN", "UNNAVIGATED_CAPTURE_TIMEOUT_S", "UPLOADS", "BrowserControl",
            "BrowserSettings", "DevToolsError", "DevToolsPipe", "WebsiteBrowserEnvironment", "Window",
            "BrowserRecord", "ClosedTab", "Cookie", "CookieToSet", "Dialog", "Download", "LaunchEntry", "OpenTab",
-           "OriginStorage", "StorageItem", "origin_of"]
+           "OriginStorage", "PartitionKey", "StorageItem", "origin_of"]

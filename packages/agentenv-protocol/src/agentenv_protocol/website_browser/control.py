@@ -41,6 +41,9 @@ UPLOADS = "Uploads"
 DOWNLOADS = "Downloads"
 #: The document agentenv serves a page of its own that it sends to an origin, so the site gets no request.
 SERVED_PAGE = base64.b64encode(b"<!doctype html>").decode()
+#: Marks the document a page of agentenv's own leaves, and reads the origin of the one it goes to once it's there, as
+#: the browser names it.
+LEAVING, ARRIVED = "window.__agentenvLeft = true", "window.__agentenvLeft ? '' : location.origin"
 #: Hostnames a secure cookie is sent to over http, as browsers treat them.
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]")
 
@@ -268,18 +271,17 @@ class BrowserControl:
         """The default context's cookies, or those a request to any of ``urls`` would send, as Playwright picks them."""
         cookies = [Cookie(**{field: raw[field] for field in Cookie.model_fields if field in raw})
                    for raw in (await self.devtools.call("Storage.getCookies"))["cookies"]]
-        return [cookie.model_dump() for cookie in cookies if not urls or any(_sent(cookie, url) for url in urls)]
+        return [cookie.model_dump(exclude_none=True) for cookie in cookies
+                if not urls or any(_sent(cookie, url) for url in urls)]
 
     async def set_cookies(self, cookies: list[CookieToSet]) -> None:
-        """Each of ``cookies`` set in the default context, a ``max_age`` turned into an expiry on this machine's clock,
-        which the browser's cookies are judged by; InvalidArgument, naming it, for one the browser refuses."""
-        now = time.time()
-        for done, cookie in enumerate(cookies):
-            try:
-                await self.devtools.call("Storage.setCookies", {"cookies": [_cdp_cookie(cookie, now)]})
-            except DevToolsError as e:
-                raise InvalidArgument(f"the browser refused cookie {cookie.name!r}, with {done} of {len(cookies)} set "
-                                      f"before it: {e}")
+        """``cookies`` set in the default context at once, a ``max_age`` turned into an expiry on this machine's clock,
+        which the browser's cookies are judged by; InvalidArgument when the browser refuses one, which sets none."""
+        try:
+            await self.devtools.call("Storage.setCookies", {"cookies": [_cdp_cookie(cookie, time.time())
+                                                                        for cookie in cookies]})
+        except DevToolsError as e:
+            raise InvalidArgument(f"the browser refused the cookies, so it set none of them: {e}")
 
     async def delete_cookies(self, name: Optional[str] = None, domain: Optional[str] = None,
                              path: Optional[str] = None) -> int:
@@ -291,7 +293,9 @@ class BrowserControl:
             async with self.hidden_page() as session:
                 for cookie in gone:
                     await self.devtools.call("Network.deleteCookies", {
-                        "name": cookie["name"], "domain": cookie["domain"], "path": cookie["path"]}, session_id=session)
+                        "name": cookie["name"], "domain": cookie["domain"], "path": cookie["path"],
+                        **({"partitionKey": cookie["partitionKey"]} if cookie.get("partitionKey") else {})},
+                        session_id=session)
         return len(gone)
 
     async def local_storage(self, origins: Optional[list[str]] = None) -> list[dict]:
@@ -299,8 +303,8 @@ class BrowserControl:
         wanted = _origins(origins) if origins is not None else sorted(self.origins)
         found = []
         async with self._at_origins() as visit:
-            for origin in wanted:
-                session = await visit(origin)
+            for asked in wanted:
+                session, origin = await visit(asked)
                 entries = (await self.devtools.call("DOMStorage.getDOMStorageItems", {"storageId": _storage(origin)},
                                                     session_id=session))["entries"]
                 found.append(OriginStorage(origin=origin, localStorage=[StorageItem(name=name, value=value)
@@ -311,19 +315,20 @@ class BrowserControl:
         """Each origin's items set in its local storage, beside those it has."""
         async with self._at_origins() as visit:
             for origin in origins:
-                session = await visit(origin.origin)
+                session, named = await visit(origin.origin)
                 for item in origin.localStorage:
                     await self.devtools.call("DOMStorage.setDOMStorageItem", {
-                        "storageId": _storage(origin.origin), "key": item.name, "value": item.value}, session_id=session)
+                        "storageId": _storage(named), "key": item.name, "value": item.value}, session_id=session)
 
     async def clear_local_storage(self, origins: Optional[list[str]] = None) -> list[str]:
         """The local storage of each of ``origins``, else of every origin it has seen, cleared; those origins."""
-        wanted = _origins(origins) if origins is not None else sorted(self.origins)
+        wanted, cleared = _origins(origins) if origins is not None else sorted(self.origins), []
         async with self._at_origins() as visit:
-            for origin in wanted:
-                await self.devtools.call("DOMStorage.clear", {"storageId": _storage(origin)},
-                                         session_id=await visit(origin))
-        return wanted
+            for asked in wanted:
+                session, origin = await visit(asked)
+                await self.devtools.call("DOMStorage.clear", {"storageId": _storage(origin)}, session_id=session)
+                cleared.append(origin)
+        return cleared
 
     def download_list(self) -> list[dict]:
         return [Download(**download).model_dump() for download in self.downloads.values()]
@@ -335,29 +340,32 @@ class BrowserControl:
         return Download(**self.downloads[guid]).model_dump()
 
     @contextlib.asynccontextmanager
-    async def _at_origins(self) -> AsyncIterator[Callable[[str], Awaitable[str]]]:
-        """A page of agentenv's own, ``visit``, that goes to an origin and returns its session once it's that origin's
-        page. agentenv serves it the document, so the site gets no request and runs no script: CDP reaches an origin's
-        local storage only through a page of that origin."""
+    async def _at_origins(self) -> AsyncIterator[Callable[[str], Awaitable[tuple[str, str]]]]:
+        """A page of agentenv's own, ``visit``, that goes to an origin and returns its session and the origin as the
+        browser names it, once it's that origin's page. agentenv serves it the document, and a service worker of the
+        origin is bypassed, so the site gets no request and runs no script: CDP reaches an origin's local storage only
+        through a page of that origin."""
         async with self.hidden_page() as session:
             self._serving.add(session)
             try:
+                await self.devtools.call("Network.enable", session_id=session)
+                await self.devtools.call("Network.setBypassServiceWorker", {"bypass": True}, session_id=session)
                 await self.devtools.call("Fetch.enable", {"patterns": [{"urlPattern": "*"}]}, session_id=session)
                 await self.devtools.call("DOMStorage.enable", session_id=session)
 
-                async def visit(origin: str) -> str:
+                async def visit(origin: str) -> tuple[str, str]:
+                    await self.devtools.call("Runtime.evaluate", {"expression": LEAVING}, session_id=session)
                     answer = await self.devtools.call("Page.navigate", {"url": f"{origin}/"}, session_id=session)
                     if error := answer.get("errorText"):
                         raise InvalidArgument(f"the browser couldn't open a page of {origin}: {error}")
                     deadline = asyncio.get_running_loop().time() + PIN_TIMEOUT_S
-                    while (await self.devtools.call("Runtime.evaluate", {"expression": "location.origin",
-                                                    "returnByValue": True}, session_id=session))["result"].get(
-                            "value") != origin:
+                    while not (named := (await self.devtools.call("Runtime.evaluate", {
+                            "expression": ARRIVED, "returnByValue": True}, session_id=session))["result"].get("value")):
                         if asyncio.get_running_loop().time() > deadline:
                             raise DeviceUnavailable(f"a page of {origin} didn't open within {PIN_TIMEOUT_S:g} s")
                         await asyncio.sleep(0.05)
-                    self.origins.add(origin)
-                    return session
+                    self.origins.add(named)
+                    return session, named
 
                 yield visit
             finally:
@@ -617,6 +625,8 @@ def _cdp_cookie(cookie: CookieToSet, now: float) -> dict:
         param["path"] = cookie.path or "/"
     if cookie.sameSite:
         param["sameSite"] = cookie.sameSite
+    if cookie.partitionKey:
+        param["partitionKey"] = cookie.partitionKey.model_dump()
     if cookie.max_age is not None:
         param["expires"] = now + cookie.max_age
     elif cookie.expires is not None and cookie.expires >= 0:
