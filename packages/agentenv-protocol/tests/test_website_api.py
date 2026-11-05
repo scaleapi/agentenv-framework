@@ -387,6 +387,36 @@ def test_a_route_must_take_its_path_parameters_and_at_most_one_body() -> None:
         Bodies().create_app()
 
 
+@pytest.mark.parametrize(("annotation", "expected", "schema"), [
+    (set[int], {1, 2}, {"type": "array", "items": {"type": "integer"}, "uniqueItems": True}),
+    (frozenset[int], frozenset({1, 2}), {"type": "array", "items": {"type": "integer"}, "uniqueItems": True}),
+    (tuple[int, ...], (1, 2, 2), {"type": "array", "items": {"type": "integer"}}),
+])
+def test_a_set_frozenset_or_tuple_query_parameter_binds_every_value_coerced(annotation, expected, schema) -> None:
+    class Picks(WebsiteEnvironment):
+        def picks(self, ids) -> dict:
+            assert isinstance(ids, type(expected))
+            return {"ids": sorted(ids)}
+
+        picks.__annotations__["ids"] = annotation
+        picks = api.get("/api/picks")(picks)
+
+    client = TestClient(Picks().create_app())
+    assert client.get("/api/picks?ids=2&ids=1&ids=2").json() == {"ids": sorted(expected)}
+    spec = client.get("/agentenv/ext/website/openapi").json()
+    assert spec["paths"]["/api/picks"]["get"]["parameters"][0]["schema"] == schema
+
+
+def test_a_fixed_length_tuple_query_parameter_fails_the_apps_build() -> None:
+    class Pair(WebsiteEnvironment):
+        @api.get("/api/pair")
+        def pair(self, point: tuple[int, int]) -> dict:
+            return {}
+
+    with pytest.raises(TypeError, match="fixed-length tuple"):
+        Pair().create_app()
+
+
 @pytest.mark.parametrize("domains", ["shop.example", ["https://shop.example"], ["shop.example:8080"], ["shop.example/x"],
                                      [""], ["-shop.example"], ["shop..example"], ["*shop.example"], [None]])
 def test_a_sites_domains_are_a_list_of_host_names(domains: object) -> None:

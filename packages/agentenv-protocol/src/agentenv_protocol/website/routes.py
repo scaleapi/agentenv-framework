@@ -200,6 +200,9 @@ def plan(route: ApiRoute) -> list[_Param]:
         annotation = hints.get(name, param.annotation)
         kind: Kind = ("context" if _is_context(annotation) else "path" if name in path_params
                       else "body" if _body_type(annotation) is not None else "query")
+        if kind == "query" and _fixed_tuple(annotation):
+            raise TypeError(f"{route.fn.__qualname__}: query parameter {name!r} is a fixed-length tuple, which repeated "
+                            f"query values can't fill; take tuple[T, ...] or list[T]")
         params.append(_Param(name, kind, annotation, param.default))
     bodies = [p.name for p in params if p.kind == "body"]
     if len(bodies) > 1 or (bodies and route.method == "GET"):
@@ -237,20 +240,36 @@ async def bind(params: list[_Param], request: Request, context: ApiContext) -> d
                     raise BadRequest(f"missing {p.kind} parameter {p.name!r}", code="invalid_params")
                 kwargs[p.name] = p.default
                 continue
-            many = _list_type(p.annotation) if p.kind == "query" else None
+            many = _many_type(p.annotation) if p.kind == "query" else None
             try:
-                kwargs[p.name] = ([_coerce_scalar(v, get_args(many)[0] if get_args(many) else None)
-                                   for v in source.getlist(p.name)] if many is not None
+                kwargs[p.name] = (many[0](_coerce_scalar(v, many[1]) for v in source.getlist(p.name)) if many is not None
                                   else _coerce_scalar(source[p.name], p.annotation))
             except (TypeError, ValueError) as e:
                 raise BadRequest(f"{p.kind} parameter {p.name!r}: {e}", code="invalid_params") from None
     return kwargs
 
 
-def _list_type(annotation: Any) -> Any:
-    """The ``list[T]`` an annotation names, Optional or Annotated or not; None when it names no list."""
+_COLLECTIONS = (list, set, frozenset, tuple)
+
+
+def _many_type(annotation: Any) -> tuple[type, Any] | None:
+    """The collection a query parameter's annotation names, Optional or Annotated or not, and its items' type (None
+    when it names none): ``list[T]``, ``set[T]``, ``frozenset[T]`` or ``tuple[T, ...]``; None for anything else."""
     inner = _unwrap_annotation(annotation)
-    return inner[0] if len(inner) == 1 and (inner[0] is list or get_origin(inner[0]) is list) else None
+    if len(inner) != 1:
+        return None
+    container = get_origin(inner[0]) or inner[0]
+    if container not in _COLLECTIONS:
+        return None
+    args = get_args(inner[0])
+    if container is tuple and args and not (len(args) == 2 and args[1] is Ellipsis):
+        return None
+    return container, args[0] if args else None
+
+
+def _fixed_tuple(annotation: Any) -> bool:
+    inner = _unwrap_annotation(annotation)
+    return len(inner) == 1 and get_origin(inner[0]) is tuple and _many_type(annotation) is None
 
 
 async def _body(p: _Param, request: Request) -> Any:
@@ -326,9 +345,10 @@ def openapi(title: str, routes: list[ApiRoute]) -> dict:
             operation["x-agentenv-roles"] = list(route.roles)
         for p in plan(route):
             if p.kind in ("path", "query"):
-                listed = _list_type(p.annotation) if p.kind == "query" else None
-                schema = _schema_for_annotation(p.annotation) if listed is None else {
-                    "type": "array", **({"items": _schema_for_annotation(get_args(listed)[0])} if get_args(listed) else {})}
+                many = _many_type(p.annotation) if p.kind == "query" else None
+                schema = _schema_for_annotation(p.annotation) if many is None else {
+                    "type": "array", **({"items": _schema_for_annotation(many[1])} if many[1] is not None else {}),
+                    **({"uniqueItems": True} if many[0] in (set, frozenset) else {})}
                 if p.default is not inspect.Parameter.empty:
                     schema["default"] = to_jsonable_python(p.default)
                 operation["parameters"].append({"name": p.name, "in": p.kind, "schema": schema,
