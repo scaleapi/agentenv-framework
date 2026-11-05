@@ -107,7 +107,8 @@ resolve script) resolves them once in a VM of the base, which builds every venv'
 protocol in one resolve, into the folder it shares and is deleted; they're stored in the object store with a lock
 naming them, whose digest joins the VM bundle's key. Every compose of those inputs, on any Mac, stages them and
 installs offline, so one name is one set of wheels. Then the VM shuts down, is kept on that Mac as the VM bundle of its
-name, and gate 3 probes it at full, a check its driver declares it fails on macOS (`known_failures`) recorded and not
+name (one that hasn't shut down within the provider's `boot_timeout_s` is synced, stopped from outside and kept all the
+same, its guest's log of the minutes before saved under the state root and warned of), and gate 3 probes it at full, a check its driver declares it fails on macOS (`known_failures`) recorded and not
 failing the build; a compose of the same inputs on that Mac reuses it. A VM bundle is kept on the Mac that composed it
 alone, so a deploy on a Mac that doesn't hold the one its env's record names composes it there first, from the same
 inputs and so under the same name. A deploy that would compose another name, as a different agent-env does, refuses
