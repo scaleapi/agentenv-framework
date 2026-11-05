@@ -107,11 +107,12 @@ class FakeMSS:
 
 class FakeGrab:
     """FFmpeg's x11grab through PyAV: ``frames`` frames a few milliseconds apart, each with its wall-clock time, then
-    ``fail`` raised if set; ``opened`` keeps what each open was asked."""
+    ``fail`` raised if set; ``opened`` keeps what each open was asked, and ``made`` counts the frames made."""
     opened: list = []
     frames = 3
     fail: Exception | None = None
     closed = 0
+    made = 0
 
     def __init__(self, display: str, format: str, options: dict) -> None:
         self.args = (display, format, options)
@@ -131,6 +132,7 @@ class FakeGrab:
     def decode(self, video):
         for n in range(self.frames):
             time.sleep(0.005)
+            FakeGrab.made = n + 1
             yield types.SimpleNamespace(time=1_793_000_000.0 + n / 10, index=n)
         if self.fail is not None:
             raise self.fail
@@ -376,6 +378,7 @@ def grab(monkeypatch):
     monkeypatch.setattr(FakeGrab, "frames", 3)
     monkeypatch.setattr(FakeGrab, "fail", None)
     monkeypatch.setattr(FakeGrab, "closed", 0)
+    monkeypatch.setattr(FakeGrab, "made", 0)
     monkeypatch.setenv("DISPLAY", ":99")
     return FakeGrab
 
@@ -398,7 +401,11 @@ async def test_a_failed_grab_raises_from_the_stream_and_a_slow_reader_gets_the_l
     grab.fail, grab.frames = None, 30
     stream = driver.stream(_hints(tmp_path))
     first = await anext(stream)
-    await asyncio.sleep(0.5)
+    for _ in range(500):
+        if grab.made == 30:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
     rest = [frame async for frame in stream]
     assert first.image.index == 0 and len(rest) < 10 and rest[-1].image.index == 29
 

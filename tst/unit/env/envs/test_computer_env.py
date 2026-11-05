@@ -37,8 +37,8 @@ from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
 from agent_env.env.env import DeployedEnv
-from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, probing,
-                                               resolve_in_base)
+from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
+                                               probing, resolve_in_base)
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -771,6 +771,19 @@ async def test_env_params_a_computer_env_cant_take_are_refused_at_save_and_at_de
         await Env.get(env.id).deploy(env_params=env_params)
 
     assert len(saved) == 1 and problem in saved[0] and boots.boots == []
+
+
+def test_a_drivers_own_settings_are_checked_against_the_schema_it_declares(base, driver):
+    env = _put(base, driver)
+    env.driver.declaration = env.driver.declaration.model_copy(update={"settings": {
+        "type": "object", "additionalProperties": False,
+        "properties": {"headed": {"type": "boolean"}, "default_space": {"enum": ["frame", "norm"]}}}})
+
+    assert params.driver_problems(env, {"headed": True, "default_space": "norm"}) == []
+    assert params.driver_problems(env, {"headed": "yes"}) == ["env_params.driver_settings.headed: 'yes' is not of type "
+                                                              "'boolean'"]
+    assert "Additional properties are not allowed ('colour' was unexpected)" in params.driver_problems(
+        env, {"colour": "blue"})[0]
 
 
 @pytest.mark.asyncio

@@ -2,10 +2,11 @@
 the base's readying (``computers/vm_bundle/macos``), each layer's files under ``context/``, its services as LaunchAgents
 under ``agents/``, and ``provision.sh``, which the VM runs as its session user, root through sudo with the password
 beside them. A layer installs as its ``[install.macos]`` says: its files under its prefix, its downloads checked by
-sha256, its venv on the pinned Python ``prepare`` installs, from the wheels of its lock, staged under ``packages/``
-and installed offline, its run scripts and install steps, its grants, and its services, each through
-``agentenv-service``, which gives it the deploy's environment, or, when direct, as its own command. ``resolver`` is the
-script a VM of the base runs to resolve those wheels, once for given inputs."""
+sha256, its venv on a copy of the pinned Python ``prepare`` installs, so its interpreter is its own, from the wheels of
+its lock, staged under ``packages/`` and installed offline, its run scripts and install steps, its grants, and its
+services, each through ``agentenv-service`` on the layer's own Python, which gives it the deploy's environment and
+which macOS charges its TCC permissions to, or, when direct, as its own command. ``resolver`` is the script a VM of
+the base runs to resolve those wheels, once for given inputs."""
 
 from __future__ import annotations
 
@@ -28,6 +29,9 @@ from agent_env.providers.sandbox_providers.lume.provider import BUILD_FOLDER, SH
 PREPARE = Path(__file__).resolve().parents[4] / "computers" / "vm_bundle" / "macos"
 #: Where the base's Python and agent-env's own programs are in a composed VM bundle.
 BIN = "/opt/agentenv/bin"
+#: The pinned Python itself, which BIN's python3 links to: a venv copies it from here, so the copy's ``home`` is the
+#: folder whose standard library it finds.
+PYTHON = "/opt/agentenv/python/bin/python3"
 #: The architecture a macOS VM bundle runs on.
 ARCH = "arm64"
 
@@ -71,7 +75,7 @@ def write(build: Path, base: ComputerArtifact, parts: list[Part], password: str,
             if "/" in words[0] and not words[0].startswith("/"):
                 words[0] = f"{part.prefix}/{words[0]}"
             arguments = words if direct is not None else [
-                f"{BIN}/python3", f"{BIN}/agentenv-service", part.prefix,
+                f"{part.prefix}/venv/bin/python" if part.venv else f"{BIN}/python3", f"{BIN}/agentenv-service", part.prefix,
                 *(f"{key}={value}" for key, value in part.environment.items()), "--", *words]
             (build / "agents" / f"{label}.plist").write_bytes(plistlib.dumps(
                 _agent(label, arguments, part.prefix, home, environment=direct)))
@@ -103,7 +107,7 @@ def _installed(part: Part) -> list[str]:
                       f'echo "{download.sha256}  "{to} | shasum -a 256 -c - > /dev/null']
     if part.venv:
         staged = staged_wheels(part.folder)
-        lines.append(f"{BIN}/python3 -m venv {quoted}/venv")
+        lines.append(f"{PYTHON} -m venv --copies {quoted}/venv")
         if part.wheels:
             lines.append(f"{prefix}/venv/bin/pip install -q --disable-pip-version-check --no-index --no-deps "
                          + " ".join(f'"$build/{staged}/"{shlex.quote(wheel)}' for wheel in part.wheels))
@@ -116,7 +120,9 @@ def _installed(part: Part) -> list[str]:
     for scope, command in commands:
         run = f"cd {quoted} && {command}"
         lines.append(f"as_root env PREFIX={quoted} bash -c {shlex.quote(run)}" if scope == "system" else f"({run})")
-    lines += [f"grant {shlex.quote(grant.app)} {' '.join(grant.services)}" for grant in install.grants or []]
+    lines += [f"grant {shlex.quote(grant.app)} {' '.join(grant.services)}" if grant.app else
+              f"grant_executable {shlex.quote(f'{prefix}/{grant.executable}')} {' '.join(grant.services)}"
+              for grant in install.grants or []]
     return lines
 
 

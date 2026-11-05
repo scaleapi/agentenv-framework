@@ -307,8 +307,8 @@ async def test_a_vm_lume_cant_run_outside_a_login_session_fails_saying_so_and_le
 
 
 @pytest.mark.asyncio
-async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundle_and_a_hung_shutdown_times_out(
-        mac, tmp_path, monkeypatch):
+async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundle_even_when_its_shutdown_hangs(
+        mac, tmp_path, monkeypatch, caplog):
     build = tmp_path / lume.BUILD_FOLDER
     build.mkdir()
 
@@ -326,10 +326,15 @@ async def test_a_builder_shares_its_build_folder_and_is_kept_as_a_local_vm_bundl
         await mac.open_builder("local:bench", "other", tmp_path)
     hung = await mac.open_builder("local:bench", "agentenv-computer-4567", build)
     monkeypatch.setenv("FAKE_SSH_HANG", "1")
+    monkeypatch.setattr(lume, "SHUTDOWN_WAIT_S", 1)
     mac.boot_timeout_s = 1
-    with pytest.raises(TimeoutError, match="agentenv-computer-4567 didn't shut down within 1 s, so it isn't kept"):
-        await mac.keep_builder(hung)
-    await hung.terminate()
+    assert await mac.keep_builder(hung) == "local:agentenv-computer-4567"
+    log = lume.state_root() / "lume" / "agentenv-computer-4567-shutdown.log"
+    saved = log.read_text()
+    assert "sync; log show --last 15m --style compact" in saved and "shutdown|halt|reboot" in saved
+    assert "log show --last 2m --style compact 2>&1 | tail -n 300" in saved
+    assert ["stop", "agentenv-computer-4567", "--force"] in _state(mac.fake)["calls"]
+    assert "agentenv-computer-4567 didn't shut down within 1 s, so it's stopped from outside" in caplog.text
     monkeypatch.setenv("FAKE_SSH_STALL", "1")
     with pytest.raises(TimeoutError, match="agentenv-computer-89ab didn't answer ssh within 1 s"):
         await mac.open_builder("local:bench", "agentenv-computer-89ab", build)

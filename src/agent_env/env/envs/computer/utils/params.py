@@ -1,13 +1,14 @@
 """What a deploy of a computer env takes as ``deploy_env`` ``env_params``: the form to boot, ``computer_settings``,
-values of the base's deploy-phase settings, ``driver_settings``, the driver's ``ComputerSettings``, such as the default
-coordinate space its tools describe, and ``app_settings``, values of each app's ``Settings`` by its name. The env's
-display and network are its own, which no deploy overrides."""
+values of the base's deploy-phase settings, ``driver_settings``, values of the driver's ``Settings``, such as the
+default coordinate space its tools describe and any its driver adds, and ``app_settings``, values of each app's
+``Settings`` by its name. The env's display and network are its own, which no deploy overrides."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
 from agentenv_protocol.computer import ComputerSettings
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agent_env.artifact.artifacts.computer import SettingValue
@@ -24,6 +25,19 @@ class ComputerParams(BaseModel):
     computer_settings: dict[str, Any] = Field(default_factory=dict)
     driver_settings: dict[str, Any] = Field(default_factory=dict)
     app_settings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+def driver_problems(env: ComputerEnv, values: dict[str, Any]) -> list[str]:
+    """What's wrong with ``values`` as the settings of ``env``'s driver: what the schema of its own ``Settings`` refuses,
+    when it declares one, else what ComputerSettings does."""
+    if (schema := env.driver.declaration.settings) is None:
+        try:
+            ComputerSettings.model_validate(values)
+        except ValidationError as e:
+            return _problems("env_params.driver_settings", e)
+        return []
+    return [f"{'.'.join(['env_params.driver_settings', *map(str, error.absolute_path)])}: {error.message}"
+            for error in Draft202012Validator(schema).iter_errors(values)]
 
 
 def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParams, dict[str, SettingValue], list[str]]:
@@ -45,10 +59,7 @@ def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParam
         if name == "resolution" and env.display is not None:
             problems.append("env_params.computer_settings: the env's display sets the screen's size, which no deploy "
                             "changes")
-    try:
-        ComputerSettings.model_validate(params.driver_settings)
-    except ValidationError as e:
-        problems += _problems("env_params.driver_settings", e)
+    problems += driver_problems(env, params.driver_settings)
     apps = {app.environment_name: app for app in env.composed_apps()}
     problems += [f"env_params.app_settings.{name}: {env.id} has no app {name!r}"
                  + (f"; its apps are {', '.join(apps)}" if apps else "") for name in params.app_settings if name not in apps]

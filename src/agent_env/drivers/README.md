@@ -70,5 +70,36 @@ To move it to another cua-driver version:
 4. Run `tst/unit/drivers/cua_driver_test.py`, then `tst/integration/computer/cua_driver_test.py` on Linux, where
    `computer-ready` names any tool or executable that doesn't match its pin.
 
+`envs/agent-desktop/` is Vercel's [agent-desktop](https://github.com/vercel-labs/agent-desktop) as a driver, for macOS
+(`arm64`, composed onto a VM bundle such as `macos-26`). agent-desktop 1.2.0 reads apps' accessibility trees and acts
+on what it finds; its release's tarball, checked by sha256, is unpacked into the driver's `bin/` by `install.sh`.
+Agents get what its own MCP server, `agent-desktop mcp`, serves, as `mcp.json` pins it: its instructions and its 67
+`desktop_*` tools, each call forwarded to a server of its own, and its skill, its references and its guide for macOS
+leading the computer's skill. The `computer_*` tools, gate 3's probe, `computer-ready` and recording run on
+`MacOSDriver` (`agentenv_protocol.computer._macos`): ScreenCaptureKit captures the display and Quartz events, posted
+where the hardware's are, send the input, from the driver's own process. `[install.macos]` grants Accessibility, Post
+Event and Screen Recording to the driver's Python, its venv's own copy of the pinned one, and the LaunchAgent starts
+the driver on it, so agent-desktop, which the driver starts, has them too, and nothing else does. A tool can't pass
+agent-desktop's global flags, so the server's come from the driver's own setting, `headed`, which a deploy passes in
+`driver_settings`: off, agent-desktop's default, it acts through the accessibility API alone and refuses what needs
+physical input (double clicks, hovers, drags, the mouse commands); on, it allows those and prefers physical input,
+moving the pointer and focus. `computer-ready` checks the two executables' sha256, that the server lists the tools
+`mcp.json` pins, and the TCC permissions. To move it to another version, pin the tarball's URL and sha256 in `env.toml`
+and the executables' in `driver.py`'s `EXECUTABLES`, and take `mcp.json` again from what that version's server says at
+connect and lists, in a macOS computer. Name it as `agent-desktop`, the alias `aliases.toml` gives it.
+
+`envs/macos-harness/` is browser-use's [macOS harness](https://github.com/browser-use/macos-harness) as a driver, for
+the same macOS computers. macos-harness 0.2.1, from PyPI into the driver's venv, reads an app as numbered text and acts
+on a number or a pixel, in the background, through eleven commands its skill teaches an agent to run in a shell,
+chaining the actions it's sure of and the read after them with `&&`. Agents get one tool, `macos_harness`, which runs
+the harness on a list of command lines in order, the first that fails stopping the rest, with no shell between, and a
+line that doesn't start with one of its commands running nothing; instructions that say how its shell lines map to the
+tool and send the agent to its skill, `skill.md` as pinned, which the computer's skill also leads with (Claude Code
+cuts a server's instructions at 4,096 characters, so the skill itself isn't in them); and a read's screenshot as an
+image beside its text. Its `computer_*` tools and its permissions are agent-desktop's, from
+`MacOSDriver` and a grant to its own Python. The harness gets none of the driver's environment, and its telemetry is off
+(`DO_NOT_TRACK`). `computer-ready` checks its version, that it prints the pinned skill, and the TCC permissions. Name it
+as `macos-harness`.
+
 This bundle has no tasks of its own: other bundles pull its drivers by alias, and `agent-env run drivers` has nothing
 to run.

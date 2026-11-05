@@ -51,6 +51,11 @@ computer = [
     "uvicorn>=0.30",
     "websockets>=13",
 ]
+# A macOS driver on MacOSDriver: ScreenCaptureKit captures the display and Quartz events send its input, through PyObjC.
+macos = [
+    "pyobjc-framework-Quartz>=11; sys_platform == 'darwin'",
+    "pyobjc-framework-ScreenCaptureKit>=11; sys_platform == 'darwin'",
+]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
     "python-multipart>=0.0.13",

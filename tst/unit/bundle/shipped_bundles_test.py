@@ -61,6 +61,8 @@ def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_the_dri
     assert {alias: named.target_id for alias, named in table.aliases.items()} == {
         "mail": "@local/agentenv-framework/mail-mcp/mail", "reference": "@local/agentenv-framework/drivers/reference",
         "cua-driver": "@local/agentenv-framework/drivers/cua-driver", "page": "@local/agentenv-framework/drivers/page",
+        "agent-desktop": "@local/agentenv-framework/drivers/agent-desktop",
+        "macos-harness": "@local/agentenv-framework/drivers/macos-harness",
         "chromium": "@local/agentenv-framework/browsers/chromium"}
     assert A2AAgent.VALIDATION_ENV_ID == "mail"
 

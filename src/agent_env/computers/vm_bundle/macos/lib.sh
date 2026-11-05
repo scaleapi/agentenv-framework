@@ -1,6 +1,6 @@
 # lib.sh, sourced by a composed VM bundle's provision script, and by the script that resolves its venvs' wheels, in the
 # VM, as its session user: root through sudo, with the password the build folder holds, the pinned Python agent-env
-# runs on, and TCC permissions granted to an app bundle.
+# runs on, and TCC permissions granted to an app bundle or an executable.
 
 build="/Volumes/My Shared Files/agentenv-build"
 export PATH="/opt/agentenv/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -32,11 +32,30 @@ pinned_python() {
 # grant APP SERVICE...: each TCC SERVICE (accessibility, post_event, screen_capture) for the app bundle APP, by its
 # identifier, bound to the code signature it has now, so another app of that identifier gets none.
 grant() {
-    local app=$1 id requirement hex service now csreq
+    local app=$1 id
     shift
     id=$(defaults read "$app/Contents/Info" CFBundleIdentifier) || fail "$app has no bundle identifier"
-    requirement=$(codesign -d -r- "$app" 2>&1 | sed -n 's/^\(# *\)\{0,1\}designated => //p')
-    [ -n "$requirement" ] || fail "$app has no designated requirement, so it can't be granted"
+    granted "$id" 0 "$app" "$@"
+}
+
+# grant_executable EXECUTABLE SERVICE...: those for the executable file EXECUTABLE, by its path, bound to the code
+# signature it has now, so another program at that path gets none. What it starts has them too: macOS charges a process
+# to the program launchd started.
+grant_executable() {
+    local executable=$1
+    shift
+    [ -f "$executable" ] && [ ! -L "$executable" ] || fail "$executable isn't an executable file of its own"
+    granted "$executable" 1 "$executable" "$@"
+}
+
+# granted CLIENT TYPE PROGRAM SERVICE...: the TCC rows of CLIENT, a bundle identifier (TYPE 0) or a path (TYPE 1), for
+# each SERVICE, bound to PROGRAM's designated requirement.
+granted() {
+    local client=$1 type=$2 program=$3 requirement hex service now csreq approvals quoted
+    shift 3
+    quoted=${client//\'/\'\'}
+    requirement=$(codesign -d -r- "$program" 2>&1 | sed -n 's/^\(# *\)\{0,1\}designated => //p')
+    [ -n "$requirement" ] || fail "$program has no designated requirement, so it can't be granted"
     csreq=$(mktemp)
     echo "$requirement" | csreq -r- -b "$csreq"
     hex=$(xxd -p "$csreq" | tr -d '\n')
@@ -52,13 +71,15 @@ grant() {
         as_root sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "INSERT OR REPLACE INTO access (service,
             client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type,
             indirect_object_identifier, indirect_object_code_identity, flags, last_modified, pid, pid_version, boot_uuid,
-            last_reminded) VALUES ('$service', '$id', 0, 2, 2, 1, X'$hex', NULL, 0, 'UNUSED', NULL, 0, $now, NULL, NULL,
-            'UNUSED', $now);"
+            last_reminded) VALUES ('$service', '$quoted', $type, 2, 2, 1, X'$hex', NULL, 0, 'UNUSED', NULL, 0, $now, NULL,
+            NULL, 'UNUSED', $now);"
         if [ "$service" = kTCCServiceScreenCapture ]; then
-            # macOS asks once an app, even granted, before its first direct capture; an approval recorded ahead counts.
+            # macOS asks once a program, even granted, before its first direct capture, keyed by the identifier or the
+            # path TCC knows it by; an approval recorded ahead counts.
             approvals="$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist"
             mkdir -p "$(dirname "$approvals")"
-            defaults write "$approvals" "$id" -dict kScreenCaptureApprovalLastAlerted -date "3024-01-01 00:00:00 +0000" \
+            defaults write "$approvals" "$client" -dict \
+                kScreenCaptureApprovalLastAlerted -date "3024-01-01 00:00:00 +0000" \
                 kScreenCaptureApprovalLastUsed -date "3024-01-01 00:00:00 +0000"
         fi
     done

@@ -48,13 +48,15 @@ class DriverPlatform(BaseModel):
 
 class DriverDeclaration(BaseModel):
     """What a ComputerDriverEnvironment class declares, as a ``computer_driver`` env stores it: its card's ``name``, the
-    platforms it ``supports``, as predicates, and what it serves on each of them."""
+    platforms it ``supports``, as predicates, what it serves on each of them, and ``settings``, the JSON schema of its
+    ``Settings`` when it adds to the base ones."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     supports: list[dict[str, Any]]
     platforms: list[DriverPlatform]
+    settings: Optional[dict[str, Any]] = None
 
 
 class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironment):
@@ -77,6 +79,8 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     layouts: ClassVar[tuple[str, ...]] = ("us",)
     #: The platforms the driver supports, as the driver env declares them: ``[{"os": {...}, "arch": [...]}]``.
     supports: ClassVar[list] = []
+    #: The settings a deploy gives the driver, read as it starts: ComputerSettings, or a subclass adding its own.
+    Settings: ClassVar[type[ComputerSettings]] = ComputerSettings
     #: computer-recording/v1, from ``@record`` if the driver has one, else by polling ``@capture``; ``None`` turns
     #: it off.
     recording: ClassVar[Recording | None] = Recording()
@@ -96,7 +100,7 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         check_features(cls)
 
     def __init__(self, settings: ComputerSettings | None = None, platform: Platform | None = None) -> None:
-        self.settings = settings if settings is not None else load_settings()
+        self.settings = settings if settings is not None else load_settings(model=type(self).Settings)
         self.platform = platform if platform is not None else detect()
         self._computer = ComputerRuntime(self)
         #: The routes each app's card opens to agents, by app, read once it answers.
@@ -109,7 +113,7 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         running its ``__init__``: what a ``computer_driver`` env records for each platform it supports. The card
         hooks may read the class and the base class's state, not what a subclass's ``__init__`` sets."""
         driver = cls.__new__(cls)
-        ComputerDriverEnvironment.__init__(driver, settings=ComputerSettings(), platform=platform)
+        ComputerDriverEnvironment.__init__(driver, settings=cls.Settings(), platform=platform)
         config = dict(getattr(cls, _CARD_CONFIG_ATTR, None) or {})
         card = EnvironmentCard(**{**config, "name": config.get("name") or cls.__name__})
         return AgentEnvFastMCPApplication(card, driver).environment_card

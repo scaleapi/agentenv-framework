@@ -66,6 +66,13 @@ RELAY = Path(__file__).resolve().parent.parent / "local_docker" / "relay" / "rel
 #: The prefix of the names of the VMs it clones for deploys, and of the bases it pulls.
 SANDBOX_PREFIX, BASE_PREFIX = "agentenv-", "agentenv-base-"
 _POLL_S = 2.0
+#: How long a builder may take to shut down before it's stopped from outside: one that shuts down does so in seconds.
+SHUTDOWN_WAIT_S = 120
+#: How far back a builder that didn't shut down has its guest's log searched for its shutdown, what marks a line of it,
+#: how many of its last lines are kept besides, and how long reading it may take.
+SHUTDOWN_LOG, SHUTDOWN_WORDS, SHUTDOWN_LOG_LINES, SHUTDOWN_LOG_S = "15m", "shutdown|halt|reboot|logout|sigterm|sigkill", 300, 120
+#: How long the ssh that reads that log may take to connect, and how many of its shutdown lines the warning quotes.
+SHUTDOWN_SSH_S, SHUTDOWN_WARN_LINES = 30, 40
 #: What Virtualization.framework says when it's asked to run a VM outside a logged-in session.
 _NO_SESSION = "security information"
 #: The variable the ssh password reaches ssh's askpass in.
@@ -243,23 +250,44 @@ class LumeSandboxProvider(SandboxProvider):
         return self._sandbox(name, state)
 
     async def keep_builder(self, builder: LumeSandbox) -> str:
-        """``builder`` shut down from inside, once what it wrote is on its disk, within ``boot_timeout_s`` in all, and kept
-        as the VM bundle of its name: its ``local:`` image. A VM stopped from outside can lose its last writes, as it was
-        before it shut down."""
+        """``builder`` shut down from inside, once what it wrote is on its disk, within ``SHUTDOWN_WAIT_S`` in all, and
+        kept as the VM bundle of its name: its ``local:`` image. One that hasn't stopped by then is synced again and
+        stopped from outside, its guest's log of the minutes before saved and warned of, and kept as well: the
+        compose's probe judges it."""
         name = builder.sandbox_id
         password = f"{SHARED_FILES}/{BUILD_FOLDER}/.password"
-        deadline = time.monotonic() + self.boot_timeout_s
+        deadline = time.monotonic() + SHUTDOWN_WAIT_S
         shutdown = await self._ssh(name, ["sh", "-c", f"sync; sudo -S -p '' shutdown -h now < {shlex.quote(password)}"],
                                    timeout=60)
-        ended = await _bounded(shutdown, self.boot_timeout_s) is not None
+        ended = await _bounded(shutdown, SHUTDOWN_WAIT_S) is not None
         while ended and (await self._get(name)).get("status") != "stopped":
             ended = time.monotonic() < deadline
             await asyncio.sleep(_POLL_S)
         if not ended:
-            raise TimeoutError(f"{name} didn't shut down within {self.boot_timeout_s:.0f} s, so it isn't kept")
+            await self._shutdown_stuck(name)
         await self._stopped(name, self._state(name))
         shutil.rmtree(self._folder(name), ignore_errors=True)
         return f"{LOCAL_IMAGE_PREFIX}{name}"
+
+    async def _shutdown_stuck(self, name: str) -> None:
+        """``name``, which didn't shut down in time, synced once more while it still answers, and what its guest logged
+        of its shutdown since the minutes before, with its last lines, saved beside the provider's state and warned of,
+        so what held its shutdown can be found."""
+        log = state_root() / "lume" / f"{name}-shutdown.log"
+        process = await self._ssh(name, ["sh", "-c", (
+            f"sync; log show --last {SHUTDOWN_LOG} --style compact 2>&1 | grep -iE '{SHUTDOWN_WORDS}'; echo ---; "
+            f"log show --last 2m --style compact 2>&1 | tail -n {SHUTDOWN_LOG_LINES}")], timeout=SHUTDOWN_SSH_S)
+        try:
+            out, _ = await asyncio.wait_for(process.communicate(), SHUTDOWN_LOG_S)
+        except TimeoutError:
+            process.kill()
+            out, _ = await process.communicate()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(out or b"")
+        shutdown = (out or b"").decode(errors="replace").split("\n---\n", 1)[0].splitlines()[-SHUTDOWN_WARN_LINES:]
+        logger.warning("lume: %s didn't shut down within %.0f s, so it's stopped from outside and kept for the probe to "
+                       "judge; what its guest logged of the shutdown is in %s, ending:\n%s", name, SHUTDOWN_WAIT_S,
+                       log, "\n".join(shutdown))
 
     async def delete_vm_bundle(self, image: str) -> None:
         """``image``'s VM bundle deleted from this Mac, as one that failed its probe is."""

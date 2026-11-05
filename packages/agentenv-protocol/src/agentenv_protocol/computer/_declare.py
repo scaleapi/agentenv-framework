@@ -20,6 +20,7 @@ from .app import AppDeclaration, ComputerAppEnvironment
 from .card import COMPUTER
 from .driver import ComputerDriverEnvironment, DriverDeclaration, DriverPlatform
 from .platform import supported
+from .settings import ComputerSettings
 
 #: The env type that stores each kind of declaration, which the printed JSON carries as ``type``.
 _ENV_TYPES = {AppDeclaration: "computer_app", DriverDeclaration: "computer_driver"}
@@ -82,7 +83,8 @@ def declare(folder: Path, file: str, name: str) -> AppDeclaration | DriverDeclar
     if not platforms:
         raise ValueError(f"{name} declares no platform: name them with @computer_driver(supports=[...])")
     cards = [(platform, cls.declaration(platform)) for platform in platforms]
-    return DriverDeclaration(name=cards[0][1].name, supports=list(cls.supports), platforms=[
+    own = cls.Settings.model_json_schema() if cls.Settings is not ComputerSettings else None
+    return DriverDeclaration(name=cards[0][1].name, supports=list(cls.supports), settings=own, platforms=[
         DriverPlatform(platform=platform, provides=[e.uri for e in card.capabilities.extensions],
                        tools=[t.name for t in card.capabilities.tools],
                        features=next({k: v for k, v in e.params.items() if k not in ("endpoint", "methods")}

@@ -140,7 +140,8 @@ def _driver(folder: Path, macos: MacInstall | None = None, daemon: dict[str, str
         name: folder / name for name in ("driver.py", "requirements.txt", "install-app.sh")})
     macos = macos or MacInstall(
         python="requirements.txt", downloads=[Download(url=URL, sha256="ab" * 32, to="desk.tar.gz", arch="arm64")],
-        run=[RunScript(script="install-app.sh")], grants=[Grant(app=APP, services=["accessibility", "screen_capture"])],
+        run=[RunScript(script="install-app.sh")], grants=[Grant(app=APP, services=["accessibility", "screen_capture"]),
+                                                          Grant(executable="venv/bin/python", services=["post_event"])],
         services=[MacService(name="daemon", command=f"{APP}/Contents/MacOS/desk serve", direct=True,
                              environment=daemon or {"DO_NOT_TRACK": "1"}),
                   MacService(name="driver", command=SERVE)])
@@ -170,9 +171,10 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
     prefix = "/opt/agentenv/drivers/desk"
     for line in ['bash "$build/prepare/prepare.sh"', f"curl -fsSL --retry 3 -o {prefix}/desk.tar.gz {URL}",
                  f'echo "{"ab" * 32}  "{prefix}/desk.tar.gz | shasum -a 256 -c - > /dev/null',
-                 f"/opt/agentenv/bin/python3 -m venv {prefix}/venv",
+                 f"/opt/agentenv/python/bin/python3 -m venv --copies {prefix}/venv",
                  f"as_root env PREFIX={prefix} bash -c 'cd {prefix} && ./install-app.sh'",
-                 f"grant {APP} accessibility screen_capture", 'cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"',
+                 f"grant {APP} accessibility screen_capture", f"grant_executable {prefix}/venv/bin/python post_event",
+                 'cp "$build"/agents/*.plist "$HOME/Library/LaunchAgents/"',
                  'as_root cp "$build/image.json" "$build/build-settings.json" /etc/agentenv/', "sync"]:
         assert line in script.splitlines()
     wheels = "packages/wheels/driver"
@@ -186,7 +188,7 @@ def test_a_macos_env_composes_a_vm_bundle_on_a_mac_each_layer_installed_by_its_p
     daemon, server = agents["dev.agentenv.driver-desk-daemon.plist"], agents["dev.agentenv.driver-desk-driver.plist"]
     assert daemon["ProgramArguments"] == [f"{APP}/Contents/MacOS/desk", "serve"]
     assert daemon["EnvironmentVariables"]["DO_NOT_TRACK"] == "1" and daemon["LimitLoadToSessionType"] == "Aqua"
-    assert server["ProgramArguments"] == ["/opt/agentenv/bin/python3", "/opt/agentenv/bin/agentenv-service", prefix,
+    assert server["ProgramArguments"] == [f"{prefix}/venv/bin/python", "/opt/agentenv/bin/agentenv-service", prefix,
                                           "MCP_PORT=18765", "--", f"{prefix}/venv/bin/python", "-m",
                                           "agentenv_protocol.computer.serve", "driver.py:Desk"]
     assert "dev.agentenv.set-display.plist" in agents and mode == 0o600
@@ -349,7 +351,12 @@ def test_a_vm_bundle_is_composed_only_where_a_link_boots_macos_vm_bundles(mac, t
     ({"services": [{"name": "d", "command": "x", "scope": "system"}]}, "services.0.scope"),
     ({"services": [{"name": "d", "command": "x"}], "grants": [{"app": "/Applications/X", "services": ["accessibility"]}]},
      "grants.0.app"),
-], ids=["apt", "environment", "system", "grant-not-an-app"])
+    ({"services": [{"name": "d", "command": "x"}], "grants": [{"services": ["accessibility"]}]}, "names one program"),
+    ({"services": [{"name": "d", "command": "x"}],
+      "grants": [{"app": "/Applications/X.app", "executable": "x", "services": ["accessibility"]}]}, "names one program"),
+    ({"services": [{"name": "d", "command": "x"}], "grants": [{"executable": "../x", "services": ["accessibility"]}]},
+     "grants.0.executable"),
+], ids=["apt", "environment", "system", "grant-not-an-app", "grant-of-nothing", "grant-of-two", "grant-outside"])
 def test_a_macos_install_takes_no_apt_and_its_services_are_session_launchagents(table, problem):
     found, problems = install.installs({"macos": table})
     assert not found and any(problem in each for each in problems)

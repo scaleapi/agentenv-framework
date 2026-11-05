@@ -165,6 +165,15 @@ def test_a_driver_reads_its_settings_and_platform_from_the_environment(monkeypat
     driver = _define({})()
     assert driver.settings.queue_wait_s == 2 and driver.platform == LINUX
 
+    class Own(ComputerSettings):
+        headed: bool = False
+
+    monkeypatch.setenv(SETTINGS_ENV, '{"queue_wait_s": 2, "headed": true}')
+    own = _define({"Settings": Own})()
+    assert own.settings.headed and own.settings.queue_wait_s == 2
+    with pytest.raises(TypeError, match="Settings is ComputerSettings or a subclass of it"):
+        _define({"Settings": dict})
+
 
 @pytest.mark.asyncio
 async def test_the_card_declares_the_contract_the_driver_implements():

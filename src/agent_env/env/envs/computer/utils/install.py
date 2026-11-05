@@ -7,7 +7,7 @@ prefix; and ``ports``, those it listens on. Everything but the files is resolved
 build installs only what was stored then (``packages`` module). The models of packages, sources, downloads and run
 scripts are the protocol's, which an app's ``@linux(...)`` uses too. ``[install.macos]`` takes the same, but apt's
 packages and sources; its services are LaunchAgents of the login session, and its ``grants`` the TCC permissions an app
-bundle it installs needs."""
+bundle or an executable it installs needs."""
 
 from __future__ import annotations
 
@@ -39,10 +39,10 @@ class Service(BaseModel):
 
 
 class MacService(Service):
-    """A program launchd runs in the login session, as a LaunchAgent: through agent-env's service runner, which gives it
-    the deploy's settings, or, when ``direct``, as its own command, with no settings. macOS attributes an app bundle's
-    TCC permissions to its executable only when launchd starts the executable itself, so a service that needs them is
-    direct."""
+    """A program launchd runs in the login session, as a LaunchAgent: through agent-env's service runner, on the layer's
+    own Python, which gives it the deploy's settings, or, when ``direct``, as its own command, with no settings. macOS
+    gives a process the TCC permissions of the program launchd started, so a service an app bundle's permissions are
+    for is direct, and one its layer's Python's are for runs through the runner."""
 
     scope: Literal["session"] = "session"
     direct: bool = False
@@ -56,13 +56,23 @@ class MacService(Service):
 
 
 class Grant(BaseModel):
-    """The TCC permissions macOS gives an app bundle the layer installs, by its path on the computer, granted to the
-    bundle's identifier and the code signature it has when it's composed."""
+    """The TCC permissions macOS gives a program the layer installs, bound to the code signature it has when it's
+    composed: an ``app`` bundle, by its path on the computer, granted to the bundle's identifier; or an ``executable``,
+    by its path under the layer's prefix, granted to that path. macOS charges what a process starts to the process
+    launchd started, so an executable's permissions cover the programs it runs, and none it didn't."""
 
     model_config = ConfigDict(extra="forbid")
 
-    app: str = Field(pattern=r"^/.+\.app$")
+    app: str | None = Field(default=None, pattern=r"^/.+\.app$")
+    executable: LayerPath | None = None
     services: list[Literal["accessibility", "post_event", "screen_capture"]] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _one_program(self) -> Grant:
+        if (self.app is None) == (self.executable is None):
+            raise ValueError("a grant names one program: an app bundle (app) or an executable under the prefix "
+                             "(executable)")
+        return self
 
 
 class Install(BaseModel):
@@ -113,7 +123,7 @@ class AppInstall(Install):
 
 class MacInstall(Install):
     """How a macOS computer installs a layer: as on Linux, but with no apt, its services LaunchAgents and its
-    ``grants`` the TCC permissions of the app bundles it installs."""
+    ``grants`` the TCC permissions of the app bundles and executables it installs."""
 
     services: list[MacService] = Field(min_length=1)
     grants: list[Grant] | None = None
