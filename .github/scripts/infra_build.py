@@ -82,6 +82,9 @@ _RATE_LIMITED = re.compile(r"429 Too Many Requests|toomanyrequests", re.IGNORECA
 # What pip in an agent image's build answers for the agentenv-framework-protocol its release published moments earlier,
 # until PyPI's index, which a CDN caches, lists it: pinned (an agent's), or a floor it names (the browser's recorder).
 _NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-framework-protocol(\[[^\]]*\])?(==|>=)")
+# What GHCR answers a push to a new package while another platform's push creates it, until it links the package to
+# this repository.
+_NOT_YET_LINKED = re.compile(r"denied: permission_denied: write_package")
 # How long to wait before each try again, so a burst of builds starting together spreads out.
 _RETRY_WAITS_SECONDS = (30, 60, 120)
 
@@ -308,13 +311,16 @@ def _tried_again(attempt: Callable[[], subprocess.CompletedProcess]) -> subproce
 
 def _why_again(result: subprocess.CompletedProcess) -> str | None:
     """Why a failed run can work later, or None: a registry rate-limited it, as public.ecr.aws does past one anonymous
-    pull a second, which builds starting together pass; or a build's pip can't find the agentenv-framework-protocol its
-    release has just published, which PyPI's index lists a little after the upload."""
+    pull a second, which builds starting together pass; a build's pip can't find the agentenv-framework-protocol its
+    release has just published, which PyPI's index lists a little after the upload; or GHCR refuses a push to a package
+    another platform's push is creating, as an image's first release pushes both at once."""
     printed, command = f"{result.stdout}{result.stderr}", f"`{' '.join(result.args)[:_PRINTED_CHARS]}`"
     if _RATE_LIMITED.search(printed):
         return f"a registry rate-limited {command}"
     if _NOT_YET_SERVED.search(printed):
         return f"PyPI doesn't list yet the agentenv-framework-protocol {command} installs"
+    if list(result.args[:2]) == ["docker", "push"] and _NOT_YET_LINKED.search(printed):
+        return f"GHCR doesn't let this repository write yet the package {command} pushes to"
     return None
 
 

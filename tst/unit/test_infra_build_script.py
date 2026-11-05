@@ -463,6 +463,25 @@ def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_floor_a_build_nam
     assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
 
 
+def test_retry_tries_again_a_push_ghcr_refuses_while_another_platform_creates_the_package(script, monkeypatch, capsys):
+    """An image's first release pushes both platforms at once; the second waits on GHCR linking the new package."""
+    runs, waits = _attempts(script, monkeypatch, [("denied: permission_denied: write_package\n", 1), ("pushed\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "push", "img") == 0
+
+    assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
+    assert ("::warning::GHCR doesn't let this repository write yet the package `docker push img` pushes to; trying again in"
+            in capsys.readouterr().out)
+
+
+def test_retry_doesnt_try_again_a_denied_command_that_isnt_a_push(script, monkeypatch, capsys):
+    runs, waits = _attempts(script, monkeypatch, [("denied: permission_denied: write_package\n", 1)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 1
+
+    assert len(runs) == 1 and waits == []
+
+
 def test_retry_doesnt_try_again_a_build_missing_another_package(script, monkeypatch, capsys):
     runs, waits = _attempts(script, monkeypatch, [("ERROR: No matching distribution found for nonexistent-pkg==1.0\n", 1)])
 
