@@ -45,23 +45,23 @@ def launcher_args(ports: list[int], env: dict[str, str], cpu: float, memory: int
                                for arg in ("-e", f"{name}={value}"))]
 
 
-def exported_disk(image: str) -> Path:
+def exported_disk(image: str, platform: str) -> Path:
     """``image``'s ``DISK_FILE`` compressed with zstd in this machine's cache, exported from its image store by this
     machine's Docker unless an export of it is there already: once for each composed disk, by its ref, whose tag is its
-    composer's key."""
+    composer's key. ``platform`` is the disk's own, which this machine's Docker may not be."""
     path = cache_root() / "disks" / f"{hashlib.sha256(image.encode()).hexdigest()[:32]}.img.zst"
     with holding_locks([f"disk-export:{path.name}"]):
         if not path.exists():
-            _export(image, path)
+            _export(image, platform, path)
     return path
 
 
-def _export(image: str, path: Path) -> None:
+def _export(image: str, platform: str, path: Path) -> None:
     """Signed in to the image store first, as a boot's pull is, since ``docker create`` pulls ``image`` when it isn't
-    here."""
+    here; for ``platform``, as the image's index holds that one alone, which a pull for this machine's wouldn't find."""
     path.parent.mkdir(parents=True, exist_ok=True)
     docker_login(get_config().get_image_store().auth(image))
-    container = docker("create", image, "disk")
+    container = docker("create", "--platform", platform, image, "disk")
     try:
         with tempfile.TemporaryDirectory(prefix="export-", dir=path.parent) as work:
             raw, compressed = Path(work) / "disk.img", Path(work) / path.name
