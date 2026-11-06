@@ -74,6 +74,10 @@ _last_attribution: dict[str, str | None] = {
 _attribution_lock = threading.Lock()
 
 
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
 def _record_attribution(project_id: str | None, task_id: str | None) -> None:
     if not project_id and not task_id:
         return
@@ -392,6 +396,8 @@ async def _read_with_watchdog(
             return
         if not isinstance(event, dict):
             return
+        # The CLI's events carry no time; when each arrived stands in for it.
+        event.setdefault("timestamp", now())
         events.append(event)
         terminal_seen = terminal_seen or event.get("type") in {
             "turn.completed",

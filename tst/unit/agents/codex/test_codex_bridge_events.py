@@ -8,6 +8,7 @@ Every event literal below is verbatim from a real codex 0.147 `exec --json` run.
 """
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -145,8 +146,9 @@ def test_advisories_and_retries_do_not_fail_a_completed_turn(spawn, noise, expec
     res = run(spawn, events, returncode=0)
     assert (res.error, res.response, len(res.warnings), res.tool_call_count) == (
         None, "done", expected_warnings, 1)
-    # The trajectory extension depends on every event surviving, noise included.
+    # The trajectory extension depends on every event surviving, noise included, each with the time it arrived.
     assert [e.get("type") for e in res.trajectory] == [e["type"] for e in events]
+    assert all(datetime.fromisoformat(e["timestamp"]).tzinfo for e in res.trajectory)
 
 
 @pytest.mark.parametrize("events, returncode", [

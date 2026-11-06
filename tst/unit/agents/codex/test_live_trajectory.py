@@ -1,5 +1,5 @@
 """A task's Codex events are readable while it runs, through the framework's cursor read, and are
-its final trajectory once it ends, each with the time it arrived."""
+its final trajectory once it ends."""
 import asyncio
 import uuid
 from datetime import datetime
@@ -50,11 +50,11 @@ def test_a_task_is_readable_while_it_runs_and_its_log_is_its_trajectory(codex, m
 
     running, ended, final = asyncio.run(exercise())
 
-    assert (running["state"], running["format"], _untimed(running["events"])) == (
+    assert (running["state"], running["format"], running["events"]) == (
         "running", a2a_server.TRAJECTORY_FORMAT, EVENTS[:1],
     )
-    assert (_untimed(ended["events"]), ended["next"], ended["has_more"]) == (EVENTS[1:], 3, False)
-    assert _untimed(final["trajectory"]) == EVENTS
+    assert (ended["events"], ended["next"], ended["has_more"]) == (EVENTS[1:], 3, False)
+    assert final == {"trajectory": EVENTS}
 
 
 def test_a_turn_ends_its_trajectory_with_the_usage_and_model_requests_the_events_omit(codex, monkeypatch):
@@ -70,13 +70,10 @@ def test_a_turn_ends_its_trajectory_with_the_usage_and_model_requests_the_events
             task = await codex.send(client, "go")
             return (await client.post("/ext/trajectory", json={"task_id": task["id"]})).json()
 
-    assert _untimed(asyncio.run(exercise())["trajectory"]) == [EVENTS[0], {
-        "type": "agentenv.usage", "usage": {"input_tokens": 900, "output_tokens": 40}, "model_requests": 46}]
-
-
-def _untimed(events: list[dict]) -> list[dict]:
-    assert all(datetime.fromisoformat(event["timestamp"]).tzinfo for event in events), events
-    return [{key: value for key, value in event.items() if key != "timestamp"} for event in events]
+    first, usage = asyncio.run(exercise())["trajectory"]
+    assert datetime.fromisoformat(usage.pop("timestamp")).tzinfo
+    assert (first, usage) == (EVENTS[0], {
+        "type": "agentenv.usage", "usage": {"input_tokens": 900, "output_tokens": 40}, "model_requests": 46})
 
 
 def test_a_canceled_task_keeps_the_events_it_emitted(codex, monkeypatch):
@@ -115,5 +112,5 @@ def test_a_canceled_task_keeps_the_events_it_emitted(codex, monkeypatch):
 
     canceled, final = asyncio.run(exercise())
 
-    assert _untimed(canceled["events"]) == EVENTS[:1]
-    assert _untimed(final["trajectory"]) == EVENTS[:1]
+    assert canceled["events"] == EVENTS[:1]
+    assert final == {"trajectory": EVENTS[:1]}
