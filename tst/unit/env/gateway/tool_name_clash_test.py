@@ -35,7 +35,7 @@ def _gateway(servers: dict[str, _Session], **kw) -> Gateway:
     async def open_sessions(server, stack, report):
         return sessions[server.mcp_url]
 
-    gw._open_child_session = open_sessions  # type: ignore[method-assign]
+    gw._sessions.open_session = open_sessions  # type: ignore[method-assign]
     return gw
 
 

@@ -39,7 +39,7 @@ def _gateway(*tools: MCPTool) -> Gateway:
     async def open_sessions(server, stack, report):
         return _Session(*tools)
 
-    gw._open_child_session = open_sessions  # type: ignore[method-assign]
+    gw._sessions.open_session = open_sessions  # type: ignore[method-assign]
     return gw
 
 

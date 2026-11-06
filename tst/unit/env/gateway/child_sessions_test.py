@@ -15,6 +15,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent, Tool as MCPTool, ToolAnnotations
 
 from agent_env.env.gateway import InternalMCPServer
+from agent_env.env.gateway import child_sessions as child_sessions_module
 from agent_env.env.gateway import gateway as gateway_module
 from agent_env.env.gateway.gateway import Gateway
 
@@ -47,7 +48,7 @@ class _FakeSession:
 
 
 class _Opener:
-    """Stands in for _open_child_session: counts attempts and sessions opened, records the entering/exiting task."""
+    """Stands in for ChildSessions.open_session: counts attempts and sessions opened, records the entering/exiting task."""
 
     def __init__(self, session: _FakeSession, *, delay: float = 0.0, failures=(), gate: asyncio.Event | None = None):
         self.session, self.delay, self.failures, self.gate = session, delay, list(failures), gate
@@ -75,12 +76,12 @@ class _Opener:
 
 def _gateway(opener: _Opener, **kw) -> Gateway:
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", URL)], **kw)
-    gw._open_child_session = opener  # type: ignore[method-assign]
+    gw._sessions.open_session = opener  # type: ignore[method-assign]
     return gw
 
 
 def _owner(gw: Gateway, url: str = URL) -> asyncio.Task | None:
-    child = gw._children.get(url)
+    child = gw._sessions.current.get(url)
     return child.owner if child is not None else None
 
 
@@ -119,7 +120,7 @@ async def test_concurrent_first_use_opens_one_session():
     try:
         results = await asyncio.gather(*(gw._ensure_child_sessions() for _ in range(5)))
         assert all(r[URL] is opener.session for r in results) and opener.opened == 1
-        assert gw._children[URL].session is opener.session and not _owner(gw).done()
+        assert gw._sessions.current[URL].session is opener.session and not _owner(gw).done()
     finally:
         await gw._close_child_sessions()
 
@@ -132,7 +133,7 @@ async def test_a_session_is_exited_by_the_task_that_entered_it():
     owner = _owner(gw)
     await gw._close_child_sessions()
     assert opener.entered == [owner] and opener.exited == [owner] and owner is not asyncio.current_task()
-    assert owner.done() and gw._children == {} and gw._draining == set()
+    assert owner.done() and gw._sessions.current == {} and gw._sessions.draining == set()
 
 
 @pytest.mark.parametrize("death", [
@@ -170,8 +171,8 @@ async def test_a_call_lost_in_flight_retires_the_session_but_is_not_retried():
         with pytest.raises(McpError, match="Connection closed"):
             await gw._call_child_tool(URL, "svc_thing", {})
         assert session.calls == ["svc_thing"]  # the child may already have written; a retry could write twice
-        await asyncio.gather(*gw._retirements)
-        assert first_owner.done() and URL not in gw._children and opener.opened == 1
+        await asyncio.gather(*gw._sessions.retirements)
+        assert first_owner.done() and URL not in gw._sessions.current and opener.opened == 1
         assert not (await gw._call_child_tool(URL, "svc_thing", {})).isError  # the next call reopens
         assert opener.opened == 2 and session.calls == ["svc_thing", "svc_thing"]
     finally:
@@ -218,7 +219,7 @@ async def test_a_failed_open_leaves_no_session_and_is_retried_on_the_next_use():
     gw = _gateway(opener)
     with pytest.raises(RuntimeError, match="refused"):
         await gw._ensure_child_sessions()
-    assert gw._children == {}
+    assert gw._sessions.current == {}
     try:
         assert (await gw._ensure_child_sessions())[URL] is opener.session
         assert opener.attempts == 2 and opener.opened == 1
@@ -248,7 +249,7 @@ async def test_a_failed_discovery_keeps_the_gateway_s_own_entry_and_heals_on_the
         assert gw._tools_discovered and [t.name for t in gw._server_tools["svc"]] == ["svc_thing"]
         assert engine._is_readonly("svc_thing") is True  # discovery dropped the early memo
         assert opener.opened == 1
-        gw._open_child_session = _explode  # type: ignore[method-assign]
+        gw._sessions.open_session = _explode  # type: ignore[method-assign]
         await gw._ensure_tools_discovered()
     finally:
         await gw._close_child_sessions()
@@ -289,7 +290,7 @@ async def test_discovery_on_a_dead_session_replaces_it():
     try:
         with pytest.raises(McpError):
             await gw._ensure_tools_discovered()
-        assert URL not in gw._children
+        assert URL not in gw._sessions.current
         await gw._ensure_tools_discovered()
         assert gw._tools_discovered and opener.opened == 2
     finally:
@@ -315,13 +316,13 @@ async def test_a_child_that_never_answers_initialize_is_a_failed_connect_attempt
     async def streams(url, **kwargs):
         yield None, None, None
 
-    monkeypatch.setattr(gateway_module, "streamable_http_client", streams)
-    monkeypatch.setattr(gateway_module, "ClientSession", _HungSession)
-    monkeypatch.setattr(gateway_module, "CARD_FETCH_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(child_sessions_module, "streamable_http_client", streams)
+    monkeypatch.setattr(child_sessions_module, "ClientSession", _HungSession)
+    monkeypatch.setattr(child_sessions_module, "CARD_FETCH_TIMEOUT_S", 0.02)
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", URL)])
     async with contextlib.AsyncExitStack() as stack:
         with pytest.raises(TimeoutError):
-            await gw._open_child_session(gw.internal_mcp_servers[0], stack, lambda exc: None, max_retries=2,
+            await gw._sessions.open_session(gw.internal_mcp_servers[0], stack, lambda exc: None, max_retries=2,
                                          retry_delay=0)
 
 
@@ -336,20 +337,20 @@ async def test_the_process_lifespan_starts_the_driver_tolerates_a_failed_startup
     assert sent == [{"type": "lifespan.startup.complete"}]  # fail-open: a raised startup would exit uvicorn
     driver = gw._trigger_engine._driver_task
     assert driver is not None and not driver.done()
-    assert gw._children == {} and opener.attempts == 1  # the failed open left nothing behind
+    assert gw._sessions.current == {} and opener.attempts == 1  # the failed open left nothing behind
     await gw._ensure_tools_discovered()  # the next use heals it
     assert gw._tools_discovered and not _owner(gw).done()
     release.set()
     await asyncio.wait_for(task, 5)
     assert sent[-1] == {"type": "lifespan.shutdown.complete"}
-    assert gw._trigger_engine._driver_task is None and gw._children == {}
+    assert gw._trigger_engine._driver_task is None and gw._sessions.current == {}
 
     # the MCP session manager runs once per app, so a second lifespan fails its startup; the process state still unwinds
     sent2: list[dict] = []
     with pytest.raises(RuntimeError, match="only be called once"):
         await _run_lifespan(app, asyncio.Event(), sent2)
     assert sent2[0]["type"] == "lifespan.startup.failed"
-    assert gw._trigger_engine._driver_task is None and gw._children == {}
+    assert gw._trigger_engine._driver_task is None and gw._sessions.current == {}
 
 
 @pytest.mark.asyncio
@@ -363,8 +364,8 @@ async def test_startup_discovery_is_bounded_and_a_hung_open_leaves_no_session(mo
     task = asyncio.create_task(_run_lifespan(app, release, sent))
     await _startup_answered(sent)
     assert sent == [{"type": "lifespan.startup.complete"}] and not gw._trigger_engine._driver_task.done()
-    assert gw._children == {} and not gw._tools_discovered
-    assert not gw._child_lock(URL).locked() and not gw._discover_lock.locked()
+    assert gw._sessions.current == {} and not gw._tools_discovered
+    assert not gw._sessions.lock(URL).locked() and not gw._discover_lock.locked()
     await asyncio.sleep(0)
     # the abandoned open was cancelled, not left running to finish for nobody
     assert not [t for t in asyncio.all_tasks() if t.get_name() == "gateway-child-session" and not t.done()]
@@ -380,7 +381,7 @@ async def test_startup_discovery_is_bounded_and_a_hung_open_leaves_no_session(mo
     finally:
         release.set()
         await asyncio.wait_for(task, 5)
-    assert sent[-1] == {"type": "lifespan.shutdown.complete"} and gw._children == {}
+    assert sent[-1] == {"type": "lifespan.shutdown.complete"} and gw._sessions.current == {}
 
 
 @pytest.mark.asyncio
@@ -410,10 +411,10 @@ async def test_shutdown_cancels_scheduled_actions_and_nothing_reopens_the_child_
     assert sent[-1] == {"type": "lifespan.shutdown.complete"}
     assert scheduled.cancelled() and outcome == ["cancelled"] and gw._trigger_engine._tasks == set()
     assert session.calls == [] and opener.opened == 1 and opener.exited == opener.entered
-    assert gw._children == {}
+    assert gw._sessions.current == {}
     with pytest.raises(RuntimeError, match="shutting down"):
         await gw._ensure_child_sessions()
-    assert gw._children == {} and opener.attempts == 1
+    assert gw._sessions.current == {} and opener.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -423,22 +424,22 @@ async def test_a_reported_transport_failure_retires_the_session_once_and_the_nex
     session = _FakeSession()
     opener = _Opener(session)
     gw = _gateway(opener)
-    first = await gw._ensure_child(URL)
-    gw._child_transport_failed(first, httpx.ReadError("peer went away"))
-    gw._child_transport_failed(first, httpx.ReadError("again"))  # every request in flight reports; one retirement
-    assert len(gw._retirements) == 1
-    await asyncio.gather(*gw._retirements)
-    assert gw._retirements == set() and gw._children == {}
+    first = await gw._sessions.ensure(URL)
+    gw._sessions.transport_failed(first, httpx.ReadError("peer went away"))
+    gw._sessions.transport_failed(first, httpx.ReadError("again"))  # every request in flight reports; one retirement
+    assert len(gw._sessions.retirements) == 1
+    await asyncio.gather(*gw._sessions.retirements)
+    assert gw._sessions.retirements == set() and gw._sessions.current == {}
     assert opener.exited == opener.entered and len(opener.exited) == 1, "retired exactly once, by the task that opened it"
 
-    second = await gw._ensure_child(URL)
+    second = await gw._sessions.ensure(URL)
     assert second is not first and opener.opened == 2
-    gw._child_transport_failed(first, httpx.ReadError("stale"))  # a report about the retired session
-    assert gw._retirements == set() and gw._children[URL] is second
+    gw._sessions.transport_failed(first, httpx.ReadError("stale"))  # a report about the retired session
+    assert gw._sessions.retirements == set() and gw._sessions.current[URL] is second
 
-    gw._closing = True
-    gw._child_transport_failed(second, httpx.ReadError("at shutdown"))
-    assert gw._retirements == set(), "nothing is retired on the way down; the process lifespan closes it"
+    gw._sessions.closing = True
+    gw._sessions.transport_failed(second, httpx.ReadError("at shutdown"))
+    assert gw._sessions.retirements == set(), "nothing is retired on the way down; the process lifespan closes it"
 
 
 @pytest.mark.asyncio
@@ -458,7 +459,7 @@ async def test_a_session_the_child_rejects_is_replaced_and_each_call_already_sen
     opener = _Opener(first)
     gw = _gateway(opener)
     try:
-        old = await gw._ensure_child(URL)
+        old = await gw._sessions.ensure(URL)
         opener.session = second
         calls = [asyncio.create_task(gw._call_child_tool(URL, f"t{i}", {})) for i in range(5)]
         while len(first.calls) < 5:
@@ -468,7 +469,7 @@ async def test_a_session_the_child_rejects_is_replaced_and_each_call_already_sen
         assert all(not r.isError for r in results)
         assert sorted(second.calls) == [f"t{i}" for i in range(5)] and opener.opened == 2
         await asyncio.wait_for(old.owner, 1)
-        assert old.close.is_set() and old not in gw._draining and gw._children[URL].session is second
+        assert old.close.is_set() and old not in gw._sessions.draining and gw._sessions.current[URL].session is second
     finally:
         await gw._close_child_sessions()
 
@@ -494,7 +495,7 @@ async def test_one_child_s_dead_session_leaves_another_child_s_calls_alone():
 
     gw = Gateway(host="127.0.0.1", port=0, server_name="t",
                  internal_mcp_servers=[InternalMCPServer("svc", URL), InternalMCPServer("other", OTHER)])
-    gw._open_child_session = opener  # type: ignore[method-assign]
+    gw._sessions.open_session = opener  # type: ignore[method-assign]
     try:
         in_flight = asyncio.create_task(gw._call_child_tool(OTHER, "other_thing", {}))
         while not slow.calls:
@@ -504,8 +505,8 @@ async def test_one_child_s_dead_session_leaves_another_child_s_calls_alone():
             await gw._call_child_tool(URL, "svc_thing", {})
         release.set()
         assert not (await in_flight).isError
-        await asyncio.gather(*gw._retirements)
-        assert URL not in gw._children and _owner(gw, OTHER) is other_owner and not other_owner.done()
+        await asyncio.gather(*gw._sessions.retirements)
+        assert URL not in gw._sessions.current and _owner(gw, OTHER) is other_owner and not other_owner.done()
     finally:
         await gw._close_child_sessions()
 
@@ -526,17 +527,17 @@ async def test_a_replaced_session_whose_transport_then_fails_fails_the_calls_sti
     opener = _Opener(session)
     gw = _gateway(opener)
     try:
-        old = await gw._ensure_child(URL)
+        old = await gw._sessions.ensure(URL)
         pending = asyncio.create_task(gw._call_child_tool(URL, "svc_thing", {}))
         while not session.calls:
             await asyncio.sleep(0)
-        await gw._replace_child(old)  # as a call the child answered 404 does
-        assert old in gw._draining and not old.close.is_set()
-        gw._child_transport_failed(old, httpx.ReadError("peer went away"))
-        await asyncio.gather(*gw._retirements)
+        await gw._sessions.replace(old)  # as a call the child answered 404 does
+        assert old in gw._sessions.draining and not old.close.is_set()
+        gw._sessions.transport_failed(old, httpx.ReadError("peer went away"))
+        await asyncio.gather(*gw._sessions.retirements)
         with pytest.raises(McpError, match="Connection closed"):
             await pending
-        assert old.owner.done() and old not in gw._draining and session.calls == ["svc_thing"]
+        assert old.owner.done() and old not in gw._sessions.draining and session.calls == ["svc_thing"]
     finally:
         await gw._close_child_sessions()
 
@@ -558,21 +559,21 @@ async def test_a_replaced_session_whose_transport_fails_while_the_next_one_opens
     gw = _gateway(opener)
     opening = None
     try:
-        old = await gw._ensure_child(URL)
+        old = await gw._sessions.ensure(URL)
         pending = asyncio.create_task(gw._call_child_tool(URL, "svc_thing", {}))
         while not session.calls:
             await asyncio.sleep(0)
-        await gw._replace_child(old)
+        await gw._sessions.replace(old)
         opener.gate = asyncio.Event()  # the next open waits, holding the child's lock
-        opening = asyncio.create_task(gw._ensure_child(URL))
+        opening = asyncio.create_task(gw._sessions.ensure(URL))
         while opener.attempts < 2:
             await asyncio.sleep(0)
-        gw._child_transport_failed(old, httpx.ReadError("peer went away"))
+        gw._sessions.transport_failed(old, httpx.ReadError("peer went away"))
         with pytest.raises(McpError, match="Connection closed"):
             await asyncio.wait_for(pending, 1)
         assert not opening.done()
         opener.gate.set()
-        assert (await opening).session is session and old.owner.done() and old not in gw._draining
+        assert (await opening).session is session and old.owner.done() and old not in gw._sessions.draining
     finally:
         if opening is not None and not opening.done():
             opener.gate.set()

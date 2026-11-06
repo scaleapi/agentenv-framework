@@ -15,6 +15,7 @@ from mcp.types import CONNECTION_CLOSED
 from pytest_socket import enable_socket
 
 from agent_env.env.gateway import InternalMCPServer
+from agent_env.env.gateway.child_sessions import ChildSessions
 from agent_env.env.gateway.gateway import Gateway
 
 
@@ -73,7 +74,7 @@ async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reop
     try:
         await gw._ensure_tools_discovered()
         assert _text(await gw._call_child_tool(url, "fast", {})) == "ok"
-        first_session = gw._children[url]
+        first_session = gw._sessions.current[url]
 
         in_flight = asyncio.create_task(gw._call_child_tool(url, "slow", {}))
         await asyncio.wait_for(slow_started.wait(), 10)  # the child holds the call
@@ -85,12 +86,12 @@ async def test_a_child_dying_mid_call_fails_the_call_fast_and_the_next_call_reop
             await asyncio.wait_for(in_flight, timeout=30)
         assert info.value.error.code == CONNECTION_CLOSED
         assert time.monotonic() - died < 10, "the in-flight call must fail promptly, not after the tool-call timeout"
-        await asyncio.gather(*gw._retirements)
-        assert url not in gw._children, "the session was retired"
+        await asyncio.gather(*gw._sessions.retirements)
+        assert url not in gw._sessions.current, "the session was retired"
 
         server = await _serve(_child(asyncio.Event()), _bind(port))  # the child is back on the same address
         assert _text(await gw._call_child_tool(url, "fast", {})) == "ok", "the next call reopens"
-        assert gw._children[url] is not first_session
+        assert gw._sessions.current[url] is not first_session
     finally:
         await gw._close_child_sessions()
         await server.shutdown()
@@ -109,7 +110,8 @@ async def test_a_call_arriving_while_the_child_is_still_down_waits_for_the_recon
     url = f"http://127.0.0.1:{port}/mcp"
     server = await _serve(_child(asyncio.Event()), sock)
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", url)])
-    gw._open_child_session = functools.partial(Gateway._open_child_session, gw, max_retries=4, retry_delay=0.5)
+    gw._sessions.open_session = functools.partial(ChildSessions.open_session, gw._sessions, max_retries=4,
+                                                 retry_delay=0.5)
     try:
         await gw._ensure_tools_discovered()
         await server.shutdown()
@@ -171,7 +173,7 @@ async def test_after_a_child_restarts_a_burst_of_calls_to_it_succeeds_and_anothe
                  internal_mcp_servers=[InternalMCPServer(name, url) for name, url in urls.items()])
     try:
         await gw._ensure_tools_discovered()
-        b_session = gw._children[urls["b"]]
+        b_session = gw._sessions.current[urls["b"]]
         await servers["a"].shutdown()
         servers["a"] = await _serve(_counting_child("a", writes["a"]), _bind(ports["a"]))  # back, its sessions gone
         slow = asyncio.create_task(gw._call_child_tool(urls["b"], "b_slow_place", {"item": "slow"}))
@@ -182,7 +184,7 @@ async def test_after_a_child_restarts_a_burst_of_calls_to_it_succeeds_and_anothe
         assert not (await slow).isError
         assert sorted(writes["a"]) == sorted(f"a{i}" for i in range(20))
         assert sorted(writes["b"]) == sorted(["slow", *(f"b{i}" for i in range(10))])
-        assert gw._children[urls["b"]] is b_session
+        assert gw._sessions.current[urls["b"]] is b_session
     finally:
         await gw._close_child_sessions()
         for server in servers.values():

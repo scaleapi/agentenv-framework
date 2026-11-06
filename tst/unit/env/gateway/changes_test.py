@@ -151,7 +151,7 @@ def _gateway(changelog: _Changelog, failure: Exception | None = None, **kw) -> G
     async def _open(server, stack, report):
         return session
 
-    gw._open_child_session = _open  # type: ignore[method-assign]
+    gw._sessions.open_session = _open  # type: ignore[method-assign]
     gw._query_changelog_id = changelog.max_id  # type: ignore[method-assign]
     gw._db_conn = changelog
     gw._create_and_register_proxy_tool(URL, TOOL)

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import contextlib
 import json
 import logging
 import os
@@ -12,7 +11,6 @@ import socket
 import subprocess
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -24,19 +22,16 @@ import httpx
 import psycopg2
 import uvicorn
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, ArgModelBase
-from mcp.shared.exceptions import McpError
-from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent, Tool as MCPTool
+from mcp.types import CallToolResult, TextContent, Tool as MCPTool
 from pydantic import create_model
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket
-from anyio import ClosedResourceError
 
 if TYPE_CHECKING:
     from . import InternalMCPServer
@@ -76,7 +71,7 @@ from .constants import (
 from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
 from .caller import Caller
 from .changes import ChangeAttribution
-from .child_transport import Report, child_http_client
+from .child_sessions import ChildSessions, is_dead_session
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .rest_proxy import (
@@ -117,27 +112,11 @@ class ToolNameClash(ValueError):
         super().__init__(f"Duplicate tool name{'s' if len(clashes) > 1 else ''} {tool_name_clashes_text(clashes)}")
 
 
-@dataclass(eq=False)
-class _ChildSession:
-    """One child's MCP session and the task that holds it open until ``close`` is set: the client contexts are anyio
-    task groups, exited only by the task that entered them. A transport failure retires it at once; a child that
-    rejects its session id has it replaced, and it closes once the calls already sent on it end."""
-
-    url: str
-    close: asyncio.Event = field(default_factory=asyncio.Event)
-    session: ClientSession | None = None
-    owner: asyncio.Task | None = None
-    in_flight: int = 0
-    replaced: bool = False
-    retiring: bool = False
-
-
 class Gateway:
     """Gateway that aggregates MCP tools and REST proxies for website backends."""
 
     TOOL_CALL_TIMEOUT_S = 600.0
     STARTUP_DISCOVERY_TIMEOUT_S = 60.0  # startup discovery past it fails open, like a failed one; uvicorn must come up
-    CHILD_CLOSE_TIMEOUT_S = 3.0  # wait for the owner task to exit a retired child session; past it, cancel it
     BARRIER_READ_AHEAD_MAX_BYTES = 8 * 1024 * 1024  # a larger sized body held by a barrier streams, its window to the last byte
     TRIGGER_BARRIER_TIMEOUT_S = 30.0  # a barrier may ask for less; past it the call is answered anyway
     # Must be >= the largest timeout any client can ask for, or the proxy severs a load the
@@ -185,13 +164,8 @@ class Gateway:
         if service_db_url:
             self._db_conn = psycopg2.connect(service_db_url)
             self._db_conn.autocommit = True
-        # Each child's session by its MCP URL, shared by the MCP proxy, /step and triggers: one child's dead session
-        # never touches another child's calls.
-        self._children: dict[str, _ChildSession] = {}
-        self._draining: set[_ChildSession] = set()  # replaced sessions still answering the calls sent on them
-        self._child_locks: dict[str, asyncio.Lock] = {}  # open / replace / retire of one child's (after _discover_lock)
-        self._closing = False  # set at process shutdown; no session is opened past it
-        self._retirements: set[asyncio.Task] = set()  # sessions being retired on a reported transport failure
+        # Each child's session, shared by the MCP proxy, /step and triggers (its locks are taken after _discover_lock)
+        self._sessions = ChildSessions(self.internal_mcp_servers)
         self._discover_lock = asyncio.Lock()
         self._server_tools: dict[str, list[MCPTool]] = {}
         self._tools_discovered = False
@@ -531,7 +505,7 @@ class Gateway:
                 async with mcp_lifespan(app):
                     yield
             finally:
-                self._closing = True
+                self._sessions.closing = True
                 await self._trigger_engine.stop_driver()
                 await self._trigger_engine.cancel_scheduled()
                 await self._close_child_sessions()
@@ -904,242 +878,19 @@ class Gateway:
             media_type=response.headers.get("content-type", "application/json"),
         )
 
-    async def _open_child_session(self, server: InternalMCPServer, exit_stack: contextlib.AsyncExitStack,
-                                  report: Report, max_retries: int = 10, retry_delay: float = 1.0) -> ClientSession:
-        """Open a persistent MCP client session to ``server``, over a transport that hands ``report`` a failed request
-        so the session is retired at once (see child_transport).
-
-        Each attempt opens its contexts on a stack of its own. mcp's client runs its requests in an anyio task group
-        whose cancel scope belongs to the task that entered it, this one: a request that fails outright (the child
-        refusing the connection) cancels whatever this task awaits, and keeps cancelling it until that group is
-        exited. So a failed attempt is exited before anything else is awaited, and reads as a failure to retry
-        rather than as this task being cancelled; only a cancellation that is still pending once the attempt's
-        group is gone came from outside."""
-        for attempt in range(max_retries):
-            attempt_stack = contextlib.AsyncExitStack()
-            try:
-                client = await attempt_stack.enter_async_context(child_http_client(report))
-                read_stream, write_stream, _ = await attempt_stack.enter_async_context(
-                    streamable_http_client(server.mcp_url, http_client=client))
-                session = await attempt_stack.enter_async_context(ClientSession(read_stream, write_stream))
-                # a child that accepts the connection but never answers initialize is a failed attempt, not a hang
-                await asyncio.wait_for(session.initialize(), timeout=CARD_FETCH_TIMEOUT_S)
-            except BaseException as e:
-                failure: BaseException = e
-                try:
-                    await attempt_stack.aclose()
-                except BaseException as unwound:  # the client's task group names what failed
-                    if isinstance(e, asyncio.CancelledError):
-                        failure = unwound
-                if isinstance(e, asyncio.CancelledError) and asyncio.current_task().cancelling():
-                    raise
-                if attempt < max_retries - 1:
-                    logger.warning(f"Failed to connect to {server.name} (attempt {attempt + 1}/{max_retries}): {failure!r}")
-                    await asyncio.sleep(retry_delay)
-                else:
-                    logger.error(f"Failed to connect to {server.name} after {max_retries} attempts: {failure!r}")
-                    if failure is e:
-                        raise
-                    raise RuntimeError(f"could not open a session to {server.name}: {failure!r}") from failure
-            else:
-                exit_stack.push_async_callback(attempt_stack.aclose)
-                logger.info(f"Opened persistent session to {server.name}")
-                return session
-        raise RuntimeError(f"could not open a session to {server.name}: no attempt was made")
-
     async def _ensure_child_sessions(self) -> dict[str, ClientSession]:
-        """Every child's session by its MCP URL, each opened on first need, as discovery reads them."""
-        return {server.mcp_url: (await self._ensure_child(server.mcp_url)).session
-                for server in self.internal_mcp_servers}
-
-    def _child_lock(self, url: str) -> asyncio.Lock:
-        return self._child_locks.setdefault(url, asyncio.Lock())
-
-    async def _ensure_child(self, url: str) -> _ChildSession:
-        """The session to the child at ``url``, opened on first need, and again once the last one was retired or
-        replaced. Liveness is its owner task's, and a session being retired has none."""
-        current = self._children.get(url)
-        if current is not None and not current.owner.done() and not current.close.is_set():
-            return current
-        async with self._child_lock(url):
-            current = self._children.get(url)
-            if current is not None and not current.owner.done() and not current.close.is_set():
-                return current
-            if self._closing:
-                raise RuntimeError("gateway is shutting down")
-            if current is not None:
-                await self._close_child(current)  # one that died on its own, or is being retired
-            server = next((s for s in self.internal_mcp_servers if s.mcp_url == url), None)
-            if server is None:
-                raise KeyError(url)
-            child = _ChildSession(url)
-            loop = asyncio.get_running_loop()
-            ready: asyncio.Future = loop.create_future()
-            child.owner = loop.create_task(self._own_child_session(server, child, ready), name="gateway-child-session")
-            child.owner.add_done_callback(self._log_owner_exit)
-            try:
-                child.session = await ready
-            except BaseException:
-                # Nobody will use this session: an open still in progress is abandoned (its stack unwinds what it
-                # entered), not finished in the background to hold a connection nobody waits on.
-                child.close.set()
-                child.owner.cancel()
-                raise
-            self._children[url] = child
-            return child
-
-    async def _own_child_session(self, server: InternalMCPServer, child: _ChildSession, ready: asyncio.Future) -> None:
-        """Holds ``child`` open: opens its client contexts, reports through ``ready``, parks until ``close`` is set (or
-        it is cancelled) and exits them. Returns rather than raising on a failed open, which ``ready`` carries.
-        ``close`` is set on the way out whatever the reason, so a call racing on it fails now, not at its timeout."""
-        try:
-            async with contextlib.AsyncExitStack() as stack:
-                try:
-                    session = await self._open_child_session(
-                        server, stack, lambda exc: self._child_transport_failed(child, exc))
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    if not ready.done():
-                        ready.set_exception(e)
-                    return
-                if ready.cancelled():
-                    return  # nobody is waiting any more; the stack closes what was opened
-                ready.set_result(session)
-                await child.close.wait()
-        except BaseExceptionGroup as e:
-            # a request failing outright under a live session cancels this task through mcp's client task group
-            # (see _open_child_session); the stack has unwound, and the transport failure retires the session
-            logger.warning(f"child session to {server.name} ended: {e!r}")
-        finally:
-            child.close.set()
-
-    @staticmethod
-    def _log_owner_exit(owner: asyncio.Task) -> None:
-        """Retrieve a session's exception when it dies on its own (a transport crash), so it is logged now rather than
-        as 'exception never retrieved' at garbage collection."""
-        if not owner.cancelled() and owner.exception() is not None:
-            logger.warning("child session ended", exc_info=owner.exception())
-
-    async def _close_child(self, child: _ChildSession) -> None:
-        """Retire ``child``, its child's session or one replaced, and wait (bounded) for its owner to exit it. Callers
-        hold the child's lock, except the process lifespan, which runs after the last request."""
-        if self._children.get(child.url) is child:
-            del self._children[child.url]
-        self._draining.discard(child)
-        child.close.set()
-        if child.owner is not None and not child.owner.done():
-            try:
-                await asyncio.wait_for(child.owner, timeout=self.CHILD_CLOSE_TIMEOUT_S)
-            except Exception:
-                logger.warning(f"the child session to {child.url} did not close cleanly", exc_info=True)
+        return await self._sessions.sessions()
 
     async def _close_child_sessions(self) -> None:
-        """Retire every child's session, those replaced and still draining too."""
-        for child in [*self._children.values(), *self._draining]:
-            await self._close_child(child)
-
-    def _live(self, child: _ChildSession) -> bool:
-        """Whether ``child`` is its child's session, or one replaced and still answering its calls."""
-        return self._children.get(child.url) is child or child in self._draining
-
-    def _retire_soon(self, child: _ChildSession) -> None:
-        """Retire ``child``: its calls in flight fail with CONNECTION_CLOSED now, and it is closed in the background,
-        under its child's lock, which an open of the next session may hold through its connection attempts. However
-        many ask, it is retired once; nothing is retired on the way down, when the process lifespan closes them all."""
-        if self._closing or child.retiring or not self._live(child):
-            return
-        child.retiring = True
-        child.close.set()
-        task = asyncio.get_running_loop().create_task(self._retire_child(child), name="gateway-child-retire")
-        self._retirements.add(task)
-        task.add_done_callback(self._retirements.discard)
-
-    async def _retire_child(self, child: _ChildSession) -> None:
-        """Close ``child`` under its child's lock, unless it is already gone."""
-        async with self._child_lock(child.url):
-            if self._live(child):
-                await self._close_child(child)
-
-    async def _replace_child(self, child: _ChildSession) -> None:
-        """Have the next call to ``child``'s child open a fresh session, as the child rejected this one's id: the
-        calls already sent on it each get their own answer, and it closes once they end."""
-        async with self._child_lock(child.url):
-            if self._children.get(child.url) is not child:
-                return  # already replaced or retired
-            del self._children[child.url]
-            if not child.in_flight:
-                await self._close_child(child)
-                return
-            child.replaced = True
-            self._draining.add(child)
-            child.owner.add_done_callback(lambda _: self._draining.discard(child))
-
-    def _child_transport_failed(self, child: _ChildSession, exc: httpx.TransportError) -> None:
-        """A request on ``child`` failed at the transport. mcp's client would keep the request pending, so the session
-        is retired now: every call it has in flight fails with CONNECTION_CLOSED instead of waiting out its timeout,
-        and the next call reopens. Called from inside the client's own task; a report for a session already retired,
-        or still opening, is nothing, as every request in flight on a dying session reports."""
-        if self._closing or child.retiring or not self._live(child):
-            return
-        logger.warning(f"child transport to {child.url} failed ({exc!r}); retiring its session")
-        self._retire_soon(child)
+        await self._sessions.close()
 
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
                                caller: Caller | None = None) -> CallToolResult:
-        """Every child tools/call (MCP proxy, /step, trigger engine): the child's own session, the caller's `_meta`
-        stamp (none for an unattributed trigger action), and one retry on a fresh session when the call never reached
-        the child: the child rejected the session (it restarted, or expired it) or its stream had closed. A call the
-        transport lost in flight may already have written, so it retires the session and is not retried; the next call
-        reopens. Discovery is not redone; the registered proxies look their child up by URL."""
+        """Every child tools/call (MCP proxy, /step, trigger engine), with the caller's `_meta` stamp (none for an
+        unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone on a
+        reconnect; the registered proxies look their child up by URL."""
         meta = caller.meta() if caller is not None else None
-        child = await self._ensure_child(server_url)
-        try:
-            return await asyncio.wait_for(self._call_on(child, tool_name, arguments, meta),
-                                          timeout=self.TOOL_CALL_TIMEOUT_S)
-        except Exception as e:
-            if not _is_dead_session(e):
-                raise
-            if not _call_never_reached_child(e):
-                self._retire_soon(child)
-                logger.warning(f"child session to {server_url} died with {tool_name} in flight ({e!r}); not retried")
-                raise
-            await self._replace_child(child)
-            logger.warning(f"child session to {server_url} is dead ({e!r}), reconnecting...")
-            child = await self._ensure_child(server_url)
-            return await asyncio.wait_for(self._call_on(child, tool_name, arguments, meta),
-                                          timeout=self.TOOL_CALL_TIMEOUT_S)
-
-    async def _call_on(self, child: _ChildSession, tool_name: str, arguments: dict, meta: dict | None) -> CallToolResult:
-        """``tool_name`` called on ``child``'s session and counted among its calls in flight, so a replaced session
-        closes once the last of them ends."""
-        child.in_flight += 1
-        try:
-            return await self._call_until_retired(child.session, child.close, tool_name, arguments, meta)
-        finally:
-            child.in_flight -= 1
-            if child.replaced and not child.in_flight:
-                child.close.set()
-
-    @staticmethod
-    async def _call_until_retired(session: ClientSession, closed: asyncio.Event, tool_name: str,
-                                  arguments: dict, meta: dict | None) -> CallToolResult:
-        """``session.call_tool``, unless its session is retired first: then the call fails with CONNECTION_CLOSED the
-        way a closed transport would fail it. mcp's client keeps a request whose transport failed pending, and exiting
-        the session under it cancels the receive loop before that loop can fail the request, so the gateway fails
-        it."""
-        call = asyncio.ensure_future(session.call_tool(tool_name, arguments, meta=meta))
-        retired = asyncio.ensure_future(closed.wait())
-        try:
-            done, _ = await asyncio.wait({call, retired}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            retired.cancel()
-            if not call.done():
-                call.cancel()
-            await asyncio.gather(call, retired, return_exceptions=True)  # the loser's cleanup ends before the caller moves on
-        if call in done:
-            return call.result()
-        raise McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+        return await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
 
     async def _ensure_tools_discovered(self) -> None:
         """Idempotent discovery over the process's child sessions (startup, MCP session start, /step, /state, triggers)."""
@@ -1176,9 +927,9 @@ class Gateway:
                 tools_result = await asyncio.wait_for(session.list_tools(), timeout=CHILD_DISCOVERY_TIMEOUT_S)
             except Exception as e:
                 logger.error(f"Failed to discover tools from {server.name}: {e}")
-                child = self._children.get(server.mcp_url)
-                if _is_dead_session(e) and child is not None and child.session is session:
-                    await self._replace_child(child)
+                child = self._sessions.current.get(server.mcp_url)
+                if is_dead_session(e) and child is not None and child.session is session:
+                    await self._sessions.replace(child)
                 raise
             logger.info(f"Found {len(tools_result.tools)} tool(s) from {server.name}")
             listed.append((server, tools_result.tools))
@@ -1703,24 +1454,6 @@ def _fields(pairs: list[tuple[str, str]]) -> dict:
     for key, value in pairs:
         grouped.setdefault(key, []).append(value)
     return {key: values[0] if len(values) == 1 else values for key, values in grouped.items()}
-
-
-def _is_dead_session(exc: BaseException) -> bool:
-    """Whether a child call failed because its session is gone, so the session is replaced or retired: the stream
-    closed under it, the child answered 404 for the session id (idle expiry or a restart, which the client reports as
-    code 32600), or the transport died with the call in flight (CONNECTION_CLOSED)."""
-    if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
-        return True
-    return isinstance(exc, McpError) and exc.error.code in (32600, CONNECTION_CLOSED)
-
-
-def _call_never_reached_child(exc: BaseException) -> bool:
-    """Whether a dead-session failure may be retried: the stream was closed before the request was written, or the
-    child rejected the session id at the transport. Not CONNECTION_CLOSED: the call was in flight when the transport
-    died, and the child may already have performed its write."""
-    if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
-        return True
-    return isinstance(exc, McpError) and exc.error.code == 32600
 
 
 def _normalized(path: str) -> str:
