@@ -25,7 +25,7 @@ from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.entity.refs import EntityKind
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.store.routing import namespace_routing
-from tst.unit.bundle._support import RefusingStore, layout, local_builds
+from tst.unit.bundle._support import RefusingStore, layout, local_builds, store_agent
 
 ROOT = "@local/~/triage"
 KIT = "@local/demo-dist/kit"
@@ -383,13 +383,6 @@ def test_a_run_locks_the_entities_it_pulls_in_as_it_does_its_own(bundle_dir, tmp
 ALIASED = {ALIASES_FILE: '[agents]\nsolver = ["solver-x"]\n'}
 
 
-def _store_agent(agent_id):
-    with namespace_routing():
-        image = get_artifact_store().put_document(DockerImageArtifact(
-            id=f"{agent_id}-image", description="d", image_name="ghcr.io/acme/agent:1", tar_gz_s3_url="s3://b/x.tar.gz"))
-        return A2AAgent.put(id=agent_id, docker_image_artifact=image)
-
-
 def _step(plan, step_id="agent"):
     task = next(write for write in plan.writes if write.kind is BundleKind.TASK)
     return next(step for step in task.source.config if step["id"] == step_id)
@@ -498,7 +491,7 @@ def test_an_installed_bundles_env_naming_another_bundles_alias_is_pointed_at_it_
 def test_the_stores_agent_of_an_alias_id_shadows_the_alias(bundle_dir, tmp_path):
     """Someone's own agent of that id is the one they mean."""
     kit = _kit(tmp_path, ALIASED)
-    _store_agent("solver-x")
+    store_agent("solver-x")
 
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}]), kit)
 
@@ -541,7 +534,7 @@ def test_an_alias_takes_no_pin(bundle_dir, tmp_path):
 
 def test_a_pinned_reference_to_the_stores_agent_of_an_alias_id_names_that_agent(bundle_dir, tmp_path):
     kit = _kit(tmp_path, ALIASED)
-    _store_agent("solver-x")
+    store_agent("solver-x")
 
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x",
                                      "a2a_agent_version": 1}]), kit)
@@ -568,7 +561,7 @@ def test_the_stores_agent_of_a_refused_alias_id_is_the_one_it_names(bundle_dir, 
     other = _installed(tmp_path / "site2" / "tools", {"agents/helper/Dockerfile": "FROM scratch\n",
                                                       ALIASES_FILE: '[agents]\nhelper = ["solver-x"]\n'},
                        dist="zeta-tools", name="tools")
-    _store_agent("solver-x")
+    store_agent("solver-x")
 
     plan = _plan(_task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}]), kit, other)
 
@@ -639,7 +632,7 @@ def test_a_dry_run_says_which_agent_an_alias_names_and_preflights_an_aliased_def
 
 def test_a_dry_run_says_when_the_store_shadows_an_alias(bundle_dir, tmp_path, monkeypatch):
     kit = _kit(tmp_path, ALIASED)
-    _store_agent("solver-x")
+    store_agent("solver-x")
     monkeypatch.setattr(run_module, "installed_bundles", lambda: (kit,))
     monkeypatch.setattr(preflight_module, "docker_unreachable", lambda: None)
     _task(bundle_dir, [{"id": "agent", "type": "deploy_agent", "a2a_agent_id": "solver-x"}])

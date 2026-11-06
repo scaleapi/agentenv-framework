@@ -62,7 +62,7 @@ _CREATES = {
 def _exported_disk(tmp_path, monkeypatch):
     """A disk's export on this machine, and the launcher's image, without Docker or a registry."""
     (tmp_path / "disk.img.zst").write_bytes(b"disk")
-    monkeypatch.setattr(modal_vm_sandbox, "exported_disk", lambda image: tmp_path / "disk.img.zst")
+    monkeypatch.setattr(modal_vm_sandbox, "exported_disk", lambda image, platform: tmp_path / "disk.img.zst")
     monkeypatch.setattr(modal_vm_sandbox, "published_digest", lambda image: "sha256:" + "b" * 64)
 
 

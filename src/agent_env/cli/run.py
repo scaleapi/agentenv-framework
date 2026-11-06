@@ -11,7 +11,7 @@ from pathlib import Path
 
 import click
 
-from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun,
+from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun, Variant,
                               dry_run_bundle, run_bundle)
 from agent_env.bundle.hub import SOURCE_KEY, HubSource
 from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
@@ -43,6 +43,10 @@ _DRY_RUN = "Dry run: nothing is written or run."
 @click.option("--agent", default=None,
               help="The agent the solver runs as, whatever the tasks name: an alias such as pi, an agent of this "
                    "bundle or an installed one, or the store's.")
+@click.option("--set", "settings", multiple=True, metavar="envs/NAME.KEY=VALUE",
+              help="Set a key of one of the bundle's envs for this run, as envs/NAME.KEY=VALUE, whatever its env.toml "
+                   "says: VALUE is TOML or a bare word, and KEY may be dotted into a table. Repeatable. Such as "
+                   "envs/desktop.driver=cua-driver or envs/desktop.tools=standard.")
 @click.option("--sandbox", default=None,
               help="The sandbox provider envs, agents, sandboxes and the judge deploy on, which picks the forms "
                    "computer envs compose on this machine; comma-separated for a fallback chain.")
@@ -56,8 +60,8 @@ _DRY_RUN = "Dry run: nothing is written or run."
                    "natively; a later run or env build builds it.")
 @click.pass_context
 def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: tuple[str, ...], model: str | None,
-        user_model: str | None, judge_model: str | None, agent: str | None, sandbox: str | None, keep: bool,
-        dry_run: bool, no_emulate: bool):
+        user_model: str | None, judge_model: str | None, agent: str | None, settings: tuple[str, ...],
+        sandbox: str | None, keep: bool, dry_run: bool, no_emulate: bool):
     """Run a bundle's tasks and evals, or list the installed bundles.
 
     BUNDLE is a folder, the name of a bundle an installed package provides (PACKAGE/NAME when several
@@ -80,6 +84,15 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     agent the solver runs as: each step that deploys or installs the agent a task prompts deploys it instead,
     while its user simulator and judges keep theirs.
 
+    --set sets a key of one of the bundle's envs for this run, as its env.toml would: --set
+    envs/desktop.driver=cua-driver runs the env in envs/desktop with that driver, and --set
+    envs/desktop.computer=ubuntu-24.04-headless composes it on that base. The envs it changes, the envs and tasks
+    that name them and the evals that name those tasks are written under ids of their own, ending in the settings,
+    such as desktop(desktop.driver cua-driver), and compose and reuse their images as any env does, leaving the
+    bundle as written. A key or value the env's type refuses, or a run whose tasks deploy no env it changes, is
+    refused before anything is written; a driver and computer that can't compose, as the run writes the env, before
+    any task runs.
+
     --dry-run makes the checks the run makes before its first task, reading the stores as the run does, and
     prints what it would write and run, writing and running nothing. It exits 1 on a problem the run would
     stop at, and 0 otherwise; the models and --keep change nothing it shows, and --agent what it writes and checks
@@ -91,23 +104,27 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     exits 130 (143 for SIGTERM); a second one stops the teardown and prints what is still up.
     """
     if bundle is None:
-        if tasks or evals or model or user_model or judge_model or agent or sandbox or keep or dry_run or no_emulate:
-            raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --agent, --sandbox, --keep, "
-                                   "--dry-run and --no-emulate need a BUNDLE to run")
+        if tasks or evals or model or user_model or judge_model or agent or settings or sandbox or keep or dry_run \
+                or no_emulate:
+            raise click.UsageError("--task, --eval, --model, --user-model, --judge-model, --agent, --set, --sandbox, "
+                                   "--keep, --dry-run and --no-emulate need a BUNDLE to run")
         _list_installed()
         return
     verbose = ctx.find_root().params.get("verbose")
+    variant = Variant(settings) if settings else None
     root = id_root = hub = None
     try:
         root, id_root, hub = locate_bundle(bundle, _installed, on_progress=click.echo)
         if dry_run:
             click.echo(_DRY_RUN)
             _report_dry_run(dry_run_bundle(root, tasks=tasks, evals=evals, sandbox=sandbox, agent=agent,
-                                           on_progress=click.echo, id_root=id_root, emulate=not no_emulate))
+                                           on_progress=click.echo, id_root=id_root, emulate=not no_emulate,
+                                           variant=variant))
             return
         result = run_bundle(root, tasks=tasks, evals=evals, model=model, user_model=user_model,
                             judge_model=judge_model, agent=agent, sandbox=sandbox, on_progress=click.echo,
-                            id_root=id_root, keep=keep, emulate=not no_emulate, source=hub.source if hub else None)
+                            id_root=id_root, keep=keep, emulate=not no_emulate, source=hub.source if hub else None,
+                            variant=variant)
     except BundleError as e:
         if root is not None:
             _note_an_installed_namesake(e, bundle, root, id_root)

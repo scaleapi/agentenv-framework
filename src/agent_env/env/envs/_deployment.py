@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Optional
 
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, METHOD_ADD, METHOD_RESET, RPC_PATH, FilePart, client as protocol_v1
@@ -31,8 +32,10 @@ LOAD_OPERATIONS = (METHOD_RESET, METHOD_ADD)  # the data-plane calls a load make
 
 
 async def deploy_through_provider(env: Env, *, environment_name: str | None, ttl_seconds: int, sandbox_type: str | None,
+                                  then: Callable[[DeployedEnv], Awaitable[None]] | None = None,
                                   **options) -> DeployedEnv:
-    """Deploy env through the provider its env_provider_type names and register the record, the way each built-in env deploys.
+    """Deploy env through the provider its env_provider_type names, await ``then`` on the deployment, whose failure fails the
+    deploy, and register the record, the way each built-in env deploys.
 
     The env's provider deploys it the first time; a deploy of an env that already has a deployment gets a provider of its own,
     so that a failure closes only what it started and leaves the earlier deployment as it was. A deploy onto the env state
@@ -68,6 +71,8 @@ async def deploy_through_provider(env: Env, *, environment_name: str | None, ttl
         else:
             check_plugin_record(env, deployed)
         env._gateway_url = gateway_url_of(deployed)
+        if then is not None:
+            await then(deployed)
         deployed = register_env_instance(deployed, ttl_seconds)
         env._instance_id = deployed.instance_id
         env._deployed, env._replaced = deployed, replaced

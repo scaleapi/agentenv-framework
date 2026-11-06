@@ -6,6 +6,8 @@ import shutil
 import pytest
 
 from agent_env.artifact.artifacts import docker_image as docker_image_module
+from agent_env.env.envs.computer.utils import composer
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.published_images import AGENT_IMAGES
 from agent_env.providers.sandbox_providers import host_images
 from tst.unit.bundle._support import CLAUDE_CODE_IMAGE, DIGEST, listing
@@ -51,3 +53,21 @@ def agents_published(monkeypatch):
     refs = {image.ref() for image in AGENT_IMAGES}
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in refs else None)
     return CLAUDE_CODE_IMAGE.ref()
+
+
+@pytest.fixture
+def composed(tmp_path, monkeypatch, local_stores, cli_routing, builds):
+    """Stands in for the composer: each computer env it's asked to compose is recorded with its computer, driver, provider
+    and, when given, the pairs, and nothing is built."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: None)
+    calls = []
+
+    def compose(env, pairs=None, composing=Composing()):
+        if composing.on_progress is not None:
+            composing.on_progress("composing")
+        calls.append((env.id, env.computer.id, env.driver.id, composing.sandbox_provider)
+                     + ((pairs,) if pairs is not None else ()))
+
+    monkeypatch.setattr(composer, "compose", compose)
+    return calls

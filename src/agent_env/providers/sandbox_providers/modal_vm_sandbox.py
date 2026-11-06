@@ -364,7 +364,8 @@ class ModalVmSandboxProvider(SandboxProvider):
                                        attribution=attribution, network_policy=network_policy,
                                        setup_for_gateway=setup_for_gateway, idle_timeout=self._idle_timeout,
                                        experimental_options={"vm_runtime": True})
-        disk = await asyncio.to_thread(exported_disk, image)
+        (platform,) = self.disk_image_platforms()
+        disk = await asyncio.to_thread(exported_disk, image, platform)
         variables = {**launcher_variables(ports, env or {}, cpu, memory), "VM_DISK": _MOUNTED_DISK}
         return await self._created(
             (LAUNCH,), (await _launcher()).add_local_file(disk, _MOUNTED_DISK, copy=False), cpu=cpu,
