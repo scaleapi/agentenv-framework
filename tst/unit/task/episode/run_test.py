@@ -449,12 +449,12 @@ async def test_an_episode_abandoned_as_it_starts_is_recorded_cancelled_with_the_
 
 @pytest.mark.asyncio
 async def test_an_episode_is_in_the_run_index_running_then_ended_in_the_group_it_was_started_in(teardowns):
-    played = await _spec(ITEMS, ALICE, TURN, REPLIES).start(run_group_id="rg-train-0")
+    played = await _spec(ITEMS, ALICE, TURN, REPLIES, seed={"week": "3"}).start(run_group_id="rg-train-0")
     run = run_store.get_run(f"episode-{played.id}")
     assert (run.runner, run.task_id, run.task_version, run.instance_id, run.status) == (
         "episode", "dock", 4, played.id, "RUNNING")
     assert run.overrides["metadata"] == {"episode": {"id": played.id, "trainer_agents": ["alice"]},
-                                         "run_group_id": "rg-train-0"}
+                                         "run_group_id": "rg-train-0", "seed": {"week": "3"}}
     await (await played.next_turn()).end("Added a crate.")
     await played.result()
     abandoned = await _spec(ITEMS, ALICE, TURN, REPLIES).start()
@@ -468,7 +468,7 @@ async def test_an_episode_is_in_the_run_index_running_then_ended_in_the_group_it
         ("COMPLETED", None), ("CANCELED", "the trainer moved on"),
         ("FAILED", "RuntimeError: the env didn't come up")]
     assert all(run.finished_at_utc for run in ended.values())
-    assert "run_group_id" not in ended[abandoned].overrides["metadata"]
+    assert ended[abandoned].overrides["metadata"].keys() == {"episode"}
 
 
 @pytest.mark.asyncio
