@@ -678,17 +678,25 @@ def test_a_wildcard_name_starts_dns_even_when_resolv_conf_names_no_other_nameser
 
 
 def test_the_proxy_serves_as_nobody_where_the_base_has_it_else_as_the_session_user(tmp_path, monkeypatch):
-    monkeypatch.setattr(site_proxy.pwd, "getpwnam", lambda name: SimpleNamespace(pw_name=name))
+    fake_pwd = SimpleNamespace(getpwnam=lambda name: SimpleNamespace(pw_name=name))
+    monkeypatch.setattr(site_proxy, "pwd", fake_pwd)
     assert site_proxy.serve_user("agent") == "nobody"
 
     def missing(name):
         raise KeyError(name)
 
-    monkeypatch.setattr(site_proxy.pwd, "getpwnam", missing)
+    monkeypatch.setattr(fake_pwd, "getpwnam", missing)
     assert site_proxy.serve_user("agent") == "agent"
     serve_path = tmp_path / "serve.json"
     serve_path.write_text(json.dumps({"user": "agent", "serve_user": "nobody", "sites": []}))
     assert (Config.load(str(serve_path)).user, Config.load(str(serve_path)).serve_user) == ("agent", "nobody")
+
+
+def test_the_proxy_falls_back_when_pwd_is_unavailable(monkeypatch):
+    monkeypatch.setattr(site_proxy, "pwd", None)
+    assert site_proxy.serve_user("agent") == "agent"
+    assert site_proxy.trust_nss("agent", "/fake/ca.pem") == []
+    site_proxy.drop_privileges("agent")
 
 
 def test_keep_starts_serve_again_each_time_it_ends(monkeypatch):

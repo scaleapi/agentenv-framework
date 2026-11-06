@@ -21,13 +21,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import pwd
 import shutil
 import socket
 import ssl
 import struct
 import subprocess
 import sys
+try:
+    import pwd
+except ImportError:
+    pwd = None
 import time
 import urllib.error
 import urllib.request
@@ -609,6 +612,8 @@ async def serve(config: Config) -> None:
 
 def serve_user(session_user: Optional[str]) -> Optional[str]:
     """The user ``serve`` drops to: ``SERVE_USER`` where the base has it, else the session user."""
+    if pwd is None:
+        return session_user
     try:
         pwd.getpwnam(SERVE_USER)
     except KeyError:
@@ -617,12 +622,15 @@ def serve_user(session_user: Optional[str]) -> Optional[str]:
 
 
 def drop_privileges(user: Optional[str]) -> None:
-    if user is None or os.geteuid() != 0:
+    if user is None or pwd is None or not hasattr(os, "geteuid") or os.geteuid() != 0:
         return
     entry = pwd.getpwnam(user)
-    os.setgroups([])
-    os.setgid(entry.pw_gid)
-    os.setuid(entry.pw_uid)
+    if hasattr(os, "setgroups"):
+        os.setgroups([])
+    if hasattr(os, "setgid"):
+        os.setgid(entry.pw_gid)
+    if hasattr(os, "setuid"):
+        os.setuid(entry.pw_uid)
 
 
 @dataclass(frozen=True)
@@ -734,9 +742,12 @@ def trust_system(paths: Paths, ca_pem: str) -> Optional[str]:
 def trust_nss(user: Optional[str], ca: str) -> list[str]:
     """Add the CA to the session user's NSS databases, Chromium's (and a snap Chromium's when there is one), as that
     user, for a Chromium too old to read its ``CACertificates`` policy; none without ``certutil``."""
-    if user is None or not shutil.which("certutil"):
+    if user is None or pwd is None or not shutil.which("certutil"):
         return []
-    home = Path(pwd.getpwnam(user).pw_dir)
+    try:
+        home = Path(pwd.getpwnam(user).pw_dir)
+    except KeyError:
+        return []
     folders = [home / ".pki" / "nssdb"]
     if (home / "snap" / "chromium").is_dir():
         folders.append(home / "snap" / "chromium" / "current" / ".pki" / "nssdb")
@@ -754,7 +765,7 @@ def trust_nss(user: Optional[str], ca: str) -> list[str]:
 
 
 def as_user(user: Optional[str], argv: list[str]) -> list[str]:
-    if user is None or os.geteuid() != 0:
+    if user is None or not hasattr(os, "geteuid") or os.geteuid() != 0:
         return argv
     return ["runuser", "-u", user, "--", *argv]
 
@@ -763,8 +774,9 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
     """As root: write the sites' certificates, names and trust, start ``serve`` on what's written, and check each name
     loads as the session user; what was trusted and each check's result. The config's folder, which arrives root's
     alone, is opened to the session user (for the CA) only once its keys and the config are private."""
-    if os.geteuid() != 0 and paths.root == Path("/"):
-        raise SystemExit(f"the site proxy installs as root, not uid {os.geteuid()}")
+    uid = getattr(os, "geteuid", lambda: -1)()
+    if uid != 0 and paths.root == Path("/"):
+        raise SystemExit(f"the site proxy installs as root, not uid {uid}")
     given = json.loads(Path(config_path).read_text())
     folder = Path(config_path).parent
     user = given.get("user")
@@ -841,7 +853,7 @@ def start(serve_path: str, log: Optional[str]) -> None:
 
 def open_log(log: str) -> int:
     Path(log).parent.mkdir(parents=True, exist_ok=True)
-    return os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    return os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
 
 
 def keep(serve_path: str) -> None:
