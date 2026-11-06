@@ -147,6 +147,22 @@ def test_transient_failure_resumes_without_replaying_prompt(scripted):
     ) == 1
 
 
+def test_a_transient_failure_at_the_turn_limit_is_not_resumed(scripted):
+    scripted["queue"].extend(
+        [
+            (_failed("stream disconnected before completion"), 1),
+            (_success("recovered"), 0),
+        ]
+    )
+
+    result = asyncio.run(
+        codex_bridge.run_codex(prompt="p", thread_id=None, max_turns=1)
+    )
+
+    assert result.error.startswith("Reached maximum number of turns (1)")
+    assert (result.attempts, result.tool_call_count, len(scripted["calls"])) == (1, 1, 1)
+
+
 def test_a_recovered_turn_reports_exactly_its_trajectory(scripted):
     scripted["queue"].extend(
         [

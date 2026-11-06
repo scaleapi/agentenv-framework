@@ -831,7 +831,9 @@ async def _run_codex_once(
                 warnings.append(_redacted_notice(event))
 
         err: str | None = None
-        if max_turns is not None and prior_tool_calls + tool_count >= max_turns and not turn_completed:
+        used = prior_tool_calls + tool_count
+        # Over the limit, or stopped at it. A turn can complete past it when its events arrive in one read.
+        if max_turns is not None and (used > max_turns or (used == max_turns and not turn_completed)):
             # Claude Code's words, which callers already read as the turn limit.
             err = f"Reached maximum number of turns ({max_turns})"
         elif timed_out or stalled:
@@ -940,6 +942,7 @@ async def run_codex(
             prior_tool_calls=tool_call_count,
         )
         failure = _resumable_api_failure(result)
+        tool_call_count += result.tool_call_count
         budget_left = deadline - time.monotonic()
         backoff = _RETRY_BACKOFF_S[
             min(attempts - 1, len(_RETRY_BACKOFF_S) - 1)
@@ -947,12 +950,13 @@ async def run_codex(
         can_retry = (
             failure is not None
             and retries_left > 0
+            # A turn that reached its limit ends there; a resumed CLI could make no tool call.
+            and (max_turns is None or tool_call_count < max_turns)
             and budget_left
             >= _MIN_RETRY_BUDGET_S + _DEADLINE_HEADROOM_S + backoff
         )
 
         warnings.extend(result.warnings)
-        tool_call_count += result.tool_call_count
 
         if not can_retry:
             trajectory.extend(result.trajectory)

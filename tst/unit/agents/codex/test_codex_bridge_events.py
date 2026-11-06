@@ -374,6 +374,13 @@ def test_a_turn_limit_stops_the_cli_once_that_many_tool_calls_complete_in_claude
     assert (result.error, result.tool_call_count) == ("Reached maximum number of turns (2)", 2)
 
 
+def test_a_turn_that_completes_past_its_limit_in_one_read_fails(spawn):
+    result = run(spawn, [THREAD_STARTED, TURN_STARTED, tool_item("mcp_tool_call"), tool_item("mcp_tool_call"),
+                         agent_message("done"), TURN_COMPLETED], max_turns=1)
+
+    assert (result.error, result.tool_call_count) == ("Reached maximum number of turns (1)", 2)
+
+
 def test_a_turn_that_ends_within_its_limit_completes(spawn):
     result = run(spawn, [THREAD_STARTED, TURN_STARTED, tool_item("mcp_tool_call"), tool_item("mcp_tool_call"),
                          agent_message("done"), TURN_COMPLETED], max_turns=2)
