@@ -71,6 +71,8 @@ FAKE = textwrap.dedent('''\
 PLATFORMS = {"macos": Platform(os="macos", version="26.5", arch="arm64", display="aqua"),
              "linux": Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="x11")}
 HELPERS = {"macos": "agent-desktop-macos-helper", "linux": "agent-desktop-linux-clipboard-owner"}
+#: What agent-desktop needs of a Linux session to reach the display and AT-SPI on its bus.
+SESSION = ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
 
 
 class Granted:
@@ -87,6 +89,8 @@ def module(request, monkeypatch, tmp_path):
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("AGENTENV_CONTROL_TOKEN", "a-deploys-secret")
+    for name in SESSION:
+        monkeypatch.setenv(name, f"the session's {name}")
     monkeypatch.setattr(_macos, "Quartz", Granted)
     monkeypatch.setattr(sys, "platform", "darwin" if request.param == "macos" else "linux")
     monkeypatch.setattr("agentenv_protocol.computer.driver.detect", lambda: PLATFORMS[request.param])
@@ -154,6 +158,7 @@ async def test_a_call_reaches_a_server_of_its_own_headed_when_the_setting_says_w
     (first, second) = _calls(tmp_path)
     assert first["argv"] == ["mcp"] and second["argv"] == ["mcp", "--headed"]
     assert "AGENTENV_CONTROL_TOKEN" not in first["env"] and "HOME" in first["env"]
+    assert set(SESSION) & set(first["env"]) == (set() if module.MACOS else set(SESSION))
 
 
 @pytest.mark.asyncio
