@@ -8,6 +8,8 @@ import logging
 from typing import ClassVar, Optional
 from urllib.parse import urlsplit, urlunsplit
 
+import idna
+
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStepDependency
@@ -106,9 +108,10 @@ class BrowserActivateTabTaskStep(_TabAtUrlStep):
 
 
 def normalized(url: str) -> str:
-    """``url`` as the browser shows it: its scheme and host lowercase, a host in another script as punycode, its default
-    port dropped, and an empty path as ``/``; its query and fragment as they are. A URL with no host, such as
-    ``about:blank``, is left as it is."""
+    """``url`` as the browser shows it: its scheme and host lowercase, a host in another script as punycode by UTS 46
+    without transitional mapping, as Chromium spells it (``faß`` stays apart from ``fass``), its default port dropped,
+    and an empty path as ``/``; its query and fragment as they are. A URL with no host, such as ``about:blank``, is left
+    as it is."""
     parts = urlsplit(url)
     if not parts.netloc:
         return url
@@ -116,8 +119,8 @@ def normalized(url: str) -> str:
     if ":" in host:
         host = f"[{host}]"
     elif not host.isascii():
-        with contextlib.suppress(UnicodeError):
-            host = host.encode("idna").decode("ascii")
+        with contextlib.suppress(idna.IDNAError, UnicodeError):
+            host = idna.encode(host, uts46=True, transitional=False).decode("ascii")
     port = parts.port
     netloc = host if port is None or port == _DEFAULT_PORTS.get(scheme) else f"{host}:{port}"
     if parts.username is not None:
