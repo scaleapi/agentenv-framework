@@ -4,7 +4,7 @@ mcp's streamable HTTP client swallows a transport error on a request it has in f
 logs "SSE stream ended" and reconnects only when the stream had carried an event id), so the request never
 resolves and its caller waits out the whole tool-call timeout. The gateway cannot see inside the client, but it
 owns the httpx client the transport uses: this transport reports every ``httpx.TransportError`` raised while a POST
-is sent or its body read, so the gateway can retire that child session generation at once. The session's receive
+is sent or its body read, so the gateway can retire that child's session at once. The session's receive
 loop then fails every pending request with CONNECTION_CLOSED, and the next call reopens.
 
 Only POSTs are reported. The standalone GET stream idles past its read timeout by design, and the DELETE at

@@ -44,10 +44,10 @@ class _RecordingSession:
 def _gateway(session: _RecordingSession) -> Gateway:
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", URL)])
 
-    async def _open(stack):
-        return {URL: session}
+    async def _open(server, stack, report):
+        return session
 
-    gw._open_persistent_sessions = _open  # type: ignore[method-assign]
+    gw._open_child_session = _open  # type: ignore[method-assign]
     return gw
 
 
