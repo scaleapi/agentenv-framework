@@ -2,8 +2,8 @@
 load_artifact signs it in to a loopback site, its start tab loaded again signed in, and a load's tabs take the open
 ones' place; snapshot_env keeps its state as browser-state.json, a tab closed during the run and its profile among its
 files; once an agent has acted, a load can't change its tabs but sets its cookies; data/reset puts it back signed out at
-its start tab with its addresses ended; and the snapshot taken mid-run loads back whole, its cookies, local storage,
-tabs and history. Under chaos: data calls at once each get their answer, its server killed and back takes a load, and
+its start tab with its addresses ended; the snapshot taken mid-run loads back whole, its cookies, local storage,
+tabs and history; and reset_env, a reboot, brings back its start tab with no cookies or local storage. Under chaos: data calls at once each get their answer, its server killed and back takes a load, and
 with chromium killed a snapshot fails at once rather than wait."""
 
 import asyncio
@@ -24,6 +24,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.env.envs.computer.utils import inside
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 
 SITE = "http://127.0.0.1:8783/"
@@ -165,6 +166,14 @@ async def check_browser_data(deployed, env_id: str, op_url: Callable[[str], str]
         restored_tabs = [tab["url"] for tab in (await call("tabs/list", method="GET"))["tabs"]]
         restored_storage = (await call("local_storage/get", {"origins": [ORIGIN]}))["origins"]
         history = await _history(deployed)
+        context = await ResetEnvTaskStep(id="reset", version=None, env_id=env_id,
+                                         fail_task_on_error=True).execute(context)
+        after_reset_tabs, deadline = None, time.monotonic() + WAIT_S
+        while after_reset_tabs != [SITE] and time.monotonic() < deadline:
+            after_reset_tabs = [tab["url"] for tab in (await call("tabs/list", method="GET"))["tabs"]]
+            await asyncio.sleep(POLL_S)
+        after_reset_cookies = (await call("cookies/get", {"urls": [SITE]}))["cookies"]
+        after_reset_storage = (await call("local_storage/get", {"origins": [ORIGIN]}))["origins"]
     finally:
         serving.cancel()
 
@@ -183,6 +192,8 @@ async def check_browser_data(deployed, env_id: str, op_url: Callable[[str], str]
     assert restored_page["url"] == SITE and restored_tabs == [SITE], restored_tabs
     assert restored_storage == [{"origin": ORIGIN, "localStorage": [{"name": "theme", "value": "dark"}]}]
     assert f"{SITE}other" in history, history
+    assert after_reset_tabs == [SITE] and after_reset_cookies == [], (after_reset_tabs, after_reset_cookies)
+    assert after_reset_storage == [{"origin": ORIGIN, "localStorage": []}], after_reset_storage
 
 
 async def _history(deployed) -> str:
