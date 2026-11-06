@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -35,7 +36,6 @@ from agentenv_protocol.computer import (  # noqa: E402
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run_probe  # noqa: E402
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
-from agentenv_protocol.computer.conformance.__main__ import main  # noqa: E402
 from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI  # noqa: E402
 from agentenv_protocol.types import EnvironmentCard  # noqa: E402
@@ -336,15 +336,23 @@ def test_an_extension_is_failed_by_any_check_verified_by_a_pass_and_unverified_o
     assert not report.passed and report.counts() == {"passed": 1, "failed": 1, "unverified": 1, "not_applicable": 0}
 
 
-def test_the_cli_prints_each_check_writes_the_report_and_exits_by_the_result(tmp_path, capsys):
+def test_the_cli_prints_each_check_writes_the_report_and_exits_by_the_result(tmp_path):
     out = tmp_path / "report.json"
     with served(FixtureDriver()) as url:
-        passed = main([url, "--level", "basic", "--json", str(out)])
+        passed = _cli(url, "--level", "basic", "--json", str(out))
     with served(ExitZero()) as url:
-        failed = main([url, "--level", "basic"])
-    unreachable = main(["http://127.0.0.1:9", "--timeout", "2"])
-    printed = capsys.readouterr()
-    assert (passed, failed, unreachable) == (0, 1, 2)
-    assert "PASS P0 computer-ready reports ready" in printed.out and "FAIL X a command's exit code" in printed.out
-    assert "couldn't probe http://127.0.0.1:9" in printed.err
+        failed = _cli(url, "--level", "basic")
+    unreachable = _cli("http://127.0.0.1:9", "--timeout", "2")
+
+    assert (passed.returncode, failed.returncode, unreachable.returncode) == (0, 1, 2)
+    assert "PASS P0 computer-ready reports ready" in passed.stdout
+    assert "FAIL X a command's exit code" in failed.stdout
+    assert "couldn't probe http://127.0.0.1:9" in unreachable.stderr
     assert ProbeReport.model_validate_json(out.read_text()).passed
+
+
+def _cli(*args: str) -> subprocess.CompletedProcess:
+    """The conformance CLI run as its users run it, in a process of its own, so nothing in this one can take a line it
+    prints."""
+    return subprocess.run([sys.executable, "-m", "agentenv_protocol.computer.conformance", *args],
+                          capture_output=True, text=True, timeout=180)
