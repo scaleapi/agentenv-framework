@@ -225,6 +225,21 @@ async def test_an_export_copies_the_paths_with_the_app_paused_and_sends_the_copy
 
 
 @pytest.mark.asyncio
+async def test_an_export_sends_a_linked_files_contents_from_inside_the_home_and_skips_a_pipe(home):
+    (home / "Mail").mkdir()
+    (home / "Archive").mkdir()
+    (home / "Archive/2024.txt").write_text("archived")
+    (home / "Mail/latest.txt").symlink_to(home / "Archive/2024.txt")
+    os.mkfifo(home / "Mail/events")
+    mail = PathsMail()
+
+    async with _http(mail) as http:
+        exported = _files(await _rpc(http, "data/get", {}))
+
+    assert exported == {"Mail/latest.txt": b"archived"}
+
+
+@pytest.mark.asyncio
 async def test_an_app_that_isnt_running_is_left_stopped(home, desktop):
     mail = PathsMail()
     mail._computer_app_data_plane().keep_initial()

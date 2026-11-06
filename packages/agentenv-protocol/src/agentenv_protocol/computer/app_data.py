@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from ..agent_env_environment import OP_ADD_DATA, OP_GET_DATA, OP_RESET_DATA
 from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, METHOD_RESET, FilePart, uploaded_object_path
-from .dataplane import file_parts, part_bytes
+from .dataplane import data_files, file_parts, part_bytes
 
 if TYPE_CHECKING:
     from .app_runtime import AppRuntime
@@ -234,8 +234,13 @@ def _restore(home: Path, paths: list[str]) -> None:
 
 
 def _stage(home: Path, paths: list[str], staging: Path) -> None:
-    for path in paths:
-        _copy(home / path, staging / path)
+    """A copy in ``staging`` of each file an export of ``paths`` sends, by its path: a link's target, inside the home, as
+    a file, and no socket or pipe."""
+    for relative, source in data_files(home, paths):
+        target = staging / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copy2(source, target)
 
 
 def _copy(source: Path, target: Path) -> None:
