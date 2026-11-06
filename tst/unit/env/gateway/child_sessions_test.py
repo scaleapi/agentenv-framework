@@ -170,6 +170,7 @@ async def test_a_call_lost_in_flight_retires_the_session_but_is_not_retried():
         with pytest.raises(McpError, match="Connection closed"):
             await gw._call_child_tool(URL, "svc_thing", {})
         assert session.calls == ["svc_thing"]  # the child may already have written; a retry could write twice
+        await asyncio.gather(*gw._retirements)
         assert first_owner.done() and URL not in gw._children and opener.opened == 1
         assert not (await gw._call_child_tool(URL, "svc_thing", {})).isError  # the next call reopens
         assert opener.opened == 2 and session.calls == ["svc_thing", "svc_thing"]
@@ -503,6 +504,7 @@ async def test_one_child_s_dead_session_leaves_another_child_s_calls_alone():
             await gw._call_child_tool(URL, "svc_thing", {})
         release.set()
         assert not (await in_flight).isError
+        await asyncio.gather(*gw._retirements)
         assert URL not in gw._children and _owner(gw, OTHER) is other_owner and not other_owner.done()
     finally:
         await gw._close_child_sessions()
@@ -536,4 +538,43 @@ async def test_a_replaced_session_whose_transport_then_fails_fails_the_calls_sti
             await pending
         assert old.owner.done() and old not in gw._draining and session.calls == ["svc_thing"]
     finally:
+        await gw._close_child_sessions()
+
+
+@pytest.mark.asyncio
+async def test_a_replaced_session_whose_transport_fails_while_the_next_one_opens_fails_its_calls_at_once():
+    """The open of the next session holds the child's lock through its connection attempts; retiring the old one
+    doesn't wait for it, so the calls still on the old one fail now, not once the open is done."""
+    session = _FakeSession()
+    release = asyncio.Event()
+
+    async def held(name, arguments, *args, meta=None, **kwargs):
+        session.calls.append(name)
+        await release.wait()
+        return _result()
+
+    session.call_tool = held
+    opener = _Opener(session)
+    gw = _gateway(opener)
+    opening = None
+    try:
+        old = await gw._ensure_child(URL)
+        pending = asyncio.create_task(gw._call_child_tool(URL, "svc_thing", {}))
+        while not session.calls:
+            await asyncio.sleep(0)
+        await gw._replace_child(old)
+        opener.gate = asyncio.Event()  # the next open waits, holding the child's lock
+        opening = asyncio.create_task(gw._ensure_child(URL))
+        while opener.attempts < 2:
+            await asyncio.sleep(0)
+        gw._child_transport_failed(old, httpx.ReadError("peer went away"))
+        with pytest.raises(McpError, match="Connection closed"):
+            await asyncio.wait_for(pending, 1)
+        assert not opening.done()
+        opener.gate.set()
+        assert (await opening).session is session and old.owner.done() and old not in gw._draining
+    finally:
+        if opening is not None and not opening.done():
+            opener.gate.set()
+            await opening
         await gw._close_child_sessions()

@@ -957,18 +957,18 @@ class Gateway:
 
     async def _ensure_child(self, url: str) -> _ChildSession:
         """The session to the child at ``url``, opened on first need, and again once the last one was retired or
-        replaced. Liveness is its owner task's."""
+        replaced. Liveness is its owner task's, and a session being retired has none."""
         current = self._children.get(url)
-        if current is not None and not current.owner.done():
+        if current is not None and not current.owner.done() and not current.close.is_set():
             return current
         async with self._child_lock(url):
             current = self._children.get(url)
-            if current is not None and not current.owner.done():
+            if current is not None and not current.owner.done() and not current.close.is_set():
                 return current
             if self._closing:
                 raise RuntimeError("gateway is shutting down")
             if current is not None:
-                await self._close_child(current)  # one that died on its own
+                await self._close_child(current)  # one that died on its own, or is being retired
             server = next((s for s in self.internal_mcp_servers if s.mcp_url == url), None)
             if server is None:
                 raise KeyError(url)
@@ -1039,11 +1039,26 @@ class Gateway:
         for child in [*self._children.values(), *self._draining]:
             await self._close_child(child)
 
+    def _live(self, child: _ChildSession) -> bool:
+        """Whether ``child`` is its child's session, or one replaced and still answering its calls."""
+        return self._children.get(child.url) is child or child in self._draining
+
+    def _retire_soon(self, child: _ChildSession) -> None:
+        """Retire ``child``: its calls in flight fail with CONNECTION_CLOSED now, and it is closed in the background,
+        under its child's lock, which an open of the next session may hold through its connection attempts. However
+        many ask, it is retired once; nothing is retired on the way down, when the process lifespan closes them all."""
+        if self._closing or child.retiring or not self._live(child):
+            return
+        child.retiring = True
+        child.close.set()
+        task = asyncio.get_running_loop().create_task(self._retire_child(child), name="gateway-child-retire")
+        self._retirements.add(task)
+        task.add_done_callback(self._retirements.discard)
+
     async def _retire_child(self, child: _ChildSession) -> None:
-        """Retire ``child`` now, its calls in flight failing with CONNECTION_CLOSED, unless it is already gone; a
-        concurrent caller that already did is a no-op."""
+        """Close ``child`` under its child's lock, unless it is already gone."""
         async with self._child_lock(child.url):
-            if self._children.get(child.url) is child or child in self._draining:
+            if self._live(child):
                 await self._close_child(child)
 
     async def _replace_child(self, child: _ChildSession) -> None:
@@ -1063,16 +1078,12 @@ class Gateway:
     def _child_transport_failed(self, child: _ChildSession, exc: httpx.TransportError) -> None:
         """A request on ``child`` failed at the transport. mcp's client would keep the request pending, so the session
         is retired now: every call it has in flight fails with CONNECTION_CLOSED instead of waiting out its timeout,
-        and the next call reopens. Called from inside the client's own task, so the retirement is scheduled rather
-        than awaited; a report for a session already retired, or still opening, is nothing."""
-        current = self._children.get(child.url) is child or child in self._draining
-        if self._closing or child.retiring or not current:
-            return  # every request in flight on a dying session reports; the first one retires it
-        child.retiring = True
+        and the next call reopens. Called from inside the client's own task; a report for a session already retired,
+        or still opening, is nothing, as every request in flight on a dying session reports."""
+        if self._closing or child.retiring or not self._live(child):
+            return
         logger.warning(f"child transport to {child.url} failed ({exc!r}); retiring its session")
-        task = asyncio.get_running_loop().create_task(self._retire_child(child), name="gateway-child-retire")
-        self._retirements.add(task)
-        task.add_done_callback(self._retirements.discard)
+        self._retire_soon(child)
 
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
                                caller: Caller | None = None) -> CallToolResult:
@@ -1090,7 +1101,7 @@ class Gateway:
             if not _is_dead_session(e):
                 raise
             if not _call_never_reached_child(e):
-                await self._retire_child(child)
+                self._retire_soon(child)
                 logger.warning(f"child session to {server_url} died with {tool_name} in flight ({e!r}); not retried")
                 raise
             await self._replace_child(child)
