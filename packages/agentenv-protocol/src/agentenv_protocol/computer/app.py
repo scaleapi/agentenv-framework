@@ -43,6 +43,9 @@ WINDOW_KEYS = frozenset({"class", "instance", "title"})
 COMPUTER_APP = "urn:agentenv:computer-app/v1"
 #: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
 SOCKET = Path(".agentenv/server.sock")
+#: Written in an app's folder by its computer's driver once an agent acts there, by a tool call or on a route the app
+#: opens to agents: a fresh computer starts without it, and an app that resets removes its own.
+AGENT_ACTED = Path(".agentenv/agent-acted")
 FAILURE = Path(".agentenv/server.failure")
 #: The values of an app's build settings its env fixes in its computer's image, in the app's folder.
 BUILD_SETTINGS = Path(".agentenv/build_settings.json")
@@ -359,6 +362,17 @@ def _named(os_types: Union[str, list[str], None]) -> Optional[list[str]]:
     return None if os_types is None else [os_types] if isinstance(os_types, str) else list(os_types)
 
 
+def agent_acted() -> bool:
+    """Whether an agent has acted in this app's computer since the computer started or the app last reset, as its
+    driver notes; read from the app's own folder."""
+    return AGENT_ACTED.exists()
+
+
+def forget_agent_acted() -> None:
+    """Start over, as an app that has reset: no agent has acted since."""
+    AGENT_ACTED.unlink(missing_ok=True)
+
+
 class ComputerAppEnvironment(AgentEnvEnvironment):
     """Subclass it, declare it with ``@computer_app`` and an OS decorator for each OS (``@linux``), and set ``skill`` as
     a class attribute; a deploy's settings arrive as ``self.settings``, those its env fixes at build as
@@ -383,6 +397,11 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     skill: ClassVar[Optional[str]] = None
     #: How long one of its data calls may take, a hook or its paths' default, before it fails.
     data_timeout_s: ClassVar[float] = 300.0
+    #: The data operations its hooks serve on the running app, which its data plane neither stops it for nor
+    #: relaunches it after; and whether its server keeps its paths as installed for a reset hook of its own to put
+    #: back (``app_data.reset``), as it does for the default reset.
+    data_live: ClassVar[frozenset[str]] = frozenset()
+    data_keeps_paths: ClassVar[bool] = False
     #: Path prefixes of its own server's routes, each ending in ``/``, that agents reach through the driver without the
     #: computer's control token; the app checks a call to one itself.
     agent_routes: ClassVar[tuple[str, ...]] = ()
@@ -426,7 +445,8 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
             launch_running=self._launch_running())
         self._computer_app_data = AppDataPlane(
             self._computer_app, {op: getattr(self, name) for op, name in cls._data_hooks.items()}, self.paths,
-            cls.data_timeout_s)
+            cls.data_timeout_s, live=cls.data_live, keeps_paths=cls.data_keeps_paths,
+            resets_failed_add=self._resets_failed_add)
 
     def _launch_for(self, launch: Launch) -> Launch:
         """The launch its server uses, from the one declared for its OS, whose ``ready`` timeout it keeps: as
@@ -448,6 +468,10 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     def _launch_running(self) -> Optional[Callable[[], Awaitable[None]]]:
         """What a launch does while it runs instead of starting a second copy: nothing, so another copy starts."""
         return None
+
+    def _resets_failed_add(self) -> bool:
+        """Whether a load that fails is followed by a reset, so the app isn't left half loaded: always."""
+        return True
 
     @classmethod
     def settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:

@@ -3,7 +3,9 @@ subprotocol the app picks, until the app closes it with its code, and only with 
 app opens to agents, and a Host that's a host; an answer streams through as the app sends it, 20 MB whole; every
 method and body goes on to the path as it came, still escaped, and the caller's headers, and only those, pass on as
 their bytes but for the hop-by-hop ones, the control token and any address the caller forwarded, which the driver
-sets as the one it was reached at."""
+sets as the one it was reached at. An agent's call on a route the app opens that the app answers, a WebSocket it takes, and
+any tool call, note in the app's folder that an agent has acted; agentenv's own calls, refused ones and those the app
+answers with an error don't."""
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +35,8 @@ from websockets.exceptions import ConnectionClosedError, InvalidStatus  # noqa: 
 
 from agentenv_protocol import CONTROL_TOKEN_ENV, client  # noqa: E402
 from agentenv_protocol.computer import ComputerAppEnvironment, apps, linux, svc  # noqa: E402
-from agentenv_protocol.computer.app import SOCKET  # noqa: E402
+from agentenv_protocol.computer.app import AGENT_ACTED, SOCKET  # noqa: E402
+from agentenv_protocol.tool_context import EMPTY  # noqa: E402
 
 MB = 1 << 20
 TOKEN = "s3cret"
@@ -63,6 +66,8 @@ class Echo(ComputerAppEnvironment):
 
     async def _raw(self, request: Request) -> Response:
         scope = request.scope
+        if scope["raw_path"].decode().endswith("/missing"):
+            return JSONResponse({"error": "no such thing"}, status_code=404)
         return JSONResponse({"path": scope["raw_path"].decode(), "query": scope["query_string"].decode()})
 
     async def _raw_socket(self, websocket: WebSocket) -> None:
@@ -159,6 +164,32 @@ async def test_a_websocket_through_svc_reaches_the_app_both_ways_until_it_closes
     assert (text, data) == ("Page.navigate", b"\x03\x02\x01") and closed.value.rcvd.code == 4001
     assert refused == [403, 403, 403] and malformed == [b"HTTP/1.1 403 Forbidden", b"HTTP/1.1 403 Forbidden"]
     assert raw == "/raw/a%3Fb" and opened == "/raw/open"
+
+
+@pytest.mark.asyncio
+async def test_an_agents_call_on_a_route_the_app_opens_and_a_tool_call_note_in_its_folder_that_an_agent_acted(
+        monkeypatch):
+    async with _computer(monkeypatch) as (_, url):
+        marker = apps.APPS / "echo" / AGENT_ACTED
+        async with httpx.AsyncClient() as http:
+            await http.get(url + "/svc/echo/headers", headers=client.control_headers(TOKEN))
+            by_agentenv = marker.exists()
+            refused = (await http.get(url + "/svc/echo/headers")).status_code
+            by_refused = marker.exists()
+            missing = (await http.get(url + "/svc/echo/raw/missing")).status_code
+            by_error = marker.exists()
+            await http.get(url + "/svc/echo/raw/open")
+            by_agent = marker.exists()
+            marker.unlink()
+        async with connect(url.replace("http", "ws") + "/svc/echo/raw/open") as socket:
+            await socket.recv()
+        by_socket = marker.exists()
+        marker.unlink()
+        FakeDriver().on_tool_call(EMPTY)
+        by_tool = marker.exists()
+
+    assert (by_agentenv, refused, by_refused, missing, by_error) == (False, 401, False, 404, False)
+    assert (by_agent, by_socket, by_tool) == (True, True, True)
 
 
 @pytest.mark.asyncio

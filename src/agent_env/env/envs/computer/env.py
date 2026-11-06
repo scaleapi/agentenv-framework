@@ -95,6 +95,11 @@ class ComputerEnv(Env):
         self._deployed: Optional[DeployedEnv] = None
         self._replaced: list[tuple] = []  # the provider and sandbox of each deployment a later deploy replaced, for close()
 
+    @property
+    def computer_name(self) -> str:
+        """The name the computer's own card, and the data plane of its own files, go by: its environment_name."""
+        return self.environment_name
+
     def to_dict(self) -> dict:
         return {**super().to_dict(), "service_name": self.environment_name,
                 "environment_name": self.environment_name,  # dual-write with service_name during the rename
@@ -374,7 +379,7 @@ class ComputerEnv(Env):
                       if environment.environment_name not in names]:
             logger.warning(f"[{self.id}] loading only {[environment.environment_name for environment in known]} from "
                            f"'{environment_universe_artifact.id}'; leaving out {others}")
-        await self._load(sorted(known, key=lambda environment: environment.environment_name != self.environment_name))
+        await self._load(sorted(known, key=lambda environment: environment.environment_name != self.computer_name))
 
     async def reset(self, deployed: DeployedEnv) -> None:
         """Return the computer to boot state: its recordings ended, its container replaced with a fresh one of the same
@@ -433,7 +438,7 @@ class ComputerEnv(Env):
 
     def _environment_names(self) -> list[str]:
         """The environments a load reaches by name: the computer's own, then its apps'."""
-        return list(dict.fromkeys([self.environment_name, *(app.environment_name for app in self.composed_apps())]))
+        return list(dict.fromkeys([self.computer_name, *(app.environment_name for app in self.composed_apps())]))
 
 
 def _app(env: Env) -> ComputerAppEnv:

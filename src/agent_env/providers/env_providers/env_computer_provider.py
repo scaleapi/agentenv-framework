@@ -249,7 +249,7 @@ def _values(computer: ComputerArtifact, values: dict) -> dict:
 
 def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
                  params: computer_params.ComputerParams) -> dict[str, str]:
-    return {**settings_environment(computer, values, environment_name=env.environment_name,
+    return {**settings_environment(computer, values, environment_name=env.computer_name,
                                    driver_settings=params.driver_settings),
             **app_settings_environment(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                        env.computer.os.type),
@@ -257,9 +257,9 @@ def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:
-    if card.get("name") != env.environment_name:
+    if card.get("name") != env.computer_name:
         raise RuntimeError(f"'{env.environment_name}' serves a card named '{card.get('name')}'; a computer env's driver "
-                           "must serve its card under the env's environment_name")
+                           f"must serve its card as {env.computer_name!r}")
 
 
 async def _require_display(record: DeployedSandboxEnv, resolution: Optional[str]) -> None:

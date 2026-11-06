@@ -2,8 +2,9 @@
 the ubuntu-24.04 base: gate 3 makes this machine's arch ready with it, which its check over the debugging pipe is part
 of; deployed, Chromium runs with agentenv's flags after the fixture's command, on the deploy's locale, through no proxy,
 with agentenv's policies where its build reads them and with no debugging port anything in the computer could find; its
-first start tab sees the deploy's time zone, and a page on loopback loads; its card declares browser/v1; and a reset
-relaunches it on its profile template, on a new pipe its ready check answers over. Its computer's /dev/shm is Docker's
+first start tab sees the deploy's time zone, and a page on loopback loads; its card declares browser/v1; a data/reset
+relaunches it on its profile template, on a new pipe its ready check answers over; and reset_env, a reboot, brings the
+template back too. Its computer's /dev/shm is Docker's
 64 MiB, so it keeps its shared memory in files. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
@@ -26,6 +27,7 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -115,6 +117,10 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
             relaunched_readiness = await _ready(deployed, card)
             template = await inside.run(deployed, ["sh", "-c", "cat ~/.config/chromium/agentenv-template.txt"],
                                         timeout_s=30)
+            context = await ResetEnvTaskStep(id="reset", version=None, env_id=website_browser_desktop.id,
+                                             fail_task_on_error=True).execute(context)
+            rebooted_template = await inside.run(deployed, ["sh", "-c", "cat ~/.config/chromium/agentenv-template.txt"],
+                                                 timeout_s=30)
         finally:
             report = await teardown_run(context)
 
@@ -139,7 +145,7 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
     assert readiness["ready"] is True, readiness
     assert relaunched["pid"] != browser["pid"] and relaunched["listening"] == 0
     assert relaunched_readiness["ready"] is True, relaunched_readiness
-    assert template["stdout"] == "from the profile template\n"
+    assert template["stdout"] == rebooted_template["stdout"] == "from the profile template\n"
     assert not report.failed
 
 

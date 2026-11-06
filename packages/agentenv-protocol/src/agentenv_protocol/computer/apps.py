@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +18,7 @@ import httpx
 
 from .. import client
 from ..types import RPC_PATH, WELL_KNOWN_PATH, EnvironmentCard
-from .app import COMPUTER_APP, FAILURE, SOCKET
+from .app import AGENT_ACTED, COMPUTER_APP, FAILURE, SOCKET
 from .app_runtime import CHECK_TIMEOUT_S, LAUNCHES, AppReadiness, boot_launch_held
 from .operations import ReadyCheck
 
@@ -151,3 +152,15 @@ def _unanswered(folder: Path) -> str:
 def _client(socket: Path) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(socket)), base_url="http://app",
                              timeout=ANSWER_TIMEOUT_S)
+
+
+def note_agent_acted(folders: list[Path]) -> None:
+    """Note in each app's folder that an agent has acted in the computer, where it isn't noted yet."""
+    for folder in folders:
+        marker = folder / AGENT_ACTED
+        if not marker.exists() and marker.parent.is_dir():
+            marker.write_text(_now())
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()

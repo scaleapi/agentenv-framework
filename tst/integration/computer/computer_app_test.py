@@ -46,7 +46,8 @@ def desk(tmp_path_factory):
     yield from _composed(tmp_path_factory.mktemp("app-desk"), bundle, f"{bundle.id_root}/desk")
 
 
-def test_an_app_deployed_alone_runs_its_service_on_its_settings_on_a_computer_named_after_it(state, monkeypatch):
+def test_an_app_deployed_alone_runs_its_service_on_its_settings_on_a_computer_named_after_it_as_its_driver(state,
+                                                                                                         monkeypatch):
     monkeypatch.setenv("NOTES_TOKEN", "t0ken")
 
     ran = CliRunner().invoke(cli, ["run", str(APP), "--task", "alone"])
@@ -54,12 +55,12 @@ def test_an_app_deployed_alone_runs_its_service_on_its_settings_on_a_computer_na
     assert ran.exit_code == 0, ran.output
     context = run_context(ran.output)
     (deployed,) = context["deployed_envs"]
-    assert deployed["env_id"].endswith("/notes") and deployed["environment_card"]["name"] == "notes"
+    assert deployed["env_id"].endswith("/notes") and deployed["environment_card"]["name"] == "notes-driver"
     service = context["metadata"]["script_results"]["service"]
     version, fastfetch = service.pop("fastfetch")
     assert version.endswith("~noble") and fastfetch.startswith("fastfetch ")
     assert service == {
-        "signature": "-- Ada", "token": "t0ken", "edition": "pro", "font": "DejaVu Sans", "card": "notes",
+        "signature": "-- Ada", "token": "t0ken", "edition": "pro", "font": "DejaVu Sans", "card": "notes-driver",
         "app_ready": [{"name": "app notes", "ok": True, "detail": "ready"}],
         "launchers": ["agentenv-app-notes.desktop"], "launched": ["notes"], "hello": "Hello, world!", "license": True,
         "installed": "pro"}

@@ -7,8 +7,9 @@ import asyncio
 import contextlib
 import logging
 import re
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote, unquote
 
 import httpx
@@ -148,9 +149,10 @@ async def forward(folder: Path, name: str, request: Request) -> Response:
     return response
 
 
-async def relay(folder: Path, name: str, websocket: WebSocket) -> None:
-    """``websocket`` relayed both ways to the app ``name``'s server in ``folder`` until either side closes; refused,
-    before it opens, with a Host that isn't a host and port, or with the app's server not answering."""
+async def relay(folder: Path, name: str, websocket: WebSocket, opened: Optional[Callable[[], None]] = None) -> None:
+    """``websocket`` relayed both ways to the app ``name``'s server in ``folder`` until either side closes, ``opened``
+    called once the app has taken it; refused, before it opens, with a Host that isn't a host and port, or with the app's
+    server not answering."""
     host = websocket.headers.get("host", "")
     if host and not HOST.fullmatch(host):
         await websocket.close(code=1008)
@@ -168,6 +170,8 @@ async def relay(folder: Path, name: str, websocket: WebSocket) -> None:
         return
     async with upstream:
         await websocket.accept(subprotocol=upstream.subprotocol)
+        if opened is not None:
+            opened()
         await _both_ways(websocket, upstream)
 
 

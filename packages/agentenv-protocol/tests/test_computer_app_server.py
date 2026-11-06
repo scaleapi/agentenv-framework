@@ -390,6 +390,32 @@ async def test_a_stop_ends_what_the_app_started_though_its_first_process_exited(
     assert running and not session.alive(pid)
 
 
+@pytest.mark.asyncio
+async def test_a_paused_session_runs_nothing_until_the_block_ends_and_a_stop_ends_it_though_paused(tmp_path):
+    counter = (f"{sys.executable} -c 'import os, time\nn = 0\nwhile True:\n    n += 1\n    open(\"count.new\", \"w\")"
+               ".write(str(n))\n    os.replace(\"count.new\", \"count\")\n    time.sleep(0.02)' & exit 0")
+    pid = await session.launch(["sh", "-c", counter], tmp_path, {})
+    await asyncio.gather(*session._running)
+    await asyncio.sleep(0.5)
+
+    def count() -> int:
+        return int((tmp_path / "count").read_text())
+
+    with session.paused(pid):
+        await asyncio.sleep(0.1)
+        frozen = count()
+        await asyncio.sleep(0.4)
+        while_paused = count()
+    await asyncio.sleep(0.4)
+    after = count()
+    os.killpg(pid, signal.SIGSTOP)
+    started = time.monotonic()
+    await session.stop(pid, 5)
+
+    assert frozen == while_paused < after
+    assert not session.alive(pid) and time.monotonic() - started < 4
+
+
 def test_the_launcher_runs_the_app_through_its_own_server(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     folder = Path("/opt/agentenv/apps/notes")

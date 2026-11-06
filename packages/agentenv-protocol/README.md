@@ -829,13 +829,19 @@ in the session (`agentenv_protocol.computer.session`) is Linux's.
 
 The server serves the app's data plane and its skill. With `paths` alone, `data/add` writes the files
 it's given under them and refuses any other path, or one a link leads out of them; `data/get`
-returns the files there, a file tree; and `data/reset` puts them back as the server found them when
+returns the files there, a file tree, copied with every process of the app paused (SIGSTOP) so they
+are of one moment, and sent from the copy once it runs again; and `data/reset` puts them back as the server found them when
 it first started on this boot, which is the app as installed. Hooks serve what they mark instead.
 A hook's `data/add` parts come as they were sent, inline or as a read grant, and
 `part_bytes(part)` returns a part's bytes either way. Either way the base class takes data calls and
 launches one at a time, runs a load and a reset with the app stopped and relaunches it after,
 follows a failed load with a reset, and fails a call that runs past `data_timeout_s` (300 s); a sync
-hook runs in a thread, which the reset and relaunch after it wait for. The driver fronts its apps:
+hook runs in a thread, which the reset and relaunch after it wait for. An app whose hooks serve an
+operation on the running app names it in `data_live` (a website browser's load sets cookies over its
+pipe), and the base class doesn't stop it for that one; a reset after such a load that failed still
+stops and relaunches it. `_resets_failed_add()` says whether a failed load is followed by a reset at
+all, always by default; and `data_keeps_paths` has the server keep the app's paths as installed for a
+reset hook of its own, which `app_data.reset(paths)` puts back, as the default reset does. The driver fronts its apps:
 its card lists each one's card as a child environment, rooted at `/svc/<app>/`, where it forwards
 requests to the app's server, taking the control token:
 
@@ -852,6 +858,11 @@ An app's `agent_routes` (`/cdp/` for a website browser) are path prefixes of its
 agents reach this way without the control token: the driver reads them from the app's card
 (`computer-app/v1`'s `agent_routes`) and lets a call under one through, while the app checks it
 itself. A path with a `.` or `..` segment, escaped or not, never counts as under one.
+
+Once an agent acts in the computer, by any tool call on the driver's `/mcp` or a call on a route an
+app opens to agents, the driver writes `.agentenv/agent-acted` in each app's folder, and
+`agent_acted()` reads it from the app's own: a fresh computer starts without it, and an app that resets
+removes its own with `forget_agent_acted()`. agentenv's own calls, with the control token, don't count.
 
 `MailApp.declaration()` returns what the class declares, an `AppDeclaration`, which a `computer_app`
 env stores (`browser: true` for a website browser), and `python -m agentenv_protocol.computer._declare <folder> <file> <class>` prints it as
@@ -953,6 +964,26 @@ are the profile's template. The base class adds:
   - `downloads/list` and `downloads/get {guid, write_namespace?}`, a download and, completed, its file: uploaded
     under the `write_namespace` grant when there is one, else inline, as `data/get` returns files. Inline, the whole
     file is read into memory and sent base64 in one answer, so a large one belongs under a grant.
+
+  The browser's data plane is a file tree, every file by its path under the session user's home:
+  - `data/get` returns its state as `browser-state.json` (`BrowserState`: `cookies` and `local_storage`
+    as above, `tabs`, `closed_tabs`, `downloads` and `clock`, `real` with its `now`); its profile's files,
+    each database with its journal or log, copied in one pass with the browser paused once its state is
+    read, so the files are of one moment, without caches (`Cache`, `Code Cache`,
+    `GPUCache`, the shader and Dawn caches, `CacheStorage`, `ScriptCache`, `Crashpad`) or locks
+    (`Singleton*`); and its finished downloads.
+  - `data/add` applies such a state while the browser runs, from `browser-state.json` or a data part of
+    its shape (`StateToLoad`: `cookies`, `local_storage` and `tabs`; what it records of the past is left),
+    after files written by their path: profile files restore the profile to exactly them, with the
+    browser stopped and relaunched first, and files under `~/Downloads` and `~/Uploads` land there; any
+    other path is refused before anything is applied. A load's `tabs` open in place of the open ones,
+    the active one in front; with none, a load that changes cookies or local storage sends the start tabs
+    back to their `start_urls`, so a page loaded before it shows it. Once an agent has acted, a load
+    can't change the profile or the tabs, the start tabs stay as they are, and a load that fails isn't
+    reset: its error says what it had applied.
+  - `data/reset` ends every CDP address, puts the profile back as installed, empties `~/Downloads` and
+    `~/Uploads`, starts its record over and forgets that an agent acted; its data plane relaunches it at
+    its start tabs.
 
   The record's entries are the models in `agentenv_protocol.website_browser` (`OpenTab`, with the tab that opened
   it as `opener`; `ClosedTab`; `Download`; `Dialog`; `LaunchEntry`; `BrowserRecord`), every field present and null

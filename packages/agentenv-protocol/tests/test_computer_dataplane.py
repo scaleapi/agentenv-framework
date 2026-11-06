@@ -176,14 +176,14 @@ async def test_data_get_leaves_out_a_file_removed_after_its_listed(home):
     (home / "app" / "kept.txt").write_text("kept")
     gone = home / "app" / "gone.pma"
     gone.write_text("metrics")
-    listed = dataplane._data_files
+    listed = dataplane.data_files
 
     def listed_then_removed(*args):
         found = listed(*args)
         gone.unlink()
         return found
 
-    with patch("agentenv_protocol.computer.dataplane._data_files", side_effect=listed_then_removed):
+    with patch("agentenv_protocol.computer.dataplane.data_files", side_effect=listed_then_removed):
         async with http_client(FakeDriver()) as http:
             parts = (await http.post("/agentenv", json=rpc("data/get", {"paths": ["app"]}))).json()["result"]["parts"]
     assert [p["metadata"][DATA_OBJECTS_EXTENSION_URI]["path"] for p in parts] == ["app/kept.txt"]
@@ -201,7 +201,7 @@ async def test_data_get_under_a_grant_leaves_out_a_file_removed_before_its_uploa
         if relative == "gone.txt":
             raise TransferError("invalid_transfer", "The transfer source is unavailable.")
 
-    with patch("agentenv_protocol.computer.dataplane._data_files",
+    with patch("agentenv_protocol.computer.dataplane.data_files",
                return_value=[("gone.txt", home / "gone.txt"), ("kept.txt", home / "kept.txt")]), \
             patch("agentenv_protocol.computer.dataplane.NamespaceUploader") as uploader:
         uploader.return_value.upload = upload

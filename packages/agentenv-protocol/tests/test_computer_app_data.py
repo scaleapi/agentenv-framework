@@ -2,8 +2,10 @@
 the defaults: a load writes files under them, through no link out of them, an export returns them, and a reset puts back
 the copy its server kept before it served; its card declares a file tree. Hooks override paths, and read the parts they
 get with part_bytes. Around a load and a reset the app is stopped and relaunched, a failed load is followed by a reset,
-and data calls take turns. A call past data_timeout_s fails then and is cancelled, but a sync hook runs in a thread,
-which its reset and relaunch, and the next call, wait for. The app serves its skill file."""
+and data calls take turns; an app that loads live is left running through a load, and a failed one is reset with it
+stopped, or left as it is when the app says so; an app with hooks may keep its paths as installed. A call past
+data_timeout_s fails then and is cancelled, but a sync hook runs in a thread, which its reset and relaunch, and the next
+call, wait for. The app serves its skill file."""
 from __future__ import annotations
 
 import asyncio
@@ -19,8 +21,9 @@ pytest.importorskip("mcp.server.fastmcp")
 import httpx  # noqa: E402
 
 from agentenv_protocol import add_data, client, reset_data  # noqa: E402
+from agentenv_protocol.agent_env_environment import OP_ADD_DATA  # noqa: E402
 from agentenv_protocol.computer import ComputerAppEnvironment, Launch, linux, part_bytes  # noqa: E402
-from agentenv_protocol.computer import app, app_runtime, session  # noqa: E402
+from agentenv_protocol.computer import app, app_data, app_runtime, session  # noqa: E402
 from agentenv_protocol.computer.app import COMPUTER_APP  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
 from agentenv_protocol.types import (DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI, RPC_PATH,  # noqa: E402
@@ -48,6 +51,28 @@ class HookedMail(ComputerAppEnvironment):
     @reset_data
     def wipe(self) -> None:
         type(self).resets += 1
+
+
+@linux(paths=MAIL, launch=Launch(command=["mail"]))
+class LiveMail(ComputerAppEnvironment):
+    data_live = frozenset({OP_ADD_DATA})
+    data_keeps_paths = True
+    resets, resets_failed = 0, True
+
+    @add_data
+    async def load(self, parts: list) -> None:
+        paths = [part.metadata[DATA_OBJECTS_EXTENSION_URI]["path"] for part in parts]
+        if "stopped" in paths:
+            await self._computer_app.stop_app()
+        if "bad" in paths or "stopped" in paths:
+            raise RuntimeError("the seed is bad")
+
+    @reset_data
+    def wipe(self) -> None:
+        type(self).resets += 1
+
+    def _resets_failed_add(self) -> bool:
+        return type(self).resets_failed
 
 
 @pytest.fixture
@@ -78,8 +103,15 @@ def desktop(monkeypatch):
         running.discard(pid)
         events.append(("stop", pid))
 
+    @contextlib.contextmanager
+    def paused(pid):
+        events.append(("pause", pid))
+        yield
+        events.append(("continue", pid))
+
     monkeypatch.setattr(session, "launch", launch)
     monkeypatch.setattr(session, "stop", stop)
+    monkeypatch.setattr(session, "paused", paused)
     monkeypatch.setattr(session, "alive", lambda pid: pid in running)
     return events
 
@@ -150,7 +182,8 @@ async def test_hooks_override_its_paths_and_read_each_part_they_get_with_part_by
 
 
 @pytest.mark.asyncio
-async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_export_leaves_it_be(home, desktop):
+async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_export_pauses_it_for_its_copy(home,
+                                                                                                           desktop):
     mail = PathsMail()
     mail._computer_app_data_plane().keep_initial()
     await mail._computer_app.launch_app()
@@ -160,7 +193,50 @@ async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_ex
         await _rpc(http, "data/get", {})
         await _rpc(http, "data/reset", {})
 
-    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244), ("stop", 4244), ("launch", 4246)]
+    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244), ("pause", 4244), ("continue", 4244),
+                       ("stop", 4244), ("launch", 4248)]
+
+
+@pytest.mark.asyncio
+async def test_an_export_copies_the_paths_with_the_app_paused_and_sends_the_copy_once_it_runs_again(home, desktop,
+                                                                                                  monkeypatch):
+    (home / "Mail").mkdir()
+    (home / "Mail/inbox.txt").write_text("one moment")
+    mail = PathsMail()
+    mail._computer_app_data_plane().keep_initial()
+    await mail._computer_app.launch_app()
+    stage, parts = app_data._stage, app_data.file_parts
+
+    def staged(*args):
+        desktop.append(("copy",))
+        stage(*args)
+
+    async def sent(*args, **kwargs):
+        desktop.append(("send",))
+        return await parts(*args, **kwargs)
+
+    monkeypatch.setattr(app_data, "_stage", staged)
+    monkeypatch.setattr(app_data, "file_parts", sent)
+    async with _http(mail) as http:
+        exported = _files(await _rpc(http, "data/get", {}))
+
+    assert desktop[1:] == [("pause", 4242), ("copy",), ("continue", 4242), ("send",)]
+    assert exported["Mail/inbox.txt"] == b"one moment" and not list(app_data.INITIAL.parent.glob("tmp*"))
+
+
+@pytest.mark.asyncio
+async def test_an_export_sends_a_linked_files_contents_from_inside_the_home_and_skips_a_pipe(home):
+    (home / "Mail").mkdir()
+    (home / "Archive").mkdir()
+    (home / "Archive/2024.txt").write_text("archived")
+    (home / "Mail/latest.txt").symlink_to(home / "Archive/2024.txt")
+    os.mkfifo(home / "Mail/events")
+    mail = PathsMail()
+
+    async with _http(mail) as http:
+        exported = _files(await _rpc(http, "data/get", {}))
+
+    assert exported == {"Mail/latest.txt": b"archived"}
 
 
 @pytest.mark.asyncio
@@ -184,6 +260,62 @@ async def test_a_failed_load_is_followed_by_a_reset_and_the_app_is_relaunched(ho
 
     assert answer.json()["error"]["message"] == "the seed is bad"
     assert HookedMail.resets == 1 and desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244)]
+
+
+@pytest.mark.asyncio
+async def test_a_live_load_runs_on_the_running_app_and_a_reset_still_stops_and_relaunches_it(home, desktop):
+    mail = LiveMail()
+    await mail._computer_app.launch_app()
+
+    async with _http(mail) as http:
+        await _rpc(http, "data/add", {"parts": [_inline("Mail/a.txt", b"a")]})
+        loaded = list(desktop)
+        await _rpc(http, "data/reset", {})
+
+    assert loaded == [("launch", 4242)]
+    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resets", [True, False])
+async def test_a_failed_live_load_is_reset_with_the_app_stopped_and_relaunched_or_left_running_as_the_app_says(
+        home, desktop, resets):
+    mail, LiveMail.resets, LiveMail.resets_failed = LiveMail(), 0, resets
+    await mail._computer_app.launch_app()
+
+    async with _http(mail) as http:
+        answer = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("bad", b"x")]}))
+
+    assert answer.json()["error"]["message"] == "the seed is bad"
+    if resets:
+        assert LiveMail.resets == 1 and desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244)]
+    else:
+        assert LiveMail.resets == 0 and desktop == [("launch", 4242)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resets", [True, False])
+async def test_a_failed_live_load_that_stopped_the_app_itself_leaves_it_running_again(home, desktop, resets):
+    mail, LiveMail.resets, LiveMail.resets_failed = LiveMail(), 0, resets
+    await mail._computer_app.launch_app()
+
+    async with _http(mail) as http:
+        answer = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("stopped", b"x")]}))
+
+    assert answer.json()["error"]["message"] == "the seed is bad"
+    assert LiveMail.resets == (1 if resets else 0)
+    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244)]
+
+
+def test_an_app_with_hooks_that_keeps_its_paths_has_them_kept_as_installed_and_one_that_doesnt_not(home):
+    (home / "Mail").mkdir()
+    (home / "Mail/inbox.txt").write_text("installed")
+
+    HookedMail()._computer_app_data_plane().keep_initial()
+    kept_without = app_data.INITIAL.exists()
+    LiveMail()._computer_app_data_plane().keep_initial()
+
+    assert not kept_without and (app_data.INITIAL / "Mail/inbox.txt").read_text() == "installed"
 
 
 @pytest.mark.asyncio

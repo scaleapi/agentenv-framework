@@ -143,7 +143,7 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
     a deploy with no ``env_params`` boots it, on the first of ``links`` that boots it, probed at ``full`` with that
     token within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name."""
     token = boot.control_token()
-    environment = {**boot.settings_environment(env.computer, env.computer_values(), environment_name=env.environment_name),
+    environment = {**boot.settings_environment(env.computer, env.computer_values(), environment_name=env.computer_name),
                    **boot.app_settings_environment(env.composed_apps(), env.app_defaults(), env.computer.os.type)}
     problems = []
     for link in links:

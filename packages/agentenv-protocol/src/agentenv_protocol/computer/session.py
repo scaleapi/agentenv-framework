@@ -9,7 +9,7 @@ import re
 import signal
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 #: How often a starting session is looked for.
 POLL_S = 0.2
@@ -68,18 +68,35 @@ async def returncode(pid: int, timeout_s: float) -> Optional[int]:
 
 
 async def stop(pid: int, timeout_s: float) -> None:
-    """End the session ``launch`` started as ``pid``, every process in it: asked to exit, then killed after
-    ``timeout_s``. No one asks how it exited once it's stopped."""
+    """End the session ``launch`` started as ``pid``, every process in it: asked to exit, a paused one continued so it
+    can, then killed after ``timeout_s``. No one asks how it exited once it's stopped."""
     _exits.pop(pid, None)
     try:
         os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    with contextlib.suppress(ProcessLookupError, PermissionError):  # macOS refuses a group of zombies alone
+        os.killpg(pid, signal.SIGCONT)
     try:
         await asyncio.wait_for(_exited(pid), timeout_s)
     except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(pid, signal.SIGKILL)
+
+
+@contextlib.contextmanager
+def paused(pid: int) -> Iterator[None]:
+    """Every process of the session ``launch`` started as ``pid`` stopped while the block runs, and continued after."""
+    try:
+        os.killpg(pid, signal.SIGSTOP)
+    except (ProcessLookupError, PermissionError):
+        yield
+        return
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pid, signal.SIGCONT)
 
 
 def alive(pid: int) -> bool:

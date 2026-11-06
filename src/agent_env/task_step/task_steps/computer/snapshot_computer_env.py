@@ -98,7 +98,7 @@ class SnapshotComputerEnvTaskStep(SnapshotEnvTaskStep):
         result = await self.snapshot_env_state(
             env=env, gateway_url=None, snapshot_id=snapshot_id, deployed=deployed,
             export_timeout_seconds=self.export_timeout_seconds,
-            data_get_params=None if self.file_paths is None else {env.environment_name: {"paths": self.file_paths}})
+            data_get_params=None if self.file_paths is None else {env.computer_name: {"paths": self.file_paths}})
         context.metadata.setdefault("env_snapshotted_universes", {})[self.id] = {
             "id": result.environment_universe_artifact_id, "version": result.environment_universe_artifact_version}
         return context

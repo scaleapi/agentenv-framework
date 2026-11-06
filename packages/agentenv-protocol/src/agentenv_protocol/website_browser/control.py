@@ -133,6 +133,45 @@ class BrowserControl:
         await self._bring_to_front(target)
         return target
 
+    async def reopen_start_tabs(self, urls: list[str]) -> None:
+        """The start tabs at their ``urls`` again, in place, the first active: each tab open, in opened order, goes to
+        its URL, and any the browser lacks opens. A page already loaded doesn't read cookies set after it, so a tab
+        a load signed in shows it only once it loads again."""
+        tabs = list(self.tabs)
+        for index, url in enumerate(urls):
+            if index < len(tabs):
+                await self._navigate_tab(tabs[index], url)
+            else:
+                tabs.append(await self.open_tab(url))
+        if tabs:
+            await self._bring_to_front(tabs[0])
+
+    async def replace_tabs(self, tabs: list) -> None:
+        """``tabs``, each with its ``url`` and whether it's ``active``, opened in order in place of the tabs open now,
+        the active one, else the first, in front. The new ones open before the old close, so the window stays."""
+        before = list(self.tabs)
+        opened = [await self.open_tab(tab.url) for tab in tabs]
+        for target in before:
+            await self.close_tab(target)
+        if opened:
+            await self._bring_to_front(next((target for target, tab in zip(opened, tabs) if tab.active), opened[0]))
+
+    async def _navigate_tab(self, target: str, url: str) -> None:
+        session = next((s for s, t in self._sessions.items() if t == target), None)
+        if session is None:
+            raise DeviceUnavailable(f"the browser's tab {target} has no session to navigate it")
+        answer = await self.devtools.call("Page.navigate", {"url": url}, session_id=session)
+        if error := answer.get("errorText"):
+            raise InvalidArgument(f"the browser couldn't open {url}: {error}")
+
+    def forget(self) -> None:
+        """A record that starts now, as a reset leaves the browser: no tabs closed, downloads or dialogs before it, and
+        no origin seen."""
+        self.since = _now()
+        self.closed_tabs, self.dialog_log = [], []
+        self.downloads.clear()
+        self.origins.clear()
+
     async def activate(self, target: str) -> None:
         """The open tab ``target`` brought to the front, the active one."""
         self._open(target)

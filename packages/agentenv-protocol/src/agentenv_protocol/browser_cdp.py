@@ -111,6 +111,11 @@ class Tokens:
             self._save()
         return self._minted[user]
 
+    def revoke_all(self) -> None:
+        """Every address minted so far ended, as a reset ends them."""
+        self._minted, self._known = {}, {}
+        self._save()
+
     def address(self, token: str) -> Optional[Address]:
         """The address ``token`` was minted for, or None for one that wasn't."""
         known = self._known.get(_hash(token))

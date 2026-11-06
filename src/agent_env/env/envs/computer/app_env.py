@@ -1,8 +1,8 @@
 """Computer app env: software on a computer, a ``ComputerAppEnvironment`` subclass, with its files, what it declares,
 read from the class at put, the values of its build settings the env fixes in the image, and the defaults for its
 settings each deploy starts from. Deployed alone it is a
-one-app computer env: the computer and driver its env.toml names, composed with the app installed under its prefix, its
-card named after it."""
+one-app computer env: the computer and driver its env.toml names, composed with the app installed under its prefix, the
+computer's card named after it with ``DRIVER_SUFFIX``, so the app's own name reaches the app."""
 
 from __future__ import annotations
 
@@ -30,6 +30,10 @@ if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
 
 
+#: What an app deployed alone adds to its name to name its computer.
+DRIVER_SUFFIX = "-driver"
+
+
 class ComputerAppEnv(ComputerEnv):
     type: ClassVar[str] = APP_TYPE
     description = ("A computer app: software and its settings on a computer, read from its ComputerAppEnvironment "
@@ -49,6 +53,10 @@ class ComputerAppEnv(ComputerEnv):
     @property
     def install(self) -> dict[str, AppInstall]:
         return _installs(self.declaration)[0]
+
+    @property
+    def computer_name(self) -> str:
+        return f"{self.environment_name}{DRIVER_SUFFIX}"
 
     def composed_apps(self) -> list[ComputerAppEnv]:
         return [self]

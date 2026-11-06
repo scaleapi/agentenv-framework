@@ -4,6 +4,7 @@ of the boot, stops the app it launched, and says whether the app is ready, its c
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
@@ -132,6 +133,16 @@ class AppRuntime:
         self.log("stop", pid)
         await session.stop(pid, STOP_TIMEOUT_S)
         return True
+
+    def running(self) -> bool:
+        """Whether the app this server launched last runs."""
+        return _running() is not None
+
+    def paused(self) -> contextlib.AbstractContextManager:
+        """The app this server launched last, every process of it, paused while the block runs, so a copy of its files
+        taken meanwhile is of one moment."""
+        pid = _running()
+        return session.paused(pid) if pid is not None else contextlib.nullcontext()
 
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended

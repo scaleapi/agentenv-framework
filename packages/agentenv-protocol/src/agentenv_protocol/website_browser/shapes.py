@@ -134,6 +134,40 @@ class LaunchEntry(BaseModel):
     signal: Optional[str] = None
 
 
+class TabToOpen(BaseModel):
+    """A tab a load opens: its URL, and whether it's the active one. A snapshot's tab, with its id and times, is one."""
+    model_config = ConfigDict(extra="ignore")
+
+    url: str
+    active: bool = False
+
+
+class StateToLoad(BaseModel):
+    """What ``data/add`` applies of the browser's state: its cookies, its local storage and, when given, its tabs.
+    A snapshot's state loads as it is: what it records of the past, its closed tabs, downloads and clock, is left."""
+    model_config = ConfigDict(extra="ignore")
+
+    cookies: list[CookieToSet] = []
+    local_storage: list[OriginStorage] = []
+    tabs: Optional[list[TabToOpen]] = None
+
+
+class Clock(BaseModel):
+    """The clock the browser's pages see: the computer's own, ``real``, until a browser follows a universe's."""
+    mode: Literal["real"]
+    now: str
+
+
+class BrowserState(BaseModel):
+    """``data/get``'s state of the browser, read at one moment and kept as ``browser-state.json`` in a snapshot."""
+    cookies: list[Cookie]
+    local_storage: list[OriginStorage]
+    tabs: list[OpenTab]
+    closed_tabs: list[ClosedTab]
+    downloads: list[Download]
+    clock: Clock
+
+
 class BrowserRecord(BaseModel):
     """``browser/v1 record``: what agentenv's connection saw ``since`` its server started, and each launch since the
     computer booted."""
