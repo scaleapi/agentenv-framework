@@ -39,6 +39,7 @@ from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task.teardown import TORN_DOWN_KEY
 from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
+from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.util.a2a_test_agent import put_test_agent
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -75,7 +76,7 @@ def local_stack(monkeypatch, tmp_path):
         pytest.skip("docker daemon not available")
     reg_port = _free_port()
     reg_name = f"server-e2e-registry-{uuid.uuid4().hex[:8]}"
-    if _docker("run", "-d", "--rm", "--name", reg_name, "-p", f"127.0.0.1:{reg_port}:5000", "registry:2").returncode != 0:
+    if _docker("run", "-d", "--rm", "--name", reg_name, "-p", f"127.0.0.1:{reg_port}:5000", REGISTRY_IMAGE).returncode != 0:
         pytest.skip("could not start registry:2")
     host = f"localhost:{reg_port}"
     if not _wait_ready(f"http://{host}/v2/", (200, 401)):

@@ -31,6 +31,7 @@ from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTas
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
+from tst.integration.utils.registry import REGISTRY_IMAGE
 
 pytestmark = pytest.mark.integration
 
@@ -151,7 +152,7 @@ def _free_port() -> int:
 def local_registry(local_backends):
     port = _free_port()
     name = f"run-code-registry-{uuid.uuid4().hex[:8]}"
-    started = _docker("run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", "registry:2")
+    started = _docker("run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", REGISTRY_IMAGE)
     assert started.returncode == 0, started.stderr
     host = f"localhost:{port}"
     deadline = time.time() + 45

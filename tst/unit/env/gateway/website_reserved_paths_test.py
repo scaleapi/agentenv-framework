@@ -62,13 +62,64 @@ _CARD = {"name": "mail", "url": "/agentenv", "capabilities": {"extensions": [
 
 def test_a_sites_reserved_paths_are_the_ones_its_card_advertises_each_a_path_of_its_own():
     assert site_reserved_paths(_CARD) == {"/agentenv", "/agentenv/ext/website/ready", "/grade", "/grading/now", "/hooks"}
-    assert site_reserved_paths({"name": "x", "url": "http://elsewhere/agentenv"}) == frozenset()
+    # a full URL's path is reserved whatever its host: the site is reached under names it never sees in advance
+    assert site_reserved_paths({"name": "x", "url": "http://elsewhere/agentenv?v=1"}) == frozenset({"/agentenv"})
+    assert site_reserved_paths({"name": "x", "url": "http://elsewhere"}) == frozenset()
     reserved = site_reserved_paths(_CARD)
     for path in ("/grade", "/grade/", "/x/../grade", "/grading/now", "/hooks/a"):
         assert reserved_site_path(path, reserved), path
     for path in ("/gold", "/grading", "/hooksy", "/"):
         assert not reserved_site_path(path, reserved), path
 
+
+
+def test_a_full_url_under_the_sites_address_is_reserved_where_its_route_reaches_it():
+    card = {"name": "shop", "additionalInterfaces": [{"url": "http://shop/base/mcp", "transport": "mcp"}]}
+    assert site_reserved_paths(card, "/base") == frozenset({"/mcp"})
+    assert site_reserved_paths(card, "/base/") == frozenset({"/mcp"})
+    assert site_reserved_paths(card) == frozenset({"/base/mcp"})
+    assert site_reserved_paths({"name": "shop", "url": "/base/agentenv"}, "/base") == frozenset({"/base/agentenv"})
+
+
+@pytest.mark.asyncio
+async def test_a_site_behind_a_base_path_refuses_the_mcp_endpoint_its_card_names_by_full_url(monkeypatch):
+    reached = []
+    card = {"name": "shop", "url": "/agentenv",
+            "additionalInterfaces": [{"url": "http://shop-website-backend:8000/base/mcp", "transport": "mcp"}]}
+
+    def site(request):
+        reached.append(request.url.path)
+        if request.url.path == f"/base{WELL_KNOWN_PATH}":
+            return httpx.Response(200, json=card)
+        return httpx.Response(200, content=_streamed())
+
+    transport = httpx.MockTransport(site)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(_Changelog(), website_urls={"shop": "http://shop-website-backend:8000/base"},
+                  rest_proxy_urls={"shop": "http://shop-website-backend:8000/base"})
+
+    for path in ("mcp", "mcp/", "x/../mcp"):
+        assert (await _http(gw, "POST", f"/website/shop/{path}", body=b"{}"))[0] == 404, path
+    assert (await _http(gw, "GET", "/website/shop/orders"))[0] == 200
+    assert reached == [f"/base{WELL_KNOWN_PATH}", "/base/orders"]
+
+
+@pytest.mark.asyncio
+async def test_a_site_refuses_the_mcp_endpoint_its_card_names_by_a_relative_path(monkeypatch):
+    card = {"name": "shop", "url": "/agentenv", "additionalInterfaces": [{"url": "mcp", "transport": "mcp"}]}
+
+    def site(request):
+        if request.url.path == WELL_KNOWN_PATH:
+            return httpx.Response(200, json=card)
+        return httpx.Response(200, content=_streamed())
+
+    transport = httpx.MockTransport(site)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(_Changelog(), website_urls={"shop": "http://shop-website-backend:8000"},
+                  rest_proxy_urls={"shop": "http://shop-website-backend:8000"})
+    for path in ("mcp", "mcp/", "./mcp"):
+        assert (await _http(gw, "POST", f"/website/shop/{path}", body=b"{}"))[0] == 404, path
+    assert (await _http(gw, "GET", "/website/shop/orders"))[0] == 200
 
 @pytest.mark.asyncio
 async def test_a_sites_route_refuses_what_its_card_advertises_reading_the_card_once(monkeypatch):

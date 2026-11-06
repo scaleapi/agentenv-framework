@@ -41,6 +41,7 @@ from agent_env.config import configure, reset_config, set_image_store
 from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.task import Task
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
+from tst.integration.utils.registry import REGISTRY_IMAGE
 
 pytestmark = pytest.mark.integration
 
@@ -120,7 +121,7 @@ def _wait_ready(url: str, codes: tuple[int, ...], timeout: int = 45) -> bool:
 def all_local(monkeypatch, tmp_path):
     reg_port = _free_port()
     reg_name = f"local-e2e-registry-{uuid.uuid4().hex[:8]}"
-    start = _docker("run", "-d", "--rm", "--name", reg_name, "-p", f"127.0.0.1:{reg_port}:5000", "registry:2")
+    start = _docker("run", "-d", "--rm", "--name", reg_name, "-p", f"127.0.0.1:{reg_port}:5000", REGISTRY_IMAGE)
     if start.returncode != 0:
         pytest.skip(f"could not start registry:2: {start.stderr.strip()}")
     host = f"localhost:{reg_port}"

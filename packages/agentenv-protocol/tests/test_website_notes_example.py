@@ -111,9 +111,9 @@ def ready(client: TestClient) -> dict:
 
 def test_the_example_passes_every_conformance_check(client: TestClient) -> None:
     results = conformance.check("http://testserver", client=client)
-    assert {r.name: r.status for r in results} == dict.fromkeys(
+    assert {r.name: r.status for r in results} == {**dict.fromkeys(
         ["card", "any_host", "health", "universe_now", "reserved_paths", "data_plane", "clock", "forwarded",
-         "cookies"], "passed"), results
+         "cookies"], "passed"), "mcp": "skipped"}, results
 
 
 def test_the_card_declares_the_site_and_its_routes_by_name_and_it_is_ready_through_website_v1(

@@ -14,8 +14,8 @@ from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl
+from typing import TYPE_CHECKING, Any, NamedTuple
+from urllib.parse import parse_qsl, urljoin, urlsplit
 from uuid import uuid4
 
 import anyio
@@ -153,6 +153,7 @@ class Gateway:
         self.internal_mcp_servers = internal_mcp_servers
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
+        self._site_mcp_endpoints = site_mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
         self._site_reserved: dict[str, frozenset[str]] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
@@ -651,12 +652,14 @@ class Gateway:
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
         role = self._request_role(request)
-        mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
+        site_mcp = self._site_mcp_endpoints.get(service_name) if url_map is self.rest_proxy_urls else None
+        mcp_server = url_map is self.rest_proxy_urls and (service_name.startswith("mcp-") or site_mcp is not None)
+        mcp_endpoint = site_mcp or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                                 withheld=self._withheld)
+                                 withheld=self._withheld, mcp_endpoint=mcp_endpoint)
         changelog_before = self._query_changelog_id()
         attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
@@ -681,7 +684,7 @@ class Gateway:
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                             on_done=log_write, withheld=self._withheld)
+                             on_done=log_write, withheld=self._withheld, mcp_endpoint=mcp_endpoint)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
@@ -797,7 +800,8 @@ class Gateway:
             card = response.json() if response.is_success else None
         except ValueError:
             card = None
-        self._site_reserved[app] = site_reserved_paths(card) if isinstance(card, dict) else frozenset()
+        address = self.website_urls.get(app) or base_url
+        self._site_reserved[app] = site_reserved_paths(card, address) if isinstance(card, dict) else frozenset()
         return self._site_reserved[app]
 
     def _backing_keys(self) -> list[str]:
@@ -1668,17 +1672,80 @@ def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> boo
                                                 for base in (RPC_PATH, *reserved))
 
 
-def site_reserved_paths(card: dict) -> frozenset[str]:
-    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, and every
-    extension's endpoint and each of its methods'; each one a path of its own, not the site's root."""
-    paths = [card.get("url")]
+def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str],
+                       rest_proxy_urls: dict[str, str]) -> dict[str, str]:
+    """The MCP endpoint, as a path under its /svc/<name>/ base, of each site that is an internal MCP server too, by
+    name: where a call through /svc/<name>/ gets the gateway's role in its JSON-RPC ``_meta``, as an MCP server's does."""
+    endpoints = {}
+    for server in servers:
+        base = rest_proxy_urls.get(server.name, "")
+        if server.name not in website_urls or not base:
+            continue
+        resolved = card_url(base, server.mcp_url)
+        if resolved is not None and resolved.own_server and resolved.route_path is not None:
+            endpoints[server.name] = resolved.route_path
+    return endpoints
+
+
+class CardURL(NamedTuple):
+    """A URL a site's card names, as the site at an address serves it: its path and query; the path a request on the
+    site's route reaches it at, its path under the address's (None when it isn't under it); and whether it is on the
+    site's own server."""
+    path: str
+    query: str
+    route_path: str | None
+    own_server: bool
+
+
+def card_url(base: str, url: str) -> CardURL | None:
+    """``url``, which a site's card names, against the site's address ``base`` (a URL, or only its path): a path,
+    absolute or relative, joined under the address's path, since a card's paths are relative to where it was read, and
+    on the site's own server; a full URL as it is, on the site's own server when its scheme, host and port are the
+    address's. The one reading of a card's URLs that discovery, /svc role stamping and a route's reserved paths share.
+    None for one with no path, or that can't be read."""
+    try:
+        own, given = urlsplit(base.rstrip("/")), urlsplit(url)
+        full = bool(given.scheme or given.netloc)
+        same = not full or _address(given) == _address(own)
+    except ValueError:
+        return None
+    under = own.path.rstrip("/")
+    if full:
+        path = given.path
+    elif given.path.startswith("/"):
+        path = under + given.path
+    else:
+        path = urljoin(under + "/", given.path) if given.path else ""
+    if not path.startswith("/"):
+        return None
+    normalized = _normalized(path)
+    route = (normalized[len(under):] or "/") if normalized == under or normalized.startswith(under + "/") else None
+    return CardURL(path, given.query, route, same)
+
+
+def _address(url) -> tuple:
+    """A split URL's scheme, host and port, its scheme's default port when it names none."""
+    return url.scheme, url.hostname, url.port or {"http": 80, "https": 443}.get(url.scheme)
+
+
+def site_reserved_paths(card: dict, base: str = "") -> frozenset[str]:
+    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, every interface's,
+    such as the MCP endpoint of a site that is an MCP server too, and every extension's endpoint and each of its
+    methods'; each one a path of its own, not the site's root, read from a full URL or one with a query as well as from
+    a bare path, as ``card_url`` reads them against the site's address ``base``. A full URL's path is reserved
+    whatever its host, since a site is reached under names it never sees in advance: as its route reaches it, under the
+    address's path, or as it is when it isn't under it."""
+    urls = [card.get("url")]
+    urls += [i.get("url") for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)]
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
         params = ext.get("params") if isinstance(ext, dict) else None
         if not isinstance(params, dict):
             continue
-        paths += [endpoint for *_, endpoint in operations(params)]
-        paths.append(params.get("endpoint"))
-    return frozenset(_normalized(p) for p in paths if isinstance(p, str) and p.startswith("/") and _normalized(p) != "/")
+        urls += [endpoint for *_, endpoint in operations(params)]
+        urls.append(params.get("endpoint"))
+    resolved = (card_url(base, url) for url in urls if isinstance(url, str))
+    paths = (_normalized(r.path if r.route_path is None else r.route_path) for r in resolved if r is not None)
+    return frozenset(p for p in paths if p != "/")
 
 
 def site_request_path(request: HTTPConnection) -> str | None:

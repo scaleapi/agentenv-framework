@@ -128,17 +128,21 @@ async def _ready(name: str) -> Driver:
     """A client for the container's driver once its computer is ready, within the time a deploy gives one; a restart may
     move its port."""
     deadline = time.monotonic() + READY_TIMEOUT_S
+    status = None
     while time.monotonic() < deadline:
         port = subprocess.run(["docker", "port", name, str(PORT)], capture_output=True, text=True).stdout
         if port:
             try:
                 driver = await Driver.connect(f"http://{port.splitlines()[0]}", 30)
-                if (await driver.invoke(COMPUTER_READY, "status"))["ready"]:
+                status = await driver.invoke(COMPUTER_READY, "status")
+                if status["ready"]:
                     return driver
             except Exception:  # not serving yet
                 pass
         await asyncio.sleep(0.25)
-    raise TimeoutError(f"{name}'s computer wasn't ready within {READY_TIMEOUT_S:.0f} s")
+    failing = [check for check in (status or {}).get("checks", []) if not check["ok"]]
+    raise TimeoutError(f"{name}'s computer wasn't ready within {READY_TIMEOUT_S:.0f} s: "
+                       f"{failing or 'its driver never answered'}")
 
 
 async def _layout(driver: Driver) -> dict:

@@ -8,6 +8,10 @@ usually its schema of the env's database (``database_url``), and serves it throu
 (``@reset_data``, ``@add_data``, ``@get_data``) as any AgentEnvEnvironment does: ``data/get`` is how agentenv reads
 what a task left a site with.
 
+A site may also be an MCP server, as an MCP env is: its ``@tool`` and ``@resource`` methods are served at ``/mcp``
+(streamable HTTP, of the ``mcp`` package), which its card declares as its ``mcp`` interface and lists the tools of, so
+an agent can act on the site through tools beside its pages. A site with none serves no ``/mcp``.
+
 One route is built in, replaced by a site's own ``@api`` route at its very path and answering before one whose path
 parameters would also match it: ``/api/session``, which a frontend calls to learn who is signed in, signing the acting
 user in when nobody is (GET), or to sign out (DELETE)."""
@@ -32,9 +36,12 @@ from starlette.routing import Route
 
 from ..agent_env_environment import (
     AgentEnvEnvironment,
+    _RESOURCE_ATTR,
+    _TOOL_ATTR,
     AgentEnvStarletteApplication,
     _marked_members,
     _maybe_await,
+    create_fastmcp_app,
     extension,
 )
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, ClockUnavailable, UniverseClock, clock_patch_script, iso
@@ -164,8 +171,15 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         api_routes = self.routes()
         taken = {openapi_path(r.path) for r in api_routes}
         root = self._site_path(declaration.static) if declaration.static is not None else None
-        asgi = Starlette(middleware=[Middleware(_Forwarded), Middleware(_Universe, env=self)])
-        AgentEnvStarletteApplication(self._build_card(), self).add_routes_to_app(asgi)
+        middleware = [Middleware(_Forwarded), Middleware(_Universe, env=self)]
+        if self.serves_mcp():
+            self.mcp = create_fastmcp_app(self, card=self._build_card())
+            served = self.mcp.streamable_http_app()
+            asgi = Starlette(middleware=middleware, lifespan=served.router.lifespan_context)
+            asgi.router.routes.extend(served.routes)
+        else:
+            asgi = Starlette(middleware=middleware)
+            AgentEnvStarletteApplication(self._build_card(), self).add_routes_to_app(asgi)
         if SESSION_PATH not in taken:
             asgi.router.routes.append(Route(SESSION_PATH, self._session, methods=["GET", "DELETE"]))
         asgi.router.routes.extend(Route(r.path, _unreserved(endpoint(getattr(self, r.fn.__name__), r, self.context)),
@@ -174,6 +188,11 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         self.asgi = asgi
         self._mounted = True
         return asgi
+
+    def serves_mcp(self) -> bool:
+        """Whether the site is an MCP server too: it has ``@tool`` or ``@resource`` methods, or forwards tools."""
+        return any(True for _ in _marked_members(self, _TOOL_ATTR)) or any(
+            True for _ in _marked_members(self, _RESOURCE_ATTR)) or bool(self.forwarded_tools())
 
     def mount(self, app: Any) -> Any:
         raise TypeError(f"{type(self).__name__} builds its own app with create_app(); set app = ... to serve more")

@@ -10,7 +10,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, redirect_stdout
 from importlib.metadata import PackageNotFoundError, distribution, packages_distributions
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 import click
 
@@ -119,6 +119,11 @@ def _quiet() -> Iterator[None]:
         yield
     finally:
         logger.setLevel(previous)
+
+
+def _stdout() -> TextIO:
+    """The stdout a command started with, which its report goes to though a plugin it imports replaces sys.stdout."""
+    return click.get_text_stream("stdout")
 
 
 def collect(root: click.Group, *, load: bool) -> Report:
@@ -334,8 +339,9 @@ def plugin():
 @click.option("--no-load", is_flag=True, help="Read installed metadata only; import no type plugin.")
 def list_command(as_json: bool, no_load: bool):
     """List every installed plugin package, what it provides, and whether it took effect."""
+    out = _stdout()
     report = collect(_root(), load=not no_load)
-    click.echo(_json(_as_dict(report)) if as_json else render_list(report))
+    click.echo(_json(_as_dict(report)) if as_json else render_list(report), file=out)
 
 
 @plugin.command()
@@ -344,6 +350,7 @@ def list_command(as_json: bool, no_load: bool):
 @click.option("--no-load", is_flag=True, help="Read installed metadata only; import no type plugin.")
 def show(package: str, as_json: bool, no_load: bool):
     """Show one plugin PACKAGE: each contribution, its status and why."""
+    out = _stdout()
     report = collect(_root(), load=not no_load)
     matches = [d for d in report.distributions if _normalized(d.name) == _normalized(package)]
     if not matches:
@@ -352,9 +359,9 @@ def show(package: str, as_json: bool, no_load: bool):
     dist = matches[0]
     effect = None if no_load else config_effect(dist.name)
     if as_json:
-        click.echo(_json({**_as_dict(report), "plugins": [dataclasses.asdict(dist)], "config_effect": effect}))
+        click.echo(_json({**_as_dict(report), "plugins": [dataclasses.asdict(dist)], "config_effect": effect}), file=out)
         return
-    click.echo(render_show(report, dist, effect))
+    click.echo(render_show(report, dist, effect), file=out)
 
 
 @plugin.command()
@@ -366,6 +373,7 @@ def check(ctx: click.Context, as_json: bool):
 
     A replaced contribution is not a failure: config chose it. Meant for CI and image builds.
     """
+    out = _stdout()
     report = collect(_root(), load=True)
     problems = [(d, c) for d in report.distributions for c in d.contributions if c.status in _CHECK_FAILS]
     error = report.inventory.config_error
@@ -380,22 +388,22 @@ def check(ctx: click.Context, as_json: bool):
             **_as_dict(report),
             "ok": not reasons,
             "problems": [{"package": d.name, "version": d.version, **dataclasses.asdict(c)} for d, c in problems],
-        }))
+        }), file=out)
         if reasons:
             ctx.exit(1)
         return
     for d, c in problems:
-        click.echo(f"{d.name} {d.version}: {_KINDS[c.group][0]} {c.name}: {_outcome(c)}")
+        click.echo(f"{d.name} {d.version}: {_KINDS[c.group][0]} {c.name}: {_outcome(c)}", file=out)
     if error:
-        click.echo(_coded(f"config: {error.reason}", error.code))
+        click.echo(_coded(f"config: {error.reason}", error.code), file=out)
     for line in _unreadable(report):
-        click.echo(line)
+        click.echo(line, file=out)
     if reasons:
         raise click.ClickException("; ".join(reasons))
     total = sum(len(d.contributions) for d in report.distributions)
     replaced = sum(c.status == "replaced" for d in report.distributions for c in d.contributions)
     note = f"; {replaced} replaced by config" if replaced else ", all in effect"
-    click.echo(f"ok: {len(report.distributions)} plugin package(s), {total} contribution(s){note}")
+    click.echo(f"ok: {len(report.distributions)} plugin package(s), {total} contribution(s){note}", file=out)
 
 
 @plugin.command()

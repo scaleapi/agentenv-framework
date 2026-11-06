@@ -10,6 +10,8 @@ moves. After an intended change, regenerate and review the diff:
 """
 
 import ast
+import importlib
+import io
 import json
 import os
 import re
@@ -32,6 +34,7 @@ from tst.unit.cli.plugin_command_test import _broken, _CliEP, _root_with_cli_plu
 from tst.unit.plugins_test import _EP, _HERE, _Dist, _fresh, _install, _use_config  # noqa: F401  (_fresh: autouse)
 
 _THIS = "tst.unit.cli.plugin_report_test"
+_PLUGIN_CLI = importlib.import_module("agent_env.cli.plugin")
 _GOLDEN = Path(__file__).parent / "golden" / "plugin_report"
 _REGENERATE = os.environ.get("AGENT_ENV_REGENERATE_GOLDENS") == "1"
 _COMMANDS = cli_plugins_mod.CLI_PLUGINS_GROUP
@@ -204,6 +207,18 @@ def _report(case: str, monkeypatch, tmp_path) -> dict:
     assert result.exit_code == exit_code, result.output
     return json.loads(result.stdout)
 
+
+
+@pytest.mark.parametrize("case", ["list", "show", "check"])
+def test_the_report_reaches_the_commands_stdout_though_a_plugin_replaces_sys_stdout(case, monkeypatch, tmp_path):
+    real = _PLUGIN_CLI.environment
+
+    def replacing(*args):
+        sys.stdout = io.StringIO()
+        return real(*args)
+
+    monkeypatch.setattr(_PLUGIN_CLI, "environment", replacing)
+    assert _report(case, monkeypatch, tmp_path)["format_version"] == FORMAT_VERSION
 
 def _normalized(node, tmp_path: Path):
     """``node`` with machine-specific values and free text replaced by placeholders."""

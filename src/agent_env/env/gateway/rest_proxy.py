@@ -86,11 +86,11 @@ WEBSOCKET_MESSAGE_MAX_BYTES = 16 * 1024 * 1024
 
 async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.Timeout, mcp_server: bool,
                   on_done: Callable[[int], Awaitable[None]] | None = None,
-                  withheld: frozenset[bytes] = frozenset()) -> Response:
+                  withheld: frozenset[bytes] = frozenset(), mcp_endpoint: str = "mcp") -> Response:
     """Forward `request` to the service at `base_url` as `role`, without the headers named in `withheld`, and stream
     the response through. `mcp_server` says
-    the service is a backing MCP server, whose own endpoint takes the role in its JSON-RPC `_meta` as well as in the
-    header. A 400 names a request-target the proxy cannot route; a 502 names an upstream that never answered.
+    the service is a backing MCP server, whose own endpoint, `mcp_endpoint` under it, takes the role in its JSON-RPC
+    `_meta` as well as in the header. A 400 names a request-target the proxy cannot route; a 502 names an upstream that never answered.
     `on_done` is awaited with the status once the response has ended, after its last byte when streamed."""
     try:
         target_url = upstream_url(base_url, request)
@@ -98,7 +98,7 @@ async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.
         return await _done(_json_response({"error": str(e)}, 400), on_done)
     content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
     headers = upstream_headers(request, role, withheld=withheld)
-    if mcp_server and request.method == "POST" and is_child_mcp_path(request.path_params.get("path", "")):
+    if mcp_server and request.method == "POST" and is_child_mcp_path(request.path_params.get("path", ""), mcp_endpoint):
         # The gateway is the trust boundary for identity: a child's proxied MCP endpoint stays reachable, but the
         # role in its JSON-RPC `_meta` is the gateway's to write, like the header above.
         content = stamp_jsonrpc_role(content, role)
@@ -200,15 +200,19 @@ def route_prefix(request: HTTPConnection) -> str:
     return raw_path.decode("latin-1").rstrip("/")
 
 
-def is_child_mcp_path(decoded_rest: str) -> bool:
-    """Whether a /svc/{service}/{path} remainder reaches the backing server's MCP endpoint (`mcp` or anything under
-    it), judged after dot-segment normalisation, since httpx collapses `x/../mcp` to `/mcp` on the way upstream.
+def is_child_mcp_path(decoded_rest: str, endpoint: str = "mcp") -> bool:
+    """Whether a /svc/{service}/{path} remainder reaches the backing server's MCP endpoint (`endpoint`, `mcp` unless
+    its card declares another, or anything under it), judged after dot-segment normalisation, since httpx collapses
+    `x/../mcp` to `/mcp` on the way upstream.
 
     >>> [is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "mcpx", "agentenv", "")]
     [True, True, True, True, True, True, False, False, False]
+    >>> [is_child_mcp_path(p, "/tools/mcp/") for p in ("tools/mcp", "tools/x/../mcp", "mcp")]
+    [True, True, False]
     """
     normalized = posixpath.normpath("/" + decoded_rest.lstrip("/"))
-    return normalized == "/mcp" or normalized.startswith("/mcp/")
+    at = posixpath.normpath("/" + endpoint.strip("/"))
+    return normalized == at or normalized.startswith(at + "/")
 
 
 def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
