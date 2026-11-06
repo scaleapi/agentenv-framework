@@ -61,7 +61,10 @@ class LiveMail(ComputerAppEnvironment):
 
     @add_data
     async def load(self, parts: list) -> None:
-        if any(part.metadata[DATA_OBJECTS_EXTENSION_URI]["path"] == "bad" for part in parts):
+        paths = [part.metadata[DATA_OBJECTS_EXTENSION_URI]["path"] for part in parts]
+        if "stopped" in paths:
+            await self._computer_app.stop_app()
+        if "bad" in paths or "stopped" in paths:
             raise RuntimeError("the seed is bad")
 
     @reset_data
@@ -237,6 +240,20 @@ async def test_a_failed_live_load_is_reset_with_the_app_stopped_and_relaunched_o
         assert LiveMail.resets == 1 and desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244)]
     else:
         assert LiveMail.resets == 0 and desktop == [("launch", 4242)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resets", [True, False])
+async def test_a_failed_live_load_that_stopped_the_app_itself_leaves_it_running_again(home, desktop, resets):
+    mail, LiveMail.resets, LiveMail.resets_failed = LiveMail(), 0, resets
+    await mail._computer_app.launch_app()
+
+    async with _http(mail) as http:
+        answer = await http.post(RPC_PATH, json=_call("data/add", {"parts": [_inline("stopped", b"x")]}))
+
+    assert answer.json()["error"]["message"] == "the seed is bad"
+    assert LiveMail.resets == (1 if resets else 0)
+    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244)]
 
 
 def test_an_app_with_hooks_that_keeps_its_paths_has_them_kept_as_installed_and_one_that_doesnt_not(home):

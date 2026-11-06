@@ -78,16 +78,20 @@ class AppDataPlane:
 
     async def _change(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> None:
         """``op`` between the app's stop and its relaunch, answered on ``answer``: as it ends, or once it runs past
-        ``timeout_s``. A live one runs on the running app, which a reset after it fails stops and relaunches."""
+        ``timeout_s``. A live one runs on the running app, which a reset after it fails stops and relaunches; an app
+        it ran on is running again after it fails, though the op stopped it."""
         try:
             running = op != OP_GET_DATA and op not in self.live and await self.runtime.stop_app()
+            ran = op in self.live and self.runtime.running()
             try:
                 result = await self._within(op, served, args, answer)
             except Exception:
                 if op == OP_ADD_DATA and self.resets_failed_add():
                     if op in self.live:
-                        running = await self.runtime.stop_app()
+                        running = await self.runtime.stop_app() or ran
                     await self._undo(answer)
+                elif op in self.live:
+                    running = ran and not self.runtime.running()
                 raise
             finally:
                 if running:
@@ -168,7 +172,7 @@ async def add(parts: list, paths: list[str]) -> None:
         if not any(PurePosixPath(path).is_relative_to(owned) for owned in paths):
             raise ValueError(f"{path!r} is under none of this app's paths: {', '.join(paths)}")
         files[path] = await part_bytes(part)
-    await in_thread(_write, Path.home(), files, paths)
+    await in_thread(write_within, Path.home(), files, paths)
 
 
 async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
@@ -200,7 +204,8 @@ async def in_thread(fn: Callable, *args: Any) -> Any:
         raise
 
 
-def _write(home: Path, files: dict[str, bytes], paths: list[str]) -> None:
+def write_within(home: Path, files: dict[str, bytes], paths: list[str]) -> None:
+    """Each file at its path under the home, none written when one leads out of ``paths`` through a link."""
     owned = [(home / path).resolve() for path in paths]
     if linked := [path for path in files if not any((home / path).resolve().is_relative_to(o) for o in owned)]:
         raise ValueError(f"{', '.join(map(repr, linked))} lead out of this app's paths through a link")

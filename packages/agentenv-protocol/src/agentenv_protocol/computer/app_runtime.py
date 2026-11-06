@@ -133,6 +133,10 @@ class AppRuntime:
         await session.stop(pid, STOP_TIMEOUT_S)
         return True
 
+    def running(self) -> bool:
+        """Whether the app this server launched last runs."""
+        return _running() is not None
+
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
         it, unless the server stopped it; whether it did."""

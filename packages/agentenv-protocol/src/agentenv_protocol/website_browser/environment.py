@@ -503,7 +503,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                 await self._until_ready()
                 applied.append("the profile")
             if load.files:
-                await app_data.in_thread(data.write, Path.home(), load.files)
+                await app_data.in_thread(app_data.write_within, Path.home(), load.files, [DOWNLOADS, UPLOADS])
                 applied.append("the files")
             if state.cookies:
                 await self.control.set_cookies(state.cookies)

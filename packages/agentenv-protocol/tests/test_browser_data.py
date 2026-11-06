@@ -17,7 +17,7 @@ from agentenv_protocol.computer import Launch, Ready, app, linux
 from agentenv_protocol.computer.app import AGENT_ACTED
 from agentenv_protocol.computer.errors import InvalidArgument
 from agentenv_protocol.computer.platform import Platform
-from agentenv_protocol.types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI
+from agentenv_protocol.types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI, AddDataRequest
 from agentenv_protocol.website_browser import WebsiteBrowserEnvironment
 
 PROFILE = ".config/chromium"
@@ -111,7 +111,6 @@ def _file(path, data: bytes) -> dict:
 
 
 def _parts(*parts):
-    from agentenv_protocol.types import AddDataRequest
     return AddDataRequest(parts=list(parts)).parts
 
 
@@ -207,11 +206,29 @@ async def test_a_profile_is_restored_with_the_browser_stopped_and_relaunched_bef
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", [".ssh/id_rsa", "Documents/x", "../escape"])
-async def test_a_file_outside_the_browsers_folders_is_refused_before_anything_is_applied(browser, path):
-    with pytest.raises(ValueError, match="none of the browser's|not a normalized relative path"):
+@pytest.mark.parametrize("path", [".ssh/id_rsa", "Documents/x", "../escape", PROFILE, "Downloads", "Uploads"])
+async def test_a_file_outside_the_browsers_folders_or_in_place_of_one_is_refused_before_anything_is_applied(browser,
+                                                                                                         path):
+    with pytest.raises(ValueError, match="none of the browser's|not a normalized relative path|a folder of the browser's"):
         await browser.browser_add_data(_parts(_file("browser-state.json", _snapshot_state()), _file(path, b"x")))
     assert browser.control.did == [] and browser.launches == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link, path", [("Uploads/cv.txt", "Uploads/cv.txt"), ("Uploads/docs", "Uploads/docs/a.txt")])
+async def test_a_file_whose_path_a_link_leads_out_of_the_browsers_folders_is_refused_before_any_is_written(
+        browser, link, path):
+    home = website_browser.environment.Path.home()
+    (home / "Documents").mkdir()
+    (home / ".bashrc").write_text("mine")
+    (home / link).symlink_to(home / (".bashrc" if link.endswith(".txt") else "Documents"))
+
+    with pytest.raises(ValueError, match="through a link"):
+        await browser.browser_add_data(_parts(_file("Downloads/ok.txt", b"ok"), _file(path, b"x"),
+                                              _file("browser-state.json", _snapshot_state())))
+
+    assert (home / ".bashrc").read_text() == "mine" and not list((home / "Documents").iterdir())
+    assert not (home / "Downloads/ok.txt").exists() and browser.control.did == []
 
 
 @pytest.mark.asyncio

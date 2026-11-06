@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
+from ..computer.app_data import write_within
 from ..computer.dataplane import part_bytes
 from ..types import DataPart, FilePart, uploaded_object_path
 from .control import DOWNLOADS, UPLOADS
@@ -48,6 +49,8 @@ async def sorted_load(parts: list, profile: str) -> Load:
             raise ValueError(f"data/add on a website browser takes its state as a data part, and files naming their "
                              f"path, not a {part.kind} part")
         under = PurePosixPath(path)
+        if under in (PurePosixPath(profile), PurePosixPath(DOWNLOADS), PurePosixPath(UPLOADS)):
+            raise ValueError(f"{path!r} is a folder of the browser's, not a file in it")
         if path == STATE_FILE:
             if load.state is not None:
                 raise ValueError(f"data/add takes the browser's state once, as a data part or as {STATE_FILE}")
@@ -107,18 +110,7 @@ def restore_profile(home: Path, profile: str, files: dict[str, bytes]) -> None:
     """The profile made exactly ``files``, by their paths, with the browser stopped."""
     target = home / profile
     shutil.rmtree(target, ignore_errors=True)
-    write(home, files)
-
-
-def write(home: Path, files: dict[str, bytes]) -> None:
-    """Each file written at its path under the home, through no link that leads out of it."""
-    root = home.resolve()
-    for path, data in files.items():
-        target = home / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.parent.resolve().is_relative_to(root):
-            raise ValueError(f"{path!r} leads out of the home through a link")
-        target.write_bytes(data)
+    write_within(home, files, [profile])
 
 
 def empty(home: Path, *folders: str) -> None:
