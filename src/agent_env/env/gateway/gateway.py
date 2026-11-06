@@ -14,8 +14,8 @@ from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl, urlsplit
+from typing import TYPE_CHECKING, Any, NamedTuple
+from urllib.parse import parse_qsl, urljoin, urlsplit
 from uuid import uuid4
 
 import anyio
@@ -800,8 +800,8 @@ class Gateway:
             card = response.json() if response.is_success else None
         except ValueError:
             card = None
-        base_path = urlsplit(self.website_urls.get(app) or base_url).path
-        self._site_reserved[app] = site_reserved_paths(card, base_path) if isinstance(card, dict) else frozenset()
+        address = self.website_urls.get(app) or base_url
+        self._site_reserved[app] = site_reserved_paths(card, address) if isinstance(card, dict) else frozenset()
         return self._site_reserved[app]
 
     def _backing_keys(self) -> list[str]:
@@ -1678,18 +1678,49 @@ def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str,
     name: where a call through /svc/<name>/ gets the gateway's role in its JSON-RPC ``_meta``, as an MCP server's does."""
     endpoints = {}
     for server in servers:
-        base = rest_proxy_urls.get(server.name, "").rstrip("/")
+        base = rest_proxy_urls.get(server.name, "")
         if server.name not in website_urls or not base:
             continue
-        try:
-            given, own = urlsplit(server.mcp_url), urlsplit(base)
-            same = _address(given) == _address(own)
-        except ValueError:
-            continue
-        under = own.path.rstrip("/")
-        if same and (given.path == under or given.path.startswith(under + "/")):
-            endpoints[server.name] = given.path[len(under):] or "/"
+        resolved = card_url(base, server.mcp_url)
+        if resolved is not None and resolved.own_server and resolved.route_path is not None:
+            endpoints[server.name] = resolved.route_path
     return endpoints
+
+
+class CardURL(NamedTuple):
+    """A URL a site's card names, as the site at an address serves it: its path and query; the path a request on the
+    site's route reaches it at, its path under the address's (None when it isn't under it); and whether it is on the
+    site's own server."""
+    path: str
+    query: str
+    route_path: str | None
+    own_server: bool
+
+
+def card_url(base: str, url: str) -> CardURL | None:
+    """``url``, which a site's card names, against the site's address ``base`` (a URL, or only its path): a path,
+    absolute or relative, joined under the address's path, since a card's paths are relative to where it was read, and
+    on the site's own server; a full URL as it is, on the site's own server when its scheme, host and port are the
+    address's. The one reading of a card's URLs that discovery, /svc role stamping and a route's reserved paths share.
+    None for one with no path, or that can't be read."""
+    try:
+        own, given = urlsplit(base.rstrip("/")), urlsplit(url)
+        full = bool(given.scheme or given.netloc)
+        same = not full or _address(given) == _address(own)
+    except ValueError:
+        return None
+    under = own.path.rstrip("/")
+    if full:
+        path = given.path
+    elif given.path.startswith("/"):
+        path = under + given.path
+    else:
+        path = urljoin(under + "/", given.path) if given.path else ""
+    if not path.startswith("/"):
+        return None
+    normalized = _normalized(path)
+    route = (normalized[len(under):] or "/") if normalized == under or normalized.startswith(under + "/") else None
+    return CardURL(path, given.query, route, same)
 
 
 def _address(url) -> tuple:
@@ -1697,12 +1728,13 @@ def _address(url) -> tuple:
     return url.scheme, url.hostname, url.port or {"http": 80, "https": 443}.get(url.scheme)
 
 
-def site_reserved_paths(card: dict, base_path: str = "") -> frozenset[str]:
+def site_reserved_paths(card: dict, base: str = "") -> frozenset[str]:
     """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, every interface's,
     such as the MCP endpoint of a site that is an MCP server too, and every extension's endpoint and each of its
     methods'; each one a path of its own, not the site's root, read from a full URL or one with a query as well as from
-    a bare path. A full URL's path is reserved whatever its host, since a site is reached under names it never sees in
-    advance, and as its route reaches it: under the site's address's path, ``base_path``, when it is under it."""
+    a bare path, as ``card_url`` reads them against the site's address ``base``. A full URL's path is reserved
+    whatever its host, since a site is reached under names it never sees in advance: as its route reaches it, under the
+    address's path, or as it is when it isn't under it."""
     urls = [card.get("url")]
     urls += [i.get("url") for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)]
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
@@ -1711,24 +1743,9 @@ def site_reserved_paths(card: dict, base_path: str = "") -> frozenset[str]:
             continue
         urls += [endpoint for *_, endpoint in operations(params)]
         urls.append(params.get("endpoint"))
-    base = base_path.rstrip("/")
-    paths = (_url_path(url, base) for url in urls if isinstance(url, str))
-    return frozenset(_normalized(p) for p in paths if p.startswith("/") and _normalized(p) != "/")
-
-
-def _url_path(url: str, base: str = "") -> str:
-    """The path of ``url``, a bare path or a full URL, without its query or fragment, a full URL's taken under
-    ``base`` when it is under it, and a relative one (``mcp``) under the site's root, as discovery resolves it; "" for
-    one that has none."""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return ""
-    if parts.netloc and base and (parts.path == base or parts.path.startswith(base + "/")):
-        return parts.path[len(base):] or "/"
-    if not parts.scheme and not parts.netloc and parts.path and not parts.path.startswith("/"):
-        return "/" + parts.path
-    return parts.path
+    resolved = (card_url(base, url) for url in urls if isinstance(url, str))
+    paths = (_normalized(r.path if r.route_path is None else r.route_path) for r in resolved if r is not None)
+    return frozenset(p for p in paths if p != "/")
 
 
 def site_request_path(request: HTTPConnection) -> str | None:

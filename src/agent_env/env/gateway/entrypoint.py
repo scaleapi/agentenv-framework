@@ -3,13 +3,13 @@ import asyncio
 import logging
 import os
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
 from .constants import DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT, WELL_KNOWN_PATH
-from .gateway import Gateway
+from .gateway import Gateway, card_url
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,6 @@ def parse_internal_servers(spec: str, port: int) -> list[InternalMCPServer]:
 # docker-compose `depends_on`), so the old 30s ceiling was far too short.
 _INTERNAL_SERVER_TIMEOUT_S = int(os.environ.get("GATEWAY_INTERNAL_SERVER_TIMEOUT_S", "180"))
 _INTERNAL_SERVER_POLL_S = 2
-_DEFAULT_PORTS = {"http": 80, "https": 443}
 _UNREAD = object()
 
 
@@ -135,21 +134,14 @@ async def website_mcp_servers(sites: dict[str, str], taken: frozenset[str] = fro
 
 
 def _site_mcp_url(base: str, declared: str) -> str | None:
-    """Where the site at ``base`` serves the MCP endpoint its card declares at ``declared``: a path joined under the
-    site's address, as a card's paths are relative to where it was read, or, when a full URL names that same server,
-    the URL's own path and query on the address's scheme and host as the address spells them, which the gateway's /svc
-    routes use; None for another server."""
-    if declared.startswith("/"):
-        return f"{base}{declared}"
-    try:
-        given, own = urlsplit(urljoin(base + "/", declared)), urlsplit(base)
-        same = (given.scheme, given.hostname, given.port or _DEFAULT_PORTS.get(given.scheme)) == (
-            own.scheme, own.hostname, own.port or _DEFAULT_PORTS.get(own.scheme))
-    except ValueError:
+    """Where the site at ``base`` serves the MCP endpoint its card declares at ``declared`` (``card_url``), on the
+    address's scheme and host as the address spells them, which the gateway's /svc routes use; None for another
+    server."""
+    resolved = card_url(base, declared)
+    if resolved is None or not resolved.own_server:
         return None
-    if not (same and given.path.startswith("/")):
-        return None
-    return f"{own.scheme}://{own.netloc}{given.path}" + (f"?{given.query}" if given.query else "")
+    own = urlsplit(base.rstrip("/"))
+    return f"{own.scheme}://{own.netloc}{resolved.path}" + (f"?{resolved.query}" if resolved.query else "")
 
 
 async def _site_card(client: httpx.AsyncClient, base: str, deadline: float) -> dict | None | object:
