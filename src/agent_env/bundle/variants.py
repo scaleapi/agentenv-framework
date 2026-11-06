@@ -12,13 +12,15 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from agent_env.entity.refs import EntityKind, EntityRef, RefSite, ref_sites
-from agent_env.env.registry import get_env_registry
 from agent_env.task_step.registry import get_task_step_registry
 
 from .parse import Bundle, BundleEntry, BundleError, BundleKind, segment_problem
+from .resolve import entity_class
 
 _TARGET = f"{BundleKind.ENV.value}/"
 _FORM = "envs/NAME.KEY=VALUE, such as envs/desktop.driver=cua-driver"
+#: The keys that say what an entry is rather than how it's set, which a run can't change.
+_FIXED = ("type", "id")
 
 
 @dataclass(frozen=True)
@@ -78,15 +80,14 @@ def with_variant(bundle: Bundle, variant: Variant) -> Varied:
     renamed = _renamed_ids(bundle, set(configs), variant.label)
     envs, tasks = ({entry_id: new for (kind, entry_id), new in renamed.items() if kind is of}
                    for of in (BundleKind.ENV, BundleKind.TASK))
+    renaming = {EntityKind.ENV: envs, EntityKind.TASK: tasks}
     entries = []
     for entry in bundle.entries:
         new_id = renamed.get((entry.kind, entry.id))
         if new_id is None:
             entries.append(entry)
-        elif entry.kind is BundleKind.EVAL:
-            entries.append(_renamed(entry, new_id, _eval(entry.config, tasks)))
         else:
-            entries.append(_renamed(entry, new_id, _repointed(entry, configs.get(entry.id, entry.config), envs)))
+            entries.append(_renamed(entry, new_id, _repointed(entry, configs.get(entry.id, entry.config), renaming)))
     return Varied(variant, replace(bundle, entries=tuple(entries)), renamed)
 
 
@@ -104,6 +105,9 @@ def _parsed(texts: tuple[str, ...], names: set[str]) -> list[_Setting]:
         path = tuple(key.removeprefix(f"{_TARGET}{env}.").split("."))
         if not all(path):
             problems.append(f"--set {text}: expected {_FORM}")
+            continue
+        if path[0] in _FIXED:
+            problems.append(f"--set {text}: an env's {path[0]} says what it is, so a run can't set it")
             continue
         settings.append(_Setting(env, path, _value(raw)))
     if problems:
@@ -140,28 +144,31 @@ def _renamed_ids(bundle: Bundle, changed: set[str], label: str) -> dict[tuple[Bu
     by_name = {(entry.kind, entry.name): entry.id for entry in bundle.entries}
     envs = set(changed)
     while more := {entry.id for entry in bundle.entries if entry.kind is BundleKind.ENV and entry.id not in envs
-                   and _names_env(entry, envs, by_name)}:
+                   and _names(entry, EntityKind.ENV, envs, by_name)}:
         envs |= more
-    tasks = {entry.id for entry in bundle.entries if entry.kind is BundleKind.TASK and _names_env(entry, envs, by_name)}
-    evals = {entry.id for entry in bundle.entries if entry.kind is BundleKind.EVAL and any(
-        by_name.get((BundleKind.TASK, task), task) in tasks for task in entry.config.get("tasks") or []
-        if isinstance(task, str))}
+    tasks = {entry.id for entry in bundle.entries if entry.kind is BundleKind.TASK
+             and _names(entry, EntityKind.ENV, envs, by_name)}
+    evals = {entry.id for entry in bundle.entries if entry.kind is BundleKind.EVAL
+             and _names(entry, EntityKind.TASK, tasks, by_name)}
     return {(kind, entry_id): f"{entry_id}({label})"
             for kind, ids in ((BundleKind.ENV, envs), (BundleKind.TASK, tasks), (BundleKind.EVAL, evals))
             for entry_id in ids}
 
 
-def _names_env(entry: BundleEntry, envs: set[str], by_name: dict) -> bool:
-    return any(by_name.get((BundleKind.ENV, site.value), site.value) in envs for site in _env_sites(entry, entry.config))
+def _names(entry: BundleEntry, kind: EntityKind, ids: set[str], by_name: dict) -> bool:
+    """Whether ``entry`` names one of ``ids``, entries of ``kind``, by its name or id."""
+    of = {EntityKind.ENV: BundleKind.ENV, EntityKind.TASK: BundleKind.TASK}[kind]
+    return any(by_name.get((of, site.value), site.value) in ids for site in _sites(entry, entry.config) if site.ref.kind is kind)
 
 
-def _env_sites(entry: BundleEntry, config: Any) -> Iterator[RefSite]:
-    """Each env ``config``, ``entry``'s steps or toml, names by a name or id, as a site it can be rewritten at."""
+def _sites(entry: BundleEntry, config: Any) -> Iterator[RefSite]:
+    """Each entity ``config``, ``entry``'s steps or toml, names by a name or id, as a site it can be rewritten at, as the
+    resolver reads them."""
     if entry.kind is BundleKind.TASK:
         sites = (site for step in config for site in ref_sites(_step_refs(step), step))
     else:
-        sites = ref_sites(getattr(get_env_registry().get(entry.type), "toml_refs", ()), config, inline_pins=True)
-    return (site for site in sites if site.ref.kind is EntityKind.ENV and isinstance(site.value, str))
+        sites = ref_sites(getattr(entity_class(entry), "toml_refs", ()), config, inline_pins=True)
+    return (site for site in sites if isinstance(site.value, str))
 
 
 def _step_refs(step: dict) -> tuple[EntityRef, ...]:
@@ -176,16 +183,11 @@ def _renamed(entry: BundleEntry, new_id: str, config: Any) -> BundleEntry:
     return replace(entry, id=new_id, config=config)
 
 
-def _repointed(entry: BundleEntry, config: Any, envs: dict[str, str]) -> Any:
-    """``config``, ``entry``'s steps or toml, with each env it names by an id that changes named by its variant's id."""
+def _repointed(entry: BundleEntry, config: Any, renaming: dict[EntityKind, dict[str, str]]) -> Any:
+    """``config``, ``entry``'s steps or toml, with each env or task it names by an id that changes named by its variant's
+    id."""
     config = copy.deepcopy(config)
-    for site in _env_sites(entry, config):
-        if site.value in envs:
-            site.rewrite(envs[site.value], site.version)
+    for site in _sites(entry, config):
+        if site.value in renaming.get(site.ref.kind, {}):
+            site.rewrite(renaming[site.ref.kind][site.value], site.version)
     return config
-
-
-def _eval(config: dict, renamed: dict[str, str]) -> dict:
-    """An eval's toml with each task it names by an id that changes named by its variant's id."""
-    return {**config, "tasks": [renamed.get(task, task) if isinstance(task, str) else task
-                                for task in config.get("tasks") or []]}

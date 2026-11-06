@@ -86,6 +86,17 @@ def test_a_reference_by_id_is_repointed_at_the_variant(tmp_path):
     assert _entry(bundle, "desktop").config["tools"] == "standard"
 
 
+@pytest.mark.parametrize("named", ["t", f"{ROOT}/t"], ids=["name", "id"])
+def test_an_eval_naming_its_task_in_a_table_is_renamed_and_repointed_too(tmp_path, named):
+    root = _bundle(tmp_path / "desk", files={"evals/e.toml": f'tasks = [{{ task = "{named}" }}]\n'})
+
+    bundle = _varied(root, "envs/desktop.driver=cua-driver")
+
+    label = "desktop.driver cua-driver"
+    assert _entry(bundle, "e").id == f"{ROOT}/e({label})"
+    assert _entry(bundle, "e").config["tasks"] == [{"task": "t" if named == "t" else f"{ROOT}/t({label})"}]
+
+
 def test_a_value_is_toml_or_a_bare_word_and_a_key_may_be_dotted_into_a_table(tmp_path):
     settings = ("envs/desktop.display={ width = 1280, height = 720 }", "envs/desktop.computer_settings.theme=dark",
                 "envs/desktop.network.mode=allow_all")
@@ -123,6 +134,9 @@ def test_one_env_is_set_by_its_folder_and_an_env_composing_an_app_set_is_renamed
     ("envs/desktop=x", "--set envs/desktop=x: expected envs/NAME.KEY=VALUE, such as envs/desktop.driver=cua-driver"),
     ("envs/desktop.=x", "--set envs/desktop.=x: expected envs/NAME.KEY=VALUE, such as envs/desktop.driver=cua-driver"),
     ("envs/nope.driver=x", "--set envs/nope.driver=x: envs/nope names no env of this bundle"),
+    ("envs/desktop.type=website", "--set envs/desktop.type=website: an env's type says what it is, so a run can't set "
+                                  "it"),
+    ("envs/desktop.id=x", "--set envs/desktop.id=x: an env's id says what it is, so a run can't set it"),
 ])
 def test_a_setting_that_names_no_envs_key_is_refused(tmp_path, setting, problem):
     with pytest.raises(BundleError) as refused:
