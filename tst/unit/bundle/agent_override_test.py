@@ -6,9 +6,6 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from agent_env.a2a_agent import A2AAgent
-from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import BundleError, dry_run_bundle, parse_bundle, run_bundle
 from agent_env.bundle import preflight as preflight_module
 from agent_env.bundle.installed import InstalledBundle
@@ -17,11 +14,10 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.entity.refs import EntityKind
 from agent_env.plugins._bundles import ALIASES_FILE
-from agent_env.store.routing import namespace_routing
 from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
-from tst.unit.bundle._support import layout
+from tst.unit.bundle._support import layout, store_agent
 
 ROOT = "@local/~/triage"
 SOLVER = "@local/demo-dist/kit/solver"
@@ -36,7 +32,7 @@ INSTALL = [{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandb
 @pytest.fixture
 def bundle_dir(tmp_path, monkeypatch, local_stores, cli_routing):
     monkeypatch.setenv("HOME", str(tmp_path))
-    _store_agent("theirs")
+    store_agent("theirs")
     return tmp_path / "triage"
 
 
@@ -46,13 +42,6 @@ def kit(tmp_path):
     root = layout(tmp_path / "site" / "kit", {"agents/solver/Dockerfile": "FROM scratch\n",
                                               ALIASES_FILE: '[agents]\nsolver = ["solver-x"]\n'})
     return InstalledBundle("kit", "demo-dist", "1.0", "demo", root, None, None)
-
-
-def _store_agent(agent_id):
-    with namespace_routing():
-        image = get_artifact_store().put_document(DockerImageArtifact(
-            id=f"{agent_id}-image", description="d", image_name="ghcr.io/acme/agent:1", tar_gz_s3_url="s3://b/x.tar.gz"))
-        return A2AAgent.put(id=agent_id, docker_image_artifact=image)
 
 
 def _bundle(bundle_dir, steps, files=None):
@@ -91,8 +80,8 @@ def test_this_bundles_own_agent_is_named_by_its_folder(bundle_dir):
 
 
 def test_the_stores_agent_is_named_by_its_id_at_the_version_the_plan_read(bundle_dir):
-    _store_agent("mine")
-    _store_agent("mine")
+    store_agent("mine")
+    store_agent("mine")
 
     plan = _plan(_bundle(bundle_dir, [DEPLOY, PROMPT]), "mine")
 
@@ -143,14 +132,14 @@ def test_preflight_checks_the_agent_the_solver_deploys(bundle_dir, monkeypatch):
             {"agents/helper/Dockerfile": "FROM scratch\n"})
 
     dry_run_bundle(bundle_dir, agent="helper")
-    _store_agent("mine")
+    store_agent("mine")
     dry_run_bundle(bundle_dir, agent="mine")
 
     assert checked == [(f"{ROOT}/helper", None), ("mine", 1)]
 
 
 def test_an_install_is_checked_for_the_agent_the_solver_installs_not_the_one_the_task_names(bundle_dir):
-    _store_agent("mine")
+    store_agent("mine")
     _bundle(bundle_dir, INSTALL, {"agents/helper/Dockerfile": "FROM scratch\n"})
 
     with pytest.raises(BundleError, match="install_agent 'agent': Agent theirs v1 has no build_context_object_url"):
@@ -162,7 +151,7 @@ def test_an_install_is_checked_for_the_agent_the_solver_installs_not_the_one_the
 
 def test_a_dry_run_says_what_the_solver_deploys(bundle_dir, monkeypatch):
     lines = []
-    _store_agent("mine")
+    store_agent("mine")
 
     dry_run_bundle(_bundle(bundle_dir, [{**DEPLOY, "sandbox_type": "local"}, PROMPT]), agent="mine",
                    on_progress=lines.append)
@@ -191,12 +180,12 @@ def test_a_run_deploys_the_stores_agent_at_the_version_the_plan_read_not_one_put
     seen = {}
 
     async def run(self, *, context, **kwargs):
-        _store_agent("mine")
+        store_agent("mine")
         seen[self.id] = context.metadata.get("user_overrides")
         return context
 
     monkeypatch.setattr(Task, "run", run)
-    _store_agent("mine")
+    store_agent("mine")
     _bundle(bundle_dir, [DEPLOY, PROMPT])
 
     run_bundle(bundle_dir, agent="mine", sandbox="local")
@@ -216,7 +205,7 @@ def test_an_install_takes_its_steps_override_over_the_run_wide_one_and_the_store
 
 def test_the_cli_takes_the_agent_for_a_run_and_a_dry_run(bundle_dir, monkeypatch):
     monkeypatch.setenv("LITELLM_BASE_URL", "http://litellm")
-    _store_agent("mine")
+    store_agent("mine")
     _bundle(bundle_dir, [{**DEPLOY, "sandbox_type": "local"}, PROMPT])
 
     result = CliRunner().invoke(cli, ["run", str(bundle_dir), "--agent", "mine", "--dry-run"])

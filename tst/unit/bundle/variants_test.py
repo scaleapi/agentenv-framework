@@ -6,7 +6,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from agent_env.bundle import BundleError, Variant, dry_run_bundle, parse_bundle
+from agent_env.bundle import BundleError, BundleKind, Variant, dry_run_bundle, parse_bundle
 from agent_env.bundle.installed import installed_bundles
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
@@ -14,9 +14,8 @@ from agent_env.bundle.resolve import resolve_bundle
 from agent_env.bundle.variants import with_variant
 from agent_env.cli import cli
 from agent_env.env import Env
-from tst.unit.bundle._support import layout, local_builds
-from tst.unit.bundle.agent_override_test import _store_agent
-from tst.unit.bundle.computer_env_folder_test import APPS, DESKTOP, UBUNTU, WITH_APPS, composed  # noqa: F401
+from tst.unit.bundle._support import layout, local_builds, store_agent
+from tst.unit.bundle.computer_env_folder_test import APPS, DESKTOP, UBUNTU, WITH_APPS
 
 ROOT = "@local/~/desk"
 CUA = "@local/agentenv-framework/drivers/cua-driver"
@@ -38,7 +37,7 @@ def _bundle(root, steps=(DEPLOY, AGENT, PROMPT), files=None):
 
 
 def _varied(root, *settings):
-    return with_variant(parse_bundle(root), Variant(settings))
+    return with_variant(parse_bundle(root), Variant(settings)).bundle
 
 
 def _entry(bundle, name):
@@ -52,9 +51,12 @@ def _ids(bundle):
 def test_a_key_set_renames_the_env_and_what_uses_it_and_leaves_the_rest(tmp_path):
     root = _bundle(tmp_path / "desk")
 
-    bundle = _varied(root, "envs/desktop.driver=cua-driver")
+    varied = with_variant(parse_bundle(root), Variant(("envs/desktop.driver=cua-driver",)))
 
-    label = "desktop.driver cua-driver"
+    label, bundle = "desktop.driver cua-driver", varied.bundle
+    assert dict(varied.renamed) == {(BundleKind.ENV, f"{ROOT}/desktop"): f"{ROOT}/desktop({label})",
+                                    (BundleKind.TASK, f"{ROOT}/t"): f"{ROOT}/t({label})",
+                                    (BundleKind.EVAL, f"{ROOT}/e"): f"{ROOT}/e({label})"}
     assert _ids(bundle) == {"desktop": f"{ROOT}/desktop({label})", "t": f"{ROOT}/t({label})", "chat": f"{ROOT}/chat",
                             "e": f"{ROOT}/e({label})", "chats": f"{ROOT}/chats"}
     assert _entry(bundle, "desktop").config == {**_entry(parse_bundle(root), "desktop").config, "driver": "cua-driver"}
@@ -131,7 +133,7 @@ def test_a_setting_that_names_no_envs_key_is_refused(tmp_path, setting, problem)
 
 @pytest.fixture
 def desk(tmp_path, local_stores, cli_routing):
-    _store_agent("theirs")
+    store_agent("theirs")
     return _bundle(tmp_path / "desk")
 
 
@@ -139,7 +141,7 @@ def _plan(root, *settings):
     return plan_bundle(resolve_bundle(_varied(root, *settings)), installed=installed_bundles)
 
 
-def test_the_variant_is_written_and_composed_with_its_driver_beside_the_bundles_own(desk, composed):  # noqa: F811
+def test_the_variant_is_written_and_composed_with_its_driver_beside_the_bundles_own(desk, composed):
     plan = _plan(desk, "envs/desktop.driver=cua-driver", "envs/desktop.tools=driver")
 
     materialize(plan, build_here=local_builds(plan))
@@ -155,7 +157,7 @@ def test_the_variant_is_written_and_composed_with_its_driver_beside_the_bundles_
     ("envs/desktop.drivr=x", "unknown key 'drivr'; a computer env takes environment_name, computer, driver, apps, "
                              "display, network, computer_settings, tools, type and id"),
 ])
-def test_a_key_or_value_the_envs_type_refuses_is_refused_before_anything_is_written(desk, composed,  # noqa: F811
+def test_a_key_or_value_the_envs_type_refuses_is_refused_before_anything_is_written(desk, composed,
                                                                                      setting, problem):
     with pytest.raises(BundleError) as refused:
         dry_run_bundle(desk, variant=Variant((setting,)))
@@ -163,7 +165,7 @@ def test_a_key_or_value_the_envs_type_refuses_is_refused_before_anything_is_writ
     assert any(line.startswith("envs/desktop") and problem in line for line in refused.value.problems), refused.value
 
 
-def test_a_driver_that_cant_compose_with_the_computer_is_refused_as_its_written(desk, composed):  # noqa: F811
+def test_a_driver_that_cant_compose_with_the_computer_is_refused_as_its_written(desk, composed):
     plan = _plan(desk, "envs/desktop.driver=macos-harness")
 
     with pytest.raises(BundleError) as refused:
@@ -174,7 +176,7 @@ def test_a_driver_that_cant_compose_with_the_computer_is_refused_as_its_written(
     assert composed == []
 
 
-def test_a_run_whose_tasks_deploy_nothing_its_settings_change_is_refused(desk, composed):  # noqa: F811
+def test_a_run_whose_tasks_deploy_nothing_its_settings_change_is_refused(desk, composed):
     with pytest.raises(BundleError) as refused:
         dry_run_bundle(desk, tasks=["chat"], variant=Variant(("envs/desktop.driver=cua-driver",)))
 
@@ -183,13 +185,13 @@ def test_a_run_whose_tasks_deploy_nothing_its_settings_change_is_refused(desk, c
 
 
 @pytest.mark.parametrize("selection", ["t", f"{ROOT}/t"], ids=["name", "id"])
-def test_a_task_is_selected_by_its_name_or_its_id_as_the_bundle_gives_it(desk, composed, selection):  # noqa: F811
+def test_a_task_is_selected_by_its_name_or_its_id_as_the_bundle_gives_it(desk, composed, selection):
     dry = dry_run_bundle(desk, tasks=[selection], variant=Variant(("envs/desktop.driver=cua-driver",)))
 
     assert [entry.id for entry in dry.runs] == [f"{ROOT}/t(desktop.driver cua-driver)"]
 
 
-def test_the_cli_runs_the_variant_and_says_what_it_writes_it_as(desk, composed, monkeypatch):  # noqa: F811
+def test_the_cli_runs_the_variant_and_says_what_it_writes_it_as(desk, composed, monkeypatch):
     monkeypatch.setenv("LITELLM_BASE_URL", "http://litellm")
 
     result = CliRunner().invoke(cli, ["run", str(desk), "--task", "t", "--set", "envs/desktop.driver=cua-driver",

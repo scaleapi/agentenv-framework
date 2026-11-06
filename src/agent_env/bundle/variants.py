@@ -7,11 +7,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from agent_env.entity.refs import EntityKind, ref_sites
+from agent_env.entity.refs import EntityKind, EntityRef, RefSite, ref_sites
 from agent_env.env.registry import get_env_registry
 from agent_env.task_step.registry import get_task_step_registry
 
@@ -42,13 +42,31 @@ class Variant:
 
 
 @dataclass(frozen=True)
+class Varied:
+    """A bundle with a variant's settings: ``bundle``, and ``renamed``, each entry it changes, by kind and id, to its
+    variant's id."""
+
+    variant: Variant
+    bundle: Bundle
+    renamed: Mapping[tuple[BundleKind, str], str]
+
+    def changes(self, kind: BundleKind, entry_id: str) -> bool:
+        """Whether ``entry_id`` is the variant's id of an entry of ``kind`` it changes."""
+        return entry_id in {new for (of, _), new in self.renamed.items() if of is kind}
+
+    def selected(self, names: Sequence[str], kind: BundleKind) -> tuple[str, ...]:
+        """``names``, a run's selections of ``kind`` by name or id, each id of an entry it changes as its variant's."""
+        return tuple(self.renamed.get((kind, name), name) for name in names)
+
+
+@dataclass(frozen=True)
 class _Setting:
     env: str  # the env it sets, by name
     path: tuple[str, ...]
     value: Any
 
 
-def with_variant(bundle: Bundle, variant: Variant) -> Bundle:
+def with_variant(bundle: Bundle, variant: Variant) -> Varied:
     """``bundle`` with ``variant``'s settings in its envs' tomls, and each entry that changes under an id ending in
     ``(<label>)``. Raises BundleError for a setting that isn't ``envs/NAME.KEY=VALUE`` or names no env of the bundle; the
     env's type checks the key and value as it checks an env.toml's."""
@@ -65,20 +83,11 @@ def with_variant(bundle: Bundle, variant: Variant) -> Bundle:
         new_id = renamed.get((entry.kind, entry.id))
         if new_id is None:
             entries.append(entry)
-        elif entry.kind is BundleKind.ENV:
-            entries.append(_renamed(entry, new_id, _repointed_toml(entry, configs.get(entry.id, entry.config), envs)))
-        elif entry.kind is BundleKind.TASK:
-            entries.append(_renamed(entry, new_id, _repointed_steps(entry.config, envs)))
-        else:
+        elif entry.kind is BundleKind.EVAL:
             entries.append(_renamed(entry, new_id, _eval(entry.config, tasks)))
-    return replace(bundle, entries=tuple(entries))
-
-
-def selected(before: Bundle, after: Bundle, names: Sequence[str], kind: BundleKind) -> tuple[str, ...]:
-    """``names``, a run's selections of ``kind`` by name or id, with the id of each entry ``after`` renames as its new
-    id."""
-    ids = {old.id: new.id for old, new in zip(before.entries, after.entries) if old.kind is kind and old.id != new.id}
-    return tuple(ids.get(name, name) for name in names)
+        else:
+            entries.append(_renamed(entry, new_id, _repointed(entry, configs.get(entry.id, entry.config), envs)))
+    return Varied(variant, replace(bundle, entries=tuple(entries)), renamed)
 
 
 def _parsed(texts: tuple[str, ...], names: set[str]) -> list[_Setting]:
@@ -125,7 +134,7 @@ def _set(config: dict, path: tuple[str, ...], value: Any) -> dict:
     return config
 
 
-def _renamed_ids(bundle: Bundle, changed: set[str], label: str) -> dict[str, str]:
+def _renamed_ids(bundle: Bundle, changed: set[str], label: str) -> dict[tuple[BundleKind, str], str]:
     """Each entry that changes, by kind and id, to its variant's id: the envs ``changed``, each env and task naming one
     that changes, by name or id, and each eval naming such a task. An id is unique within its kind alone."""
     by_name = {(entry.kind, entry.name): entry.id for entry in bundle.entries}
@@ -143,20 +152,21 @@ def _renamed_ids(bundle: Bundle, changed: set[str], label: str) -> dict[str, str
 
 
 def _names_env(entry: BundleEntry, envs: set[str], by_name: dict) -> bool:
-    return any(by_name.get((BundleKind.ENV, site.value), site.value) in envs for site in _env_sites(entry))
+    return any(by_name.get((BundleKind.ENV, site.value), site.value) in envs for site in _env_sites(entry, entry.config))
 
 
-def _env_sites(entry: BundleEntry):
+def _env_sites(entry: BundleEntry, config: Any) -> Iterator[RefSite]:
+    """Each env ``config``, ``entry``'s steps or toml, names by a name or id, as a site it can be rewritten at."""
     if entry.kind is BundleKind.TASK:
-        registry = get_task_step_registry()
-        for step in entry.config:
-            cls = registry.get(step.get("type")) if isinstance(step.get("type"), str) else None
-            yield from (site for site in ref_sites(cls.entity_refs or () if cls is not None else (), step)
-                        if site.ref.kind is EntityKind.ENV and isinstance(site.value, str))
+        sites = (site for step in config for site in ref_sites(_step_refs(step), step))
     else:
-        cls = get_env_registry().get(entry.type)
-        yield from (site for site in ref_sites(getattr(cls, "toml_refs", ()), entry.config, inline_pins=True)
-                    if site.ref.kind is EntityKind.ENV and isinstance(site.value, str))
+        sites = ref_sites(getattr(get_env_registry().get(entry.type), "toml_refs", ()), config, inline_pins=True)
+    return (site for site in sites if site.ref.kind is EntityKind.ENV and isinstance(site.value, str))
+
+
+def _step_refs(step: dict) -> tuple[EntityRef, ...]:
+    cls = get_task_step_registry().get(step["type"]) if isinstance(step.get("type"), str) else None
+    return (cls.entity_refs or ()) if cls is not None else ()
 
 
 def _renamed(entry: BundleEntry, new_id: str, config: Any) -> BundleEntry:
@@ -166,26 +176,13 @@ def _renamed(entry: BundleEntry, new_id: str, config: Any) -> BundleEntry:
     return replace(entry, id=new_id, config=config)
 
 
-def _repointed_toml(entry: BundleEntry, config: dict, renamed: dict[str, str]) -> dict:
-    """An env's toml with each env it names by an id that changes named by its variant's id."""
+def _repointed(entry: BundleEntry, config: Any, envs: dict[str, str]) -> Any:
+    """``config``, ``entry``'s steps or toml, with each env it names by an id that changes named by its variant's id."""
     config = copy.deepcopy(config)
-    cls = get_env_registry().get(entry.type)
-    for site in ref_sites(getattr(cls, "toml_refs", ()), config, inline_pins=True):
-        if site.ref.kind is EntityKind.ENV and site.value in renamed:
-            site.rewrite(renamed[site.value], site.version)
+    for site in _env_sites(entry, config):
+        if site.value in envs:
+            site.rewrite(envs[site.value], site.version)
     return config
-
-
-def _repointed_steps(steps: list[dict], renamed: dict[str, str]) -> list[dict]:
-    """A task's steps with each env a step names by an id that changes named by its variant's id."""
-    steps = copy.deepcopy(steps)
-    registry = get_task_step_registry()
-    for step in steps:
-        cls = registry.get(step.get("type")) if isinstance(step.get("type"), str) else None
-        for site in ref_sites(cls.entity_refs or () if cls is not None else (), step):
-            if site.ref.kind is EntityKind.ENV and site.value in renamed:
-                site.rewrite(renamed[site.value], site.version)
-    return steps
 
 
 def _eval(config: dict, renamed: dict[str, str]) -> dict:

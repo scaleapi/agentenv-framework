@@ -66,6 +66,7 @@ from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
+from .variants import Varied
 from .resolve import (BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, entity_class,
                       resolve_bundle)
 
@@ -194,6 +195,7 @@ class Plan:
     # Each alias the run names, by the kind it names and then by alias.
     alias_uses: Mapping[EntityKind, Mapping[str, AliasUse]] = field(default_factory=dict)
     agent: AgentOverride | None = None  # the agent --agent names for the solver
+    variant: Varied | None = None  # what --set changes, written under its variant's ids
 
     def bundle_of(self, entry: BundleEntry) -> Bundle:
         """The bundle ``entry`` comes from: the installed one for an entry pulled in from one, else the run's."""

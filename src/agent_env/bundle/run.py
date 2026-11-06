@@ -46,7 +46,7 @@ from .preflight import Preflight, preflight_run
 from .requires import Declaring, declare, declaring_for
 from .resolve import (BuiltImage, BundleImage, Reference, ReferencedImage, ResolvedEntry, resolve_bundle,
                       without_played_agents)
-from .variants import Variant, selected, with_variant
+from .variants import Variant, with_variant
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +359,7 @@ def dry_run_bundle(
     say = _progress(on_progress)
     with namespace_routing():
         plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, variant=variant)
-        _say_plan(plan, say, declaring_for(Path(root), installed=id_root is not None, dry_run=True), variant)
+        _say_plan(plan, say, declaring_for(Path(root), installed=id_root is not None, dry_run=True))
         materialization = materialize(plan, dry_run=True, on_write=lambda done: say(_written(plan, done)),
                                       composing=composing, sandbox=sandbox,
                                       on_progress=lambda write, line: say(f"{_label(plan, write)}: {line}"))
@@ -395,7 +395,7 @@ def _prepare(root: Path | str, tasks: Sequence[str], evals: Sequence[str], sandb
              variant: Variant | None = None) -> PreparedBundle:
     plan, preflight = _planned(root, tasks, evals, id_root, sandbox, agent, played=played,
                                solver_endpoint=solver_endpoint, variant=variant)
-    _say_plan(plan, say, declaring, variant)
+    _say_plan(plan, say, declaring)
     materialization = _written_with_infra(plan, preflight, say, composing, sandbox)
     to_run = tuple((entry, Task.get(entry.id, materialization.version_of("task", entry.id))) for entry in _to_run(plan))
     return PreparedBundle(plan, materialization, to_run)
@@ -405,16 +405,17 @@ def _planned(root: Path | str, tasks: Sequence[str], evals: Sequence[str], id_ro
              sandbox: str | None, agent: str | None = None, *, played: bool = False,
              solver_endpoint: bool = False, variant: Variant | None = None) -> tuple[Plan, Preflight]:
     bundle = parse_bundle(Path(root), id_root=id_root)
-    if variant is not None:
-        varied = with_variant(bundle, variant)
-        tasks, evals = selected(bundle, varied, tasks, BundleKind.TASK), selected(bundle, varied, evals, BundleKind.EVAL)
-        bundle = varied
-    resolved = resolve_bundle(bundle)
+    varied = with_variant(bundle, variant) if variant is not None else None
+    if varied is not None:
+        tasks, evals = varied.selected(tasks, BundleKind.TASK), varied.selected(evals, BundleKind.EVAL)
+    resolved = resolve_bundle(varied.bundle if varied is not None else bundle)
     plan = plan_bundle(without_played_agents(resolved) if played else resolved, tasks=tasks, evals=evals,
                        installed=installed_bundles, agent=agent)
     refuse_store_tasks(plan)
-    if variant is not None and not _changed(plan, variant):
-        raise BundleError([f"{variant.typed}: none of the tasks this run selects deploys an env it changes"])
+    if varied is not None:
+        plan = replace(plan, variant=varied)
+        if not _changed(plan):
+            raise BundleError([f"{variant.typed}: none of the tasks this run selects deploys an env it changes"])
     to_run = set(_to_run(plan))
     return plan, preflight_run(plan, [write.source for write in plan.writes
                                       if write.kind is BundleKind.TASK and write.source.entry in to_run], sandbox,
@@ -465,9 +466,9 @@ def refuse_store_tasks(plan: Plan) -> None:
         raise BundleError(problems)
 
 
-def _say_plan(plan: Plan, say: Callable[[str], None], declaring: Declaring, variant: Variant | None = None) -> None:
+def _say_plan(plan: Plan, say: Callable[[str], None], declaring: Declaring) -> None:
     """Say what each agent, env and artifact alias names, what the solver deploys in place of the tasks' agents, the
-    ids ``variant``'s entries are written under, and what plugin packages the bundle uses that its bundle.toml doesn't
+    ids what --set changes is written under, and what plugin packages the bundle uses that its bundle.toml doesn't
     require, as ``declaring`` says (``declare``)."""
     for use in (use for uses in plan.alias_uses.values() for use in uses.values()):
         say(_aliased(use))
@@ -476,16 +477,17 @@ def _say_plan(plan: Plan, say: Callable[[str], None], declaring: Declaring, vari
         solved = sum(entry.id in plan.agent.steps for entry in runs)
         say(f"--agent {plan.agent.name}: the solver deploys {plan.agent.agent_id}, in {solved} of {len(runs)} "
             f"task{'s' if len(runs) != 1 else ''}")
-    if variant is not None:
-        say(f"{variant.typed}: {_changed(plan, variant)} written under ids ending in ({variant.label})")
+    if plan.variant is not None:
+        variant = plan.variant.variant
+        say(f"{variant.typed}: {_changed(plan)} written under ids ending in ({variant.label})")
     for line in declare(plan.bundle, declaring):
         say(line)
 
 
-def _changed(plan: Plan, variant: Variant) -> str:
-    """How many envs, tasks and evals ``variant`` changes the run writes: ``1 env and 2 tasks``, or ``""``."""
+def _changed(plan: Plan) -> str:
+    """How many envs, tasks and evals that --set changes the run writes: ``1 env and 2 tasks``, or ``""``."""
     counts = Counter(write.kind for write in plan.writes
-                     if isinstance(write.source, ResolvedEntry) and write.id.endswith(f"({variant.label})"))
+                     if isinstance(write.source, ResolvedEntry) and plan.variant.changes(write.kind, write.id))
     named = [f"{counts[kind]} {noun}{'s' if counts[kind] != 1 else ''}" for kind, noun in (
         (BundleKind.ENV, "env"), (BundleKind.TASK, "task"), (BundleKind.EVAL, "eval")) if counts[kind]]
     return " and ".join([", ".join(named[:-1]), named[-1]] if len(named) > 1 else named)
