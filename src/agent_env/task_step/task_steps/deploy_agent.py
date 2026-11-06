@@ -31,6 +31,7 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import StagedObjectStore, transfer_store
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers import sizing
+from agent_env.providers.sandbox_providers.sandbox_provider import may_create_vm
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.gateway import AGENT_ENV_ROLE_HEADER
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
@@ -402,7 +403,8 @@ class DeployAgentTaskStep(TaskStep):
             deploy_kwargs["sandbox_type"] = resolved_sandbox_type
         resolved_ttl = self._resolved_ttl_seconds(context)
         deploy_kwargs["ttl_seconds"] = resolved_ttl
-        size, deploy_kwargs["attribution"] = sizing.resolve(self, deploy_attribution(self, context))
+        size, deploy_kwargs["attribution"] = sizing.resolve(
+            self, deploy_attribution(self, context), vm=may_create_vm(resolved_sandbox_type, agent=True))
         if size.cpu is not None:
             deploy_kwargs["cpu"] = size.cpu
         if size.memory_mb is not None:

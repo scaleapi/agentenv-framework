@@ -75,8 +75,11 @@ class DeploySandboxTaskStep(TaskStep):
         base["sandbox_name"] = self.sandbox_name
         base["sandbox_mode"] = self.sandbox_mode
         base["image"] = self.image
-        base["cpu"] = self.cpu
-        base["memory_mb"] = self.memory_mb
+        # An unset size is left out, so a reader that predates it never sees a null.
+        if self.cpu is not None:
+            base["cpu"] = self.cpu
+        if self.memory_mb is not None:
+            base["memory_mb"] = self.memory_mb
         base["disk_size_gb"] = self.disk_size_gb
         base["ttl_seconds"] = self.ttl_seconds
         base["exposed_ports"] = self.exposed_ports
@@ -89,14 +92,23 @@ class DeploySandboxTaskStep(TaskStep):
         return base
 
     @classmethod
+    def _stored_size(cls, data: dict) -> dict:
+        """``cpu`` and ``memory_mb`` as ``data`` stores them. Before a step could leave them unset, every unsized step
+        was stored with both at the default, 1.0 and 8192, so that pair is read as unset: such a step gets the same
+        size unless a sizer chooses one."""
+        cpu, memory_mb = data.get("cpu"), data.get("memory_mb")
+        if (cpu, memory_mb) == (cls.DEFAULT_CPU, cls.DEFAULT_MEMORY_MB):
+            return {"cpu": None, "memory_mb": None}
+        return {"cpu": cpu, "memory_mb": memory_mb}
+
+    @classmethod
     def from_dict(cls, data: dict) -> DeploySandboxTaskStep:
         return cls(
             **cls._base_from_dict(data),
             sandbox_name=data["sandbox_name"],
             sandbox_mode=data["sandbox_mode"],
             image=data.get("image"),
-            cpu=data.get("cpu"),
-            memory_mb=data.get("memory_mb"),
+            **cls._stored_size(data),
             disk_size_gb=data.get("disk_size_gb", 10),
             ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS),
             exposed_ports=data.get("exposed_ports"),
@@ -132,7 +144,8 @@ class DeploySandboxTaskStep(TaskStep):
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
         size, attribution = sizing.resolve(self, deploy_attribution(self, context),
-                                           sizing.SandboxSize(self.DEFAULT_CPU, self.DEFAULT_MEMORY_MB))
+                                           sizing.SandboxSize(self.DEFAULT_CPU, self.DEFAULT_MEMORY_MB),
+                                           vm=self.sandbox_mode == "vm")
         cpu, memory_mb = size.cpu, size.memory_mb
         logger.info(
             f"Deploying sandbox '{self.sandbox_name}' (mode={self.sandbox_mode}, "

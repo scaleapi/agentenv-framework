@@ -32,13 +32,21 @@ def _stored(**fields) -> dict:
 def test_an_unsized_step_stays_unsized(step):
     assert (step.cpu, step.memory_mb) == (None, None)
     stored = step.to_dict()
-    assert (stored["cpu"], stored["memory_mb"]) == (None, None)
+    assert "cpu" not in stored and "memory_mb" not in stored  # left out, so no older reader meets a null
     assert DeploySandboxTaskStep.from_dict(stored).cpu is None
 
 
-def test_a_stored_size_is_kept():
-    step = DeploySandboxTaskStep.from_dict(_stored(cpu=2.0, memory_mb=8192))
-    assert (step.cpu, step.memory_mb) == (2.0, 8192)
+@pytest.mark.parametrize("size", [{"cpu": 2.0, "memory_mb": 8192}, {"cpu": 1.0}, {"memory_mb": 8192},
+                                  {"cpu": 1.0, "memory_mb": 4096}], ids=["both", "cpu", "memory", "cpu-at-default"])
+def test_a_stored_size_is_kept(size):
+    step = DeploySandboxTaskStep.from_dict(_stored(**size))
+    assert (step.cpu, step.memory_mb) == (size.get("cpu"), size.get("memory_mb"))
+
+
+def test_the_old_stored_default_reads_as_unsized():
+    """Every unsized step was stored as 1.0 / 8192 before a step could leave its size unset."""
+    step = DeploySandboxTaskStep.from_dict(_stored(cpu=1.0, memory_mb=8192))
+    assert (step.cpu, step.memory_mb) == (None, None)
 
 
 @pytest.mark.asyncio

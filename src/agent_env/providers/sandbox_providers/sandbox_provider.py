@@ -704,6 +704,23 @@ def _build_sandbox_provider_from_section(name: str, section: dict) -> SandboxPro
     return _install_sandbox_type_guard(provider, name)
 
 
+def may_create_vm(spec: Optional[str] = None, *, agent: bool = False) -> bool:
+    """Whether a sandbox from ``spec`` (unset: ``[sandbox] default``, or ``agent_default`` with ``agent``) may be a VM:
+    a backend it names creates VMs, as a gateway on one deploys into a VM. Read from the backends' classes, so nothing
+    is built; True when a backend can't be resolved, as the safe answer for something that sizes it."""
+    from agent_env.config import load_impl
+
+    spec = spec or (_agent_sandbox_spec() if agent else _default_sandbox_spec())
+    try:
+        registry = _get_sandbox_registry()
+        classes = [load_impl(registry[name]["impl"], SandboxProvider)
+                   for name in (s.strip() for s in spec.split(",")) if name]
+    except Exception as e:
+        logger.debug(f"Could not tell whether sandbox spec {spec!r} creates VMs, so taking it that it may: {e}")
+        return True
+    return not classes or any(SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES for cls in classes)
+
+
 def build_sandbox_provider(spec: str) -> SandboxProvider:
     """Build a provider (or a comma-separated fallback chain) from backend names,
     resolved through the open registry (built-ins + config.toml [sandbox.providers])."""

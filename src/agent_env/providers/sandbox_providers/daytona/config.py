@@ -11,6 +11,7 @@ from typing import Any
 
 from daytona import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams, Resources
 
+from agent_env.attribution import identifying
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.daytona.image import DEFAULT_BASE_IMAGE, HOST_IMAGE_VERSION, host_image
 
@@ -110,6 +111,7 @@ def sandbox_labels(
 ) -> dict[str, str]:
     """Labels for attribution (cost joins), reconnect (ports), sweeping (the managed marker) and, on a
     sandbox booted from the host image, the recipe version that built it."""
+    attribution = identifying(attribution)
     labels = {MANAGED_LABEL: "true", PORTS_LABEL: ",".join(str(port) for port in ports)}
     if host_image:
         labels[HOST_IMAGE_LABEL] = HOST_IMAGE_VERSION
@@ -125,6 +127,7 @@ def sandbox_labels(
 
 def sandbox_name(attribution: Mapping[str, Any]) -> str:
     """``ae-<random>`` plus the attribution values in key order: unique, findable by people."""
+    attribution = identifying(attribution)
     slugs = [
         re.sub(r"[^A-Za-z0-9-]+", "-", str(attribution[key])).strip("-")
         for key in sorted(attribution)

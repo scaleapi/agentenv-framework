@@ -16,6 +16,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
 from agent_env.providers.sandbox_providers import sizing
+from agent_env.providers.sandbox_providers.sandbox_provider import may_create_vm
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,8 @@ class DeployEnvTaskStep(TaskStep):
         resolved_env_state_type, resolved_env_state_instance_id = self.run_state(user_overrides)
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
-        size, attribution = sizing.resolve(self, deploy_attribution(self, context))
+        size, attribution = sizing.resolve(self, deploy_attribution(self, context),
+                                           vm=may_create_vm(resolved_sandbox_type))
         logger.info(
             f"Deploying env '{self.env_id}' (ttl={resolved_ttl}s, "
             f"disk_size_gb={self.disk_size_gb}, gateway_mode={self.gateway_mode}, "

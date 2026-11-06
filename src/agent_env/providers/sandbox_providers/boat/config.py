@@ -9,6 +9,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_env.attribution import identifying
 from agent_env.config.errors import ConfigError
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ def _label_value(value: object) -> str:
 def sandbox_labels(attribution: Mapping[str, Any], ports: Iterable[int], create_token: str) -> dict[str, str]:
     """Labels for reconnect (ports), cleanup (the create token, the managed marker) and attribution (cost joins). boat
     keeps at most ``MAX_LABELS``; attribution past that is logged and left off."""
+    attribution = identifying(attribution)
     labels = {MANAGED_LABEL: "true", PORTS_LABEL: ",".join(str(port) for port in ports), CREATE_LABEL: create_token}
     for key, value in attribution.items():
         slug = _UNSAFE_KEY.sub("-", str(key)).strip("-./")
@@ -89,6 +91,7 @@ def sandbox_labels(attribution: Mapping[str, Any], ports: Iterable[int], create_
 
 def sandbox_name(attribution: Mapping[str, Any]) -> str:
     """``ae-<random>`` plus the attribution values in key order: unique, findable by people."""
+    attribution = identifying(attribution)
     slugs = [
         _UNSAFE_NAME.sub("-", str(attribution[key])).strip("-")
         for key in sorted(attribution)

@@ -19,6 +19,13 @@ ATTRIBUTION_KEY = "attribution"
 PIPELINE_STEP_KEY = "pipeline_step"
 RUN_ID_KEY = "run_id"
 
+# Where a sandbox's cpu and memory came from (``step``, ``sizer`` or ``default``; see
+# ``providers.sandbox_providers.sizing``). They describe the sandbox rather than name what it is for, so a provider
+# that builds names, labels or tags from attribution leaves them out (``identifying``).
+CPU_SOURCE_KEY = "cpu_source"
+MEMORY_SOURCE_KEY = "memory_source"
+SIZE_SOURCE_KEYS = frozenset({CPU_SOURCE_KEY, MEMORY_SOURCE_KEY})
+
 
 def attribution_of(step) -> Attribution:
     """A step's attribution: a copy of ``metadata["attribution"]`` (``{}`` when unset)."""
@@ -39,3 +46,9 @@ def deploy_attribution(step, context) -> Attribution:
     if instance_id and RUN_ID_KEY not in attribution:
         attribution[RUN_ID_KEY] = instance_id
     return attribution
+
+
+def identifying(attribution) -> Attribution:
+    """``attribution`` without the keys that describe a sandbox's size rather than what it is for: what a provider
+    builds a sandbox's name, labels or tags from, whose length and number are limited."""
+    return {key: value for key, value in (attribution or {}).items() if key not in SIZE_SOURCE_KEYS}
