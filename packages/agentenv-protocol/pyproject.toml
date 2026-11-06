@@ -56,6 +56,11 @@ macos = [
     "pyobjc-framework-Quartz>=11; sys_platform == 'darwin'",
     "pyobjc-framework-ScreenCaptureKit>=11; sys_platform == 'darwin'",
 ]
+# A Linux driver on X11Driver: mss captures the X display and XTEST sends its input, through python-xlib.
+x11 = [
+    "mss>=9,<11",
+    "python-xlib>=0.33,<0.34",
+]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
     "python-multipart>=0.0.13",

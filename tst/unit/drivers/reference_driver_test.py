@@ -176,6 +176,7 @@ def x11(monkeypatch):
     module("Xlib", X=X, XK=XK, display=display)
     module("mss", MSS=FakeMSS)
     module("av", open=FakeGrab.open)
+    monkeypatch.delitem(sys.modules, "agentenv_protocol.computer._x11", raising=False)
     monkeypatch.setattr("agentenv_protocol.computer.driver.detect", lambda: LINUX)
     monkeypatch.delenv("ENVIRONMENT_NAME", raising=False)
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)

@@ -98,16 +98,18 @@ if TYPE_CHECKING:
     )
     from .driver import DEFAULT_IDENTITY, ComputerDriverEnvironment, DriverDeclaration, computer_driver
     from ._macos import MacOSDriver
+    from ._x11 import X11Driver
     from .recording import RecordedFrame, RecordedSegment, RecordHints, Recording, frames_in_thread
 
 # The names whose modules need the computer extra (mcp, av and Pillow), by module; MacOSDriver's, the macos extra too,
-# on first use of the Mac.
+# on first use of the Mac, and X11Driver's, the x11 extra.
 _ON_USE = {
     "driver": ("ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration"),
     "card": ("COMPUTER", "COMPUTER_READY", "COMPUTER_DISPLAY", "COMPUTER_SPACES", "COMPUTER_POINTER",
              "COMPUTER_KEYBOARD", "COMPUTER_PAGE", "COMPUTER_EXEC", "COMPUTER_RECORDING"),
     "recording": ("Recording", "RecordHints", "RecordedFrame", "RecordedSegment", "frames_in_thread"),
     "_macos": ("MacOSDriver",),
+    "_x11": ("X11Driver",),
 }
 
 
@@ -120,6 +122,7 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration", "MacOSDriver",
+    "X11Driver",
     "ComputerAppEnvironment", "computer_app", "install", "linux", "install_step", "ready_check", "Linux", "Service",
     "Launch", "Ready", "Packages", "AptSource", "Download", "RunScript",
     "AppDeclaration", "AppOs",
