@@ -9,7 +9,7 @@ them. The page shows the universe's time.
 | `site.py` | The server: the `Notes` WebsiteEnvironment, its `@api` routes, and `serve()` on `PORT` (8000). |
 | `data/seed.json` | The seed data: two users (`ann`, `ben`), their notes, and `current_user`, the acting user. |
 | `web/` | A minimal Vite app (`index.html`, `src/main.js`, `src/style.css`). Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/notes/` alike; opened at a path without its final slash, such as `/website/notes` or `/website/notes/index.html`, the page first reloads itself at its folder's address. |
-| `Dockerfile` | The server image: Node builds `web/`, then Python installs this repo's `packages/agentenv-protocol` with uvicorn. It installs `curl`, which the gateway's compose health check runs against the card. |
+| `Dockerfile` | The server image, built with this folder as its context: Node builds `web/`, then Python installs the released protocol (`agentenv-framework-protocol`) with uvicorn. It installs `curl`, which the gateway's compose health check runs against the card. |
 | `env.toml` | The website env as a bundle entry. |
 
 ## What it exercises
@@ -59,10 +59,11 @@ build.
 
 ## Build and verify the image
 
-The build context is the repo root, because the image installs the protocol package from this repo's source:
+The build context is this folder; the image installs the released protocol, so it runs the SDK as published, while
+the test above runs this repo's.
 
 ```bash
-docker build -f packages/agentenv-protocol/examples/website/notes/Dockerfile -t notes-site .
+docker build -t notes-site .
 docker run -d --name notes-site -p 18080:8000 notes-site
 python -m agentenv_protocol.website.conformance http://localhost:18080 --clock-host host.docker.internal
 curl -s http://localhost:18080/api/notes
@@ -74,16 +75,13 @@ the container before using it.
 
 ## Register it
 
+In a bundle, `env.toml` declares the env: copied to a bundle's `envs/notes/`, `agent-env bundle register <bundle>`
+builds the image with that folder as its context. Its keys are `type`, `environment_name` and `backend_image`; domains
+are not one of them, as they come from the card. Without a bundle:
+
 ```bash
-agent-env env website put --id notes-site \
-  --server-dockerfile packages/agentenv-protocol/examples/website/notes/Dockerfile \
-  --server-docker-context .
+agent-env env website put --id notes-site --server-dockerfile Dockerfile --server-docker-context .
 ```
 
-Run it from the repo root. `environment_name` comes from the card (`@environment_card(name="notes")`). The stored env
+Run it from this folder. `environment_name` comes from the card (`@environment_card(name="notes")`). The stored env
 has a server image and no frontend image. Pass `--skip-validation` to register without deploying.
-
-`env.toml` describes the same env for a bundle. Its keys are `type`, `environment_name` and
-`backend_image`. Domains are not one of them: they come from the card. A bundle builds `backend_image` with this
-folder as the build context, but this Dockerfile needs the repo root. Until the protocol package is installed from a
-published release instead, register the site with `put` as above.
