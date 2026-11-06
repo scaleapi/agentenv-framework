@@ -59,10 +59,11 @@ server = http.server.ThreadingHTTPServer(("127.0.0.1", 8783), Page)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 time.sleep(float(sys.argv[1]))
 """
-# The URLs in the browser's history, read from its History database as it is on disk, which the running browser
-# writes some seconds after each visit.
-HISTORY = (f"python3 -c \"import os, sqlite3; print([row[0] for row in sqlite3.connect('file:' + os.path.expanduser("
-           f"'~/{PROFILE}/Default/History') + '?immutable=1', uri=True).execute('select url from urls')])\" 2>&1")
+# The URLs in the browser's history, read from a copy of its History database and its write-ahead log as they are on
+# disk, which the running browser writes some seconds after each visit.
+HISTORY = (f"rm -rf /tmp/history && mkdir /tmp/history && cp ~/{PROFILE}/Default/History ~/{PROFILE}/Default/History-wal "
+           "/tmp/history/ 2>/dev/null; python3 -c \"import sqlite3; print([row[0] for row in "
+           "sqlite3.connect('/tmp/history/History').execute('select url from urls')])\" 2>&1")
 
 
 def _client(deployed, op_url: Callable[[str], str]):
