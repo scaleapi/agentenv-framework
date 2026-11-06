@@ -2,6 +2,7 @@
 its final trajectory once it ends."""
 import asyncio
 import uuid
+from datetime import datetime
 
 from tst.unit.agents.codex.agent import a2a_server, codex_bridge
 
@@ -54,6 +55,25 @@ def test_a_task_is_readable_while_it_runs_and_its_log_is_its_trajectory(codex, m
     )
     assert (ended["events"], ended["next"], ended["has_more"]) == (EVENTS[1:], 3, False)
     assert final == {"trajectory": EVENTS}
+
+
+def test_a_turn_ends_its_trajectory_with_the_usage_and_model_requests_the_events_omit(codex, monkeypatch):
+    async def fake_run_codex(**kwargs):
+        kwargs["event_callback"](EVENTS[0])
+        return codex_bridge.CodexResult(response="", tool_call_count=45, session_id="t-1", error="limit",
+                                        token_usage={"input_tokens": 900, "output_tokens": 40}, model_requests=46)
+
+    monkeypatch.setattr(a2a_server, "run_codex", fake_run_codex)
+
+    async def exercise():
+        async with codex.client() as client:
+            task = await codex.send(client, "go")
+            return (await client.post("/ext/trajectory", json={"task_id": task["id"]})).json()
+
+    first, usage = asyncio.run(exercise())["trajectory"]
+    assert datetime.fromisoformat(usage.pop("timestamp")).tzinfo
+    assert (first, usage) == (EVENTS[0], {
+        "type": "agentenv.usage", "usage": {"input_tokens": 900, "output_tokens": 40}, "model_requests": 46})
 
 
 def test_a_canceled_task_keeps_the_events_it_emitted(codex, monkeypatch):

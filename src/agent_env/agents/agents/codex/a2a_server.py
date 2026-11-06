@@ -69,6 +69,7 @@ from codex_bridge import (
     find_rollout_path,
     get_last_attribution_snapshot,
     kill_running_clis,
+    now,
     run_codex,
 )
 from codex_kit import DurableSessionRefs, in_thread_to_its_end, install_skill, json_error_bodies, read_object_bytes
@@ -236,6 +237,8 @@ class CodexConfig(AgentConfig):
     project_id: str | None = None
     task_id: str | None = None
     timeout_seconds: int = 1800
+    # Tool calls a turn may make; see run_codex.
+    max_turns: int | None = None
     # Which of the CLI's own tools it may use. With any selection, the MCP tools agent-env gives it stay.
     builtin_tools: codex_config.CodexTools | None = None
 
@@ -691,6 +694,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             project_id=cfg.project_id,
                             task_id=cfg.task_id,
                             event_callback=_record_event,
+                            max_turns=cfg.max_turns,
                             config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
                                               *codex_config.builtin_tools_overrides(cfg.builtin_tools),
                                               *catalog],
@@ -706,6 +710,11 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
 
                 if result.session_id:
                     self.set_session_ref_for_context(context_id, result.session_id)
+                if result.token_usage or result.model_requests is not None:
+                    # Usage the CLI's events omit: a turn it was stopped in has no turn.completed.
+                    request.trajectory.append({"type": "agentenv.usage", "usage": result.token_usage,
+                                               "model_requests": result.model_requests,
+                                               "timestamp": now()})
         finally:
             if execution_task is not None:
                 _discard_execution_task(context_id, execution_task)

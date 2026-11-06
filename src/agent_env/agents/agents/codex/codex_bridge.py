@@ -74,6 +74,10 @@ _last_attribution: dict[str, str | None] = {
 _attribution_lock = threading.Lock()
 
 
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
 def _record_attribution(project_id: str | None, task_id: str | None) -> None:
     if not project_id and not task_id:
         return
@@ -123,6 +127,7 @@ class CodexResult:
     attempts: int = 1
     usage: dict = field(default_factory=dict)
     token_usage: dict | None = None
+    model_requests: int | None = None
 
 
 # Inactivity watchdog: if the CLI emits no output for this many seconds (e.g. a
@@ -282,6 +287,32 @@ def read_rollout_usage(thread_id: str | None) -> dict[str, int] | None:
     return None
 
 
+def read_rollout_requests(thread_id: str | None) -> int | None:
+    """How many model requests a native rollout records: its token counts that raised the thread's total."""
+    path = find_rollout_path(thread_id) if thread_id else None
+    if path is None:
+        return None
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    requests, last = 0, 0
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "event_msg":
+            continue
+        payload = record.get("payload") or {}
+        if payload.get("type") != "token_count":
+            continue
+        total = ((payload.get("info") or {}).get("total_token_usage") or {}).get("total_tokens")
+        if isinstance(total, int) and total > last:
+            requests, last = requests + 1, total
+    return requests
+
+
 def _usage_delta(
     current: dict, baseline: dict[str, int] | None
 ) -> dict[str, int] | None:
@@ -304,11 +335,13 @@ async def _read_with_watchdog(
     stdin_data: bytes,
     event_callback: Callable[[dict], None] | None = None,
     inactivity_s: float | None = None,
+    max_tool_calls: int | None = None,
 ) -> tuple[list[dict], bytes, bool, bool]:
     """Drain a subprocess under deadline and inactivity limits.
 
     `inactivity_s` defaults to the module-wide watchdog; callers that know the
-    turn's effort pass `inactivity_timeout_s(effort)` instead.
+    turn's effort pass `inactivity_timeout_s(effort)` instead. The CLI is
+    stopped once `max_tool_calls` tool calls have completed.
     """
     if inactivity_s is None:
         inactivity_s = _INACTIVITY_TIMEOUT_S
@@ -347,9 +380,10 @@ async def _read_with_watchdog(
     pending = b""
     timed_out = stalled = False
     terminal_seen = False
+    tool_calls = 0
 
     def emit_line(raw_line: bytes) -> None:
-        nonlocal terminal_seen
+        nonlocal terminal_seen, tool_calls
         if not raw_line.strip():
             return
         try:
@@ -362,11 +396,15 @@ async def _read_with_watchdog(
             return
         if not isinstance(event, dict):
             return
+        # The CLI's events carry no time; when each arrived stands in for it.
+        event.setdefault("timestamp", now())
         events.append(event)
         terminal_seen = terminal_seen or event.get("type") in {
             "turn.completed",
             "turn.failed",
         }
+        if event.get("type") == "item.completed" and (event.get("item") or {}).get("type") in _TOOL_ITEM_TYPES:
+            tool_calls += 1
         if event_callback is not None:
             event_callback(event)
 
@@ -440,6 +478,9 @@ async def _read_with_watchdog(
             consume_chunk(chunk)
             if terminal_seen:
                 break
+            if max_tool_calls is not None and tool_calls >= max_tool_calls:
+                await stop_process()
+                return events, b"", False, False
 
         # Codex does not promise a trailing newline. Parse the final buffered
         # record even when the deadline/inactivity watchdog fired immediately
@@ -683,6 +724,8 @@ async def _run_codex_once(
     task_id: str | None = None,
     event_callback: Callable[[dict], None] | None = None,
     config_overrides: Sequence[str] = (),
+    max_turns: int | None = None,
+    prior_tool_calls: int = 0,
 ) -> CodexResult:
     # JSON Schema: codex's `--output-schema` flag takes a FILE PATH (unlike
     # claude-code's inline-JSON `--json-schema`). Write the inner schema to a
@@ -752,7 +795,8 @@ async def _run_codex_once(
         )
         _RUNNING.add(proc)
         trajectory, stderr, timed_out, stalled = await _read_with_watchdog(
-            proc, timeout_s, prompt.encode(), event_callback, inactivity_s
+            proc, timeout_s, prompt.encode(), event_callback, inactivity_s,
+            None if max_turns is None else max_turns - prior_tool_calls,
         )
 
         final_message = ""
@@ -787,7 +831,12 @@ async def _run_codex_once(
                 warnings.append(_redacted_notice(event))
 
         err: str | None = None
-        if timed_out or stalled:
+        used = prior_tool_calls + tool_count
+        # Over the limit, or stopped at it. A turn can complete past it when its events arrive in one read.
+        if max_turns is not None and (used > max_turns or (used == max_turns and not turn_completed)):
+            # Claude Code's words, which callers already read as the turn limit.
+            err = f"Reached maximum number of turns ({max_turns})"
+        elif timed_out or stalled:
             err = (
                 f"codex CLI timed out after {timeout_s:.0f}s" if timed_out
                 else f"codex CLI produced no output for {inactivity_s}s "
@@ -850,10 +899,16 @@ async def run_codex(
     task_id: str | None = None,
     event_callback: Callable[[dict], None] | None = None,
     config_overrides: Sequence[str] = (),
+    max_turns: int | None = None,
 ) -> CodexResult:
-    """Run one logical turn with bounded transient recovery."""
+    """Run one logical turn with bounded transient recovery.
+
+    `max_turns` bounds the turn's tool calls, each of which is one model request when the CLI sends no parallel calls,
+    as for a model its catalog has no entry for; `model_requests` counts the requests from the rollout.
+    """
     deadline = time.monotonic() + timeout_s
     usage_baseline = read_rollout_usage(thread_id)
+    requests_baseline = read_rollout_requests(thread_id) or 0
     retries_left = _configured_api_error_retries()
     attempt_prompt = prompt
     attempt_thread = thread_id
@@ -883,8 +938,11 @@ async def run_codex(
             task_id=task_id,
             event_callback=event_callback,
             config_overrides=config_overrides,
+            max_turns=max_turns,
+            prior_tool_calls=tool_call_count,
         )
         failure = _resumable_api_failure(result)
+        tool_call_count += result.tool_call_count
         budget_left = deadline - time.monotonic()
         backoff = _RETRY_BACKOFF_S[
             min(attempts - 1, len(_RETRY_BACKOFF_S) - 1)
@@ -892,12 +950,13 @@ async def run_codex(
         can_retry = (
             failure is not None
             and retries_left > 0
+            # A turn that reached its limit ends there; a resumed CLI could make no tool call.
+            and (max_turns is None or tool_call_count < max_turns)
             and budget_left
             >= _MIN_RETRY_BUDGET_S + _DEADLINE_HEADROOM_S + backoff
         )
 
         warnings.extend(result.warnings)
-        tool_call_count += result.tool_call_count
 
         if not can_retry:
             trajectory.extend(result.trajectory)
@@ -911,6 +970,9 @@ async def run_codex(
             result.tool_call_count = tool_call_count
             result.attempts = attempts
             result.error = error
+            requests = read_rollout_requests(result.session_id)
+            if requests is not None:
+                result.model_requests = requests - requests_baseline
             cumulative_usage = result.usage or (
                 read_rollout_usage(result.session_id) or {}
             )
