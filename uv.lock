@@ -174,6 +174,9 @@ tenki = [
 tensorlake = [
     { name = "tensorlake" },
 ]
+tinker = [
+    { name = "openenv" },
+]
 trl = [
     { name = "datasets" },
     { name = "openenv" },
@@ -195,12 +198,13 @@ verl = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = "==0.3.26" },
-    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "harness", "openenv", "sail", "skyrl", "tensorlake", "tenki", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
+    { name = "agentenv-framework", extras = ["aws", "boat", "boxd", "coreweave", "daytona", "gcp", "harness", "openenv", "sail", "skyrl", "tensorlake", "tenki", "tinker", "trl", "vercel", "verl"], marker = "extra == 'dev'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'harness'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'miles'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'nemo-gym'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'skyrl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'slime'" },
+    { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'tinker'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'trl'" },
     { name = "agentenv-framework", extras = ["openenv"], marker = "extra == 'verl'" },
     { name = "agentenv-framework-protocol", extras = ["computer"], editable = "packages/agentenv-protocol" },
@@ -267,7 +271,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
 ]
-provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "miles", "slime", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
+provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "miles", "slime", "tinker", "aws", "gcp", "sail", "vercel", "tensorlake", "tenki", "boxd", "daytona", "boat", "coreweave", "dev", "smol"]
 
 [[package]]
 name = "agentenv-framework-protocol"
