@@ -1,7 +1,8 @@
-"""The agent-desktop driver against a fake agent-desktop: its instructions and tools are its server's as pinned, each call
-reaches a server of its own, ``--headed`` when the driver's setting says, with none of the driver's environment, and
-the screenshots it saves come back beside its answer; a server that fails answers an error; readiness checks the pinned executables and the tools the server lists; and its
-skill is agent-desktop's own, with its references and its guide for macOS."""
+"""The agent-desktop driver against a fake agent-desktop, on macOS and on Linux: its instructions and tools are its
+server's as pinned, each call reaches a server of its own, ``--headed`` when the driver's setting says, with none of the
+driver's environment, and the screenshots it saves come back beside its answer; a server that fails answers an error;
+readiness checks the OS's pinned executables, the tools the server lists and the OS's own checks; and its skill is
+agent-desktop's own, with its references and its guide for the OS."""
 from __future__ import annotations
 
 import base64
@@ -10,12 +11,13 @@ import importlib.util
 import json
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
 
 import agent_env
-from agentenv_protocol.computer import _macos
+from agentenv_protocol.computer import Platform, ReadyCheck, _macos
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "agent-desktop" / "driver.py"
 FAKE = textwrap.dedent('''\
@@ -66,30 +68,66 @@ FAKE = textwrap.dedent('''\
 ''')
 
 
+PLATFORMS = {"macos": Platform(os="macos", version="26.5", arch="arm64", display="aqua"),
+             "linux": Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="x11")}
+HELPERS = {"macos": "agent-desktop-macos-helper", "linux": "agent-desktop-linux-clipboard-owner"}
+#: What agent-desktop needs of a Linux session to reach the display and AT-SPI on its bus.
+SESSION = ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
+
+
 class Granted:
     def missing(self) -> list[str]:
         return []
 
 
-@pytest.fixture
-def module(monkeypatch, tmp_path):
+async def xtest(self) -> list[ReadyCheck]:
+    return [ReadyCheck("xtest", True, "XTEST available")]
+
+
+@pytest.fixture(params=["macos", "linux"])
+def module(request, monkeypatch, tmp_path):
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("AGENTENV_CONTROL_TOKEN", "a-deploys-secret")
+    for name in SESSION:
+        monkeypatch.setenv(name, f"the session's {name}")
     monkeypatch.setattr(_macos, "Quartz", Granted)
+    monkeypatch.setattr(sys, "platform", "darwin" if request.param == "macos" else "linux")
+    monkeypatch.setattr("agentenv_protocol.computer.driver.detect", lambda: PLATFORMS[request.param])
+    if request.param == "linux":
+        _fake_x11(monkeypatch)
     spec = importlib.util.spec_from_file_location("agent_desktop_driver", DRIVER)
     loaded = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loaded)
+    if request.param == "linux":
+        monkeypatch.setattr(loaded.OSDriver, "ready_checks", xtest)
     (tmp_path / "fake").mkdir()
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     (bin_ / "agent-desktop").write_text(f"#!{sys.executable}\n{FAKE}")
     (bin_ / "agent-desktop").chmod(0o755)
-    (bin_ / "agent-desktop-macos-helper").write_text("helper")
+    (bin_ / HELPERS[request.param]).write_text("helper")
     (tmp_path / "fake" / "tools.json").write_text(loaded.MANIFEST.read_text())
     monkeypatch.setattr(loaded, "BIN", bin_)
     monkeypatch.setattr(loaded, "EXECUTABLE", bin_ / "agent-desktop")
     return loaded
+
+
+def _fake_x11(monkeypatch) -> None:
+    """mss and python-xlib as inert stand-ins, enough for X11Driver's module to load, and that module loaded afresh."""
+    def module(name: str, **attrs) -> types.ModuleType:
+        m = types.ModuleType(name)
+        m.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, m)
+        return m
+
+    X = module("Xlib.X", Button1Mask=1 << 8, Button2Mask=1 << 9, Button3Mask=1 << 10)
+    xtest_ = module("Xlib.ext.xtest")
+    module("Xlib", X=X, XK=module("Xlib.XK"), display=module("Xlib.display"))
+    module("Xlib.error", ConnectionClosedError=OSError, DisplayConnectionError=OSError)
+    module("Xlib.ext", xtest=xtest_)
+    module("mss")
+    monkeypatch.delitem(sys.modules, "agentenv_protocol.computer._x11", raising=False)
 
 
 def _calls(home: Path) -> list[dict]:
@@ -120,6 +158,7 @@ async def test_a_call_reaches_a_server_of_its_own_headed_when_the_setting_says_w
     (first, second) = _calls(tmp_path)
     assert first["argv"] == ["mcp"] and second["argv"] == ["mcp", "--headed"]
     assert "AGENTENV_CONTROL_TOKEN" not in first["env"] and "HOME" in first["env"]
+    assert set(SESSION) & set(first["env"]) == (set() if module.MACOS else set(SESSION))
 
 
 @pytest.mark.asyncio
@@ -164,8 +203,9 @@ async def test_a_server_that_fails_before_it_answers_is_an_error_saying_the_comm
 async def test_readiness_checks_the_pinned_executables_then_the_tools_its_server_lists(module, tmp_path, monkeypatch):
     driver = module.AgentDesktop()
     (wrong, *_) = await driver.ready_checks()
-    monkeypatch.setattr(module, "EXECUTABLES", {name: hashlib.sha256((tmp_path / "bin" / name).read_bytes()).hexdigest()
-                                                for name in module.EXECUTABLES})
+    key = "macos/arm64" if module.MACOS else "amd64"
+    monkeypatch.setitem(module.EXECUTABLES, key, {name: hashlib.sha256((tmp_path / "bin" / name).read_bytes()).hexdigest()
+                                                  for name in module.EXECUTABLES[key]})
     ready = await driver.ready_checks()
     manifest = json.loads(module.MANIFEST.read_text())
     manifest["tools"][0]["inputSchema"] = {"type": "object", "properties": {}}
@@ -173,9 +213,10 @@ async def test_readiness_checks_the_pinned_executables_then_the_tools_its_server
     driver._pinned = None
     (_, changed, _) = await driver.ready_checks()
 
-    assert not wrong.ok and "agent-desktop, agent-desktop-macos-helper" in wrong.detail
+    helper = "agent-desktop-macos-helper" if module.MACOS else "agent-desktop-linux-clipboard-owner"
+    assert not wrong.ok and f"agent-desktop, {helper}" in wrong.detail
     assert [(check.name, check.ok) for check in ready] == [("agent-desktop", True), ("agent-desktop tools", True),
-                                                           ("macOS permissions", True)]
+                                                           ("macOS permissions" if module.MACOS else "xtest", True)]
     assert not changed.ok and changed.detail == "these tools differ from mcp.json: desktop_snapshot"
 
 

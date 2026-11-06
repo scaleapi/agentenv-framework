@@ -5,8 +5,9 @@ runs a bundle's `desktop` env with another driver for one run, and `--set envs/d
 the driver's own tools; the bundle stays as written, and what changes is written under ids ending in the settings,
 such as `desktop(desktop.driver cua-driver)`.
 
-`envs/reference/` is the reference driver, for an X11 desktop on Linux (`amd64` and `arm64`): `mss` captures the
-screen and XTEST, through `python-xlib`, sends the input, foreground only. It serves the seven `computer_*` tools, the
+`envs/reference/` is the reference driver, for an X11 desktop on Linux (`amd64` and `arm64`): `X11Driver`
+(`agentenv_protocol.computer._x11`, the protocol's `x11` extra) as it is, `mss` capturing the screen and XTEST, through
+`python-xlib`, sending the input, foreground only. It serves the seven `computer_*` tools, the
 pointer and keyboard groups, and `computer-ready`, `computer-display`, `computer-spaces`, `computer-keyboard`, and
 `computer-exec` and `data/add` through the base class's Linux defaults, and `computer-recording`, from FFmpeg's
 `x11grab` through PyAV at up to 30 fps. Name it from another bundle as `reference`, the
@@ -76,24 +77,26 @@ To move it to another cua-driver version:
    `computer-ready` names any tool or executable that doesn't match its pin.
 
 `envs/agent-desktop/` is Vercel's [agent-desktop](https://github.com/vercel-labs/agent-desktop) as a driver, for macOS
-(`arm64`, composed onto a VM bundle such as `macos-26`). agent-desktop 1.2.0 reads apps' accessibility trees and acts
-on what it finds; its release's tarball, checked by sha256, is unpacked into the driver's `bin/` by `install.sh`.
-Agents get what its own MCP server, `agent-desktop mcp`, serves, as `mcp.json` pins it: its instructions and its 67
-`desktop_*` tools, each call forwarded to a server of its own, and its skill, its references and its guide for macOS
+(`arm64`, composed onto a VM bundle such as `macos-26`) and for an X11 desktop on Linux (`amd64` and `arm64`).
+agent-desktop 1.2.0 reads apps' accessibility trees, AT-SPI's on Linux, and acts on what it finds; its release's
+tarball for the OS and arch, checked by sha256, is unpacked into the driver's `bin/` by `install.sh`.
+Agents get what its own MCP server, `agent-desktop mcp`, serves, as `mcp.json` pins it, the same on both OSes: its
+instructions and its 67 `desktop_*` tools, each call forwarded to a server of its own, and its skill, its references and its guide for the OS
 leading the computer's skill. The agent doesn't share the computer's files, so each screenshot a call saves to an
 `output_path`, in a batch too, comes back beside the answer (up to 8 MB in all, a line naming the rest), and the
 instructions add a line saying other files it writes stay on the computer. The `computer_*` tools, gate 3's probe, `computer-ready` and recording run on
-`MacOSDriver` (`agentenv_protocol.computer._macos`): ScreenCaptureKit captures the display and Quartz events, posted
-where the hardware's are, send the input, from the driver's own process. `[install.macos]` grants Accessibility, Post
+`MacOSDriver` (`agentenv_protocol.computer._macos`) on macOS: ScreenCaptureKit captures the display and Quartz events,
+posted where the hardware's are, send the input, from the driver's own process. On Linux they run on `X11Driver`, as
+the reference driver's do, and agent-desktop gets the session's display and bus, where it finds AT-SPI. `[install.macos]` grants Accessibility, Post
 Event and Screen Recording to the driver's Python, its venv's own copy of the pinned one, and the LaunchAgent starts
 the driver on it, so agent-desktop, which the driver starts, has them too, and nothing else does. A tool can't pass
 agent-desktop's global flags, so the server's come from the driver's own setting, `headed`, which a deploy passes in
 `driver_settings`: off, agent-desktop's default, it acts through the accessibility API alone and refuses what needs
 physical input (double clicks, hovers, drags, the mouse commands); on, it allows those and prefers physical input,
-moving the pointer and focus. `computer-ready` checks the two executables' sha256, that the server lists the tools
-`mcp.json` pins, and the TCC permissions. To move it to another version, pin the tarball's URL and sha256 in `env.toml`
-and the executables' in `driver.py`'s `EXECUTABLES`, and take `mcp.json` again from what that version's server says at
-connect and lists, in a macOS computer. Name it as `agent-desktop`, the alias `aliases.toml` gives it.
+moving the pointer and focus. `computer-ready` checks the two executables' sha256 for the OS and arch, that the
+server lists the tools `mcp.json` pins, and the TCC permissions on macOS, XTEST on Linux. To move it to another version,
+pin each tarball's URL and sha256 in `env.toml` and the executables' in `driver.py`'s `EXECUTABLES`, and take `mcp.json`
+again from what that version's server says at connect and lists. Name it as `agent-desktop`, the alias `aliases.toml` gives it.
 
 `envs/macos-harness/` is browser-use's [macOS harness](https://github.com/browser-use/macos-harness) as a driver, for
 the same macOS computers. macos-harness 0.2.1, from PyPI into the driver's venv, reads an app as numbered text and acts
