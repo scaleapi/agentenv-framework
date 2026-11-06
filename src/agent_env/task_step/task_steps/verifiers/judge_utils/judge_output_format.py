@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
 from string import Template
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -556,6 +557,7 @@ class JudgeResponseDiscrepancy:
     duplicate_ids: list[str]
     unknown_ids: list[str]
     parse_error: str | None = None
+    non_finite_score_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {
@@ -568,15 +570,23 @@ class JudgeResponseDiscrepancy:
         }
         if self.parse_error is not None:
             out["parse_error"] = self.parse_error
+        if self.non_finite_score_ids:
+            out["non_finite_score_ids"] = list(self.non_finite_score_ids)
         return out
 
     def __str__(self) -> str:
         if self.parse_error:
             return f"invalid JSON ({self.parse_error})"
+        if self.non_finite_score_ids:
+            return _non_finite_score_problem(self.non_finite_score_ids)
         return (
             f"expected {self.expected_count} results but got {self.returned_count}"
             f" (missing={self.missing_ids}, duplicate={self.duplicate_ids}, unknown={self.unknown_ids})"
         )
+
+
+def _non_finite_score_problem(ids: list[str]) -> str:
+    return f"Each `score` must be a finite number; criterion id(s) {', '.join(ids)} were not"
 
 
 def _default_failure_results(criteria: list[dict]) -> list[dict]:
@@ -704,6 +714,15 @@ def _build_validated_results_partial(results: list, criteria: list[dict]) -> lis
     return validated
 
 
+def _is_non_finite_number(value: Any) -> bool:
+    try:
+        return not math.isfinite(float(value))
+    except OverflowError:
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _parse_judge_results(
     response_text: str,
     criteria: list[dict],
@@ -715,7 +734,7 @@ def _parse_judge_results(
 
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError as e:
+    except ValueError as e:  # JSONDecodeError, or an integer literal past sys.get_int_max_str_digits()
         logger.error(f"Failed to parse judge response as JSON: {e}")
         logger.error(f"Raw response: {response_text[:500]}")
         return None, None, _parse_failure_discrepancy(criteria, str(e))
@@ -730,6 +749,18 @@ def _parse_judge_results(
     discrepancy = _analyze_result_ids(results, criteria)
     if discrepancy is not None:
         return parsed, None, discrepancy
+
+    non_finite_ids = [item["id"] for item in results if _is_non_finite_number(item.get("score"))]
+    if non_finite_ids:
+        return parsed, None, JudgeResponseDiscrepancy(
+            expected_count=len(criteria),
+            returned_count=len(results),
+            expected_ids=[c["id"] for c in criteria],
+            missing_ids=[],
+            duplicate_ids=[],
+            unknown_ids=[],
+            non_finite_score_ids=non_finite_ids,
+        )
 
     return parsed, results, None
 
@@ -891,6 +922,8 @@ def format_judge_correction_prompt(
             f"Your response was not valid JSON: {discrepancy.parse_error}",
             f"Return only a JSON object with {object_shape} — no preamble, markdown fences, or extra text.",
         ]
+    elif discrepancy.non_finite_score_ids:
+        problems = [f"{_non_finite_score_problem(discrepancy.non_finite_score_ids)}."]
     else:
         problems = [
             f"You returned {discrepancy.returned_count} result(s) but there are "
@@ -980,11 +1013,11 @@ def format_evidence_judge_correction_prompt(
 
 
 def _rows_or_raise(diagnose: DiagnoseResponse, response_text: str, criteria: list[dict]) -> list[dict]:
-    """Verification rows from ``diagnose``: invalid JSON degrades to all-fail rows, a wrong row set
-    (missing / duplicate / unknown ids) raises."""
+    """Verification rows from ``diagnose``: invalid JSON or a non-finite score degrades to all-fail rows,
+    a wrong row set (missing / duplicate / unknown ids) raises."""
     results, discrepancy = diagnose(response_text, criteria)
     if discrepancy is not None:
-        if discrepancy.parse_error:
+        if discrepancy.parse_error or discrepancy.non_finite_score_ids:
             return _default_failure_results(criteria)
         raise ValueError(
             f"Judge returned {discrepancy.returned_count} results but expected "

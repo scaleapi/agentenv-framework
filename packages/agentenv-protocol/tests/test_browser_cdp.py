@@ -294,7 +294,7 @@ async def test_cdp_waits_for_what_computer_app_ready_reports_up_to_its_declared_
         return AppReadiness(ready=next(answers, False), problems=[], launched=True, waited_s=0, timeout_s=30)
 
     monkeypatch.setattr(browser._computer_app, "readiness", readiness)
-    monkeypatch.setattr("agentenv_protocol.website_browser.READY_POLL_S", 0.01)
+    monkeypatch.setattr("agentenv_protocol.website_browser.environment.READY_POLL_S", 0.01)
     timeout_s = browser._computer_app.timeout_s
     await browser._until_ready()
     browser._computer_app.timeout_s = 0.05

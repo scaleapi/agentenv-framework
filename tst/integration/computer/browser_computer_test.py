@@ -10,7 +10,8 @@ one; one client's close leaves the browser up for the other, which can't open fi
 relaunch, and the computer's reset ends it. browser_connect_cdp hands the echo agent its address, with the computer's
 tools hidden from its role; after reset_env that address fails until the task runs browser_connect_cdp again, whose
 fresh one its next turn opens the site through. Through an app server and a driver restart and a relaunch, the agent's
-address keeps working, and two agents connected at once each drive the browser through their own. Needs Docker and the local registry on
+address keeps working, and two agents connected at once each drive the browser through their own. browser/v1 reads
+and sets its cookies, local storage and downloads. Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
@@ -45,6 +46,7 @@ from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdp
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
 from tst.util.a2a_test_agent import put_test_agent
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -277,6 +279,44 @@ async def test_an_agent_navigates_moves_in_history_answers_a_dialog_uses_tabs_an
     assert [(d["message"], d["answer"], d["by"]) for d in record["dialogs"]] == [
         ("Delete this message?", "accepted", "agent")]
     assert any(tab["id"] == second and tab["closed_by"] == "agentenv" for tab in record["closed_tabs"])
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_cookies_local_storage_and_downloads_are_read_and_set_through_browser_v1(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_browser_state(deployed, lambda op: deployed.environment_url
+                                      + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"])
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_state_operations_hold_up_at_once_through_a_server_restart_and_fail_at_once_with_the_browser_gone(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            kept = await check_browser_state_under_chaos(
+                deployed, lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)[
+                    "endpoint"], lambda pattern: _kill(deployed, pattern, oldest=pattern.startswith("[-]")),
+                lambda: _ready(deployed))
+        finally:
+            report = await teardown_run(context)
+
+    print("browser-state-kept", json.dumps(kept))
     assert not report.failed
 
 

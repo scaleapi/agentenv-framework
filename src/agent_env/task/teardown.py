@@ -236,11 +236,21 @@ async def _remove_folder(sandbox: RecordedSandbox) -> str | None:
 def _sandbox_ids_of(
     sandbox_id: Optional[str], sandbox_type: Optional[str], sandbox_ids: Optional[dict],
 ) -> list[tuple[str, Optional[str]]]:
-    ids = [(sandbox_id, sandbox_type)] if sandbox_id else []
+    backends = {key for key in sandbox_ids or {} if _is_backend(key)}
+    return [(i, key if key in backends else sandbox_type) for key, _, i in env_record_ids(sandbox_id, sandbox_ids)]
+
+
+def env_record_ids(
+    sandbox_id: Optional[str], sandbox_ids: Optional[dict],
+) -> list[tuple[Optional[str], Optional[str], str]]:
+    """The ``(key, service, id)`` of each sandbox an env record names: ``(None, None, sandbox_id)``, then each
+    ``sandbox_ids`` key with its id, or with each ``{service: id}`` it holds. A value of any other shape names none."""
+    ids = [(None, None, sandbox_id)] if sandbox_id else []
     for key, value in (sandbox_ids or {}).items():
-        entry_type = key if _is_backend(key) else sandbox_type
-        values = [value] if isinstance(value, str) else [v for v in value.values() if isinstance(v, str)]
-        ids.extend((v, entry_type) for v in values)
+        if isinstance(value, str):
+            ids.append((key, None, value))
+        elif isinstance(value, dict):
+            ids.extend((key, service, v) for service, v in value.items() if isinstance(v, str))
     return ids
 
 

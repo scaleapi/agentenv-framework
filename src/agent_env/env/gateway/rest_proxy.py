@@ -38,7 +38,7 @@ import posixpath
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, NamedTuple
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from starlette.requests import HTTPConnection, Request
@@ -161,16 +161,29 @@ def forwarded_address(request: HTTPConnection) -> dict[str, str]:
     names them in its own ``X-Forwarded-Host``/``X-Forwarded-Proto``, else the request's ``Host`` and scheme; the
     client could set ``Host`` anyway, so believing its front names nothing it couldn't), and the route prefix as sent,
     or none for a client that says with ``AgentEnv-Site-Root`` it serves the route at a root of its own: a computer's
-    site proxy, whose browser would otherwise get the route's prefix twice. Like the host, that only changes the links
-    the client's own answer names; what the route reaches is the path's alone. A header with nothing to say is left
+    site proxy, whose browser would otherwise get the route's prefix twice. A ``AgentEnv-Site-Root`` naming an origin
+    (``https://notes.test``) is that root's address, ahead of any ``X-Forwarded-Host``/``-Proto``, which a front
+    between the client and the gateway may have rewritten to its own. Like the host, that only changes the links the
+    client's own answer names; what the route reaches is the path's alone. A header with nothing to say is left
     out."""
-    host = _first(request.headers.get(FORWARDED_HOST, "")) or request.headers.get("host", "")
-    proto = _first(request.headers.get(FORWARDED_PROTO, "")).lower()
-    at_root = bool(request.headers.get(AGENT_ENV_SITE_ROOT_HEADER, "").strip())
+    root = request.headers.get(AGENT_ENV_SITE_ROOT_HEADER, "").strip()
+    origin = _origin(root)
+    host = origin[1] if origin else _first(request.headers.get(FORWARDED_HOST, "")) or request.headers.get("host", "")
+    proto = origin[0] if origin else _first(request.headers.get(FORWARDED_PROTO, "")).lower()
+    at_root = bool(root)
     scheme = _HTTP_SCHEME.get(request.url.scheme, request.url.scheme)
     address = {FORWARDED_HOST: host, FORWARDED_PROTO: proto if proto in ("http", "https") else scheme,
                FORWARDED_PREFIX: "" if at_root else route_prefix(request)}
     return {name: value for name, value in address.items() if value}
+
+
+def _origin(value: str) -> tuple[str, str] | None:
+    """The scheme and host of ``value`` when it is an origin (``https://notes.test``, a port allowed), else None."""
+    parts = urlsplit(value)
+    if (parts.scheme in ("http", "https") and parts.netloc and parts.path in ("", "/") and not parts.query
+            and not parts.fragment and "@" not in parts.netloc and value.isprintable()):
+        return parts.scheme, parts.netloc
+    return None
 
 
 def _first(value: str) -> str:

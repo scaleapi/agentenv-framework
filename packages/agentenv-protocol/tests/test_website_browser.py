@@ -76,7 +76,7 @@ def browser_home(monkeypatch, tmp_path):
     """A browser on Linux, its session user's home under ``tmp_path``, inside a computer with no site proxy and 1 GiB
     of /dev/shm."""
     monkeypatch.setattr(app, "detect", lambda: Platform(os="linux"))
-    monkeypatch.setattr(website_browser, "_shm_bytes", lambda path="/dev/shm": 1 << 30)
+    monkeypatch.setattr(website_browser.environment, "_shm_bytes", lambda path="/dev/shm": 1 << 30)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
@@ -166,7 +166,7 @@ def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_d
 
 @pytest.mark.parametrize("mib, in_files", [(64, True), (1024, False)], ids=["docker-default", "sized"])
 def test_it_keeps_its_shared_memory_in_files_only_when_dev_shm_is_under_1_gib(monkeypatch, mib, in_files):
-    monkeypatch.setattr(website_browser, "_shm_bytes", lambda path="/dev/shm": mib * 2**20)
+    monkeypatch.setattr(website_browser.environment, "_shm_bytes", lambda path="/dev/shm": mib * 2**20)
 
     assert ("--disable-dev-shm-usage" in Browser().launch.command) is in_files
 

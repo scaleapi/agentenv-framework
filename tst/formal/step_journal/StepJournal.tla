@@ -32,6 +32,10 @@
 (*                        Lte(attempt_epoch) filter                        *)
 (*   NoSeedJournalFence   seed_context journals __seed__ with              *)
 (*                        attempt_epoch=None                               *)
+(*   MarkerFromStoreOnly  _roll_back_span's retry_resets marker diffs only *)
+(*                        the stored context, not the live one             *)
+(*   MarkerNamesSurvivors _rolled_back_sandboxes names a sandbox that a    *)
+(*                        record in the replayed context still names       *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -44,6 +48,7 @@ CONSTANTS
 Steps == {"a", "b", "c"}
 Deps  == [s \in Steps |-> IF s = "a" THEN {} ELSE {"a"}]
 Keys  == Steps \cup {"seed", "sched"}        \* context keys and journal step_ids
+SandboxMakers == {"a", "c"}
 KillKeys == Keys \cup {"status"}
 Slots == {1, 2}
 
@@ -72,16 +77,22 @@ VARIABLES
     span,    \* per process: rollback_ids of the undo in progress
     uRev, uCtx, uDone, uSeqs, uRm, uEpoch, \* per process: undo_steps_sync's CAS read
     sSeq, sGen, \* per process: (seq, generation) a seed / scheduler journal bump returned
-    thr      \* per process, step, slot: one _run_one task and its to_thread write
+    thr,     \* per process, step, slot: one _run_one task and its to_thread write
+    created,
+    liveDeployed,
+    liveMarked
 
 vars == <<doc, jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span,
-          uRev, uCtx, uDone, uSeqs, uRm, uEpoch, sSeq, sGen, thr>>
+          uRev, uCtx, uDone, uSeqs, uRm, uEpoch, sSeq, sGen, thr, created, liveDeployed, liveMarked>>
+ghostVars == <<created, liveDeployed, liveMarked>>
 undoVars == <<uRev, uCtx, uDone, uSeqs, uRm, uEpoch>>
 
 Tok(p) == [p |-> p, born |-> aera[p]]
 SlotTok(p, s, i) == [p |-> p, born |-> thr[p][s][i].born]
+Sandbox(s, tok) == <<s, tok.p, tok.born>>
+StoredSandboxes(ctx) == {Sandbox(s, ctx[s]) : s \in {x \in SandboxMakers : ctx[x] # None}}
 
-ActivePcs == {"exec", "failed", "bump", "fence", "row", "cas", "casw", "clean", "ok", "sup"}
+ActivePcs == {"exec", "made", "failed", "bump", "fence", "row", "cas", "casw", "clean", "ok", "sup"}
 WritePcs  == {"bump", "fence", "row", "cas", "casw", "clean"}
 InFlight(p, s) == \E i \in Slots : ~thr[p][s][i].orphan /\ thr[p][s][i].pc \in ActivePcs
 AnyInFlight(p) == \E s \in Steps : InFlight(p, s)
@@ -115,6 +126,9 @@ Init ==
     /\ sSeq = [p \in Procs |-> 0]
     /\ sGen = [p \in Procs |-> 0]
     /\ thr = [p \in Procs |-> [s \in Steps |-> [i \in Slots |-> IdleSlot]]]
+    /\ created = [p \in Procs |-> {}]
+    /\ liveDeployed = [p \in Procs |-> {}]
+    /\ liveMarked = [p \in Procs |-> {}]
 
 -----------------------------------------------------------------------------
 (* Registration and seed: task.py:_run -> store.py:register_task_instance  *)
@@ -137,6 +151,7 @@ Register(p) ==
               /\ ep' = [ep EXCEPT ![p] = doc.epoch + 1]
     /\ dpc' = [dpc EXCEPT ![p] = "seedDoc"]
     /\ UNCHANGED <<jr, sdone, retried, ferr, span, undoVars, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 (* store.py:seed_context, first call: store.update of the instance by      *)
 (* instance_id and Lte(attempt_epoch), the epoch Task._run registered at.  *)
@@ -149,6 +164,7 @@ SeedDoc(p) ==
          ELSE /\ doc' = [doc EXCEPT !.ctx["seed"] = Tok(p)]
               /\ dpc' = [dpc EXCEPT ![p] = "seedBump"]
     /\ UNCHANGED <<jr, era, killed, aera, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 (* store.py:_journal_step(__seed__, attempt_epoch) -> _bump_journal_seq:   *)
 (* atomic inc of journal_seq, returns the doc; then the epoch check.       *)
@@ -162,6 +178,7 @@ SeedBump(p) ==
               /\ sGen' = [sGen EXCEPT ![p] = doc.gen]
               /\ dpc' = [dpc EXCEPT ![p] = "seedRow"]
     /\ UNCHANGED <<jr, era, killed, aera, ep, sdone, retried, ferr, span, undoVars, thr>>
+    /\ UNCHANGED ghostVars
 
 (* store.py:_write_journal_row for __seed__.                               *)
 SeedRow(p) ==
@@ -169,6 +186,7 @@ SeedRow(p) ==
     /\ jr' = Upsert("seed", [seq |-> sSeq[p], gen |-> sGen[p], val |-> Tok(p)])
     /\ dpc' = [dpc EXCEPT ![p] = "run"]
     /\ UNCHANGED <<doc, era, killed, aera, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
 (* Steps: task.py:_drive_dag dispatch and _run_one                         *)
@@ -190,13 +208,26 @@ Dispatch(p) ==
                            [IdleSlot EXCEPT !.pc = "exec", !.dep = ep[p], !.born = aera[p]]]
                    ELSE thr[p][s]]]
     /\ UNCHANGED <<doc, jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
+
+(* A maker's execute creates its sandbox and appends the record to the    *)
+(* live context (deploy_sandbox, deploy_env, deploy_agent). The record    *)
+(* reaches the store only through this step's _heartbeat_step.            *)
+Make(p, s, i) ==
+    /\ s \in SandboxMakers
+    /\ thr[p][s][i].pc = "exec"
+    /\ thr' = [thr EXCEPT ![p][s][i].pc = "made"]
+    /\ created' = [created EXCEPT ![p] = @ \cup {Sandbox(s, SlotTok(p, s, i))}]
+    /\ liveDeployed' = [liveDeployed EXCEPT ![p] = @ \cup {Sandbox(s, SlotTok(p, s, i))}]
+    /\ UNCHANGED <<doc, jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen, liveMarked>>
 
 (* step.execute returns; _heartbeat_step -> record_step_complete ->        *)
 (* asyncio.to_thread(record_step_complete_sync).                           *)
 ExecOk(p, s, i) ==
-    /\ thr[p][s][i].pc = "exec"
+    /\ thr[p][s][i].pc = IF s \in SandboxMakers THEN "made" ELSE "exec"
     /\ thr' = [thr EXCEPT ![p][s][i].pc = "bump"]
     /\ UNCHANGED <<doc, jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 (* step.execute raises; b is fatal, so no heartbeat is written.            *)
 ExecFail(p, i) ==
@@ -204,6 +235,7 @@ ExecFail(p, i) ==
     /\ thr[p]["b"][i].pc = "exec"
     /\ thr' = [thr EXCEPT ![p]["b"][i].pc = "failed"]
     /\ UNCHANGED <<doc, jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 (* store.py:_journal_step -> _bump_journal_seq, then the attempt_epoch     *)
 (* check on the returned doc. A fenced write returns None (not journaled). *)
@@ -218,6 +250,7 @@ Bump(p, s, i) ==
                    THEN thr' = [thr EXCEPT ![p][s][i].pc = "cas"]
                    ELSE thr' = [thr EXCEPT ![p][s][i] = [sl EXCEPT !.pc = "row", !.seq = doc.seq + 1, !.jg = doc.gen]]
     /\ UNCHANGED <<jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 (* Mutation FenceBeforeSeq only: the seq is bumped after the fence read.   *)
 FenceSeq(p, s, i) ==
@@ -226,6 +259,7 @@ FenceSeq(p, s, i) ==
     /\ doc' = [doc EXCEPT !.seq = @ + 1]
     /\ thr' = [thr EXCEPT ![p][s][i] = [sl EXCEPT !.pc = "row", !.seq = doc.seq + 1, !.jg = doc.gen]]
     /\ UNCHANGED <<jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 (* store.py:_write_journal_row for the step.                               *)
 Row(p, s, i) ==
@@ -235,6 +269,7 @@ Row(p, s, i) ==
     /\ jr' = Upsert(s, row)
     /\ thr' = [thr EXCEPT ![p][s][i] = [sl EXCEPT !.pc = "cas", !.jok = RowLands(s, row)]]
     /\ UNCHANGED <<doc, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 (* record_step_complete_sync._mutate's refusals.                           *)
 Declines(d, sl) ==
@@ -263,6 +298,7 @@ Cas(p, s, i) ==
            ELSE /\ doc' = Complete(doc, s, SlotTok(p, s, i), doc.done)
                 /\ thr' = [thr EXCEPT ![p][s][i].pc = "ok"]
     /\ UNCHANGED <<jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 (* Mutation NoCas only: the update lands with no rev precondition, built   *)
 (* from the earlier read.                                                  *)
@@ -275,6 +311,7 @@ CasW(p, s, i) ==
          ELSE /\ doc' = Complete(doc, s, SlotTok(p, s, i), sl.rd)
               /\ thr' = [thr EXCEPT ![p][s][i].pc = "ok"]
     /\ UNCHANGED <<jr, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 (* record_step_complete_sync: a refused completion deletes its own row at  *)
 (* its exact seq, then raises SupersededAttemptError.                      *)
@@ -284,6 +321,7 @@ Clean(p, s, i) ==
     /\ jr' = IF jr[s] # NoRow /\ jr[s].seq = sl.seq THEN [jr EXCEPT ![s] = NoRow] ELSE jr
     /\ thr' = [thr EXCEPT ![p][s][i].pc = "sup"]
     /\ UNCHANGED <<doc, era, killed, aera, dpc, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 (* task.py:_drain_in_flight: cancel every in-flight task. A task still in  *)
 (* step.execute stops with no write; one inside to_thread keeps running    *)
@@ -325,6 +363,7 @@ Collect(p, s, i) ==
                         /\ dpc' = [dpc EXCEPT ![p] = "undoRead"]
                         /\ UNCHANGED <<sdone, ferr>>
     /\ UNCHANGED <<doc, jr, era, killed, aera, ep, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
 (* Retry: task.py:_roll_back_span -> store.py:undo_steps_sync              *)
@@ -357,11 +396,20 @@ UndoRead(p) ==
               /\ dpc' = [dpc EXCEPT ![p] = "undoWrite"]
               /\ UNCHANGED <<ferr, uEpoch>>
     /\ UNCHANGED <<doc, jr, era, killed, aera, ep, sdone, retried, span, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 (* compare_and_swap's update_one_and_get with the rev precondition; on a   *)
-(* miss it reads again. bump_epoch=True advances attempt_epoch.            *)
+(* miss it reads again. bump_epoch=True advances attempt_epoch. In the     *)
+(* same CAS, _audit's retry_resets entry names the sandboxes in the stored *)
+(* context before the undo, or in the live one taken before it, that the   *)
+(* replay drops; _rebuild_context then replaces the live context with the  *)
+(* stored one, so its deployed_* records are the replay's and its markers  *)
+(* are the ones just written.                                              *)
 UndoWrite(p) ==
-    LET newEpoch == IF Mut = "NoUndoEpochBump" THEN doc.epoch ELSE doc.epoch + 1 IN
+    LET newEpoch == IF Mut = "NoUndoEpochBump" THEN doc.epoch ELSE doc.epoch + 1
+        before == StoredSandboxes(doc.ctx)
+        after == StoredSandboxes(uCtx[p])
+        rolledBack == IF Mut = "MarkerFromStoreOnly" THEN before ELSE before \cup liveDeployed[p] IN
     /\ dpc[p] = "undoWrite"
     /\ IF doc.rev = uRev[p]
          THEN /\ doc' = [doc EXCEPT !.rev = @ + 1, !.ctx = uCtx[p], !.done = uDone[p], !.epoch = newEpoch,
@@ -370,10 +418,13 @@ UndoWrite(p) ==
               /\ killed' = [k \in KillKeys |-> IF k \in span[p] THEN era + 1 ELSE killed[k]]
               /\ aera' = [aera EXCEPT ![p] = era + 1]
               /\ uEpoch' = [uEpoch EXCEPT ![p] = newEpoch]
+              /\ liveMarked' = [liveMarked EXCEPT ![p] = @ \cup IF Mut = "MarkerNamesSurvivors" THEN rolledBack
+                                                                 ELSE rolledBack \ after]
+              /\ liveDeployed' = [liveDeployed EXCEPT ![p] = after]
               /\ dpc' = [dpc EXCEPT ![p] = "undoTrim"]
          ELSE /\ dpc' = [dpc EXCEPT ![p] = "undoRead"]
-              /\ UNCHANGED <<doc, era, killed, aera, uEpoch>>
-    /\ UNCHANGED <<jr, ep, sdone, retried, ferr, span, uRev, uCtx, uDone, uSeqs, uRm, sSeq, sGen, thr>>
+              /\ UNCHANGED <<doc, era, killed, aera, uEpoch, liveDeployed, liveMarked>>
+    /\ UNCHANGED <<jr, ep, sdone, retried, ferr, span, uRev, uCtx, uDone, uSeqs, uRm, sSeq, sGen, thr, created>>
 
 (* undo_steps_sync: delete each undone row at the seq the CAS read.        *)
 UndoTrim(p) ==
@@ -381,6 +432,7 @@ UndoTrim(p) ==
     /\ jr' = [k \in Keys |-> IF k \in Steps /\ jr[k] # NoRow /\ <<k, jr[k].seq>> \in uSeqs[p] THEN NoRow ELSE jr[k]]
     /\ dpc' = [dpc EXCEPT ![p] = "undoSchedBump"]
     /\ UNCHANGED <<doc, era, killed, aera, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 (* _roll_back_span sets state.epoch from the undo's result; _drive_dag     *)
 (* then drops the span from state.completed and calls _rearm.              *)
@@ -401,12 +453,14 @@ UndoSchedBump(p) ==
               /\ dpc' = [dpc EXCEPT ![p] = "undoSchedRow"]
               /\ UNCHANGED <<ep, sdone>>
     /\ UNCHANGED <<jr, era, killed, aera, retried, ferr, span, undoVars, thr>>
+    /\ UNCHANGED ghostVars
 
 UndoSchedRow(p) ==
     /\ dpc[p] = "undoSchedRow"
     /\ jr' = Upsert("sched", [seq |-> sSeq[p], gen |-> sGen[p], val |-> uCtx[p]["sched"]])
     /\ Rearm(p)
     /\ UNCHANGED <<doc, era, killed, aera, retried, ferr, span, undoVars, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
 (* Ending the run                                                          *)
@@ -418,6 +472,7 @@ Finish(p) ==
     /\ ferr[p] \/ sdone[p] = Steps
     /\ dpc' = [dpc EXCEPT ![p] = IF ferr[p] THEN "fail" ELSE "end"]
     /\ UNCHANGED <<doc, jr, era, killed, aera, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 (* The terminal write: one conditional update on status != completed and,  *)
 (* given attempt_epoch, attempt_epoch <= it.                               *)
@@ -432,6 +487,7 @@ FailWrite(p) ==
     /\ dpc[p] = "fail"
     /\ Terminal(p, "failed")
     /\ UNCHANGED <<jr, era, killed, aera, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 (* A CancelledError reaches _drive_dag: _drain_in_flight, then            *)
 (* store.py:record_task_cancelled_sync(attempt_epoch=state.epoch).         *)
@@ -442,11 +498,13 @@ CancelRun(p) ==
     /\ thr' = Drained(p)
     /\ dpc' = [dpc EXCEPT ![p] = "cancelWrite"]
     /\ UNCHANGED <<doc, jr, era, killed, aera, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen>>
+    /\ UNCHANGED ghostVars
 
 CancelWrite(p) ==
     /\ dpc[p] = "cancelWrite"
     /\ Terminal(p, "cancelled")
     /\ UNCHANGED <<jr, era, killed, aera, ep, sdone, retried, ferr, span, undoVars, sSeq, sGen, thr>>
+    /\ UNCHANGED ghostVars
 
 Done ==
     /\ \A p \in Procs : dpc[p] = "end"
@@ -461,7 +519,7 @@ Next ==
          \/ Dispatch(p)
          \/ \E i \in Slots : ExecFail(p, i)
          \/ \E s \in Steps, i \in Slots :
-              ExecOk(p, s, i) \/ Bump(p, s, i) \/ FenceSeq(p, s, i) \/ Row(p, s, i)
+              Make(p, s, i) \/ ExecOk(p, s, i) \/ Bump(p, s, i) \/ FenceSeq(p, s, i) \/ Row(p, s, i)
               \/ Cas(p, s, i) \/ CasW(p, s, i) \/ Clean(p, s, i) \/ Collect(p, s, i)
     \/ Done
 
@@ -496,5 +554,15 @@ Quiescent == \A p \in Procs : dpc[p] \notin {"seedDoc", "seedBump", "seedRow", "
 (* in-memory context unjournaled, by design).                              *)
 ReplayReproducesStored ==
     (Quiescent /\ doc.exists /\ doc.status \notin {"failed", "cancelled"}) => Replay = doc.ctx
+
+(* teardown_run(context) terminates what recorded_sandboxes(context)       *)
+(* finds: the live context's deployed_* records and its retry_resets       *)
+(* markers. A run that has ended must name there every sandbox it created, *)
+(* or the teardown leaves that sandbox running.                            *)
+NoSandboxLeaks == \A p \in Procs : dpc[p] = "end" => created[p] \subseteq liveDeployed[p] \cup liveMarked[p]
+
+(* A retry_resets marker names only sandboxes the rollback dropped, never  *)
+(* one a deployed_* record of the live context still names.                *)
+NoMarkerNamesLive == \A p \in Procs : liveMarked[p] \cap liveDeployed[p] = {}
 
 =============================================================================
