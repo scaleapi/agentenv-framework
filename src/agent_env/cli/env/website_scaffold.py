@@ -31,6 +31,7 @@ _VERBS = _READ_VERBS + ("create", "add", "new", "update", "edit", "set", "delete
 _BUILTIN_PATHS = {"/api/users", "/api/sign-in", SESSION_PATH}
 _JSON_TYPES = {"string": "str", "integer": "int", "number": "float", "boolean": "bool", "object": "dict",
                "array": "list", "null": "None"}
+_ANNOTATION_NAMES = ("str", "int", "float", "bool", "dict", "list", "Any", "Optional", "Literal", "Field", "BaseModel")
 _PY_TYPES = {"str": "string", "int": "integer", "float": "number", "bool": "boolean", "dict": "object",
              "list": "array", "Dict": "object", "List": "array", "tuple": "array", "Tuple": "array", "set": "array"}
 
@@ -261,7 +262,8 @@ def _literal(value: Any) -> str | None:
 def _stubs(tools: list[dict]) -> list[dict]:
     """Each tool's route: its function and model names, verb, path, parameters and the example the page sends. A
     function is never named like the site class's own methods or a lowercase name ``site-tools.py.tmpl`` imports,
-    such as ``api``, which a method of that name would shadow for the routes declared after it."""
+    such as ``api``, which a method of that name would shadow for the routes declared after it; nor is a parameter
+    named like a type its annotations use, which a model field of that name would shadow (its key is its alias)."""
     functions: set[str] = {"api", "ready_check", "website", "environment_card", "reset_data", "add_data", "get_data",
                            "seeded", "reset", "add", "export", "data", "list_users", "sign_in", *dir(WebsiteEnvironment)}
     names: set[str] = {"list_users", "sign_in"}
@@ -285,7 +287,7 @@ def _stubs(tools: list[dict]) -> list[dict]:
         while model in models:
             model += "_"
         models.add(model)
-        taken: set[str] = set()
+        taken: set[str] = set(_ANNOTATION_NAMES)
         params = []
         for key, prop in properties.items():
             prop = prop if isinstance(prop, dict) else {}

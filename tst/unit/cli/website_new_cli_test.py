@@ -262,3 +262,14 @@ def test_tools_named_after_what_the_site_module_uses_make_a_site_that_loads(tmp_
     for route in routes[2:]:
         answer = client.request(route.method, route.path, **({} if route.method == "GET" else {"json": {}}))
         assert (answer.status_code, answer.json()["code"]) == (501, "not_implemented"), route
+
+
+def test_a_parameter_named_like_a_type_makes_a_model_that_loads(tmp_path, socket_enabled):
+    tools = [{"name": "create_box", "inputSchema": {"type": "object", "properties": {
+        "int": {"type": "integer", "default": 0}, "str": {"type": "string"}, "Optional": {"type": "boolean"}},
+        "required": ["str"]}}]
+    (tmp_path / "tools.json").write_text(json.dumps(tools))
+    assert _new("box", "--dir", str(tmp_path / "site"), "--from-tools-json", str(tmp_path / "tools.json")).exit_code == 0
+    client = TestClient(_load(tmp_path / "site")().create_app())
+    assert client.post("/api/create-box", json={"str": "a", "int": 3, "Optional": True}).status_code == 501
+    assert client.post("/api/create-box", json={"int": "x"}).status_code == 400
