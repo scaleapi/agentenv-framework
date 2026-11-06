@@ -37,6 +37,7 @@ from agent_env.env.envs._deployment import provider_refusal
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
+from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -893,7 +894,7 @@ class _Planner:
         """Each env of a multi runs as containers its environment_name names: an MCP server as one by that name, a
         website as its backend's and frontend's. No two of a multi's envs may name one container, and a provider
         other than the core's, which gives a multi one env card, can't tell an MCP server and a website of one name
-        apart."""
+        apart. Nor may two of its websites claim one name."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BundleImage) or source.entry.kind is not BundleKind.ENV:
@@ -903,6 +904,12 @@ class _Planner:
             where = self._path(source.entry)
             taken: dict[str, str] = {}  # each container a child runs as, by the field naming the child
             named: dict[str, set[str]] = {}  # the environment_names of each list's envs
+            claimed = [sites.Claim(domain, sites.SYNTHETIC, ref.where) for ref in source.references
+                       if ref.where.startswith("website_envs[")
+                       for domain in dict.fromkeys(self._domains(ref, store_latest))]
+            if conflicts := sites.name_conflicts(claimed):
+                self.problems.append(f"{where}: website_envs: names claimed twice: {'; '.join(conflicts)}; each site of "
+                                     "a multi needs names of its own")
             for ref in source.references:
                 name = self._environment_name(ref, store_latest)
                 if name is None:
@@ -1041,14 +1048,24 @@ class _Planner:
             return next((name for path, name in self._folder_environments(ref.local) or () if not path), None)
         if ref.local is not None:
             return self.accepted.get(_key(ref.local), {}).get("environment_name")
+        return getattr(self._store_entity(ref, store_latest), "environment_name", None)
+
+    def _domains(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> list[str]:
+        """The names the website ``ref`` names stores: a bundle env's from its accepted toml, a store one's at the
+        version the plan read, or none when that's unknown."""
+        if ref.local is not None:
+            return list(self.accepted.get(_key(ref.local), {}).get("domains") or [])
+        return list(getattr(self._store_entity(ref, store_latest), "domains", None) or [])
+
+    def _store_entity(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> Any:
+        """The store's entity ``ref`` names at the version the plan read, or None when that's unknown."""
         if store_latest is None:
             return None
         try:
-            entity = STORE_GETTERS[ref.kind](ref.id, ref.version if ref.version is not None
-                                             else store_latest.get((ref.kind, ref.id)))
+            return STORE_GETTERS[ref.kind](ref.id, ref.version if ref.version is not None
+                                           else store_latest.get((ref.kind, ref.id)))
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
-        return getattr(entity, "environment_name", None)
 
     def _build_tasks(self, closure: set[_Key]) -> None:
         """Build each task's steps the way a write will, so a bad step fails before anything is written."""

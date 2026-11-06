@@ -22,6 +22,7 @@ from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifac
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
+from agent_env.env.envs.computer.utils.sites import name_problem
 from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
@@ -51,7 +52,7 @@ class WebsiteEnv(Env):
                                                   EntityRef.artifact("frontend_image", artifact_type="docker_image",
                                                                      optional=True))
     toml_keys: ClassVar[dict[str, type]] = {"backend_image": object, "frontend_image": object, "environment_name": str,
-                                            "health": str, "env_provider_type": str}
+                                            "health": str, "domains": list, "env_provider_type": str}
 
     def __init__(
         self,
@@ -63,6 +64,7 @@ class WebsiteEnv(Env):
         *,
         backend_docker_image_artifact: Optional[DockerImageArtifact] = None,
         health_path: str = DEFAULT_HEALTH_PATH,
+        domains: Optional[list[str]] = None,
         metadata: Optional[dict[str, str]] = None,
         env_provider_type: str = "gateway",
     ):
@@ -79,6 +81,9 @@ class WebsiteEnv(Env):
         if problem := health_path_problem(health_path):
             raise ValueError(f"website env {id!r}: {problem}")
         self.health_path = health_path
+        if problem := domains_problem(domains or []):
+            raise ValueError(f"website env {id!r}: {problem}")
+        self.domains = list(domains or [])
         self.environment_name = environment_name
         self.env_provider_type = env_provider_type
         self._sandbox = None
@@ -106,6 +111,8 @@ class WebsiteEnv(Env):
                 "type": self.frontend_docker_image_artifact.type,
             }
         base["health_path"] = self.health_path
+        if self.domains:
+            base["domains"] = list(self.domains)
         base["service_name"] = self.environment_name
         base["environment_name"] = self.environment_name  # dual-write with service_name during the rename
         base["env_provider_type"] = self.env_provider_type
@@ -123,6 +130,7 @@ class WebsiteEnv(Env):
                                             if frontend_ref else None),
             environment_name=data["environment_name"] if "environment_name" in data else data["service_name"],
             health_path=data.get("health_path", DEFAULT_HEALTH_PATH),
+            domains=data.get("domains") or [],
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
         )
@@ -147,6 +155,7 @@ class WebsiteEnv(Env):
                        frontend_docker_image_artifact=ctx.artifact(frontend, DockerImageArtifact) if frontend else None,
                        environment_name=fields["environment_name"],
                        health_path=fields.get("health", DEFAULT_HEALTH_PATH),
+                       domains=fields.get("domains") or [],
                        env_provider_type=fields["env_provider_type"])
 
     def to_toml(self, out: ExportContext) -> dict:
@@ -157,6 +166,8 @@ class WebsiteEnv(Env):
             toml["frontend_image"] = out.image(self.frontend_docker_image_artifact, "frontend_image")
         if self.health_path != DEFAULT_HEALTH_PATH:
             toml["health"] = self.health_path
+        if self.domains:
+            toml["domains"] = list(self.domains)
         return {**toml, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
@@ -166,6 +177,9 @@ class WebsiteEnv(Env):
         problem."""
         health = data.get("health", DEFAULT_HEALTH_PATH)
         if isinstance(health, str) and (problem := health_path_problem(health)):
+            ctx.refuse([ctx.config_problem(problem)])
+        domains = data.get("domains", [])
+        if isinstance(domains, list) and (problem := domains_problem(domains)):
             ctx.refuse([ctx.config_problem(problem)])
         return ctx.accept_env(data, cls, named_by="backend_image")
 
@@ -335,6 +349,7 @@ class WebsiteEnv(Env):
         github_token: str | None = None,
         env_provider_type: str = "gateway",
         health_path: str = DEFAULT_HEALTH_PATH,
+        domains: list[str] | None = None,
     ) -> WebsiteEnv:
         """Build the server image, from ``backend_dockerfile_github_url``, and any deprecated frontend image from
         GitHub in parallel, and create a WebsiteEnv."""
@@ -384,6 +399,7 @@ class WebsiteEnv(Env):
             metadata=combined_metadata,
             env_provider_type=env_provider_type,
             health_path=health_path,
+            domains=domains,
         )
         return env
 
@@ -394,3 +410,10 @@ def health_path_problem(health_path: str) -> str | None:
     if _HEALTH_PATH.fullmatch(health_path):
         return None
     return f"health: {health_path!r} is not a path of letters, digits, '.', '_', '~', '-' and '/' starting with '/'"
+
+
+def domains_problem(domains: list[str]) -> str | None:
+    """Why ``domains`` can't be the names a site is reached by, or None: each a DNS name, as a computer's site table
+    takes it, a wildcard only as its whole first label."""
+    problems = [name_problem(name) if isinstance(name, str) else f"{name!r} is not a host name" for name in domains]
+    return next((f"domains: {problem}" for problem in problems if problem), None)
