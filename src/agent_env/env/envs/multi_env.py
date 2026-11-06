@@ -87,8 +87,9 @@ class MultiEnv(Env):
         self.env_provider_type = env_provider_type  # the children's own types are ignored: this one deploys them all
         self.mcp_server_envs = mcp_server_envs
         self.website_envs = website_envs or []
-        if conflicts := sites.name_conflicts([sites.Claim(name, sites.SYNTHETIC, env.id)
-                                              for env in self.website_envs for name in dict.fromkeys(env.domains)]):
+        if conflicts := sites.name_conflicts([sites.Claim(name, sites.SYNTHETIC, f"{env.environment_name} at website_envs[{i}]")
+                                              for i, env in enumerate(self.website_envs)
+                                              for name in dict.fromkeys(env.domains)]):
             raise sites.SiteConflict(f"multi env {id!r}: its websites claim names twice: {'; '.join(conflicts)}")
         self._sandbox = None
         self._gateway_url = None

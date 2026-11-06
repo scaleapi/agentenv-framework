@@ -44,10 +44,20 @@ def test_a_multi_env_whose_sites_claim_one_name_is_refused(local_stores):
 
     with pytest.raises(sites.SiteConflict) as refused:
         MultiEnv.put(id="suite", mcp_server_envs=[], website_envs=[slack, notes, _site("chat", "acme.slack.com")])
-    assert str(refused.value) == ("multi env 'suite': its websites claim names twice: 'acme.slack.com' (chat) "
-                                  "overlaps '*.slack.com' (slack)")
+    assert str(refused.value) == ("multi env 'suite': its websites claim names twice: 'acme.slack.com' (chat at "
+                                  "website_envs[2]) overlaps '*.slack.com' (slack at website_envs[0])")
     assert MultiEnv.put(id="suite", mcp_server_envs=[],
                         website_envs=[slack, notes, _site("forum", "forum.example")]).version == 1
+
+
+def test_two_versions_of_one_website_env_claiming_one_name_are_refused(local_stores):
+    shop = _site("shop", "shop.test")
+    renamed = WebsiteEnv.put(id="shop", server_docker_image_artifact=_image("shop-server"), environment_name="chat",
+                             domains=["shop.test"])
+
+    with pytest.raises(sites.SiteConflict, match=r"'shop.test' \(chat at website_envs\[1\]\) overlaps 'shop.test' "
+                                                 r"\(shop at website_envs\[0\]\)"):
+        MultiEnv.put(id="suite", mcp_server_envs=[], website_envs=[shop, renamed])
 
 
 @pytest.mark.asyncio
