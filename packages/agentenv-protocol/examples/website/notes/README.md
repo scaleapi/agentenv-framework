@@ -22,9 +22,11 @@ them. The page shows the universe's time.
   sends `AgentEnv-Role: admin` with `AgentEnv-Role-Key` equal to the container's `WEBSITE_ROLE_KEY`; any other caller
   gets 403. The gateway passes on whatever role a browser sends, so without the key a page could claim `admin`; with no
   `WEBSITE_ROLE_KEY` set, every caller is `default` and the route is closed.
-- **Users.** `ApiContext.user` is the user in the signed session cookie. With no cookie, it is the acting user (the
-  data's `current_user`, which `acting_user()` returns), and `GET /api/session` signs that user in. `POST /api/sign-in` switches to another seeded
-  user. A user's notes are invisible to every other user, and another user's note answers 404.
+- **Users.** `ApiContext.user` is the user in the signed session cookie, `agentenv_session_notes` (the site's own, so
+  it doesn't collide with another site's under the same gateway host; the card names it). With no cookie, it is the
+  acting user (the data's `current_user`, which `acting_user()` returns), and `GET /api/session` signs that user in.
+  `POST /api/sign-in` switches to another seeded user. A user's notes are invisible to every other user, and another
+  user's note answers 404.
 - **State.** The site keeps its users and notes itself, starting from `data/seed.json`, and serves them through its
   data hooks: `data/add` adds a part's records by id (a data part, or a file part by bytes or `file://`), `data/get`
   exports them, and `data/reset` empties them. `data/get` is how agentenv reads what a task left the site with.
@@ -65,11 +67,13 @@ the test above runs this repo's.
 ```bash
 docker build -t notes-site .
 docker run -d --name notes-site -p 18080:8000 notes-site
-python -m agentenv_protocol.website.conformance http://localhost:18080 --clock-host host.docker.internal
+python -m agentenv_protocol.website.conformance http://localhost:18080 --clock-host host.docker.internal --strict
 curl -s http://localhost:18080/api/notes
 ```
 
-Use `--clock-host` so the container can reach the checker's clock. The clock check leaves the server following a
+Use `--clock-host` so the container can reach the checker's clock. `--strict` fails on a recommended check's warning
+too (the card, `X-Universe-Now`, the clock, forwarded headers, cookies); without it only the contract's required checks
+fail the run, and Notes passes every check either way. The clock check leaves the server following a
 clock that is gone once the check ends: later timestamps start from 2031 until the server is synced again, so restart
 the container before using it.
 

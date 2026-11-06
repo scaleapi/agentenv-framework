@@ -1,13 +1,18 @@
-"""Check a running site's server against ``urn:agentenv:website/v1``, whatever it's written in:
-``python -m agentenv_protocol.website.conformance <url>`` prints each check and exits 1 when one failed (a warning
-doesn't), 2 when the server couldn't be reached. Everything goes over HTTP: the card, ``/`` under a made-up host, readiness by the card's
-``website/v1`` ``ready``, whose answer must be a ``WebsiteReadiness`` (by the declared health path, deprecated, for a
-card without it), ``X-Universe-Now`` on every answer the other checks got, a data-plane round trip at the card's ``url``
-(data/get, data/reset, data/get, which no longer returns the exported data, data/add of what the first data/get
-returned, data/get again), ``clock/v1``'s
-``sync_time`` against a clock the checker serves, and the forwarded headers wherever an answer shows them, on ``/`` and
-on a GET route with its trailing slash toggled, which a server may redirect, and the cookies those answers set:
-none tied to a domain, and a warning for one whose lifetime is an absolute ``Expires`` with no ``Max-Age``.
+"""Check a running site's server against ``urn:agentenv:website/v1``, whatever it's written in: ``python -m
+agentenv_protocol.website.conformance <url>`` prints each check and exits 1 when a required one failed (or, with
+``--strict``, when a recommended one warned), 2 when the server couldn't be reached. Everything goes over HTTP.
+
+The required checks are the contract, what the gateway and a browser rely on of any server: ``/`` serves HTML under a
+made-up host; the site is ready, by the card's ``website/v1`` ``ready``, whose answer must be a ``WebsiteReadiness``
+(by the declared health path, deprecated, for a card without it); the data plane's and card's paths are not the site's
+pages; and, when the card advertises the data plane, a round trip at the card's ``url`` (data/get, data/reset,
+data/get, which no longer returns the exported data, data/add of what the first data/get returned, data/get again)
+returns what it was given. A failed one is ``failed``. The recommended checks are what an SDK site does and the gateway
+uses when a server offers it: a card declaring the site's domains, readiness and routes, ``X-Universe-Now`` on every
+answer the other checks got, ``clock/v1``'s ``sync_time`` against a clock the checker serves, the forwarded headers
+wherever an answer shows them (on ``/`` and on a GET route with its trailing slash toggled, which a server may
+redirect), and the cookies those answers set: none tied to a domain, the session path's the one the card names, and
+none whose lifetime is an absolute ``Expires`` with no ``Max-Age``. A failed one is ``warned``.
 
 Every request goes to the server under check: a card's path or URL naming another scheme, host or port fails the check
 that would have used it, with nothing sent there. The round trip leaves the server's data as it found it, adding the
@@ -40,17 +45,26 @@ from .readiness import DEFAULT_HEALTH_PATH, WEBSITE_EXTENSION_URI, WEBSITE_READY
 Status = Literal["passed", "failed", "skipped", "warned"]
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
 CLOCK_SLACK_S = 120
+REQUIRED = ("any_host", "health", "reserved_paths", "data_plane")
 
 
 @dataclasses.dataclass(frozen=True)
 class Result:
+    """One check's outcome; ``required`` for a check of the contract, whose failure is ``failed``, and not for a
+    recommended one, whose failure is ``warned``."""
+
     name: str
     status: Status
     detail: str = ""
+    required: bool = True
 
     @property
     def passed(self) -> bool:
         return self.status != "failed"
+
+    def fails(self, strict: bool = False) -> bool:
+        """Whether the result fails the run: a failed check, or with ``strict`` a warned one too."""
+        return self.status == "failed" or (strict and self.status == "warned")
 
 
 def check(base_url: str, *, client: httpx.Client | None = None, clock_host: str = "127.0.0.1",
@@ -92,19 +106,26 @@ class _Checker:
             card = response.json() if response.status_code == 200 else {}
         except ValueError:
             card = {}
+        card = card if isinstance(card, dict) else {}
         site = (find_extension(card, WEBSITE_EXTENSION_URI) or {}).get("params") or {}
         health = site.get("health") if isinstance(site.get("health"), str) else DEFAULT_HEALTH_PATH
-        steps = (("any_host", self._any_host), ("health", lambda: self._health(card, health)),
-                 ("universe_now", self._universe_now), ("data_plane", lambda: self._data_plane(card)),
+        steps = (("card", lambda: self._card(response, card, site)), ("any_host", self._any_host),
+                 ("health", lambda: self._health(card, health)), ("universe_now", self._universe_now),
+                 ("reserved_paths", self._reserved_paths), ("data_plane", lambda: self._data_plane(card)),
                  ("clock", lambda: self._clock(card)), ("forwarded", lambda: self._forwarded(site)),
                  ("cookies", lambda: self._cookies(site)))
         outcomes = {name: _outcome(step) for name, step in steps if name != "universe_now"}
         outcomes["universe_now"] = _outcome(self._universe_now)
-        return [self._card(response, card, site), *(Result(name, *outcomes[name]) for name, _step in steps)]
+        results = []
+        for name, _step in steps:
+            status, detail = outcomes[name]
+            required = name in REQUIRED
+            results.append(Result(name, "warned" if status == "failed" and not required else status, detail, required))
+        return results
 
-    def _card(self, response: httpx.Response, card: dict, site: dict) -> Result:
+    def _card(self, response: httpx.Response, card: dict, site: dict) -> tuple[Status, str]:
         if response.status_code != 200:
-            return Result("card", "failed", f"{WELL_KNOWN_PATH} answered {response.status_code}")
+            return "failed", f"{WELL_KNOWN_PATH} answered {response.status_code}"
         problems = []
         if not site:
             problems.append(f"declares no {WEBSITE_EXTENSION_URI} with params")
@@ -117,7 +138,7 @@ class _Checker:
         if not isinstance(routes, list) or not all(isinstance(r, dict) and {"method", "path", "name"} <= set(r)
                                                    for r in routes):
             problems.append("its params' routes aren't a list of {method, path, name}")
-        return Result("card", "failed" if problems else "passed", "; ".join(problems))
+        return ("failed" if problems else "passed"), "; ".join(problems)
 
     def _any_host(self) -> tuple[Status, str]:
         host = f"conformance-{uuid.uuid4().hex[:8]}.invalid"
@@ -159,6 +180,15 @@ class _Checker:
             parse_time(response.headers[UNIVERSE_NOW_HEADER])
         return "passed", f"on all {len(self.responses)} answers"
 
+    def _reserved_paths(self) -> tuple[Status, str]:
+        paths = [RPC_PATH, WELL_KNOWN_PATH, f"{RPC_PATH}/conformance-{uuid.uuid4().hex[:8]}", f"{RPC_PATH}/",
+                 f"{WELL_KNOWN_PATH}/"]
+        for path in paths:
+            response = self.get(path)
+            if response.is_success and response.headers.get("content-type", "").startswith("text/html"):
+                return "failed", f"{path} answered a page, but the gateway keeps {RPC_PATH} and {WELL_KNOWN_PATH}"
+        return "passed", f"no page at {', '.join(paths)}"
+
     def _rpc(self, method: str, params: dict | None = None) -> dict:
         response = self._seen(self.client.post(self.rpc_url, json={"jsonrpc": "2.0", "id": method,
                                                                                "method": method, "params": params or {}}))
@@ -171,7 +201,10 @@ class _Checker:
 
     def _data_plane(self, card: dict) -> tuple[Status, str]:
         operations = (card.get("capabilities") or {}).get("operations")
-        missing = [m for m in (METHOD_GET, METHOD_RESET, METHOD_ADD) if operations is not None and m not in operations]
+        operations = operations if isinstance(operations, list) else []
+        missing = [m for m in (METHOD_GET, METHOD_RESET, METHOD_ADD) if m not in operations]
+        if len(missing) == 3:
+            return "skipped", "the card advertises no data plane"
         if missing:
             return "failed", f"the card's operations lack {', '.join(missing)}"
         url = card.get("url")
@@ -238,14 +271,19 @@ class _Checker:
         return "passed", f"no answer to {', '.join(paths)} named the internal Host"
 
     def _cookies(self, site: dict) -> tuple[Status, str]:
+        session = []
         if isinstance(site.get("session_path"), str):
-            self.get(site["session_path"])
+            session = self.get(site["session_path"]).headers.get_list("set-cookie")
         cookies = [c for r in self.responses for c in r.headers.get_list("set-cookie")]
         if not cookies:
             return "skipped", "no answer set a cookie"
         scoped = sorted({c.split("=", 1)[0] for c in cookies if "domain" in _attributes(c)})
         if scoped:
             return "failed", f"cookies tied to a domain: {', '.join(scoped)}"
+        named = site.get("session_cookie")
+        if isinstance(named, str) and session and named not in {c.split("=", 1)[0].strip() for c in session}:
+            return "failed", (f"{site['session_path']} set {', '.join(c.split('=', 1)[0] for c in session)}, not the "
+                              f"card's {named}")
         absolute = sorted({c.split("=", 1)[0] for c in cookies if "expires" in _attributes(c) and "max-age" not in _attributes(c)})
         if absolute:
             return "warned", (f"cookies with an absolute Expires and no Max-Age, which a browser on another clock "
@@ -341,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("url", help="where the server answers, such as http://localhost:8000")
     parser.add_argument("--clock-host", default="127.0.0.1", help="the address the server reaches this checker at")
     parser.add_argument("--timeout", type=float, default=30, help="seconds for each request")
+    parser.add_argument("--strict", action="store_true", help="fail on a recommended check's warning too")
     args = parser.parse_args(argv)
     try:
         results = check(args.url, clock_host=args.clock_host, timeout=args.timeout)
@@ -348,10 +387,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"couldn't reach {args.url}: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     for result in results:
-        print(f"{_MARK[result.status]} {result.name}{': ' + result.detail if result.detail else ''}")
-    failed = sum(not r.passed for r in results)
-    print(f"{args.url}: {len(results) - failed} passed, warned or skipped, {failed} failed")
-    return 1 if failed else 0
+        kind = "required" if result.required else "recommended"
+        print(f"{_MARK[result.status]} {result.name} ({kind}){': ' + result.detail if result.detail else ''}")
+    counts = {status: sum(r.status == status for r in results) for status in _MARK}
+    print(f"{args.url}: {counts['passed']} passed, {counts['failed']} failed, {counts['warned']} warned, "
+          f"{counts['skipped']} skipped{' (strict)' if args.strict else ''}")
+    return 1 if any(r.fails(args.strict) for r in results) else 0
 
 
 if __name__ == "__main__":

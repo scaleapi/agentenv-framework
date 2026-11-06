@@ -42,7 +42,7 @@ from .errors import ApiError, NotFound
 from .readiness import SITE_READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness
 from .routes import (ApiContext, ApiRoute, endpoint, error_response, forwarded_prefix, openapi, openapi_path, request_role,
                      reserved_path, routes_of)
-from .session import SESSION_COOKIE, SessionSigner
+from .session import SessionSigner, session_cookie_name
 
 SESSION_PATH = "/api/session"
 CHECK_TIMEOUT_S = 10.0
@@ -114,7 +114,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     def __init__(self) -> None:
         self.clock = UniverseClock()
-        self._signer = SessionSigner()
+        self._signer = SessionSigner(cookie_name=session_cookie_name(self._build_card().name))
         self._started = time.monotonic()
         self._checking: dict[str, asyncio.Future] = {}
 
@@ -125,6 +125,11 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     @classmethod
     def routes(cls) -> list[ApiRoute]:
         return routes_of(cls)
+
+    @property
+    def session_cookie(self) -> str:
+        """The name of the site's session cookie, ``agentenv_session_<environment_name>``."""
+        return self._session_signer().cookie_name
 
     @property
     def database_url(self) -> str | None:
@@ -148,7 +153,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     def context(self, request: Request) -> ApiContext:
         """The ``ApiContext`` of ``request``, for a mounted ``app``'s routes as for ``@api`` ones."""
-        session = self._session_signer().decode(request.cookies.get(SESSION_COOKIE))
+        session = self._session_signer().read(request.cookies)
         user = session["user"] if session is not None else self.acting_user()
         return ApiContext(request, user, request_role(request), session, self._session_signer())
 
@@ -186,7 +191,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         if uri == WEBSITE_EXTENSION_URI:
             declaration = self.declaration()
             return {"domains": list(declaration.domains),
-                    "routes": [r.advertised() for r in self.routes()], "session_cookie": SESSION_COOKIE,
+                    "routes": [r.advertised() for r in self.routes()], "session_cookie": self.session_cookie,
                     "session_path": SESSION_PATH}
         return super().extension_params(uri)
 
