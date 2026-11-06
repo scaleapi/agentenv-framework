@@ -7,6 +7,7 @@ installed, empties the downloads and uploads and starts the record over."""
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 from types import SimpleNamespace
 
@@ -99,7 +100,13 @@ def browser(tmp_path, monkeypatch):
     async def until_ready():
         launches.append("ready")
 
-    made._computer_app = SimpleNamespace(stop_app=stop_app, launch_app=launch_app)
+    @contextlib.contextmanager
+    def paused():
+        launches.append("pause")
+        yield
+        launches.append("continue")
+
+    made._computer_app = SimpleNamespace(stop_app=stop_app, launch_app=launch_app, paused=paused)
     made._until_ready = until_ready
     made.launches = launches
     return made
@@ -139,6 +146,20 @@ async def test_data_get_is_its_state_its_profile_without_caches_or_locks_and_its
     assert files == {f"{PROFILE}/Default/Cookies": b"db", f"{PROFILE}/Default/Cookies-journal": b"j",
                      f"{PROFILE}/Default/Local Storage/leveldb/CURRENT": b"m", "Downloads/report.csv": b"a,b"}
     assert not list((home / ".cache").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_data_get_reads_the_state_then_copies_the_profile_with_the_browser_paused(browser, monkeypatch):
+    stage = website_browser.data.stage_profile
+
+    def staged(*args):
+        browser.launches.append("copy")
+        stage(*args)
+
+    monkeypatch.setattr(website_browser.data, "stage_profile", staged)
+    await browser.browser_get_data()
+
+    assert browser.launches == ["pause", "copy", "continue"]
 
 
 @pytest.mark.asyncio

@@ -461,8 +461,9 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @get_data
     async def browser_get_data(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
-        """Its state, as ``browser-state.json``, its profile without caches, and its finished downloads: each a file
-        uploaded under ``write_namespace`` when there is one, else inline."""
+        """Its state, as ``browser-state.json``, its profile without caches, copied with the browser paused so its files
+        are of one moment, and its finished downloads: each a file uploaded under ``write_namespace`` when there is
+        one, else inline."""
         home = Path.home()
         state = BrowserState(cookies=await self.control.cookies(), local_storage=await self.control.local_storage(),
                              tabs=await self.control.tab_list(),
@@ -473,7 +474,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         with tempfile.TemporaryDirectory(dir=home / ".cache") as staging:
             root = Path(staging)
             (root / data.STATE_FILE).write_text(json.dumps(written, indent=1), encoding="utf-8")
-            await app_data.in_thread(data.stage_profile, home, self.profile, root)
+            with self._computer_app.paused():
+                await app_data.in_thread(data.stage_profile, home, self.profile, root)
             parts = await file_parts(root, [data.STATE_FILE, self.profile], write_namespace)
         return parts + await file_parts(home, data.finished_downloads(home), write_namespace)
 
