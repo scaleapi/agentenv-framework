@@ -1482,6 +1482,8 @@ class RubricsVerifierTaskStep(TaskStep):
             )
             discrepancy_log.append(discrepancy.to_dict())
             if attempt == self.DEFAULT_MAX_RETRIES:
+                if discrepancy.non_finite_score_ids:
+                    raise ValueError(f"Judge output invalid after {attempt} attempts: {discrepancy}")
                 raise ValueError(
                     f"Judge returned {discrepancy.returned_count} results but expected "
                     f"{discrepancy.expected_count} criteria"
