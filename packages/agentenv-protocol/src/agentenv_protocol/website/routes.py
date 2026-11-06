@@ -28,7 +28,7 @@ from ..agent_env_environment import _coerce_scalar, _maybe_await, _schema_for_an
 from ..tool_context import DEFAULT_ROLE, caller_from_request
 from ..types import RPC_PATH, WELL_KNOWN_PATH
 from .errors import ApiError, BadRequest, Forbidden
-from .session import SESSION_COOKIE, SESSION_TTL_S, SessionSigner
+from .session import SESSION_TTL_S, SessionSigner
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,8 @@ class ApiContext:
 
     def apply(self, response: Response) -> Response:
         for value in self._set_cookie:
-            response.set_cookie(SESSION_COOKIE, value, max_age=SESSION_TTL_S, path="/", httponly=True, samesite="lax")
+            response.set_cookie(self._signer.cookie_name, value, max_age=SESSION_TTL_S, path="/", httponly=True,
+                                samesite="lax")
         return response
 
 

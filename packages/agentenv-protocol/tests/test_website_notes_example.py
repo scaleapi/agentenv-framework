@@ -19,7 +19,7 @@ import pytest
 from starlette.responses import PlainTextResponse
 from starlette.testclient import TestClient
 
-from agentenv_protocol.website import (ROLE_KEY_ENV, ROLE_KEY_HEADER, SESSION_COOKIE, UNIVERSE_NOW_HEADER, WebsiteEnvironment,
+from agentenv_protocol.website import (ROLE_KEY_ENV, ROLE_KEY_HEADER, UNIVERSE_NOW_HEADER, WebsiteEnvironment,
                                        conformance, website)
 
 NOTES_DIR = Path(__file__).resolve().parents[1] / "examples" / "website" / "notes"
@@ -112,8 +112,8 @@ def ready(client: TestClient) -> dict:
 def test_the_example_passes_every_conformance_check(client: TestClient) -> None:
     results = conformance.check("http://testserver", client=client)
     assert {r.name: r.status for r in results} == {**dict.fromkeys(
-        ["card", "any_host", "health", "universe_now", "data_plane", "clock", "forwarded", "cookies"], "passed"),
-        "mcp": "skipped"}, results
+        ["card", "any_host", "health", "universe_now", "reserved_paths", "data_plane", "clock", "forwarded",
+         "cookies"], "passed"), "mcp": "skipped"}, results
 
 
 def test_the_card_declares_the_site_and_its_routes_by_name_and_it_is_ready_through_website_v1(
@@ -131,7 +131,7 @@ def test_the_card_declares_the_site_and_its_routes_by_name_and_it_is_ready_throu
 def test_a_browser_is_signed_in_as_the_acting_user_and_can_sign_in_as_another(client: TestClient) -> None:
     session = client.get("/api/session")
     assert session.json() == {"user": "ann", "role": "default", "signed_in": True}
-    assert SESSION_COOKIE in session.cookies
+    assert "agentenv_session_notes" in session.cookies
     assert [n["title"] for n in client.get("/api/notes").json()] == ["Buy milk", "Book dentist"]
     assert client.post("/api/sign-in", json={"user": "ben"}).json() == {"user": "ben"}
     assert client.get("/api/session").json()["user"] == "ben"
@@ -235,6 +235,7 @@ def test_the_seed_loads_exports_and_resets_through_the_data_plane(client: TestCl
     client.post("/api/notes/1/toggle")
     toggled = rpc(client, "data/get")["parts"][0]["data"]["notes"]
     assert next(note for note in toggled if note["id"] == 1)["done"] is True
+
 
 
 GATEWAY_PREFIX = "/website/notes"

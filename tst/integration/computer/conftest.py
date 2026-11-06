@@ -143,4 +143,4 @@ def state(monkeypatch, tmp_path):
 def run_context(output: str) -> dict:
     """The context of the run whose ``agent-env run`` output ``output`` is."""
     with namespace_routing():
-        return get_task_instance_store().get(re.search(r"instance (@local/\S+)", output).group(1)).context
+        return get_task_instance_store().get(re.search(r"instance (@local/.+)$", output, re.M).group(1)).context

@@ -442,7 +442,8 @@ def modal_fake(monkeypatch):
 
     monkeypatch.setattr(mvs.modal.Sandbox, "_experimental_create", SimpleNamespace(aio=create))
     monkeypatch.setattr(mvs.modal.Secret, "from_dict", lambda variables: made.secrets.append(variables) or variables)
-    monkeypatch.setattr(mvs, "exported_disk", lambda image: made.exported.append(image) or Path("/cache/disk.img.zst"))
+    monkeypatch.setattr(mvs, "exported_disk", lambda image, platform: made.exported.append((image, platform))
+                        or Path("/cache/disk.img.zst"))
     monkeypatch.setattr(mvs, "_launcher", AsyncMock(return_value=made.launcher))
     monkeypatch.setattr(mvs, "_log_sandbox_started", AsyncMock())
     return made
@@ -467,7 +468,7 @@ async def test_a_disk_boots_in_a_vm_sandbox_whose_image_is_the_launcher_with_the
                                              cpu=2, memory=4096, timeout=3600)
 
     ((command, kwargs),) = modal_fake.creates
-    assert modal_fake.exported == [DISK_IMAGE]
+    assert modal_fake.exported == [(DISK_IMAGE, "linux/amd64")]
     modal_fake.launcher.add_local_file.assert_called_once_with(Path("/cache/disk.img.zst"), "/disk/disk.img.zst",
                                                                copy=False)
     assert command == ("/usr/local/bin/launch",) and kwargs["image"] is modal_fake.launcher.add_local_file.return_value

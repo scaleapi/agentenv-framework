@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import METHOD_ADD, RPC_PATH
 from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.computer.tools import Tools
+from agentenv_protocol.tool_access import (DISABLE, DISABLE_TOOL_EXTENSION_URI, ENABLE, ENABLE_TOOL_EXTENSION_URI,
+                                           WILDCARD)
+from agentenv_protocol.tool_context import DEFAULT_ROLE
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, SettingValue
 from agent_env.attribution import Attribution
@@ -56,6 +60,13 @@ APP_TYPE = "computer_app"
 #: The statuses of a build a deploy boots, by form: a disk may also boot unprobed, as KVM is where a disk is probed, and
 #: so may a VM bundle, which a Mac probes.
 _DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified"), "vm_bundle": ("ready", "unverified")}
+#: Every ``computer_*`` tool a driver can serve.
+COMPUTER_TOOLS = tuple(sorted(name for name in vars(Tools) if name.startswith("computer_")))
+#: What a computer env's ``tools`` gives its agents, as the tool-access changes a deploy makes for them: ``standard``,
+#: AgentEnv's ``computer_*`` tools alone; ``driver``, the driver's own alone; ``both``, every tool it serves.
+TOOLS = {"standard": ((DISABLE, [WILDCARD]), (ENABLE, list(COMPUTER_TOOLS))), "driver": ((DISABLE, list(COMPUTER_TOOLS)),),
+         "both": ()}
+_TOOL_ACCESS_URIS = {DISABLE: DISABLE_TOOL_EXTENSION_URI, ENABLE: ENABLE_TOOL_EXTENSION_URI}
 
 
 class ComputerEnv(Env):
@@ -70,11 +81,12 @@ class ComputerEnv(Env):
     def __init__(self, id: str, version: Optional[int], environment_name: str, computer: ComputerArtifact,
                  driver: ComputerDriverEnv, display: Optional[dict] = None, network: Optional[dict] = None,
                  computer_settings: Optional[dict[str, SettingValue]] = None, metadata: Optional[dict[str, Any]] = None,
-                 apps: Optional[list[ComputerAppEnv]] = None, app_settings: Optional[dict[str, dict]] = None):
+                 apps: Optional[list[ComputerAppEnv]] = None, app_settings: Optional[dict[str, dict]] = None,
+                 tools: Optional[str] = None):
         super().__init__(id, version, metadata=metadata)
         self.environment_name = environment_name
         self.computer, self.driver, self.apps = computer, driver, apps or []
-        self.display, self.network = display, network
+        self.display, self.network, self.tools = display, network, tools
         self.computer_settings = computer_settings or {}
         self.app_settings = app_settings or {}
         self._sandbox = None
@@ -89,6 +101,7 @@ class ComputerEnv(Env):
                 "computer": {"id": self.computer.id, "version": self.computer.version},
                 "driver": {"id": self.driver.id, "version": self.driver.version}, "display": self.display,
                 "network": self.network, "computer_settings": self.computer_settings,
+                **({"tools": self.tools} if self.tools else {}),
                 **({"apps": [{"id": app.id, "version": app.version,
                               **({"settings": own} if (own := self.app_settings.get(app.environment_name)) else {})}
                              for app in self.apps]} if self.apps else {})}
@@ -106,21 +119,21 @@ class ComputerEnv(Env):
                    display=data.get("display"), network=data.get("network"),
                    computer_settings=data.get("computer_settings"), metadata=data.get("metadata") or {}, apps=apps,
                    app_settings={app.environment_name: ref["settings"] for app, ref in zip(apps, refs)
-                                 if ref.get("settings")})
+                                 if ref.get("settings")}, tools=data.get("tools"))
 
     @classmethod
     def put(cls, *, id: str, computer: ComputerArtifact, driver: ComputerDriverEnv, environment_name: str,
             apps: Any = (), display: Any = None, network: Any = None, computer_settings: Any = None,
-            app_settings: Optional[dict[str, dict]] = None, compose: bool = True,
+            app_settings: Optional[dict[str, dict]] = None, tools: Optional[str] = None, compose: bool = True,
             composing: Composing = Composing()) -> Self:
         """Write a computer env of ``computer``, ``driver`` and ``apps``, computer app envs built into it in their
-        order, with ``app_settings``, defaults for some of their settings by app name, once gate 1 passes, then compose
-        it as ``composing`` says unless ``compose`` is False. Refused, naming every mismatch, before anything is
-        stored."""
+        order, with ``app_settings``, defaults for some of their settings by app name, and ``tools``, which of them its
+        agents get (``TOOLS``), once gate 1 passes, then compose it as ``composing`` says unless ``compose`` is False.
+        Refused, naming every mismatch, before anything is stored."""
         apps, app_settings = list(apps), app_settings or {}
         values, problems = gate.check(computer, driver, environment_name=environment_name, apps=apps, display=display,
                                       network=network, computer_settings=computer_settings or {})
-        problems += gate.check_screen(driver, apps)
+        problems += gate.check_screen(driver, apps) + _tools_problems(tools)
         by_name = {app.environment_name: app for app in apps}
         for name, defaults in app_settings.items():
             problems += ([f"apps.{name}.settings: {id} has no app {name!r}"] if name not in by_name else
@@ -130,7 +143,7 @@ class ComputerEnv(Env):
             raise ValueError(f"computer env {id!r}: " + "; ".join(problems))
         env = get_env_store().put_document(cls(
             id=id, version=None, environment_name=environment_name, computer=computer, driver=driver, apps=apps,
-            display=display, network=network, computer_settings=values, app_settings=app_settings))
+            display=display, network=network, computer_settings=values, app_settings=app_settings, tools=tools))
         if compose:
             composer.compose(env, composing=composing)
         return env
@@ -152,12 +165,13 @@ class ComputerEnv(Env):
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a computer env takes: the ``computer`` and ``driver`` it's composed of,
-        both required, its ``apps``, ``display``, ``network`` and ``computer_settings``, and ``environment_name``, the
-        folder's when it sets none. Raises BundleError listing every problem."""
+        both required, its ``apps``, ``display``, ``network``, ``computer_settings`` and ``tools``, and
+        ``environment_name``, the folder's when it sets none. Raises BundleError listing every problem."""
         fields, refused = ctx.accepted(data, environment_name=str, computer=object, driver=object, apps=list,
-                                       display=dict, network=dict, computer_settings=dict)
+                                       display=dict, network=dict, computer_settings=dict, tools=str)
         missing = [ctx.config_problem(f"{key} is required: the {what}, such as {example}") for key, what, example in (
             ("computer", "base computer", '"ubuntu-24.04"'), ("driver", "driver", '"reference"')) if key not in data]
+        refused += [ctx.config_problem(problem) for problem in _tools_problems(fields.get("tools"))]
         if refused or missing:
             ctx.refuse([*refused, *missing])
         return {"environment_name": ctx.name, **fields}
@@ -260,7 +274,7 @@ class ComputerEnv(Env):
                      env_params: Optional[dict] = None) -> DeployedEnv:
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
-            disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
+            then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
             env_params=env_params)
 
@@ -365,8 +379,15 @@ class ComputerEnv(Env):
     async def reset(self, deployed: DeployedEnv) -> None:
         """Return the computer to boot state: its recordings ended, its container replaced with a fresh one of the same
         image, on the same sandbox and port, so its address stays. An agent's MCP session ends with the old driver; one
-        held across the reset is answered 404, and MCP clients then start a new one."""
+        held across the reset is answered 404, and MCP clients then start a new one. Its agents get its ``tools``
+        again, as at deploy."""
         await as_builtin(self._env_provider).reboot(self, deployed)
+        await self._give_tools(deployed)
+
+    async def _give_tools(self, deployed: DeployedEnv) -> None:
+        """Make the tool-access changes ``tools`` makes for the agents' role, which a task's own then follow."""
+        for action, tools in TOOLS[self.tools or "both"]:
+            await deployed.invoke(_TOOL_ACCESS_URIS[action], action, {"role": DEFAULT_ROLE, "tools": tools})
 
     async def close(self) -> None:
         """End the computer's recordings, so what they recorded reaches the store, then tear it down."""
@@ -477,3 +498,8 @@ def _waiting(awaited: dict[tuple[str, str], str | None], seconds: float) -> str:
     building = f"building since {datetime.fromisoformat(since).strftime('%H:%M')} UTC" if since else "building"
     so_far = f", {composer.took(seconds)} so far" if seconds >= 1 else ""
     return f"waiting for another deploy composing {_pairs(list(awaited)) or 'it'} ({building}{so_far})"
+
+
+def _tools_problems(tools: Any) -> list[str]:
+    return [] if tools is None or tools in TOOLS else [
+        f"tools is {', '.join(map(repr, list(TOOLS)[:-1]))} or {list(TOOLS)[-1]!r}, not {tools!r}"]

@@ -25,7 +25,7 @@ from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
-from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
+from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -39,12 +39,12 @@ from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.env import DeployedEnv
+from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
                                                probing, resolve_in_base)
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.probing import _probe
-from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer import app_env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.utils.install import Install, Service
@@ -474,8 +474,9 @@ async def test_a_computer_env_with_no_ready_build_is_refused_at_deploy_naming_it
      "computer_settings.wallpaper: @local/~/kit/ubuntu-24.04 declares no setting 'wallpaper'"),
     ({"computer_settings": {"timezone": 3}}, "computer_settings.timezone must be a str, like its default 'UTC', not 3"),
     ({"computer_settings": ["timezone"]}, "computer_settings must be a table of the computer's setting values"),
+    ({"tools": "all"}, "tools is 'standard', 'driver' or 'both', not 'all'"),
 ], ids=["display-zero", "display-side", "display-and-resolution", "network", "network-key",
-        "settings-name", "settings-type", "settings-table"])
+        "settings-name", "settings-type", "settings-table", "tools"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
         _put(base, driver, **changes)
@@ -642,6 +643,7 @@ def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_r
 DRIVER_CARD = {"name": "desktop", "capabilities": {"extensions": [
     {"uri": COMPUTER_DISPLAY, "params": {"endpoint": "/computer/display", "methods": {"get": {"method": "GET"}}}},
     {"uri": DISABLE_TOOL_EXTENSION_URI, "params": {"endpoint": "/tools/disable", "methods": {"disable": {}}}},
+    {"uri": ENABLE_TOOL_EXTENSION_URI, "params": {"endpoint": "/tools/enable", "methods": {"enable": {}}}},
     {"uri": COMPUTER_RECORDING, "params": {"endpoint": "/computer/recording", "methods": {"end_all": {}}}}]}}
 
 
@@ -754,6 +756,46 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S,
                                                          deployed.control_token, answering=False)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools, changes", [
+    ("standard", [(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "default", "tools": ["*"]}),
+                  (ENABLE_TOOL_EXTENSION_URI, "enable", {"role": "default", "tools": list(COMPUTER_TOOLS)})]),
+    ("driver", [(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "default", "tools": list(COMPUTER_TOOLS)})]),
+    ("both", []),
+])
+async def test_a_computer_envs_tools_are_given_its_agents_at_deploy_and_again_after_a_reset(
+        base, driver, docker, boots, monkeypatch, tools, changes):
+    env = _put(base, driver, display={"width": 1600, "height": 900}, tools=tools)
+    deployed = await Env.get(env.id).deploy()
+    (sandbox,) = boots.sandboxes
+    given = [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)]
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", AsyncMock())
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+    boots.calls.clear()
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    assert Env.get(env.id).tools == tools and given == changes
+    assert [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)] == changes
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_whose_tools_the_driver_cant_take_fails_and_tears_down_its_computer_alone(
+        base, driver, docker, boots, monkeypatch):
+    live = Env.get(_put(base, driver, display={"width": 1600, "height": 900}, tools="standard").id)
+    first = await live.deploy()
+    monkeypatch.setitem(DRIVER_CARD["capabilities"], "extensions", [
+        extension for extension in DRIVER_CARD["capabilities"]["extensions"] if extension["uri"] != ENABLE_TOOL_EXTENSION_URI])
+
+    with pytest.raises(EnvCapabilityUnsupported):
+        await live.deploy()
+
+    kept, failed = boots.sandboxes
+    assert failed.terminated and not kept.terminated and live._deployed is first
 
 
 @pytest.mark.asyncio

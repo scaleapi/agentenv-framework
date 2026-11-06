@@ -5,7 +5,9 @@ import shutil
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
+from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
+from agent_env.artifact.store import get_artifact_store
 from agent_env.bundle import parse_bundle
 from agent_env.bundle import requires as requires_module
 from agent_env.bundle.plan import plan_bundle
@@ -14,6 +16,7 @@ from agent_env.config import get_config
 from agent_env.env.published_images import AGENT_IMAGES
 from agent_env.plugins import Inventory, _requirements
 from agent_env.store.document_store import DocumentStore
+from agent_env.store.routing import namespace_routing
 
 # The image of the Claude Code agent agent-env ships.
 CLAUDE_CODE_IMAGE = next(image for image in AGENT_IMAGES if image.name == "agentenv-claude-code")
@@ -97,3 +100,11 @@ class RefusingStore(DocumentStore):
         pass
 
     find_one = query = count = insert = update = update_one_and_get = replace = delete = None
+
+
+def store_agent(agent_id):
+    """An agent ``agent_id`` in the store, over an image that names a registry ref."""
+    with namespace_routing():
+        image = get_artifact_store().put_document(DockerImageArtifact(
+            id=f"{agent_id}-image", description="d", image_name="ghcr.io/acme/agent:1", tar_gz_s3_url="s3://b/x.tar.gz"))
+        return A2AAgent.put(id=agent_id, docker_image_artifact=image)

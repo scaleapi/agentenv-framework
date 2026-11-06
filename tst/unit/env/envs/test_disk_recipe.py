@@ -453,12 +453,12 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
     monkeypatch.setattr(local_disk.subprocess, "run", run)
     first = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
 
-    exported = [local_disk.exported_disk(image) for image in (first, first, first.replace("1", "2"))]
+    exported = [local_disk.exported_disk(image, "linux/amd64") for image in (first, first, first.replace("1", "2"))]
 
     assert exported[0] == exported[1] != exported[2] and exported[0].parent == tmp_path / "cache" / "agentenv" / "disks"
     assert exported[0].read_bytes() == b"zstd:disk of container1:/disk/disk.img" and exported[0].name.endswith(".img.zst")
     assert [args[0] for args in ran] == ["login", "create", "cp", "login", "create", "cp"]
-    assert ran[0] == ("login", f"credentials for {first}") and ran[1][1:] == (first, "disk")
+    assert ran[0] == ("login", f"credentials for {first}") and ran[1][1:] == ("--platform", "linux/amd64", first, "disk")
     assert compressed[0] == ["docker", "run", "--rm", "-i", "--entrypoint", "zstd", "agentenv-qemu-launcher:src-1",
                              "-q", "-3", "-T0", "-c"] and len(compressed) == 2
     assert sorted(p.name for p in exported[0].parent.iterdir()) == sorted({exported[0].name, exported[2].name})

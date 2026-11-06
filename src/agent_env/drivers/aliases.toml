@@ -1,4 +1,4 @@
-# Ids a task, or --driver, can name these drivers by; a store's env of the id wins over an alias.
+# Ids a task, or --set envs/<name>.driver=, can name these drivers by; a store's env of the id wins over an alias.
 [envs]
 reference = ["reference"]
 cua-driver = ["cua-driver"]

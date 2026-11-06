@@ -225,7 +225,7 @@ def _slug(name: str) -> str:
 
 # The fields of a Plan that hold no ``@local`` id, so a translated plan keeps them: the store's latest versions, by store
 # id, and the agent ``--agent`` names, which a registration plans without.
-_KEPT = frozenset({"store_latest", "agent"})
+_KEPT = frozenset({"store_latest", "agent", "variant"})
 
 
 def translated(plan: Plan, ids: Mapping[str, str]) -> Plan:
