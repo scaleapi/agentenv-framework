@@ -3,6 +3,7 @@ there, picked by its URL, closed or brought to the front."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import ClassVar, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -19,7 +20,7 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 class BrowserOpenTabTaskStep(BrowserStep):
     """Open a tab at ``url``, in front, or with ``background`` behind the active tab, which stays active; the new tab's
-    id is recorded."""
+    id is recorded. ``background`` is sent only when set, so a browser built before it opens tabs in front."""
 
     type: ClassVar[str] = "browser_open_tab"
     entity_refs = (EntityRef.env("env_id"),)
@@ -44,7 +45,8 @@ class BrowserOpenTabTaskStep(BrowserStep):
         return cls(**cls._browser_from_dict(data), url=data["url"], background=data.get("background", False))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        tab = (await self._call(context, "tabs/open", {"url": self.url, "background": self.background}))["tab"]
+        params = {"url": self.url, **({"background": True} if self.background else {})}
+        tab = (await self._call(context, "tabs/open", params))["tab"]
         logger.info(f"{self.id}: opened tab {tab} at {self.url}{' in the background' if self.background else ''} in "
                     f"the browser of env {self.env_id!r}")
         self._record(context, tab=tab)
@@ -104,13 +106,18 @@ class BrowserActivateTabTaskStep(_TabAtUrlStep):
 
 
 def normalized(url: str) -> str:
-    """``url`` as the browser shows it: its scheme and host lowercase, its default port dropped, and an empty path as
-    ``/``; its query and fragment as they are. A URL with no host, such as ``about:blank``, is left as it is."""
+    """``url`` as the browser shows it: its scheme and host lowercase, a host in another script as punycode, its default
+    port dropped, and an empty path as ``/``; its query and fragment as they are. A URL with no host, such as
+    ``about:blank``, is left as it is."""
     parts = urlsplit(url)
     if not parts.netloc:
         return url
     scheme, host = parts.scheme.lower(), (parts.hostname or "")
-    host = f"[{host}]" if ":" in host else host
+    if ":" in host:
+        host = f"[{host}]"
+    elif not host.isascii():
+        with contextlib.suppress(UnicodeError):
+            host = host.encode("idna").decode("ascii")
     port = parts.port
     netloc = host if port is None or port == _DEFAULT_PORTS.get(scheme) else f"{host}:{port}"
     if parts.username is not None:

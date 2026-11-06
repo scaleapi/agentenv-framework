@@ -50,6 +50,8 @@ _TABS = [{"id": "A", "url": "https://shop.test/", "active": True}, {"id": "B", "
     (BrowserClearLocalStorageTaskStep(id="s", version=None, env_id="computer"), "local_storage/clear", {}, None),
     (BrowserOpenTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test/help", background=True),
      "tabs/open", {"url": "https://shop.test/help", "background": True}, {"tab": "C"}),
+    (BrowserOpenTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test/help"),
+     "tabs/open", {"url": "https://shop.test/help"}, {"tab": "C"}),
 ])
 async def test_each_step_calls_its_operation_on_the_browser_with_the_control_token(monkeypatch, step, op, body,
                                                                                    recorded):
@@ -191,6 +193,7 @@ def test_each_step_is_registered_and_round_trips(step):
     ("http://shop.test:80/a?b=1#c", "http://shop.test/a?b=1#c"),
     ("https://shop.test:8443", "https://shop.test:8443/"),
     ("http://[::1]:8080", "http://[::1]:8080/"),
+    ("https://Bücher.test/a", "https://xn--bcher-kva.test/a"),
     ("about:blank", "about:blank"),
 ])
 def test_a_url_is_normalized_as_the_browser_shows_it(url, shown):
