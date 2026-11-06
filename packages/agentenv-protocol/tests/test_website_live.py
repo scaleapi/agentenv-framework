@@ -160,3 +160,25 @@ def test_a_session_state_is_checked_by_index_and_field_never_by_value():
         session_state({"name": "a"}, [])
     assert session_state([{"name": "b", "value": "v", "url": "https://b.example/"}], [], ["a.example"])["cookies"] == [
         {"name": "b", "value": "v", "url": "https://b.example/", "httpOnly": False, "secure": False}]
+
+
+def test_a_plain_session_method_runs_off_the_event_loop():
+    import threading
+
+    seen = {}
+
+    @website(domains=["example.com"], live=True)
+    class Blocking(WebsiteEnvironment):
+        @ready_check
+        async def on_loop(self) -> bool:
+            seen["loop"] = threading.get_ident()
+            return True
+
+        @session
+        def sign_in(self, user):
+            seen["session"] = threading.get_ident()
+            return [{"name": "sid", "value": "v"}]
+
+    client = TestClient(Blocking().create_app())
+    assert client.post(SESSION, json={}).status_code == 200 and ready(client)["ready"] is True
+    assert seen["session"] != seen["loop"]

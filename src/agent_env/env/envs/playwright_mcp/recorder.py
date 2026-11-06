@@ -316,20 +316,27 @@ def _placed(cookie: CookieToSet, now: float) -> dict:
     split = urlsplit(cookie.url) if cookie.url else None
     expires = cookie.expires if cookie.expires is not None else (
         now + cookie.max_age if cookie.max_age is not None else -1)
-    return {"name": cookie.name, "value": cookie.value, "domain": cookie.domain or split.hostname,
-            "path": cookie.path or "/", "expires": expires, "httpOnly": cookie.httpOnly,
-            "secure": cookie.secure or (split is not None and split.scheme == "https"),
-            "sameSite": cookie.sameSite or "Lax"}
+    placed = {"name": cookie.name, "value": cookie.value, "domain": cookie.domain or split.hostname,
+              "path": cookie.path or "/", "expires": expires, "httpOnly": cookie.httpOnly,
+              "secure": cookie.secure or (split is not None and split.scheme == "https"),
+              "sameSite": cookie.sameSite or "Lax"}
+    if cookie.partitionKey is not None:
+        placed["partitionKey"] = cookie.partitionKey.model_dump()
+    return placed
 
 
-def _key(cookie: dict) -> tuple[str, str, str]:
-    """What a browser keeps one cookie under: a later one with the same key replaces it."""
-    return cookie["name"], str(cookie["domain"]).lower(), cookie.get("path") or "/"
+def _key(cookie: dict) -> tuple:
+    """What a browser keeps one cookie under, a partitioned one's partition among it: a later one with the same key
+    replaces it."""
+    partition = cookie.get("partitionKey") or {}
+    return (cookie["name"], str(cookie["domain"]).lower(), cookie.get("path") or "/", partition.get("topLevelSite"),
+            partition.get("hasCrossSiteAncestor"))
 
 
 def _settable(cookie: dict) -> dict:
     """A cookie as ``Storage.setCookies`` takes it: one kept in the file, or one DevTools listed."""
-    param = {k: cookie[k] for k in ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite") if k in cookie}
+    param = {k: cookie[k] for k in ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite", "partitionKey")
+             if k in cookie}
     if not cookie.get("session", False) and cookie.get("expires", -1) not in (-1, None):
         param["expires"] = cookie["expires"]
     return param

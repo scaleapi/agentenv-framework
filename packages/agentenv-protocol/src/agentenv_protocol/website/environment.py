@@ -127,7 +127,8 @@ def host_problem(host: Any) -> str | None:
 
 def session(fn: Any) -> Any:
     """Mark the method that signs a browser in: called with the ``user`` to sign in as (None for the site's own
-    choice), it returns the cookies a browser adds, browser/v1's ``cookies/set`` shape, or ``{"cookies": [...],
+    choice; a plain ``def`` in a worker thread, so a blocking sign-in holds up no other answer), it returns the
+    cookies a browser adds, browser/v1's ``cookies/set`` shape, or ``{"cookies": [...],
     "local_storage": [...]}``. A cookie that names neither a ``url`` nor a ``domain`` is for the site's first domain.
     website/v1's ``session`` operation calls it in place of the site's own signed cookie; a live site needs one to
     start signed in."""
@@ -291,7 +292,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
                 raise AgentEnvError("no_session", f"{type(self).__name__} is a live site with no @session method, so "
                                     "it can't sign a browser in", status=501)
             return {"cookies": [self._session_signer().cookie(user)], "local_storage": []}
-        result = await _maybe_await(hook(user))
+        result = await (hook(user) if inspect.iscoroutinefunction(hook) else asyncio.to_thread(hook, user))
         given, storage = (result.get("cookies"), result.get("local_storage") or []) if isinstance(result, dict) else (
             result, [])
         try:

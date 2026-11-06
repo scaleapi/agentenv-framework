@@ -177,9 +177,11 @@ async def sign_in(context: TaskStepContext, deployed: Any, *, users: Optional[di
         named = f"named {browser!r} " if browser is not None else ""
         raise RuntimeError(f"env {deployed.env_id!r} has live websites with a session ({[s.name for s in chosen]}) "
                            f"but no child env {named}serves {BROWSER_EXTENSION_URI} {SET_COOKIES} to sign a browser in")
-    if chosen and browser is not None and len(offered) > 1:
-        raise RuntimeError(f"env {deployed.env_id!r} has {len(offered)} browsers named {browser!r} "
-                           f"({', '.join(str(c.url) for c in offered)}), so the name can't say which to sign in")
+    if chosen and len(offered) > 1:
+        which = f"named {browser!r} " if browser is not None else ""
+        hint = "the name can't say" if browser is not None else "set browser to say"
+        raise RuntimeError(f"env {deployed.env_id!r} has {len(offered)} browsers {which}serving {SET_COOKIES} "
+                           f"({', '.join(str(c.name) for c in offered)}), so {hint} which to sign in")
     target = offered[0] if chosen else None
     browser = target.name if target is not None else browser
     record: dict = {"env_id": deployed.env_id, "env_step_id": deploy_step_of(deployed), "browser": browser,

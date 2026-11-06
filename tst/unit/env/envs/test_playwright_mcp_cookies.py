@@ -169,3 +169,16 @@ def test_playwright_mcp_starts_each_context_from_the_file_the_recorder_writes():
     default = re.search(r'PLAYWRIGHT_STORAGE_STATE="\$\{PLAYWRIGHT_STORAGE_STATE:-([^}]+)\}"', entrypoint).group(1)
     assert default == recorder.DEFAULT_STORAGE_STATE
     assert '--storage-state "${PLAYWRIGHT_STORAGE_STATE}"' in entrypoint
+
+
+@pytest.mark.asyncio
+async def test_a_partitioned_cookie_keeps_its_partition_in_the_file_and_the_browser(tmp_path):
+    devtools = _DevTools()
+    app = recorder.create_app(_recorder(tmp_path, devtools))
+    partition = {"topLevelSite": "https://shop.example", "hasCrossSiteAncestor": False}
+    await _post(app, SET, {"cookies": [{**OTHER, "partitionKey": partition}, OTHER]})
+    assert [c.get("partitionKey") for c in json.loads((tmp_path / "storage-state.json").read_text())["cookies"]] == [
+        partition, None]
+    assert [c.get("partitionKey") for c in devtools.jars[None]] == [partition, None]
+    await _post(app, DELETE, {"name": "sid"})
+    assert devtools.jars[None][0]["partitionKey"] == partition

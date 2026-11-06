@@ -329,3 +329,16 @@ async def test_a_sessions_local_storage_goes_to_a_browser_that_takes_it_and_is_r
     with pytest.raises(RuntimeError, match="doesn't serve local_storage/set"):
         await SignInBrowserTaskStep(id="s", version=1, env_id="e1").execute(
             TaskStepContext(deployed_envs=[set_only.deployed()]))
+
+
+@pytest.mark.asyncio
+async def test_two_browsers_without_one_named_are_refused(gateway, browser):
+    second = rewrite_child_card("mcp-second", TestClient(_card_app(Browser())).get("/.well-known/agent-env.json").json(),
+                                GATEWAY_EXTENSIONS)
+    second["name"] = "second-browser"
+    card = {**gateway.card, "children_environments": [*gateway.card["children_environments"], second]}
+    deployed = DeployedEnv(env_id="e1", env_version=1, environment_card_url="http://gw/.well-known/agent-env.json",
+                           environment_card=card)
+    with pytest.raises(RuntimeError, match="2 browsers serving cookies/set .* set browser to say which"):
+        await SignInBrowserTaskStep(id="s", version=1, env_id="e1").execute(TaskStepContext(deployed_envs=[deployed]))
+    assert browser.calls == []
