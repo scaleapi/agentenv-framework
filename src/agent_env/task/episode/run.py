@@ -401,7 +401,8 @@ def _record_run(task: Task, instance_id: str, metadata: dict[str, Any]) -> None:
             run_id=_run_id(instance_id), runner="episode", task_id=task.id, task_version=task.version,
             instance_id=instance_id, status=RunStatus.RUNNING, started_at_utc=now,
             owner={"host": socket.gethostname(), "pid": os.getpid(), "seen": now},
-            overrides={"metadata": {key: metadata[key] for key in ("episode", "run_group_id") if key in metadata}}))
+            overrides={"metadata": {key: metadata[key] for key in ("episode", "run_group_id", "seed")
+                                    if key in metadata}}))
 
 
 def _record_ended(task_id: str, instance_id: str, status: RunStatus, error: str | None) -> None:
