@@ -763,7 +763,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
 
         # Role-based tool filtering: disable list_emails for "default" role, verify it's hidden from
         # default callers but still accessible to a non-default role; then re-enable and verify recovery.
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_DISABLE_ACTION}",
                 json={"role": "default", "tools": ["list_emails"]},
@@ -839,7 +839,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             assert "alex.chen@techcorp.com" in (await cli_session.call_tool("list_emails", {"folder_name": "INBOX"})).text
 
         # Re-enable: list_emails accessible to default role again
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_ENABLE_ACTION}",
                 json={"role": "default", "tools": ["list_emails"]},
@@ -863,7 +863,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
 
         # Global disable (role="*"): tool should be hidden from every role, including never-seen ones,
         # and become visible to everyone again on global enable.
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_DISABLE_ACTION}",
                 json={"role": "*", "tools": ["list_emails"]},
@@ -901,7 +901,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
                 tools_result = await session.list_tools()
                 assert "list_emails" not in [t.name for t in tools_result.tools]
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_ENABLE_ACTION}",
                 json={"role": "*", "tools": ["list_emails"]},
@@ -920,7 +920,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
         # Override scenario: globally disable everything via the wildcard tool sentinel ("*"), then
         # re-enable everything for one specific role. Verifies (a) per-role allow beats global deny,
         # and (b) wildcard rules apply to all tools without snapshotting (future-tool semantic).
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_DISABLE_ACTION}",
                 json={"role": "*", "tools": "*"},
@@ -2268,7 +2268,7 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch
 
         await _verify_list_tools(mcp_url=result.mcp_url, tool_verifier_callback=assert_list_items_present)
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers=result.control_headers) as client:
             r = await client.post(
                 f"{result.gateway_url}{disable_params['endpoint']}",
                 json={"role": "default", "tools": ["list_items"]},
@@ -2510,7 +2510,7 @@ async def test_gateway_triggers_extension(sandbox_provider, mcp_server_envs, ema
                                      "predicate": {"regex": r"alex\.chen@techcorp\.com"}}}]},
         ]
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Baseline: pre-disable send_email for role default so the grant has a visible effect.
             r = await client.post(f"{gw}/tools/{TOOL_DISABLE_ACTION}",
                                   json={"role": "default", "tools": ["send_email"]}, timeout=30)
@@ -2677,7 +2677,7 @@ async def test_gateway_barrier_orders_a_templated_mirror(sandbox_provider, mcp_s
         result = await email_env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             reg = await client.post(f"{gw}/triggers/register",
                                     json={"watch_roles": ["default"], "triggers": [mirror]}, timeout=30)
             assert reg.status_code == 200, f"register failed: {reg.status_code} {reg.text}"
@@ -2789,7 +2789,7 @@ async def test_gateway_trigger_rearms_after_a_failed_mirror(sandbox_provider, mc
         result = await email_env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             reg = await client.post(f"{gw}/triggers/register",
                                     json={"watch_roles": ["default"], "triggers": [breaks]}, timeout=30)
             assert reg.status_code == 200, f"register failed: {reg.status_code} {reg.text}"
@@ -2861,7 +2861,7 @@ async def test_gateway_trigger_registration_is_fail_loud(sandbox_provider, mcp_s
         result = await email_env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Force discovery, so the unknown-tool checks are live rather than skipped.
             lt = await client.post(f"{gw}/step", json={"action": "list_tools"}, timeout=30)
             assert "send_email" in [t["name"] for t in lt.json()["tools"]], lt.text
@@ -2896,7 +2896,7 @@ async def test_gateway_website_trigger_fires_on_a_request_through_the_website_pr
         card = await protocol_v1.get_card(gw)
         assert TRIGGER_WEBSITE in protocol_v1.extension_params(card, EXT_TRIGGERS_URI)["features"], card
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             unknown = await client.post(f"{gw}/triggers/register", timeout=30, json={
                 "triggers": [{**visit, "when": {**visit["when"], "app": "calendar"}}]})
             assert unknown.status_code == 400 and "unknown website 'calendar'" in unknown.text, unknown.text
@@ -2950,7 +2950,7 @@ async def test_gateway_queued_trigger_is_not_reported_settled(sandbox_provider, 
         result = await email_env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             reg = await client.post(f"{gw}/triggers/register",
                                     json={"watch_roles": ["default"], "triggers": [slow]}, timeout=30)
             assert reg.status_code == 200, f"register failed: {reg.status_code} {reg.text}"
@@ -3048,7 +3048,7 @@ async def test_gateway_triggers_nl_executor(sandbox_provider, mcp_server_envs, e
         await email_env.load_environment_artifact(email_service_artifact)
         ctx = TaskStepContext(deployed_envs=[result], metadata={})
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Lock the executor role to exactly one tool (deny-all, then allow send_email). Wrong
             # realizations become structurally impossible, and the executor's own call stays outside
             # watch_roles (no cascade).
@@ -3204,7 +3204,7 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
         result = await env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Off-by-default + unconditional advertisement.
             assert (await _read(client, gw)).status_code == 404, "unarmed clock should 404"
             card = (await client.get(f"{gw}/.well-known/agent-env.json", timeout=30)).json()
@@ -3228,6 +3228,19 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
                                      timeout=30)).status_code == 400
             assert GET_TIME not in (await _get_time_surfaces(client, gw, result.mcp_url)).mcp
             assert (await _read(client, gw)).status_code == 404, "rejected arm must not arm the clock"
+
+            # Without the deploy's control token, every control route refuses and changes nothing; reads stay open.
+            async with httpx.AsyncClient() as agent:
+                for method, path in (("PUT", "/clock/set-time"), ("PUT", "/clock/advance"), ("POST", "/clock/clear"),
+                                     ("POST", "/tools/enable"), ("POST", "/tools/disable"), ("POST", "/triggers/register"),
+                                     ("POST", "/triggers/remove"), ("POST", "/triggers/clear"),
+                                     ("POST", "/notifications/config"), ("POST", "/notifications/take"),
+                                     ("POST", "/notifications/clear")):
+                    refused = await agent.request(method, f"{gw}{path}", timeout=30,
+                                                  json={"virtual_time": t0a, "virtual_seconds_per_real_second": 3600})
+                    assert refused.status_code == 401, (path, refused.text)
+                assert (await agent.get(f"{gw}/clock/time", timeout=30)).status_code == 404
+            assert (await _read(client, gw)).status_code == 404, "a refused arm must not arm the clock"
 
             # Arm at t0a, rate=3600 (1 real s -> 1 virtual h); baseline near t0a.
             armed_at = time.monotonic()
@@ -3398,7 +3411,7 @@ async def test_gateway_clock_rate_accuracy(sandbox_provider, mcp_server_envs):
     try:
         result = await env.deploy()
         gw = result.gateway_url
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             for rate in rates:
                 arm = await client.put(f"{gw}/clock/set-time", json={"virtual_time": t0, "virtual_seconds_per_real_second": rate}, timeout=30)
                 assert arm.status_code == 200 and arm.json()["virtual_seconds_per_real_second"] == rate, f"rate={rate}: {arm.text}"
@@ -3471,7 +3484,7 @@ async def test_gateway_time_trigger_extension(sandbox_provider, mcp_server_envs)
     try:
         result = await env.deploy()
         gw = result.gateway_url
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Pre-disable send_email so the flagship's permission mutation is observable.
             await client.post(f"{gw}/tools/{TOOL_DISABLE_ACTION}",
                               json={"role": "default", "tools": ["send_email"]}, timeout=30)
@@ -3567,7 +3580,7 @@ async def test_gateway_autonomous_time_trigger(sandbox_provider, mcp_server_envs
     try:
         result = await env.deploy()
         gw = result.gateway_url
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # rate 3600: 1 real s = 1 virtual h, so PT2H lands in ~2 real s and PT1H arrives ~1/real s.
             arm = await client.put(f"{gw}/clock/set-time",
                                    json={"virtual_time": t0, "virtual_seconds_per_real_second": 3600}, timeout=30)
@@ -5548,7 +5561,7 @@ async def _set_async_wait(result, tool_name, min_seconds, max_seconds=None, scal
 
 async def _clock_clear(result) -> None:
     """Disarm the gateway clock (POST /clock/clear); it then 404s on /clock/time."""
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers=result.control_headers) as client:
         r = await client.post(f"{result.gateway_url}/clock/clear", timeout=30)
         assert r.status_code == 200 and r.json()["armed"] is False, r.text
 
