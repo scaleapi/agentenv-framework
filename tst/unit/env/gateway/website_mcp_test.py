@@ -103,18 +103,19 @@ async def test_the_sites_whose_cards_declare_an_mcp_interface_are_internal_serve
 
 
 @pytest.mark.asyncio
-async def test_a_site_whose_server_never_answers_is_left_out_once_the_time_is_up(monkeypatch):
+async def test_a_site_whose_card_cant_be_read_in_time_stops_the_gateway_starting(monkeypatch):
     def down(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down")
 
     real = httpx.AsyncClient
     monkeypatch.setattr(entrypoint_module.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(down), **kw))
     monkeypatch.setattr(entrypoint_module, "_INTERNAL_SERVER_POLL_S", 0)
-    assert await website_mcp_servers({"shop": "http://shop:8000"}, timeout_s=0) == []
+    with pytest.raises(RuntimeError, match="not readable after 0s: shop"):
+        await website_mcp_servers({"shop": "http://shop:8000"}, timeout_s=0)
 
 
 @pytest.mark.asyncio
-async def test_sites_are_asked_at_once_so_one_never_up_leaves_another_its_retries(monkeypatch):
+async def test_sites_are_asked_at_once_and_the_one_never_up_is_named(monkeypatch):
     calls: dict[str, int] = {}
 
     def site(request: httpx.Request) -> httpx.Response:
@@ -127,8 +128,9 @@ async def test_sites_are_asked_at_once_so_one_never_up_leaves_another_its_retrie
     real = httpx.AsyncClient
     monkeypatch.setattr(entrypoint_module.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(site), **kw))
     monkeypatch.setattr(entrypoint_module, "_INTERNAL_SERVER_POLL_S", 0.01)
-    found = await website_mcp_servers({"down": "http://down", "late": "http://late"}, timeout_s=1)
-    assert found == [InternalMCPServer("late", "http://late/mcp")]
+    with pytest.raises(RuntimeError, match=r"not readable after 1s: down$"):
+        await website_mcp_servers({"down": "http://down", "late": "http://late"}, timeout_s=1)
+    assert calls["late"] == 3
 
 
 @environment_card(name="shop")

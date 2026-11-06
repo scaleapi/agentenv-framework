@@ -47,6 +47,7 @@ def parse_internal_servers(spec: str, port: int) -> list[InternalMCPServer]:
 _INTERNAL_SERVER_TIMEOUT_S = int(os.environ.get("GATEWAY_INTERNAL_SERVER_TIMEOUT_S", "180"))
 _INTERNAL_SERVER_POLL_S = 2
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+_UNREAD = object()
 
 
 def _ready_url(mcp_url: str) -> str:
@@ -111,11 +112,15 @@ async def website_mcp_servers(sites: dict[str, str], taken: frozenset[str] = fro
     the MCP endpoint its card declares, so the gateway serves its tools as it does an MCP env's. A site whose card
     declares no MCP interface, or that answers no card, is left out, as is one named as an internal server already
     (``taken``). Every site is asked at once, and one whose server can't be reached yet is asked again until
-    ``timeout_s``."""
+    ``timeout_s``; raises, naming them, when a site's card still can't be read then, so the gateway doesn't start
+    without a site, as with an MCP server that never comes up."""
     asked = {name: url.rstrip("/") for name, url in sites.items() if name not in taken}
     deadline = time.monotonic() + timeout_s
     async with httpx.AsyncClient() as client:
-        cards = await asyncio.gather(*(_site_card(client, name, base, deadline) for name, base in asked.items()))
+        cards = await asyncio.gather(*(_site_card(client, base, deadline) for base in asked.values()))
+    unread = [name for name, card in zip(asked, cards) if card is _UNREAD]
+    if unread:
+        raise RuntimeError(f"Website card(s) not readable after {timeout_s}s: {', '.join(sorted(unread))}")
     found: list[InternalMCPServer] = []
     for (name, base), card in zip(asked.items(), cards):
         declared = next((i.get("url") for i in (card or {}).get("additionalInterfaces") or []
@@ -147,9 +152,9 @@ def _site_mcp_url(base: str, declared: str) -> str | None:
     return f"{own.scheme}://{own.netloc}{given.path}" + (f"?{given.query}" if given.query else "")
 
 
-async def _site_card(client: httpx.AsyncClient, name: str, base: str, deadline: float) -> dict | None:
+async def _site_card(client: httpx.AsyncClient, base: str, deadline: float) -> dict | None | object:
     """The card the site at ``base`` serves, None when it serves none; asked again while its server can't be reached
-    or answers 5xx, until ``deadline``."""
+    or answers 5xx, until ``deadline``, then ``_UNREAD``."""
     while True:
         try:
             answer = await client.get(base + WELL_KNOWN_PATH, timeout=5)
@@ -162,8 +167,7 @@ async def _site_card(client: httpx.AsyncClient, name: str, base: str, deadline: 
                 return None
             return card if isinstance(card, dict) else None
         if time.monotonic() >= deadline:
-            logger.warning(f"site {name}'s card at {base} didn't answer in time; its MCP tools, if any, aren't served")
-            return None
+            return _UNREAD
         await asyncio.sleep(_INTERNAL_SERVER_POLL_S)
 
 
