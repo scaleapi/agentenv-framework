@@ -316,20 +316,26 @@ def test_the_clock_check_calls_sync_time_whichever_operation_the_card_lists_firs
 def test_a_server_with_no_card_health_or_header_fails_the_contract_and_warns_of_the_rest() -> None:
     bare = Starlette(routes=[Route("/", lambda request: JSONResponse({"not": "html"}))])
     results = conformance.check("http://testserver", client=TestClient(bare))
-    assert statuses(results) == {"card": "warned", "any_host": "failed", "health": "failed", "universe_now": "warned",
-                                 "reserved_paths": "passed", "data_plane": "skipped", "clock": "warned",
+    assert statuses(results) == {"card": "failed", "any_host": "failed", "health": "failed", "universe_now": "warned",
+                                 "reserved_paths": "passed", "data_plane": "failed", "clock": "warned",
                                  "forwarded": "passed", "cookies": "skipped"}
-    assert [r.name for r in results if r.required] == ["any_host", "health", "reserved_paths", "data_plane"]
+    assert [r.name for r in results if r.required] == ["card", "any_host", "health", "reserved_paths", "data_plane"]
 
 
-def test_a_bare_server_meeting_only_the_contract_passes_with_warnings() -> None:
+def test_a_page_and_a_health_path_with_no_card_or_data_plane_fail_the_contract() -> None:
     async def page(request: Request) -> Response:
         return HTMLResponse("<html>hi</html>")
 
     bare = Starlette(routes=[Route("/", page), Route("/api/health", lambda request: JSONResponse({"ok": True}))])
     results = conformance.check("http://testserver", client=TestClient(bare))
+    assert {r.name for r in results if r.fails()} == {"card", "data_plane"}
+    assert {r.name for r in results if r.status == "warned"} == {"universe_now", "clock"}
+
+
+def test_a_server_meeting_only_the_contract_passes_with_warnings() -> None:
+    results = conformance.check("http://testserver", client=TestClient(_handwritten(clock=False)))
     assert not any(r.fails() for r in results) and any(r.fails(strict=True) for r in results)
-    assert {r.name for r in results if r.status == "warned"} == {"card", "universe_now", "clock"}
+    assert {r.name for r in results if r.status == "warned"} == {"clock"}
 
 
 def test_a_spa_fallback_that_serves_the_reserved_paths_fails() -> None:

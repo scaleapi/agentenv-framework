@@ -2,14 +2,14 @@
 agentenv_protocol.website.conformance <url>`` prints each check and exits 1 when a required one failed (or, with
 ``--strict``, when a recommended one warned), 2 when the server couldn't be reached. Everything goes over HTTP.
 
-The required checks are the contract, what the gateway and a browser rely on of any server: ``/`` serves HTML under a
-made-up host; the site is ready, by the card's ``website/v1`` ``ready``, whose answer must be a ``WebsiteReadiness``
-(by the declared health path, deprecated, for a card without it); the data plane's and card's paths are not the site's
-pages; and, when the card advertises the data plane, a round trip at the card's ``url`` (data/get, data/reset,
-data/get, which no longer returns the exported data, data/add of what the first data/get returned, data/get again)
-returns what it was given. A failed one is ``failed``. The recommended checks are what an SDK site does and the gateway
-uses when a server offers it: a card declaring the site's domains, readiness and routes, ``X-Universe-Now`` on every
-answer the other checks got, ``clock/v1``'s ``sync_time`` against a clock the checker serves, the forwarded headers
+The required checks are the contract, what agentenv, the gateway and a browser rely on of a website env's server: a
+card declaring the site's domains, readiness and routes; ``/`` serving HTML under a made-up host; the site ready, by
+the card's ``website/v1`` ``ready``, whose answer must be a ``WebsiteReadiness`` (by the declared health path,
+deprecated, for a card without it); the data plane's and card's paths not the site's pages; and the data plane the
+card advertises, whose round trip at the card's ``url`` (data/get, data/reset, data/get, which no longer returns the
+exported data, data/add of what the first data/get returned, data/get again) returns what it was given. A failed one is
+``failed``. The recommended checks are what an SDK site does and the gateway uses when a server offers it:
+``X-Universe-Now`` on every answer the other checks got, ``clock/v1``'s ``sync_time`` against a clock the checker serves, the forwarded headers
 wherever an answer shows them (on ``/`` and on a GET route with its trailing slash toggled, which a server may
 redirect), and the cookies those answers set: none tied to a domain, the session path's the one the card names, and
 none whose lifetime is an absolute ``Expires`` with no ``Max-Age``. A failed one is ``warned``.
@@ -45,7 +45,7 @@ from .readiness import DEFAULT_HEALTH_PATH, WEBSITE_EXTENSION_URI, WEBSITE_READY
 Status = Literal["passed", "failed", "skipped", "warned"]
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
 CLOCK_SLACK_S = 120
-REQUIRED = ("any_host", "health", "reserved_paths", "data_plane")
+REQUIRED = ("card", "any_host", "health", "reserved_paths", "data_plane")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -203,8 +203,6 @@ class _Checker:
         operations = (card.get("capabilities") or {}).get("operations")
         operations = operations if isinstance(operations, list) else []
         missing = [m for m in (METHOD_GET, METHOD_RESET, METHOD_ADD) if m not in operations]
-        if len(missing) == 3:
-            return "skipped", "the card advertises no data plane"
         if missing:
             return "failed", f"the card's operations lack {', '.join(missing)}"
         url = card.get("url")
