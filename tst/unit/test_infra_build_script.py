@@ -254,7 +254,7 @@ def test_verify_record_refuses_a_digest_the_registry_doesnt_serve_under_its_tag(
 
 
 @pytest.mark.parametrize("record, problem", [
-    ({"images": []}, "records no agentenv-claude-code, agentenv-codex, agentenv-db-mcp"),
+    ({"images": []}, "records no agentenv-browser-use, agentenv-claude-code, agentenv-codex"),
     ({"images": [], "extra": 1}, "it holds ['extra', 'images']"),
     ({"images": [{"repository": "ghcr.io/someone/thing", "tag": _TAG, "digest": _DIGEST}]},
      "'ghcr.io/someone/thing' isn't an image agent-env ships"),
@@ -461,6 +461,25 @@ def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_floor_a_build_nam
     assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 0
 
     assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
+
+
+def test_retry_tries_again_a_push_ghcr_refuses_while_another_platform_creates_the_package(script, monkeypatch, capsys):
+    """An image's first release pushes both platforms at once; the second waits on GHCR linking the new package."""
+    runs, waits = _attempts(script, monkeypatch, [("denied: permission_denied: write_package\n", 1), ("pushed\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "push", "img") == 0
+
+    assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
+    assert ("::warning::GHCR doesn't let this repository write yet the package `docker push img` pushes to; trying again in"
+            in capsys.readouterr().out)
+
+
+def test_retry_doesnt_try_again_a_denied_command_that_isnt_a_push(script, monkeypatch, capsys):
+    runs, waits = _attempts(script, monkeypatch, [("denied: permission_denied: write_package\n", 1)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "build", ".") == 1
+
+    assert len(runs) == 1 and waits == []
 
 
 def test_retry_doesnt_try_again_a_build_missing_another_package(script, monkeypatch, capsys):

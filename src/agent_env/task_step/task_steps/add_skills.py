@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 from typing import ClassVar, Optional
 
 from agentenv_protocol import SKILL_EXTENSION_URI
-from agentenv_protocol.client import find_extension_method
+from agentenv_protocol.client import children, find_extension_method
 
 from agent_env.config import get_config
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
@@ -327,7 +327,8 @@ def _stored_skill(skill_md: str, files: dict[str, str]) -> str:
 
 async def _env_skills(context: TaskStepContext, agent: DeployedAgent, env_id: str) -> list[dict]:
     """The skills the env ``env_id`` serves, each under its card's environment name: its own card's and each of its
-    child envs' (a gateway's servers, a computer's apps) its name reaches; refused for an env this run didn't deploy or
+    child envs' (a gateway's servers, a computer's apps), each asked as its own card advertises it, a name another
+    already serves skills under skipped; refused for an env this run didn't deploy or
     bind to ``agent``, or that serves none."""
     deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
     if deployed is None:
@@ -338,12 +339,13 @@ async def _env_skills(context: TaskStepContext, agent: DeployedAgent, env_id: st
     card = deployed.environment_card or {}
     serving = [(None, _env_skill_name(card.get("name") or env_id, env_id))] if find_extension_method(
         card, SKILL_EXTENSION_URI, "get") is not None else []
-    serving += [(child["name"], _env_skill_name(child["name"], f"{env_id}/{child['name']}"))
-                for child in card.get("children_environments") or []
-                if find_extension_method(child, SKILL_EXTENSION_URI, "get") is not None
-                and deployed.get_child_env_card(child["name"]) is child]
+    named = {card.get("name")} if serving else set()
+    for child in children(card):
+        if find_extension_method(child.card, SKILL_EXTENSION_URI, "get") is not None and child.name not in named:
+            named.add(child.name)
+            serving.append((child, _env_skill_name(child.name, f"{env_id}/{child.name}")))
     if not serving:
         raise RuntimeError(f"env '{env_id}' serves no skill: neither its card nor a child env's declares "
                            f"{SKILL_EXTENSION_URI}")
-    return [await deployed.invoke(SKILL_EXTENSION_URI, "get", {"name": name}, environment_name=child)
+    return [await deployed.invoke(SKILL_EXTENSION_URI, "get", {"name": name}, child=child)
             for child, name in serving]

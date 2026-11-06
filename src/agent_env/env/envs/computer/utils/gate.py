@@ -70,8 +70,7 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
-        return [f"{at}: {app.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
-                f"{os.display}); it supports {named or 'none'}"]
+        return [f"{at}: {app.id} supports no platform {base.id} is ({_os_shown(base)}); it supports {named or 'none'}"]
     problems = []
     if not arches(base, driver, [app]):
         problems.append(f"{at}: no architecture {base.id}, {driver.id} and {app.id} all run")
@@ -219,8 +218,7 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     os = base.os
     if not _matching(base, driver.declaration.supports):
         named = ", ".join(_shown(platform) for entry in driver.declaration.supports for platform in supported(entry))
-        return [f"driver: {driver.id} supports no platform {base.id} is ({os.type} {os.distribution} {os.version} "
-                f"{os.display}); it supports {named}"]
+        return [f"driver: {driver.id} supports no platform {base.id} is ({_os_shown(base)}); it supports {named}"]
     problems = []
     if not arches(base, driver):
         problems.append(f"driver: no architecture both run: {base.id} runs {', '.join(base.arch)}, and {driver.id} "
@@ -228,9 +226,9 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     if (install := driver.install.get(os.type)) is None:
         problems.append(f"driver: {driver.id} declares no install for {os.type}")
     else:
-        problems += [f"driver: its service {service.name!r} runs as root, and {base.id}'s "
-                     f"{base.forms.container.init} runs every program as {base.session.user}"
-                     for service in install.services if service.scope == "system"]
+        init = base.forms.container.init if base.forms.container is not None else "launchd"
+        problems += [f"driver: its service {service.name!r} runs as root, and {base.id}'s {init} runs every program as "
+                     f"{base.session.user}" for service in install.services if service.scope == "system"]
     return problems
 
 
@@ -239,7 +237,13 @@ def _matching(base: ComputerArtifact, supports: list) -> list[Platform]:
     os = base.os
     return [platform for entry in supports for platform in supported(entry)
             if platform.os == os.type and platform.display == os.display
-            and platform.distribution in (None, os.distribution) and platform.version in (None, os.version)]
+            and platform.distribution in (None, getattr(os, "distribution", None))
+            and platform.version in (None, os.version)]
+
+
+def _os_shown(base: ComputerArtifact) -> str:
+    return " ".join(part for part in (base.os.type, getattr(base.os, "distribution", None), base.os.version,
+                                      base.os.display) if part)
 
 
 def _shown(platform: Platform) -> str:
@@ -248,6 +252,8 @@ def _shown(platform: Platform) -> str:
 
 
 def _image(base: ComputerArtifact) -> list[str]:
+    if base.forms.container is None:
+        return []
     image = base.image()
     if names_registry(image.image_name) or image.buildable:
         return []

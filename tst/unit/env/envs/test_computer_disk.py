@@ -244,7 +244,7 @@ def vms(monkeypatch):
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "create_vm", create_vm)
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_vm", reset_vm)
     monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset({"linux/arm64"}))
-    monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=lambda url, timeout, token: {
+    monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=lambda url, timeout, token, answering=False: {
         **DRIVER_CARD, "name": "desktop"}))
     monkeypatch.setattr(env_computer_provider, "ready", boot.ready)
     monkeypatch.setattr(env_computer_provider, "_require_display", AsyncMock())
@@ -322,6 +322,24 @@ async def test_first_deploys_of_an_unverified_disk_at_once_share_one_probe_and_i
     else:
         assert recorded["status"] == "ready" and len(vms.created) == 3
         assert all(record.metadata["computer"]["form"] == "disk" for record in deployed)
+
+
+@pytest.mark.asyncio
+async def test_a_first_boot_whose_record_another_compose_took_over_probes_the_build_it_picked_and_records_none(
+        disk_base, driver, docker, vms, monkeypatch):
+    """As a deploy by an agent-env that composes differently does, starting its own compose of the pair."""
+    monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset())
+    env = _put(disk_base, driver)
+    monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset({"linux/arm64"}))
+    picked, stored = Env.get(env.id), Env.get(env.id)
+    taken = {"status": "building", "started_at": "2026-11-05T16:00:00+00:00", "composer": "sha256:another-agent-env"}
+    composed = stored.metadata["composed"]
+    stored.update_metadata({**stored.metadata, "composed": {**composed, "disk": {**composed["disk"], "arm64": taken}}})
+
+    result = await probing.probe_first_boot(picked, "disk", "arm64", local_sandbox.LocalSandboxProvider())
+
+    assert (result["status"], result["image"]) == ("ready", picked.metadata["composed"]["disk"]["arm64"]["image"])
+    assert Env.get(env.id).metadata["composed"]["disk"]["arm64"] == taken
 
 
 @pytest.mark.asyncio

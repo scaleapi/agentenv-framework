@@ -6,6 +6,7 @@ from ..errors import AgentEnvError
 from .keys import canonical
 from .operations import declared
 from .recording import check_recording
+from .settings import ComputerSettings
 
 BUTTONS = ("left", "right", "middle", "back", "forward")
 
@@ -37,6 +38,8 @@ def check_features(cls: type) -> None:
                 problems.append("keys are W3C key values in their W3C case")
         except AgentEnvError as e:
             problems.append(f"keys: {e.message}")
+    if not (isinstance(cls.Settings, type) and issubclass(cls.Settings, ComputerSettings)):
+        problems.append(f"Settings is ComputerSettings or a subclass of it, got {cls.Settings!r}")
     if cls.screen_kind not in ("desktop", "page"):
         problems.append(f"screen_kind is desktop or page, got {cls.screen_kind!r}")
     if ("set_display" in declared(cls)) != bool(cls.display_modes):

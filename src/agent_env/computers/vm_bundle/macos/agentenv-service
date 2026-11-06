@@ -1,0 +1,71 @@
+"""agentenv-service PREFIX [NAME=VALUE ...] -- COMMAND ...: a layer's service as its LaunchAgent starts it in the login
+session: in PREFIX, its program under PREFIX when it's a relative path, with the build-phase settings the VM bundle
+fixes, the deploy's environment over them, read from the seed the VM shares (agentenv_protocol.computer.seed, version
+1), and NAME=VALUE over that. It waits for the seed, which the VM mounts at login, and refuses one that carries only
+versions it doesn't read, as an init does."""
+import base64
+import json
+import os
+import sys
+import time
+
+SEED = "/Volumes/My Shared Files/agentenv-seed"
+BUILD_SETTINGS = "/etc/agentenv/build-settings.json"
+#: The seed versions this reads, oldest first.
+READS = (1,)
+HEADER = "#agentenv-environment"
+WAIT_S = 120
+PATH = "/opt/agentenv/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+
+
+def environment(folder):
+    """The variables of the newest version the seed in ``folder`` carries that this reads, from the one its
+    agentenv-seed-oldest names (1 without it); raises SystemExit when it carries none."""
+    try:
+        oldest = int(open(os.path.join(folder, "agentenv-seed-oldest")).read().strip() or 1)
+    except (FileNotFoundError, ValueError):
+        oldest = 1
+    if oldest > READS[-1]:
+        raise SystemExit(f"agentenv-service: this computer reads seed v{READS[-1]}; this agent-env writes v{oldest} or "
+                         "later; recompose it with agent-env env build")
+    newest = max(version for version in READS if version >= oldest)
+    name = "user-data" if newest == 1 else f"user-data.v{newest}"
+    found = {}
+    with open(os.path.join(folder, name)) as lines:
+        for line in lines:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            key, _, value = line.partition("=")
+            if key.isidentifier() and not key[0].isdigit():
+                found[key] = base64.b64decode(value).decode()
+    return found
+
+
+def main(argv):
+    prefix, rest = argv[0], argv[1:]
+    split = rest.index("--")
+    given = dict(pair.split("=", 1) for pair in rest[:split])
+    command = rest[split + 1:]
+    deadline = time.monotonic() + WAIT_S
+    while not os.path.isfile(os.path.join(SEED, "user-data")):
+        if time.monotonic() > deadline:
+            raise SystemExit(f"agentenv-service: no seed at {SEED} after {WAIT_S} s")
+        time.sleep(1)
+    fixed = json.load(open(BUILD_SETTINGS)) if os.path.isfile(BUILD_SETTINGS) else {}
+    env = {**os.environ, "PATH": PATH, **fixed, **environment(SEED), **given}
+    program = command[0] if "/" not in command[0] or command[0].startswith("/") else os.path.join(prefix, command[0])
+    os.chdir(prefix)
+    os.execve(program if "/" in program else _which(program, env["PATH"]), [program, *command[1:]], env)
+
+
+def _which(program, path):
+    for folder in path.split(":"):
+        candidate = os.path.join(folder, program)
+        if os.access(candidate, os.X_OK):
+            return candidate
+    raise SystemExit(f"agentenv-service: no {program} on {path}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

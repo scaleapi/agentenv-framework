@@ -9,6 +9,7 @@ import json
 import os
 import shlex
 import signal
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -22,8 +23,9 @@ from . import session
 if TYPE_CHECKING:
     from .app import Launch
 
-#: Where an app's server marks that it launched the app since the computer booted, at boot or on demand.
-LAUNCHED = Path("/run/agentenv/apps")
+#: Where an app's server marks that it launched the app since the computer booted, at boot or on demand: a folder a
+#: boot clears, under /tmp on macOS, which has no /run and lets the session user write nothing at its root.
+LAUNCHED = Path("/tmp/agentenv/apps" if sys.platform == "darwin" else "/run/agentenv/apps")
 #: How long one readiness check may take; an app's checks run at once.
 CHECK_TIMEOUT_S = 10.0
 #: Where an app's server keeps the pid of the app it launched last, in the app's folder, so a server that restarts can
@@ -36,6 +38,7 @@ LAUNCHES = Path(".agentenv/launches")
 EXIT_WAIT_S = 5.0
 #: How long a stopped app may take to exit before it's killed.
 STOP_TIMEOUT_S = 10.0
+HOLD_BOOT_LAUNCH_ENV = "AGENTENV_HOLD_BOOT_LAUNCH"
 
 
 class AppReadiness(BaseModel):
@@ -74,9 +77,10 @@ class AppRuntime:
 
     async def start(self) -> None:
         """Once its X display is up, when it has one, add the app's menu launcher on a desktop and launch a boot app,
-        unless the computer has launched it since it booted, at boot or on demand: a server that restarts leaves the
-        app be, or with ``relaunch_on_start``, for an app only the server that launched it can talk to, stops it and
-        launches it again, whether it was launched at boot or on demand."""
+        unless the computer has launched it since it booted, at boot or on demand, or its boot launch is held
+        (``boot_launch_held``): a server that restarts leaves the app be, or with ``relaunch_on_start``, for an app
+        only the server that launched it can talk to, stops it and launches it again, whether it was launched at boot
+        or on demand."""
         if self.launch is None:
             return
         if os.environ.get("DISPLAY"):
@@ -85,7 +89,7 @@ class AppRuntime:
             session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())
         launched = _launched_at() is not None
         relaunch = self.relaunch_on_start and launched
-        if relaunch or (self.launch.at == "boot" and not launched):
+        if relaunch or (self.launch.at == "boot" and not launched and not boot_launch_held()):
             try:
                 if relaunch:
                     await self.stop_app()
@@ -188,6 +192,14 @@ class AppRuntime:
                 running.add_done_callback(lambda done: done.cancelled() or done.exception())
             passed = await asyncio.shield(running)
         return None if passed else f"@ready_check {name} returned {passed!r}"
+
+
+def boot_launch_held() -> bool:
+    """Whether the computer holds its boot apps' launches (``HOLD_BOOT_LAUNCH_ENV`` is ``1`` in its environment): each
+    app's server then leaves its boot app unlaunched, the driver counts it ready until something launches it, and
+    whoever booted the computer launches each one through ``computer-app/v1``'s ``launch`` once it has set the computer
+    up for them, as a deploy routing the run's websites does once their names, CA and proxy are in place."""
+    return os.environ.get(HOLD_BOOT_LAUNCH_ENV) == "1"
 
 
 def _mark() -> Path:

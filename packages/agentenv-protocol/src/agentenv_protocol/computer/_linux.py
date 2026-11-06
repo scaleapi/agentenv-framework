@@ -1,5 +1,6 @@
-"""The base class's Linux defaults for the OS operations. The driver runs as the session user inside the desktop
-session, so both act directly: a command inherits the session's environment, a file lands as that user."""
+"""The base class's defaults for the OS operations on Linux and macOS, which use POSIX alone. The driver runs as the
+session user inside the desktop session, so both act directly: a command inherits the session's environment, a file
+lands as that user."""
 from __future__ import annotations
 
 import asyncio

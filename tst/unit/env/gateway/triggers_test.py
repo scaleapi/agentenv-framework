@@ -350,8 +350,8 @@ async def test_each_nl_action_goes_to_the_executor_it_names(engine, executor_cal
     assert sorted((e["a2a_url"], i, c) for e, i, c in executor_calls) == [
         ("http://alice", "as a", "trigger-a"), ("http://bob", "as b", "trigger-b"), ("http://default", "as d", "trigger-d")]
     details = {e["trigger_id"]: e["detail"] for e in engine._events if e["kind"] == "action_ok"}
-    assert details == {"d": {"nl": "as d"}, "a": {"nl": "as a", "executor": "alice"},
-                       "b": {"nl": "as b", "executor": "bob"}}
+    assert details == {"d": {"nl": "as d", "calls": {}}, "a": {"nl": "as a", "executor": "alice", "calls": {}},
+                       "b": {"nl": "as b", "executor": "bob", "calls": {}}}
 
 
 @pytest.mark.asyncio
@@ -752,12 +752,41 @@ async def test_a_matching_call_after_the_anchor_cancels_the_deadline(engine, vir
     engine.on_tool_call("default", "slack_send_message", {"channel_id": "D1"}, _result())
     assert engine.state()["triggers"][1]["status"] == "cancelled"
     [cancelled] = [e for e in engine._events if e["kind"] == "cancelled"]
-    assert cancelled["provoking"] == {"tool": "slack_send_message", "role": "default"}
+    assert cancelled["provoking"] == {"tool": "slack_send_message", "role": "default", "args": {"channel_id": "D1"}}
 
     virtual_time.advance(3600)
     engine._eval_time_triggers()
     await asyncio.sleep(0.1)
     assert engine._triggers["deadline"]["status"] == "cancelled" and engine._triggers["deadline"]["fire_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_each_detection_names_its_own_calls_ids_but_not_its_content(engine):
+    engine.register({"triggers": [
+        {"id": "dm", "when": {"type": "action", "tool": "slack_send_message", "repeat": True}, "actions": []}]})
+    engine.on_tool_call("default", "slack_send_message", {"channel_id": "D1", "message": "approve $2,400?"}, _result())
+    engine.on_tool_call("default", "slack_send_message", {"channel_id": "U_1", "message": "ok"}, _result())  # queued
+    await asyncio.sleep(0.1)
+
+    detected = [e for e in engine._events if e["kind"] == "detected"]
+    assert [(e["provoking"]["args"], e.get("queued")) for e in detected] == [
+        ({"channel_id": "D1", "message": {"redacted": {"type": "str", "len": 15}}}, None),
+        ({"channel_id": "U_1", "message": {"redacted": {"type": "str", "len": 2}}}, 1)]
+    assert engine._triggers["dm"]["fire_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_args_too_large_to_echo_are_recorded_as_their_shape_and_still_fire(engine):
+    engine.register({"triggers": [{"id": "any", "when": {"type": "action", "tool": "t", "repeat": True}, "actions": []}]})
+    many_values = {"rows": [{"row_id": f"r{i}"} for i in range(10_000)], "name": "x"}
+    few_long_ids = {f"k{i}_id": "x" * 199 for i in range(25)}
+    for args in (many_values, few_long_ids):
+        engine.on_tool_call("default", "t", args, _result())
+        await asyncio.sleep(0.1)
+
+    assert [e["provoking"]["args"] for e in engine._events if e["kind"] == "detected"] == [
+        {"redacted": {"type": "dict", "len": 2}}, {"redacted": {"type": "dict", "len": 25}}]
+    assert engine._triggers["any"]["fire_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -870,6 +899,54 @@ async def test_each_fire_is_numbered_failed_ones_included(engine, monkeypatch):
         engine.on_tool_call("default", "t", {}, _result())
         await asyncio.sleep(0.05)
     assert [causes[0]["fire"] for causes in seen] == [1, 2, 3] and engine._triggers["x"]["fire_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_an_nl_action_ok_counts_the_calls_its_executor_made_for_the_fire(engine, monkeypatch):
+    acts = iter([[("slack_conversations_history", False), ("slack_send_message", True), ("slack_send_message", False)],
+                 []])
+
+    async def executor(self, executor, instruction, context_id):
+        for tool, failed in next(acts):
+            engine.on_tool_call("bob", tool, {}, _result(is_error=failed))
+        engine.on_tool_call("default", "gdocs_search_documents", {}, _result())  # someone else's call
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+                     "triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "repeat": True},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "reply"}]}]})
+    for _ in range(2):
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.05)
+    engine.on_tool_call("bob", "slack_send_message", {}, _result())  # after its fires ended
+
+    oks = [e["detail"] for e in engine._events if e["kind"] == "action_ok"]
+    assert [(d["calls"], d.get("failed_calls")) for d in oks] == [
+        ({"slack_conversations_history": 1, "slack_send_message": 1}, {"slack_send_message": 1}), ({}, None)]
+    assert engine.caused_by("bob") == [] and not any("calls_shared_with" in d for d in oks)
+
+
+@pytest.mark.asyncio
+async def test_fires_one_executor_realizes_at_once_name_each_other_beside_the_calls_they_share(engine, monkeypatch):
+    started, called = _Gate(2), _Gate(2)
+
+    async def executor(self, executor, instruction, context_id):
+        await started.arrive()  # both fires are in flight before either executor calls
+        engine.on_tool_call("bob", "slack_send_message", {}, _result())
+        await called.arrive()  # and neither ends before both calls are made
+        return "done"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", executor)
+    engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}}, "triggers": [
+        {"id": tid, "when": {"type": "action", "tool": "t"}, "actions": [{"type": "nl", "executor": "bob", "instruction": tid}]}
+        for tid in ("chan", "dm")]})
+    engine.on_tool_call("default", "t", {}, _result())
+    await asyncio.sleep(0.2)
+
+    oks = {e["trigger_id"]: e["detail"] for e in engine._events if e["kind"] == "action_ok"}
+    assert {tid: (d["calls"], d["calls_shared_with"]) for tid, d in oks.items()} == {
+        "chan": ({"slack_send_message": 2}, ["dm"]), "dm": ({"slack_send_message": 2}, ["chan"])}
 
 
 def test_generated_id_on_omit(engine):
@@ -1099,6 +1176,19 @@ async def test_step_path_respects_watch_roles(monkeypatch):
 
 class _ExecutorCalls(list):
     reply: object = "done"
+
+
+class _Gate:
+    """Holds each arrival until ``n`` have arrived."""
+
+    def __init__(self, n: int) -> None:
+        self.n, self.arrived, self.open = n, 0, asyncio.Event()
+
+    async def arrive(self) -> None:
+        self.arrived += 1
+        if self.arrived == self.n:
+            self.open.set()
+        await self.open.wait()
 
 
 

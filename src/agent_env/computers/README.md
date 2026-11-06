@@ -53,6 +53,12 @@ a deploy waiting for another's compose says what it waits for and since when. A 
 env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the
 deploy refuses for want of a ready build and names `agent-env env build`.
 
+Each build's record names the digest of the code that composed it: the composer, these build files, the Lume provider
+and the protocol's `computer` package. A build an agent-env with other composing code recorded, or one from before
+records named it, isn't deployed: a deploy that boots its form composes it again first, saying so, as `env build` and
+a put do, and its record says `by another composer` until then. So upgrading agent-env never boots a computer composed
+the old way.
+
 Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAME>`, read as it starts:
 
 | Setting | Default | What it does |
@@ -79,6 +85,57 @@ Everything in a computer runs as that one user, so any code in it, an app's, a d
 command run through `computer-exec`, can read the environment of any other process there, settings included. A secret
 setting, the base's or an app's, is kept out of the stored env, the task and the run's record, which hold only its
 `secret:` or `env:` reference, but not from code in the computer: give a computer only secrets its own code may see.
+
+`artifacts/macos-26/` is macOS 26 on Apple silicon (`arm64`), a VM bundle: a whole saved virtual machine, its disk,
+NVRAM and hardware identity, which Virtualization.framework restores as it was saved, in Lume's format. Its image is
+Cua's public base, `ghcr.io/trycua/macos:26-20261021-fca2193`, pinned by digest beside the tag Lume pulls it by: its
+user `lume` logs in at boot, System Integrity Protection is off and ssh is on. Name it as `macos-26`, or by its id,
+`@local/agentenv-framework/computers/macos-26`. A VM bundle's image is a registry image pinned so, or `local:<name>`,
+a VM bundle already on the Mac that boots it, as composing leaves one.
+
+A macOS computer env is composed on a Mac, by a sandbox provider that boots macOS VM bundles there, `lume`: the base's
+VM bundle is cloned under a name of the compose's key, booted with a build folder shared read-write, and readied for
+agent-env (`vm_bundle/macos/prepare.sh`): `/opt/agentenv` for the layers; a pinned Python, python-build-standalone's
+CPython 3.12 with Tk, checked by its sha256 (`vm_bundle/macos/lib.sh`), `python3` first on the `PATH` of what services
+run, which their venvs and the probe's fixture run on; `agentenv-service`, which starts each
+service with the deploy's environment; `set-display`, which puts the display in the virtual display's size at login,
+since a guest boots in the mode its disk was last in, with the sRGB colour profile, so a screenshot holds the pixels as
+drawn; and Cua Spacesd and the Login Items banner off. Then each layer, the driver's and each app's, installs as its
+`[install.macos]` says, by a script composing writes (`env/envs/computer/utils/macos_vm_bundle.py`): its files under its
+prefix, its downloads checked by sha256, its venv, on a copy of the pinned Python so its interpreter is its own,
+installed offline from the wheels of its lock, its run scripts and install steps, as root or the session user, its
+`grants`, the TCC permissions of an app bundle it installs (`app`, granted to the bundle's identifier) or of an
+executable under its prefix (`executable`, granted to that path), bound to the code signature it has then, and its
+services as LaunchAgents of the login session. A service runs through `agentenv-service` on the layer's own Python, or,
+when `direct`, as its own command, with the variables it names. macOS gives a process the TCC permissions of the program
+launchd started, and what that program starts has them too, so an app bundle's service is direct, and a grant to
+`venv/bin/python` covers the layer's other services and what they run. macOS has no apt: a layer's
+`[install.macos]` names no `packages` or `sources`. The venvs' wheels are locked as a Linux layer's packages are: the
+first compose of given inputs (each venv's requirements, the protocol's source, the base, the pinned Python and the
+resolve script) resolves them once in a VM of the base, which builds every venv's wheels, its requirements and the
+protocol in one resolve, into the folder it shares and is deleted; they're stored in the object store with a lock
+naming them, whose digest joins the VM bundle's key. Every compose of those inputs, on any Mac, stages them and
+installs offline, so one name is one set of wheels. Then the VM shuts down, is kept on that Mac as the VM bundle of its
+name (one that hasn't shut down within two minutes is synced, stopped from outside and kept all the same, what its guest
+logged of the shutdown saved under the state root and warned of), and gate 3 probes it at full, a check its driver declares it fails on macOS (`known_failures`) recorded and not
+failing the build; a compose of the same inputs on that Mac reuses it. A VM bundle is kept on the Mac that composed it
+alone, so a deploy on a Mac that doesn't hold the one its env's record names composes it there first, from the same
+inputs and so under the same name. A deploy that would compose another name, as a different agent-env does, refuses
+before composing; `agent-env run` and `agent-env env build` on a Mac that doesn't hold the VM bundle compose it there
+and record what they composed, so a deploy after them boots it. A VM bundle's compose and probe hold a lock of its name
+on its Mac, which a deploy takes to look for it, so a deploy waits for one under way and boots none before its probe
+passed; one that fails its probe is deleted.
+
+A deploy clones the env's VM bundle, writes the deploy's environment into a folder the VM shares as
+`agentenv_protocol.computer.seed`'s seed, which `agentenv-service` reads (waiting for the share, which mounts at login),
+boots it, and fronts the driver's port with a relay on this Mac's loopback, run by Apple's `/usr/bin/python3`, since
+macOS's Local Network privacy lets only Apple's own binaries reach a VM's address; agent-env reaches the computer at
+`127.0.0.1:<port>`. The relay listens on loopback alone unless `relay_host` names another address, since a computer's
+MCP endpoint takes no token. A reset clones it afresh under its MAC address, so it keeps its address and its URLs.
+Virtualization.framework runs a VM only in a logged-in session, so on a Mac with no one at it (an EC2 Mac), the user
+agent-env runs as logs in at boot and agent-env runs in that session (`launchctl asuser`). A Mac runs two macOS VMs at
+once, as Apple's licence allows and Virtualization.framework enforces; `lume` refuses a third. Its `resolution` setting
+sizes the virtual display.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

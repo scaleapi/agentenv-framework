@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.website import READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness, env_readiness
 
 from agent_env.entity.refs import EntityRef
 from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
@@ -130,25 +131,58 @@ class DeployedEnv:
         if not self.supports(uri, method):
             raise EnvCapabilityUnsupported(uri, method, self.env_id, self.instance_id)
 
-    def get_child_env_card(self, environment_name: str) -> Optional[dict]:
+    def get_child_env_card(self, environment_name: str, *, mcp: Optional[bool] = None) -> Optional[dict]:
+        """The card of the stored card's child env named `environment_name` (``child_env``), or None."""
+        child = self.child_env(environment_name, mcp=mcp)
+        return child.card if child is not None else None
+
+    def child_env(self, environment_name: str, *, mcp: Optional[bool] = None) -> Optional[protocol_v1.ChildEnv]:
         """The stored card's child env named `environment_name`; a leaf card is its own only child env, and a composed
         card serving a data plane of its own, as a computer's driver fronting its apps does, is the one its own name
-        reaches."""
+        reaches. Of several children of a composed card sharing the name, with `mcp`, only an MCP server's (True) or a
+        website's (False, ``website_child``) is, so a website and an MCP server sharing a name are told apart. Raises
+        ``AmbiguousChildError`` when several children still are: their urls tell them apart (``protocol_v1.child_at``)."""
         card = self.environment_card or {}
         composed = isinstance(card.get("children_environments"), list)
-        own = not composed or protocol_v1.operations(card)
-        if own and card.get("name") == environment_name:
-            return card
-        return protocol_v1.find_child(card, environment_name) if composed else None
+        if (not composed or protocol_v1.operations(card)) and card.get("name") == environment_name:
+            return protocol_v1.ChildEnv(name=card.get("name"), url=card.get("url"), card=card)
+        found = [child for child in protocol_v1.children(card) if child.name == environment_name]
+        if len(found) > 1 and mcp is not None:
+            found = [child for child in found if website_child(child) is not mcp]
+        if len(found) > 1:
+            raise protocol_v1.AmbiguousChildError(
+                f"{len(found)} child envs of env '{self.env_id}' are named {environment_name!r} "
+                f"({', '.join(str(child.url) for child in found)}); look one up by its url")
+        return found[0] if found else None
 
     async def invoke(self, uri: str, method: str, params: Optional[dict] = None, *,
-                     environment_name: Optional[str] = None, timeout: int = _EXTENSION_CALL_TIMEOUT_S) -> Any:
-        """Call `method` on the extension at `uri` as the env card, or a child env's card, advertises it."""
-        card = self.environment_card if environment_name is None else self.get_child_env_card(environment_name)
+                     environment_name: Optional[str] = None, child: Optional[protocol_v1.ChildEnv] = None,
+                     timeout: int = _EXTENSION_CALL_TIMEOUT_S) -> Any:
+        """Call `method` on the extension at `uri` as the env card advertises it, or as a child env's card does: the
+        `child` given, one of the card's (``protocol_v1.children``), else the one `environment_name` names
+        (``child_env``)."""
+        if child is not None:
+            card = child.card
+            environment_name = child.name
+        else:
+            card = self.environment_card if environment_name is None else self.get_child_env_card(environment_name)
         if card is None or not self.environment_url or protocol_v1.find_extension_method(card, uri, method) is None:
             raise EnvCapabilityUnsupported(uri, method, self.env_id, self.instance_id, environment_name)
         return await protocol_v1.invoke_extension(self.environment_url, card, uri, params, timeout, method=method,
                                                   headers=self.control_headers)
+
+    async def readiness(self, timeout: float = READY_TIMEOUT_S) -> WebsiteReadiness:
+        """Whether the env is ready, as the protocol determines a website env's health (``env_readiness``): every site
+        its card, the stored one or, for a record without it, the card it serves now, advertises ``website/v1``'s
+        ``ready`` on is asked, with the env's control headers, each within ``timeout``, and its problems are named
+        after it. An env with no site serving ``ready``, as one of MCP servers alone or a computer, is ready with no
+        problems. Raises ``EnvCapabilityUnsupported`` for a record with no card URL, which nothing can be asked at."""
+        if not self.environment_url:
+            raise EnvCapabilityUnsupported(WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, self.env_id, self.instance_id)
+        card = self.environment_card
+        if card is None:
+            card = await protocol_v1.get_card(self.environment_url, timeout=timeout)
+        return await env_readiness(self.environment_url, card, timeout=timeout, headers=self.control_headers)
 
     @classmethod
     def _fields_from(cls, data: dict) -> dict:
@@ -380,6 +414,11 @@ class Env(ABC):
         overrides this; one that doesn't takes no ``env_params``."""
         return f"{self.type} envs take no env_params" if env_params else None
 
+    async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
+        """``env_params`` as a run's deploy_env passes them to deploy(), once the run has deployed ``deployed_envs``:
+        as given, unless the type reads something of what the run deployed into them."""
+        return env_params
+
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> Self:
         """The env a running deployment serves, for its caller to drive. A type that can be
@@ -464,6 +503,13 @@ class Env(ABC):
             f"v{file_artifact_universe.version}: {total} file(s) at {destination}"
         )
         return LoadFileArtifactUniverseResult(destination_path=destination, files=loaded)
+
+
+def website_child(child: protocol_v1.ChildEnv) -> bool:
+    """Whether a child env is a website: its card carries ``website/v1``, or, for a site serving none, its url is at a
+    website's gateway route, ``/svc/{name}`` (an MCP server's is ``/svc/mcp-{name}``)."""
+    route, url = f"/svc/{child.name}", (child.url or "").rstrip("/")
+    return child.find_extension(WEBSITE_EXTENSION_URI) is not None or url == route or url.startswith(f"{route}/")
 
 
 def gateway_url_of(deployed: Optional[DeployedEnv]) -> Optional[str]:

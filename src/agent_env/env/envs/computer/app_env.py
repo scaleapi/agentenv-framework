@@ -19,7 +19,7 @@ from agent_env.env.env import Env
 from agent_env.env.envs.computer.utils import composer, gate
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.env import APP_TYPE, ComputerEnv
-from agent_env.env.envs.computer.utils.install import AppInstall, folder_problems, installs
+from agent_env.env.envs.computer.utils.install import APP_INSTALLS, AppInstall, folder_problems, installs
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv, declared
 from agent_env.env.store import get_env_store
 from agent_env.store.ids import derive_id
@@ -188,7 +188,7 @@ class ComputerAppEnv(ComputerEnv):
 
 def _installs(declaration: AppDeclaration) -> tuple[dict[str, AppInstall], list[str]]:
     """Its installs by OS type, each checked as the composer installs it, and the problems with them."""
-    return installs({os_type: on.install for os_type, on in declaration.os.items()}, AppInstall)
+    return installs({os_type: on.install for os_type, on in declaration.os.items()}, APP_INSTALLS)
 
 
 def _in_server_folder(declaration: AppDeclaration, names: Iterable[str]) -> list[str]:

@@ -1,7 +1,7 @@
 """The computer artifact: a base a computer env composes a driver and apps onto. It declares what the computer is, its
-architectures, OS, session user and settings, and how each form starts it. A form's image is a docker_image artifact,
-pinned when the computer is written and read back from its registry to check it holds what the computer says
-(``metadata.validated_images``)."""
+architectures, OS, session user and settings, and how each form starts it. A container or disk form's image is a
+docker_image artifact, pinned when the computer is written and read back from its registry to check it holds what the
+computer says (``metadata.validated_images``); a VM bundle form's is read by the host that boots it."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import functools
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -34,8 +34,9 @@ from agent_env.store.image_store.image_contents import UnreadableLayerError, dis
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
 
-OS_TYPES = ("linux",)
-FORMS = ("container", "disk")
+FORMS = ("container", "disk", "vm_bundle")
+#: A VM bundle's image that is already on the host that boots it, by its name there, as composing leaves one.
+LOCAL_IMAGE_PREFIX = "local:"
 #: The file a disk form's image holds, as KubeVirt's containerDisk has it, owned by the uid its QEMU runs as.
 DISK_FILE, DISK_OWNER = "disk/disk.img", 107
 #: What a setting holds: its default's type, which a value an env or a deploy gives must share.
@@ -53,6 +54,24 @@ class LinuxOS(BaseModel):
     version: str = Field(min_length=1, description="os-release's VERSION_ID, or rolling")
     display: Literal["x11", "wayland", "none"]
     build: str | None = None
+
+
+class MacOS(BaseModel):
+    """A macOS base: its version, as ``sw_vers`` gives it, at least its major (``26``), and its display server, Aqua."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["macos"] = "macos"
+    version: str = Field(pattern=r"^[0-9]+(\.[0-9]+){0,2}$", description="sw_vers' ProductVersion, or its major")
+    display: Literal["aqua"] = "aqua"
+    build: str | None = None
+
+
+#: The OS types a computer is, by ``os.type``.
+OS_TYPES: dict[str, type[BaseModel]] = {"linux": LinuxOS, "macos": MacOS}
+#: The forms each OS type's computers have: a Linux computer is a container and may be a disk too, a macOS one a VM
+#: bundle alone.
+OS_FORMS = {"linux": ("container", "disk"), "macos": ("vm_bundle",)}
 
 
 class Session(BaseModel):
@@ -109,11 +128,42 @@ class DiskForm(BaseModel):
     min_disk_gb: int = Field(ge=1, description="Its virtual size, which a deploy's disk is at least")
 
 
+class VmBundleForm(BaseModel):
+    """The computer as a VM bundle: a whole saved virtual machine, its disk, NVRAM and hardware identity, that a
+    hypervisor restores as it was saved, in Lume's ``format``. ``image`` is a registry reference pinned by digest, which
+    each host that boots it pulls once, or ``local:<name>``, a VM bundle already on that host, as composing leaves one.
+    Deploy settings reach the computer as the protocol's seed in a folder the VM shares (``input_channel``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str
+    format: Literal["lume"]
+    input_channel: Literal["shared_folder"]
+    min_disk_gb: int = Field(ge=1, description="Its virtual size, which a deploy's disk is at least")
+
+    @field_validator("image")
+    @classmethod
+    def _pinned_or_local(cls, value: str) -> str:
+        name = value.removeprefix(LOCAL_IMAGE_PREFIX)
+        if name != value:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name):
+                raise ValueError(f"a local VM bundle's name is letters, digits, '.', '_' and '-', not {name!r}")
+        elif not re.fullmatch(r"[^\s@]+/[^\s@]+@sha256:[0-9a-f]{64}", value):
+            raise ValueError(f"a VM bundle's image is a registry reference pinned by digest (<repository>@sha256:<digest>) "
+                             f"or local:<name>, not {value!r}")
+        return value
+
+    def local_name(self) -> str | None:
+        """The name of the VM bundle on the host when ``image`` is a local one, else None."""
+        return self.image.removeprefix(LOCAL_IMAGE_PREFIX) if self.image.startswith(LOCAL_IMAGE_PREFIX) else None
+
+
 class Forms(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    container: ContainerForm
+    container: ContainerForm | None = None
     disk: DiskForm | None = None
+    vm_bundle: VmBundleForm | None = None
 
     @model_serializer(mode="wrap")
     def _without_absent_forms(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -144,7 +194,7 @@ class ComputerArtifact(Artifact):
     type: Literal["computer"] = "computer"
     description: str = Field(default="", description="What the computer is")
     arch: list[Literal["amd64", "arm64"]] = Field(min_length=1, description="The architectures every form runs on")
-    os: LinuxOS
+    os: Annotated[LinuxOS | MacOS, Field(discriminator="type")]
     session: Session
     forms: Forms
     config: dict[str, Setting] = Field(default_factory=dict, description="Its settings, by name")
@@ -160,7 +210,18 @@ class ComputerArtifact(Artifact):
     def _os_type_supported(cls, value: Any) -> Any:
         if isinstance(value, dict) and value.get("type", "linux") not in OS_TYPES:
             raise ValueError(f"os.type {value['type']!r} isn't supported yet; a computer is {', '.join(OS_TYPES)}")
-        return value
+        return {"type": "linux", **value} if isinstance(value, dict) else value
+
+    @model_validator(mode="after")
+    def _forms_fit_os(self) -> Self:
+        allowed = OS_FORMS[self.os.type]
+        if others := [form for form in FORMS if getattr(self.forms, form) is not None and form not in allowed]:
+            raise ValueError(f"forms.{others[0]}: a {self.os.type} computer's forms are {' and '.join(allowed)}")
+        if getattr(self.forms, allowed[0]) is None:
+            raise ValueError(f"forms.{allowed[0]} is required: every {self.os.type} computer has one")
+        if self.os.type == "macos" and self.arch != ["arm64"]:
+            raise ValueError(f"arch: a macOS VM bundle runs on Apple silicon, arm64 alone, not {self.arch}")
+        return self
 
     @field_validator("forms", mode="before")
     @classmethod
@@ -193,9 +254,13 @@ class ComputerArtifact(Artifact):
         from agent_env.artifact.store import get_artifact_store
 
         computer = cls(**fields)
-        image, disk = computer.image(), computer.forms.disk
-        checks = {"container": _inspect(image, computer.arch, functools.partial(_read_container, computer.os))
-                  if inspect else _unread(computer.arch, "inspection was skipped")}
+        disk, checks = computer.forms.disk, {}
+        if computer.forms.container is not None:
+            image = computer.image()
+            checks["container"] = (_inspect(image, computer.arch, functools.partial(_read_container, computer.os))
+                                   if inspect else _unread(computer.arch, "inspection was skipped"))
+        if computer.forms.vm_bundle is not None:
+            checks["vm_bundle"] = _unread(computer.arch, "a VM bundle is read by the host that boots it")
         if disk is not None and disk.image is None:
             checks["disk"] = _unread(computer.arch, "it's made from the container form when composed")
         elif disk is not None:
@@ -216,8 +281,8 @@ class ComputerArtifact(Artifact):
         """Write the computer an artifact.toml declares, its form's image as the bundle wrote it or the artifact the
         key names."""
         fields = {key: value for key, value in data.items() if key not in ("id", "type", "version")}
-        for form in (fields.get("forms") or {}).values():
-            if isinstance(form, dict) and "image" in form:
+        for name, form in (fields.get("forms") or {}).items():
+            if name != "vm_bundle" and isinstance(form, dict) and "image" in form:
                 image = ctx.artifact(form["image"])
                 form["image"] = {"id": image.id, "version": image.version}
         try:

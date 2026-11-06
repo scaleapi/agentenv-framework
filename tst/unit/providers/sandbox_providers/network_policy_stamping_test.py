@@ -21,6 +21,7 @@ from agent_env.providers.sandbox_providers.daytona.config import Settings as Day
 from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.lume.provider import LumeSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sail_vm import _sdk as sail_sdk
@@ -178,6 +179,16 @@ async def _smol_vm() -> Sandbox:
         return await SmolVmSandboxProvider().create_vm(exposed_ports=[])
 
 
+
+async def _lume() -> Sandbox:
+    provider = LumeSandboxProvider()
+    with (patch.object(provider, "_source", AsyncMock(return_value="bench")),
+          patch.object(provider, "_ended_past_lifetime", AsyncMock()),
+          patch.object(provider, "_refuse_over_limit", AsyncMock()), patch.object(provider, "_lume", AsyncMock()),
+          patch.object(provider, "_get", AsyncMock(return_value={"macAddress": "aa:00:00:00:00:01"})),
+          patch.object(provider, "_save"), patch.object(provider, "_started", AsyncMock())):
+        return await provider.create_vm(image="local:bench", env={})
+
 FACTORIES = {
     "modal": _modal,
     "modal_vm": _modal_vm,
@@ -193,6 +204,7 @@ FACTORIES = {
     "agent37": _agent37,
     "smol_vm": _smol_vm,
     "local": _local,
+    "lume": _lume,
 }
 
 

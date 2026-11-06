@@ -61,8 +61,12 @@ _ECHO_KEYS = frozenset({
 _ECHO_ID_RE = re.compile(r"(?:^id|Id|_id)$")  # id, fileId, documentId, email_id, …
 _ECHO_VALUE_MAX = 200  # chars; an allowlisted scalar longer than this is a payload wearing an id's name
 _ECHO_DIGEST_CHARS = 16
+_ECHO_ARGS_MAX_CHARS = 4096  # JSON chars; a provoking call's echo past this is recorded as its args' shape alone
+_ECHO_ARGS_MAX_VALUES = 256  # a provoking call's args holding more values are shaped without building their echo
 
 # Firing-log event vocabulary (the GET /triggers/state contract); _emit rejects anything not here.
+# `provoking` is {tool, role, args} for a tool call, {source: "website", app, method, path, status, role}
+# for a website request, or {source: "clock"} for a time trigger.
 _EVENT_KINDS = frozenset({
     "added", "removed",               # registration lifecycle
     "detected",                       # a trigger's condition matched
@@ -307,6 +311,27 @@ def _echo_args(value: Any, key: str | None = None) -> Any:
     return _shape(value)
 
 
+def _echo_call_args(arguments: dict) -> Any:
+    """A provoking call's args as its events carry them: `_echo_args`, or only their shape when that echo is too large."""
+    if _holds_more_than(arguments, _ECHO_ARGS_MAX_VALUES):
+        return _shape(arguments)
+    echo = _echo_args(arguments)
+    return echo if len(json.dumps(echo)) <= _ECHO_ARGS_MAX_CHARS else _shape(arguments)
+
+
+def _holds_more_than(value: Any, limit: int) -> bool:
+    """Whether ``value`` nests more than ``limit`` values, counting no further than ``limit``."""
+    pending, count = [value], 1
+    while pending:
+        node = pending.pop()
+        children = node.values() if isinstance(node, dict) else node if isinstance(node, list) else ()
+        count += len(children)
+        if count > limit:
+            return True
+        pending.extend(children)
+    return False
+
+
 def _strings(value: Any) -> list[str]:
     """Every string anywhere in an args structure, so the two placeholder scans share one walk."""
     if isinstance(value, dict):
@@ -402,7 +427,7 @@ class TriggerEngine:
     def __init__(self, gateway):
         self._gw = gateway
         self._executors: dict[str | None, dict] = {}  # `executor` under None, `executors` by name
-        self._in_flight: dict[str, list[dict]] = {}  # executor role -> the fires it is realizing, for attribution
+        self._in_flight: dict[str, list[dict]] = {}  # executor role -> the fires it is realizing: cause and calls made
         self._watch_roles: set[str] = set()
         self._config_set = False
         self._triggers: dict[str, dict] = {}
@@ -713,7 +738,8 @@ class TriggerEngine:
         _normalize_provoked_when(when, tid)
 
     def _normalize_website_when(self, when: dict, tid: str) -> None:
-        """Validate a website `when`: a known app, upper-cased method, `path`/`status` predicates, `where`, `repeat`."""
+        """Validate a website `when`: a known app, upper-cased method, the `op` (a route the site's card names),
+        `path`/`status` predicates, `where`, `repeat`."""
         w = f"trigger '{tid}'"
         app = when.get("app")
         if not isinstance(app, str) or not app:
@@ -726,6 +752,17 @@ class TriggerEngine:
             raise TriggerError(f"{w}: when.method must be a non-empty HTTP method, e.g. 'POST'")
         else:
             when["method"] = when["method"].strip().upper()
+        if when.get("op") is None:
+            when.pop("op", None)
+        elif not isinstance(when["op"], str) or not when["op"]:
+            raise TriggerError(f"{w}: when.op must be a non-empty string naming one of the website's routes")
+        else:
+            names = self._gw.website_route_names(app)
+            if names is None:
+                raise TriggerError(f"{w}: when.op names a route of website {app!r}, whose card the gateway could not "
+                                   "read; match its path instead")
+            if when["op"] not in names:
+                raise TriggerError(f"{w}: when.op names no route of website {app!r} (routes: {sorted(names)})")
         for key in ("path", "status"):
             if when.get(key) is None:
                 when.pop(key, None)
@@ -888,6 +925,9 @@ class TriggerEngine:
         hold the call for: the widest of their timeouts, counting an omitted one as the gateway
         default so a neighbour's tighter ask cannot cut it short.
         """
+        for fire in self._in_flight.get(role, ()):  # an executor's call counts toward the fires it is realizing
+            counts = fire["failed_calls" if getattr(result, "isError", False) else "calls"]
+            counts[name] = counts.get(name, 0) + 1
         provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
         if not provokable:
             return [], None
@@ -899,7 +939,7 @@ class TriggerEngine:
             return [], None
         data = _result_data(result)
         ctx = {"args": arguments, "result": data}
-        provoking = {"tool": name, "role": role}
+        provoking = {"tool": name, "role": role, "args": _echo_call_args(arguments)}
         # Before detection, so the call that sets off a deadline's anchor can't also be the call that cancels it.
         for tid, trig in provokable:
             when = trig["spec"]["when"]
@@ -921,17 +961,18 @@ class TriggerEngine:
         return pending, timeout_s
 
     def on_website_request(self, role: str, app: str, method: str, path: str, status: int,
-                           args: dict) -> tuple[list[asyncio.Task], float | None]:
-        """Detection hook for an answered website request, before its response goes out; returns what on_tool_call does."""
+                           args: dict, op: str | None = None) -> tuple[list[asyncio.Task], float | None]:
+        """Detection hook for an answered website request, before its response goes out, `op` naming the route of
+        the site's card it reached; returns what on_tool_call does."""
         provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
         if not provokable:
             return [], None
         if self._has_time_triggers:
             self._eval_time_triggers()
-        request = {"app": app, "method": method, "path": path, "status": status}
+        request = {"app": app, "method": method, "path": path, "status": status, **({"op": op} if op else {})}
         provoking = {"source": "website", **request, "role": role}
         matched = [(tid, trig) for tid, trig in provokable
-                   if _website_matches(trig["spec"]["when"], app, method, path, status)]
+                   if _website_matches(trig["spec"]["when"], app, method, path, status, op)]
         pending, timeout_s = self._detect(matched, provoking, {"args": args, "request": request})
         if method not in _SAFE_METHODS and status < 400:
             self._reevaluate_states(provokable, provoking)
@@ -963,10 +1004,12 @@ class TriggerEngine:
                 trig["evaluating"] = True
                 self._schedule(self._eval_state(tid, trig, provoking))
 
-    def may_hold_website_request(self, role: str, app: str, method: str, path: str, status: int) -> bool:
+    def may_hold_website_request(self, role: str, app: str, method: str, path: str, status: int,
+                                 op: str | None = None) -> bool:
         """Whether a `provoking_call` barrier could hold this website request: a matcher check, `where` and status aside."""
         return any((trig["spec"].get("barrier") or {}).get("at") == "provoking_call" and self._provoked_by(trig, role)
-                   and _website_matches(trig["spec"]["when"], app, method, path, status) for trig in self._triggers.values())
+                   and _website_matches(trig["spec"]["when"], app, method, path, status, op)
+                   for trig in self._triggers.values())
 
     @property
     def has_website_triggers(self) -> bool:
@@ -1393,9 +1436,12 @@ class TriggerEngine:
                     detail = {"notify": action["channel"], "to": note["to"], "notification_id": note["id"],
                               "text_len": len(text)}
             else:
-                if not await self._run_nl(tid, trig, index, action, ctx):
+                fire = await self._run_nl(tid, trig, index, action, ctx)
+                if fire is None:
                     return False
-                detail = {"nl": action["instruction"][:120], **_named_executor(action)}
+                detail = {"nl": action["instruction"][:120], **_named_executor(action), "calls": fire["calls"],
+                          **({"failed_calls": fire["failed_calls"]} if fire["failed_calls"] else {}),
+                          **({"calls_shared_with": sorted(fire["shared_with"])} if fire["shared_with"] else {})}
             if "verify" in action and action["type"] != "nl":
                 # only an action's own verify inherits its `as`; when.check state probes read as the pin
                 if not await self._run_verify(tid, index, action["verify"], ctx, role=action.get("as")):
@@ -1417,38 +1463,42 @@ class TriggerEngine:
         self._emit("verify_failed", tid, action_index=index)
         return False
 
-    async def _run_nl(self, tid: str, trig: dict, index: int, action: dict, ctx: dict | None = None) -> bool:
+    async def _run_nl(self, tid: str, trig: dict, index: int, action: dict, ctx: dict | None = None) -> dict | None:
+        """The fire with the calls its executor made for it, by tool, or None when the action failed."""
         instruction = action["instruction"]
         named = _named_executor(action)
         executor = self._executors.get(action.get("executor"))
         if executor is not None and "hours" in executor:
             await self._await_hours(tid, trig, index, executor["hours"], named)
-        cause = {"trigger_id": tid, "action_index": index, "fire": trig["attempts"]}
-        causes = self._in_flight.setdefault(executor["role"], []) if executor is not None else []
-        causes.append(cause)
+        fire = _in_flight_fire({"trigger_id": tid, "action_index": index, "fire": trig["attempts"]})
+        fires = self._in_flight.setdefault(executor["role"], []) if executor is not None else []
+        for other in fires:  # an executor's calls carry only its role, so fires it realizes at once share their counts
+            other["shared_with"].add(tid)
+            fire["shared_with"].add(other["cause"]["trigger_id"])
+        fires.append(fire)
         try:
             for attempt in (1, 2):
                 reply = await self._call_executor(executor, instruction, context_id=f"trigger-{tid}")
                 if reply is None:
                     self._emit("action_failed", tid, action_index=index,
                                detail=f"executor attempt {attempt} did not complete", **named)
-                    return False
+                    return None
                 if "verify" not in action:
-                    return True
+                    return fire
                 if await self._run_verify(tid, index, action["verify"], ctx):
-                    return True
+                    return fire
                 if attempt == 1:
                     instruction = (f"{action['instruction']}\n\nYour previous attempt did not pass verification — "
                                    f"the expected change is not observable in the environment. Do it again exactly as described.")
         finally:
-            causes.remove(cause)
+            fires.remove(fire)
         self._emit("action_failed", tid, action_index=index, detail="verification failed after retry", **named)
-        return False
+        return None
 
     def caused_by(self, role: str) -> list[dict]:
         """The fires in flight for the executor with ``role``, all of them when several overlap; its tool calls are
         attributed to them. A fire is the trigger's n-th, failed ones counted."""
-        return list(self._in_flight.get(role, ()))
+        return [fire["cause"] for fire in self._in_flight.get(role, ())]
 
     async def _delay(self, tid: str, trig: dict, index: int, action: dict, since: float) -> None:
         """Wait until the action's delay has run since ``since``, the Clock.elapsed() reading of its cause."""
@@ -1565,6 +1615,11 @@ def _named_executor(action: dict) -> dict:
     return {"executor": action["executor"]} if action.get("executor") is not None else {}
 
 
+def _in_flight_fire(cause: dict) -> dict:
+    """An nl fire as `_in_flight` holds it: its cause, its executor's calls by tool, and the triggers it overlapped."""
+    return {"cause": cause, "calls": {}, "failed_calls": {}, "shared_with": set()}
+
+
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _HHMM_RE = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 _UTC_OFFSET_RE = re.compile(r"([+-])([01]\d|2[0-3]):([0-5]\d)")
@@ -1608,9 +1663,12 @@ def _normalize_provoked_when(when: dict, tid: str) -> None:
         raise TriggerError(f"trigger '{tid}': when.repeat must be a boolean")
 
 
-def _website_matches(when: dict, app: str, method: str, path: str, status: int) -> bool:
-    """Whether a request matches a website `when` (`where` aside); without `status`, only a response below 400 does."""
+def _website_matches(when: dict, app: str, method: str, path: str, status: int, op: str | None = None) -> bool:
+    """Whether a request matches a website `when` (`where` aside); with `op`, only one reaching that route does, and
+    without `status`, only a response below 400 does."""
     if when["type"] != "website" or when["app"] != app or when.get("method", method) != method:
+        return False
+    if "op" in when and when["op"] != op:
         return False
     if "path" in when and not _eval_predicate(when["path"], path):
         return False

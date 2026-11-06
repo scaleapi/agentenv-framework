@@ -23,7 +23,7 @@ def _gone(pid: int, within: float = 5.0) -> bool:
         try:
             with open(f"/proc/{pid}/stat") as stat:
                 state = stat.read().rsplit(")", 1)[1].split()[0]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):  # a process reaped mid-read fails the read with ESRCH
             return True
         if state == "Z":
             return True

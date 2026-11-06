@@ -27,8 +27,8 @@ from agentenv_protocol.computer.platform import Platform  # noqa: E402
 DRIVER = '''import not_installed_here
 from not_installed_here.input import Base, Keyboard
 
-from agentenv_protocol.computer import (ComputerDriverEnvironment, Display, capture, click, computer_driver, display,
-                                        drag, press, scroll, type_text)
+from agentenv_protocol.computer import (ComputerDriverEnvironment, ComputerSettings, Display, capture, click,
+                                        computer_driver, display, drag, press, scroll, type_text)
 
 SHIFT = Keyboard.keysym("Shift_L")[0]
 print("loading the desk driver")
@@ -62,6 +62,11 @@ class Desk(ComputerDriverEnvironment):
 
     @press
     def press_keys(self, keys): pass
+
+
+class Headed(Desk):
+    class Settings(ComputerSettings):
+        headed: bool = False
 '''
 APP = '''import not_installed_here
 from pydantic import BaseModel, SecretStr
@@ -160,6 +165,9 @@ def test_a_class_whose_imports_arent_installed_declares_what_it_serves_on_each_p
     linux = declared.platforms[0]
     assert {"urn:agentenv:computer/v1", "urn:agentenv:computer-exec/v1"} <= set(linux.provides)
     assert len(linux.tools) == 7 and linux.features["buttons"] == ["left", "right"]
+    assert declared.settings is None
+    assert declare(folder, "driver.py", "Headed").settings["properties"]["headed"] == {"default": False, "title": "Headed",
+                                                                                      "type": "boolean"}
 
 
 def test_a_stub_is_itself_again_except_for_dunders(folder):
@@ -264,6 +272,9 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.fonts runs on 'windows', which Changed declares no install for; it declares freebsd, linux"),
     ('@ready_check(os="macos")\n    def window_shown(self): return True',
      "Changed.window_shown runs on 'macos', which Changed declares no install for"),
+    ('@install("macos", FreeBSD(), launch=Launch(command=["mail"], window={"class": "Mail"}, '
+     'ready=Ready(window=True)))',
+     "on macos an app's launch can't wait on its window, which is read from X11"),
     ('class BuildSettings(BaseModel): key: SecretStr = SecretStr("")',
      "Changed.BuildSettings holds a secret at properties.key, which its computer's image would keep; declare it in "
      "Settings"),
@@ -273,9 +284,9 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.BuildSettings holds a secret at $defs.Settings.properties.password, which"),
 ], ids=["no-wait", "no-window", "window-key", "download-sha", "script-escape", "os-skill-twice", "os-build-secret",
         "step-os",
-        "check-os", "build-secret", "build-secrets-listed", "build-secret-nested"])
+        "check-os", "macos-window-wait", "build-secret", "build-secrets-listed", "build-secret-nested"])
 def test_an_app_whose_declaration_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
-    decorator, body = (change, "pass") if change.startswith("@linux") else ("", change)
+    decorator, body = (change, "pass") if change.startswith(("@linux", "@install(")) else ("", change)
     (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64) + f"""
 
 @computer_app(supports={LINUX})

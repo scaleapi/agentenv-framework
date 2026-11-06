@@ -37,8 +37,8 @@ from agent_env.store.routing import disable_namespace_routing
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from agent_env.utils.docker.context import BuildContext
-from agent_env.env.published_images import AGENT_IMAGES, EXAMPLE_IMAGES
-from tst.unit.bundle._support import DIGEST, RefusingStore, layout, local_builds, local_store, plan_of, shipped_agent
+from agent_env.env.published_images import EXAMPLE_IMAGES
+from tst.unit.bundle._support import CLAUDE_CODE_IMAGE, DIGEST, RefusingStore, layout, local_builds, local_store, plan_of, shipped_agent
 
 ROOT = "@local/~/triage"
 LAYOUT = {
@@ -485,7 +485,7 @@ def test_an_agent_image_from_a_shipped_agents_sources_is_registered_as_its_publi
     assert [(found.ref, found.digest) for found in plan.published.values()] == [(agents_published, DIGEST)]
     assert (written.image_name, written.image_digest, written.pinned_name) == (
         agents_published, DIGEST, f"{agents_published}@{DIGEST}")
-    assert written.source_digest == f"sha256:{AGENT_IMAGES[0].tag().removeprefix('src-')}"
+    assert written.source_digest == f"sha256:{CLAUDE_CODE_IMAGE.tag().removeprefix('src-')}"
     assert written.buildable and not written.context_only and written.tar_gz_object_url is None
     assert builds == []
     assert A2AAgent.get(f"{ROOT}/solver").docker_image_artifact.image_digest == DIGEST
@@ -541,7 +541,7 @@ def test_an_agent_image_written_before_its_image_was_published_is_written_again_
         bundle_dir, builds, monkeypatch):
     shipped_agent(bundle_dir)
     _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
-    image, agent, ref = f"{ROOT}/solver__agent_image", f"{ROOT}/solver", AGENT_IMAGES[0].ref()
+    image, agent, ref = f"{ROOT}/solver__agent_image", f"{ROOT}/solver", CLAUDE_CODE_IMAGE.ref()
     _run(bundle_dir)
     monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda asked: DIGEST if asked == ref else None)
 

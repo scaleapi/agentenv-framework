@@ -251,6 +251,15 @@ class AppDeclaration(BaseModel):
     ready_checks: list[AppReadyCheck]
     browser: Optional[bool] = None
 
+    @model_validator(mode="after")
+    def _no_window_wait_on_macos(self) -> AppDeclaration:
+        """A window's readiness is read from X11's windows, which macOS hasn't."""
+        launch = self.os["macos"].launch if "macos" in self.os else None
+        if launch is not None and launch.ready is not None and launch.ready.window:
+            raise ValueError("on macos an app's launch can't wait on its window, which is read from X11; wait on a "
+                             "port, a command or a @ready_check")
+        return self
+
     @model_validator(mode="before")
     @classmethod
     def _stored_before_each_os(cls, data: Any) -> Any:

@@ -52,6 +52,8 @@ FAILING_S = 60.0
 GAP_S = 2.0
 #: How long a stream that stopped or failed waits before it is started again.
 RETRY_S = 1.0
+#: How long a recording's start waits for its first frame, so a recording a start answered for is recording.
+FIRST_FRAME_S = 5.0
 #: How often free disk is checked while frames arrive.
 DISK_CHECK_S = 5.0
 KEEP_ENDED = 64
@@ -127,8 +129,9 @@ def recording_params(recording: Recording, streams: bool) -> dict:
 
 
 class Recordings:
-    """The recordings of one driver: started by request id, open ones counted against ``max_concurrent``, ended
-    ones kept with their manifests so a repeated ``end`` answers the same."""
+    """The recordings of one driver: started by request id, each start answering once its recording is recording, open
+    ones counted against ``max_concurrent``, ended ones kept with their manifests so a repeated ``end`` answers the
+    same."""
 
     def __init__(self, runtime: ComputerRuntime) -> None:
         self.runtime = runtime
@@ -144,7 +147,9 @@ class Recordings:
             raise InvalidArgument("request_id is a non-empty string")
         async with self._lock:
             if request_id in self.started:
-                return self.started[request_id]
+                answer = self.started[request_id]
+                await self._live(self.running.get(answer["recording_id"]))
+                return answer
             hints, grant = self._hints(features, scope, window, fps, max_edge, cursor, upload)
             stopped = [rid for rid, r in self.running.items() if r.done]
             for rid in stopped[:max(0, len(stopped) - KEEP_ENDED)]:  # stopped by itself and never ended
@@ -164,7 +169,15 @@ class Recordings:
             self.started[request_id] = answer
             while len(self.started) > KEEP_STARTED:
                 self.started.popitem(last=False)
+            await self._live(recording)
             return answer
+
+    @staticmethod
+    async def _live(recording: Optional[_Recording]) -> None:
+        """Wait up to FIRST_FRAME_S for ``recording``, one still running, to have its first frame."""
+        if recording is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(recording.live.wait(), FIRST_FRAME_S)
 
     async def end(self, recording_id: str, upload: Optional[dict], reason: str) -> dict:
         if reason not in REASONS:
@@ -219,6 +232,7 @@ class _Recording:
         self.ended_by: Optional[str] = None
         self.error: Optional[str] = None
         self.done = False
+        self.live = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
         self.timer: Optional[asyncio.TimerHandle] = None
         self.released: Optional[asyncio.Future] = None
@@ -228,7 +242,11 @@ class _Recording:
         self._last_disk_check = 0.0
 
     async def run(self) -> None:
+        """Frames or segments from the source, recorded until the recording ends; ``live`` once it's recording: a
+        stream from its start, the fallback's polling from its first frame, which a busy computer is slow to take."""
         failing_since: Optional[float] = None
+        if self.streams:
+            self.live.set()
         try:
             while True:
                 try:
@@ -255,6 +273,7 @@ class _Recording:
                 await self._close()
             finally:
                 self.done = True
+                self.live.set()
                 self.released = asyncio.ensure_future(self._release())
 
     def expire(self) -> None:
@@ -315,6 +334,7 @@ class _Recording:
             path = self.hints.directory / f"{len(self.segments):04d}.mp4"
             self.encoder = await self._in_thread(_Encoder, path, frame.width, frame.height, self.hints.fps, at)
         await self._in_thread(self.encoder.add, frame, at)
+        self.live.set()
         self._check_disk()
 
     async def _add_segment(self, item: RecordedSegment) -> None:

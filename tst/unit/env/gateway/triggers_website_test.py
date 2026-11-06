@@ -12,7 +12,7 @@ from mcp.types import CallToolResult, TextContent
 from agent_env.env.gateway import gateway as gateway_module
 from agent_env.env.gateway import rest_proxy as rest_proxy_module
 from agent_env.env.gateway.clock import Clock
-from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, TRIGGER_WEBSITE
+from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, TRIGGER_WEBSITE, TRIGGER_WEBSITE_OP
 from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway
 from agent_env.env.gateway.triggers import TriggerEngine, TriggerError
 
@@ -27,11 +27,15 @@ class _FakeGateway:
         self.events: list[dict] = []
         self.rules: list[tuple[str, str, bool]] = []
         self.website_urls = {"mail": "http://mail-frontend", "shop": "http://shop-frontend"}
+        self.route_names = {"mail": {"send_message", "list_messages"}}
         self._role_rules_lock = asyncio.Lock()
         self._server_tools: dict = {}
         self._tool_server_urls: dict = {}
         self._clock = Clock()
         self.TRIGGER_BARRIER_TIMEOUT_S = 30.0
+
+    def website_route_names(self, app):
+        return self.route_names.get(app)
 
     def _apply_rule(self, role, tool, value):
         self.rules.append((role, tool, value))
@@ -98,6 +102,10 @@ REPLY = {"id": "reply", "when": {"type": "website", "app": "mail", "method": "po
      "a website request carries args, not a result"),
     ({"type": "website", "app": "mail", "unless": {"tool": "t"}}, [], "when.unless is only valid on time triggers"),
     ({"type": "website", "app": "mail", "roles": []}, [], "when.roles must be a non-empty list"),
+    ({"type": "website", "app": "mail", "op": ""}, [], "when.op must be a non-empty string"),
+    ({"type": "website", "app": "mail", "op": "archive"}, [],
+     "when.op names no route of website 'mail' (routes: ['list_messages', 'send_message'])"),
+    ({"type": "website", "app": "shop", "op": "checkout"}, [], "whose card the gateway could not read"),
 ])
 def test_registration_fails_loud(monkeypatch, when, actions, fragment):
     engine = _make_engine(monkeypatch)
@@ -121,7 +129,7 @@ def test_registration_normalizes_the_method_and_state_echoes_the_request_matcher
 
 def test_the_card_declares_website_triggers():
     triggers = next(e for e in GATEWAY_EXTENSIONS if e["uri"] == EXT_TRIGGERS_URI)
-    assert TRIGGER_WEBSITE in triggers["params"]["features"]
+    assert {TRIGGER_WEBSITE, TRIGGER_WEBSITE_OP} <= set(triggers["params"]["features"])
 
 
 # ---------------------------------------------------------------- detection
@@ -155,6 +163,21 @@ async def test_only_a_request_matching_app_method_path_status_and_where_provokes
         engine.on_website_request("default", app, method, path, status, dict(args))
         await _settle(engine)
     assert [p["path"] for _, p in _detected(engine)] == ["/api/messages/"]
+    assert len(engine._test_gw.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_naming_an_op_is_provoked_only_by_a_request_that_reached_that_route(monkeypatch):
+    engine = _make_engine(monkeypatch)
+    by_op = {**REPLY, "when": {"type": "website", "app": "mail", "op": "send_message", "repeat": True}}
+    engine.register({"triggers": [by_op]})
+    assert engine._triggers["reply"]["spec"]["when"]["op"] == "send_message"
+    engine.on_website_request("default", "mail", "POST", "/api/messages", 201, dict(MESSAGE))
+    engine.on_website_request("default", "mail", "POST", "/api/messages", 201, dict(MESSAGE), "list_messages")
+    engine.on_website_request("default", "mail", "POST", "/api/messages", 201, dict(MESSAGE), "send_message")
+    await _settle(engine)
+    request = {"app": "mail", "method": "POST", "path": "/api/messages", "status": 201, "op": "send_message"}
+    assert _detected(engine) == [("reply", {"source": "website", **request, "role": "default"})]
     assert len(engine._test_gw.calls) == 1
 
 
@@ -335,14 +358,14 @@ async def test_the_proxy_hands_the_engine_the_role_path_status_and_args_of_each_
     assert await _request(gw, "GET", "/website/calendar/") == 404
 
     assert seen == [
-        ("default", "mail", "GET", "/", 200, {}),
-        ("carol@example.com", "mail", "GET", "/inbox", 200, {"folder": "work", "tag": ["a", "b"]}),
-        ("default", "mail", "POST", "/api/messages", 200, {"draft": "0", "to": "dana@example.com"}),
-        ("default", "mail", "POST", "/compose", 200, {"subject": "Hi there", "to": "dana@example.com"}),
-        ("default", "mail", "POST", "/api/batch", 200, {"op": "send"}),
-        ("default", "mail", "PUT", "/api/drafts/a/b", 200, {}),
+        ("default", "mail", "GET", "/", 200, {}, None),
+        ("carol@example.com", "mail", "GET", "/inbox", 200, {"folder": "work", "tag": ["a", "b"]}, None),
+        ("default", "mail", "POST", "/api/messages", 200, {"draft": "0", "to": "dana@example.com"}, None),
+        ("default", "mail", "POST", "/compose", 200, {"subject": "Hi there", "to": "dana@example.com"}, None),
+        ("default", "mail", "POST", "/api/batch", 200, {"op": "send"}, None),
+        ("default", "mail", "PUT", "/api/drafts/a/b", 200, {}, None),
     ]
-    assert [r.content for r in website.requests][2:4] == [b'{"to": "dana@example.com", "draft": "0"}',
+    assert [r.content for r in website.requests if r.url.path != "/.well-known/agent-env.json"][2:4] == [b'{"to": "dana@example.com", "draft": "0"}',
                                                           b"subject=Hi+there&to=dana%40example.com"]
 
 
@@ -419,3 +442,137 @@ async def test_a_failing_trigger_evaluation_still_answers_the_request(monkeypatc
 
     gw._trigger_engine.on_website_request = explode
     assert await _request(gw, "GET", "/website/mail/inbox") == 200
+
+
+NOTES_CARD = {"name": "notes", "capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {"routes": [
+    {"method": "GET", "path": "/api/notes", "name": "list_notes", "roles": None},
+    {"method": "POST", "path": "/api/notes", "name": "create_note", "roles": None},
+    {"method": "PATCH", "path": "/api/notes/{note_id}", "name": "edit_note", "roles": None},
+]}}]}}
+
+
+class _NotesSite(_Website):
+    """A website whose server serves `NOTES_CARD` at the card's path, counting how often the gateway reads it."""
+
+    def install(self, monkeypatch) -> None:
+        self.card_reads = 0
+
+        async def body():
+            yield b'{"ok": true}'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/.well-known/agent-env.json":
+                self.card_reads += 1
+                return httpx.Response(200, json=NOTES_CARD)
+            self.requests.append(request)
+            return httpx.Response(self.status, headers={"content-type": "application/json"}, content=body())
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+
+
+def _notes_gateway() -> Gateway:
+    return Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                   website_urls={"notes": "http://notes-website-backend:8000"},
+                   rest_proxy_urls={"notes": "http://notes-website-backend:8000"})
+
+
+async def _register(gw: Gateway, body: dict) -> tuple[int, dict]:
+    sent = json.dumps(body).encode()
+    answered: list[bytes] = []
+    statuses: list[int] = []
+
+    async def receive():
+        return {"type": "http.request", "body": sent, "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            statuses.append(message["status"])
+        elif message["type"] == "http.response.body":
+            answered.append(message.get("body", b""))
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST", "scheme": "http",
+             "path": "/triggers/register", "raw_path": b"/triggers/register", "query_string": b"", "root_path": "",
+             "server": ("gateway", 80), "client": ("c", 1), "headers": [(b"content-type", b"application/json")]}
+    await gw._mcp.streamable_http_app()(scope, receive, send)
+    return statuses[0], json.loads(b"".join(answered))
+
+
+EDITED = {"id": "edited", "when": {"type": "website", "app": "notes", "op": "edit_note", "repeat": True}, "actions": []}
+
+
+@pytest.mark.asyncio
+async def test_registering_an_op_trigger_reads_the_site_s_routes_and_refuses_a_route_it_does_not_name(monkeypatch):
+    site = _NotesSite(status=200)
+    site.install(monkeypatch)
+    gw = _notes_gateway()
+
+    status, answer = await _register(gw, {"triggers": [{**EDITED, "id": "typo", "when": {**EDITED["when"], "op": "edit"}}]})
+    assert status == 400 and "routes: ['create_note', 'edit_note', 'list_notes']" in answer["error"]
+    status, _ = await _register(gw, {"triggers": [EDITED]})
+    assert status == 200 and site.card_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_registering_an_op_trigger_whose_app_is_not_a_name_is_refused_as_bad_config(monkeypatch):
+    site = _NotesSite(status=200)
+    site.install(monkeypatch)
+    gw = _notes_gateway()
+
+    status, answer = await _register(gw, {"triggers": [{**EDITED, "when": {**EDITED["when"], "app": []}}]})
+    assert status == 400 and answer["ok"] is False and site.card_reads == 0
+
+
+@pytest.mark.asyncio
+async def test_the_proxy_names_the_route_a_request_reached_to_the_engine_and_the_trajectory(monkeypatch):
+    site = _NotesSite(status=200)
+    site.install(monkeypatch)
+    gw = _notes_gateway()
+    assert (await _register(gw, {"triggers": [EDITED]}))[0] == 200
+    changelog = iter(range(100))
+    monkeypatch.setattr(gw, "_query_changelog_id", lambda: next(changelog))
+    before = len(_trajectory())
+
+    await _request(gw, "PATCH", "/website/notes/api/notes/7", headers={"content-type": "application/json"}, body=b"{}")
+    await _request(gw, "PATCH", "/website/notes/api/notes/7/extra", headers={"content-type": "application/json"}, body=b"{}")
+    await _request(gw, "POST", "/website/notes/api/notes", headers={"content-type": "application/json"}, body=b"{}")
+    await asyncio.sleep(0.05)
+
+    detected = [p for _, p in _detected(gw._trigger_engine)]
+    assert [(p["path"], p.get("op")) for p in detected] == [("/api/notes/7", "edit_note")]
+    writes = [e for e in _trajectory()[before:] if e["event_type"] == "http_request"]
+    assert [(w["method"], w["path"], w.get("op")) for w in writes] == [
+        ("PATCH", "/api/notes/7", "edit_note"), ("PATCH", "/api/notes/7/extra", None), ("POST", "/api/notes", "create_note")]
+
+
+@pytest.mark.asyncio
+async def test_a_request_is_named_by_the_path_the_site_s_server_receives(monkeypatch):
+    """An encoded slash beside a dot segment routes here as one path and reaches the site's server as another; the
+    route, the trigger's match and the write's trajectory event all go by the one the server receives."""
+    site = _NotesSite(status=200)
+    site.install(monkeypatch)
+    gw = _notes_gateway()
+    assert (await _register(gw, {"triggers": [EDITED]}))[0] == 200
+    changelog = iter(range(100))
+    monkeypatch.setattr(gw, "_query_changelog_id", lambda: next(changelog))
+    before = len(_trajectory())
+
+    await _request(gw, "PATCH", "/website/notes/public%2Fx/../api/notes/7", headers={"content-type": "application/json"},
+                   body=b"{}")
+    await asyncio.sleep(0.05)
+
+    assert [r.url.path for r in site.requests] == ["/api/notes/7"]
+    assert [(p["path"], p.get("op")) for _, p in _detected(gw._trigger_engine)] == [("/api/notes/7", "edit_note")]
+    writes = [e for e in _trajectory()[before:] if e["event_type"] == "http_request"]
+    assert [w.get("op") for w in writes] == ["edit_note"]
+
+
+@pytest.mark.asyncio
+async def test_composing_the_env_card_reads_each_site_s_routes(monkeypatch):
+    site = _NotesSite(status=200)
+    site.install(monkeypatch)
+    gw = _notes_gateway()
+    assert gw.website_route_names("notes") is None
+    await gw._serve_env_card()
+    assert gw.website_route_names("notes") == {"list_notes", "create_note", "edit_note"} and site.card_reads == 1
+    assert gw._website_op("notes", "GET", "/api/notes") == "list_notes"

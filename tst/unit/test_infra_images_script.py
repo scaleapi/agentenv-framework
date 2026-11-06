@@ -74,9 +74,9 @@ def test_plan_only_lists_the_infra_images_the_agents_images_or_the_disk_forms(sc
                                 "forms"]["disk"]["min_disk_gb"])}
     assert "args" not in planned["infra"][0]
     assert "agentenv-gateway" in names["infra"] and bundles == [
-        "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-hermes", "agentenv-letta-code",
-        "agentenv-opencode", "agentenv-openhands", "agentenv-pi", "agentenv-proxy", "agentenv-pydantic-ai",
-        "agentenv-mail-mcp", "agentenv-ubuntu-24.04", "agentenv-ubuntu-24.04-headless"]
+        "agentenv-browser-use", "agentenv-claude-code", "agentenv-codex", "agentenv-gemini", "agentenv-hermes",
+        "agentenv-letta-code", "agentenv-opencode", "agentenv-openhands", "agentenv-pi", "agentenv-proxy",
+        "agentenv-pydantic-ai", "agentenv-mail-mcp", "agentenv-ubuntu-24.04", "agentenv-ubuntu-24.04-headless"]
 
 
 def test_plan_missing_lists_the_images_the_registry_lacks_or_refuses_to_show(script, monkeypatch, capsys):

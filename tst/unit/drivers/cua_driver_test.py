@@ -9,6 +9,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
+import types
 import stat
 import tempfile
 from pathlib import Path
@@ -100,10 +102,36 @@ class FakeDaemon:
                 and (session is None or r["session_id"] == session)]
 
 
+class FakeKeymap:
+    """An X display's keymap: printable ASCII on keycodes 8 to 102, and 103 and 104 spare."""
+
+    def __init__(self):
+        self.display = types.SimpleNamespace(info=types.SimpleNamespace(min_keycode=8, max_keycode=104))
+        self.keys = {8 + i: (0x20 + i, 0x20 + i) for i in range(0x5F)} | {103: (0, 0), 104: (0, 0)}
+
+    def get_keyboard_mapping(self, first, count):
+        return [self.keys[code] for code in range(first, first + count)]
+
+    def change_keyboard_mapping(self, code, keysyms):
+        self.keys[code] = tuple(keysyms[0])
+
+    def sync(self):
+        pass
+
+
 @pytest.fixture
 def module(monkeypatch):
     monkeypatch.delenv("ENVIRONMENT_NAME", raising=False)
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
+    xlib = types.ModuleType("Xlib")
+    xlib.display = types.ModuleType("Xlib.display")
+    xlib.display.Display = FakeKeymap
+    xlib.error = types.ModuleType("Xlib.error")
+    xlib.error.ConnectionClosedError = type("ConnectionClosedError", (Exception,), {})
+    xlib.error.DisplayConnectionError = type("DisplayConnectionError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setitem(sys.modules, "Xlib.display", xlib.display)
+    monkeypatch.setitem(sys.modules, "Xlib.error", xlib.error)
     spec = importlib.util.spec_from_file_location("cua_driver_driver", DRIVER)
     loaded = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loaded)
@@ -128,7 +156,8 @@ async def mcp_session(driver):
 
 
 @pytest.mark.asyncio
-async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_session(module, daemon):
+async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_session_and_rest_the_pointer_on_macos(
+        module, daemon, monkeypatch):
     driver = module.CuaDriver()
 
     size, shot = await driver.screen(), await driver.grab()
@@ -141,7 +170,7 @@ async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_s
 
     assert (size.width, size.height, shot.width, shot.height, shot.mode) == (1280, 800, 1280, 800, "png")
     assert daemon.calls() == [
-        ("get_screen_size", {}), ("get_desktop_state", {}),
+        ("get_screen_size", {}), ("get_desktop_state", {"max_image_dimension": 0}),
         ("click", {"scope": "desktop", "x": 100, "y": 200, "button": "right", "count": 2, "modifier": ["ctrl"]}),
         ("drag", {"scope": "desktop", "from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40, "button": "left",
                   "duration_ms": 300, "modifier": ["shift"]}),
@@ -151,6 +180,45 @@ async def test_the_operations_become_desktop_scope_calls_in_the_frameworks_own_s
         ("press_key", {"scope": "desktop", "key": "enter", "modifiers": []}),
     ]
     assert len({r["session_id"] for _, r in daemon.requests}) == 1
+    for name, value in (("MACOS", True), ("FOREGROUND", {"delivery_mode": "foreground"}), ("SETTLE_S", 0)):
+        monkeypatch.setattr(module, name, value)
+    await driver.click_at(100, 200, "left", 1, [])
+    await driver.drag_along([(10, 20), (30, 40)], "left", 300, [])
+    assert daemon.calls()[-4:] == [
+        ("move_cursor", {"scope": "desktop", "x": 100, "y": 200, "delivery_mode": "foreground"}),
+        ("click", {"scope": "desktop", "x": 100, "y": 200, "button": "left", "count": 1, "modifier": [],
+                   "delivery_mode": "foreground"}),
+        ("move_cursor", {"scope": "desktop", "x": 10, "y": 20, "delivery_mode": "foreground"}),
+        ("drag", {"scope": "desktop", "from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40, "button": "left",
+                  "duration_ms": 300, "modifier": [], "steps": 20, "delivery_mode": "foreground"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_characters_off_x11s_keymap_are_kept_on_spare_keycodes_before_cua_driver_types_them(
+        module, daemon, monkeypatch):
+    monkeypatch.setattr(module, "MACOS", False)
+    monkeypatch.setattr(module, "x_display", sys.modules["Xlib.display"], raising=False)
+    for name in ("ConnectionClosedError", "DisplayConnectionError"):
+        monkeypatch.setattr(module, name, getattr(sys.modules["Xlib.error"], name), raising=False)
+    driver = module.CuaDriver()
+    oe, east, capital = 0xF6, 0x1000000 | ord("東"), 0x1000000 | ord("京")
+
+    await driver.type_in("Wörld")
+    keymap = driver._keymap.d
+    assert keymap.keys[103] == (oe, oe) and keymap.keys[104] == (0, 0)
+    await driver.type_in("東")
+    await driver.type_in("京")
+    assert keymap.keys[103] == (capital, capital) and keymap.keys[104] == (east, east)
+    await driver.type_in("東京ö")
+    assert keymap.keys[103] == keymap.keys[104] == (0, 0) and not driver._keymap.ours
+
+    def dropped(*args):
+        raise sys.modules["Xlib.error"].ConnectionClosedError("X restarted")
+    monkeypatch.setattr(keymap, "get_keyboard_mapping", dropped)
+    await driver.type_in("ö")
+    assert driver._keymap.d is not keymap and driver._keymap.d.keys[103] == (oe, oe)
+    assert [r["text"] for name, r in daemon.calls() if name == "type_text"] == ["Wörld", "東", "京", "東京ö", "ö"]
 
 
 @pytest.mark.asyncio

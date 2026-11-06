@@ -11,6 +11,7 @@ import os
 import posixpath
 import socket
 import subprocess
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,8 +32,10 @@ from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, ArgModelBas
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent, Tool as MCPTool
 from pydantic import create_model
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
+from starlette.routing import WebSocketRoute
+from starlette.websockets import WebSocket
 from anyio import ClosedResourceError
 
 if TYPE_CHECKING:
@@ -51,6 +54,7 @@ from .constants import (
     CONTROL_ROUTES,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
+    EXT_WEBSITE_URI,
     GATEWAY_COMPOSE_HOST,
     GATEWAY_EXTENSIONS,
     GATEWAY_TRAJECTORY_FILE,
@@ -64,17 +68,32 @@ from .constants import (
     STEP_SOURCE_POST_TURN_HOOK,
     TOOL_DISABLE_ACTION,
     TOOL_ENABLE_ACTION,
+    WEBSITE_BROWSE_URL_PARAM,
     WELL_KNOWN_PATH,
     WILDCARD,
     GatewayMode,
     tool_name_clashes_text,
 )
+from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
 from .caller import Caller
 from .changes import ChangeAttribution
 from .child_transport import child_http_client
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
-from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card, upstream_url
+from .rest_proxy import (
+    ROLE_HEADER_BYTES,
+    UpstreamResponse,
+    WebsiteRoute,
+    fetch_child_card,
+    forward,
+    operations,
+    refuse_websocket,
+    relay_websocket,
+    rewrite_child_card,
+    route_name,
+    upstream_url,
+    website_routes,
+)
 from .triggers import TriggerEngine, TriggerError
 from .notifications import CHECK_TOOL_NAMES, NotificationError, Notifications, build_check_tools
 
@@ -82,6 +101,11 @@ logger = logging.getLogger(__name__)
 
 # RFC 9110's safe methods: a request using one asks for no change, so the proxy measures no write window for it.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+# A CDP address at the gateway: the website browser behind the /svc child <key>, discovery and its WebSocket.
+BROWSER_ROUTE = "/browser/{key}/cdp/{token}/{path:path}"
+# The loggers that write a request's path or a forwarded URL: uvicorn's, for HTTP requests and WebSocket handshakes,
+# and httpx's, for each request the gateway forwards.
+_TOKEN_LOGGERS = ("uvicorn.access", "uvicorn.error", "httpx")
 _STEP_API = {"source": "step_api"}
 
 
@@ -122,16 +146,28 @@ class Gateway:
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
         control_token: str | None = None,
+        provider_headers: Iterable[str] = (),
     ):
+        """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
+        which the gateway takes off every request it forwards to a service behind it."""
         self.host = host
         self.port = port
         self.server_name = server_name
         self.internal_mcp_servers = internal_mcp_servers
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
+        self._site_reserved: dict[str, frozenset[str]] = {}
+        self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
+        self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
+                                       self._attribution, self._request_role, withheld=self._withheld)
+        for name in _TOKEN_LOGGERS:  # each names a CDP address's path, its token in it, at INFO
+            log = logging.getLogger(name)
+            if not any(isinstance(f, TokenRedaction) for f in log.filters):
+                log.addFilter(TokenRedaction())
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
+        self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
             self._db_conn = psycopg2.connect(service_db_url)
@@ -191,20 +227,29 @@ class Gateway:
             async def proxy_to_service(request: Request) -> Response:
                 return await self._proxy_rest_request(request)
 
+            @self._mcp.custom_route(BROWSER_ROUTE, methods=["GET", "HEAD"])
+            async def browser_discovery(request: Request) -> Response:
+                return await self._browsers.discovery(request)
+
         if self.website_urls:
             @self._mcp.custom_route(
                 "/website/{service_name}/{path:path}",
-                methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+                methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
             )
             async def proxy_to_frontend(request: Request) -> Response:
                 return await self._proxy_website_request(request)
 
             @self._mcp.custom_route(
                 "/website/{service_name}",
-                methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+                methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
             )
             async def proxy_to_frontend_root(request: Request) -> Response:
                 return await self._proxy_website_request(request)
+
+            self._mcp._custom_starlette_routes += [
+                WebSocketRoute("/website/{service_name}/{path:path}", self._proxy_website_socket),
+                WebSocketRoute("/website/{service_name}", self._proxy_website_socket),
+            ]
 
         @self._mcp.custom_route(f"/tools/{TOOL_DISABLE_ACTION}", methods=["POST"])
         async def tools_disable(request: Request) -> Response:
@@ -243,13 +288,15 @@ class Gateway:
         async def step_endpoint(request: Request) -> Response:
             return await self._handle_step(request)
 
-        async def _trigger_write(request: Request, method) -> Response:
-            """Shared body for the trigger write routes: parse JSON, invoke the engine method,
-            map a TriggerError (bad config) to a 400."""
+        async def _trigger_write(request: Request, method, prepare=None) -> Response:
+            """Shared body for the trigger write routes: parse JSON, await `prepare` with it, invoke the engine
+            method, map a TriggerError (bad config) to a 400."""
             try:
                 body = await request.json()
             except Exception:
                 return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if prepare is not None:
+                await prepare(body)
             try:
                 return self._json_response(method(body), 200)
             except TriggerError as e:
@@ -257,7 +304,7 @@ class Gateway:
 
         @self._mcp.custom_route("/triggers/register", methods=["POST"])
         async def triggers_register(request: Request) -> Response:
-            return await _trigger_write(request, self._trigger_engine.register)
+            return await _trigger_write(request, self._trigger_engine.register, prepare=self._read_trigger_website_routes)
 
         @self._mcp.custom_route("/triggers/remove", methods=["POST"])
         async def triggers_remove(request: Request) -> Response:
@@ -399,6 +446,8 @@ class Gateway:
             host=self._mcp.settings.host,
             port=self._mcp.settings.port,
             log_level=self._mcp.settings.log_level.lower(),
+            ws_ping_interval=PING_INTERVAL_S,
+            ws_ping_timeout=PING_INTERVAL_S,
         )
         server = uvicorn.Server(config)
         if self._resolve_i6pn_host():
@@ -421,6 +470,8 @@ class Gateway:
         the deploy's token when it has one, and the process lifespan wrapped around the MCP session manager's."""
         inner = self._mcp.streamable_http_app()
         inner.router.lifespan_context = self._process_lifespan(inner.router.lifespan_context)
+        if self.rest_proxy_urls:
+            inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
             if scope["type"] != "http":
@@ -610,8 +661,11 @@ class Gateway:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
         role = self._request_role(request)
         mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
+        if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
+            return cdp
         if request.method in _SAFE_METHODS:
-            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server)
+            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
+                                 withheld=self._withheld)
         changelog_before = self._query_changelog_id()
         attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
@@ -619,12 +673,16 @@ class Gateway:
             changelog_after = self._query_changelog_id()
             if changelog_after is None or changelog_after <= (changelog_before or 0):
                 return  # only a request that wrote changelog rows is a write window
+            path = "/" + request.path_params.get("path", "")
+            op = (self._website_op(service_name, request.method, site_request_path(request) or path)
+                  if url_map is self.website_urls else None)
             await self._log_event({
                 "event_type": "http_request",
                 "route": "website" if url_map is self.website_urls else "svc",
                 "service": service_name,
                 "method": request.method,
-                "path": "/" + request.path_params.get("path", ""),
+                "path": path,
+                **({"op": op} if op else {}),
                 "status": status,
                 **attribution,
                 "changelog_id_before": changelog_before,
@@ -632,21 +690,26 @@ class Gateway:
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                             on_done=log_write)
+                             on_done=log_write, withheld=self._withheld)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
-        A site's data plane and card are never reached through its route, so an agent browsing the site can't read
-        what grades it; agentenv reaches them through /svc/<name>/."""
-        if reserved_site_request(request):
+        A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), are
+        never reached through its route, so an agent browsing the site can't read its data or what grades it; agentenv
+        reaches them through /svc/<name>/."""
+        reserved = await self._site_reserved_paths(request.path_params["service_name"])
+        if reserved is None:
+            return self._json_response({"error": "website card unavailable"}, 503)
+        if reserved_site_request(request, reserved):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
         engine = self._trigger_engine
         if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
+            path = site_request_path(request) or "/" + request.path_params.get("path", "")
             if isinstance(response, UpstreamResponse):
-                if not engine.may_hold_website_request(self._request_role(request), app, request.method,
-                                                       "/" + request.path_params.get("path", ""), response.status_code):
+                if not engine.may_hold_website_request(self._request_role(request), app, request.method, path,
+                                                       response.status_code, self._website_op(app, request.method, path)):
                     response.after_body(lambda status: self._fire_website_triggers(request, app, status))  # answered at its last byte
                     return response
                 await response.read_ahead_if_sized(self.BARRIER_READ_AHEAD_MAX_BYTES)  # its window ends before its triggers run
@@ -654,22 +717,97 @@ class Gateway:
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
         return response
 
+    async def _proxy_website_socket(self, websocket: WebSocket) -> None:
+        """Relay a WebSocket on a site's route to its server, as its HTTP requests are: its data plane and card, and
+        every path its card advertises for agentenv (``site_reserved_paths``), are refused, and it goes upstream with
+        the role, role key and forwarded address an HTTP request would carry."""
+        reserved = await self._site_reserved_paths(websocket.path_params["service_name"])
+        if reserved is None:
+            await refuse_websocket(websocket, self._json_response({"error": "website card unavailable"}, 503))
+            return
+        if reserved_site_request(websocket, reserved):
+            await refuse_websocket(websocket, self._json_response({"error": "not found"}, 404))
+            return
+        service_name = websocket.path_params["service_name"]
+        base_url = self.website_urls.get(service_name)
+        if base_url is None:
+            await refuse_websocket(websocket, self._json_response({"error": f"Unknown service: {service_name}"}, 404))
+            return
+        await relay_websocket(websocket, base_url, role=self._request_role(websocket),
+                              open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld)
+
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
         """Feed an answered website request to the trigger engine (fail-open)."""
         try:
             # Only a website trigger reads the request's args; a state re-check needs just the method and status.
             args = _request_args(request, await request.body()) if self._trigger_engine.has_website_triggers else {}
-            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method,
-                                                           "/" + request.path_params.get("path", ""), status, args)
+            path = site_request_path(request) or "/" + request.path_params.get("path", "")
+            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method, path,
+                                                           status, args, self._website_op(app, request.method, path))
         except Exception:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
     @staticmethod
-    def _request_role(request: Request) -> str:
+    def _request_role(request: HTTPConnection) -> str:
         """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
         return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+
+    async def _read_trigger_website_routes(self, body: Any) -> None:
+        """Read the routes of each website a website trigger in a register `body` names an `op` of, so registration
+        can check the op and requests can be matched by it; one whose card could not be read before is read again."""
+        triggers = body.get("triggers") if isinstance(body, dict) else None
+        apps = {trigger["when"]["app"] for trigger in triggers if isinstance(trigger, dict)
+                and isinstance(trigger.get("when"), dict) and trigger["when"].get("type") == "website"
+                and trigger["when"].get("op") is not None and isinstance(trigger["when"].get("app"), str)
+                and trigger["when"]["app"] in self.website_urls} if isinstance(triggers, list) else set()
+        await asyncio.gather(*(self._read_website_routes(app, again=True) for app in apps))
+
+    async def _read_website_routes(self, app: str, *, again: bool = False) -> None:
+        """Read website `app`'s routes from its card once (`again`: once more, when its card could not be read). The
+        env card's composition reads them too, so a deploy, which reads that card, leaves them read."""
+        if app in self._website_routes and not (again and self._website_routes[app] is None):
+            return
+        async with httpx.AsyncClient() as client:
+            card = await fetch_child_card(client, app, self.rest_proxy_urls.get(app) or self.website_urls[app])
+        self._website_routes[app] = website_routes(card) if card is not None else None
+
+    def website_route_names(self, app: str) -> set[str] | None:
+        """The names of the routes website `app`'s card names, as last read; None when it has not been read."""
+        routes = self._website_routes.get(app)
+        return None if routes is None else {route.name for route in routes if route.name is not None}
+
+    def _website_op(self, app: str, method: str, path: str) -> str | None:
+        """The name of the route of website `app` a request reached, by the routes last read from its card; never a
+        read of its own, so answering a request waits on no card."""
+        return route_name(self._website_routes.get(app) or [], method, path)
+
+    async def _site_reserved_paths(self, app: str) -> frozenset[str] | None:
+        """The paths ``app``'s card advertises for agentenv (``site_reserved_paths``), read once from its server, the one
+        its /svc/ route reaches (else the one its website route does), and kept; none for a site serving no card, one
+        whose card path answers a 4xx or what isn't a JSON object, and None, read again next time, while its card can't
+        be read, unreachable or answering a 5xx, so its route serves nothing until it knows what to refuse."""
+        if app in self._site_reserved:
+            return self._site_reserved[app]
+        base_url = self.rest_proxy_urls.get(app) or self.website_urls.get(app)
+        if base_url is None:
+            return frozenset()
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=CARD_FETCH_TIMEOUT_S)
+            if response.status_code >= 500:
+                response.raise_for_status()
+        except Exception as e:
+            logger.warning(f"website {app}: its card could not be read ({type(e).__name__}: {e}), so its route answers "
+                           "503 until it can be")
+            return None
+        try:
+            card = response.json() if response.is_success else None
+        except ValueError:
+            card = None
+        self._site_reserved[app] = site_reserved_paths(card) if isinstance(card, dict) else frozenset()
+        return self._site_reserved[app]
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website
@@ -677,11 +815,22 @@ class Gateway:
         return list(self.rest_proxy_urls)
 
     def _rewrite_child_card(self, key: str, card: dict) -> dict:
-        return rewrite_child_card(key, card, self._gateway_extensions())
+        """One backing server's card rooted at the gateway (``rewrite_child_card``); a website's ``website/v1`` params
+        also name the route the gateway serves it to a browser at, ``/website/<key>/``, as ``browse_url``."""
+        card = rewrite_child_card(key, card, self._gateway_extensions())
+        if key in self.website_urls:
+            for ext in (card.get("capabilities") or {}).get("extensions") or []:
+                if isinstance(ext, dict) and ext.get("uri") == EXT_WEBSITE_URI:
+                    params = ext.get("params") if isinstance(ext.get("params"), dict) else {}
+                    ext["params"] = {**params, WEBSITE_BROWSE_URL_PARAM: f"/website/{key}/"}
+        return card
 
     async def _fetch_child_card(self, client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:
-        """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON."""
+        """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON. A
+        website's card read here also refreshes the routes its requests are named by."""
         child = await fetch_child_card(client, key, base_url)
+        if child is not None and key in self.website_urls:
+            self._website_routes[key] = website_routes(child)
         return None if child is None else self._rewrite_child_card(key, child)
 
     def _gateway_extensions(self) -> list[dict]:
@@ -1516,21 +1665,48 @@ def _call_never_reached_child(exc: BaseException) -> bool:
     return isinstance(exc, McpError) and exc.error.code == 32600
 
 
-def reserved_site_path(path: str) -> bool:
-    """Whether ``path``, as a site's server would route it, is its data plane or its env card."""
-    normalized = posixpath.normpath("/" + path.lstrip("/"))
-    return normalized == RPC_PATH or normalized.startswith(RPC_PATH + "/") or normalized == WELL_KNOWN_PATH
+def _normalized(path: str) -> str:
+    return posixpath.normpath("/" + path.lstrip("/"))
 
 
-def reserved_site_request(request: Request) -> bool:
-    """Whether a request on a site's route reaches its data plane or env card: by the path as routed here, or by the
-    one its server receives, which is the raw path forwarded, its dot segments removed by httpx and then decoded. The
-    two differ when an encoded slash sits beside a dot segment (``public%2Fx/../agentenv``). A request-target the proxy
-    can't build a URL for isn't reserved here: ``forward()`` refuses it."""
-    if reserved_site_path("/" + request.path_params.get("path", "")):
-        return True
+def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> bool:
+    """Whether ``path``, as a site's server would route it, is its data plane or its env card, or one of the paths
+    ``reserved`` names (``site_reserved_paths``), or under one."""
+    normalized = _normalized(path)
+    return normalized == WELL_KNOWN_PATH or any(normalized == base or normalized.startswith(base.rstrip("/") + "/")
+                                                for base in (RPC_PATH, *reserved))
+
+
+def site_reserved_paths(card: dict) -> frozenset[str]:
+    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, and every
+    extension's endpoint and each of its methods'; each one a path of its own, not the site's root."""
+    paths = [card.get("url")]
+    for ext in (card.get("capabilities") or {}).get("extensions") or []:
+        params = ext.get("params") if isinstance(ext, dict) else None
+        if not isinstance(params, dict):
+            continue
+        paths += [endpoint for *_, endpoint in operations(params)]
+        paths.append(params.get("endpoint"))
+    return frozenset(_normalized(p) for p in paths if isinstance(p, str) and p.startswith("/") and _normalized(p) != "/")
+
+
+def site_request_path(request: HTTPConnection) -> str | None:
+    """The path a site's server receives for a request on its route: the raw path forwarded, its dot segments removed
+    by httpx and then decoded. It differs from the path as routed here when an encoded slash sits beside a dot segment
+    (``public%2Fx/../api`` reaches ``/api``). None for a request-target the proxy can't build a URL for: ``forward()``
+    refuses it."""
     try:
-        sent = httpx.URL(upstream_url("http://site", request)).path
+        return httpx.URL(upstream_url("http://site", request)).path
     except (ValueError, httpx.InvalidURL):
-        return False
-    return reserved_site_path(sent)
+        return None
+
+
+def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset()) -> bool:
+    """Whether a request or WebSocket on a site's route reaches its data plane or env card, or one of the paths
+    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server receives
+    (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved here: ``forward()``
+    refuses it."""
+    if reserved_site_path("/" + request.path_params.get("path", ""), reserved):
+        return True
+    sent = site_request_path(request)
+    return sent is not None and reserved_site_path(sent, reserved)

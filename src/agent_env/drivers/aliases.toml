@@ -3,3 +3,5 @@
 reference = ["reference"]
 cua-driver = ["cua-driver"]
 page = ["page"]
+agent-desktop = ["agent-desktop"]
+macos-harness = ["macos-harness"]

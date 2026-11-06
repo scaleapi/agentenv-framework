@@ -7,7 +7,7 @@ import time
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
-from .constants import CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME
+from .constants import CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV
 from .gateway import Gateway
 
 logger = logging.getLogger(__name__)
@@ -153,5 +153,6 @@ if __name__ == "__main__":
         gateway_mode=gateway_mode,
         service_db_url=service_db_url,
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
+        provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
     )
     gateway.run()

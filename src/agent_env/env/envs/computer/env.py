@@ -27,7 +27,8 @@ from agent_env.env.envs._deployment import (
     deploy_through_provider,
     provider_or_class,
 )
-from agent_env.env.envs.computer.utils import boot, composer, gate, inside
+from agent_env.env.envs.computer.utils import boot, composer, gate, inside, sites
+from agent_env.env.envs.computer.utils.composed import stale
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -52,8 +53,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_DESTINATION = "Downloads"
 #: The computer app env's type: an app composed into a computer env, and a computer env of its own.
 APP_TYPE = "computer_app"
-#: The statuses of a build a deploy boots, by form: a disk may also boot unprobed, as KVM is where a disk is probed.
-_DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified")}
+#: The statuses of a build a deploy boots, by form: a disk may also boot unprobed, as KVM is where a disk is probed, and
+#: so may a VM bundle, which a Mac probes.
+_DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified"), "vm_bundle": ("ready", "unverified")}
 
 
 class ComputerEnv(Env):
@@ -160,6 +162,10 @@ class ComputerEnv(Env):
             ctx.refuse([*refused, *missing])
         return {"environment_name": ctx.name, **fields}
 
+    def serves_website_browser(self) -> bool:
+        """Whether a website browser is among its apps, whose CDP address an agent reaches by WebSocket."""
+        return any(app.declaration.browser for app in self.composed_apps())
+
     def composed_apps(self) -> list[ComputerAppEnv]:
         """The computer app envs composed into the env's computer, each installed under its prefix."""
         return self.apps
@@ -207,9 +213,13 @@ class ComputerEnv(Env):
             if pairs := composer.unstarted(self, sandbox_provider, form):
                 them = "it" if len(pairs) == 1 else "them"
                 on = Composing(on_progress=progress)
-                say(f"composing {_pairs(pairs)} before this deploy on "
-                    f"{' or '.join(type(link).__name__ for link in on.provider().links)} (no compose built {them} for "
-                    f"{' or '.join(type(link).__name__ for link in sandbox_provider.links)} yet); later deploys reuse {them}")
+                composed = self.metadata.get("composed", {})
+                booting, building = (" or ".join(type(link).__name__ for link in provider.links)
+                                     for provider in (sandbox_provider, on.provider()))
+                why = (f"an agent-env that composes differently built {them}" if any(
+                    stale(composed.get(name, {}).get(arch)) for name, arch in pairs)
+                       else f"no compose built {them} for {booting} yet")
+                say(f"composing {_pairs(pairs)} before this deploy on {building} ({why}); later deploys reuse {them}")
                 composing = asyncio.ensure_future(asyncio.to_thread(composer.compose, self, pairs, on))
                 try:
                     await asyncio.shield(composing)
@@ -224,20 +234,23 @@ class ComputerEnv(Env):
     def deployable_builds(self, form: Optional[str] = None) -> list[tuple[str, str, dict]]:
         """Each build a deploy may boot, as (form, arch, record), in the base's order of forms and of arches; only
         ``form``'s when it's given: a ready one, or a disk no compose could probe (unverified), which its first boot on
-        a provider that boots it natively probes before it's used."""
+        a provider that boots it natively probes before it's used; never one an agent-env that composes differently
+        recorded."""
         composed, arches = self.metadata.get("composed", {}), self.computer.arch
         return [(name, arch, composed[name][arch]) for name in gate.forms(self.computer) if form in (None, name)
-                for arch in arches if composed.get(name, {}).get(arch, {}).get("status") in _DEPLOYABLE[name]]
+                for arch in arches if composed.get(name, {}).get(arch, {}).get("status") in _DEPLOYABLE[name]
+                and not stale(composed[name][arch])]
 
     def disk_size_refusal(self, form: str, disk_size_gb: float) -> Optional[str]:
         """Why a deploy of ``form`` can't have ``disk_size_gb``: a disk is the size its base makes it, which a deploy
         doesn't enlarge."""
-        if form == "disk" and disk_size_gb > (size := self.computer.forms.disk.min_disk_gb):
+        if form in ("disk", "vm_bundle") and disk_size_gb > (size := getattr(self.computer.forms, form).min_disk_gb):
             return f"{self.id}'s disk is {size} GB, which a deploy doesn't enlarge, and it asks for {disk_size_gb:g} GB"
         return None
 
     def build_statuses(self) -> dict[str, str]:
-        return {f"{form}/{arch}": result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()
+        return {f"{form}/{arch}": f"{result.get('status')}, by another composer" if stale(result) else
+                result.get("status") for form, by_arch in self.metadata.get("composed", {}).items()
                 for arch, result in by_arch.items()}
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10,
@@ -251,11 +264,28 @@ class ComputerEnv(Env):
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
             env_params=env_params)
 
+    async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
+        """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
+        before the computer: all of them, or those of the env ids ``site_routing`` lists."""
+        routing = (env_params or {}).get("site_routing")
+        if routing is not None and routing is not False and routing is not True and not (
+                isinstance(routing, list) and all(isinstance(env_id, str) for env_id in routing)):
+            raise ValueError(f"computer env {self.id!r}: env_params.site_routing is true or a list of env ids, not "
+                             f"{routing!r}")
+        if not routing or env_params.get("sites"):
+            return env_params
+        found = await sites.deployed_sites(deployed_envs, None if routing is True else list(routing))
+        if not found:
+            raise ValueError(f"computer env {self.id!r}: env_params.site_routing reaches the run's websites, and the "
+                             "run deployed none before the computer")
+        return {**env_params, "sites": found}
+
     def deploy_refusal(self, *, sandbox_type: str | None = None, env_params: Optional[dict] = None,
                        **options) -> str | None:
         """Why deploy() would refuse before booting anything, or None: an option the computer provider doesn't take, a
-        problem with ``env_params``, or a sandbox provider that runs none of the env's arches natively or can't enforce
-        its network."""
+        problem with ``env_params``, or a sandbox provider with no one link that runs one of the env's arches natively,
+        carries WebSockets when a website browser is among its apps, and can enforce its network, as a deploy needs of
+        the link it boots on."""
         from agent_env.providers import build_sandbox_provider, get_env_sandbox_provider
         from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 
@@ -265,16 +295,21 @@ class ComputerEnv(Env):
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
         links, arches = sandbox_provider.links, self.composed_arches()
         forms = [params.form] if params.form else gate.forms(self.computer)
-        if not any(boot.native_links(sandbox_provider, arch, form, self.stored_id) for form in forms
-                   for arch in arches):
+        native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id) for form in forms
+                                                for arch in arches)]
+        usable = [link for link in native if link.WEBSOCKETS] if self.serves_website_browser() else native
+        if native and not usable:
+            problems.append(f"{', '.join(type(link).__name__ for link in native)} carries no WebSockets, which its "
+                            "website browser's CDP address needs")
+        if not native:
             unpulled = [type(link).__name__ for link in links if not boot.pulls_containers(link, self.stored_id)]
             problems.append(f"{', '.join(type(link).__name__ for link in links)} runs none of its arches "
                             f"({', '.join(arches)}) natively as {' or '.join(forms)}" + (
                                 f", and {', '.join(unpulled)} can't pull its containers from the image store's registry "
                                 "on this machine" if "container" in forms and unpulled else ""))
         policy = NetworkPolicy.from_dict(self.network) if self.network else None
-        if policy is not None and not any(link.supports_network_policy(policy) for link in links):
-            problems.append(f"{', '.join(type(link).__name__ for link in links)} can't enforce its network")
+        if policy is not None and usable and not any(link.supports_network_policy(policy) for link in usable):
+            problems.append(f"{', '.join(type(link).__name__ for link in usable)} can't enforce its network")
         return f"computer env {self.id!r}: " + "; ".join(problems) if problems else None
 
     @classmethod

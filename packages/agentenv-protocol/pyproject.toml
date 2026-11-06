@@ -1,6 +1,6 @@
 [project]
 name = "agentenv-framework-protocol"
-version = "0.1.453"
+version = "0.1.466"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
 license = "Apache-2.0"
@@ -50,6 +50,11 @@ computer = [
     "Pillow>=10.4",
     "uvicorn>=0.30",
     "websockets>=13",
+]
+# A macOS driver on MacOSDriver: ScreenCaptureKit captures the display and Quartz events send its input, through PyObjC.
+macos = [
+    "pyobjc-framework-Quartz>=11; sys_platform == 'darwin'",
+    "pyobjc-framework-ScreenCaptureKit>=11; sys_platform == 'darwin'",
 ]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",

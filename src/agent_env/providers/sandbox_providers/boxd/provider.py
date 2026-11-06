@@ -188,6 +188,7 @@ class BoxdSandboxProvider(SandboxProvider):
 
     # Exposed ports get public URLs under this domain.
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.boxd.sh",)
+    WEBSOCKETS = True
 
     def __init__(
         self,

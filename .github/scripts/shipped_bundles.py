@@ -5,8 +5,8 @@ folder ``src/<package as a path>/<name>/``.
 ``pyproject.toml``, to the version ``packages/agentenv-protocol`` is at, which the release's wheel is built with. Its
 extras are what core imports from the protocol, so a pin that dropped them would ship a wheel that can't import.
 
-``pin`` pins the protocol the same way in each shipped env's and artifact's requirements.txt, which a release ships them
-with. An agent's, and an env's whose image
+``pin`` pins the protocol the same way in each shipped env's and artifact's requirements files (``requirements.txt``, and
+an OS's own, such as ``requirements-macos.txt``), which a release ships them with. An agent's, and an env's whose image
 a release publishes (``PUBLISHED_ENVS``), keep their floor: a pin is one of an image's sources, so pinning it would
 build and publish a new image every release, and with the floor the image is built only when its folder changes. Every
 release job that reads those folders runs it first, so an image's tag, its build and the wheel all see the same sources.
@@ -42,11 +42,11 @@ def bundle_roots(repo: Path = REPO) -> dict[str, Path]:
 
 
 def requirements_files(repo: Path = REPO) -> list[Path]:
-    """Every ``<bundle>/<envs|artifacts>/<name>/requirements.txt`` a shipped bundle holds but a ``PUBLISHED_ENVS``
+    """Every ``<bundle>/<envs|artifacts>/<name>/requirements*.txt`` a shipped bundle holds but a ``PUBLISHED_ENVS``
     folder's: those a release pins."""
     published = {repo / folder for folder in PUBLISHED_ENVS}
     return sorted(path for root in bundle_roots(repo).values() for kind in _PINNED_KINDS
-                  for path in root.glob(f"{kind}/*/requirements.txt") if path.parent not in published)
+                  for path in root.glob(f"{kind}/*/requirements*.txt") if path.parent not in published)
 
 
 def protocol_version(repo: Path = REPO) -> str:

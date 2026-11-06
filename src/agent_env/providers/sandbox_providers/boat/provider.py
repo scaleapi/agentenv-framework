@@ -62,6 +62,7 @@ class BoatSandboxProvider(SandboxProvider):
 
     # boat serves hosted ports at https://<sandbox subdomain>-<port>.on.boat.dev.
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.on.boat.dev",)
+    WEBSOCKETS = True
     _CREATE_ATTEMPTS = 6
     _RETRY_BASE_DELAY = 2.0
     _RETRY_MAX_DELAY = 60.0

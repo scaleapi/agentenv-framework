@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import os
 import shlex
 import signal
@@ -109,6 +110,16 @@ async def test_an_apps_server_is_ready_once_it_launched_the_app_and_each_check_p
     assert after["ready"] is True and after["problems"] == []
 
 
+
+@pytest.mark.parametrize("platform, folder", [("linux", "/run/agentenv/apps"), ("darwin", "/tmp/agentenv/apps")])
+def test_a_launch_is_marked_in_a_folder_a_boot_clears_and_the_session_user_writes(monkeypatch, platform, folder):
+    monkeypatch.setattr(sys, "platform", platform)
+    spec = importlib.util.spec_from_file_location(f"agentenv_protocol.computer._app_runtime_on_{platform}",
+                                                  app_runtime.__file__)
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    assert loaded.LAUNCHED == Path(folder)
+
 @pytest.mark.asyncio
 async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_the_server(desktop, monkeypatch):
     monkeypatch.setattr(app_runtime, "CHECK_TIMEOUT_S", 1.0)
@@ -159,6 +170,25 @@ async def test_a_boot_app_is_launched_once_per_boot_its_clock_from_that_launch_a
     assert (tmp_path / "launched" / tmp_path.name).exists()
     answer = await restarted._computer_app_ready()
     assert answer["launched"] is True and answer["waited_s"] >= 100
+
+
+@pytest.mark.asyncio
+async def test_a_held_boot_launch_leaves_the_app_unlaunched_and_counted_ready_until_it_is_launched(desktop, monkeypatch):
+    shown, launched = desktop
+    monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
+    monkeypatch.setenv(app_runtime.HOLD_BOOT_LAUNCH_ENV, "1")
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
+        monkeypatch.setattr(apps, "APPS", Path(root))
+        async with _serving(Mail(), Path(root) / "mail", monkeypatch) as mail:
+            await mail._computer_app.start()
+            held = await apps.check(Path(root) / "mail")
+            await mail._computer_app_launch()
+            shown.append({"instance": "mail", "class": "Mail", "title": "Inbox"})
+            mail.synced = True
+            launched_check = await apps.check(Path(root) / "mail")
+
+    assert held == ReadyCheck("app mail", True, "its server answers; its boot launch is held")
+    assert len(launched) == 1 and launched_check == ReadyCheck("app mail", True, "ready")
 
 
 @pytest.mark.asyncio

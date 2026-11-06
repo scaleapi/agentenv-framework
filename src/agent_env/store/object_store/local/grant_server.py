@@ -205,6 +205,10 @@ class GrantServer:
         host = f"[{self.advertise_host}]" if ":" in self.advertise_host else self.advertise_host
         return f"https://{host}:{self._port}"
 
+    def port(self) -> int:
+        """The port it serves on, started if it isn't."""
+        return self._start()
+
     def close(self) -> None:
         """Stop serving; grants already issued stop working."""
         with self._lock:

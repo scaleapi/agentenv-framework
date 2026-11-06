@@ -80,6 +80,7 @@ class Agent37SandboxProvider(SandboxProvider):
 
     # Exposed ports get public URLs under this domain.
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.agent37.app",)
+    WEBSOCKETS = True
 
     def __init__(self, *, api_key: str, region: str = "us", transport: httpx.AsyncBaseTransport | None = None):
         if not isinstance(api_key, str) or not api_key.strip():

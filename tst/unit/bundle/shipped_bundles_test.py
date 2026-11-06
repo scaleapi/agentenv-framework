@@ -48,7 +48,8 @@ def test_the_shipped_aliases_are_agent_envs_alone_and_claude_code_names_the_defa
         "openhands": "@local/agentenv-framework/agents/openhands", "codex": "@local/agentenv-framework/agents/codex",
         "gemini": "@local/agentenv-framework/agents/gemini", "opencode": "@local/agentenv-framework/agents/opencode",
         "letta-code": "@local/agentenv-framework/agents/letta-code",
-        "pydantic-ai": "@local/agentenv-framework/agents/pydantic-ai", "hermes": "@local/agentenv-framework/agents/hermes"}
+        "pydantic-ai": "@local/agentenv-framework/agents/pydantic-ai", "hermes": "@local/agentenv-framework/agents/hermes",
+        "browser-use": "@local/agentenv-framework/agents/browser-use"}
     assert table.target("claude-code").target_id == get_config().get_default_a2a_agent_id()
 
 
@@ -60,6 +61,8 @@ def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_the_dri
     assert {alias: named.target_id for alias, named in table.aliases.items()} == {
         "mail": "@local/agentenv-framework/mail-mcp/mail", "reference": "@local/agentenv-framework/drivers/reference",
         "cua-driver": "@local/agentenv-framework/drivers/cua-driver", "page": "@local/agentenv-framework/drivers/page",
+        "agent-desktop": "@local/agentenv-framework/drivers/agent-desktop",
+        "macos-harness": "@local/agentenv-framework/drivers/macos-harness",
         "chromium": "@local/agentenv-framework/browsers/chromium"}
     assert A2AAgent.VALIDATION_ENV_ID == "mail"
 

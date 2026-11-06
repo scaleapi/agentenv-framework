@@ -15,6 +15,8 @@ from agent_env.env.published_images import AGENT_IMAGES
 from agent_env.plugins import Inventory, _requirements
 from agent_env.store.document_store import DocumentStore
 
+# The image of the Claude Code agent agent-env ships.
+CLAUDE_CODE_IMAGE = next(image for image in AGENT_IMAGES if image.name == "agentenv-claude-code")
 # The digest the registry fixture pins every tag to.
 DIGEST = "sha256:" + "a" * 64
 
@@ -38,7 +40,7 @@ def context_image(root, id, files=None, dockerfile="Dockerfile", folder=None):
 def shipped_agent(root, name="solver"):
     """A copy of the Claude Code agent agent-env ships, as ``root``'s agent ``name``: the sources its image is published
     for."""
-    shutil.copytree(AGENT_IMAGES[0].dockerfile.parent, root / "agents" / name,
+    shutil.copytree(CLAUDE_CODE_IMAGE.dockerfile.parent, root / "agents" / name,
                     ignore=shutil.ignore_patterns("__pycache__"))
     return root / "agents" / name
 

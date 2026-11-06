@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1438"
+version = "0.9.1451"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -159,6 +159,7 @@ dev = [
     "tomli-w==1.2.0",  # the Codex agent's config writer, which only its image installs; its tests import it
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
+    "websockets>=13",  # the gateway's WebSocket relay to a website; outside its container only the tests import it
     "pytest>=9.0",
     "pytest-asyncio>=0.23.0",
     "pytest-dependency>=0.6.0",

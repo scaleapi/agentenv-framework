@@ -1,0 +1,15 @@
+type = "computer"
+description = "macOS 26 on Apple silicon, from Cua's public base VM bundle: its user lume logs in at boot, SIP off, ssh on; composed on a Mac with the lume provider"
+arch = ["arm64"]
+os = { type = "macos", version = "26", display = "aqua" }
+session = { user = "lume" }
+
+[forms.vm_bundle]
+image = "ghcr.io/trycua/macos:26-20261021-fca2193@sha256:7cb23670cad48a6723cf667bc63c444b83dc0c73756c23b614897127d5ba22ba"
+format = "lume"
+input_channel = "shared_folder"
+min_disk_gb = 150
+
+[config.resolution]
+default = "1280x800"
+phase = "deploy"

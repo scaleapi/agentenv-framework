@@ -1,0 +1,4 @@
+# What a composed macOS computer installs into the driver's venv: the protocol with MacOSDriver, whose screen and input
+# need its macos extra, and the MCP client the forwarded tools reach agent-desktop's server with. A release pins it to
+# the version it ships. agent-desktop itself is its release's executable, whose sha256 the driver checks.
+agentenv-framework-protocol[computer,macos]>=0.1.459

@@ -1,5 +1,6 @@
 """Tests for ServiceDBEnv and docker-compose generation with ServiceDB."""
 
+import re
 from unittest.mock import MagicMock
 
 from agent_env.env.envs.service_db import (
@@ -13,6 +14,7 @@ from agent_env.env.envs.service_db import (
 from agent_env.providers.env_providers import EnvironmentGatewayProvider, MCPServerConfig, WebsiteConfig
 from agent_env.env.envs.service_db import DATABASE_SERVICE_NAME, DB_MCP_SERVICE_NAME, PGWEB_SERVICE_NAME
 from agent_env.providers.env_state import LocalPostgresStateProvider
+from agentenv_protocol.website import SESSION_SECRET_ENV
 
 # create_docker_compose requires an explicit state provider; these render tests are local-Postgres.
 _LOCAL_STATE = LocalPostgresStateProvider()
@@ -167,7 +169,7 @@ class TestDockerComposeWithServiceDB:
     def test_compose_static_instance_matches_live(self):
         """The export/snapshot render path feeds the static ``default_instance``; a live-acquired
         instance carrying the same base URL must render byte-identically (per-service schemas are
-        derived at wire time, so only the base URL matters)."""
+        derived at wire time, so only the base URL matters). Each render draws its sites' session secrets afresh."""
         from agent_env.providers.env_state import EnvStateInstance, LocalPostgresStateProvider
 
         provider = EnvironmentGatewayProvider()
@@ -194,7 +196,8 @@ class TestDockerComposeWithServiceDB:
             mcp_servers=servers, website_configs=websites,
             state_provider=state_provider, state_instance=live,
         )
-        assert via_static == via_live
+        secret = re.compile(rf"{SESSION_SECRET_ENV}=[0-9a-f]+")
+        assert secret.sub("secret", via_static) == secret.sub("secret", via_live)
 
     def test_sidecar_urls_share_mcp_creds_source(self):
         """P1 regression: pgweb PGWEB_DATABASE_URL and db-mcp DATABASE_URI are built from the

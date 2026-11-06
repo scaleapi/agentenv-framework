@@ -17,9 +17,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from starlette.testclient import TestClient
 import pytest
 import uvicorn
 import yaml
+from agentenv_protocol.website import SESSION_SECRET_ENV, WebsiteReadiness
 from mcp.server.fastmcp import FastMCP
 from pytest_socket import enable_socket
 
@@ -303,8 +305,10 @@ async def test_a_vm_gateway_refuses_an_image_its_vm_cant_get_before_creating_the
 
 
 @pytest.mark.asyncio
-async def test_container_mode_constructs_internal_mcp_servers_url_format():
-    """Container mode must pass INTERNAL_MCP_SERVERS as 'name=url,name=url' to the gateway."""
+async def test_container_mode_constructs_internal_mcp_servers_url_format(monkeypatch):
+    """Container mode must pass INTERNAL_MCP_SERVERS as 'name=url,name=url' to the gateway, and the names of the
+    providers' request headers, which it takes off what it forwards."""
+    monkeypatch.setattr(env_gateway_provider, "sandbox_request_header_names", lambda: ("cf-access-client-id", "x-a"))
     provider = ModalSandboxProvider()
     gp = EnvironmentGatewayProvider()
     gp._state_provider = LocalPostgresStateProvider()  # normally set by create_gateway
@@ -396,6 +400,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
     assert re.search(r"^postgresql://agentenv:agentenv@\[fdaa::fake:[0-9a-f]+\]:5432/agentenv", env["SERVICE_DB_URL"]), env["SERVICE_DB_URL"]
     assert env["MCP_SERVER_NAME"] == "crm"
     assert result.mcp_server_name == "crm"
+    assert env["AGENTENV_PROVIDER_REQUEST_HEADERS"] == "cf-access-client-id,x-a"
 
     # Each MCP got DATABASE_URL with its scoped search_path
     mcp_calls = [c for c in create_calls if c["image_name"].startswith("mcp-")]
@@ -1208,6 +1213,26 @@ def test_redact_compose_secrets_masks_only_secret_env_lines():
     assert "s3cr3t-token-value" in compose
 
 
+@pytest.mark.parametrize("names", [("cf-access-client-id", "cf-access-client-secret"), ()], ids=["named", "none"])
+def test_compose_gives_the_gateway_the_names_of_the_providers_request_headers_alone(names, monkeypatch):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    monkeypatch.setattr(env_gateway_provider, "sandbox_request_header_names", lambda: names)
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+        gateway_image="agent-gateway",
+        website_configs=[WebsiteConfig(backend_image="notes-be", frontend_image=None, environment_name="notes")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    named = {name: [entry for entry in service.get("environment") or [] if "PROVIDER_REQUEST_HEADERS" in entry]
+             for name, service in services.items()}
+    expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_PROVIDER_REQUEST_HEADERS={','.join(names)}"]} if names else {}
+    assert {name: entries for name, entries in named.items() if entries} == expected
+
+
 @pytest.mark.asyncio
 async def test_acquire_state_for_deploy_local_returns_none():
     """Local Postgres cannot be pre-provisioned (its container's host doesn't exist yet), so the
@@ -1506,6 +1531,17 @@ def test_website_backend_gets_both_service_name_and_environment_name():
     frontend = _service_block(compose, f"{_SITE_NAME}-website-frontend")
     assert _env_values(frontend, "SERVICE_NAME") == []
     assert _env_values(frontend, "ENVIRONMENT_NAME") == []
+
+
+def test_each_website_backend_gets_a_session_secret_of_its_own_which_the_logged_compose_masks():
+    compose = _compose_for([], website_configs=[
+        WebsiteConfig(backend_image="ecr/shop-be:1", frontend_image=None, environment_name="shop"),
+        WebsiteConfig(backend_image="ecr/notes-be:1", frontend_image=None, environment_name="notes"),
+    ])
+    (shop,) = _env_values(_service_block(compose, "shop-website-backend"), SESSION_SECRET_ENV)
+    (notes,) = _env_values(_service_block(compose, "notes-website-backend"), SESSION_SECRET_ENV)
+    assert re.fullmatch(r"[0-9a-f]{64}", shop) and re.fullmatch(r"[0-9a-f]{64}", notes) and shop != notes
+    assert shop not in _redact_compose_secrets(compose) and notes not in _redact_compose_secrets(compose)
 
 
 def test_injected_names_are_the_environment_name_not_the_image_or_container_name():
@@ -2027,6 +2063,40 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
 
 
 @pytest.mark.asyncio
+async def test_a_deploy_with_websites_records_the_card_read_once_they_are_ready():
+    """The gateway composes its card from its children's as it reads them, so the card read before the sites were up
+    may lack them; the one recorded is read once they're ready, as what reads the sites from it expects."""
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp, external = EnvironmentGatewayProvider(), MagicMock(state_type="remote", instance_id="st-ext")
+    state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock(), teardown=AsyncMock())
+    vm = MagicMock(sandbox_id="vm-1", type="modal_vm", tunnel_urls={18765: "https://vm.example"}, host_port=lambda port: port, host_ips=(),
+                   load_docker_images=AsyncMock(), exec_script=AsyncMock(), exec_with_output=AsyncMock(return_value=(0, "gateway", "")))
+    env = WebsiteEnv(id="web-shop", version=1, backend_docker_image_artifact=_loadable("shop-be"),
+                     frontend_docker_image_artifact=_loadable("shop-fe"), environment_name="shop")
+    before, after = {"name": "env1234", "children_environments": []}, {"name": "env1234", "children_environments": [{"name": "shop"}]}
+
+    with patch("agent_env.providers.env_state.acquire_state_for_deploy", AsyncMock(return_value=external)), \
+         patch("agent_env.providers.env_state.build_state_provider", return_value=state_provider), \
+         patch("agent_env.env.env.Env.get", MagicMock(return_value=MagicMock(docker_image_artifact=_loadable("gw")))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", return_value="services: {}"), \
+         patch.object(gp, "_wait_for_gateway", AsyncMock(return_value=True)), \
+         patch.object(gp, "_get_container_id", AsyncMock(return_value=None)), \
+         patch.object(gp, "_wait_for_tunnel", AsyncMock(side_effect=[before, after])), \
+         patch.object(gp, "_refuse_tool_name_clashes", AsyncMock()), \
+         patch.object(env_gateway_provider, "_wait_for_websites", AsyncMock()) as websites_waited, \
+         patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())), \
+         patch("agent_env.providers.env_providers.env_gateway_provider.asyncio.sleep", AsyncMock()):
+        record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), ttl_seconds=60, env_state_type="remote")
+
+    websites_waited.assert_awaited_once()
+    assert record.environment_card == after
+    assert record.website_frontend_urls == {"shop": "https://vm.example/website/shop/"}
+    await gp.close()
+
+
+@pytest.mark.asyncio
 async def test_deploy_records_the_gateways_sidecar_urls_and_its_containers():
     gp, sandboxes = EnvironmentGatewayProvider(), {i: _FakeSandbox(i, 18765, f"https://{i}") for i in ("gw", "srv", "db", "pg", "dm")}
     env = MagicMock(id="slack-env", version=1, environment_name="slack", docker_image_artifact=MagicMock(image_name="mcp-slack"))
@@ -2487,6 +2557,18 @@ def test_a_one_image_website_env_is_fronted_with_only_its_server_image():
     assert topology.website_images == [server]
 
 
+def test_a_websites_server_reaches_the_gateways_clock_at_the_url_the_gateway_hands_it():
+    """sync_env_clock hands each server http://gateway:<MCP_PORT>/clock/time: the gateway's compose service is that host,
+    listening on that port, on the one network the website's server is on."""
+    from agent_env.env.gateway.constants import GATEWAY_COMPOSE_HOST
+
+    services = yaml.safe_load(_render([], [WebsiteConfig(backend_image="shop-be", frontend_image=None, environment_name="shop")]))["services"]
+    gateway, site = services[GATEWAY_COMPOSE_HOST], services["shop-website-backend"]
+
+    assert "MCP_PORT=18765" in gateway["environment"]
+    assert gateway["networks"] == site["networks"] == ["env-network"]
+
+
 def _sites(handler):
     """Route the deploy's site checks to ``handler(request) -> httpx.Response``."""
     real = httpx.AsyncClient
@@ -2548,6 +2630,93 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
             timeout_s=0, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so():
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=_READY_CARD)
+        return httpx.Response(200, json={"ready": "yes"})
+
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(ValidationError: "):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
+            timeout_s=0, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_site_that_says_how_long_it_may_take_is_waited_that_long_not_the_default():
+    answers = iter([{"ready": False, "problems": ["seeded"], "waited_s": 1, "timeout_s": 600},
+                    {"ready": True, "problems": [], "waited_s": 2, "timeout_s": 600}])
+
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=_READY_CARD)
+        return httpx.Response(200, json=next(answers))
+
+    with _sites(site):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
+            timeout_s=0, poll_s=0)
+    assert next(answers, "done") == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_site_past_the_time_it_declared_fails_the_deploy_saying_so(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=_READY_CARD)
+        return httpx.Response(200, json={"ready": False, "problems": ["@ready_check seeded returned False"],
+                                         "waited_s": 61, "timeout_s": 0})
+
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(not ready after 0 s: "
+                                                         r"@ready_check seeded returned False\)"):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
+            timeout_s=300, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_reads_a_sites_readiness_through_the_protocols_website_readiness():
+    asked = []
+
+    async def readiness(base_url, card, **kwargs):
+        asked.append((base_url, card["name"]))
+        return WebsiteReadiness(ready=False, problems=["a", "b"])
+
+    def site(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_READY_CARD)
+
+    with _sites(site), patch.object(env_gateway_provider, "website_readiness", readiness):
+        assert await env_gateway_provider._website_ready("http://gw/svc/mail", "/healthz") == (False, "a, b", None)
+    assert asked == [("http://gw/svc/mail", "mail")]
+
+
+def test_the_website_v1_ready_a_deploy_reads_is_the_one_the_sdk_serves_and_the_gateways_mirror_names(tmp_path):
+    """The deploy reads the protocol's own URI and op; the gateway container, which has no agentenv_protocol, keeps a
+    mirror of them in its constants, which must stay equal to the protocol's."""
+    from agentenv_protocol import client as protocol_v1
+    from agentenv_protocol import website as protocol_website
+    from agentenv_protocol.website import WebsiteEnvironment, website
+
+    from agent_env.env.gateway import constants as gateway_constants
+
+    (tmp_path / "index.html").write_text("<html></html>")
+
+    @website(domains=["x.test"], static=str(tmp_path))
+    class Site(WebsiteEnvironment):
+        pass
+
+    card = TestClient(Site().create_app()).get("/.well-known/agent-env.json").json()
+    assert (gateway_constants.EXT_WEBSITE_URI, gateway_constants.WEBSITE_READY_OP) == (
+        protocol_website.WEBSITE_EXTENSION_URI, protocol_website.WEBSITE_READY_OP)
+    assert (env_gateway_provider.WEBSITE_EXTENSION_URI, env_gateway_provider.WEBSITE_READY_OP) == (
+        protocol_website.WEBSITE_EXTENSION_URI, protocol_website.WEBSITE_READY_OP)
+    assert protocol_v1.find_extension_method(card, protocol_website.WEBSITE_EXTENSION_URI,
+                                             protocol_website.WEBSITE_READY_OP) is not None
 
 
 @pytest.mark.asyncio

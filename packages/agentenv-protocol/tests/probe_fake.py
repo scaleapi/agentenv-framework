@@ -39,7 +39,7 @@ from agentenv_protocol.computer import (
     upload,
 )
 from agentenv_protocol.computer import _linux as linux
-from agentenv_protocol.computer.conformance.checks import STAGE
+from agentenv_protocol.computer.conformance.checks import OWNER, STAGE
 from agentenv_protocol.computer.conformance.page_fixture import QUESTION, TITLE, TWO, TWO_TITLE
 
 CLIPBOARD = "agentenv-probe clipboard"
@@ -54,6 +54,7 @@ KEYSYMS = {" ": "space", ",": "comma", "!": "exclam", "\t": "Tab", "\n": "Return
 PAGE_LAYOUT = {**LAYOUT, "ask": [40, 600, 120, 44], "file": [40, 670, 300, 34]}
 DESK_URL = "http://127.0.0.1:4343/"
 TITLES = {DESK_URL: TITLE, DESK_URL + TWO.lstrip("/"): TWO_TITLE}
+
 
 
 class FakeDesk:
@@ -202,7 +203,7 @@ class FixtureDriver(FakeDriver):
         if f"python3 {STAGE}/fixture.py" in text:
             self.desk.start()
             return ExecResult(0, b"4242\n")
-        if argv in (["id", "-u"], ["stat", "-c", "%u", f"{STAGE}/fixture.py"]):
+        if argv in (["id", "-u"], [*OWNER, f"{STAGE}/fixture.py"]):
             return ExecResult(0, b"1000\n")
         if argv[:1] in (["kill"], ["tail"]) or f"rm -rf {STAGE}/state" in text:
             return ExecResult(0)
@@ -320,10 +321,10 @@ class PageFixtureDriver(FixtureDriver):
             return ExecResult(0, b"4343") if self.desk.started else ExecResult(1)
         if argv[:1] == ["cat"] and argv[1].endswith("layout.json") and self.desk.started:
             return ExecResult(0, json.dumps(PAGE_LAYOUT).encode())
-        if argv == ["stat", "-c", "%u", f"{STAGE}/page_fixture.py"]:
+        if argv == [*OWNER, f"{STAGE}/page_fixture.py"]:
             return ExecResult(0, b"1000\n")
-        if argv == ["stat", "-c", "%u", f"{STAGE}/fixture.py"]:
-            return ExecResult(1, b"", b"stat: cannot statx: No such file or directory")
+        if argv == [*OWNER, f"{STAGE}/fixture.py"]:
+            return ExecResult(1, b"", b"FileNotFoundError: [Errno 2] No such file or directory")
         return super()._fixture(argv)
 
 

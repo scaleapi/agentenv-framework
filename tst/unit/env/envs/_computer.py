@@ -209,7 +209,7 @@ def _base(image, **changes):
 
 
 def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, install=True, extra=None,
-            features=None):
+            features=None, known_failures=None):
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "driver.py").write_text("class Desk: ...\n")
     (folder / "requirements.txt").write_text(requirements)
@@ -224,7 +224,8 @@ def _driver(folder, requirements="mss>=9,<11\n", supports=None, services=None, i
     return ComputerDriverEnv.put(
         id="@local/~/kit/desk", module="driver.py:Desk", files=files,
         declaration=DriverDeclaration.model_validate({"name": "desk", "supports": supports, "platforms": platforms}),
-        install={"linux": Install(python="requirements.txt", services=services)} if install else {}, port=18765)
+        install={"linux": Install(python="requirements.txt", services=services)} if install else {}, port=18765,
+        known_failures=known_failures)
 
 
 def _put(base, driver, compose=True, **changes):

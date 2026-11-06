@@ -199,6 +199,16 @@ with any other transport are kept beside the SDK's entry. Card URLs are paths, r
 address the card was fetched from. On the client side, `client.mcp_path(card)` returns the
 declared path, or `/mcp` for a card without one.
 
+A composed card, such as a gateway's, nests each backing environment's card under
+`children_environments`, its `url` and endpoints rooted at the route the composer serves it at.
+`client.children(card)` returns each as a `ChildEnv` (its `name`, `url` and `card`, with its
+`extensions`, `operations` and `serves(method)`, and `base_url(address)`, its data plane resolved
+against the composed card's address). Two children may share a name, as a website and an MCP
+server can, so `client.child_at(card, url)` finds one by its url or route; `client.child_named(card,
+name)` raises `AmbiguousChildError` for a shared name, and `client.find_child` returns the first.
+`client.serves(card, method)` says whether a card serves a data-plane method by its declared
+`operations`, None for a card that declares none.
+
 Extensions are invoked from what the card advertises. `client.find_extension_method(card, uri,
 method)` returns one advertised method, whose `endpoint` is the method's own or else the
 extension's, and `client.invoke_extension(base_url, card, uri, params, method=...)` calls it with
@@ -420,6 +430,37 @@ async with ToolSession(mcp_url=mcp_url, role="alice@example.com") as session:
     unknown; read it back (`data/get`) or end the episode.
 - **Tools:** `list_tools()` returns the tools the role may use as `EnvironmentTool`, the type a card's
   `capabilities.tools` holds. Each `inputSchema` is the JSON Schema a model API takes as the tool's parameters.
+
+## Website readiness
+
+`agentenv_protocol.website` is the one definition of whether a website env is healthy. A site's card advertises
+`urn:agentenv:website/v1`'s `ready` (`WEBSITE_READY_OP`), a GET answering a `WebsiteReadiness`: `ready`, a boolean,
+`problems`, what keeps it from being ready, and optionally `waited_s` since its server started and the `timeout_s` it
+may take (`SITE_READY_TIMEOUT_S` when it says nothing), which is how long a deploy waits for it. A
+`WebsiteEnvironment` answers from its `@ready_check` methods, run at once, each within `CHECK_TIMEOUT_S` and a plain
+`def` in a worker thread, and from `@website(ready_timeout_s=...)`; it serves no separate health path. The model is
+strict about `ready` and `problems` (`"yes"` is no `ready`) and ignores fields it doesn't know, so a reader keeps
+reading a newer site. A server whose card has no `ready` is still read at its health path (`DEFAULT_HEALTH_PATH`
+unless it names one), which is deprecated. Everything that judges a site reads it through these helpers: agent-env's deploy,
+`DeployedEnv.readiness()`, and the conformance checker's `health`, which fails an answer that isn't a
+`WebsiteReadiness`.
+
+```python
+from agentenv_protocol.website import env_readiness, website_readiness
+
+site = await website_readiness(base_url, card)   # WebsiteReadiness, or None for a card without ready
+env = await env_readiness(gateway_url, env_card)  # WebsiteReadiness of every site of the env
+print(env.ready, env.problems)                    # False ['shop: seeded']
+```
+
+- **One site:** `website_readiness(base_url, card, *, timeout=READY_TIMEOUT_S, headers=None)` asks the site as its card
+  advertises `ready`. It raises httpx's error when the site can't be reached, `ExtensionCallError` for a non-2xx
+  answer and `ValueError` (pydantic's `ValidationError`) for an answer that isn't a `WebsiteReadiness`.
+- **An env:** `env_readiness(base_url, card, ...)` asks, at once, the card itself when it advertises `ready` (a single
+  site's card), and every child under a composed card's `children_environments` that does, its endpoints rooted at
+  `base_url` as a gateway's are. A child's problems are prefixed with its name (`shop: seeded`); one that can't be
+  asked, or answers no `WebsiteReadiness`, is a problem itself. A card or child without `ready`, an MCP server's or an
+  older site's, isn't counted, so an env with no site serving it is ready with no problems.
 
 ## Computer drivers
 
