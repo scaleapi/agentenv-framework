@@ -80,8 +80,11 @@ the container before using it.
 ## Register it
 
 In a bundle, `env.toml` declares the env: copied to a bundle's `envs/notes/`, `agent-env bundle register <bundle>`
-builds the image with that folder as its context. Its keys are `type`, `environment_name` and `backend_image`; domains
-are not one of them, as they come from the card. Without a bundle:
+builds the image with that folder as its context. Its keys are `type`, `environment_name` and `backend_image`, and it
+may name `domains`, the names the site is reached by, such as `domains = ["notes.example"]`. These win over the
+card's; without them a computer reaches the site by the names its card declares (`notes.test`), or as
+`notes.localhost` when it declares none. Two sites of one multi env can't claim one name. Without a bundle (`--domain`
+names the site, and can be repeated):
 
 ```bash
 agent-env env website put --id notes-site --server-dockerfile Dockerfile --server-docker-context .

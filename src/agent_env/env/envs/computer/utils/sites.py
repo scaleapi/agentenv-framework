@@ -32,8 +32,10 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from agent_env.env.env import Env, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
+from agent_env.store.base import NotFoundError
 
 if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv
@@ -148,6 +150,13 @@ def claims(sites: Iterable[Site], allow_hosts: Iterable[str] = ()) -> list[Claim
     return found + [Claim(host.lower(), ALLOWLIST, "network") for host in dict.fromkeys(allow_hosts)]
 
 
+def name_conflicts(every: list[Claim]) -> list[str]:
+    """Each overlap of two claims of one rank by different owners, the later named first, as ``site_table`` refuses
+    them."""
+    return [f"{claim.name!r} ({claim.owner}) overlaps {k.name!r} ({k.owner})" for i, claim in enumerate(every)
+            for k in every[:i] if k.rank == claim.rank and k.owner != claim.owner and overlap(k.name, claim.name)]
+
+
 def site_table(sites: list[Site], allow_hosts: Iterable[str] = ()) -> SiteTable:
     """The deployment's names: a synthetic site's routed, the rest left to the network but those a stronger claim
     covers, a stronger claim shadowing each weaker one that overlaps it. Raises SiteConflict naming every name two sites
@@ -161,17 +170,15 @@ def site_table(sites: list[Site], allow_hosts: Iterable[str] = ()) -> SiteTable:
                 if not re.fullmatch(r"[A-Za-z0-9_-]+", name)]
     if invalid:
         raise ValueError("; ".join(invalid))
-    conflicts, kept, table = [], [], SiteTable()
+    if conflicts := name_conflicts(every):
+        raise SiteConflict("names claimed twice: " + "; ".join(conflicts))
+    kept, table = [], SiteTable()
     for rank in RANKS:
         for claim in (c for c in every if c.rank == rank):
-            same = [k for k in kept if k.rank == rank and k.owner != claim.owner and overlap(k.name, claim.name)]
-            conflicts += [f"{claim.name!r} ({claim.owner}) overlaps {k.name!r} ({k.owner})" for k in same]
             stronger = [k for k in kept if k.rank != rank and overlap(k.name, claim.name)]
             if stronger := sorted(stronger, key=lambda k: not covers(k.name, claim.name))[:1]:
                 table.shadowed.append((claim, stronger[0]))
             kept.append(claim)
-    if conflicts:
-        raise SiteConflict("names claimed twice: " + "; ".join(conflicts))
     by_site = {site.name: site for site in sites}
     for owner in dict.fromkeys(c.owner for c in kept if c.rank == SYNTHETIC):
         table.routes.append(Route(owner, by_site[owner].url,
@@ -405,18 +412,17 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
 async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[str]] = None) -> list[dict]:
     """The websites a run has deployed, as ``env_params.sites`` names them: each ``website/v1`` child env of a deployed
     env's stored card, with the route its composer serves it to a browser at (its params' ``browse_url``, joined onto
-    the env's address), and the names its params declare. A record whose card names no ``browse_url``, as
-    one a gateway made before it did, takes the route from its ``website_frontend_urls``. A site those name that the
-    stored card doesn't hold, every site of a record without a card or one whose card the gateway couldn't read when it
-    composed its own, is read live at ``/svc/<name>``, and has no names when it serves no card (404 or no JSON).
-    Reading one fails otherwise, after ``CARD_ATTEMPTS`` tries, rather than route the site by names it didn't declare.
+    the env's address), and its names: those its env stores (a website env's ``domains``), else those its params
+    declare. A record whose card names no ``browse_url``, as one a gateway made before it did, takes the route from
+    its ``website_frontend_urls``. A site those name that the stored card doesn't hold, every site of a record without
+    a card or one whose card the gateway couldn't read when it composed its own, is read live at ``/svc/<name>``
+    unless its env stores its names, and has no names when it serves no card (404 or no JSON). Reading one fails
+    otherwise, after ``CARD_ATTEMPTS`` tries, rather than route the site by names it didn't declare.
     ``only`` keeps the websites of the envs it names, each of which must be deployed. Sites of different envs that
     share a name are each named for their env (``_env_qualified``), so they're routed apart, while two that claim one
     domain are still refused."""
     from agentenv_protocol import client as protocol_v1
     from agentenv_protocol.website import WEBSITE_BROWSE_URL_PARAM, WEBSITE_EXTENSION_URI
-
-    from agent_env.env.env import gateway_url_of
 
     records = list(deployed_envs)
     if only is not None:
@@ -429,10 +435,11 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
     for record in records:
         address = gateway_url_of(record) or getattr(record, "environment_url", None)
         frontends = getattr(record, "website_frontend_urls", None) or {}
+        children = [child for child in protocol_v1.children(getattr(record, "environment_card", None) or {})
+                    if child.find_extension(WEBSITE_EXTENSION_URI) is not None and child.name]
+        stored = _stored_domains(record) if children or frontends else {}
         named = set()
-        for child in protocol_v1.children(getattr(record, "environment_card", None) or {}):
-            if child.find_extension(WEBSITE_EXTENSION_URI) is None or not child.name:
-                continue
+        for child in children:
             params = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI)
             browse = params.get(WEBSITE_BROWSE_URL_PARAM)
             service = _served_as(child)
@@ -443,11 +450,13 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
                                "isn't routed", child.name, record.env_id)
                 continue
             named.add(service)
-            found.append((record.env_id, _found(child.name, url, params)))
+            found.append((record.env_id, _found(child.name, url, params, stored.get(service))))
         for name, url in frontends.items():
             if name not in named:
-                card = await _site_card(protocol_v1, f"{gateway_url_of(record)}/svc/{name}", name)
-                found.append((record.env_id, _found(name, url, protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI))))
+                card = {} if name in stored else await _site_card(protocol_v1, f"{gateway_url_of(record)}/svc/{name}",
+                                                                   name)
+                params = protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI)
+                found.append((record.env_id, _found(name, url, params, stored.get(name))))
     return _env_qualified(found)
 
 
@@ -468,8 +477,19 @@ def _served_as(child) -> str:
     return parts[1] if len(parts) > 1 and parts[0] == "svc" and parts[1] else child.name
 
 
-def _found(name: str, url: str, params: dict) -> dict:
-    return {"name": name, "url": url, "domains": list(params.get("domains") or [])}
+def _stored_domains(record: DeployedEnv) -> dict[str, list[str]]:
+    """The names each website of the env ``record`` deployed stores, by its environment_name: a multi env's websites',
+    or a website env's own. None for an env the store doesn't hold."""
+    try:
+        env = Env.get(record.env_id, getattr(record, "env_version", None))
+    except NotFoundError:
+        return {}
+    websites = getattr(env, "website_envs", None) or [env]
+    return {site.environment_name: list(site.domains) for site in websites if getattr(site, "domains", None)}
+
+
+def _found(name: str, url: str, params: dict, stored: Optional[list[str]] = None) -> dict:
+    return {"name": name, "url": url, "domains": list(stored or params.get("domains") or [])}
 
 
 def _joined(address: str, url: str) -> str:

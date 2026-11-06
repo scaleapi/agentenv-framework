@@ -40,10 +40,13 @@ def test_a_site_is_built_from_its_server_dockerfile_alone_with_its_build_context
 def test_a_site_registers_a_server_image_already_in_a_registry(local_stores):
     with patch("agent_env.cli.env.website.DockerImageArtifact.put_ref",
                side_effect=lambda id, **k: _stored(id)) as put_ref:
-        result = _put("--server-image-ref", "ghcr.io/acme/mail:3", "--environment-name", "mail")
+        result = _put("--server-image-ref", "ghcr.io/acme/mail:3", "--environment-name", "mail",
+                      "--domain", "mail.example", "--domain", "*.mail.example")
     assert result.exit_code == 0, result.output
     assert put_ref.call_args.kwargs["image_name"] == "ghcr.io/acme/mail:3"
-    assert Env.get("mail-site").server_docker_image_artifact.id == "mail-site__backend_image"
+    env = Env.get("mail-site")
+    assert (env.server_docker_image_artifact.id, env.domains) == ("mail-site__backend_image",
+                                                                  ["mail.example", "*.mail.example"])
 
 
 def test_put_refuses_no_server_image_two_of_them_an_unnamed_registry_image_and_a_bad_health_path(local_stores, tmp_path):
@@ -54,7 +57,10 @@ def test_put_refuses_no_server_image_two_of_them_an_unnamed_registry_image_and_a
     assert "needs --environment-name" in _put("--server-image-ref", "ghcr.io/acme/mail:3").output
     with patch("agent_env.cli.env.website.DockerImageArtifact.put_ref", side_effect=lambda id, **k: _stored(id)) as put_ref:
         refused = _put("--server-image-ref", "ghcr.io/acme/mail:3", "--environment-name", "mail", "--health-path", "ok")
+        bad_domain = _put("--server-image-ref", "ghcr.io/acme/mail:3", "--environment-name", "mail",
+                          "--domain", "Mail.example")
     assert refused.exit_code == 1 and "health: 'ok' is not a path" in refused.output
+    assert bad_domain.exit_code == 1 and "domains: 'Mail.example' must be lowercase" in bad_domain.output
     put_ref.assert_not_called()
 
 
