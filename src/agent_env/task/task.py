@@ -7,7 +7,6 @@ import copy
 import dataclasses
 import inspect
 import itertools
-import json
 import logging
 import re
 import time
@@ -24,6 +23,7 @@ from agent_env.plugins import _registration
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
+from agent_env.task.teardown import env_record_ids
 from agent_env.task_step.context import TaskStepContext, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.task_step.task_step import RetryConfig, TaskStep
@@ -35,34 +35,49 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _identity(entry: dict) -> str:
-    return json.dumps(entry, sort_keys=True, default=str)
+def _sandbox_ids(key: str, record: dict) -> list[tuple[Optional[str], Optional[str], str]]:
+    if key == "deployed_envs":
+        return env_record_ids(record.get("sandbox_id"), record.get("sandbox_ids"))
+    return [(None, None, record["sandbox_id"])] if record.get("sandbox_id") else []
 
 
-def _rolled_back_sandboxes(before: dict, after: dict) -> dict:
-    """The sandbox coordinates of every deployed env / agent / sandbox present in the stored
-    context ``before`` an undo and absent ``after`` it, shaped like the context's own slices
-    so the executor's cleanup can scan the marker exactly as it scans a context. The undo is
-    what removes these from the live and persisted context, so without this record an
-    orphaned sandbox from the failed attempt is discoverable nowhere.
+def _rolled_back_sandboxes(before: dict, after: dict, live: dict) -> dict:
+    """The sandbox coordinates of every sandbox that a deployed env / agent / sandbox in the stored
+    context ``before`` an undo names and no record ``after`` it names, shaped like the context's own
+    slices so the executor's cleanup can scan the marker exactly as it scans a context. The ``live``
+    context the undo's rebuild replaces counts as ``before`` too. The undo is what removes these
+    from the live and persisted context, so without this record an orphaned sandbox from the failed
+    attempt is discoverable nowhere.
     """
-    def gone(key: str) -> list[dict]:
-        kept = {_identity(e) for e in after.get(key) or []}
-        return [e for e in before.get(key) or [] if _identity(e) not in kept]
+    slices = ("deployed_envs", "deployed_agents", "deployed_sandboxes")
+    kept = {i for key in slices for e in after.get(key) or [] for _, _, i in _sandbox_ids(key, e)}
+
+    def gone(key: str) -> list[tuple[dict, list]]:
+        named, found = set(kept), []
+        for e in [*(before.get(key) or []), *(live.get(key) or [])]:
+            if fresh := [entry for entry in _sandbox_ids(key, e) if entry[2] not in named]:
+                named.update(i for _, _, i in fresh)
+                found.append((e, fresh))
+        return found
+
+    def env(e: dict, fresh: list) -> dict:
+        record = {"sandbox_id": None, "sandbox_type": e.get("sandbox_type"), "sandbox_ids": {}}
+        for key, service, i in fresh:
+            if key is None:
+                record["sandbox_id"] = i
+            elif service is None:
+                record["sandbox_ids"][key] = i
+            else:
+                record["sandbox_ids"].setdefault(key, {})[service] = i
+        return record
 
     return {
-        "deployed_envs": [
-            {"sandbox_id": e.get("sandbox_id"), "sandbox_type": e.get("sandbox_type"),
-             "sandbox_ids": e.get("sandbox_ids") or {}}
-            for e in gone("deployed_envs")
-        ],
+        "deployed_envs": [env(e, fresh) for e, fresh in gone("deployed_envs")],
         "deployed_agents": [
-            {"sandbox_id": a.get("sandbox_id"), "sandbox_type": a.get("sandbox_type")}
-            for a in gone("deployed_agents") if a.get("sandbox_id")
+            {"sandbox_id": a["sandbox_id"], "sandbox_type": a.get("sandbox_type")} for a, _ in gone("deployed_agents")
         ],
         "deployed_sandboxes": [
-            {"sandbox_id": x.get("sandbox_id"), "sandbox_type": x.get("sandbox_type")}
-            for x in gone("deployed_sandboxes")
+            {"sandbox_id": x["sandbox_id"], "sandbox_type": x.get("sandbox_type")} for x, _ in gone("deployed_sandboxes")
         ],
     }
 
@@ -256,9 +271,11 @@ async def _roll_back_span(
         "at_utc": datetime.now(timezone.utc).isoformat(),
     }
 
+    live = context.to_dict()
+
     def _audit(before: dict, after: dict) -> ContextUpdateOps:
         # Runs inside the store's CAS with the context as stored and as replayed.
-        entry = {**marker, "rolled_back_sandboxes": _rolled_back_sandboxes(before, after)}
+        entry = {**marker, "rolled_back_sandboxes": _rolled_back_sandboxes(before, after, live)}
         return ContextUpdateOps(sets={
             "context.metadata.failed_steps": failed_steps,
             "context.metadata.retry_resets": resets + [entry],

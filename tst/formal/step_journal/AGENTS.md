@@ -6,7 +6,7 @@ this directory. The repository-wide rules are in the root `AGENTS.md`.
 `StepJournal.tla` models the instance document, the journal rows, and the scheduler that writes them. Each store call
 is one atomic action. TLC, the TLA+ model checker, explores every interleaving of those calls across a retry, a
 cancelled sibling whose `to_thread` write lands late, and a second process that re-registers the same `instance_id`.
-It checks two invariants:
+It checks four invariants:
 
 - `NoSupersededWriteLands`. A seed, completion, scheduler record, failure or cancel write from an attempt that an undo
   or a re-register retired never lands on the instance. If one lands, the run's stored context or `completed_steps`
@@ -14,6 +14,11 @@ It checks two invariants:
 - `ReplayReproducesStored`. Replaying the live generation's journal over its seed reproduces the stored context,
   whenever no doc-first write is half done and the run is neither failed nor cancelled. If it does not,
   `undo_steps_sync` rebuilds a context the run never had, so a retry runs on the wrong state.
+- `NoSandboxLeaks`. When a run ends, its live context names every sandbox its steps created, in a `deployed_*` record
+  or a `retry_resets` marker. `teardown_run` terminates what `teardown.py:recorded_sandboxes` finds there, except the
+  ids `TORN_DOWN_KEY` lists as terminated already, so a sandbox missing from both stays up after the run.
+- `NoMarkerNamesLive`. A `retry_resets` marker never names a sandbox that a `deployed_*` record of the live context
+  still names. If one does, the run's record says a retry rolled back a sandbox that is still in use.
 
 `single.cfg` runs one process. `takeover.cfg` runs two processes on one `instance_id`, where the second re-registers it
 while the first runs.
@@ -37,8 +42,10 @@ it stands for.
 | `task.py:_run`: register, then seed under the registered `attempt_epoch` | `Register`, `SeedDoc` |
 | `task.py:_drive_dag`: the dispatch loop, batch classification, loop exit, `except` branch | `Dispatch`, `Collect`, `Finish`, `CancelRun` |
 | `task.py:_drive_dag._run_one`, `_heartbeat_step` | `ExecOk`, `ExecFail` |
+| a deploy step's `execute` appending its record to the live context | `Make` |
 | `task.py:_drive_dag._drain_in_flight` | `Drained` (in-flight writes become orphans that keep running) |
 | `task.py:_roll_back_span` (the overlap gate, the undo, `state.epoch`) | the retry branch of `Collect`, then `UndoRead` through `Rearm` |
+| `task.py:_roll_back_span._audit`, `_rolled_back_sandboxes`, `_sandbox_ids`, `_rebuild_context`, `teardown.py:env_record_ids` | the marker and the live context in `UndoWrite` |
 
 The paths are under `src/agent_env/task/`, except `document_store.py`, which is
 `src/agent_env/store/document_store/document_store.py`. A change elsewhere, such as the async wrappers' logging or retry
@@ -67,8 +74,8 @@ exits nonzero when any run differs from its expected outcome, and prints the dir
 config and `tlc.out`. A passing baseline prints:
 
 ```
-ok          single                             holds                              4697 distinct states found
-ok          takeover                           holds                              3104845 distinct states found
+ok          single                             holds                              5333 distinct states found
+ok          takeover                           holds                              3662428 distinct states found
 TLC 1.7.4; configs and output in /tmp/step-journal-tlc.XXXXXX
 ```
 
@@ -120,8 +127,15 @@ the undo CAS to its `__scheduler__` row.
 
 ## What the model does not cover
 
+- Record shapes. The model names each sandbox by its id, as `_rolled_back_sandboxes` and `recorded_sandboxes` do, so
+  it does not check how a record serializes.
+- Records that name several sandboxes. Each record names one, so `teardown_test.py`, not the model, checks that a
+  rolled-back env record sharing a survivor's sandboxes names only its own in the marker.
 - Context contents. Each step writes only its own key, so the model does not check replay order, `rerecorded_steps`,
   `move_to_end` or the `add_to_sets` union. Re-records do not occur.
+- Sandboxes other than `a`'s and `c`'s. Each creates one and records it in one step: a sandbox a cancel strands inside
+  the provider's create call, a record appended before the step raises, and a `teardown_sandboxes` step are not
+  modeled.
 - Store failures: a failed journal write, a process that crashes mid-call, the `RuntimeError` paths, and the retries in
   the async wrappers.
 - `start_step > 0` (`_journal_seeded_completions`), `end_step`, tolerant steps, `create_instance`, `clear_journal_sync`
