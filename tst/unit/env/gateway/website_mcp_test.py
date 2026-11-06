@@ -20,10 +20,16 @@ from tst.unit.env.gateway.process_scope_socket_test import _serve
 CARD = "/.well-known/agent-env.json"
 
 
-@pytest.mark.parametrize("declared", ["/mcp", "http://shop:8000/mcp", "/mcp?transport=http", "http://shop:8000/mcp/#x"])
+@pytest.mark.parametrize("declared", ["/mcp", "http://shop:8000/mcp", "/mcp?transport=http", "http://shop:8000/mcp/#x",
+                                      "mcp", "./mcp", "mcp?transport=http"])
 def test_a_sites_mcp_interface_is_one_of_its_reserved_paths_however_its_card_writes_it(declared):
     card = {"url": "/agentenv", "additionalInterfaces": [{"url": declared, "transport": "mcp"}, {"transport": "x"}]}
     assert site_reserved_paths(card) == frozenset({"/agentenv", "/mcp"})
+
+
+def test_a_relative_mcp_interface_is_reserved_under_the_sites_root_as_discovery_resolves_it():
+    card = {"additionalInterfaces": [{"url": "tools/mcp", "transport": "mcp"}]}
+    assert site_reserved_paths(card) == site_reserved_paths(card, "/base") == frozenset({"/tools/mcp"})
 
 
 def test_a_sites_mcp_endpoint_is_its_internal_servers_path_under_its_svc_base():

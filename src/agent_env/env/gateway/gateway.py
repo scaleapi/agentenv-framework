@@ -1718,13 +1718,16 @@ def site_reserved_paths(card: dict, base_path: str = "") -> frozenset[str]:
 
 def _url_path(url: str, base: str = "") -> str:
     """The path of ``url``, a bare path or a full URL, without its query or fragment, a full URL's taken under
-    ``base`` when it is under it; "" for one that has none."""
+    ``base`` when it is under it, and a relative one (``mcp``) under the site's root, as discovery resolves it; "" for
+    one that has none."""
     try:
         parts = urlsplit(url)
     except ValueError:
         return ""
     if parts.netloc and base and (parts.path == base or parts.path.startswith(base + "/")):
         return parts.path[len(base):] or "/"
+    if not parts.scheme and not parts.netloc and parts.path and not parts.path.startswith("/"):
+        return "/" + parts.path
     return parts.path
 
 

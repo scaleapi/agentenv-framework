@@ -103,6 +103,24 @@ async def test_a_site_behind_a_base_path_refuses_the_mcp_endpoint_its_card_names
     assert (await _http(gw, "GET", "/website/shop/orders"))[0] == 200
     assert reached == [f"/base{WELL_KNOWN_PATH}", "/base/orders"]
 
+
+@pytest.mark.asyncio
+async def test_a_site_refuses_the_mcp_endpoint_its_card_names_by_a_relative_path(monkeypatch):
+    card = {"name": "shop", "url": "/agentenv", "additionalInterfaces": [{"url": "mcp", "transport": "mcp"}]}
+
+    def site(request):
+        if request.url.path == WELL_KNOWN_PATH:
+            return httpx.Response(200, json=card)
+        return httpx.Response(200, content=_streamed())
+
+    transport = httpx.MockTransport(site)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(_Changelog(), website_urls={"shop": "http://shop-website-backend:8000"},
+                  rest_proxy_urls={"shop": "http://shop-website-backend:8000"})
+    for path in ("mcp", "mcp/", "./mcp"):
+        assert (await _http(gw, "POST", f"/website/shop/{path}", body=b"{}"))[0] == 404, path
+    assert (await _http(gw, "GET", "/website/shop/orders"))[0] == 200
+
 @pytest.mark.asyncio
 async def test_a_sites_route_refuses_what_its_card_advertises_reading_the_card_once(monkeypatch):
     reached = []
