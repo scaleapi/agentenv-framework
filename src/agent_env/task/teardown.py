@@ -3,7 +3,8 @@
 ``teardown_run`` takes down everything a run's context records: its bare sandboxes, its envs and its agents. It
 removes compute only; the instance, its outputs and the artifacts it collected stay. What has to reach the stores goes
 first: the changelogs staged on its agents (``before_teardown``), the recordings the run left open, ended with fresh
-grants whatever env serves them, and what each env saves as it closes (``Env.close``); a recording still open after
+grants whatever env serves them, the traffic captures of each env deployed with ``capture_traffic`` that the run didn't
+collect, and what each env saves as it closes (``Env.close``); a recording still open after
 that is registered from what its namespace holds. Then every sandbox is terminated by id, and a local one's work
 folder goes once it's down. ``agent-env run`` and ``agent-env eval run`` call it after each run, and the
 ``teardown_sandboxes`` step takes down part of a run the same way (``tear_down``). ``Task.run`` never does, so a
@@ -31,6 +32,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 from agent_env.task.interrupts import tearing_down
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.computer_recording import end_open_recordings, register_open_recordings
+from agent_env.task_step.task_steps.traffic_capture import collect_uncollected_captures, rolled_back_deployments
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +118,9 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
 
 async def tear_down(context: TaskStepContext, sandboxes: Sequence[RecordedSandbox], envs: Sequence[DeployedEnv], *,
                     timeout: float) -> TeardownReport:
-    """End the recordings the run left open on ``envs`` with fresh grants, close each env still up, register any
+    """End the recordings the run left open on ``envs`` with fresh grants, collect the traffic captures of each of them
+    that captures and that the run didn't collect, and of each capturing env a retry rolled back whose sandboxes are
+    among ``sandboxes``, close each env still up, register any
     recording still open from its namespace, then terminate each of ``sandboxes`` by id, all at once and each within
     ``timeout`` seconds, and remove a local one's work folder once it's down. A close that fails is logged: its env's sandboxes are terminated by id regardless, which leaves one the
     close took down as it is. Cancelling it returns what it reached, with the rest in ``left``."""
@@ -129,8 +133,15 @@ async def tear_down(context: TaskStepContext, sandboxes: Sequence[RecordedSandbo
                 await end_open_recordings(context, env_ids)
         except TimeoutError:
             logger.warning("teardown: the run's open recordings weren't all ended within %gs", timeout)
-        await asyncio.gather(*(_close(env, timeout) for env in envs
-                               if any(sandbox_id in up for sandbox_id, _ in env_sandbox_ids(env))))
+        still_up = [env for env in envs if any(sandbox_id in up for sandbox_id, _ in env_sandbox_ids(env))]
+        rolled_back = [(key, env) for key, env in rolled_back_deployments(context)
+                       if any(sandbox_id in up for sandbox_id, _ in env_sandbox_ids(env))]
+        try:
+            async with asyncio.timeout(timeout):
+                await collect_uncollected_captures(context, still_up, rolled_back=rolled_back)
+        except TimeoutError:
+            logger.warning("teardown: the run's uncollected traffic captures weren't all collected within %gs", timeout)
+        await asyncio.gather(*(_close(env, timeout) for env in still_up))
         await asyncio.to_thread(register_open_recordings, context, env_ids)
     except asyncio.CancelledError:
         return TeardownReport(left=pending)

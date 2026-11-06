@@ -293,13 +293,19 @@ def provider_or_class(env: Env) -> EnvironmentProvider | type[EnvironmentProvide
 
 def deploy_refusal(env: Env, provider: EnvironmentProvider | type[EnvironmentProvider], options: dict) -> str | None:
     """Why deploying env through provider, or a provider of that class, is refused before anything is built, or None: the provider
-    can't deploy an env like it (see ``provider_refusal``), or an option it can't take."""
+    can't deploy an env like it (see ``provider_refusal``), ``capture_traffic`` for an env that serves no website, or an option it
+    can't take."""
+    from agent_env.env.envs.website import WebsiteEnv
+
     provider_class = provider if isinstance(provider, type) else type(provider)
     reason = provider_refusal(provider_class, type(env),
                               mcp_names=[child.environment_name for child in getattr(env, "mcp_server_envs", ())],
                               website_names=[child.environment_name for child in getattr(env, "website_envs", ())])
     if reason is not None:
         return f"env '{env.id}' has env_provider_type '{env.env_provider_type}', which {reason}"
+    if options.get("capture_traffic") and not (isinstance(env, WebsiteEnv) or getattr(env, "website_envs", ())):
+        return (f"env '{env.id}' serves no website, and capture_traffic records what a website's containers send and "
+                "receive")
     return option_refusal(env, provider, options)
 
 

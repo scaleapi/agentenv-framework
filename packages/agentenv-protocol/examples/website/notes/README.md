@@ -92,3 +92,7 @@ agent-env env website put --id notes-site --server-dockerfile Dockerfile --serve
 
 Run it from this folder. `environment_name` comes from the card (`@environment_card(name="notes")`). The stored env
 has a server image and no frontend image. Pass `--skip-validation` to register without deploying.
+
+To record what the site sends and receives, deploy it with `--capture-traffic` (or `"capture_traffic": true` on a
+task's `deploy_env` step): tcpdump runs in the server container's network namespace and the gateway serves its pcap
+files as `traffic/v1`, which a `collect_traffic_capture` step with the env's `env_id` stores as file artifacts.

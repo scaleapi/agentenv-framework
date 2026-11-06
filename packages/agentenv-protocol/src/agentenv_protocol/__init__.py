@@ -4,6 +4,14 @@ from . import client
 from .client import ExtensionCallError
 from .errors import Applied, AgentEnvError
 from .preflight import intake_fit_check
+from . import traffic
+from .traffic import (
+    TRAFFIC_EXTENSION_URI,
+    TrafficCapture,
+    TrafficCaptureListing,
+    fetch_traffic_capture,
+    list_traffic_captures,
+)
 from .tool_client import ToolResult, ToolSession, ToolSessionError
 from .agent_env_environment import (
     HIDDEN_BY_DEFAULT_META_KEY,
@@ -88,6 +96,12 @@ from .types import (
 
 __all__ = [
     "client",
+    "traffic",
+    "TRAFFIC_EXTENSION_URI",
+    "TrafficCapture",
+    "TrafficCaptureListing",
+    "list_traffic_captures",
+    "fetch_traffic_capture",
     "AgentEnvApplication",
     "AgentEnvEnvironment",
     "AgentEnvFastMCPApplication",

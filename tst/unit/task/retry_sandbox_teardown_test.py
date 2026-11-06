@@ -111,6 +111,7 @@ async def test_a_sibling_cancelled_during_its_completion_write_is_still_torn_dow
     [reset] = context.metadata["retry_resets"]
     assert reset["rolled_back_sandboxes"] == {
         "deployed_envs": [], "deployed_agents": [], "deployed_sandboxes": [{"sandbox_id": "sb-2", "sandbox_type": "fake"}],
+        "capturing_envs": [],
     }
     report = await teardown_run(context)
     assert sorted(provider.terminated) == ["sb-1", "sb-2", "sb-3"]

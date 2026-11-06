@@ -30,9 +30,11 @@ from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
 from agent_env.env.gateway.constants import (
+    CONTROL_TOKEN_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
+    TRAFFIC_CAPTURE_DIR_ENV,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
     tool_name_clashes_text,
@@ -88,6 +90,7 @@ _TRAJECTORY_READ_ATTEMPTS = 3
 # How much of a service's output a failed deploy's error carries: enough for the end of a traceback.
 _LOG_TAIL_LINES = 30
 _LOG_LINE_CHARS = 300
+_CAPTURE_CHECK_ERROR_CHARS = 500
 # Gathering it may stall with the connection; past this, the deploy raises the error it had.
 _DOWN_SERVICES_TIMEOUT_S = 60.0
 
@@ -100,6 +103,14 @@ MCP_HC_START_PERIOD = "60s"
 WEBSITE_READY_TIMEOUT_S = SITE_READY_TIMEOUT_S
 WEBSITE_READY_MARGIN_S = 30.0
 WEBSITE_READY_POLL_S = 2.0
+
+TRAFFIC_CAPTURE_SUFFIX = "traffic"
+TRAFFIC_VOLUME = "traffic-captures"
+TRAFFIC_GATEWAY_DIR = "/var/lib/agentenv/traffic"
+TRAFFIC_SIDECAR_DIR = "/captures"
+TRAFFIC_CAPTURE_FILE_MB = 20
+TRAFFIC_CAPTURE_FILES = 10
+
 
 
 @dataclass
@@ -128,6 +139,7 @@ class DeployedGateway:
     # The env card the readiness probe read, and when (ISO 8601, UTC).
     environment_card: dict | None = None
     environment_card_read_at_utc: str | None = None
+    control_token: str | None = None
 
 
 @dataclass
@@ -292,6 +304,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         host_ips: tuple[str, ...] = (),
         extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
+        capture_traffic: bool = False,
+        control_token: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
 
@@ -303,6 +317,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_image: Docker image for the gateway.
             gateway_port: Port to expose for the gateway.
             website_configs: Optional list of website configurations (frontend + backend pairs).
+            capture_traffic: Add a capture service beside each website's server container, and its deprecated
+                frontend container when it has one (see ``traffic_capture_services``): tcpdump, from the gateway's
+                image, in that container's network namespace, the only service holding NET_RAW and NET_ADMIN, writing
+                rotating pcap files to a volume the gateway mounts read-only and serves as traffic/v1.
+            control_token: The token the gateway's framework-only routes take, given to it as AGENTENV_CONTROL_TOKEN.
 
         Returns:
             docker-compose.yml content as a string.
@@ -390,7 +409,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
               env-network:
                 driver: bridge
         """
-        problems = _compose_name_problems(mcp_servers, website_configs, sidecars, images=(gateway_image,))
+        problems = _compose_name_problems(mcp_servers, website_configs, sidecars, images=(gateway_image,),
+                                          capture_traffic=capture_traffic)
         if mcp_server_name and ("\n" in mcp_server_name or "\r" in mcp_server_name):
             problems.append(f"MCP server name {mcp_server_name!r} must be one line")
         if problems:
@@ -466,6 +486,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             dep_lines += [f"      {name}:", "        condition: service_healthy"]
         for backend_name in website_backend_servers.values():
             dep_lines += [f"      {backend_name}:", "        condition: service_healthy"]
+        captures = traffic_capture_services(website_configs) if capture_traffic else {}
+        for capture_name in captures:
+            dep_lines += [f"      {capture_name}:", "        condition: service_started"]
         if dep_lines:
             lines.append("    depends_on:")
             lines.extend(dep_lines)
@@ -502,6 +525,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
         if provider_headers := sandbox_request_header_names():
             gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
+        if control_token:
+            gateway_env.append(f"      - {CONTROL_TOKEN_ENV}={control_token}")
+        gateway_volumes = []
+        if capture_traffic:
+            gateway_env.append(f"      - {TRAFFIC_CAPTURE_DIR_ENV}={TRAFFIC_GATEWAY_DIR}")
+            gateway_volumes = ["    volumes:", f"      - {_traffic_mount(TRAFFIC_GATEWAY_DIR, read_only=True)}"]
         publish = host_port or (lambda port: port)
         exposed_gateway_ports = []
         if expose_gateway_port:
@@ -516,6 +545,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             *gateway_env,
             *exposed_gateway_ports,
             *gateway_extra_hosts,
+            *gateway_volumes,
             "    restart: on-failure",
             "    healthcheck:",
             f'      test: ["CMD-SHELL", "python3 -c \\"import socket; s=socket.create_connection((\'localhost\',{gateway_port}),2); s.close()\\""]',
@@ -572,6 +602,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "",
             ])
 
+        for capture_name, container in captures.items():
+            lines.extend([f"  {capture_name}:", *_traffic_capture_service(gateway_image, container), ""])
+
+
         # Add sidecar services.
         # Secrets go through the compose environment block, never a docker-run command line.
         for sc in sidecars or []:
@@ -598,6 +632,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             "  env-network:",
             "    driver: bridge",
         ])
+        if capture_traffic:
+            lines.extend(["volumes:", f"  {TRAFFIC_VOLUME}: {{}}"])
         return "\n".join(lines)
 
     async def deploy(
@@ -615,17 +651,24 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         attribution: Optional[Attribution] = None,
         artifact_id: str | None = None,
         artifact_version: int | None = None,
+        capture_traffic: bool = False,
     ) -> DeployedGatewayEnv:
         """A gateway in front of the env, with the state store it acquires (local Postgres by default); returns the record.
 
         A MultiEnv's gateway fronts its MCP servers and websites, a WebsiteEnv's its website, and any other env's its one MCP server.
+        With ``capture_traffic``, it captures its websites' traffic (see ``create_gateway``), and refuses an env that
+        serves no website.
         """
         from agent_env.config import get_config, service_db_env_id
         from agent_env.env.env import Env
         from agent_env.providers.env_state import LOCAL_POSTGRES_STATE_TYPE, acquire_state_for_deploy
 
         topology = _gateway_topology(env)
-        if problems := _compose_name_problems(topology.mcp_servers, topology.website_configs):
+        if capture_traffic and not topology.website_configs:
+            raise ValueError(f"Can't capture {env.id!r}'s traffic: capture_traffic records what a website's containers "
+                             "send and receive, and the env serves no website")
+        if problems := _compose_name_problems(topology.mcp_servers, topology.website_configs,
+                                              capture_traffic=capture_traffic):
             raise ValueError(f"Can't deploy {env.id!r} behind a gateway: {'; '.join(problems)}")
         state_instance = await acquire_state_for_deploy(
             env_state_type=env_state_type, ttl_seconds=ttl_seconds, name_hint=env.id, env_state_instance_id=env_state_instance_id,
@@ -637,6 +680,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             mcp_server_images=topology.mcp_server_images, website_configs=topology.website_configs,
             website_images=topology.website_images, mcp_server_name=topology.mcp_server_name, gateway_mode=gateway_mode,
             ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
+            **({"capture_traffic": True} if capture_traffic else {}),
         )
         return DeployedGatewayEnv(
             env_id=env.id,
@@ -653,6 +697,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             website_frontend_urls=deployed.website_frontend_urls,
             gateway_mode=gateway_mode.value,
             env_state_instance_ids=deployed.env_state_instance_ids,
+            control_token=deployed.control_token,
         )
 
     async def create_gateway(
@@ -675,6 +720,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
         *,
         attribution: Optional[Attribution] = None,
+        capture_traffic: bool = False,
     ) -> DeployedGateway:
         """Create and start a gateway from explicit topology, for a caller that builds its own record rather than calling ``deploy()``.
 
@@ -688,20 +734,29 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         ``mcp_server_name`` is the name the gateway presents on its card and as its MCP server; drawn as ``env`` +
         4 random digits when the env declares none; the record takes it from the gateway's card.
+
+        ``capture_traffic`` records every packet each website's server and frontend containers send and receive once
+        its capture attaches, just after the container starts, with tcpdump in a capture service beside each, as
+        rotating pcap files the gateway serves as traffic/v1, behind a
+        control token the deploy draws for it and keeps on the record (``control_token``). VM deploys only, since only
+        they serve websites; off, the stack is as before it.
         """
         return await self._launch(
             sandbox_provider, env_id, state_instance=state_instance, mcp_servers=mcp_servers, mcp_server_images=mcp_server_images,
             gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
             gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             existing_sandbox=existing_sandbox, sidecars=sidecars, mcp_server_name=mcp_server_name,
-            attribution=attribution,
+            attribution=attribution, **({"capture_traffic": True} if capture_traffic else {}),
         )
 
-    async def _launch(self, sandbox_provider: SandboxProvider, env_id: str | None, *, mcp_server_name: str | None = None, **gateway) -> DeployedGateway:
-        """One gateway, deployed on the sandbox provider or each chained member in turn, then its tools probed."""
+    async def _launch(self, sandbox_provider: SandboxProvider, env_id: str | None, *, mcp_server_name: str | None = None,
+                      capture_traffic: bool = False, **gateway) -> DeployedGateway:
+        """One gateway, deployed on the sandbox provider or each chained member in turn, then its tools probed. Its
+        control token is drawn once, so every chained attempt holds the same."""
         attempt = functools.partial(
             self._deploy_gateway, **gateway,
             mcp_server_name=mcp_server_name or random_mcp_server_name(),  # drawn once, so every chained attempt presents the same name
+            **({"capture_traffic": True, "control_token": secrets.token_urlsafe(32)} if capture_traffic else {}),
         )
         earlier_sandbox = self._sandbox
         result = await self._run(sandbox_provider, env_id, attempt)
@@ -753,6 +808,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
+        capture_traffic: bool = False,
+        control_token: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
         from agent_env.config import gateway_env_id, get_config, website_browser_env_id
@@ -844,6 +901,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
+            **({"capture_traffic": True, "control_token": control_token} if capture_traffic else {}),
         )
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
 
@@ -892,6 +950,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if not gateway_ready:
             down = await self._down_services(sandbox)
             raise RuntimeError("Gateway did not become ready in time" + (f":\n{down}" if down else ""))
+        if capture_traffic:
+            await self._refuse_stopped_captures(sandbox, list(traffic_capture_services(website_configs)))
 
         # Check container status only on the sidecars the provider actually rendered
         sidecar_names = (
@@ -940,6 +1000,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             website_frontend_urls=website_frontend_urls, mcp_server_name=mcp_server_name,
             env_state_instance_ids=[state_instance.instance_id],
             environment_card=card, environment_card_read_at_utc=card_read_at_utc,
+            control_token=control_token,
         )
 
     async def _deploy_via_containers(
@@ -1184,6 +1245,33 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             logger.warning(f"Can't list the stack's services: no answer in {_DOWN_SERVICES_TIMEOUT_S:.0f}s")
             return None
 
+    async def _refuse_stopped_captures(self, sandbox: VmSandbox, capture_services: list[str]) -> None:
+        """Refuse a deploy whose capture services aren't all running once the gateway is up, as one is whose gateway
+        image has no tcpdump: it would record nothing. A lookup that fails is a warning, since it says nothing of them."""
+        try:
+            exit_code, stdout, stderr = await sandbox.exec_with_output(
+                "sudo", "docker", "compose", "-f", DOCKER_COMPOSE_PATH, "ps", "-a", "--format", "json")
+        except Exception as e:
+            logger.warning(f"Can't check the traffic captures are running: {e}")
+            return
+        if exit_code != 0:
+            logger.warning(f"Can't check the traffic captures are running: docker compose ps exited {exit_code}: "
+                           f"{stderr.strip()[-_CAPTURE_CHECK_ERROR_CHARS:]}")
+            return
+        rows = {row.get("Service"): row for row in _compose_ps_rows(stdout)}
+        stopped = []
+        for name in capture_services:
+            row = rows.get(name)
+            if row is None or row.get("State") != "running":
+                tail = await self._log_tail(sandbox, str((row or {}).get("ID") or ""))
+                why = _why_down(row) if row is not None else "has no container"
+                stopped.append(f"{name} {why or row.get('State')}" + (f":\n{tail}" if tail else ""))
+        if stopped:
+            raise RuntimeError("The env's traffic captures aren't running, so its traffic wouldn't be recorded (a gateway "
+                               "image built before captures has no tcpdump: put the gateway env again):\n"
+                               + "\n".join(stopped))
+
+
     async def _read_down_services(self, sandbox: VmSandbox) -> str | None:
         try:
             exit_code, stdout, stderr = await sandbox.exec_with_output(
@@ -1387,9 +1475,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
         attribution: Optional[Attribution] = None,
+        capture_traffic: bool = False,
+        control_token: str | None = None,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
-        server on its private network."""
+        server on its private network, which captures no traffic."""
         from agent_env.providers.env_state import LocalPostgresStateProvider, build_state_provider
 
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
@@ -1401,6 +1491,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         )
         deploy_kwargs = {"attribution": dict(attribution or {})}
         if not self.in_vm(sandbox_provider):
+            if capture_traffic:
+                raise ValueError(f"Can't capture traffic on {type(sandbox_provider).__name__}, which runs the gateway in "
+                                 "containers: a capture runs beside its website's container on the gateway's VM")
             if problem := self.sandbox_problem(sandbox_provider, websites=bool(website_configs)):
                 raise ValueError(f"Can't deploy a gateway on {type(sandbox_provider).__name__}, which {problem}")
             if existing_sandbox is not None:
@@ -1421,6 +1514,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
                 cpu=cpu, memory_mb=memory_mb, existing_sandbox=existing_sandbox, sidecars=sidecars,
                 mcp_server_name=mcp_server_name, **deploy_kwargs,
+                **({"capture_traffic": True, "control_token": control_token} if capture_traffic else {}),
             )
         except BaseException:
             await self._terminate_new_sandbox(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)
@@ -1516,6 +1610,49 @@ class _GatewayTopology:
     names_gateway_on_vm: bool  # a MultiEnv's record names its gateway sandbox even on a VM
 
 
+def traffic_capture_services(website_configs: list[WebsiteConfig] | None) -> dict[str, str]:
+    """The capture service a deploy capturing its websites' traffic runs for each website container, by name, each
+    with the compose service of the container whose network namespace it captures in: every website's server, and its
+    deprecated frontend when it has one."""
+    containers = [f"{wc.environment_name}-{suffix}" for wc in website_configs or []
+                  for suffix in (AGENT_ENV_WEBSITE_BACKEND_SUFFIX, AGENT_ENV_WEBSITE_FRONTEND_SUFFIX)
+                  if suffix == AGENT_ENV_WEBSITE_BACKEND_SUFFIX or wc.frontend_image]
+    return {f"{container}-{TRAFFIC_CAPTURE_SUFFIX}": container for container in containers}
+
+
+def _traffic_mount(path: str, *, read_only: bool = False) -> str:
+    """The compose ``volumes:`` entry mounting ``TRAFFIC_VOLUME`` at ``path``."""
+    return f"{TRAFFIC_VOLUME}:{path}" + (":ro" if read_only else "")
+
+
+def _traffic_capture_service(gateway_image: str, container: str) -> list[str]:
+    """The compose lines of the service capturing ``container``'s traffic: tcpdump, from the gateway's image, on every
+    interface of the container's, its loopback among them, every packet whole and written as it's captured, rotating
+    through ``TRAFFIC_CAPTURE_FILES`` files of ``TRAFFIC_CAPTURE_FILE_MB`` million bytes named for the container, its
+    oldest overwritten once they're full, so a long run holds at most their product per container on the VM's disk. It joins
+    the container's network namespace, so it sees what the container sends and receives and nothing else, from when it
+    attaches, which is just after the container starts: what a server sends while it starts up can come before it, and
+    isn't recorded. It is the only service given the capabilities a capture needs. It writes to ``TRAFFIC_VOLUME``, which the gateway mounts
+    read-only and no website container mounts at all."""
+    argv = ["-i", "any", "-n", "-s", "0", "-U", "-Z", "root", "-C", str(TRAFFIC_CAPTURE_FILE_MB),
+            "-W", str(TRAFFIC_CAPTURE_FILES), "-w", f"{TRAFFIC_SIDECAR_DIR}/{container}.pcap"]
+    return [
+        f"    image: {gateway_image}",
+        f'    network_mode: "service:{container}"',
+        "    depends_on:",
+        f"      - {container}",
+        "    cap_add:",
+        "      - NET_RAW",
+        "      - NET_ADMIN",
+        '    entrypoint: ["tcpdump"]',
+        f"    command: {json.dumps(argv)}",
+        "    volumes:",
+        f"      - {_traffic_mount(TRAFFIC_SIDECAR_DIR)}",
+        "    restart: unless-stopped",
+    ]
+
+
+
 def website_config(env: WebsiteEnv) -> WebsiteConfig:
     """A website env as the gateway runs it: its server image, any deprecated frontend image, and its health path."""
     frontend = env.frontend_docker_image_artifact
@@ -1562,10 +1699,12 @@ def environment_name_problem(name: str) -> str | None:
 
 
 def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: list[WebsiteConfig] | None,
-                           sidecars: list[SidecarConfig] | None = None, *, images: tuple[str, ...] = ()) -> list[str]:
+                           sidecars: list[SidecarConfig] | None = None, *, images: tuple[str, ...] = (),
+                           capture_traffic: bool = False) -> list[str]:
     """Why the environment names and images of a gateway deploy can't go into its compose file and shell lines: one
     can't be a service name, two of its services would share one (a website's are suffixed, so a website may share an
-    MCP server's name), or one is a service every gateway deploy runs."""
+    MCP server's name; so are the capture services of a deploy with ``capture_traffic``), or one is a service every
+    gateway deploy runs."""
     names = [c.environment_name for c in [*mcp_servers, *(website_configs or []), *(sidecars or [])]]
     refs = [*images, *(s.image for s in mcp_servers), *(s.image for s in sidecars or []),
             *(ref for w in website_configs or [] for ref in (w.backend_image, w.frontend_image) if ref is not None)]
@@ -1573,7 +1712,8 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
                 if problem]
     services = Counter([*(c.environment_name for c in [*mcp_servers, *(sidecars or [])]),
                         *(f"{w.environment_name}-{suffix}" for w in website_configs or []
-                          for suffix in (AGENT_ENV_WEBSITE_BACKEND_SUFFIX, AGENT_ENV_WEBSITE_FRONTEND_SUFFIX))])
+                          for suffix in (AGENT_ENV_WEBSITE_BACKEND_SUFFIX, AGENT_ENV_WEBSITE_FRONTEND_SUFFIX)),
+                        *(traffic_capture_services(website_configs) if capture_traffic else ())])
     problems += [f"two of its services would both be named {name!r}" for name, count in services.items() if count > 1]
     problems += [f"environment name {name!r} is one a gateway deploy names its own containers "
                  f"({', '.join(sorted(GATEWAY_SERVICE_NAMES))})" for name in services if name in GATEWAY_SERVICE_NAMES]

@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import hmac
 import json
 import logging
 import os
 import posixpath
+import re
 import socket
 import subprocess
+import tempfile
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -60,12 +63,14 @@ from .constants import (
     METHOD_ADD,
     METHOD_GET,
     METHOD_RESET,
+    PCAP_MEDIA_TYPE,
     PROTOCOL_VERSION,
     RPC_PATH,
     STATE_TOOL_NAME_CLASHES_KEY,
     STEP_SOURCE_POST_TURN_HOOK,
     TOOL_DISABLE_ACTION,
     TOOL_ENABLE_ACTION,
+    TRAFFIC_EXTENSION,
     WEBSITE_BROWSE_URL_PARAM,
     WELL_KNOWN_PATH,
     WILDCARD,
@@ -105,6 +110,9 @@ BROWSER_ROUTE = "/browser/{key}/cdp/{token}/{path:path}"
 # and httpx's, for each request the gateway forwards.
 _TOKEN_LOGGERS = ("uvicorn.access", "uvicorn.error", "httpx")
 _STEP_API = {"source": "step_api"}
+_CAPTURE_FILE = re.compile(r"(?P<container>[A-Za-z0-9][A-Za-z0-9_.-]*)\.pcap(?P<index>[0-9]*)")
+_CONTROL_SCOPE_KEY = "agentenv.control"
+_AUTHORIZATION = b"authorization"
 
 
 class ToolNameClash(ValueError):
@@ -132,6 +140,8 @@ class Gateway:
     REST_PROXY_TIMEOUT_S = float(DATA_PLANE_LOAD_TIMEOUT_MAX_S)  # data-plane loads
     REST_PROXY_CONNECT_TIMEOUT_S = 10.0  # a service that never answers the TCP connect fails in seconds, not an hour
     REST_PROXY_TIMEOUT = httpx.Timeout(REST_PROXY_TIMEOUT_S, connect=REST_PROXY_CONNECT_TIMEOUT_S)
+    CAPTURE_READ_BYTES = 64 * 1024
+    CAPTURE_SNAPSHOT_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -144,9 +154,17 @@ class Gateway:
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
         provider_headers: Iterable[str] = (),
+        traffic_dir: str | None = None,
+        control_token: str | None = None,
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
-        which the gateway takes off every request it forwards to a service behind it."""
+        which the gateway takes off every request it forwards to a service behind it.
+
+        `traffic_dir` is the folder the deploy's capture sidecars write their websites' pcap files to, mounted here
+        read-only; with one, the gateway serves traffic/v1 from it. `control_token` is the bearer its framework-only
+        routes take (traffic/v1's): a request carrying it has it taken off before anything else sees it, so no site or
+        backing server it is proxied to ever reads it; without one, those routes are open, as an env's are without
+        ``AGENTENV_CONTROL_TOKEN``."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -164,6 +182,8 @@ class Gateway:
                 log.addFilter(TokenRedaction())
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
+        self._traffic_dir = Path(traffic_dir) if traffic_dir else None
+        self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
@@ -424,6 +444,16 @@ class Gateway:
         async def env_trajectory(request: Request) -> Response:
             return self._serve_trajectory()
 
+        if self._traffic_dir is not None:
+            @self._mcp.custom_route("/traffic/captures", methods=["GET"])
+            async def traffic_captures(request: Request) -> Response:
+                return self._refuse_uncontrolled(request) or await asyncio.to_thread(self._serve_captures)
+
+            @self._mcp.custom_route("/traffic/capture", methods=["GET"])
+            async def traffic_capture(request: Request) -> Response:
+                return self._refuse_uncontrolled(request) or await asyncio.to_thread(
+                    self._serve_capture, request.query_params.get("name", ""))
+
         @self._mcp.custom_route("/changes", methods=["GET"])
         async def env_changes(request: Request) -> Response:
             return await self._serve_changes(request)
@@ -471,6 +501,8 @@ class Gateway:
             inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
+            if scope["type"] in ("http", "websocket") and self._control_bearer is not None:
+                scope = self._take_control_token(scope)
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
@@ -486,6 +518,22 @@ class Gateway:
                 Caller.reset(token)
 
         return app
+
+    def _take_control_token(self, scope: dict) -> dict:
+        """``scope`` without any Authorization header that carries the gateway's control token, and marked when one
+        did, so a framework-only route can tell and nothing the request is proxied to ever reads the token."""
+        headers = scope.get("headers", ())
+        kept = [(name, value) for name, value in headers
+                if not (name == _AUTHORIZATION and hmac.compare_digest(value, self._control_bearer))]
+        return {**scope, "headers": kept, _CONTROL_SCOPE_KEY: len(kept) != len(headers)}
+
+    def _refuse_uncontrolled(self, request: Request) -> Response | None:
+        """The refusal of a framework-only route's request that didn't carry the control token, or None: with no token,
+        every request is let through."""
+        if self._control_bearer is None or request.scope.get(_CONTROL_SCOPE_KEY):
+            return None
+        return self._json_response({"ok": False, "error": {"code": "unauthorized", "message":
+                                    "this route is agent-env's own: it takes the env's control token"}}, 401)
 
     @asynccontextmanager
     async def _session_lifespan(self, mcp: FastMCP):
@@ -829,7 +877,7 @@ class Gateway:
         return None if child is None else self._rewrite_child_card(key, child)
 
     def _gateway_extensions(self) -> list[dict]:
-        return GATEWAY_EXTENSIONS
+        return [*GATEWAY_EXTENSIONS, TRAFFIC_EXTENSION] if self._traffic_dir is not None else GATEWAY_EXTENSIONS
 
     async def _serve_env_card(self) -> Response:
         """Compose the env card: the gateway's own extensions + each backing server's card nested
@@ -1573,6 +1621,84 @@ class Gateway:
         for row in rows:
             row["timestamp"] = row["timestamp"].isoformat()
         return rows
+
+    def _capture_files(self) -> list[tuple[Path, re.Match]]:
+        """Each capture file in the traffic folder, as tcpdump's rotation names it, with its name's parts; a link is
+        none, so nothing but what the captures wrote is ever served."""
+        try:
+            entries = list(self._traffic_dir.iterdir())
+        except FileNotFoundError:
+            return []
+        return [(path, match) for path in entries
+                if (match := _CAPTURE_FILE.fullmatch(path.name)) and path.is_file() and not path.is_symlink()]
+
+    def _serve_captures(self) -> Response:
+        """traffic/v1's list: each capture file's name, the container it holds, its size and when it was last written,
+        oldest first, so a container's files read in the order their packets were captured."""
+        found = []
+        for path, match in self._capture_files():
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            found.append(((match["container"], stat.st_mtime_ns, path.name), {
+                "name": path.name, "container": match["container"], "bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()}))
+        captures = [capture for _, capture in sorted(found, key=lambda entry: entry[0])]
+        return self._json_response({"format": "pcap", "captures": captures}, 200)
+
+    def _serve_capture(self, name: str) -> Response:
+        """traffic/v1's get: the capture file ``name``, one ``list`` names, as a copy taken whole before any of it is
+        sent (``_snapshot_capture``), so a file tcpdump's rotation rewrites while it downloads never arrives mixed or
+        cut short; 503 when every copy was rewritten under it. A file still being written ends on a whole packet, or at
+        worst one torn."""
+        if not _CAPTURE_FILE.fullmatch(name):
+            return self._json_response({"ok": False, "error": {"code": "invalid_params",
+                                        "message": f"{name!r} is not a capture's name, as list gives it"}}, 400)
+        path = self._traffic_dir / name
+        try:
+            if not path.is_file() or path.is_symlink():
+                raise FileNotFoundError(name)
+            handle = os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb")
+        except OSError:
+            return self._json_response({"ok": False, "error": {"code": "not_found",
+                                        "message": f"no capture named {name!r}"}}, 404)
+        with handle:
+            snapshot = self._snapshot_capture(handle)
+        if snapshot is None:
+            return self._json_response({"ok": False, "error": {"code": "unavailable",
+                                        "message": f"capture {name!r} kept being rewritten while it was copied; "
+                                                   "ask again"}}, 503)
+        size = os.fstat(snapshot.fileno()).st_size
+
+        def chunks():
+            with snapshot:
+                while chunk := snapshot.read(self.CAPTURE_READ_BYTES):
+                    yield chunk
+
+        return StreamingResponse(chunks(), media_type=PCAP_MEDIA_TYPE,
+                                 headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                          "Content-Length": str(size)})
+
+    def _snapshot_capture(self, handle: Any) -> Any | None:
+        """A copy of the open capture ``handle`` in an unlinked temp file, read back from its start, or None when each
+        of ``CAPTURE_SNAPSHOT_ATTEMPTS`` copies found the file shorter than what it had copied: tcpdump truncated it to
+        reuse it, so the copy would mix two rounds of packets. The copy is gone once it's closed."""
+        for _ in range(self.CAPTURE_SNAPSHOT_ATTEMPTS):
+            handle.seek(0)
+            copy = tempfile.TemporaryFile()
+            copied, rewritten = 0, False
+            while chunk := handle.read(self.CAPTURE_READ_BYTES):
+                copy.write(chunk)
+                copied += len(chunk)
+                if os.fstat(handle.fileno()).st_size < copied:
+                    rewritten = True
+                    break
+            if not rewritten and os.fstat(handle.fileno()).st_size >= copied:
+                copy.seek(0)
+                return copy
+            copy.close()
+        return None
 
     def _serve_trajectory(self) -> Response:
         """Stream the whole env trajectory as JSONL; only a mid-write tail line can arrive torn."""
