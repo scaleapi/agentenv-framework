@@ -18,7 +18,7 @@ from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_steps.browser import base
+from agent_env.task_step import preflight
 from agent_env.task_step.task_steps.browser.cookies import BrowserDeleteCookiesTaskStep, BrowserSetCookiesTaskStep
 from agent_env.task_step.task_steps.browser.local_storage import (BrowserClearLocalStorageTaskStep,
                                                                    BrowserSetLocalStorageTaskStep)
@@ -129,12 +129,12 @@ _NO_BROWSER = "env 'computer' has no website browser: browser steps act on a com
 ])
 def test_preflight_refuses_an_env_with_no_browser_none_of_its_name_or_several_unnamed(monkeypatch, stored, browser,
                                                                                      problem):
-    def get(env_id):
+    def get(env_id, version=None):
         if stored == "missing":
             raise NotFoundError(env_id)
         return _stored(stored)
 
-    monkeypatch.setattr(base, "Env", SimpleNamespace(get=get))
+    monkeypatch.setattr(preflight, "Env", SimpleNamespace(get=get))
     step = BrowserActivateTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test/",
                                       browser=browser)
 

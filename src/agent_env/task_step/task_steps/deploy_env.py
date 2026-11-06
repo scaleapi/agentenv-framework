@@ -111,6 +111,9 @@ class DeployEnvTaskStep(TaskStep):
             env_params=data.get("env_params"),
         )
 
+    def deploys_env(self) -> Optional[tuple[str, Optional[int]]]:
+        return (self.env_id, self.env_version) if isinstance(self.env_id, str) and self.env_id else None
+
     def preflight(self) -> list[str]:
         """An invalid gateway_mode, an env this step can't load, or an option it would refuse at deploy, reported at save instead."""
         from agent_env.env.env import Env

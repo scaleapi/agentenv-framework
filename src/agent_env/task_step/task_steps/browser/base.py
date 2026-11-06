@@ -10,8 +10,8 @@ from agentenv_protocol.website_browser import BROWSER
 
 from agent_env.env.env import DeployedEnv, Env
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 #: How long a browser/v1 operation may take to answer.
@@ -42,9 +42,8 @@ class BrowserStep(TaskStep):
         problems = super().preflight()
         if not isinstance(self.env_id, str) or not self.env_id:
             return problems
-        try:
-            env = Env.get(self.env_id)
-        except NotFoundError:  # what the run reports
+        env = stored_env(self.env_id)
+        if env is None:
             return problems
         names = stored_browsers(env)
         if not names:
