@@ -148,10 +148,10 @@ def _gateway(changelog: _Changelog, failure: Exception | None = None, **kw) -> G
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("mail", URL)], **kw)
     session = _WritingSession(changelog, failure)
 
-    async def _open(stack):
-        return {URL: session}
+    async def _open(server, stack, report):
+        return session
 
-    gw._open_persistent_sessions = _open  # type: ignore[method-assign]
+    gw._sessions.open_session = _open  # type: ignore[method-assign]
     gw._query_changelog_id = changelog.max_id  # type: ignore[method-assign]
     gw._db_conn = changelog
     gw._create_and_register_proxy_tool(URL, TOOL)

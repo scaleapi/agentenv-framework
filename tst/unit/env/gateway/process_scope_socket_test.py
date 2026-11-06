@@ -1,5 +1,5 @@
-"""Two agents on one gateway process, over real loopback sockets and the app `run()` serves: one child-session
-generation shared by their MCP sessions, /step and the time-trigger driver; every child call stamped with its own
+"""Two agents on one gateway process, over real loopback sockets and the app `run()` serves: one session to the
+child shared by their MCP sessions, /step and the time-trigger driver; every child call stamped with its own
 session's role and key; and one agent leaving taking nothing away from the other."""
 from __future__ import annotations
 
@@ -73,11 +73,11 @@ async def _stack():
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", URL)],
                  website_urls={"web": "http://web"})
 
-    async def _open(stack):
+    async def _open(server, stack, report):
         opened.append(asyncio.current_task())
-        return {URL: child}
+        return child
 
-    gw._open_persistent_sessions = _open  # type: ignore[method-assign]
+    gw._sessions.open_session = _open  # type: ignore[method-assign]
     gw._trigger_engine._driver_interval = 0.01
     server, url = await _serve(gw._asgi_app())
     try:
@@ -99,9 +99,9 @@ async def _client(url: str, role: str | None = None):
 
 
 @pytest.mark.asyncio
-async def test_two_mcp_clients_share_one_generation_and_one_leaving_keeps_the_other_working():
+async def test_two_mcp_clients_share_one_child_session_and_one_leaving_keeps_the_other_working():
     async with _stack() as (gw, url, child, opened):
-        owner0 = gw._child_owner
+        owner0 = gw._sessions.current[URL].owner
         assert owner0 is not None and not owner0.done() and len(opened) == 1  # opened once, at startup
         forged = {AGENT_ENV_ROLE_META_KEY: "victim@example.com", AGENT_ENV_SESSION_META_KEY: "forged"}
         async with _client(url, "alice@example.com") as alice:
@@ -124,10 +124,10 @@ async def test_two_mcp_clients_share_one_generation_and_one_leaving_keeps_the_ot
         keys = [m.get(AGENT_ENV_SESSION_META_KEY) for m in metas]
         assert keys[0] == keys[2] != keys[1] and keys[3] is None  # one key per inbound MCP session; /step has none
         assert "forged" not in keys and all(len(k) == 32 for k in keys[:3])
-        assert gw._child_owner is owner0 and len(opened) == 1
+        assert gw._sessions.current[URL].owner is owner0 and len(opened) == 1
         gateway_entry = next(s for s in state["mcp_servers"] if s["name"] == "gateway")
         assert [t["name"] for t in gateway_entry["tools"]].count("list_website_urls") == 1  # not once per session
-    assert gw._child_owner is None and gw._trigger_engine._driver_task is None  # process shutdown closed both
+    assert gw._sessions.current == {} and gw._trigger_engine._driver_task is None  # process shutdown closed both
 
 
 @pytest.mark.asyncio
@@ -151,7 +151,7 @@ async def test_an_armed_time_trigger_keeps_firing_after_a_client_leaves():
         ticks = [meta for _, args, meta in child.calls if args == {"v": "tick"}]
         assert ticks and all(meta == {AGENT_ENV_ROLE_META_KEY: "carol@example.com"} for meta in ticks)
         assert len(opened) == 1
-    assert gw._trigger_engine._driver_task is None and gw._child_owner is None and gw._child_sessions == {}
+    assert gw._trigger_engine._driver_task is None and gw._sessions.current == {}
 
 
 @pytest.mark.asyncio
@@ -159,8 +159,9 @@ async def test_a_dead_child_session_is_reopened_once_under_a_live_mcp_client():
     async with _stack() as (gw, url, child, opened):
         async with _client(url, "alice@example.com") as alice:
             assert not (await alice.call_tool("svc_thing", {"v": "1"})).isError
-            owner0 = gw._child_owner
+            owner0 = gw._sessions.current[URL].owner
             child.failures.append(McpError(ErrorData(code=32600, message="Session terminated")))  # idle expiry / restart
             assert not (await alice.call_tool("svc_thing", {"v": "2"})).isError  # alice's own session was never dropped
-        assert len(opened) == 2 and owner0.done() and gw._child_owner is not owner0 and not gw._child_owner.done()
+        owner1 = gw._sessions.current[URL].owner
+        assert len(opened) == 2 and owner0.done() and owner1 is not owner0 and not owner1.done()
         assert [args for _, args, _ in child.calls] == [{"v": "1"}, {"v": "2"}, {"v": "2"}]

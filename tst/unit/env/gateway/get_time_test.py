@@ -108,7 +108,7 @@ def test_a_completed_pass_over_zero_servers_is_not_rediscovered(gw):
     def _explode(*a, **kw):
         raise AssertionError("discovery must not run again after a successful pass")
 
-    gw._open_persistent_sessions = _explode
+    gw._sessions.open_session = _explode
     asyncio.run(gw._ensure_tools_discovered())
 
 
