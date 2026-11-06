@@ -73,6 +73,16 @@ def test_an_entry_of_another_kind_with_the_envs_id_stays_as_it_is(tmp_path):
     assert _entry(bundle, "t").id == f"{ROOT}/t(desktop.driver cua-driver)"
 
 
+def test_an_eval_sharing_the_envs_id_keeps_its_own_toml(tmp_path):
+    root = _bundle(tmp_path / "desk", files={"evals/desktop.toml": 'tasks = ["t"]\n'})
+
+    bundle = _varied(root, "envs/desktop.driver=cua-driver")
+
+    evals = {entry.id: entry.config for entry in bundle.entries if entry.kind is BundleKind.EVAL}
+    assert evals[f"{ROOT}/desktop(desktop.driver cua-driver)"] == {"tasks": ["t"]}
+    assert _entry(bundle, "desktop").config["driver"] == "cua-driver"
+
+
 def test_a_reference_by_id_is_repointed_at_the_variant(tmp_path):
     steps = [{**DEPLOY, "env_id": f"{ROOT}/desktop"}, {**AGENT, "env_ids": [f"{ROOT}/desktop"]}, PROMPT]
     root = _bundle(tmp_path / "desk", steps, {"evals/e.toml": f'tasks = ["{ROOT}/t"]\n'})

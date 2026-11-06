@@ -73,11 +73,11 @@ def with_variant(bundle: Bundle, variant: Variant) -> Varied:
     ``(<label>)``. Raises BundleError for a setting that isn't ``envs/NAME.KEY=VALUE`` or names no env of the bundle; the
     env's type checks the key and value as it checks an env.toml's."""
     by_name = {entry.name: entry for entry in bundle.entries if entry.kind is BundleKind.ENV}
-    configs = {}
+    configs = {}  # each env's toml with its settings, by kind and id, as an id is unique within its kind alone
     for setting in _parsed(variant.settings, set(by_name)):
-        entry = by_name[setting.env]
-        configs[entry.id] = _set(configs.get(entry.id, entry.config), setting.path, setting.value)
-    renamed = _renamed_ids(bundle, set(configs), variant.label)
+        key = (BundleKind.ENV, by_name[setting.env].id)
+        configs[key] = _set(configs.get(key, by_name[setting.env].config), setting.path, setting.value)
+    renamed = _renamed_ids(bundle, {entry_id for _, entry_id in configs}, variant.label)
     envs, tasks = ({entry_id: new for (kind, entry_id), new in renamed.items() if kind is of}
                    for of in (BundleKind.ENV, BundleKind.TASK))
     renaming = {EntityKind.ENV: envs, EntityKind.TASK: tasks}
@@ -87,7 +87,8 @@ def with_variant(bundle: Bundle, variant: Variant) -> Varied:
         if new_id is None:
             entries.append(entry)
         else:
-            entries.append(_renamed(entry, new_id, _repointed(entry, configs.get(entry.id, entry.config), renaming)))
+            config = configs.get((entry.kind, entry.id), entry.config)
+            entries.append(_renamed(entry, new_id, _repointed(entry, config, renaming)))
     return Varied(variant, replace(bundle, entries=tuple(entries)), renamed)
 
 
