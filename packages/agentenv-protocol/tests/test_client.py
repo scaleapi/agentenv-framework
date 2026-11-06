@@ -298,6 +298,23 @@ async def test_invoke_extension_strips_trailing_slashes_from_base_url():
 
 
 @pytest.mark.asyncio
+async def test_invoke_extension_ensures_leading_slash_on_relative_endpoint():
+    card = {"capabilities": {"extensions": [{
+        "uri": "urn:agentenv:set-errors/v1",
+        "params": {"endpoint": "agentenv/ext/set_errors",
+                   "methods": {"set_errors": {"method": "POST", "request": {}}}},
+    }]}}
+    client = _client(_resp({"tool_name": "list_items", "error_rate": 0.75}))
+    with _patch(client):
+        await protocol_v1.invoke_extension(
+            _BASE, card, "urn:agentenv:set-errors/v1",
+            {"tool_name": "list_items", "error_rate": 0.75},
+        )
+    args, _ = client.request.call_args
+    assert args[1] == f"{_BASE}/agentenv/ext/set_errors"
+
+
+@pytest.mark.asyncio
 async def test_invoke_extension_get_uses_query_params():
     card = {"capabilities": {"extensions": [{
         "uri": "urn:agentenv:ping/v1",
