@@ -800,7 +800,8 @@ class Gateway:
             card = response.json() if response.is_success else None
         except ValueError:
             card = None
-        self._site_reserved[app] = site_reserved_paths(card) if isinstance(card, dict) else frozenset()
+        base_path = urlsplit(self.website_urls.get(app) or base_url).path
+        self._site_reserved[app] = site_reserved_paths(card, base_path) if isinstance(card, dict) else frozenset()
         return self._site_reserved[app]
 
     def _backing_keys(self) -> list[str]:
@@ -1696,12 +1697,12 @@ def _address(url) -> tuple:
     return url.scheme, url.hostname, url.port or {"http": 80, "https": 443}.get(url.scheme)
 
 
-def site_reserved_paths(card: dict) -> frozenset[str]:
+def site_reserved_paths(card: dict, base_path: str = "") -> frozenset[str]:
     """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, every interface's,
     such as the MCP endpoint of a site that is an MCP server too, and every extension's endpoint and each of its
     methods'; each one a path of its own, not the site's root, read from a full URL or one with a query as well as from
     a bare path. A full URL's path is reserved whatever its host, since a site is reached under names it never sees in
-    advance."""
+    advance, and as its route reaches it: under the site's address's path, ``base_path``, when it is under it."""
     urls = [card.get("url")]
     urls += [i.get("url") for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)]
     for ext in (card.get("capabilities") or {}).get("extensions") or []:
@@ -1710,16 +1711,21 @@ def site_reserved_paths(card: dict) -> frozenset[str]:
             continue
         urls += [endpoint for *_, endpoint in operations(params)]
         urls.append(params.get("endpoint"))
-    paths = (_url_path(url) for url in urls if isinstance(url, str))
+    base = base_path.rstrip("/")
+    paths = (_url_path(url, base) for url in urls if isinstance(url, str))
     return frozenset(_normalized(p) for p in paths if p.startswith("/") and _normalized(p) != "/")
 
 
-def _url_path(url: str) -> str:
-    """The path of ``url``, a bare path or a full URL, without its query or fragment; "" for one that has none."""
+def _url_path(url: str, base: str = "") -> str:
+    """The path of ``url``, a bare path or a full URL, without its query or fragment, a full URL's taken under
+    ``base`` when it is under it; "" for one that has none."""
     try:
-        return urlsplit(url).path
+        parts = urlsplit(url)
     except ValueError:
         return ""
+    if parts.netloc and base and (parts.path == base or parts.path.startswith(base + "/")):
+        return parts.path[len(base):] or "/"
+    return parts.path
 
 
 def site_request_path(request: HTTPConnection) -> str | None:

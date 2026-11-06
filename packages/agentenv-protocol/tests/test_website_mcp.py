@@ -186,6 +186,22 @@ def test_a_hidden_by_default_tool_on_the_card_warns_without_failing_the_run(tmp_
     assert all(r.passed for r in results.values()), results
 
 
+@pytest.mark.parametrize("result", [None, {}, {"tools": "a"}, {"tools": None}])
+def test_a_tools_list_answering_no_list_of_tools_fails_the_check(result: object) -> None:
+    async def answer(request: Request) -> Response:
+        body = await request.json()
+        if body.get("method") == "initialize":
+            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": {"serverInfo": {"name": "x"}}})
+        if body.get("method") == "tools/list":
+            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": result})
+        return Response(status_code=202)
+
+    client = TestClient(_declaring(Route("/mcp", answer, methods=["POST"])))
+    card = client.get("/.well-known/agent-env.json").json()
+    found = conformance._outcome(lambda: conformance._Checker("http://testserver", client, "127.0.0.1")._mcp(card))
+    assert found[0] == "failed" and "answered no tools list" in found[1], found
+
+
 def _streaming(*events: str) -> Route:
     """An MCP endpoint answering each request with an event stream of ``events``, ``{id}`` the request's id."""
     async def answer(request: Request) -> Response:

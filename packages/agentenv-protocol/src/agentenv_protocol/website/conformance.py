@@ -233,7 +233,9 @@ class _Checker:
                 listed = _mcp_result(self.client.post(url, headers=headers, json={
                     "jsonrpc": "2.0", "id": "tools/list", "method": "tools/list",
                     **({"params": {"cursor": cursor}} if cursor else {})}), "tools/list", "tools/list")
-                served += [t.get("name") for t in listed.get("tools") or [] if isinstance(t, dict)]
+                if not isinstance(listed, dict) or not isinstance(listed.get("tools"), list):
+                    return "failed", f"tools/list at {path} answered no tools list: {str(listed)[:200]}"
+                served += [t.get("name") for t in listed["tools"] if isinstance(t, dict)]
                 cursor = listed.get("nextCursor")
                 if not cursor:
                     break
