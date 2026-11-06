@@ -690,6 +690,24 @@ async def test_a_tab_opened_in_the_background_opens_behind_the_active_one_which_
 
 
 @pytest.mark.asyncio
+async def test_a_background_open_leaves_a_tab_another_call_switched_to_meanwhile_in_front():
+    focus = {"s-a": True}
+    devtools = Tabbed({"Runtime.evaluate": lambda params, session: {
+        "result": {"value": ["visible", focus.get(session, False)]}}})
+    control = await _tabs(devtools, "a", "c")
+
+    opening = asyncio.ensure_future(control.open_tab("https://mail.test/b", background=True))
+    await asyncio.sleep(0)
+    focus.update({"s-a": False, "s-c": True})
+    devtools.send("Target.targetCreated", _page("b", "https://mail.test/b", "Mail b"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-b", **_page("b")})
+    await opening
+
+    assert _sent(devtools, "Target.activateTarget") == []
+    assert [(tab["id"], tab["active"]) for tab in await control.tab_list()] == [("a", False), ("c", True), ("b", False)]
+
+
+@pytest.mark.asyncio
 async def test_a_hidden_tab_whose_page_still_says_it_has_focus_isnt_the_active_one():
     states = {"s-a": ["hidden", True], "s-b": ["visible", True]}
     devtools = Tabbed({"Runtime.evaluate": lambda params, session: {"result": {"value": states[session]}}})

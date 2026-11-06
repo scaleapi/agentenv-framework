@@ -122,8 +122,8 @@ class BrowserControl:
 
     async def open_tab(self, url: Optional[str] = None, background: bool = False) -> str:
         """A new tab at ``url``, else blank, brought to the front, or with ``background`` behind the active tab, which
-        stays active; its id. Headless, it opens blank and goes to ``url`` once it's held to the window's size, so its
-        page loads at that size."""
+        stays active, brought back only if the new tab took its place; its id. Headless, it opens blank and goes to
+        ``url`` once it's held to the window's size, so its page loads at that size."""
         active = await self.active_tab() if background else None
         held = self.viewport is not None and url
         start = "about:blank" if held else url or "about:blank"
@@ -134,7 +134,7 @@ class BrowserControl:
             await self.devtools.call("Page.navigate", {"url": url}, session_id=session)
         if not background:
             await self._bring_to_front(target)
-        elif active is not None and active in self.tabs and await self.active_tab() != active:
+        elif active is not None and active in self.tabs and await self.active_tab() == target:
             await self._bring_to_front(active)
         return target
 
