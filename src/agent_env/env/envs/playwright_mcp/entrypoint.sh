@@ -7,6 +7,8 @@ set -euo pipefail
 # The recorder serves the browser's card on RECORDER_PORT, restarted whenever it exits; the MCP server starts once
 # it listens, so the card is there by the time the server is healthy, or after RECORDER_WAIT_S without it.
 export RECORDER_PORT="${RECORDER_PORT:-18766}"
+export PLAYWRIGHT_STORAGE_STATE="${PLAYWRIGHT_STORAGE_STATE:-/app/storage-state.json}"
+[ -f "${PLAYWRIGHT_STORAGE_STATE}" ] || (umask 077 && echo '{"cookies": [], "origins": []}' > "${PLAYWRIGHT_STORAGE_STATE}")
 (while true; do /opt/recorder/bin/python /app/recorder.py || true; sleep 1; done) &
 for _ in $(seq 1 "$(( ${RECORDER_WAIT_S:-20} * 10 ))"); do
     (exec 3<>"/dev/tcp/127.0.0.1/${RECORDER_PORT}") 2>/dev/null && break
@@ -17,6 +19,7 @@ exec npx @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
     --browser chromium \
     --headless \
     --isolated \
+    --storage-state "${PLAYWRIGHT_STORAGE_STATE}" \
     --no-sandbox \
     --host "${MCP_HOST:-0.0.0.0}" \
     --port "${MCP_PORT:-18765}" \

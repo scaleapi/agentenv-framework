@@ -3,7 +3,8 @@
 Env-agnostic: looks up the deployed env in context and calls its ``reset()``.
 Best-effort by default — a reset failure (including an env that doesn't support
 it) is logged and the run continues. Place right before prompt_agent in a
-warm-reuse task.
+warm-reuse task. After a reset, the browser is signed in again to the live websites
+a sign_in_browser step of the run signed it in to.
 """
 from __future__ import annotations
 
@@ -61,6 +62,9 @@ class ResetEnvTaskStep(TaskStep):
             env = Env.get(deployed.env_id, deployed.env_version)
             await env.reset(deployed)
             logger.info("reset_env: reset env '%s'", self.env_id)
+            from agent_env.task_step.task_steps.sign_in_browser import sign_in_again
+
+            await sign_in_again(context, deployed)
         except NotImplementedError:
             # Env doesn't support reset — not an error.
             logger.info("reset_env: env '%s' does not support reset; skipping", self.env_id)

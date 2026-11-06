@@ -134,12 +134,22 @@ class DeployedGateway:
 class WebsiteConfig:
     """Configuration for a website in a gateway deployment: its server image, which serves the site's pages and API and
     says when it's ready by its card's ``website/v1`` ``ready`` (``health_path``, deprecated, for a site whose card
-    has none), and a deprecated separate frontend image for a site built on one."""
+    has none), a deprecated separate frontend image for a site built on one, and the env's ``settings`` as stored,
+    secrets as their references, which only the compose file holds resolved."""
 
     backend_image: str
     frontend_image: str | None
     environment_name: str
     health_path: str = AGENT_ENV_WEBSITE_HEALTH_PATH
+    settings: dict[str, str] | None = None
+
+    def env_vars(self) -> dict[str, str]:
+        """The settings with each ``secret:`` / ``env:`` reference resolved from the deploying user's config."""
+        if not self.settings:
+            return {}
+        from agent_env.config import get_config
+        resolve = get_config().resolve_reference
+        return {name: resolve(value) for name, value in self.settings.items()}
 
 
 @dataclass
@@ -548,6 +558,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
                 f"      - {SESSION_SECRET_ENV}={secrets.token_hex(32)}",
                 "      - PYTHONUNBUFFERED=1",
+                *(f"      - {compose_env_entry(name, value)}" for name, value in wc.env_vars().items()),
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'
                 f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
@@ -1516,12 +1527,30 @@ class _GatewayTopology:
     names_gateway_on_vm: bool  # a MultiEnv's record names its gateway sandbox even on a VM
 
 
+def compose_env_entry(name: str, value: str) -> str:
+    """``name=value`` as one quoted YAML scalar of a compose ``environment:`` list, so the value stays that variable's
+    whatever it holds: a newline, quote or ``: `` can't start more of the service, and each ``$`` is ``$$``, which
+    compose doesn't interpolate. The scalar is plain ASCII, any other character written as its escape."""
+    escaped = []
+    for char in f"{name}={value}".replace("$", "$$"):
+        if char in '"\\':
+            escaped.append("\\" + char)
+        elif " " <= char <= "~":
+            escaped.append(char)
+        elif ord(char) <= 0xFFFF:
+            escaped.append(f"\\u{ord(char):04x}")
+        else:
+            escaped.append(f"\\U{ord(char):08x}")
+    return '"' + "".join(escaped) + '"'
+
+
 def website_config(env: WebsiteEnv) -> WebsiteConfig:
     """A website env as the gateway runs it: its server image, any deprecated frontend image, and its health path."""
     frontend = env.frontend_docker_image_artifact
     return WebsiteConfig(backend_image=env.server_docker_image_artifact.image_name,
                          frontend_image=frontend.image_name if frontend else None,
-                         environment_name=env.environment_name, health_path=env.health_path)
+                         environment_name=env.environment_name, health_path=env.health_path,
+                         settings=dict(env.settings) or None)
 
 
 def _gateway_topology(env: Env) -> _GatewayTopology:
@@ -1584,6 +1613,7 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
 _SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+_SETTING_ENV_RE = re.compile(r'^(\s*-\s*")([A-Za-z_][A-Za-z0-9_]*)=.*"$')
 
 
 def _compose_ps_rows(text: str) -> list[dict]:
@@ -1614,9 +1644,12 @@ def _why_down(row: dict) -> str | None:
 
 
 def _redact_compose_secrets(compose_content: str) -> str:
-    """Mask secret-valued env lines so the logged compose never carries a live secret."""
+    """Mask secret-valued env lines so the logged compose never carries a live secret, and every website setting's
+    quoted ``"NAME=VALUE"`` line as ``compose_env_entry`` writes it, whatever its name: its value may be a credential
+    a ``secret:`` or ``env:`` reference resolved."""
     return "\n".join(
-        _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line) for line in compose_content.splitlines()
+        _SETTING_ENV_RE.sub(r'\1\2=***"', _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line))
+        for line in compose_content.splitlines()
     )
 
 

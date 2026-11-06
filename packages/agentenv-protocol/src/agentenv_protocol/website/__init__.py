@@ -6,7 +6,9 @@ is ready is its ``WebsiteReadiness`` answer to ``ready``, which ``website_readin
 ``env_readiness`` of every site of an env. What a task left a site with is its data plane's ``data/get``. A site's pages
 can call its API with ``client/site-client.js``, a dependency-free ES module (with its ``.d.ts``) to copy into them:
 ``api()``, ``universeNow()`` from ``X-Universe-Now``, ``followUniverseClock()``, ``session()``, ``signIn()``
-and ``signOut()``."""
+and ``signOut()``. A live site, ``@website(domains=[...], live=True, allow_hosts=[...])``, serves none of its pages and
+signs a browser in with ``@session``; ``agentenv_protocol.website.replay`` captures a real site and serves the capture
+as ``ReplayWebsite``."""
 
 from __future__ import annotations
 
@@ -17,6 +19,8 @@ from .environment import (
     WebsiteEnvironment,
     host_problem,
     ready_check,
+    session,
+    session_state,
     website,
 )
 from .errors import ApiError, BadRequest, Conflict, Forbidden, NotFound, Unauthorized
@@ -35,7 +39,8 @@ from .routes import ROLE_KEY_ENV, ROLE_KEY_HEADER, ApiContext, ApiRoute, api, re
 from .session import SESSION_COOKIE, SESSION_SECRET_ENV, SessionSigner
 
 __all__ = [
-    "WebsiteEnvironment", "WebsiteDeclaration", "website", "api", "ApiContext", "ApiRoute", "ready_check", "host_problem",
+    "WebsiteEnvironment", "WebsiteDeclaration", "website", "api", "ApiContext", "ApiRoute", "ready_check", "session",
+    "session_state", "host_problem",
     "ApiError", "BadRequest", "Unauthorized", "Forbidden", "NotFound", "Conflict",
     "UniverseClock", "ClockUnavailable", "SessionSigner", "reserved_path",
     "WEBSITE_EXTENSION_URI", "CLOCK_EXTENSION_URI", "UNIVERSE_NOW_HEADER", "DEFAULT_HEALTH_PATH", "SESSION_PATH",
