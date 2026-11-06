@@ -1,17 +1,19 @@
 """The Tinker helper's episodes on the Episode API's fake steps, as tinker-cookbook's rollouts step them: a rollout's
-tool calls run on its turn and its reply ends it with the task's reward, filed in its run group; the turn bound ends a
-turn; a step's logs are clipped; a rollout the cookbook cuts is scored as it is cut, freeing its slot for the rest of
+tool calls run on its turn and its reply ends it with the task's reward, filed in its run group; a later turn's new
+system prompt comes before its prompt; a turn with skills is refused; the turn bound ends a turn; a step's logs are
+clipped; a rollout the cookbook cuts is scored as it is cut, freeing its slot for the rest of
 its group; a bundle's splits as prepared for a trainer to play; and the tasks a dataset plays."""
 
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 
 import pytest
 
 from agent_env.openenv.reward import _score_at
 from agent_env.runner import store as run_store
-from agent_env.task import Task
+from agent_env.task import EpisodeError, Task
 from tst.unit.bundle._support import layout
 from tst.unit.task.episode.run_test import ALICE, ITEMS, REPLIES, TURN, _spec
 from tst.util.capabilities import TINKER, missing_capability_reason
@@ -22,6 +24,7 @@ base = pytest.importorskip("tinker_cookbook.renderers.base", reason=missing_capa
 sdk = pytest.importorskip("tinker", reason=missing_capability_reason(TINKER))
 
 GROUP = "dock-run/train/step-0003"
+ADD_ANOTHER = {**TURN, "id": "again", "prompt_id": "again", "prompt": "Add another.", "depends_on": ["turn"]}
 
 
 class _Renderer:
@@ -70,6 +73,30 @@ async def test_a_rollouts_calls_run_on_its_turn_and_its_reply_ends_it_with_the_t
     run = run_store.get_run(f"episode-{ended.logs['episode']}")
     assert (run.status, run.overrides["metadata"]["run_group_id"]) == ("COMPLETED", GROUP)
     assert await env.score_cut() == (0.0, {"cut": 0.0})
+
+
+@pytest.mark.asyncio
+async def test_a_later_turns_new_system_prompt_comes_before_its_prompt_as_every_trainer_writes_it(teardowns, tools):
+    env = _env(ITEMS, ALICE, TURN, {**ADD_ANOTHER, "system_prompt": "You count the items."}, REPLIES)
+    await env.initial_observation()
+
+    second = await env.step({"role": "assistant", "content": "Added a crate."})
+    assert (second.episode_done, second.next_messages[-1]) == (
+        False, {"role": "user", "content": "You count the items.\n\nAdd another."})
+    ended = await env.step({"role": "assistant", "content": "Added another."})
+
+    assert ended.episode_done
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_gives_the_agent_skills_is_refused_whichever_turn_it_is(teardowns, tools):
+    env = _env(ITEMS, ALICE, TURN, REPLIES)
+    await env.initial_observation()
+    later = SimpleNamespace(step_id="again", skills=[SimpleNamespace(name="refunds")])
+
+    with pytest.raises(EpisodeError, match=r"turn 'again' gives the agent skills \['refunds'\]"):
+        await env._open(later)
+    await env.close()
 
 
 @pytest.mark.asyncio
@@ -170,6 +197,7 @@ AGENT = {"id": "agent", "type": "deploy_agent", "agent_name": "policy", "env_ids
          "role": "agent@retail.example", "system_prompt": "You run the store."}
 PLAY = {"id": "play", "type": "prompt_agent", "agent_name": "policy", "prompt_id": "play", "prompt": "Help."}
 AGAIN = {**PLAY, "id": "again", "prompt_id": "again", "prompt": "Anything else?"}
+REFUNDS = {"name": "refunds", "description": "How the store refunds.", "body": "Refund within 30 days."}
 BOB = {"id": "bob", "type": "deploy_agent", "agent_name": "bob", "a2a_agent_id": "echo"}
 ASK_BOB = {"id": "ask-bob", "type": "prompt_agent", "agent_name": "bob", "prompt": "Check."}
 
@@ -185,18 +213,20 @@ def _task(id, *steps):
 
 def test_tasks_that_cant_run_as_an_episode_are_left_out_and_the_rest_rewarded(caplog):
     played = _task("played", ENV, AGENT, PLAY, _verifier("records"), _verifier("db_match"))
-    two_turns = _task("two-turns", ENV, AGENT, PLAY, {**AGAIN, "system_prompt": "You run the store."},
-                      _verifier("records"))
-    two_agents = _task("two-agents", ENV, AGENT, PLAY, BOB, ASK_BOB, _verifier("records"))
     new_instructions = _task("new-instructions", ENV, AGENT, PLAY, {**AGAIN, "system_prompt": "You audit the store."},
                              _verifier("records"))
+    two_agents = _task("two-agents", ENV, AGENT, PLAY, BOB, ASK_BOB, _verifier("records"))
+    skilled = _task("skilled", ENV, AGENT, PLAY, {"id": "learn", "type": "add_skills", "agent_name": "policy",
+                                                  "skills": [REFUNDS]}, AGAIN, _verifier("records"))
+    skilled_at_deploy = _task("skilled-at-deploy", ENV, {**AGENT, "skills": [REFUNDS]}, PLAY, _verifier("records"))
     with caplog.at_level(logging.WARNING):
-        kept = tinker.playable([played, two_turns, two_agents, new_instructions], "records", None)
+        kept = tinker.playable([played, new_instructions, two_agents, skilled, skilled_at_deploy], "records", None)
     assert [(name, spec.trainer_agents) for name, spec, _ in kept] == [("played", ("policy",)),
-                                                                       ("two-turns", ("policy",))]
+                                                                       ("new-instructions", ("policy",))]
     assert kept[0][2]({"records": 0.25, "db_match": 0.0}) == 0.25
     assert "two-agents" in caplog.text
-    assert "'new-instructions' changes the played agent's system prompt between turns" in caplog.text
+    assert "'skilled' gives the agent it plays skills (['learn'])" in caplog.text
+    assert "'skilled-at-deploy' gives the agent it plays skills (['agent'])" in caplog.text
 
 
 @pytest.mark.parametrize(("tasks", "reward", "refusal"), [
