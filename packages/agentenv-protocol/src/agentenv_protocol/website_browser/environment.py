@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
 
@@ -14,17 +15,21 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.websockets import WebSocket
 
-from ..agent_env_environment import add_websocket_route, agent_skill, extension
+from ..agent_env_environment import (OP_ADD_DATA, add_data, add_websocket_route, agent_skill, extension, get_data,
+                                     reset_data)
 from ..browser_cdp import ROUTE, Relay, Tokens, reached, websocket_form
 from ..computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from ..computer import app as computer_app
-from ..computer.app import SOCKET
+from ..computer import app_data
+from ..computer.app import SOCKET, agent_acted, forget_agent_acted
 from ..computer.dataplane import file_parts
 from ..computer.errors import DeviceUnavailable, InvalidArgument
 from ..transfers import WriteNamespaceGrant
-from .control import AGENT, DOWNLOADS, EXIT, STOP, UPLOADS, BrowserControl
+from ..types import METHOD_ADD, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
+from . import data
+from .control import AGENT, DOWNLOADS, EXIT, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
-from .shapes import BrowserRecord, CookieToSet, OriginStorage
+from .shapes import BrowserRecord, BrowserState, CookieToSet, OriginStorage, StateToLoad
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +117,10 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     #: How long its ready check waits on the browser's answer over its pipe.
     devtools_timeout_s: ClassVar[float] = 5.0
     agent_routes = (ROUTE,)
+    #: A load sets cookies and storage over its pipe, so the browser runs through it; its reset puts the profile
+    #: back as installed, which its server keeps.
+    data_live = frozenset({OP_ADD_DATA})
+    data_keeps_paths = True
 
     def __init__(self) -> None:
         #: Its CDP connection, over the pipe its server launches it with.
@@ -431,6 +440,98 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     async def browser_files_choose(self, paths: list[str]) -> dict:
         await self.control.choose_files(paths)
         return {}
+
+    def _resets_failed_add(self) -> bool:
+        """A load that fails is followed by a reset only before an agent has acted: after, the reset would end the
+        agent's session over it."""
+        return not agent_acted()
+
+    def declared_extensions(self) -> list[EnvironmentExtension]:
+        """Its data plane moves files by their path, a file tree: its state as ``browser-state.json``, its profile, its
+        downloads and files for agents to upload. A load takes its state as a data part too."""
+        tree = IntakeDeclaration(get=[IntakeFormat(part="file", format="file-tree")],
+                                 add=[IntakeFormat(part="file", format="file-tree", load="replace"),
+                                      IntakeFormat(part="data", format="json", load="replace")])
+        return [*super().declared_extensions(), intake_extension(tree, (
+            f"data/get returns the browser's state as {data.STATE_FILE}: its cookies and local storage as Playwright's "
+            f"storageState has them, its tabs open and closed, its downloads and its clock; beside it, its profile "
+            f"without caches, and its finished downloads. data/add applies such a state, while the browser runs, and "
+            f"writes files by their path: its profile, restored with the browser stopped, ~/{DOWNLOADS} and "
+            f"~/{UPLOADS}. data/reset puts the profile back as installed and relaunches it at its start tabs."))]
+
+    @get_data
+    async def browser_get_data(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
+        """Its state, as ``browser-state.json``, its profile without caches, and its finished downloads: each a file
+        uploaded under ``write_namespace`` when there is one, else inline."""
+        home = Path.home()
+        state = BrowserState(cookies=await self.control.cookies(), local_storage=await self.control.local_storage(),
+                             tabs=await self.control.tab_list(),
+                             closed_tabs=(record := await self.control.record())["closed_tabs"],
+                             downloads=record["downloads"], clock={"mode": "real", "now": _now()})
+        written = {**state.model_dump(), "cookies": [cookie.model_dump(exclude_none=True) for cookie in state.cookies]}
+        (home / ".cache").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=home / ".cache") as staging:
+            root = Path(staging)
+            (root / data.STATE_FILE).write_text(json.dumps(written, indent=1), encoding="utf-8")
+            await app_data.in_thread(data.stage_profile, home, self.profile, root)
+            parts = await file_parts(root, [data.STATE_FILE, self.profile], write_namespace)
+        return parts + await file_parts(home, data.finished_downloads(home), write_namespace)
+
+    @add_data
+    async def browser_add_data(self, parts: list) -> None:
+        """Its state, its profile and files, from ``parts``, while it runs: a profile restored with the browser
+        stopped and launched again, then the files, then the cookies, the local storage and the tabs. A load that
+        changes cookies or storage and names no tabs opens the start tabs again, so they show it; and once an agent has
+        acted, a load can't change the profile or the tabs, which would end what it's doing."""
+        load = await data.sorted_load(parts, self.profile)
+        try:
+            state = StateToLoad.model_validate(load.state or {})
+        except ValidationError as e:
+            raise InvalidArgument(f"{data.STATE_FILE}: " + "; ".join(
+                f"{'.'.join(map(str, error['loc'])) or 'it'}: {error['msg']}"
+                for error in e.errors(include_input=False, include_url=False)))
+        if agent_acted() and (load.profile or state.tabs is not None):
+            raise InvalidArgument("an agent has acted in this computer, so a load can't change the browser's "
+                                  "profile or tabs, which would end what it's doing; only its cookies, local storage "
+                                  "and files")
+        applied: list[str] = []
+        try:
+            if load.profile:
+                await self._computer_app.stop_app()
+                await app_data.in_thread(data.restore_profile, Path.home(), self.profile, load.profile)
+                await self._computer_app.launch_app(METHOD_ADD)
+                await self._until_ready()
+                applied.append("the profile")
+            if load.files:
+                await app_data.in_thread(data.write, Path.home(), load.files)
+                applied.append("the files")
+            if state.cookies:
+                await self.control.set_cookies(state.cookies)
+                applied.append("the cookies")
+            if state.local_storage:
+                await self.control.set_local_storage(state.local_storage)
+                applied.append("the local storage")
+            if state.tabs is not None:
+                await self.control.replace_tabs(state.tabs)
+                applied.append("the tabs")
+            elif (state.cookies or state.local_storage) and not agent_acted():
+                await self.control.reopen_start_tabs(self.settings.start_urls)
+                applied.append("the start tabs again")
+        except Exception as e:
+            done = ", ".join(applied) or "nothing"
+            raise type(e)(f"{e} (the load had applied {done})") if isinstance(e, (ValueError, InvalidArgument)) \
+                else RuntimeError(f"{type(e).__name__}: {e} (the load had applied {done})") from e
+
+    @reset_data
+    async def browser_reset_data(self) -> None:
+        """With the browser stopped: its addresses ended, its profile as installed, its downloads and uploads gone and
+        a record that starts now. Its data plane launches it again after, at its start tabs."""
+        self.relay.ended()
+        self.cdp_tokens.revoke_all()
+        await app_data.reset(self.paths)
+        await app_data.in_thread(data.empty, Path.home(), DOWNLOADS, UPLOADS)
+        self.control.forget()
+        forget_agent_acted()
 
     def extension_params(self, uri: str) -> dict:
         if uri == BROWSER:

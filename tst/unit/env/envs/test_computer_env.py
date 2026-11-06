@@ -1401,6 +1401,22 @@ async def test_a_snapshot_loads_back_its_files_then_each_apps_through_the_apps_r
 
 
 @pytest.mark.asyncio
+async def test_an_app_deployed_alone_loads_its_own_name_through_its_route_and_its_computers_through_the_driver(
+        base, driver, docker, computer, tmp_path, monkeypatch):
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: False)
+    mail = _app(base, driver, tmp_path / "mail", compose=False)
+    mail._deployed = computer.deployed(env_id=mail.id, card={**HOME_CARD, "name": "mail-driver", "children_environments": [
+        _child("mail", "data/add", "data/get")]})
+
+    await mail.load_environment_universe_artifact(EnvironmentUniverseArtifact.put("alone", environment_artifacts=[
+        _snapshot("mail", {"Mail/inbox.txt": b"m"}), _snapshot("mail-driver", {"Desktop/a.txt": b"a"})]))
+
+    assert computer.added_at == ["http://127.0.0.1:20001", "http://127.0.0.1:20001/svc/mail"]
+    assert (computer.home / "Desktop/a.txt").read_bytes() == b"a"
+    assert [markers for _, markers, _ in computer.calls][1] == [{"path": "Mail/inbox.txt"}]
+
+
+@pytest.mark.asyncio
 async def test_an_environment_named_after_neither_the_computer_nor_an_app_that_loads_is_refused_before_anything_is_sent(
         base, driver, docker, computer, tmp_path):
     mail = _app(base, driver, tmp_path / "mail", compose=False)
@@ -1694,7 +1710,7 @@ def test_an_app_that_doesnt_fit_its_computer_and_driver_is_refused_before_anythi
 
 
 @pytest.mark.asyncio
-async def test_an_app_deployed_alone_is_named_after_it_and_handed_its_settings_a_secret_resolved(
+async def test_an_app_deployed_alone_is_a_computer_named_after_it_as_its_driver_and_handed_its_settings_a_secret_resolved(
         base, driver, docker, boots, tmp_path, monkeypatch):
     monkeypatch.setenv("MAIL_PASSWORD", "s3cret")
     monkeypatch.setenv("MAIL_TOKEN", "t0ken")
@@ -1705,7 +1721,7 @@ async def test_an_app_deployed_alone_is_named_after_it_and_handed_its_settings_a
     deployed = await Env.get(app.id).deploy(env_params={"app_settings": settings})
 
     environment = boots.boots[0]["environment"]
-    assert environment["ENVIRONMENT_NAME"] == "mail" and deployed.environment_card["name"] == "mail"
+    assert environment["ENVIRONMENT_NAME"] == "mail-driver" and deployed.environment_card["name"] == "mail-driver"
     assert json.loads(environment["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada", "password": "s3cret",
                                                                          "token": "t0ken"}}
     assert deployed.env_id == app.id and deployed.metadata["computer"]["env_params"] == {"app_settings": settings}

@@ -118,6 +118,12 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         card = EnvironmentCard(**{**config, "name": config.get("name") or cls.__name__})
         return AgentEnvFastMCPApplication(card, driver).environment_card
 
+    def on_tool_call(self, context: ToolContext) -> Any:
+        """Note that an agent has acted, for the apps whose loads change what's on screen only before one has: a
+        subclass that has its own calls this one too."""
+        apps.note_agent_acted(self._computer.apps)
+        return None
+
     def has(self, capability: str) -> bool:
         """Whether an operation, or a whole group (``pointer``, ``keyboard``), works on this platform."""
         return self._computer.has(capability)
@@ -177,7 +183,10 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         if not await self._computer_allows(folder, request):
             return _error_response(AgentEnvError(
                 "unauthorized", "this route is agent-env's own: it takes the env's control token", status=401))
-        return await svc.forward(folder, name, request)
+        answer = await svc.forward(folder, name, request)
+        if answer.status_code < 400 and not control_check()(request.headers):
+            apps.note_agent_acted(self._computer.apps)
+        return answer
 
     async def _computer_relay(self, websocket: WebSocket) -> None:
         """A WebSocket under ``/svc/<name>/``, relayed both ways to the app named so; refused, before it opens, with no
@@ -186,7 +195,8 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         if (folder := self._computer_app_folder(name)) is None or not await self._computer_allows(folder, websocket):
             await websocket.close(code=1008)
             return
-        await svc.relay(folder, name, websocket)
+        agent = not control_check()(websocket.headers)
+        await svc.relay(folder, name, websocket, (lambda: apps.note_agent_acted(self._computer.apps)) if agent else None)
 
     # The card: what the driver's operations support.
 

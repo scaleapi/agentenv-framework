@@ -31,21 +31,28 @@ INITIAL = Path(".agentenv/initial")
 
 class AppDataPlane:
     """An app's data plane, served around its contract: one data call or launch at a time; a load and a reset stop the
-    running app first and relaunch it after, and a load that fails is followed by a reset. A call fails once it runs
+    running app first and relaunch it after, but for those the app serves live, and a load that fails is followed by a
+    reset, when the app says so. A call fails once it runs
     past ``timeout_s`` and is cancelled: what awaits stops at once, but a thread can't be stopped, so a sync hook's or
     a default's thread is waited for, as are the reset and relaunch after it and the next call."""
 
-    def __init__(self, runtime: AppRuntime, hooks: dict[str, Callable], paths: list[str], timeout_s: float) -> None:
+    def __init__(self, runtime: AppRuntime, hooks: dict[str, Callable], paths: list[str], timeout_s: float, *,
+                 live: frozenset[str] = frozenset(), keeps_paths: bool = False,
+                 resets_failed_add: Callable[[], bool] = lambda: True) -> None:
         self.runtime = runtime
         self.hooks = hooks
         self.paths = paths
         self.timeout_s = timeout_s
+        #: The operations served on the running app; whether a hook's reset needs the paths as installed; and whether
+        #: a load that fails is followed by a reset now.
+        self.live, self.keeps_paths, self.resets_failed_add = live, keeps_paths, resets_failed_add
         self.turn = asyncio.Lock()
         self.changing: set[asyncio.Task] = set()
 
     def keep_initial(self) -> None:
-        """Keep the app's paths as installed, before anything changes them, when they serve its data."""
-        if self.paths and not self.hooks:
+        """Keep the app's paths as installed, before anything changes them, when they serve its data or its own reset
+        puts them back."""
+        if self.paths and (not self.hooks or self.keeps_paths):
             keep_initial(self.paths)
 
     async def call(self, op: str, *args: Any) -> Any:
@@ -71,13 +78,15 @@ class AppDataPlane:
 
     async def _change(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> None:
         """``op`` between the app's stop and its relaunch, answered on ``answer``: as it ends, or once it runs past
-        ``timeout_s``."""
+        ``timeout_s``. A live one runs on the running app, which a reset after it fails stops and relaunches."""
         try:
-            running = op != OP_GET_DATA and await self.runtime.stop_app()
+            running = op != OP_GET_DATA and op not in self.live and await self.runtime.stop_app()
             try:
                 result = await self._within(op, served, args, answer)
             except Exception:
-                if op == OP_ADD_DATA:
+                if op == OP_ADD_DATA and self.resets_failed_add():
+                    if op in self.live:
+                        running = await self.runtime.stop_app()
                     await self._undo(answer)
                 raise
             finally:

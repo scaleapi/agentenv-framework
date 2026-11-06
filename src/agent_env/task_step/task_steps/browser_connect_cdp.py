@@ -134,8 +134,7 @@ def _deployed_agent(context: TaskStepContext, agent_name: str) -> DeployedAgent:
 
 def _browser(deployed: DeployedEnv, named: Optional[str]) -> tuple[Optional[str], dict]:
     """The website browser to connect to, the one named else the env's only one: its name among the env's children,
-    or None for the env itself, and its card. A browser computer's driver takes its app's name, so a child is found
-    among the children, never by name as the driver's own card."""
+    or None for the env itself, and its card."""
     card = deployed.environment_card or {}
     browsers = [(None, card)] if find_extension_method(card, BROWSER, "cdp") else []
     browsers += [(child.get("name"), child) for child in card.get("children_environments") or []

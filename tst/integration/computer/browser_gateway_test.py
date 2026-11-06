@@ -2,8 +2,8 @@
 folder and run with the computer as its /svc child ``web``. Playwright and Puppeteer reach the browser through the
 gateway's ``/browser/web/cdp/<token>/`` route by the ``http_url`` and the ``ws_url`` the browser's ``cdp`` answer
 gives through the gateway, an address the browser didn't mint is refused, and each connection is a trajectory event
-that, like the gateway's log, never shows its token. A gateway restart or a browser relaunch closes a live connection
-with a code, and a new one then works; so does the browser's app server or the computer's driver dying behind the
+that, like the gateway's log, never shows its token. A gateway restart closes a live connection with a code, and a new
+one then works; a data/reset closes it with the relaunch code and ends its address, and one minted after works; so does the browser's app server or the computer's driver dying behind the
 gateway, and a browser whose app server was down when the gateway first looked is found once it's back. Needs Docker,
 and Node 20 or later with npm for the CDP clients."""
 
@@ -21,6 +21,7 @@ import pytest
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.website_browser import BROWSER
 from websockets.asyncio.client import connect
+from websockets.exceptions import InvalidStatus
 
 import agent_env
 from agent_env.env import Env
@@ -88,7 +89,7 @@ async def test_playwright_and_puppeteer_reach_the_browser_through_the_gateway_an
 
 
 @pytest.mark.asyncio
-async def test_a_gateway_restart_or_a_browser_relaunch_closes_a_live_connection_with_a_code_and_a_new_one_works(
+async def test_a_gateway_restart_or_a_data_reset_closes_a_live_connection_with_a_code_and_a_new_one_works(
         browser_computer, gateway_image):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
@@ -104,14 +105,19 @@ async def test_a_gateway_restart_or_a_browser_relaunch_closes_a_live_connection_
                 held, second = await _version(address["ws_url"])
                 await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium",
                                              headers=deployed.control_headers)
-                at_relaunch = await _closed(held)
-                held, third = await _version(address["ws_url"])
+                at_reset = await _closed(held)
+                try:
+                    await _version(address["ws_url"])
+                    ended = None
+                except InvalidStatus as e:
+                    ended = e.response.status_code
+                held, third = await _version((await _cdp(gateway, deployed, "ada"))["ws_url"])
                 await held.close()
         finally:
             report = await teardown_run(context)
 
     assert first.startswith("Chrome/") and first == second == third
-    assert at_restart is not None and at_relaunch == RELAUNCHED
+    assert at_restart is not None and at_reset == RELAUNCHED and ended == 403
     assert not report.failed
 
 

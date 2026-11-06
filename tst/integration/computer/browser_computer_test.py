@@ -7,11 +7,12 @@ started again by supervisord and the computer is ready again; and chromium kille
 saying why and the tools answering with it. Through its cdp address, Playwright and Puppeteer drive it two at once,
 each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
 one; one client's close leaves the browser up for the other, which can't open file: URLs; the address outlives a
-relaunch, and the computer's reset ends it. browser_connect_cdp hands the echo agent its address, with the computer's
+relaunch by its app server's restart, and the browser's reset and the computer's end it. browser_connect_cdp hands the echo agent its address, with the computer's
 tools hidden from its role; after reset_env that address fails until the task runs browser_connect_cdp again, whose
-fresh one its next turn opens the site through. Through an app server and a driver restart and a relaunch, the agent's
-address keeps working, and two agents connected at once each drive the browser through their own. browser/v1 reads
-and sets its cookies, local storage and downloads. Needs Docker and the local registry on
+fresh one its next turn opens the site through. Through an app server's restart, which relaunches the browser, and a
+driver's, the agent's address keeps working, and two agents connected at once each drive the browser through their own. browser/v1 reads
+and sets its cookies, local storage and downloads, and its data plane signs it in, snapshots it, resets it, loads a
+snapshot back and holds up under chaos. Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
@@ -46,6 +47,7 @@ from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdp
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data, check_browser_data_under_chaos
 from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
 from tst.util.a2a_test_agent import put_test_agent
 
@@ -320,6 +322,48 @@ async def test_its_state_operations_hold_up_at_once_through_a_server_restart_and
     assert not report.failed
 
 
+@pytest.mark.asyncio
+async def test_its_data_plane_signs_it_in_snapshots_it_resets_it_and_loads_a_snapshot_back_whole(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+
+            async def act():
+                async with streamablehttp_client(deployed.mcp_url) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        assert not (await session.call_tool("computer_screenshot", {"space": "frame"})).isError
+
+            await check_browser_data(deployed, browser_computer.id, lambda op: deployed.environment_url
+                                     + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"], act)
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_data_calls_take_turns_a_server_restart_takes_a_load_and_with_the_browser_gone_they_fail_at_once(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            await check_browser_data_under_chaos(
+                deployed, lambda pattern: _kill(deployed, pattern, oldest=pattern.startswith("[-]")),
+                lambda: _ready(deployed))
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
 async def _shown(session: ClientSession, holds) -> dict:
     """A screenshot's result once the page it shows is what ``holds`` waits for, within ``WAIT_S``."""
     last, deadline = None, time.monotonic() + WAIT_S
@@ -420,9 +464,11 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
             record = await _record(deployed)
             guarded = await _clients(cdp_clients, "guard", ada)
             guarded_record = await _record(deployed)
-            await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium", headers=deployed.control_headers)
-            relaunched_address = await _cdp(deployed, "ada")
+            await _kill(deployed, "[s]erve_app")
+            await _ready(deployed)
             relaunched = await _clients(cdp_clients, "together", ada)
+            await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium", headers=deployed.control_headers)
+            after_data_reset = await _clients(cdp_clients, "refused", ada, wrong=False)
             await ResetEnvTaskStep(id="reset", version=None, env_id=browser_computer.id,
                                    fail_task_on_error=True).execute(context)
             after_reset = await _clients(cdp_clients, "refused", ada, wrong=False)
@@ -443,7 +489,7 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
     assert "agentenv refuses Page.navigate: file:" in guarded["file"].get("error", ""), guarded
     assert {("Browser.close", "closed"), ("Page.navigate", "refused"), ("Browser.setDownloadBehavior", "changed")} <= {
         (entry["method"], entry["did"]) for c in guarded_record["cdp_connections"] for entry in c["guarded"]}
-    assert relaunched_address == ada
+    assert "error" in after_data_reset["playwright"] and "error" in after_data_reset["puppeteer"], after_data_reset
     assert "error" in after_reset["playwright"] and "error" in after_reset["puppeteer"], after_reset
     assert fresh != ada and not report.failed
 
@@ -507,13 +553,11 @@ async def test_a_cdp_agent_keeps_its_address_through_an_app_server_and_a_driver_
             await _kill(deployed, "[c]omputer.serve driver.py:PageDriver")
             await _ready(deployed)
             after_driver = await _opened_over_cdp(context, "after-driver", url=DATA_PAGE)
-            await protocol_v1.reset_data(f"{deployed.environment_url}/svc/chromium", headers=deployed.control_headers)
-            after_relaunch = await _opened_over_cdp(context, "after-relaunch", url=DATA_PAGE)
         finally:
             report = await teardown_run(context)
 
-    assert [title for _, title in (first, after_server, after_driver, after_relaunch)] == ["Home"] * 4
-    assert first[0] == after_server[0] == after_driver[0] == after_relaunch[0]
+    assert [title for _, title in (first, after_server, after_driver)] == ["Home"] * 3
+    assert first[0] == after_server[0] == after_driver[0]
     assert not report.failed
 
 
