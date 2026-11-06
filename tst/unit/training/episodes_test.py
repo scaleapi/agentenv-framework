@@ -1,7 +1,7 @@
-"""The arguments a rollout's tool calls run with, typed by each tool's schema, and the run groups a trainer files its
-episodes in by training step."""
+"""The arguments a rollout's tool calls run with, typed by each tool's schema, a later turn's prompt as every trainer's
+model reads it, and the run groups a trainer files its episodes in by training step."""
 
-from agent_env.training._episodes import RunGroup, TrainingSteps, run_group_id, typed_arguments
+from agent_env.training._episodes import RunGroup, TrainingSteps, next_prompt, run_group_id, typed_arguments
 
 LOOKUP = {"type": "object", "properties": {
     "zip": {"type": "string"},
@@ -21,6 +21,14 @@ def test_a_scalar_its_schema_wants_as_a_string_is_given_back_as_the_string_it_wa
 def test_values_their_schema_allows_are_left_as_parsed():
     arguments = {"zip": "19122", "note": None, "count": 3, "price": 2, "gift": False, "items": ["1151293680"]}
     assert typed_arguments(arguments, LOOKUP) == arguments
+
+
+def test_a_later_turns_new_system_prompt_comes_before_its_prompt_and_stays_in_effect():
+    assert next_prompt("Add another.", "Keep the barrels.", "Keep the items.") == (
+        "Keep the barrels.\n\nAdd another.", "Keep the barrels.")
+    assert next_prompt("Add another.", "Keep the items.", "Keep the items.") == ("Add another.", "Keep the items.")
+    assert next_prompt("Add another.", None, "Keep the items.") == ("Add another.", "Keep the items.")
+    assert next_prompt("Add another.", "", None) == ("Add another.", None)
 
 
 def test_an_argument_the_schema_doesnt_name_and_arguments_that_arent_an_object_are_left_alone():

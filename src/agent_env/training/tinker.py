@@ -11,8 +11,9 @@ applies (``agent_env.openenv.reward``: the score at the step id ``reward`` names
 score is a metric ``score/<step id>``.
 
 The system prompt and the tools are written once, at the start of the conversation, as the cookbook's renderers write
-them; a task whose turns change either is left out (``playable``), since its later turns would train under the first
-turn's instructions.
+them. A later turn that changes the system prompt has the new one written before its prompt, as every trainer's model
+reads it (``agent_env.training._episodes.next_prompt``); a turn that offers other tools than the first fails its
+rollout; and a task that gives the agent skills, which no trainer shows its model yet, is left out (``playable``).
 
 An episode lives on the event loop that started it, so every rollout runs on ``rl.train``'s: set no rollout executor.
 A rollout the cookbook ends itself (a structural parse failure, the context or token limit) is scored the moment it is
@@ -50,7 +51,7 @@ from agent_env.bundle.run import prepare_bundle
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Episode, EpisodeError, EpisodeSpec, Task, Turn
 from agent_env.openenv.reward import reward_of
-from agent_env.training._episodes import RunGroup, TrainingSteps, typed_arguments
+from agent_env.training._episodes import RunGroup, TrainingSteps, next_prompt, typed_arguments
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +73,9 @@ class EpisodeEnv(MessageEnv):
     turn, rewarded from its scores once the run ends. ``max_turns`` bounds the model's messages; at the bound the turn
     ends with what the model last said, and every later turn with no reply, so the verifiers score where it got to.
 
-    The episode holds a slot under ``max_concurrent_episodes`` from its start until its run is scored or abandoned, since
-    a run is containers of its own. The system prompt is the first turn's, written once; ``playable`` leaves out a task
-    whose later turns would change it."""
+    The episode holds a slot under ``max_concurrent_episodes`` from its start until its run is scored or abandoned,
+    since a run is containers of its own. The system prompt and the tools are the first turn's, written once; a later
+    turn's new system prompt comes before its prompt (``next_prompt``)."""
 
     #: The most of an assistant message, a call's arguments or a tool's answer a step logs, in characters.
     LOGGED_CHARS: ClassVar[int] = 2000
@@ -97,6 +98,7 @@ class EpisodeEnv(MessageEnv):
         self._turn: Turn | None = None
         self._tools: Any = None
         self._specs: list[ToolSpec] | None = None
+        self._system: str | None = None
         self._holding = False
         self._scored = False
         self._messages = 0
@@ -120,8 +122,9 @@ class EpisodeEnv(MessageEnv):
         except BaseException:
             await self.close()  # a failed episode gives its slot back now, not when its group is cleaned up
             raise
+        self._system = turn.system_prompt
         prefix = self._renderer.create_conversation_prefix_with_tools(tools=self._specs or [],
-                                                                      system_prompt=self._system_prompt(turn))
+                                                                      system_prompt=self._system or "")
         self.history = [*prefix, {"role": "user", "content": turn.prompt}]
         return self.history
 
@@ -172,6 +175,11 @@ class EpisodeEnv(MessageEnv):
             self._release()
 
     async def _open(self, turn: Turn) -> None:
+        """Make ``turn`` the one being played, refusing what the conversation can't show the model: skills, and tools
+        other than the first turn's, which the renderer wrote at its start."""
+        if turn.skills:
+            raise EpisodeError(f"turn {turn.step_id!r} gives the agent skills {[s.name for s in turn.skills]}, which "
+                               "no trainer shows its model yet")
         self._turn = turn
         self._tools = await turn.tools(timeout=self._tool_timeout).__aenter__()
         specs: list[ToolSpec] = [{"name": tool.name, "description": tool.description or "",
@@ -184,12 +192,6 @@ class EpisodeEnv(MessageEnv):
 
     def _schema(self, call: ToolCall) -> dict:
         return next((spec["parameters"] for spec in self._specs or [] if spec["name"] == call.function.name), {})
-
-    def _system_prompt(self, turn: Turn) -> str:
-        if turn.skills:
-            raise EpisodeError(f"turn {turn.step_id!r} gives the agent skills {[s.name for s in turn.skills]}, which "
-                               "this module doesn't show the model yet")
-        return turn.system_prompt or ""
 
     async def _run(self, call: ToolCall, call_id: str, arguments: dict) -> Message:
         self._tool_calls += 1
@@ -223,8 +225,8 @@ class EpisodeEnv(MessageEnv):
         while (turn := await self._episode.next_turn()) is not None:
             if self._messages < self._max_turns:
                 await self._open(turn)
-                # Only the prompt: the system prompt stays the first turn's, which ``playable`` checks every turn shares.
-                self.history.append({"role": "user", "content": turn.prompt})
+                prompt, self._system = next_prompt(turn.prompt, turn.system_prompt, self._system)
+                self.history.append({"role": "user", "content": prompt})
                 return MessageStepResult(reward=0.0, episode_done=False, next_messages=self.history)
             await turn.end("")
         reward, metrics, scores = await self._finish()
@@ -285,7 +287,7 @@ def _text(part: Any) -> str:
 
 
 class _ScoredWhenCut(EnvFromMessageEnv):
-    """The cookbook's adapter from an ``EpisodeEnv`` to its token-level ``Env``, scoring a rollout the moment it cuts it.
+    """The cookbook's token-level ``Env`` over an ``EpisodeEnv``, scoring a rollout the moment it cuts it.
 
     ``EnvFromMessageEnv`` ends a rollout itself, without calling the ``EpisodeEnv`` behind it, when a message runs past
     the token limit, the response can't be parsed, or the conversation outgrows ``max_trajectory_tokens``. The episode
@@ -467,13 +469,18 @@ def _splits(bundle: Path, splits: list[str], sandbox: str | None) -> dict[str, l
     return {split: found[split] for split in splits}
 
 
+def _gives_skills(step: Any, agents: Sequence[str]) -> bool:
+    return getattr(step, "agent_name", None) in agents and (
+        step.type == "add_skills" or step.type == "deploy_agent" and bool(step.skills))
+
+
 def playable(tasks: list[tuple[str, Task]], reward: str | None,
               turn_timeout: float | None) -> list[tuple[str, EpisodeSpec, Reward]]:
     """Each task that can run as an episode, with its reward; the rest are logged and left out. Raises ValueError when
     a task's scores make no reward, since a rollout must be rewarded, or when no task is left.
 
-    A task whose turns don't share one system prompt is left out: the renderer writes the system prompt once, at the
-    start of the conversation, so its later turns would be sampled and trained under the first turn's instructions."""
+    A task that gives a played agent skills is left out, here rather than when its turn opens: no trainer shows its
+    model skills yet, and a rollout refused at that turn would be retried and refused again."""
     episodes, refused, unscorable = [], {}, {}
     for name, task in tasks:
         try:
@@ -481,9 +488,9 @@ def playable(tasks: list[tuple[str, Task]], reward: str | None,
         except EpisodeError as e:
             refused[name] = str(e)
             continue
-        if len({system_prompt for _, system_prompt in spec.prompts}) > 1:
-            refused[name] = (f"task {task.id!r} changes the played agent's system prompt between turns, and the "
-                             "renderer writes the system prompt once, at the start of the conversation")
+        if skilled := [step.id for step in task.steps if _gives_skills(step, spec.trainer_agents)]:
+            refused[name] = (f"task {task.id!r} gives the agent it plays skills ({skilled}), which no trainer shows "
+                             "its model yet")
             continue
         task_reward, problem = reward_of(task, reward)
         if problem or not any(getattr(step, "verifier_id", None) for step in task.steps):

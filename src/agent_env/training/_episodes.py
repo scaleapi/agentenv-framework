@@ -1,5 +1,5 @@
 """What a trainer's adapter needs without the trainer installed: a tool call's arguments typed by its tool's schema,
-and the run group a trainer files its episodes in."""
+a later turn's prompt as the model reads it, and the run group a trainer files its episodes in."""
 
 from __future__ import annotations
 
@@ -27,6 +27,16 @@ def typed_arguments(arguments: Any, schema: Mapping[str, Any]) -> Any:
         if kind is not None and "string" in allowed and kind not in allowed and not widened:
             typed[name] = json.dumps(value)
     return typed
+
+
+def next_prompt(prompt: str, system_prompt: str | None, in_effect: str | None) -> tuple[str, str | None]:
+    """A later turn's prompt as every trainer's model reads it, and the system prompt in effect after it. A trainer
+    plays an episode as one conversation, whose system prompt is written once, at its start; so a turn that changes the
+    system prompt has the new one written before its prompt, as text. A turn that sets none, or the one in effect,
+    is its prompt alone."""
+    if not system_prompt or system_prompt == in_effect:
+        return prompt, in_effect
+    return f"{system_prompt}\n\n{prompt}", system_prompt
 
 
 def _allowed_types(schema: Mapping[str, Any]) -> set[str]:
