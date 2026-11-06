@@ -14,7 +14,14 @@ an agent can act on the site through tools beside its pages. A site with none se
 
 One route is built in, replaced by a site's own ``@api`` route at its very path and answering before one whose path
 parameters would also match it: ``/api/session``, which a frontend calls to learn who is signed in, signing the acting
-user in when nobody is (GET), or to sign out (DELETE)."""
+user in when nobody is (GET), or to sign out (DELETE).
+
+A live site, ``@website(domains=[...], live=True, allow_hosts=[...])``, is a real site on the internet: its server serves
+no pages and no API, only the data plane and the card, whose ``ready`` says whether its account works. Its data hooks
+reach the site through what is known of it (its API, or scripted steps), its ``@session`` method returns the storage
+state a browser adds to start signed in, and its credentials are settings, read with ``self.setting(name)``.
+``allow_hosts`` names the hosts beyond its domains its pages load from (APIs, CDNs, sign-in), which a computer's network
+allowlist lets through."""
 from __future__ import annotations
 
 import asyncio
@@ -34,6 +41,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
+from ..errors import AgentEnvError
 from ..agent_env_environment import (
     AgentEnvEnvironment,
     _RESOURCE_ATTR,
@@ -55,6 +63,7 @@ SESSION_PATH = "/api/session"
 CHECK_TIMEOUT_S = 10.0
 _WEBSITE_ATTR = "_aee_website"
 _READY_ATTR = "_aee_website_ready"
+_SESSION_ATTR = "_aee_website_session"
 _HEAD = re.compile(rb"<head(?:\s[^>]*)?>", re.IGNORECASE)
 _PREAMBLE = re.compile(rb"\A(?:\s|<!--.*?-->|<!doctype[^>]*>|<html(?:\s[^>]*)?>)*", re.IGNORECASE | re.DOTALL)
 _HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
@@ -62,23 +71,35 @@ _HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]
 
 class WebsiteDeclaration(NamedTuple):
     """What ``@website`` declares: the site's domains, its static folder (relative to the class's file), how long it
-    may take to be ready after its server starts, and whether its HTML pages read the universe's time."""
+    may take to be ready after its server starts, whether its HTML pages read the universe's time, and for a live
+    site, ``live`` and the other hosts its pages reach."""
 
     domains: tuple[str, ...] = ()
     static: Optional[str] = None
     ready_timeout_s: float = SITE_READY_TIMEOUT_S
     clock_patch: bool = False
+    live: bool = False
+    allow_hosts: tuple[str, ...] = ()
 
 
 def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = (), static: str | None = None,
-            ready_timeout_s: float = SITE_READY_TIMEOUT_S, clock_patch: bool = False) -> Any:
-    """Declare a WebsiteEnvironment's site."""
+            ready_timeout_s: float = SITE_READY_TIMEOUT_S, clock_patch: bool = False, live: bool = False,
+            allow_hosts: list[str] | tuple[str, ...] = ()) -> Any:
+    """Declare a WebsiteEnvironment's site. ``live`` declares a real site at ``domains``, which serves its own pages,
+    and ``allow_hosts`` the hosts beyond them its pages reach."""
     if _cls is not None:
         raise TypeError("use @website(...) with parentheses")
-    if isinstance(domains, str):
-        raise ValueError(f"domains is a list of host names, not the string {domains!r}")
-    if problems := [problem for host in domains if (problem := host_problem(host))]:
-        raise ValueError(f"domains: {problems[0]}")
+    for label, hosts in (("domains", domains), ("allow_hosts", allow_hosts)):
+        if isinstance(hosts, str):
+            raise ValueError(f"{label} is a list of host names, not the string {hosts!r}")
+        if problems := [problem for host in hosts if (problem := host_problem(host))]:
+            raise ValueError(f"{label}: {problems[0]}")
+    if live and not domains:
+        raise ValueError("a live site names its domains")
+    if live and (static is not None or clock_patch):
+        raise ValueError("a live site serves none of its pages, so it takes no static or clock_patch")
+    if allow_hosts and not live:
+        raise ValueError("allow_hosts is for a live site: a synthetic site's pages reach only the sites of its env")
     if isinstance(ready_timeout_s, bool) or not isinstance(ready_timeout_s, (int, float)) or not (
             0 < ready_timeout_s < math.inf):
         raise ValueError(f"ready_timeout_s is a number of seconds above 0, not {ready_timeout_s!r}")
@@ -86,7 +107,11 @@ def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = 
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, WebsiteEnvironment)):
             raise TypeError(f"@website declares a WebsiteEnvironment subclass, not {cls!r}")
-        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, float(ready_timeout_s), clock_patch))
+        if live and (served := routes_of(cls)):
+            raise ValueError(f"{cls.__name__} is a live site, whose API is the real site's: it serves no @api "
+                             f"route, not {served[0].name}")
+        setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, float(ready_timeout_s), clock_patch,
+                                                       live, tuple(allow_hosts)))
         return cls
 
     return deco
@@ -98,6 +123,17 @@ def host_problem(host: Any) -> str | None:
     if not isinstance(host, str) or not _HOST.fullmatch(host):
         return f"{host!r} is not a host name such as example.com or *.example.com"
     return None
+
+
+def session(fn: Any) -> Any:
+    """Mark the method that signs a browser in: called with the ``user`` to sign in as (None for the site's own
+    choice; a plain ``def`` in a worker thread, so a blocking sign-in holds up no other answer), it returns the
+    cookies a browser adds, browser/v1's ``cookies/set`` shape, or ``{"cookies": [...],
+    "local_storage": [...]}``. A cookie that names neither a ``url`` nor a ``domain`` is for the site's first domain.
+    website/v1's ``session`` operation calls it in place of the site's own signed cookie; a live site needs one to
+    start signed in."""
+    setattr(fn, _SESSION_ATTR, True)
+    return fn
 
 
 def ready_check(fn: Any) -> Any:
@@ -154,6 +190,11 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         None when it named none. ``now()`` is UTC either way."""
         return self._clock().timezone
 
+    def setting(self, name: str, default: str | None = None) -> str | None:
+        """The site's setting ``name``, as its deploy passes it: an environment variable of the server's, which a
+        website env's ``settings`` set, a secret among them resolved from its ``secret:`` reference at deploy."""
+        return os.environ.get(name, default)
+
     def acting_user(self) -> str | None:
         """Who a browser with no session is signed in as: nobody unless a site says else, from its data say."""
         return None
@@ -180,7 +221,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         else:
             asgi = Starlette(middleware=middleware)
             AgentEnvStarletteApplication(self._build_card(), self).add_routes_to_app(asgi)
-        if SESSION_PATH not in taken:
+        if SESSION_PATH not in taken and not declaration.live:
             asgi.router.routes.append(Route(SESSION_PATH, self._session, methods=["GET", "DELETE"]))
         asgi.router.routes.extend(Route(r.path, _unreserved(endpoint(getattr(self, r.fn.__name__), r, self.context)),
                                         methods=[r.method]) for r in api_routes)
@@ -209,6 +250,9 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     def extension_params(self, uri: str) -> dict:
         if uri == WEBSITE_EXTENSION_URI:
             declaration = self.declaration()
+            if declaration.live:
+                return {"domains": list(declaration.domains), "routes": [], "live": True,
+                        "allow_hosts": list(declaration.allow_hosts), "signs_in": self._session_hook() is not None}
             return {"domains": list(declaration.domains),
                     "routes": [r.advertised() for r in self.routes()], "session_cookie": self.session_cookie,
                     "session_path": SESSION_PATH}
@@ -242,7 +286,25 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @extension(WEBSITE_EXTENSION_URI, op="session")
     async def _website_session(self, user: Optional[str] = None) -> dict:
-        return {"cookies": [self._session_signer().cookie(user)], "local_storage": []}
+        hook = self._session_hook()
+        if hook is None:
+            if self.declaration().live:
+                raise AgentEnvError("no_session", f"{type(self).__name__} is a live site with no @session method, so "
+                                    "it can't sign a browser in", status=501)
+            return {"cookies": [self._session_signer().cookie(user)], "local_storage": []}
+        result = await (hook(user) if inspect.iscoroutinefunction(hook) else asyncio.to_thread(hook, user))
+        given, storage = (result.get("cookies"), result.get("local_storage") or []) if isinstance(result, dict) else (
+            result, [])
+        try:
+            return session_state(given, storage, self.declaration().domains)
+        except ValueError as e:
+            raise AgentEnvError("invalid_session", f"{hook.__name__} returned {e}", status=500) from None
+
+    def _session_hook(self) -> Any:
+        hooks = [member for member, _marker in _marked_members(self, _SESSION_ATTR)]
+        if len(hooks) > 1:
+            raise TypeError(f"{type(self).__name__} marks {len(hooks)} methods @session; a site signs in one way")
+        return hooks[0] if hooks else None
 
     async def _not_ready(self) -> list[str]:
         found = await asyncio.gather(*(self._checked(check) for check, _marker in _marked_members(self, _READY_ATTR)))
@@ -293,6 +355,39 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     def _site_path(cls, path: str) -> Path:
         given = Path(path)
         return given if given.is_absolute() else Path(inspect.getfile(cls)).resolve().parent / given
+
+
+def session_state(cookies: Any, local_storage: Any, domains: tuple[str, ...] | list[str] = ()) -> dict:
+    """A ``session``'s answer, ``{cookies, local_storage}`` in browser/v1's ``cookies/set`` and ``local_storage/set``
+    shapes, each cookie that names neither a ``url`` nor a ``domain`` given the first of ``domains`` (``.example.com``
+    for ``*.example.com``). Raises ValueError naming each problem by the cookie's index and field, never by a value,
+    which is a credential."""
+    from pydantic import TypeAdapter, ValidationError
+
+    from ..website_browser.shapes import CookieToSet, OriginStorage
+
+    if not isinstance(cookies, list):
+        raise ValueError("cookies is a list of cookie objects")
+    default = domains[0].removeprefix("*") if domains else None
+    parsed, problems = [], []
+    for i, item in enumerate(cookies):
+        if not isinstance(item, dict):
+            problems.append(f"cookies[{i}] is not an object")
+            continue
+        if not item.get("url") and not item.get("domain") and default:
+            item = {**item, "domain": default}
+        try:
+            parsed.append(CookieToSet.model_validate(item).model_dump(exclude_none=True))
+        except ValidationError as e:
+            problems += [f"cookies[{i}].{'.'.join(map(str, err['loc'])) or 'cookie'}: {err['msg']}"
+                         for err in e.errors()]
+    try:
+        storage = [o.model_dump() for o in TypeAdapter(list[OriginStorage]).validate_python(local_storage)]
+    except ValidationError as e:
+        problems += [f"local_storage[{'.'.join(map(str, err['loc']))}]: {err['msg']}" for err in e.errors()]
+    if problems:
+        raise ValueError("; ".join(problems))
+    return {"cookies": parsed, "local_storage": storage}
 
 
 class _Forwarded:

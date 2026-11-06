@@ -196,8 +196,9 @@ async def test_a_recording_through_the_card_is_an_mp4_of_the_page(home):
         manifest = (await http.post(END, json={"recording_id": started["recording_id"]})).json()
 
     assert card["name"] == "playwright-mcp" and card["capabilities"]["operations"] == []
-    assert [e["uri"] for e in card["capabilities"]["extensions"]] == [COMPUTER_RECORDING]
-    params = card["capabilities"]["extensions"][0]["params"]
+    extensions = {e["uri"]: e for e in card["capabilities"]["extensions"]}
+    assert set(extensions) == {COMPUTER_RECORDING, "urn:agentenv:browser/v1"}
+    params = extensions[COMPUTER_RECORDING]["params"]
     assert params["cursor"] is False and params["source"] == "stream" and set(params["methods"]) == {"start", "end"}
     assert (manifest["ended_by"], manifest["cursor"], manifest["source"]) == ("end", False, "stream")
     (segment,) = manifest["segments"]

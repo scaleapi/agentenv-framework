@@ -191,7 +191,9 @@ class DeployEnvTaskStep(TaskStep):
         deployed_env = await env.deploy(**deploy_kwargs)
         # create_instance runs inside env.deploy(), so an annotation set after it
         # returns has to be persisted explicitly to reach the instance record.
-        annotations = {"deploy_step_id": self.id}
+        from agent_env.task_step.task_steps.sign_in_browser import mark_live
+
+        annotations = {"deploy_step_id": self.id, **mark_live(context, deployed_env)}
         deployed_env.metadata = {**(deployed_env.metadata or {}), **annotations}
         if deployed_env.instance_id:
             update_env_instance_metadata(deployed_env.instance_id, annotations)
