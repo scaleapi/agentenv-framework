@@ -829,7 +829,8 @@ in the session (`agentenv_protocol.computer.session`) is Linux's.
 
 The server serves the app's data plane and its skill. With `paths` alone, `data/add` writes the files
 it's given under them and refuses any other path, or one a link leads out of them; `data/get`
-returns the files there, a file tree; and `data/reset` puts them back as the server found them when
+returns the files there, a file tree, copied with every process of the app paused (SIGSTOP) so they
+are of one moment, and sent from the copy once it runs again; and `data/reset` puts them back as the server found them when
 it first started on this boot, which is the app as installed. Hooks serve what they mark instead.
 A hook's `data/add` parts come as they were sent, inline or as a read grant, and
 `part_bytes(part)` returns a part's bytes either way. Either way the base class takes data calls and
@@ -967,7 +968,8 @@ are the profile's template. The base class adds:
   The browser's data plane is a file tree, every file by its path under the session user's home:
   - `data/get` returns its state as `browser-state.json` (`BrowserState`: `cookies` and `local_storage`
     as above, `tabs`, `closed_tabs`, `downloads` and `clock`, `real` with its `now`); its profile's files,
-    each database with its journal or log, copied in one pass, without caches (`Cache`, `Code Cache`,
+    each database with its journal or log, copied in one pass with the browser paused once its state is
+    read, so the files are of one moment, without caches (`Cache`, `Code Cache`,
     `GPUCache`, the shader and Dawn caches, `CacheStorage`, `ScriptCache`, `Crashpad`) or locks
     (`Singleton*`); and its finished downloads.
   - `data/add` applies such a state while the browser runs, from `browser-state.json` or a data part of

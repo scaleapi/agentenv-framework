@@ -5,10 +5,12 @@ boot, which is the app as installed, since every boot starts from the computer's
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import inspect
 import logging
 import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Optional
@@ -129,7 +131,7 @@ class AppDataPlane:
         if not self.paths:
             return None
         return {OP_ADD_DATA: functools.partial(add, paths=self.paths),
-                OP_GET_DATA: functools.partial(get, self.paths),
+                OP_GET_DATA: functools.partial(get, self.paths, self.runtime.paused),
                 OP_RESET_DATA: functools.partial(reset, self.paths)}[op]
 
     async def _within(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> Any:
@@ -175,9 +177,15 @@ async def add(parts: list, paths: list[str]) -> None:
     await in_thread(write_within, Path.home(), files, paths)
 
 
-async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
-    """A part for each file under ``paths``."""
-    return await file_parts(Path.home(), paths, write_namespace)
+async def get(paths: list[str], paused: Callable[[], contextlib.AbstractContextManager],
+              write_namespace: Optional[WriteNamespaceGrant]) -> list:
+    """A part for each file under ``paths``, copied with the app ``paused``, so they are of one moment, and sent from
+    the copy once it runs again."""
+    INITIAL.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=INITIAL.parent) as staging:
+        with paused():
+            await in_thread(_stage, Path.home(), paths, Path(staging))
+        return await file_parts(Path(staging), paths, write_namespace)
 
 
 async def reset(paths: list[str]) -> None:
@@ -223,6 +231,11 @@ def _restore(home: Path, paths: list[str]) -> None:
         else:
             target.unlink(missing_ok=True)
         _copy(INITIAL / path, target)
+
+
+def _stage(home: Path, paths: list[str], staging: Path) -> None:
+    for path in paths:
+        _copy(home / path, staging / path)
 
 
 def _copy(source: Path, target: Path) -> None:

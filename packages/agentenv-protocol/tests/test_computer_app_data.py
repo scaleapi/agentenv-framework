@@ -103,8 +103,15 @@ def desktop(monkeypatch):
         running.discard(pid)
         events.append(("stop", pid))
 
+    @contextlib.contextmanager
+    def paused(pid):
+        events.append(("pause", pid))
+        yield
+        events.append(("continue", pid))
+
     monkeypatch.setattr(session, "launch", launch)
     monkeypatch.setattr(session, "stop", stop)
+    monkeypatch.setattr(session, "paused", paused)
     monkeypatch.setattr(session, "alive", lambda pid: pid in running)
     return events
 
@@ -175,7 +182,8 @@ async def test_hooks_override_its_paths_and_read_each_part_they_get_with_part_by
 
 
 @pytest.mark.asyncio
-async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_export_leaves_it_be(home, desktop):
+async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_export_pauses_it_for_its_copy(home,
+                                                                                                           desktop):
     mail = PathsMail()
     mail._computer_app_data_plane().keep_initial()
     await mail._computer_app.launch_app()
@@ -185,7 +193,35 @@ async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_ex
         await _rpc(http, "data/get", {})
         await _rpc(http, "data/reset", {})
 
-    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244), ("stop", 4244), ("launch", 4246)]
+    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244), ("pause", 4244), ("continue", 4244),
+                       ("stop", 4244), ("launch", 4248)]
+
+
+@pytest.mark.asyncio
+async def test_an_export_copies_the_paths_with_the_app_paused_and_sends_the_copy_once_it_runs_again(home, desktop,
+                                                                                                  monkeypatch):
+    (home / "Mail").mkdir()
+    (home / "Mail/inbox.txt").write_text("one moment")
+    mail = PathsMail()
+    mail._computer_app_data_plane().keep_initial()
+    await mail._computer_app.launch_app()
+    stage, parts = app_data._stage, app_data.file_parts
+
+    def staged(*args):
+        desktop.append(("copy",))
+        stage(*args)
+
+    async def sent(*args, **kwargs):
+        desktop.append(("send",))
+        return await parts(*args, **kwargs)
+
+    monkeypatch.setattr(app_data, "_stage", staged)
+    monkeypatch.setattr(app_data, "file_parts", sent)
+    async with _http(mail) as http:
+        exported = _files(await _rpc(http, "data/get", {}))
+
+    assert desktop[1:] == [("pause", 4242), ("copy",), ("continue", 4242), ("send",)]
+    assert exported["Mail/inbox.txt"] == b"one moment" and not list(app_data.INITIAL.parent.glob("tmp*"))
 
 
 @pytest.mark.asyncio
