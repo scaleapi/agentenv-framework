@@ -21,7 +21,7 @@ RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=error && 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
-COPY a2a_server.py codex_bridge.py codex_config.py codex_kit.py entrypoint.sh install.sh run.sh ./
+COPY a2a_server.py codex_bridge.py codex_config.py codex_kit.py mcp_images.py entrypoint.sh install.sh run.sh ./
 # The CLI's cwd, /app, and its state, fixed so neither follows the uid: Modal runs the image as root.
 RUN useradd --create-home --uid 10001 agent && mkdir -p /app /home/agent/.codex \
     && chown agent:agent /app /home/agent/.codex && chmod 0755 entrypoint.sh

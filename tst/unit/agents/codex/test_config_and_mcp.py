@@ -6,12 +6,13 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
 import httpx
 
-from tst.unit.agents.codex.agent import a2a_server, codex_bridge
+from tst.unit.agents.codex.agent import a2a_server, codex_bridge, codex_config
 
 
 def _call(codex, method: str, path: str, body: dict | None = None) -> httpx.Response:
@@ -145,16 +146,17 @@ def test_turns_of_different_roles_share_one_config_and_each_cli_gets_its_own_rol
     (first, solver), (second, judge), (third, none) = turns
     assert first == second == third
     assert first["env4821"] == {
-        "command": "mcp-remote",
-        "args": ["https://gw/mcp", "--allow-http", "--header", "X-Tenant: t", "--header", "AgentEnv-Role: ${AGENTENV_ROLE}"],
+        "command": sys.executable,
+        "args": [str(codex_config.MCP_IMAGES), "mcp-remote", "https://gw/mcp", "--allow-http", "--header", "X-Tenant: t",
+                 "--header", "AgentEnv-Role: ${AGENTENV_ROLE}"],
         "env": {"AGENTENV_ROLE": ""},
         "env_vars": ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE"],
         "startup_timeout_sec": 60,
         "required": True,
     }
-    assert (first["audited"]["args"][2:], first["audited"]["env"]) == (
+    assert (first["audited"]["args"][4:], first["audited"]["env"]) == (
         ["--header", "AgentEnv-Role: ${AGENTENV_ROLE}"], {"AGENTENV_ROLE": "auditor"})
-    assert first["peer_agents"]["args"][0] == "http://127.0.0.1:8000/ext/peer-agents/mcp"
+    assert first["peer_agents"]["args"][2] == "http://127.0.0.1:8000/ext/peer-agents/mcp"
     servers = ("env4821", "audited", "peer_agents")
     assert solver == {f'mcp_servers.{name}.env.AGENTENV_ROLE="solver"' for name in servers}
     assert judge == {f'mcp_servers.{name}.env.AGENTENV_ROLE="judge"' for name in servers}

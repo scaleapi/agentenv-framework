@@ -236,6 +236,8 @@ class CodexConfig(AgentConfig):
     project_id: str | None = None
     task_id: str | None = None
     timeout_seconds: int = 1800
+    # Tool calls a turn may make; see run_codex.
+    max_turns: int | None = None
     # Which of the CLI's own tools it may use. With any selection, the MCP tools agent-env gives it stay.
     builtin_tools: codex_config.CodexTools | None = None
 
@@ -663,7 +665,8 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                 thread_id = self.session_ref_for_context(context_id)
 
                 def _record_event(event: dict) -> None:
-                    request.trajectory.append(event)
+                    # The CLI's events carry no time; when each arrived stands in for it.
+                    request.trajectory.append({**event, "timestamp": _now()})
                     if event.get("type") == "thread.started" and event.get("thread_id"):
                         self.set_session_ref_for_context(context_id, event["thread_id"])
 
@@ -691,6 +694,7 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             project_id=cfg.project_id,
                             task_id=cfg.task_id,
                             event_callback=_record_event,
+                            max_turns=cfg.max_turns,
                             config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
                                               *codex_config.builtin_tools_overrides(cfg.builtin_tools),
                                               *catalog],
@@ -706,6 +710,10 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
 
                 if result.session_id:
                     self.set_session_ref_for_context(context_id, result.session_id)
+                if result.token_usage or result.model_requests is not None:
+                    # Usage the CLI's events omit: a turn it was stopped in has no turn.completed.
+                    request.trajectory.append({"type": "agentenv.usage", "usage": result.token_usage,
+                                               "model_requests": result.model_requests, "timestamp": _now()})
         finally:
             if execution_task is not None:
                 _discard_execution_task(context_id, execution_task)
@@ -1034,6 +1042,10 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
             f"(file={target_path}, rewrote session_meta.payload.id)"
         )
         return {"context_id": new_context_id}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 def build_app(agent: CodexAgent) -> Starlette:

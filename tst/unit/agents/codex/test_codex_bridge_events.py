@@ -335,6 +335,50 @@ def test_native_rollout_usage_is_read_for_snapshot_resume(monkeypatch, tmp_path)
     }
 
 
+def test_the_rollout_counts_a_model_request_per_token_count_that_raised_the_total(monkeypatch, tmp_path):
+    def token_count(total):
+        info = None if total is None else {"total_token_usage": {"input_tokens": total, "total_tokens": total}}
+        return {"type": "event_msg", "payload": {"type": "token_count", "info": info}}
+
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text("".join(json.dumps(record) + "\n" for record in (
+        {"type": "session_meta", "payload": {"id": "thread-1"}},
+        token_count(None), token_count(100), token_count(100),
+        {"type": "response_item", "payload": {"type": "function_call"}}, token_count(250))))
+    monkeypatch.setattr(codex_bridge, "find_rollout_path", lambda _: rollout)
+
+    assert codex_bridge.read_rollout_requests("thread-1") == 2
+
+
+class _OpenStream(_FakeStream):
+    """A CLI's stdout that stays open once its events are read, as a turn still running."""
+
+    async def read(self, n: int = -1) -> bytes:
+        return await super().read(n) or await asyncio.Event().wait()
+
+
+def test_a_turn_limit_stops_the_cli_once_that_many_tool_calls_complete_in_claude_codes_words(monkeypatch):
+    proc = _FakeProc(b"", returncode=-9)
+    proc.stdout = _OpenStream(ndjson(THREAD_STARTED, TURN_STARTED, tool_item("mcp_tool_call"),
+                                     tool_item("mcp_tool_call")))
+
+    async def fake_exec(*cmd, **kwargs):
+        return proc
+
+    monkeypatch.setattr(codex_bridge.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(asyncio.wait_for(
+        codex_bridge.run_codex(prompt="p", thread_id=None, timeout_s=60, max_turns=2), 10))
+
+    assert (result.error, result.tool_call_count) == ("Reached maximum number of turns (2)", 2)
+
+
+def test_a_turn_that_ends_within_its_limit_completes(spawn):
+    result = run(spawn, [THREAD_STARTED, TURN_STARTED, tool_item("mcp_tool_call"), tool_item("mcp_tool_call"),
+                         agent_message("done"), TURN_COMPLETED], max_turns=2)
+
+    assert (result.error, result.response) == (None, "done")
+
+
 def test_system_prompt_is_per_invocation_config_not_agents_md(spawn, tmp_path):
     cap = spawn(ndjson(THREAD_STARTED, TURN_COMPLETED))
     system_prompt = 'BE "TERSE"\nUse tools. 🚀'
