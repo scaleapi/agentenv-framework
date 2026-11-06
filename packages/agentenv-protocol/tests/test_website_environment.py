@@ -42,6 +42,7 @@ from agentenv_protocol.website import environment as environment_module
 from agentenv_protocol.website.clock import parse_time
 
 RPC = "/agentenv"
+COOKIE = "agentenv_session_Shop"
 
 
 def rpc(client: TestClient, method: str, params: dict | None = None) -> dict:
@@ -362,7 +363,7 @@ def test_the_acting_user_is_signed_in_until_a_session_says_else(client: TestClie
     first = client.get("/api/session")
     assert first.json() == {"user": "alice", "role": "default", "signed_in": True}
     cookie = first.headers["set-cookie"]
-    assert cookie.startswith(f"{SESSION_COOKIE}=") and "domain" not in cookie.lower() and "httponly" in cookie.lower()
+    assert cookie.startswith(f"{COOKIE}=") and "domain" not in cookie.lower() and "httponly" in cookie.lower()
     client.post("/api/sign-in", json={"user": "bob"})
     assert client.get("/api/orders").json() == [{"id": 1, "user": "bob"}]
     assert client.get("/api/session").json()["user"] == "bob"
@@ -370,7 +371,7 @@ def test_the_acting_user_is_signed_in_until_a_session_says_else(client: TestClie
     assert client.get("/api/session").json()["user"] is None
     # The jar holds the site's signed-out cookie under its own domain; a second cookie of the name would race it.
     client.cookies.clear()
-    client.cookies.set(SESSION_COOKIE, "forged.signature")
+    client.cookies.set(COOKIE, "forged.signature")
     assert client.get("/api/session").json()["user"] == "alice"
 
 
@@ -385,7 +386,7 @@ def test_a_site_restarted_under_its_deploys_secret_keeps_its_sessions(dist: Path
     before.data = after.data = copy.deepcopy(SEED)
     browser = TestClient(before.create_app())
     browser.post("/api/sign-in", json={"user": "bob"})
-    restarted = TestClient(after.create_app(), cookies={SESSION_COOKIE: browser.cookies[SESSION_COOKIE]})
+    restarted = TestClient(after.create_app(), cookies={COOKIE: browser.cookies[COOKIE]})
     assert restarted.get("/api/session").json()["user"] == "bob"
 
 
@@ -394,12 +395,49 @@ def test_the_session_operation_mints_cookies_for_a_user_or_signed_out(shop: Webs
     minted = client.post("/agentenv/ext/website/session", json={"user": "bob"}).json()
     assert minted.keys() == {"cookies", "local_storage"} and minted["local_storage"] == []
     (cookie,) = minted["cookies"]
-    assert cookie["name"] == SESSION_COOKIE and cookie["path"] == "/" and cookie["max_age"] == 7 * 24 * 3600
+    assert cookie["name"] == COOKIE and cookie["path"] == "/" and cookie["max_age"] == 7 * 24 * 3600
     assert "domain" not in cookie and "expires" not in cookie
-    browser = TestClient(shop.asgi, cookies={SESSION_COOKIE: cookie["value"]})
+    browser = TestClient(shop.asgi, cookies={COOKIE: cookie["value"]})
     assert browser.get("/api/session").json()["user"] == "bob"
     signed_out = client.post("/agentenv/ext/website/session", json={}).json()["cookies"][0]["value"]
-    assert TestClient(shop.asgi, cookies={SESSION_COOKIE: signed_out}).get("/api/session").json()["user"] is None
+    assert TestClient(shop.asgi, cookies={COOKIE: signed_out}).get("/api/session").json()["user"] is None
+
+
+def test_each_site_keeps_its_own_session_cookie(dist: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT_NAME", "shop a/1")
+    first = site(dist)()
+    monkeypatch.setenv("ENVIRONMENT_NAME", "shop-b")
+    second = site(dist)()
+    for env in (first, second):
+        env.data = copy.deepcopy(SEED)
+    named = "agentenv_session_shop_a_1~030f5785d67a"
+    assert (first.session_cookie, second.session_cookie) == (named, "agentenv_session_shop-b")
+    browser = TestClient(first.create_app())
+    browser.post("/api/sign-in", json={"user": "bob"})
+    other = TestClient(second.create_app(), cookies=browser.cookies)
+    other.post("/api/sign-in", json={"user": "alice"})
+    assert set(other.cookies.keys()) == {named, "agentenv_session_shop-b"}
+    assert TestClient(first.asgi, cookies=other.cookies).get("/api/session").json()["user"] == "bob"
+    card = browser.get("/.well-known/agent-env.json").json()
+    assert _extension(card, WEBSITE_EXTENSION_URI)["params"]["session_cookie"] == named
+    shared = first._session_signer().encode("bob")
+    assert TestClient(first.asgi, cookies={SESSION_COOKIE: shared}).get("/api/session").json()["user"] == "alice"
+
+
+def test_sites_whose_names_spell_alike_keep_their_own_cookies(dist: Path, monkeypatch) -> None:
+    apps = []
+    for name in ("shop a/1", "shop_a_1"):
+        monkeypatch.setenv("ENVIRONMENT_NAME", name)
+        env = site(dist)()
+        env.data = copy.deepcopy(SEED)
+        apps.append(env.create_app())
+    browser = TestClient(apps[0])
+    browser.post("/api/sign-in", json={"user": "bob"})
+    other = TestClient(apps[1], cookies=browser.cookies)
+    other.post("/api/sign-in", json={"user": "alice"})
+    assert len(other.cookies.keys()) == 2
+    back = TestClient(apps[0], cookies=other.cookies)
+    assert back.get("/api/session").json()["user"] == "bob"
 
 
 def test_every_answer_carries_the_universe_time(client: TestClient) -> None:
