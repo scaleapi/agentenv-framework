@@ -12,7 +12,8 @@ tools hidden from its role; after reset_env that address fails until the task ru
 fresh one its next turn opens the site through. Through an app server's restart, which relaunches the browser, and a
 driver's, the agent's address keeps working, and two agents connected at once each drive the browser through their own. browser/v1 reads
 and sets its cookies, local storage and downloads, and its data plane signs it in, snapshots it, resets it, loads a
-snapshot back and holds up under chaos. Needs Docker and the local registry on
+snapshot back and holds up under chaos; and the browser task steps set its cookies and storage and open, activate and
+close its tabs by URL. Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
@@ -43,11 +44,12 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdpTaskStep
+from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data, check_browser_data_under_chaos
+from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
 from tst.util.a2a_test_agent import put_test_agent
 
@@ -341,6 +343,25 @@ async def test_its_data_plane_signs_it_in_snapshots_it_resets_it_and_loads_a_sna
 
             await check_browser_data(deployed, browser_computer.id, lambda op: deployed.environment_url
                                      + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"], act)
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_task_steps_set_cookies_and_storage_open_a_tab_behind_and_activate_and_close_it_by_its_url(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_browser_steps(deployed, browser_computer.id, lambda op: deployed.environment_url
+                                      + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"])
         finally:
             report = await teardown_run(context)
 

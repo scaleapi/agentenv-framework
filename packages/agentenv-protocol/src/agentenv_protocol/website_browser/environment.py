@@ -376,8 +376,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return {"tabs": await self.control.tab_list()}
 
     @extension(BROWSER, op="tabs/open")
-    async def browser_tabs_open(self, url: Optional[str] = None) -> dict:
-        return {"tab": await self.control.open_tab(url)}
+    async def browser_tabs_open(self, url: Optional[str] = None, background: bool = False) -> dict:
+        return {"tab": await self.control.open_tab(url, background)}
 
     @extension(BROWSER, op="tabs/activate")
     async def browser_tabs_activate(self, tab: str) -> dict:
