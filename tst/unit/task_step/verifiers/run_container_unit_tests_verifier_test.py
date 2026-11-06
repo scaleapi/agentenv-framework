@@ -453,3 +453,88 @@ def test_a_verifier_for_a_computer_that_cant_clear_the_reward_file_grades_nothin
 def test_a_verifier_naming_its_target_wrong_is_refused(fields, problem):
     with pytest.raises(ValueError, match=problem):
         Step(id="scrape", version=None, command="true", **fields)
+
+
+class _Config:
+    """The two config reads ``_merged_env`` makes for the model endpoint, and no headers."""
+
+    def get_litellm_api_key(self):
+        return "sk-platform"
+
+    def get_litellm_base_url(self):
+        return "https://proxy.example"
+
+    def resolve_reference(self, value):
+        return value.removeprefix("env:RESOLVED_") if isinstance(value, str) else value
+
+    def get_model_headers(self, base_url):
+        return {}
+
+
+@pytest.fixture
+def no_provider_env(monkeypatch):
+    monkeypatch.setattr(verifier_module, "all_sandbox_container_env", lambda: {})
+
+
+def test_a_run_launched_on_a_callers_key_grades_on_that_key(no_provider_env):
+    env = _step()._merged_env(_Config(), "modal", {}, {"litellm_api_key": "sk-caller"})
+    assert env["LITELLM_API_KEY"] == env["ANTHROPIC_API_KEY"] == "sk-caller"
+
+
+def test_a_runs_judge_key_wins_over_its_agent_key_as_in_the_rubrics_verifier(no_provider_env):
+    env = _step()._merged_env(_Config(), "modal", {},
+                              {"litellm_api_key": "sk-agent", "judge_litellm_api_key": "sk-judge"})
+    assert env["LITELLM_API_KEY"] == env["ANTHROPIC_API_KEY"] == "sk-judge"
+
+
+def test_a_run_key_given_as_a_reference_is_resolved(no_provider_env):
+    env = _step()._merged_env(_Config(), "modal", {}, {"litellm_api_key": "env:RESOLVED_sk-ref"})
+    assert env["LITELLM_API_KEY"] == "sk-ref"
+
+
+def test_a_run_without_its_own_key_or_url_keeps_the_platforms(no_provider_env):
+    env = _step()._merged_env(_Config(), "modal", {}, {"step_params": {}})
+    assert env["LITELLM_API_KEY"] == "sk-platform"
+    assert env["LITELLM_BASE_URL"] == env["ANTHROPIC_BASE_URL"] == "https://proxy.example"
+
+
+def test_a_run_endpoint_override_moves_the_url_too(no_provider_env):
+    env = _step()._merged_env(_Config(), "modal", {}, {"litellm_base_url": "https://other.example"})
+    assert env["LITELLM_BASE_URL"] == "https://other.example"
+
+
+def test_a_key_the_step_itself_sets_still_wins_over_the_runs(no_provider_env):
+    step = _step(env_vars={"LITELLM_API_KEY": "sk-step"})
+    env = step._merged_env(_Config(), "modal", {}, {"litellm_api_key": "sk-caller"})
+    assert env["LITELLM_API_KEY"] == "sk-step"
+
+
+def test_the_executed_verifier_hands_the_runs_key_to_its_container(local_stores, monkeypatch):
+    """Through ``execute``: the hub's worker puts the launcher's decrypted key in ``user_overrides``."""
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-platform")
+    configure()
+    commands: list[str] = []
+
+    class _Recording(_Sandbox):
+        async def exec_script(self, script: str) -> str:
+            commands.append(script)
+            return ""
+
+        async def exec_with_output(self, *args) -> tuple[int, str, str]:
+            commands.extend(a for a in args if isinstance(a, str))
+            return 0, "ok", ""
+
+    provider = SimpleNamespace(get_sandbox=lambda sandbox_id: asyncio.sleep(0, result=_Recording()))
+    monkeypatch.setattr(sandbox_provider, "get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(Step, "_upload_text_artifact", staticmethod(
+        lambda text, artifact_id, description, object_url: SimpleNamespace(
+            id=artifact_id, version=1, object_url=object_url)))
+    ctx = TaskStepContext()
+    ctx.metadata["deployed_docker_containers"] = [{"container_name": "c", "sandbox_name": "h"}]
+    ctx.deployed_sandboxes.append(DeployedSandbox(sandbox_name="h", sandbox_id="sb-1", sandbox_mode="vm"))
+    ctx.metadata["user_overrides"] = {"litellm_api_key": "sk-caller"}
+
+    asyncio.run(_step(command="true").execute(ctx))
+
+    sent = " ".join(commands)
+    assert "LITELLM_API_KEY=sk-caller" in sent and "sk-platform" not in sent

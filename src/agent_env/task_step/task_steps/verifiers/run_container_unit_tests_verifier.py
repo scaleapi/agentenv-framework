@@ -235,13 +235,14 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
 
         config = get_config()
         command, extra_env = self._resolve_command(context)
+        user_overrides = context.metadata.get("user_overrides") or {}
         if self.env_id is not None:
             target = self._computer(context)
-            target.env = self._merged_env(config, target.deployed.sandbox_type, extra_env)
+            target.env = self._merged_env(config, target.deployed.sandbox_type, extra_env, user_overrides)
             exit_code, stdout, stderr, extracted_files = await self._run_in_computer(target, command)
         else:
             sandbox = await self._container_sandbox(context)
-            merged_env = self._merged_env(config, sandbox.type, extra_env)
+            merged_env = self._merged_env(config, sandbox.type, extra_env, user_overrides)
             exit_code, stdout, stderr, extracted_files = await self._run_in_container(sandbox, merged_env, command)
         timed_out = exit_code in (124, 137)
         logger.info(
@@ -343,19 +344,28 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
 
         return context
 
-    def _merged_env(self, config, sandbox_type: Optional[str], extra_env: dict[str, str]) -> dict[str, str]:
-        """The commands' environment: the model endpoint's key and URL from agent-env's config, every sandbox
-        provider's container env, ``env_vars`` and this run's ``extra_env``, then the endpoint's headers, its URL as
-        ``sandbox_type``'s containers reach it."""
+    def _merged_env(
+        self, config, sandbox_type: Optional[str], extra_env: dict[str, str],
+        user_overrides: Optional[dict[str, Any]] = None,
+    ) -> dict[str, str]:
+        """The commands' environment: the model endpoint's key and URL, every sandbox provider's container env,
+        ``env_vars`` and this run's ``extra_env``, then the endpoint's headers, its URL as ``sandbox_type``'s
+        containers reach it. The key and URL are the run's own (``user_overrides`` ``litellm_api_key`` /
+        ``litellm_base_url``, as ``deploy_agent`` takes them; ``judge_litellm_api_key`` first, as ``rubrics_verifier``)
+        when it names them, else agent-env's config: a run
+        launched on a caller's key grades on that key and bills it, not the platform's."""
+        overrides = user_overrides or {}
         merged_env: dict[str, str] = {}
         try:
-            litellm_key = config.get_litellm_api_key()
+            # as rubrics_verifier: a judge key, when the run names one, then the run's own key
+            run_key = overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key")
+            litellm_key = config.resolve_reference(run_key) if run_key else config.get_litellm_api_key()
             merged_env["LITELLM_API_KEY"] = litellm_key
             merged_env["ANTHROPIC_API_KEY"] = litellm_key
         except (KeyError, ConfigError):
             logger.warning("LITELLM_API_KEY unavailable; verifier won't have LLM creds")
         try:
-            litellm_url = config.get_litellm_base_url()
+            litellm_url = overrides.get("litellm_base_url") or config.get_litellm_base_url()
             merged_env["LITELLM_BASE_URL"] = litellm_url
             merged_env["ANTHROPIC_BASE_URL"] = litellm_url
         except (KeyError, ConfigError):
