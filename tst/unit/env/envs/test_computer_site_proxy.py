@@ -8,12 +8,14 @@ import asyncio
 import base64
 import contextlib
 import email.message
+import importlib
 import io
 import json
 import os
 import socket
 import ssl
 import struct
+import sys
 import urllib.error
 from datetime import timedelta
 from pathlib import Path
@@ -697,6 +699,16 @@ def test_the_proxy_falls_back_when_pwd_is_unavailable(monkeypatch):
     assert site_proxy.serve_user("agent") == "agent"
     assert site_proxy.trust_nss("agent", "/fake/ca.pem") == []
     site_proxy.drop_privileges("agent")
+
+
+def test_the_proxy_imports_when_pwd_is_unavailable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pwd", None)
+    reloaded = importlib.reload(site_proxy)
+    try:
+        assert reloaded.pwd is None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(site_proxy)
 
 
 def test_keep_starts_serve_again_each_time_it_ends(monkeypatch):
