@@ -1,0 +1,68 @@
+import "./style.css";
+import { api, followUniverseClock, session, signIn, universeNow } from "./site-client.js";
+
+// The routes `agent-env env website new` made from the MCP server's tools. Each answers 501 until site.py writes it.
+const ROUTES = {{routes_json}};
+
+const $ = (id) => document.getElementById(id);
+
+function showError(error) {
+  $("error").textContent = error ? error.error || error.message : "";
+  $("error").hidden = !error;
+}
+
+function tick() {
+  const now = universeNow();
+  $("universe-now").textContent = `${now.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" })} UTC`;
+  $("universe-now").dateTime = now.toISOString();
+}
+
+function routeItem(route) {
+  const item = document.createElement("li");
+  item.className = "card";
+  const title = document.createElement("code");
+  title.textContent = `${route.method} ${route.path}`;
+  const about = document.createElement("p");
+  about.textContent = route.description || route.name;
+  const params = document.createElement("textarea");
+  params.rows = 2;
+  params.value = JSON.stringify(route.example, null, 0);
+  params.setAttribute("aria-label", `${route.name} parameters`);
+  const call = document.createElement("button");
+  call.textContent = "Call";
+  const out = document.createElement("pre");
+  call.addEventListener("click", async () => {
+    try {
+      const values = JSON.parse(params.value || "{}");
+      const query = new URLSearchParams(Object.entries(values).map(([k, v]) => [k, String(v)])).toString();
+      const answer = route.method === "GET"
+        ? await api(query ? `${route.path}?${query}` : route.path)
+        : await api(route.path, { method: route.method, body: values });
+      out.textContent = JSON.stringify(answer, null, 2);
+      showError(null);
+    } catch (error) {
+      out.textContent = "";
+      showError(error);
+    }
+  });
+  item.append(title, about, params, call, out);
+  return item;
+}
+
+async function start() {
+  const [signedIn, users] = await Promise.all([session(), api("api/users")]);
+  $("user").replaceChildren(...users.map((user) => new Option(user.name || user.id, user.id)));
+  $("user").value = signedIn.user ?? "";
+  $("user").addEventListener("change", (event) => signIn(event.target.value).then(() => showError(null), showError));
+
+  const list = document.createElement("ul");
+  list.id = "routes";
+  list.append(...ROUTES.map(routeItem));
+  $("app").append(list);
+
+  tick();
+  setInterval(tick, 1000);
+  followUniverseClock({ path: "api/users" });
+}
+
+start().catch(showError);

@@ -8,6 +8,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shutil
+import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -278,3 +280,28 @@ def test_the_built_page_loads_its_assets_and_api_under_the_gateways_prefix() -> 
     assert not [path for path in called if path.startswith("/")], called
     assert browser.get(urljoin(page_url, "api/session")).json()["user"] == "ann"
     assert [u["id"] for u in browser.get(urljoin(page_url, "api/users")).json()] == ["ann", "ben"]
+
+
+def test_the_page_uses_the_sdks_browser_client_as_the_package_ships_it() -> None:
+    shipped = Path(website.__code__.co_filename).parent / "client" / "site-client.js"
+    assert (NOTES_DIR / "web" / "src" / "site-client.js").read_text(encoding="utf-8") == shipped.read_text(encoding="utf-8")
+    assert 'from "./site-client.js"' in (NOTES_DIR / "web" / "src" / "main.js").read_text(encoding="utf-8")
+
+
+DROPPED_BODY = """
+globalThis.location = {href: "http://site.test/"};
+globalThis.fetch = async () => ({ok: false, status: 502, headers: {get: () => null},
+                                  text: async () => { throw new Error("connection reset"); }});
+const {api, ApiError} = await import(process.argv[1]);
+try { await api("api/notes"); } catch (error) {
+  console.log(JSON.stringify({isApiError: error instanceof ApiError, status: error.status, code: error.code}));
+}
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_the_browser_client_reports_a_body_lost_after_its_headers_as_a_network_api_error() -> None:
+    shipped = Path(website.__code__.co_filename).parent / "client" / "site-client.js"
+    out = subprocess.run(["node", "--input-type=module", "-e", DROPPED_BODY, shipped.as_uri()],
+                         capture_output=True, text=True, check=True).stdout
+    assert json.loads(out) == {"isApiError": True, "status": 502, "code": "network_error"}

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{title}}</title>
+    <script>
+      if (!location.pathname.endsWith("/")) { const url = new URL(location.href); url.pathname += "/"; location.replace(url.href); }
+    </script>
+  </head>
+  <body>
+    <header class="bar">
+      <h1>{{title}}</h1>
+      <div class="who">
+        <label>Signed in as
+          <select id="user" aria-label="Signed-in user"></select>
+        </label>
+        <time id="universe-now" title="The universe's time, from X-Universe-Now"></time>
+      </div>
+    </header>
+    <main>
+      <p id="error" role="alert" hidden></p>
+      <div id="app"></div>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
