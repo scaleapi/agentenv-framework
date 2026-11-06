@@ -122,7 +122,7 @@ def test_agent_config_reaches_the_cli(codex, calls):
         async with codex.client() as client:
             await client.post(AGENT_CONFIG_PATH, json={
                 "model": "gpt-x", "effort": "high", "system_prompt": "be brief",
-                "output_format": schema, "timeout_seconds": 42,
+                "output_format": schema, "timeout_seconds": 42, "max_turns": 45,
                 "project_id": "p-1", "task_id": "t-1",
             })
             await codex.send(client, "line one", context_id="ctx-cfg")
@@ -133,7 +133,7 @@ def test_agent_config_reaches_the_cli(codex, calls):
     call.pop("event_callback")
     assert call == {
         "prompt": "line one", "thread_id": None, "model": "gpt-x", "effort": "high",
-        "system_prompt": "be brief", "output_format": schema, "timeout_s": 42,
+        "system_prompt": "be brief", "output_format": schema, "timeout_s": 42, "max_turns": 45,
         "project_id": "p-1", "task_id": "t-1", "config_overrides": [],
     }
 

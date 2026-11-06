@@ -329,7 +329,7 @@ def test_unterminated_completion_at_deadline_wins_over_timeout(
         )
 
     events, _, timed_out, stalled = asyncio.run(exercise())
-    assert events[-1] == TURN_COMPLETED
+    assert {key: value for key, value in events[-1].items() if key != "timestamp"} == TURN_COMPLETED
     assert not timed_out and not stalled
 
 
