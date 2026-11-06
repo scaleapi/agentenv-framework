@@ -10,20 +10,26 @@ user message. Once the run ends, the rollout's reward is the task's reward of it
 applies (``agent_env.openenv.reward``: the score at the step id ``reward`` names, or the task's one score), and each
 score is a metric ``score/<step id>``.
 
+The system prompt and the tools are written once, at the start of the conversation, as the cookbook's renderers write
+them; a task whose turns change either is left out (``playable``), since its later turns would train under the first
+turn's instructions.
+
 An episode lives on the event loop that started it, so every rollout runs on ``rl.train``'s: set no rollout executor.
-A rollout the cookbook ends itself (a structural parse failure, the context or token limit) is scored too, once its
-group's rollouts are done: its turn ends with no reply, the verifiers score where the episode got to, and that score is
-added to the cookbook's own reward for the cut, ``failed_reward``. The metric ``cut`` is 1 for such a rollout."""
+A rollout the cookbook ends itself (a structural parse failure, the context or token limit) is scored the moment it is
+cut (``_ScoredWhenCut``): its turn ends with no reply, the verifiers score where the episode got to, that score is added
+to the cookbook's own reward for the cut, ``failed_reward``, and the episode's slot under ``max_concurrent_episodes`` is
+freed. The metric ``cut`` is 1 for such a rollout and 0 for the rest."""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import random
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 try:
     import chz
@@ -31,7 +37,8 @@ try:
     from tinker_cookbook.renderers import get_renderer
     from tinker_cookbook.renderers.base import Message, Renderer, ToolCall, ToolSpec, get_text_content
     from tinker_cookbook.rl.message_env import EnvFromMessageEnv, MessageEnv, MessageStepResult
-    from tinker_cookbook.rl.types import Env, EnvGroupBuilder, Metrics, RLDataset, RLDatasetBuilder, Trajectory
+    from tinker_cookbook.rl.types import (Action, ActionExtra, Env, EnvGroupBuilder, InitialObservationOverflow,
+                                          RLDataset, RLDatasetBuilder, StepResult)
 except ModuleNotFoundError as exc:
     if (exc.name or "").split(".")[0] not in ("chz", "tinker", "tinker_cookbook"):
         raise
@@ -63,7 +70,14 @@ def _slots(limit: int) -> asyncio.Semaphore:
 class EpisodeEnv(MessageEnv):
     """One episode of ``spec``'s task as a cookbook ``MessageEnv``: started at the first observation, played turn by
     turn, rewarded from its scores once the run ends. ``max_turns`` bounds the model's messages; at the bound the turn
-    ends with what the model last said, and every later turn with no reply, so the verifiers score where it got to."""
+    ends with what the model last said, and every later turn with no reply, so the verifiers score where it got to.
+
+    The episode holds a slot under ``max_concurrent_episodes`` from its start until its run is scored or abandoned, since
+    a run is containers of its own. The system prompt is the first turn's, written once; ``playable`` leaves out a task
+    whose later turns would change it."""
+
+    #: The most of an assistant message, a call's arguments or a tool's answer a step logs, in characters.
+    LOGGED_CHARS: ClassVar[int] = 2000
 
     def __init__(self, name: str, spec: EpisodeSpec, *, renderer: Renderer, reward: Reward, model_name: str,
                  sandbox: str | None, max_turns: int, tool_timeout: float, max_concurrent_episodes: int,
@@ -88,6 +102,11 @@ class EpisodeEnv(MessageEnv):
         self._messages = 0
         self._tool_calls = 0
         self._tool_errors = 0
+
+    @property
+    def scored(self) -> bool:
+        """Whether the episode's run has ended and been rewarded."""
+        return self._scored
 
     async def initial_observation(self) -> list[Message]:
         await _slots(self._max_concurrent).acquire()
@@ -122,7 +141,8 @@ class EpisodeEnv(MessageEnv):
         # A call whose arguments aren't an object can't run, so it isn't recorded: the turn runs every recorded call.
         await self._turn.record_model_call(
             _chat_message(text, [call for call in calls if isinstance(call[2], dict)]), model=self._model_name)
-        logs: dict[str, str | int | float] = {"task": self._name, "episode": self._episode.id, "assistant": text}
+        logs: dict[str, str | int | float] = {"task": self._name, "episode": self._episode.id,
+                                              "assistant": _clipped(text, self.LOGGED_CHARS)}
         for n, (call, call_id, arguments) in enumerate(calls):
             if isinstance(arguments, dict):
                 result = await self._run(call, call_id, arguments)
@@ -130,7 +150,8 @@ class EpisodeEnv(MessageEnv):
                 self._tool_errors += 1
                 result = _tool_message(call, call_id, "error: the arguments aren't a JSON object")
             self.history.append(result)
-            logs[f"tool_call_{n}"] = f"{call.function.name}({json.dumps(arguments)}) -> {str(result['content'])[:600]}"
+            logs[f"tool_call_{n}"] = (f"{call.function.name}({_clipped(json.dumps(arguments), self.LOGGED_CHARS)}) -> "
+                                      f"{_clipped(str(result['content']), self.LOGGED_CHARS)}")
         unparsed = message.get("unparsed_tool_calls") or []
         for each in unparsed:
             self._tool_errors += 1
@@ -183,8 +204,9 @@ class EpisodeEnv(MessageEnv):
         return _tool_message(call, call_id, f"error: {text}" if result.isError else text)
 
     async def score_cut(self) -> tuple[float, dict[str, float]]:
-        """The verifiers' reward for an episode whose rollout the cookbook cut, its open turn ended with no reply, and
-        the metric ``cut``; nothing for one ``step`` already rewarded."""
+        """The verifiers' reward for an episode whose rollout the cookbook cut, called the moment it is cut
+        (``_ScoredWhenCut``): its open turn ends with no reply, its run is scored and its slot freed. Nothing for an
+        episode ``step`` already rewarded."""
         if self._scored:
             return 0.0, {"cut": 0.0}
         try:
@@ -201,6 +223,7 @@ class EpisodeEnv(MessageEnv):
         while (turn := await self._episode.next_turn()) is not None:
             if self._messages < self._max_turns:
                 await self._open(turn)
+                # Only the prompt: the system prompt stays the first turn's, which ``playable`` checks every turn shares.
                 self.history.append({"role": "user", "content": turn.prompt})
                 return MessageStepResult(reward=0.0, episode_done=False, next_messages=self.history)
             await turn.end("")
@@ -219,7 +242,8 @@ class EpisodeEnv(MessageEnv):
         if reward is None:
             raise EpisodeError(f"episode {self._episode.id} recorded no score to make a reward of: {scores}")
         metrics = {f"score/{step}": score for step, score in scores.items()}
-        metrics |= {"messages": self._messages, "tool_calls": self._tool_calls, "tool_errors": self._tool_errors}
+        metrics |= {"messages": self._messages, "tool_calls": self._tool_calls, "tool_errors": self._tool_errors,
+                    "cut": 0.0}
         return reward, metrics, scores
 
     def _release(self) -> None:
@@ -233,6 +257,10 @@ def _arguments(call: ToolCall) -> Any:
         return json.loads(call.function.arguments or "{}")
     except json.JSONDecodeError:
         return None
+
+
+def _clipped(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[:limit]}… ({len(text) - limit} more characters)"
 
 
 def _chat_message(text: str, calls: list[tuple[ToolCall, str, dict]]) -> dict[str, Any]:
@@ -254,6 +282,31 @@ def _text(part: Any) -> str:
     if kind == "text":
         return part.get("text", "") if isinstance(part, dict) else part.text
     return f"[{kind} content]"
+
+
+class _ScoredWhenCut(EnvFromMessageEnv):
+    """The cookbook's adapter from an ``EpisodeEnv`` to its token-level ``Env``, scoring a rollout the moment it cuts it.
+
+    ``EnvFromMessageEnv`` ends a rollout itself, without calling the ``EpisodeEnv`` behind it, when a message runs past
+    the token limit, the response can't be parsed, or the conversation outgrows ``max_trajectory_tokens``. The episode
+    is then left with its turn open, still holding its containers and its slot under ``max_concurrent_episodes``. Left
+    until its group is done, such episodes can hold every slot while their groups' other rollouts wait for one, and
+    training stops. So the cut is scored here, where it happens, which frees the slot at once."""
+
+    async def initial_observation(self):
+        observation = await super().initial_observation()
+        if isinstance(observation, InitialObservationOverflow):  # the prompt alone is over the token budget
+            reward, metrics = await self.message_env.score_cut()
+            observation = dataclasses.replace(observation, reward=observation.reward + reward,
+                                              metrics={**observation.metrics, **metrics})
+        return observation
+
+    async def step(self, action: Action, *, extra: ActionExtra | None = None) -> StepResult:
+        result = await super().step(action, extra=extra)
+        if result.episode_done and not self.message_env.scored:  # the cookbook ended it, not the episode
+            reward, metrics = await self.message_env.score_cut()
+            result = dataclasses.replace(result, reward=result.reward + reward, metrics={**result.metrics, **metrics})
+        return result
 
 
 class EpisodeGroupBuilder(EnvGroupBuilder):
@@ -281,14 +334,10 @@ class EpisodeGroupBuilder(EnvGroupBuilder):
                                      max_concurrent_episodes=self.settings.max_concurrent_episodes,
                                      run_group_id=run_group_id)
             self._made.append(episode_env)
-            envs.append(EnvFromMessageEnv(renderer, episode_env, failed_parse_reward=self.settings.failed_reward,
-                                          context_overflow_reward=self.settings.failed_reward,
-                                          max_trajectory_tokens=self.settings.max_trajectory_tokens))
+            envs.append(_ScoredWhenCut(renderer, episode_env, failed_parse_reward=self.settings.failed_reward,
+                                       context_overflow_reward=self.settings.failed_reward,
+                                       max_trajectory_tokens=self.settings.max_trajectory_tokens))
         return envs
-
-    async def compute_group_rewards(self, trajectory_group: list[Trajectory],
-                                    env_group: Sequence[Env]) -> list[tuple[float, Metrics]]:
-        return list(await asyncio.gather(*(env.message_env.score_cut() for env in env_group)))
 
     async def cleanup(self) -> None:
         made, self._made = self._made, []
@@ -361,7 +410,7 @@ class AgentEnvDatasetBuilder(RLDatasetBuilder):
     ``all`` or an eval of the bundle. ``reward`` is the step id whose score is the reward, needed
     when a task records more than one. ``sandbox`` is where episodes deploy, as ``agent-env run --sandbox`` sets it,
     and ``max_concurrent_episodes`` bounds the runs under way at once. A rollout the cookbook ends itself is scored
-    once its group is done, and given ``failed_reward`` on top."""
+    as it is cut, and given ``failed_reward`` on top."""
 
     bundle: str
     run_name: str
@@ -421,13 +470,20 @@ def _splits(bundle: Path, splits: list[str], sandbox: str | None) -> dict[str, l
 def playable(tasks: list[tuple[str, Task]], reward: str | None,
               turn_timeout: float | None) -> list[tuple[str, EpisodeSpec, Reward]]:
     """Each task that can run as an episode, with its reward; the rest are logged and left out. Raises ValueError when
-    a task's scores make no reward, since a rollout must be rewarded, or when no task is left."""
+    a task's scores make no reward, since a rollout must be rewarded, or when no task is left.
+
+    A task whose turns don't share one system prompt is left out: the renderer writes the system prompt once, at the
+    start of the conversation, so its later turns would be sampled and trained under the first turn's instructions."""
     episodes, refused, unscorable = [], {}, {}
     for name, task in tasks:
         try:
             spec = EpisodeSpec.from_task(task, turn_timeout=turn_timeout)
         except EpisodeError as e:
             refused[name] = str(e)
+            continue
+        if len({system_prompt for _, system_prompt in spec.prompts}) > 1:
+            refused[name] = (f"task {task.id!r} changes the played agent's system prompt between turns, and the "
+                             "renderer writes the system prompt once, at the start of the conversation")
             continue
         task_reward, problem = reward_of(task, reward)
         if problem or not any(getattr(step, "verifier_id", None) for step in task.steps):
