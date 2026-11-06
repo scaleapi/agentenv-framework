@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import stat
-import sys
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -30,7 +29,6 @@ _ROLE_VARIABLE = "AGENTENV_ROLE"
 # Codex hands a stdio MCP server only a few of its own variables; these tell mcp-remote, a Node client, which
 # certificates to trust.
 _TRUST_ENV = ("NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE")
-MCP_IMAGES = Path(__file__).with_name("mcp_images.py")
 
 # The CLI version CodexTool names the tools of; a test holds it to package.json's @openai/codex.
 TOOLS_CLI_VERSION = "0.147.0"
@@ -237,8 +235,7 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
     """Build a codex `mcp_servers.<name>` config table.
 
     Wraps the URL in `mcp-remote` (stdio shim), a Node client that trusts the
-    certificates `_TRUST_ENV` names in the agent's environment, run through
-    `mcp_images.py` so the model sees the images tool results carry. Each header is passed
+    certificates `_TRUST_ENV` names in the agent's environment. Each header is passed
     as a `--header "Name: Value"` arg. The `AgentEnv-Role` header, which the env
     gateway filters tools by, is mcp-remote's `${AGENTENV_ROLE}`: the role the
     registration's own headers name, from the entry's env, unless a CLI run passes
@@ -246,7 +243,7 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
     concurrent turns of different roles share it.
     """
     registered = ""
-    args: list[str] = [str(MCP_IMAGES), "mcp-remote", url, "--allow-http"]
+    args: list[str] = [url, "--allow-http"]
     for k, v in (headers or {}).items():
         if k.lower() == ROLE_HEADER.lower():
             registered = v
@@ -254,7 +251,7 @@ def _server_entry(url: str, headers: dict[str, str] | None = None) -> dict[str, 
             args += ["--header", f"{k}: {v}"]
     args += ["--header", f"{ROLE_HEADER}: ${{{_ROLE_VARIABLE}}}"]
     return {
-        "command": sys.executable,
+        "command": "mcp-remote",
         "args": args,
         "env": {_ROLE_VARIABLE: registered},
         "env_vars": list(_TRUST_ENV),
