@@ -420,7 +420,8 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
     otherwise, after ``CARD_ATTEMPTS`` tries, rather than route the site by names it didn't declare.
     ``only`` keeps the websites of the envs it names, each of which must be deployed. Sites of different envs that
     share a name are each named for their env (``_env_qualified``), so they're routed apart, while two that claim one
-    domain are still refused."""
+    domain are still refused. A live site, whose params say ``live``, is never routed: the browser reaches it at its
+    real domains, and its server serves no pages."""
     from agentenv_protocol import client as protocol_v1
     from agentenv_protocol.website import WEBSITE_BROWSE_URL_PARAM, WEBSITE_EXTENSION_URI
 
@@ -443,6 +444,9 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
             params = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI)
             browse = params.get(WEBSITE_BROWSE_URL_PARAM)
             service = _served_as(child)
+            if params.get("live") is True:
+                named.add(service)
+                continue
             url = (_joined(address, browse) if isinstance(browse, str) and browse and address
                    else frontends.get(service))
             if url is None:
@@ -456,7 +460,8 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
                 card = {} if name in stored else await _site_card(protocol_v1, f"{gateway_url_of(record)}/svc/{name}",
                                                                    name)
                 params = protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI)
-                found.append((record.env_id, _found(name, url, params, stored.get(name))))
+                if params.get("live") is not True:
+                    found.append((record.env_id, _found(name, url, params, stored.get(name))))
     return _env_qualified(found)
 
 

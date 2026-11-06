@@ -32,6 +32,7 @@ capture holds one request twice, its first answer is served."""
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import dataclasses
 import datetime
@@ -479,10 +480,11 @@ class ReplayWebsite(WebsiteEnvironment):
 
     @add_data
     async def _replay_add(self, parts: list) -> None:
-        """Serve a capture among ``parts`` instead of the declared one; the rest go to ``add_site_data``."""
+        """Serve a capture among ``parts`` instead of the declared one, read in a worker thread so the site goes on
+        answering; the rest go to ``add_site_data``."""
         for part in parts:
             if _is_capture(part):
-                self.archive = Archive.read(await _capture_source(part), self.ignore_query)
+                self.archive = await asyncio.to_thread(Archive.read, await _capture_source(part), self.ignore_query)
         await _maybe_await(self.add_site_data([part for part in parts if not _is_capture(part)]))
 
     @reset_data

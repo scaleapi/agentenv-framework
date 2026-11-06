@@ -355,7 +355,9 @@ async def test_the_sites_a_run_deployed_are_read_from_each_gateways_records_and_
     cards = {"https://gw.example/svc/notes": {"capabilities": {"extensions": [
                  {"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}},
              "https://gw.example/svc/gh": {"capabilities": {"extensions": [
-                 {"uri": "urn:agentenv:website/v1", "params": {"domains": ["github.com"]}}]}}}
+                 {"uri": "urn:agentenv:website/v1", "params": {"domains": ["github.com"]}}]}},
+             "https://gw.example/svc/live": {"capabilities": {"extensions": [
+                 {"uri": "urn:agentenv:website/v1", "params": {"domains": ["gitlab.com"], "live": True}}]}}}
 
     async def get_card(url, timeout=10, verify=True):
         if url not in cards:
@@ -366,7 +368,7 @@ async def test_the_sites_a_run_deployed_are_read_from_each_gateways_records_and_
     from agent_env.env.env import DeployedGatewayEnv
     gateway = DeployedGatewayEnv(env_id="sites", env_version=1, sandbox_id="s", gateway_url="https://gw.example",
                                  website_frontend_urls={name: f"https://gw.example/website/{name}/"
-                                                        for name in ("notes", "gh", "legacy")})
+                                                        for name in ("notes", "gh", "legacy", "live")})
     computer = SimpleNamespace(env_id="desktop")
 
     found = await sites.deployed_sites([gateway, computer])
@@ -393,6 +395,9 @@ async def test_two_envs_each_serving_a_site_of_one_name_are_routed_apart_and_one
                                   gateway_url=f"https://{env_id}.example", environment_card=card)
 
     found = await sites.deployed_sites([gateway("team.a", "notes.test"), gateway("team-b", "notes.example")])
+    live = gateway("team-c", "github.com")
+    live.environment_card["children_environments"][0]["capabilities"]["extensions"][0]["params"]["live"] = True
+    assert await sites.deployed_sites([live]) == []
 
     assert [(s["name"], s["url"], s["domains"]) for s in found] == [
         ("team-a-notes", "https://team.a.example/website/notes/", ["notes.test"]),
