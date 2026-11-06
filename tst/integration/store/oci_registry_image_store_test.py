@@ -19,6 +19,7 @@ from agent_env.store import (
     OciRegistryImageStore,
     SecretStoreCredentials,
 )
+from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.store import image_conformance
 
 pytestmark = pytest.mark.integration
@@ -70,7 +71,7 @@ def authenticated_registry_host(tmp_path_factory):
         "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm",
         "-e",
         "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd",
-        "registry:2",
+        REGISTRY_IMAGE,
     )
     if start.returncode != 0:
         pytest.fail(f"could not start authenticated registry:2: {start.stderr.strip()}")

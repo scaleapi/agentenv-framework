@@ -27,6 +27,7 @@ from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.task import Task
 from agent_env.task.store import get_task_instance_store
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.task import journal_invariants as journal
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -71,9 +72,9 @@ def local_stack_at(monkeypatch: pytest.MonkeyPatch, path: Path):
 
     reg_port = _free_port()
     reg_name = f"par-e2e-registry-{uuid.uuid4().hex[:8]}"
-    if _docker("run", "-d", "--rm", "--name", reg_name,
-               "-p", f"127.0.0.1:{reg_port}:5000", "registry:2").returncode != 0:
-        pytest.skip("could not start registry:2")
+    start = _docker("run", "-d", "--rm", "--name", reg_name, "-p", f"127.0.0.1:{reg_port}:5000", REGISTRY_IMAGE)
+    if start.returncode != 0:
+        pytest.skip(f"could not start registry:2: {start.stderr.strip()}")
     host = f"localhost:{reg_port}"
     if not _wait_ready(f"http://{host}/v2/", (200, 401)):
         _docker("rm", "-f", reg_name)

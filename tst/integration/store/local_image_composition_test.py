@@ -23,6 +23,7 @@ from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config, set_image_store
 from agent_env.config.paths import state_root
 from agent_env.store.image_store import LocalRegistryImageStore
+from tst.integration.utils.registry import REGISTRY_IMAGE
 
 pytestmark = pytest.mark.integration
 
@@ -43,7 +44,7 @@ def _docker(*args):
 def all_local(monkeypatch, tmp_path):
     port = _free_port()
     name = f"local-composition-registry-{uuid.uuid4().hex[:8]}"
-    start = _docker("run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", "registry:2")
+    start = _docker("run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", REGISTRY_IMAGE)
     if start.returncode != 0:
         pytest.skip(f"could not start registry:2: {start.stderr.strip()}")
     host = f"localhost:{port}"
