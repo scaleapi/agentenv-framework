@@ -3,8 +3,7 @@ under ``WEBSITE_SESSION_SECRET``, which a deploy sets for each site so its sessi
 of the process's own when that isn't set. The cookie names no domain, so it holds under whatever host the site is
 reached at, and its lifetime is a ``Max-Age``, never an absolute ``Expires``, so the browser's clock and the site's
 needn't agree. Its name is the site's own, ``agentenv_session_<name>``, so two sites a browser reaches under one gateway
-host (``/website/a/``, ``/website/b/``) keep a session each; a site still reads the shared ``agentenv_session`` of
-older sites, for one release."""
+host (``/website/a/``, ``/website/b/``) keep a session each."""
 from __future__ import annotations
 
 import base64
@@ -67,11 +66,8 @@ class SessionSigner:
         return {"user": data.get("u")}
 
     def read(self, cookies: dict) -> dict | None:
-        """The session of a request's ``cookies``: its own cookie's, else the shared legacy cookie's."""
-        session = self.decode(cookies.get(self.cookie_name))
-        if session is None and self.cookie_name != SESSION_COOKIE:
-            session = self.decode(cookies.get(SESSION_COOKIE))
-        return session
+        """The session of a request's ``cookies``, from the site's own cookie."""
+        return self.decode(cookies.get(self.cookie_name))
 
     def cookie(self, user: str | None, ttl_s: int = SESSION_TTL_S) -> dict:
         """The cookie a browser adds to be signed in as ``user``, in browser/v1's shape with ``max_age`` for its

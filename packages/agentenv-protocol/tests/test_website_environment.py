@@ -403,7 +403,7 @@ def test_the_session_operation_mints_cookies_for_a_user_or_signed_out(shop: Webs
     assert TestClient(shop.asgi, cookies={COOKIE: signed_out}).get("/api/session").json()["user"] is None
 
 
-def test_each_site_keeps_its_own_session_cookie_and_reads_the_legacy_one(dist: Path, monkeypatch) -> None:
+def test_each_site_keeps_its_own_session_cookie(dist: Path, monkeypatch) -> None:
     monkeypatch.setenv("ENVIRONMENT_NAME", "shop a/1")
     first = site(dist)()
     monkeypatch.setenv("ENVIRONMENT_NAME", "shop-b")
@@ -420,8 +420,8 @@ def test_each_site_keeps_its_own_session_cookie_and_reads_the_legacy_one(dist: P
     assert TestClient(first.asgi, cookies=other.cookies).get("/api/session").json()["user"] == "bob"
     card = browser.get("/.well-known/agent-env.json").json()
     assert _extension(card, WEBSITE_EXTENSION_URI)["params"]["session_cookie"] == named
-    legacy = first._session_signer().encode("bob")
-    assert TestClient(first.asgi, cookies={SESSION_COOKIE: legacy}).get("/api/orders").json() == [{"id": 1, "user": "bob"}]
+    shared = first._session_signer().encode("bob")
+    assert TestClient(first.asgi, cookies={SESSION_COOKIE: shared}).get("/api/session").json()["user"] == "alice"
 
 
 def test_sites_whose_names_spell_alike_keep_their_own_cookies(dist: Path, monkeypatch) -> None:

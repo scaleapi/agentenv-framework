@@ -45,7 +45,6 @@ from .readiness import DEFAULT_HEALTH_PATH, WEBSITE_EXTENSION_URI, WEBSITE_READY
 Status = Literal["passed", "failed", "skipped", "warned"]
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
 CLOCK_SLACK_S = 120
-REQUIRED = ("card", "any_host", "health", "reserved_paths", "data_plane")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -109,17 +108,17 @@ class _Checker:
         card = card if isinstance(card, dict) else {}
         site = (find_extension(card, WEBSITE_EXTENSION_URI) or {}).get("params") or {}
         health = site.get("health") if isinstance(site.get("health"), str) else DEFAULT_HEALTH_PATH
-        steps = (("card", lambda: self._card(response, card, site)), ("any_host", self._any_host),
-                 ("health", lambda: self._health(card, health)), ("universe_now", self._universe_now),
-                 ("reserved_paths", self._reserved_paths), ("data_plane", lambda: self._data_plane(card)),
-                 ("clock", lambda: self._clock(card)), ("forwarded", lambda: self._forwarded(site)),
-                 ("cookies", lambda: self._cookies(site)))
-        outcomes = {name: _outcome(step) for name, step in steps if name != "universe_now"}
+        # (name, required, check): a recommended check's failure is warned.
+        steps = (("card", True, lambda: self._card(response, card, site)), ("any_host", True, self._any_host),
+                 ("health", True, lambda: self._health(card, health)), ("universe_now", False, self._universe_now),
+                 ("reserved_paths", True, self._reserved_paths), ("data_plane", True, lambda: self._data_plane(card)),
+                 ("clock", False, lambda: self._clock(card)), ("forwarded", False, lambda: self._forwarded(site)),
+                 ("cookies", False, lambda: self._cookies(site)))
+        outcomes = {name: _outcome(step) for name, _required, step in steps if name != "universe_now"}
         outcomes["universe_now"] = _outcome(self._universe_now)
         results = []
-        for name, _step in steps:
+        for name, required, _step in steps:
             status, detail = outcomes[name]
-            required = name in REQUIRED
             results.append(Result(name, "warned" if status == "failed" and not required else status, detail, required))
         return results
 
