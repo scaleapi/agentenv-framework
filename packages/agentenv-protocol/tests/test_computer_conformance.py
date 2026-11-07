@@ -34,6 +34,7 @@ from agentenv_protocol.computer import (  # noqa: E402
     type_text,
 )
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run_probe  # noqa: E402
+from agentenv_protocol.computer import _linux  # noqa: E402
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
 from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
@@ -174,6 +175,26 @@ async def test_a_driver_without_exec_or_data_add_passes_basic_and_leaves_full_un
     assert "the driver lacks ['urn:agentenv:computer-exec/v1', 'data/add']" in unverified[0].detail
     assert "urn:agentenv:computer-exec/v1" not in report.extensions
     assert report.extensions["urn:agentenv:computer/v1"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_a_windows_computer_is_probed_with_the_commands_windows_has(monkeypatch):
+    """Its exec checks run Python one-liners rather than a POSIX shell; here they run on this machine's python3."""
+    sent = []
+    run = _linux.run_in_session
+
+    async def recorded(argv, *args, **kwargs):
+        sent.append(list(argv))
+        return await run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(_linux, "run_in_session", recorded)
+    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="windows", arch="amd64")), "basic")
+
+    assert report.passed, _failed(report)
+    exec_checks = [c for c in report.checks if "urn:agentenv:computer-exec/v1" in c.extensions]
+    assert len(exec_checks) >= 4 and all(c.status == "passed" for c in exec_checks)
+    assert list(checks.WIN_ECHO) in sent and list(checks.WIN_SLEEP) in sent and list(checks.WIN_NOW) in sent
+    assert not [argv for argv in sent if argv[0] == "sh"]
 
 
 class NeverReady(FixtureDriver):
