@@ -437,7 +437,9 @@ def test_on_windows_a_call_waits_out_a_busy_or_briefly_absent_pipe_and_a_daemon_
 
     clock = iter(range(0, 100, 1))
     monkeypatch.setattr(module.time, "monotonic", lambda: next(clock))
-    monkeypatch.setattr(module, "open", lambda *a: (_ for _ in ()).throw(OSError(2, "No such file or directory")),
-                        raising=False)
+    def daemon_down(path, mode, buffering):
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(module, "open", daemon_down, raising=False)
     with pytest.raises(DeviceUnavailable, match="isn't answering"):
         module._piped({"method": "list"})
