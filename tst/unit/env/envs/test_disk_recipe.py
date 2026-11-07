@@ -595,8 +595,8 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
     assert exported[0].disk.read_bytes() == b"zstd:disk of /disk/disk.img"
     assert exported[0].disk.name.endswith(".img.zst") and exported[0].base is exported[0].guest is None
     assert [args[0] for args in ran] == ["login", "create", "cp", "image", "cp"] * 2
-    assert ran[0] == ("login", f"credentials for {first}") and ran[1][1:] == (
-        "--name", f"agentenv-export-{exported[0].disk.name.split('.')[0]}", "--platform", "linux/amd64", first, "disk")
+    assert ran[0] == ("login", f"credentials for {first}") and ran[1][1] == "--name"
+    assert ran[1][2].startswith("agentenv-export-") and ran[1][3:] == ("--platform", "linux/amd64", first, "disk")
     assert compressed[0] == ["docker", "run", "--rm", "-i", "--entrypoint", "zstd", "agentenv-qemu-launcher:src-1",
                              "-q", "-3", "-T0", "-c"] and len(compressed) == 2
     assert sorted(p.name for p in exported[0].disk.parent.iterdir()) == sorted({exported[0].disk.name,
@@ -638,6 +638,37 @@ def test_an_export_killed_outright_leaves_nothing_behind_once_the_disk_is_export
 
     assert events[:2] == [("rm", "-f"), ("create", "--name")] and events[-1] == ("rm", "-f")
     assert sorted(path.name for path in disks.iterdir()) == [exported.disk.name, exported.disk.name + ".guest"]
+
+
+def test_two_users_exports_of_one_disk_through_one_docker_name_their_containers_apart(tmp_path, monkeypatch):
+    """Each holds a lock of its own, so neither clears the other's container."""
+    monkeypatch.setattr(local_disk, "launcher", lambda: "agentenv-qemu-launcher:src-1")
+    monkeypatch.setattr(local_disk, "get_config", lambda: SimpleNamespace(get_image_store=lambda: SimpleNamespace(
+        auth=lambda ref: None)))
+    monkeypatch.setattr(local_disk, "docker_login", lambda auth: None)
+    created = []
+
+    def docker(*args):
+        if args[0] == "create":
+            created.append(args[2])
+        if args[0] == "cp":
+            Path(args[2]).write_bytes(b"disk")
+        return "1 sha256:linux" if args[0] == "image" else ""
+
+    def run(argv, stdin=None, stdout=None, **kwargs):
+        if argv[:2] == ["docker", "run"]:
+            stdout.write(stdin.read())
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(local_disk, "docker", docker)
+    monkeypatch.setattr(local_disk.subprocess, "run", run)
+    image = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
+
+    for user in ("one", "two"):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / user / "cache"))
+        local_disk.exported_disk(image, "linux/amd64")
+
+    assert len(set(created)) == 2
 
 
 def test_an_export_that_cant_copy_a_disks_guest_file_fails_rather_than_cache_the_disk_without_it(tmp_path,

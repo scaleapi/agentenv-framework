@@ -94,8 +94,10 @@ def _export(image: str, platform: str, path: Path) -> None:
     here; for ``platform``, as the image's index holds that one alone, which a pull for this machine's wouldn't find.
     The disk is placed last, so one that's there was exported whole, with its base and guest file. Its work folder and
     container are named for ``path`` and cleared first, under its lock, so an export killed outright leaves no copy of
-    a base behind once the disk is exported again."""
-    work, container = path.with_name(path.name + ".work"), f"agentenv-export-{path.name.split('.')[0]}"
+    a base behind once the disk is exported again; the container by the folder's whole path, as another user's export
+    of the same disk through this machine's Docker holds a lock of its own."""
+    work = path.with_name(path.name + ".work")
+    container = f"agentenv-export-{hashlib.sha256(str(work).encode()).hexdigest()[:24]}"
     _cleared(work, container)
     work.mkdir(parents=True)
     docker_login(get_config().get_image_store().auth(image))
