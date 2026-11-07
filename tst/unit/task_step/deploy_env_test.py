@@ -521,9 +521,11 @@ _SHARED = "runs on the multi env's own sandbox, which the step's own fields set,
     ({"email": {"env_params": {"form": "container"}}}, f"child_envs.email: email {_SHARED}"),
     ({"email": {"ttl_seconds": 60, "gateway_mode": "consistent"}}, f"child_envs.email: {_ENTRY} gateway_mode, ttl_seconds"),
     ({"email": "big"}, f"child_envs.email: {_ENTRY} a str"),
+    ({"email": {1: "a", "b": 2}}, f"child_envs.email: {_ENTRY} 1, b"),
     ({"email": {}, "shop": {}}, f"child_envs.email: email {_SHARED}; child_envs.shop: shop {_SHARED}"),
     (["email"], "child_envs is a table of child env names, not list"),
-], ids=["unknown-name", "website", "mcp-server-params", "whole-env-fields", "not-a-table", "each-named", "not-a-table-of-names"])
+], ids=["unknown-name", "website", "mcp-server-params", "whole-env-fields", "not-a-table", "keys-of-two-types", "each-named",
+     "not-a-table-of-names"])
 def test_preflight_names_the_child_env_each_problem_is_with(child_envs, problem):
     assert _preflight(_multi_env(), child_envs=child_envs) == [f"deploy_env 'd': {problem}"]
 

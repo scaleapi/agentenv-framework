@@ -194,7 +194,7 @@ class MultiEnv(Env):
         names = list(dict.fromkeys(env.environment_name for env in (*self.mcp_server_envs, *self.website_envs)))
         problems = []
         for name, entry in child_envs.items():
-            extra = sorted(set(entry) - set(CHILD_ENV_OPTIONS)) if isinstance(entry, dict) else []
+            extra = sorted(map(str, set(entry) - set(CHILD_ENV_OPTIONS))) if isinstance(entry, dict) else []
             if name not in names:
                 problems.append(f"child_envs.{name}: env '{self.id}' has no child env named {name!r}; its child envs "
                                 f"are {', '.join(names)}")
