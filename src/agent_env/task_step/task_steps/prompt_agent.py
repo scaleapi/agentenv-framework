@@ -1083,7 +1083,7 @@ class _UserSide:
         try:
             # A user-sim runs in a sandbox agent-env deployed; a human peer, registered or named by
             # user_a2a_url, has none and reads the store itself.
-            _, user_result = await send_and_wait(
+            user_task_id, user_result = await send_and_wait(
                 self._url, agent_parts,
                 agent=self._user_sim if self._is_user_sim and self._user_sim.sandbox_id else None,
                 shareable=self._shareable, message_id=user_a2a_task_id, context_id=self._conversation_id,
@@ -1093,6 +1093,9 @@ class _UserSide:
         except TimeoutError as e:
             logger.warning(f"user_a2a_url timeout for conversation {self._conversation_id} ({e}); marking abandoned")
             return {"end": "user_timeout"}
+
+        if self._is_user_sim:
+            await self._save_user_sim_trajectory(number, user_task_id, user_a2a_task_id)
 
         user_state = (user_result.get("status") or {}).get("state")
         if user_state != TaskState.completed:
@@ -1122,6 +1125,27 @@ class _UserSide:
             logger.info(f"user-sim signaled done=true at turn {number}; ending multi-turn")
             return {"end": "user_done"}
         return {"message": [{"kind": "text", "text": message_text}]}
+
+    async def _save_user_sim_trajectory(self, number: int, user_task_id: str, user_a2a_task_id: str) -> None:
+        """Store the user-sim's own trajectory for this answer, when its card serves one, and record where it went.
+        Best-effort: a failed fetch is logged and the conversation goes on."""
+        card = self._user_sim.a2a_card or {}
+        traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        if not traj_ext:
+            return
+        prefix = self._step._trajectory_prefix().rstrip("/") + "/usersim/"
+        try:
+            url = await self._step._fetch_trajectory(
+                self._url, traj_ext, user_task_id, prefix, user_a2a_task_id,
+                card=card, sandbox_type=self._user_sim.sandbox_type,
+            )
+        except Exception as e:
+            logger.warning(f"user-sim trajectory fetch at turn {number} failed (continuing): {e}")
+            return
+        if url is None:
+            logger.warning(f"user-sim trajectory fetch at turn {number} returned no trajectory; nothing stored")
+            return
+        self._record("usersim_trajectories", {"turn": number, "a2a_task_id": user_a2a_task_id, "url": url})
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
