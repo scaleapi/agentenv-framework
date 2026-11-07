@@ -1,8 +1,11 @@
 #!/bin/bash
-# launch: boot a Linux computer's disk form under QEMU until it powers off, on a copy-on-write overlay so the disk stays
-# as it is: with KVM when /dev/kvm is here and the disk is this machine's arch, else with TCG, from UEFI firmware. The
-# guest's console is this process's output.
-#   VM_DISK        the disk, /disk/disk.img by default; one ending .zst is expanded onto this machine's disk first
+# launch: boot a computer's disk form under QEMU until it powers off, on a copy-on-write overlay so the disk stays as it
+# is: with KVM when /dev/kvm is here and the disk is this machine's arch, else with TCG, from UEFI firmware. The guest's
+# console is this process's output. The guest is what the guest file beside the disk names, linux when there's none; a
+# windows guest, which has no virtio drivers, boots from secure-boot UEFI with Microsoft's keys and a fresh TPM 2.0,
+# its disk and seed on AHCI, an e1000e NIC, a 1920x1080 display and, under KVM, Hyper-V enlightenments.
+#   VM_DISK        the disk, /disk/disk.img by default, which may be backed by another beside it; one ending .zst is
+#                  expanded onto this machine's disk first
 #   VM_ENV_<NAME>  the computer's variable NAME, its value base64'd, for its NoCloud seed (CIDATA; see seed)
 #   VM_PORTS       guest TCP ports, each served on the same port here by socat, whose listen backlog takes a burst of
 #                  connections, in front of QEMU's forward on 127.0.0.1 at the port plus 10000, whose backlog is 1;
@@ -39,6 +42,8 @@ fi
 here=$(dpkg --print-architecture)
 arch=${VM_ARCH:-$here}
 disk=${VM_DISK:-/disk/disk.img}
+guest=linux
+[ -s "$(dirname "$disk")/guest" ] && guest=$(cat "$(dirname "$disk")/guest")
 work=$state/boot
 mkdir -p "$control"
 rm -f "$control/qemu.pid" "$control/reset" "$control/next.env"
@@ -50,11 +55,24 @@ elif [ -n "${VM_REQUIRE_KVM:-}" ]; then
          "($([ -e /dev/kvm ] && echo "/dev/kvm isn't writable" || echo "there's no /dev/kvm"))" >&2
     exit 3
 fi
-case "$arch" in
-    amd64) machine=(qemu-system-x86_64 -machine "q35,accel=$accel"
-                    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd) ;;
-    arm64) machine=(qemu-system-aarch64 -machine "virt,accel=$accel"
-                    -drive if=pflash,format=raw,readonly=on,file="$work/code.fd") ;;
+case "$guest/$arch" in
+    linux/*) ;;
+    windows/amd64) [ "$accel" = kvm ] && cpu=host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_time ;;
+    windows/*)
+        echo "launch: a windows guest boots on amd64 alone, not $arch" >&2
+        exit 2 ;;
+    *)
+        echo "launch: no guest $guest" >&2
+        exit 2 ;;
+esac
+case "$guest/$arch" in
+    windows/amd64) machine=(qemu-system-x86_64 -machine "q35,smm=on,accel=$accel"
+                            -global driver=cfi.pflash01,property=secure,value=on
+                            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd) ;;
+    */amd64) machine=(qemu-system-x86_64 -machine "q35,accel=$accel"
+                      -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd) ;;
+    */arm64) machine=(qemu-system-aarch64 -machine "virt,accel=$accel"
+                      -drive if=pflash,format=raw,readonly=on,file="$work/code.fd") ;;
     *)
         echo "launch: no architecture $arch" >&2
         exit 2 ;;
@@ -85,17 +103,28 @@ boot() {
     seed "$work/seed"
     mkfs.vfat -C -n CIDATA "$work/seed.img" 2048 >/dev/null
     mcopy -i "$work/seed.img" "$work/seed/"* ::/
-    if [ "$arch" = amd64 ]; then
-        cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
+    if [ "$guest" = windows ]; then
+        cp /usr/share/OVMF/OVMF_VARS_4M.ms.fd "$work/vars.fd"
+        mkdir "$work/tpm"
+        swtpm socket --tpm2 --tpmstate dir="$work/tpm" --ctrl type=unixio,path="$work/tpm.sock" --daemon --terminate
+        devices=(-chardev socket,id=tpm,path="$work/tpm.sock" -tpmdev emulator,id=tpm,chardev=tpm
+                 -device tpm-tis,tpmdev=tpm
+                 -drive file="$work/disk.qcow2",format=qcow2,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0
+                 -drive file="$work/seed.img",format=raw,if=none,id=seed -device ide-hd,drive=seed,bus=ide.1
+                 -device e1000e,netdev=net -vga none -device VGA,xres=1920,yres=1080)
     else
-        cp /usr/share/AAVMF/AAVMF_CODE.fd "$work/code.fd"
-        truncate -s 64M "$work/code.fd" "$work/vars.fd"
+        if [ "$arch" = amd64 ]; then
+            cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
+        else
+            cp /usr/share/AAVMF/AAVMF_CODE.fd "$work/code.fd"
+            truncate -s 64M "$work/code.fd" "$work/vars.fd"
+        fi
+        devices=(-drive file="$work/disk.qcow2",format=qcow2,if=virtio
+                 -drive file="$work/seed.img",format=raw,if=virtio,readonly=on
+                 -device virtio-net-pci,netdev=net -device virtio-rng-pci)
     fi
     "${machine[@]}" -cpu "$cpu" -smp "${VM_CPUS:-2}" -m "${VM_MEMORY_MB:-4096}" \
-        -drive if=pflash,format=raw,file="$work/vars.fd" \
-        -drive file="$work/disk.qcow2",format=qcow2,if=virtio \
-        -drive file="$work/seed.img",format=raw,if=virtio,readonly=on \
-        -netdev "user,id=net$forwards" -device virtio-net-pci,netdev=net -device virtio-rng-pci \
+        -drive if=pflash,format=raw,file="$work/vars.fd" -netdev "user,id=net$forwards" "${devices[@]}" \
         -display none -serial stdio -no-reboot &
     echo "$!" > "$control/qemu.pid"
 }

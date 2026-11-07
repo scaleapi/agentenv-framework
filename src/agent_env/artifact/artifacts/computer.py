@@ -39,6 +39,9 @@ FORMS = ("container", "disk", "vm_bundle")
 LOCAL_IMAGE_PREFIX = "local:"
 #: The file a disk form's image holds, as KubeVirt's containerDisk has it, owned by the uid its QEMU runs as.
 DISK_FILE, DISK_OWNER = "disk/disk.img", 107
+#: A thin disk's base, in a layer of its own below ``DISK_FILE``'s, and the guest its launcher boots it as (``windows``),
+#: in ``DISK_FILE``'s layer.
+DISK_BASE_FILE, DISK_GUEST_FILE = "disk/base.img", "disk/guest"
 #: What a setting holds: its default's type, which a value an env or a deploy gives must share.
 SettingValue = str | int | float | bool
 

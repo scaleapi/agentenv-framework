@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from agent_env.artifact.artifacts.computer import DISK_FILE
+from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_GUEST_FILE
 from agent_env.artifact.artifacts.docker_image import docker_login
 from agent_env.config import get_config
 from agent_env.config.paths import cache_root
@@ -30,13 +30,23 @@ def kvm_platforms() -> frozenset[str]:
 
 
 async def machine_image(disk: str) -> str:
-    """An image of the launcher holding ``disk``'s ``DISK_FILE`` for this machine's platform, built unless held."""
+    """An image of the launcher holding ``disk``'s files for this machine's platform, built unless held. A disk of more
+    than one layer is a thin one on ``DISK_BASE_FILE``, which gets a step of its own, so every machine on that base
+    shares one copy of it."""
     launcher = await asyncio.to_thread(_launcher)
     tag = "agentenv-vm:" + hashlib.sha256(f"{launcher} {disk}".encode()).hexdigest()[:16]
     if not await asyncio.to_thread(present, tag):
-        folder = f"/{PurePosixPath(DISK_FILE).parent}/"
-        await asyncio.to_thread(_build, f"FROM {launcher}\nCOPY --from={disk} {folder} {folder}\n", tag)
+        layers = int(await asyncio.to_thread(docker, "image", "inspect", "-f", "{{len .RootFS.Layers}}", disk))
+        await asyncio.to_thread(_build, _machine_dockerfile(launcher, disk, layers), tag)
     return tag
+
+
+def _machine_dockerfile(launcher: str, disk: str, layers: int) -> str:
+    folder = f"/{PurePosixPath(DISK_FILE).parent}/"
+    if layers == 1:
+        return f"FROM {launcher}\nCOPY --from={disk} {folder} {folder}\n"
+    return (f"FROM {launcher}\nCOPY --from={disk} /{DISK_BASE_FILE} /{DISK_BASE_FILE}\n"
+            f"COPY --from={disk} /{DISK_FILE} /{DISK_GUEST_FILE} {folder}\n")
 
 
 def launcher_args(ports: list[int], env: dict[str, str], cpu: float, memory: int) -> list[str]:
