@@ -87,7 +87,8 @@ WIN_RMDIR = ("python3", "-c", "import os,sys;p=sys.argv[1];os.path.isdir(p) and 
 WIN_START = ("python3", "-c", "import subprocess,sys;log=open(sys.argv[3],'wb');print(subprocess.Popen("
              "[sys.executable,sys.argv[1],sys.argv[2]],stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL,"
              "creationflags=0x08000200).pid)")
-WIN_OWNER = ("powershell", "-NoProfile", "-Command", "(Get-Acl -LiteralPath $args[0]).Owner")
+#: A file's owner, its path in the command, since PowerShell takes what follows -Command as more of the command.
+WIN_OWNER = "(Get-Acl -LiteralPath '{}').Owner"
 #: The well-known SID of the local Administrators group, which an unprivileged user's token holds no enabled entry of.
 ADMINISTRATORS = "S-1-5-32-544"
 #: The checks only ``full`` runs, recorded unverified when the fixture can't be staged.
@@ -636,7 +637,8 @@ class Probe:
     async def _security(self) -> None:
         async def one_account() -> str | None:
             account = (await self.driver.run("whoami"))["stdout"].strip()
-            owner = (await self.driver.run(*WIN_OWNER, f"{STAGE}/{self.fixture}"))["stdout"].strip()
+            owner = (await self.driver.run("powershell", "-NoProfile", "-Command",
+                                           WIN_OWNER.format(f"{STAGE}/{self.fixture}")))["stdout"].strip()
             groups = (await self.driver.run("whoami", "/groups"))["stdout"]
             if any(ADMINISTRATORS in line and "Enabled group" in line for line in groups.splitlines()):
                 return f"commands run as {account}, an administrator"

@@ -99,6 +99,8 @@ NAMED = {
 SKILL_TIMEOUT_S = 60
 #: The largest reply the daemon sends: a screenshot of a large display, base64.
 REPLY_LIMIT = 64 << 20
+#: Windows' error for a named pipe whose every instance is taken, and how long a call waits for one to free.
+PIPE_BUSY, PIPE_WAIT_S = 231, 10.0
 
 
 @computer_driver(name="cua-driver",
@@ -296,11 +298,17 @@ async def _request(payload: dict) -> dict:
 
 
 def _piped(payload: dict) -> dict:
-    """``_request`` on Windows, over the daemon's named pipe, which a thread waits on."""
-    try:
-        pipe = open(SOCKET, "r+b", buffering=0)
-    except OSError as e:
-        raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
+    """``_request`` on Windows, over the daemon's named pipe, which a thread waits on. A pipe whose every instance is
+    taken refuses the open, where a Unix socket queues the connection, so a burst of calls waits for one to free."""
+    deadline = time.monotonic() + PIPE_WAIT_S
+    while True:
+        try:
+            pipe = open(SOCKET, "r+b", buffering=0)
+            break
+        except OSError as e:
+            if getattr(e, "winerror", None) != PIPE_BUSY or time.monotonic() > deadline:
+                raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
+            time.sleep(0.01)
     with pipe:
         try:
             pipe.write((json.dumps(payload) + "\n").encode())
