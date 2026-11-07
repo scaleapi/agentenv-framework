@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_GUEST_FILE, DISK_OWNER
+from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_OWNER
 from agent_env.config.paths import cache_root
 from agent_env.env.envs.computer.utils.install import WindowsInstall
 from agent_env.providers.sandbox_providers.host_images import SOURCES_LABEL, present
@@ -255,7 +255,7 @@ def _installed_part(part: Part) -> list[str]:
     if install.python is not None or part.wants:
         venv = prefix / "venv"
         lines.append(f"Checked {{ & '{PYTHON}' -m venv '{venv}' }}")
-        wants = [*((f"-r", str(prefix / PureWindowsPath(install.python))) if install.python else ()), *part.wants]
+        wants = [*(("-r", str(prefix / PureWindowsPath(install.python))) if install.python else ()), *part.wants]
         lines.append(f"Checked {{ & '{venv / 'Scripts' / 'python.exe'}' -m pip install -q --disable-pip-version-check "
                      + " ".join(_ps(want) for want in wants) + " }")
         lines.append(f"Checked {{ & '{venv / 'Scripts' / 'python.exe'}' -m pip list --format=json | "
