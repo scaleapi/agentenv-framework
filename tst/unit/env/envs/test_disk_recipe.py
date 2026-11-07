@@ -367,7 +367,7 @@ def test_a_windows_install_boots_its_iso_first_pressing_enter_and_finds_its_answ
     (answers / "autounattend.xml").write_text("<unattend/>")
 
     running = launch(VM_KEEP=str(out / "base.img"), VM_DISK=str(tmp_path / "none.img"), VM_MEDIA="/in/win11.iso",
-                     VM_FILES=str(answers))
+                     VM_FILES=str(answers), SOCAT_EXITS_S="0")
 
     (qemu,) = _logged(calls, "qemu-system-x86_64")
     assert ("-drive file=/in/win11.iso,format=raw,if=none,id=media,media=cdrom,readonly=on"
@@ -378,6 +378,9 @@ def test_a_windows_install_boots_its_iso_first_pressing_enter_and_finds_its_answ
     assert _logged(calls, "mcopy -s")[0].startswith(f"mcopy -s -i {tmp_path}/state/boot/files.img {answers}/")
     running.terminate()
     assert running.wait(10) == 143
+    pressed = calls.read_text().count("socat - UNIX-CONNECT:")
+    time.sleep(1.5)
+    assert calls.read_text().count("socat - UNIX-CONNECT:") == pressed, "Enter is still pressed after the launcher exits"
 
 
 def test_install_media_is_for_a_windows_guest(launcher):
