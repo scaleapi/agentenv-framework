@@ -167,7 +167,7 @@ async def test_each_app_a_driver_fronts_that_exports_is_asked_for_its_export_onc
 
 @pytest.mark.asyncio
 async def test_a_driver_without_exec_or_data_add_passes_basic_and_leaves_full_unverified():
-    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="windows")))
+    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="freebsd")))
     assert report.passed, _failed(report)
     unverified = [c for c in report.checks if c.status == "unverified"]
     assert {c.check for c in unverified} == {"P3", "P4", "P5", "P6", "P7", "P9"}
