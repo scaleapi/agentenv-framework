@@ -31,7 +31,7 @@ from typing import Any
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_GUEST_FILE, DISK_OWNER
 from agent_env.config.paths import cache_root
 from agent_env.env.envs.computer.utils.install import WindowsInstall
-from agent_env.providers.sandbox_providers.host_images import present
+from agent_env.providers.sandbox_providers.host_images import SOURCES_LABEL, present
 from agent_env.providers.sandbox_providers.local_docker.cli import docker
 from agent_env.providers.sandbox_providers.local_docker.disk import KVM, launcher, machine_image
 from agent_env.store.local_state import holding_locks
@@ -366,7 +366,9 @@ def _pack(folder: Path, image: str, labels: dict[str, str], base_image: str | No
     for name in ("answers", "out"):
         shutil.rmtree(folder / name, ignore_errors=True)
     (folder / "Dockerfile").write_text(dockerfile)
-    build_image(folder / "Dockerfile", folder, image, platform="linux/amd64", labels=labels)
+    # Labelled as built here from its key, so a deploy boots this machine's image and pulls none of the name.
+    build_image(folder / "Dockerfile", folder, image, platform="linux/amd64",
+                labels={**labels, SOURCES_LABEL: labels[KEY_LABEL]})
 
 
 def _tarred(folder: Path) -> bytes:
