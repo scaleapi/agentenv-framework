@@ -13,6 +13,7 @@ from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
+from agentenv_protocol.website_browser import BROWSER, LOADED, start_tab_why
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
@@ -191,13 +192,16 @@ async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sa
                        params: computer_params.ComputerParams, valid_for_s: int,
                        resolution: Optional[str]) -> Optional[dict]:
     """What a deploy and a reset do once the computer's driver answers, in order: with ``site_routing``, the sites
-    routed and the held boot apps launched, the computer then ready; then its display checked. What the record keeps
-    of the routing, or None without it."""
+    routed, each browser handed their names and the held boot apps launched, the computer then ready; then its display
+    checked; then each browser's start tabs read into the record, the boot failing on one on a site of the env's that
+    didn't load. What the record keeps of the routing, or None without it."""
     routed = None
     if params.site_routing:
         routed = await _route_sites(env, sandbox, params, valid_for_s)
-        await _launch_held_apps(env, record, record.environment_url)
+        await _launch_held_apps(env, record, record.environment_url, params.sites)
     await _require_display(record, resolution)
+    if start_tabs := await _start_tabs(record):
+        record.metadata["computer"]["start_tabs"] = start_tabs
     return routed
 
 
@@ -210,12 +214,14 @@ async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_para
     return {**routed, "valid_for_s": valid_for_s}
 
 
-async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: str) -> None:
+async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: str,
+                            routed: list[computer_params.Site]) -> None:
     """Launch each app that starts with the computer, whose launch a deploy routing sites holds until the sites' names,
-    CA and proxy are in place, through its ``computer-app/v1`` ``launch`` once the computer lists it with its server,
-    then wait until the computer is ready, which its boot only waited to answer; the record keeps the card the computer
-    answers then, as its boot's card may list an app by its name alone. Each is launched as the child its card lists,
-    as a computer named for its app, a browser alone, has that name too."""
+    CA and proxy are in place, through its ``computer-app/v1`` ``launch`` once the computer lists it with its server, a
+    website browser first handed the ``routed`` sites, then wait until the computer is ready, which its boot only
+    waited to answer; the record keeps the card the computer answers then, as its boot's card may list an app by its
+    name alone. Each is launched as the child its card lists, as a computer named for its app, a browser alone, has
+    that name too."""
     os_type = env.computer.os.type
     timeout = ready_timeout(env.composed_apps(), os_type)
     held = [app for app in env.composed_apps() if (launch := app.launch(os_type)) is not None and launch.at == "boot"]
@@ -225,9 +231,47 @@ async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: s
         launchers = {child.name: child for child in protocol_v1.children(record.environment_card)
                      if protocol_v1.find_extension_method(child.card, COMPUTER_APP, "launch") is not None}
     for app in held:
+        await _hand_sites(record, launchers[app.environment_name], routed)
         await record.invoke(COMPUTER_APP, "launch", child=launchers[app.environment_name])
     record.environment_card = await ready(url, timeout, record.control_token)
     record.environment_card_read_at_utc = datetime.now(timezone.utc).isoformat()
+
+
+async def _hand_sites(record: DeployedSandboxEnv, child: protocol_v1.ChildEnv,
+                      routed: list[computer_params.Site]) -> None:
+    """The ``routed`` sites, by name and domains, handed to the website browser ``child`` is, through ``browser/v1``'s
+    ``sites/set``, so its start tabs on them must load; a browser built before it took them is told nothing, its start
+    tabs on them waited on as any live one's."""
+    if child.find_extension(BROWSER) is None:
+        return
+    try:
+        await record.invoke(BROWSER, "sites/set", {"sites": [{"name": site.name, "domains": site.domains}
+                                                            for site in routed if site.domains]}, child=child)
+    except EnvCapabilityUnsupported:
+        logger.warning(f"the website browser {child.name} in {record.env_id} serves no browser/v1 sites/set, so its "
+                       "start tabs on the env's sites are waited on as live ones")
+
+
+async def _start_tabs(record: DeployedSandboxEnv) -> dict[str, list[dict]]:
+    """Each website browser's start tabs as its latest launch loaded them, by its name: the computer's own card's, for
+    a browser alone, or a child's; a browser that keeps none, built before it did, left out. RuntimeError naming each
+    start tab on one of the env's sites that didn't load."""
+    card = record.environment_card or {}
+    browsers = ([(card.get("name") or record.env_id, None)] if protocol_v1.find_extension(card, BROWSER) else []) \
+        + [(child.name, child) for child in protocol_v1.children(card) if child.find_extension(BROWSER) is not None]
+    kept: dict[str, list[dict]] = {}
+    for name, child in browsers:
+        try:
+            launches = (await record.invoke(BROWSER, "record", child=child)).get("start_tabs") or []
+        except EnvCapabilityUnsupported:
+            continue
+        if launches:
+            kept[name] = launches[-1]["tabs"]
+    if failed := [f"{name}'s start tab {tab['url']} on the env's site {tab['site']} {start_tab_why(tab)}"
+                  for name, tabs in kept.items() for tab in tabs
+                  if tab["site"] is not None and tab["outcome"] != LOADED]:
+        raise RuntimeError(f"computer env {record.env_id!r}: " + "; ".join(failed))
+    return kept
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:

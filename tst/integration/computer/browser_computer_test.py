@@ -13,8 +13,9 @@ fresh one its next turn opens the site through. Through an app server's restart,
 driver's, the agent's address keeps working, and two agents connected at once each drive the browser through their own. browser/v1 reads
 and sets its cookies, local storage and downloads, and its data plane signs it in, snapshots it, resets it, loads a
 snapshot back and holds up under chaos; the browser task steps set its cookies and storage and open, activate and
-close its tabs by URL; and a task whose deploy_env pins a version of the browser, its latest one with none, passes
-preflight on the version pinned and runs its browser steps through task.run. Needs Docker and the local registry on
+close its tabs by URL; a task whose deploy_env pins a version of the browser, its latest one with none, passes
+preflight on the version pinned and runs its browser steps through task.run; and each start tab's page sees the
+window's size from its first script. Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
@@ -54,6 +55,7 @@ from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data, check_browser_data_under_chaos
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
+from tst.integration.computer.start_tabs import tabs_of
 from tst.util.a2a_test_agent import put_test_agent
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -126,6 +128,8 @@ SERVE_START_S = 3
 DATA_PAGE = "data:text/html,<title>Home</title><h1>Home</h1>"
 #: A page a task's tab steps open, bring to the front and close by its URL.
 PINNED_PAGE = "data:text/html,pinned"
+#: A page whose title is the window's size as its first script sees it, told apart by ``{}``.
+SIZED = "data:text/html,<title>{}</title><script>document.title = innerWidth + 'x' + innerHeight</script>"
 # Every TCP port something in the computer listens on, and whether any process is an X server.
 LISTENING = """import glob
 ports = set()
@@ -410,6 +414,27 @@ async def test_a_task_pinning_a_version_of_the_browser_passes_preflight_on_it_an
     records = context.metadata["browser_steps"]
     assert records["open"]["tab"] == records["front"]["tab"] == records["close"]["tab"], records
     assert records["sign-out"]["deleted"] == 1 and not report.failed, (records, report)
+
+
+@pytest.mark.asyncio
+async def test_each_start_tabs_page_sees_the_windows_size_from_its_first_script_in_order_the_first_active(
+        browser_computer):
+    urls = [SIZED.format(index) for index in range(3)]
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": urls}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            tabs = await tabs_of(deployed)
+        finally:
+            report = await teardown_run(context)
+
+    start_tabs = deployed.metadata["computer"]["start_tabs"]["chromium"]
+    assert [tab["outcome"] for tab in start_tabs] == ["loaded"] * 3
+    assert [tab["id"] for tab in tabs] == [tab["tab"] for tab in start_tabs]
+    assert [(tab["title"], tab["active"]) for tab in tabs] == [("1280x800", True), ("1280x800", False),
+                                                               ("1280x800", False)]
+    assert not report.failed
 
 
 @pytest.mark.asyncio

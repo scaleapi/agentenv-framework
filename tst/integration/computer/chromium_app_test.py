@@ -10,8 +10,9 @@ its control connection keeps lists a tab an agent opened and closed, a download 
 accepted for it, and each launch, exit and stop with its cause, across a kill and a restart of its server; and browser/v1 reads and sets its
 cookies, local storage and downloads; and its data plane signs it in, snapshots it, resets it and loads a
 snapshot back; and the browser task steps set its cookies and storage and open, activate and close its tabs by URL.
-Needs Docker
-and the local registry on localhost:5000."""
+Its start tabs open in order, the first active, a deploy recording each one's outcome and going on past a live page
+that never answers; and with the run's sites routed to it, a start tab on one must load, so a site answering 503
+fails the deploy, naming it. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import hashlib
@@ -32,6 +33,7 @@ from agentenv_protocol.website_browser import BROWSER
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state
+from tst.integration.computer.start_tabs import host_pages, tabs_of
 from tst.integration.computer.website_browser_test import _app, _browser_process, _keys, _ready
 from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
@@ -185,7 +187,7 @@ async def test_it_runs_chrome_itself_on_its_pipe_answers_prompts_as_the_deploy_s
     assert argv[0].endswith("chromium/chrome/chrome") and argv[1:3] == ["--no-sandbox", "--class=Chromium"]
     assert argv[3].endswith("/.config/chromium") and argv[4].endswith("/.cache/chromium")
     assert argv[5:10] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=en-US",
-                          "--disable-dev-shm-usage"] and argv[10:] == [LOOPBACK]
+                          "--disable-dev-shm-usage"] and argv[10:] == ["about:blank"]
     assert browser["listening"] == 0
     assert permissions == ["denied prompt - Google Chrome for Testing"]
     assert launched["exit_code"] == 0 and len(windows) == 2 and after["pid"] == browser["pid"]
@@ -349,6 +351,55 @@ async def test_its_data_plane_signs_it_in_snapshots_it_resets_it_and_loads_a_sna
         finally:
             report = await teardown_run(context)
 
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_start_tabs_open_in_order_the_first_active_and_a_live_one_that_never_answers_is_recorded_not_fatal(
+        chromium_desktop):
+    with host_pages() as port, namespace_routing():
+        urls = [f"http://host.docker.internal:{port}/{page}" for page in ("alpha", "bravo", "hang")]
+        deployed = await Env.get(chromium_desktop.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": urls}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            tabs = await tabs_of(deployed)
+        finally:
+            report = await teardown_run(context)
+
+    start_tabs = deployed.metadata["computer"]["start_tabs"]["chromium"]
+    assert [(tab["url"], tab["status"], tab["site"], tab["outcome"]) for tab in start_tabs] == [
+        (urls[0], 200, None, "loaded"), (urls[1], 200, None, "loaded"), (urls[2], None, None, "timed_out")]
+    assert start_tabs[2]["load_ms"] >= 30_000 and [tab["id"] for tab in tabs] == [tab["tab"] for tab in start_tabs]
+    assert [(tab["url"], tab["title"], tab["active"]) for tab in tabs[:2]] == [(urls[0], "alpha", True),
+                                                                               (urls[1], "bravo", False)]
+    assert not tabs[2]["active"] and not report.failed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 503], ids=["loads", "answers-503"])
+async def test_a_start_tab_on_a_routed_site_must_load_so_a_site_answering_an_error_fails_the_deploy(
+        chromium_desktop, status):
+    with host_pages(site_status=status) as port, namespace_routing():
+        params = {"site_routing": True, "sites": [{"name": "shop", "url": f"http://127.0.0.1:{port}/website/shop/",
+                                                   "domains": ["shop.test"]}],
+                  "app_settings": {"chromium": {"start_urls": ["https://shop.test/"]}}}
+        if status != 200:
+            with pytest.raises(RuntimeError, match=r"chromium's start tab https://shop.test/ on the env's site shop "
+                                                   r"answered 503"):
+                await Env.get(chromium_desktop.id).deploy(env_params=params)
+            return
+        deployed = await Env.get(chromium_desktop.id).deploy(env_params=params)
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            tabs = await tabs_of(deployed)
+        finally:
+            report = await teardown_run(context)
+
+    (tab,) = deployed.metadata["computer"]["start_tabs"]["chromium"]
+    assert (tab["url"], tab["final_url"], tab["status"], tab["site"], tab["outcome"]) == (
+        "https://shop.test/", "https://shop.test/", 200, "shop", "loaded")
+    assert [(open_tab["url"], open_tab["title"]) for open_tab in tabs] == [("https://shop.test/", "shop")]
     assert not report.failed
 
 

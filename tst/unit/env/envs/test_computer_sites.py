@@ -497,3 +497,42 @@ async def test_a_card_that_fails_to_load_is_retried_then_fails_rather_than_dropp
 def _status_error(url, code):
     request = httpx.Request("GET", f"{url}/.well-known/agent-env.json")
     return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+
+class _Website:
+    """A deployed env whose ``readiness`` answers each of ``answers`` in turn, then the last again: a readiness, an
+    error to raise, or None for a record with no address."""
+
+    def __init__(self, env_id, *answers):
+        self.env_id, self.answers, self.asked = env_id, list(answers), 0
+
+    async def readiness(self):
+        from agent_env.env.env import EnvCapabilityUnsupported
+        from agentenv_protocol.website import WebsiteReadiness
+
+        answer = self.answers[min(self.asked, len(self.answers) - 1)]
+        self.asked += 1
+        if answer is None:
+            raise EnvCapabilityUnsupported("urn:agentenv:website/v1", "ready", self.env_id, None)
+        if isinstance(answer, Exception):
+            raise answer
+        return WebsiteReadiness(ready=not answer, problems=answer)
+
+
+@pytest.mark.asyncio
+async def test_the_websites_a_computer_routes_are_waited_on_till_ready_and_one_never_ready_is_named():
+    late = _Website("late", ["notes: warming up"], [])
+    shop = _Website("shop", [])
+    other = _Website("other", ["never asked"])
+    unaddressed = _Website("unaddressed", None)
+
+    await sites.require_ready([late, shop, other, unaddressed], ["late", "shop", "unaddressed"], timeout_s=5,
+                              poll_s=0.01)
+    broken = _Website("broken", ["shop: its database is down"])
+    unreachable = _Website("unreachable", httpx.ConnectError("refused"))
+    with pytest.raises(RuntimeError) as never:
+        await sites.require_ready([broken, unreachable, shop], timeout_s=0.05, poll_s=0.01)
+
+    assert (late.asked, shop.asked, other.asked, unaddressed.asked) == (2, 2, 0, 1)
+    assert str(never.value).startswith("site routing: the run's websites weren't ready after 0.05 s: ")
+    assert str(never.value).endswith("broken (shop: its database is down); unreachable (ConnectError: refused)")
