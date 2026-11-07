@@ -1,0 +1,188 @@
+"""Apply SQL to a deployed env's service database, as part of building the state a run starts from.
+
+Typical use: ``deploy_env -> load_artifact (a base universe) -> apply_sql -> deploy_agent -> prompt_agent``, so the
+agent starts from the base universe plus exactly the declared SQL, and nothing else.
+
+The SQL runs as one psql script in a single transaction (``psql -1``) and stops at its first error, which fails the
+step with psql's message (it names the statement's line). After it:
+
+- the env's changelog rows the SQL wrote are deleted, so the run starts with a changelog that holds only what
+  happens after this step, as a freshly loaded universe does; nothing the SQL did shows up as an agent's change;
+- every serial / identity sequence in the services' schemas is advanced past its column's largest value, so an
+  insert with explicit ids doesn't make the services' own later inserts collide;
+- ``context.metadata["applied_sql"][<step id>]`` records the SQL's sha256 and size, the rows it wrote per table and
+  operation (read from the changelog before it was cleared), and any volatile functions (``now()``, ``random()``,
+  ...) it calls: those give a different result on every apply, so a rebuild can't reproduce their rows exactly.
+
+Blank SQL is a no-op that still records the sha256 of the empty string, so a task built from an empty field runs on
+the base universe alone.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import re
+from typing import Optional
+
+from agent_env.entity.refs import EntityRef
+from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_steps.service_db_sql import ServiceDbSqlError, service_db_host
+
+logger = logging.getLogger(__name__)
+
+SUMMARY_MARKER = "__agentenv_apply_sql_summary__"
+
+# Calls whose result differs on every apply.
+_VOLATILE = re.compile(
+    r"\b(now|clock_timestamp|statement_timestamp|transaction_timestamp|timeofday|random|gen_random_uuid|"
+    r"uuid_generate_v[14])\s*\(|\b(current_timestamp|current_date|current_time|localtimestamp|localtime)\b",
+    re.IGNORECASE,
+)
+
+# Before the SQL: remember where the changelog ends.
+_PREAMBLE = """\
+CREATE TEMP TABLE _agentenv_apply_sql_mark AS SELECT coalesce(max(id), 0) AS pre FROM public._changelog;
+"""
+
+# After the SQL: summarize and clear its changelog rows, then advance every service sequence past its column's max.
+_EPILOGUE = f"""\
+;
+\\echo {SUMMARY_MARKER}
+SELECT coalesce(jsonb_agg(s ORDER BY s.schema_name, s.table_name, s.operation), '[]'::jsonb)
+FROM (SELECT schema_name, table_name, operation, count(*) AS rows FROM public._changelog
+      WHERE id > (SELECT pre FROM _agentenv_apply_sql_mark) GROUP BY 1, 2, 3) s;
+DELETE FROM public._changelog WHERE id > (SELECT pre FROM _agentenv_apply_sql_mark);
+DO $agentenv_sync$
+DECLARE r record; mx bigint; cur bigint; called boolean;
+BEGIN
+  FOR r IN
+    SELECT n.nspname AS sch, c.relname AS tbl, a.attname AS col,
+           pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname) AS seq
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'agent_env_internal')
+      AND n.nspname NOT LIKE 'pg\\_%'
+      AND pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname) IS NOT NULL
+  LOOP
+    EXECUTE format('SELECT max(%I)::bigint FROM %I.%I', r.col, r.sch, r.tbl) INTO mx;
+    EXECUTE format('SELECT last_value, is_called FROM %s', r.seq) INTO cur, called;
+    IF mx IS NOT NULL AND (mx > cur OR (mx = cur AND NOT called)) THEN
+      PERFORM setval(r.seq, mx, true);
+    END IF;
+  END LOOP;
+END
+$agentenv_sync$;
+"""
+
+
+def volatile_functions(sql: str) -> list[str]:
+    """The volatile calls ``sql`` makes, lower-cased and de-duplicated, in order of first use."""
+    seen: dict[str, None] = {}
+    for m in _VOLATILE.finditer(sql):
+        seen.setdefault((m.group(1) or m.group(2)).lower(), None)
+    return list(seen)
+
+
+def build_script(sql: str) -> str:
+    """The psql script ``apply_sql`` runs: the preamble, the SQL, then the epilogue."""
+    return _PREAMBLE + sql.rstrip() + "\n" + _EPILOGUE
+
+
+_PSQL_LINE = re.compile(r"psql:<stdin>:(\d+):")
+
+
+def sql_relative_error(message: str) -> str:
+    """psql's ``psql:<stdin>:N:`` positions, which count the preamble's lines, as lines of the SQL itself."""
+    offset = _PREAMBLE.count("\n")
+
+    def line(m: re.Match) -> str:
+        n = int(m.group(1)) - offset
+        return f"line {n} of the SQL:" if n >= 1 else m.group(0)
+
+    return _PSQL_LINE.sub(line, message)
+
+
+def parse_summary(stdout: str) -> list[dict]:
+    """The per-table write counts the epilogue prints after its marker; [] when absent or unparsable."""
+    _, found, rest = stdout.partition(SUMMARY_MARKER)
+    if not found:
+        return []
+    for line in rest.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            try:
+                return json.loads(line)
+            except ValueError:
+                return []
+    return []
+
+
+class ApplySqlTaskStep(TaskStep):
+    """Run SQL against a deployed env's service database, then clear the changelog rows it wrote."""
+
+    type = "apply_sql"
+    entity_refs = (EntityRef.env("env_id"),)
+
+    def __init__(
+        self,
+        id: str,
+        version: Optional[int],
+        env_id: str,
+        sql: str = "",
+        depends_on: Optional[list] = None,
+        fail_task_on_error: bool = True,
+    ):
+        if not env_id:
+            raise ValueError("apply_sql requires an env_id (the env whose service database the SQL runs in)")
+        if not isinstance(sql, str):
+            raise ValueError("apply_sql: `sql` must be a string")
+        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        self.env_id = env_id
+        self.sql = sql
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["env_id"] = self.env_id
+        base["sql"] = self.sql
+        return base
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ApplySqlTaskStep":
+        if not data.get("env_id"):
+            raise ValueError("apply_sql step requires 'env_id'")
+        sql = data.get("sql")
+        return cls(**cls._base_from_dict(data), env_id=data["env_id"], sql="" if sql is None else sql)
+
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        sql = self.sql or ""
+        record: dict = {
+            "env_id": self.env_id,
+            "sql_sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+            "sql_bytes": len(sql.encode("utf-8")),
+            "volatile_functions": volatile_functions(sql),
+            "changes": [],
+            "applied": False,
+        }
+        context.metadata.setdefault("applied_sql", {})[self.id] = record
+        if not sql.strip():
+            logger.info("apply_sql '%s': no SQL; env '%s' keeps the state it was loaded with", self.id, self.env_id)
+            return context
+        if record["volatile_functions"]:
+            logger.warning("apply_sql '%s': the SQL calls %s, which give a different result on every apply",
+                           self.id, ", ".join(record["volatile_functions"]))
+        host = await service_db_host(context, self.env_id, "apply_sql")
+        what = f"apply_sql '{self.id}' on env '{self.env_id}'"
+        try:
+            out = await host.run_sql_file(what, build_script(sql), "-1", "-A", "-t")
+        except ServiceDbSqlError as e:
+            raise ServiceDbSqlError(what, e.exit_code, sql_relative_error(e.message)) from None
+        record["changes"] = parse_summary(out)
+        record["applied"] = True
+        logger.info("apply_sql '%s': applied %d bytes to env '%s': %s", self.id, record["sql_bytes"], self.env_id,
+                    ", ".join(f"{c['operation']} {c['rows']} {c['schema_name']}.{c['table_name']}"
+                              for c in record["changes"]) or "no rows written")
+        return context
