@@ -35,7 +35,7 @@ def test_an_agent_saves_a_line_in_notepad_through_cua_drivers_tools(state):
     ran = _run("notepad")
 
     assert ran.exit_code == 0, ran.output
-    assert "passed (notepad: 1)" in ran.output, ran.output
+    assert "passed (check: 1)" in ran.output, ran.output
 
 
 def _run(task: str):
