@@ -10,6 +10,7 @@ pytest.importorskip("PIL")
 import asyncio  # noqa: E402
 import base64  # noqa: E402
 import io  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
 from computer_fake import LINUX, FakeDriver, FakeScreen, MinimalDriver, http_client, mcp_session  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
@@ -133,7 +134,7 @@ def test_a_driver_method_replaces_the_linux_default():
     Driver = _define({"run": run_in_session(lambda self, *a: None)})
     assert declared(Driver)["run_in_session"] == [("run", {})]
     assert declared(MinimalDriver)["run_in_session"] == [("_computer_linux_run_in_session",
-                                                         {"os": frozenset({"linux", "macos"})})]
+                                                         {"os": frozenset({"linux", "macos", "windows"})})]
 
 
 def test_the_platform_is_detected(tmp_path, monkeypatch):
@@ -148,6 +149,11 @@ def test_the_platform_is_detected(tmp_path, monkeypatch):
     monkeypatch.setattr("agentenv_protocol.computer.platform.sys.platform", "darwin")
     monkeypatch.setattr("agentenv_protocol.computer.platform._platform.mac_ver", lambda: ("26.5.2", ("", "", ""), ""))
     assert detect({"DISPLAY": ":0"}, release) == Platform("macos", None, "26.5.2", "arm64", "aqua")
+    monkeypatch.setattr("agentenv_protocol.computer.platform.sys.platform", "win32")
+    monkeypatch.setattr("agentenv_protocol.computer.platform._platform.machine", lambda: "AMD64")
+    monkeypatch.setattr("agentenv_protocol.computer.platform.sys.getwindowsversion",
+                        lambda: SimpleNamespace(build=26200), raising=False)
+    assert detect({}, release) == Platform("windows", None, "11", "amd64", "dwm")
 
 
 def test_settings_come_from_one_json_value():
