@@ -201,7 +201,8 @@ class Tools:
             raise InvalidArgument(f"text is at most {self.max_text_length} characters on this computer, got {len(text)}")
         control = sorted({f"U+{ord(c):04X}" for c in text if c not in "\n\t" and unicodedata.category(c) == "Cc"})
         if control:
-            raise InvalidArgument(f"text has control characters {control}; press keys with computer_key")
+            raise InvalidArgument(f"text has control characters {control}; press keys with "
+                                  f"{self.served_name('computer_key')}")
         return await computer.act(ctx, "type_text", (text,), frame=computer.frames.latest(self.caller_identity(ctx)),
                                   screenshot=screenshot, summary=f"Typed {len(text)} characters")
 

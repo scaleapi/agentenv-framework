@@ -309,7 +309,8 @@ class AgentEnvApplication(ABC):
         self._app: Any = None
         ext_handlers = _served_extensions(handler, _discover_extensions(handler))
         environment_card = _merge_extensions(environment_card, ext_handlers + _declared_extensions(handler, ext_handlers))
-        tool_handlers = _served_tools(handler, _with_forwarded(_discover_tools(handler, environment_card.name), handler))
+        tool_handlers = _named_tools(handler, _served_tools(
+            handler, _with_forwarded(_discover_tools(handler, environment_card.name), handler)))
         if tool_handlers and not self.supports_tools:
             raise ValueError(f"@tool methods require a FastMCP-backed application; {type(self).__name__} cannot serve MCP tools")
         self._resources = _discover_resources(handler)
@@ -1318,6 +1319,20 @@ def _served_tools(handler: Any, tool_handlers: list) -> list:
     if len(set(names)) != len(names):
         raise ValueError(f"served_tools returned a tool twice: {sorted({n for n in names if names.count(n) > 1})}")
     return [(descriptor, by_name[descriptor.name]) for descriptor in chosen]
+
+
+def _named_tools(handler: Any, tool_handlers: list) -> list:
+    """The tools as the handler's ``serve_tools_as`` names and describes them, in their order; as they are without one."""
+    hook = getattr(handler, "serve_tools_as", None)
+    if hook is None:
+        return tool_handlers
+    named = list(hook([descriptor for descriptor, _fn in tool_handlers]))
+    if len(named) != len(tool_handlers):
+        raise ValueError(f"serve_tools_as returned {len(named)} tools for {len(tool_handlers)}")
+    names = [descriptor.name for descriptor in named]
+    if len(set(names)) != len(names):
+        raise ValueError(f"serve_tools_as named two tools alike: {sorted({n for n in names if names.count(n) > 1})}")
+    return [(descriptor, fn) for descriptor, (_old, fn) in zip(named, tool_handlers)]
 
 
 def _merge_tools(card: EnvironmentCard, tool_handlers: list) -> EnvironmentCard:

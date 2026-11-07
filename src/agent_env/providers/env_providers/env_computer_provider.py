@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, tool_prefix_problem
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
 
@@ -70,10 +70,11 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
         env_params: Optional[dict] = None,
+        tool_prefix: str = "",
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
         provider runs natively, booted, once what it boots that no compose started is composed; returns the record once
-        the driver is ready with the env's display."""
+        the driver is ready with the env's display. With ``tool_prefix``, its driver serves its tools under it."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
         if not isinstance(env, ComputerEnv):
@@ -81,6 +82,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         if env.computer is None:  # an app that names no computer to deploy alone on
             raise DeployRefused(env.deploy_refusal())
         params, values, problems = computer_params.checked(env, env_params)
+        if problem := tool_prefix_problem(tool_prefix):
+            problems.append(problem)
         if problems:
             raise DeployRefused(f"{env.id}: " + "; ".join(problems))
         if params.site_routing and not params.sites:
@@ -94,7 +97,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             raise DeployRefused(f"{env.id}: env_params.site_routing installs into the computer's container, and a disk "
                                 "computer runs inside a launcher container it can't reach; deploy a container form")
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
-                                    disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution)
+                                    disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
+                                    tool_prefix=tool_prefix)
         return await self._run(sandbox_provider, env.id, attempt)
 
     async def install_changelog_triggers(self, environment_name: str) -> None:
@@ -103,7 +107,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
     async def _boot(self, env: ComputerEnv, builds: list[tuple[str, str, dict]], params: computer_params.ComputerParams,
                     values: dict, sandbox_provider: SandboxProvider, *, ttl_seconds: int,
                     disk_size_gb: float, cpu: float | None, memory_mb: int | None,
-                    attribution: Optional[Attribution]) -> DeployedSandboxEnv:
+                    attribution: Optional[Attribution], tool_prefix: str = "") -> DeployedSandboxEnv:
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
@@ -131,7 +135,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         policy = NetworkPolicy.from_dict(env.network) if env.network else None
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
-            environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
+            environment=_environment(env, computer, values, params, tool_prefix), timeout=ttl_seconds,
+            attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing),
             os_type=env.computer.os.type)
@@ -151,6 +156,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     "port": env.driver.port, "display": values.get("resolution"), "network": env.network,
                     "computer_settings": recorded_settings(computer, values),
                     **({"app_settings": app_settings} if app_settings else {}),
+                    **({"tool_prefix": tool_prefix} if tool_prefix else {}),
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )
             if routed := await _finish_boot(env, record, booted.sandbox, params, ttl_seconds, values.get("resolution")):
@@ -171,7 +177,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         await end_recordings(deployed, "reset")
         sandbox_provider = build_sandbox_provider(deployed.sandbox_type)
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
-        environment = {**_environment(env, computer, values, params), **control_environment(deployed.control_token)}
+        environment = {**_environment(env, computer, values, params, record.get("tool_prefix", "")),
+                       **control_environment(deployed.control_token)}
         try:
             if record.get("form") in ("disk", "vm_bundle"):
                 await sandbox_provider.reset_vm(sandbox, image=record["image"], env=environment)
@@ -249,9 +256,9 @@ def _values(computer: ComputerArtifact, values: dict) -> dict:
 
 
 def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
-                 params: computer_params.ComputerParams) -> dict[str, str]:
+                 params: computer_params.ComputerParams, tool_prefix: str = "") -> dict[str, str]:
     return {**settings_environment(computer, values, environment_name=env.computer_name,
-                                   driver_settings=params.driver_settings),
+                                   driver_settings=params.driver_settings, tool_prefix=tool_prefix),
             **app_settings_environment(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                        env.computer.os.type),
             **({HOLD_BOOT_LAUNCH_ENV: "1"} if params.site_routing else {})}

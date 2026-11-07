@@ -276,12 +276,13 @@ class ComputerEnv(Env):
                      gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None,
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
-                     env_params: Optional[dict] = None) -> DeployedEnv:
+                     env_params: Optional[dict] = None, tool_prefix: str = "") -> DeployedEnv:
+        """With ``tool_prefix``, its driver serves its tools under it, as a multi env's computers serve theirs."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            env_params=env_params)
+            env_params=env_params, tool_prefix=tool_prefix)
 
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
@@ -390,9 +391,12 @@ class ComputerEnv(Env):
         await self._give_tools(deployed)
 
     async def _give_tools(self, deployed: DeployedEnv) -> None:
-        """Make the tool-access changes ``tools`` makes for the agents' role, which a task's own then follow."""
+        """Make the tool-access changes ``tools`` makes for the agents' role, which a task's own then follow, naming
+        each tool as the deploy's tool prefix has the driver serve it."""
+        prefix = (deployed.metadata or {}).get("computer", {}).get("tool_prefix", "")
         for action, tools in TOOLS[self.tools or "both"]:
-            await deployed.invoke(_TOOL_ACCESS_URIS[action], action, {"role": DEFAULT_ROLE, "tools": tools})
+            served = [tool if tool == WILDCARD else f"{prefix}{tool}" for tool in tools]
+            await deployed.invoke(_TOOL_ACCESS_URIS[action], action, {"role": DEFAULT_ROLE, "tools": served})
 
     async def close(self) -> None:
         """End the computer's recordings, so what they recorded reaches the store, then tear it down."""

@@ -3,12 +3,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 SETTINGS_ENV = "AGENTENV_COMPUTER_SETTINGS"
+#: The prefix a deploy gives the names of the computer's tools, so several computers serve them side by side.
+TOOL_PREFIX_ENV = "AGENTENV_TOOL_PREFIX"
+_TOOL_PREFIX = re.compile(r"[A-Za-z0-9_-]*")
+
+
+def tool_prefix_problem(prefix: str) -> str | None:
+    """What's wrong with ``prefix`` as a tool prefix, or None: only what a tool's name may hold."""
+    return None if _TOOL_PREFIX.fullmatch(prefix) else f"tool prefix {prefix!r} holds characters a tool's name can't"
 
 Space = Literal["frame", "norm"]
 

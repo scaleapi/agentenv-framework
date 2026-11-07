@@ -82,7 +82,7 @@ from .dataplane import part_bytes
 from .keys import PRINTABLE_KEYS
 from .manifest import ManifestSegment, RecordingManifest
 from .platform import Platform
-from .settings import SETTINGS_ENV, ComputerSettings
+from .settings import SETTINGS_ENV, TOOL_PREFIX_ENV, ComputerSettings, tool_prefix_problem
 
 if TYPE_CHECKING:
     from .card import (
@@ -127,7 +127,7 @@ __all__ = [
     "Launch", "Ready", "Packages", "AptSource", "Download", "RunScript",
     "AppDeclaration", "AppOs",
     "APP_SETTINGS_ENV", "part_bytes",
-    "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV",
+    "Display", "Image", "Effect", "ExecResult", "ReadyCheck", "Platform", "ComputerSettings", "SETTINGS_ENV", "TOOL_PREFIX_ENV", "tool_prefix_problem",
     "Tab", "PageState", "PageDialog", "FileChooser",
     "PRINTABLE_KEYS",
     "display", "set_display", "capture", "click", "drag", "scroll", "type_text", "press",
