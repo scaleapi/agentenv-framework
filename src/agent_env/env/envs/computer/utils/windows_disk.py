@@ -55,6 +55,8 @@ INSTALL_TIMEOUT_S, COMPOSE_TIMEOUT_S, SETTLE_S = 3600, 3600, 60
 #: How long a guest may take to power off once told.
 SHUTDOWN_TIMEOUT_S = 300
 CPUS, MEMORY_MB = 4, 8192
+#: What every service runs with: Python reading and writing files as UTF-8, as on Linux, not in Windows' code page.
+UTF8 = {"PYTHONUTF8": "1"}
 #: What a base's install prints once, as it fetches Microsoft's media.
 NOTICE = ("windows: fetching the Windows 11 Enterprise evaluation from Microsoft ({url}, about 7 GB) into {path}, "
           "once; it's installed for evaluation under Microsoft's terms and runs 90 days from each install")
@@ -265,7 +267,7 @@ def _installed_part(part: Part) -> list[str]:
                      f"-ExecutionPolicy Bypass -File '{prefix / PureWindowsPath(run.script)}' }}; Pop-Location")
     for name, argv in part.services.items():
         spec = {"name": name, "prefix": str(prefix), "command": argv,
-                "env": {key: str(value) for key, value in part.environment.items()}}
+                "env": {**UTF8, **{key: str(value) for key, value in part.environment.items()}}}
         lines.append(_written(ROOT / "services" / f"{name}.json", json.dumps(spec)))
     return lines
 

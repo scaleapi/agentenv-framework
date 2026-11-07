@@ -136,7 +136,7 @@ def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installe
     daemon = next(line for line in lines if "services\\driver-desk-daemon.json" in line)
     assert json.loads(daemon.split(", '", 1)[1].rsplit("')", 1)[0].replace("''", "'")) == {
         "name": "driver-desk-daemon", "prefix": str(prefix), "command": [str(prefix / "venv/Scripts/python.exe"),
-                                                                         "driver.py"], "env": {"MCP_PORT": "18765"}}
+                                                                         "driver.py"], "env": {"PYTHONUTF8": "1", "MCP_PORT": "18765"}}
     assert {"provision.ps1", "context/driver/driver.py", "context/driver/install.ps1"} <= set(files)
     computer = env.computer_artifact()
     assert computer.os.type == "windows" and computer.forms.disk.init == "agentenv-session"

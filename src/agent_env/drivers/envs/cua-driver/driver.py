@@ -328,7 +328,7 @@ async def _read_resources(uris: list[str]) -> dict[str, str]:
 
 @functools.cache
 def _manifest() -> dict:
-    return json.loads(MANIFEST.read_text())
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
 class _Keymap:
@@ -406,7 +406,7 @@ def _skill_pack() -> tuple[str, str, dict[str, str]]:
         subprocess.run([str(_executable()), "mcp-config", "--client", "claude"], capture_output=True, check=True,
                        timeout=SKILL_TIMEOUT_S, env={**os.environ, "HOME": home, "USERPROFILE": home, **QUIET})
         folder = Path(home) / ".cua-driver" / "skills" / "cua-driver"
-        files = {path.name: path.read_text() for path in sorted(folder.iterdir()) if path.is_file()}
+        files = {path.name: path.read_text(encoding="utf-8") for path in sorted(folder.iterdir()) if path.is_file()}
     _, frontmatter, body = files.pop("SKILL.md").split("---\n", 2)
     description = next(line.partition(":")[2].strip() for line in frontmatter.splitlines()
                        if line.startswith("description:"))
