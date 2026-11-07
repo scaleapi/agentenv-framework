@@ -804,6 +804,28 @@ async def test_a_deploy_refuses_a_container_still_unprobed_for_a_setting_that_do
 
 
 @pytest.mark.asyncio
+async def test_a_deploy_says_why_its_native_container_is_unprobed_though_another_arch_it_cant_run_is_ready(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    stored = Env.get(env.id)
+    composed = stored.metadata["composed"]
+    composed["container"]["amd64"] = {**composed["container"]["amd64"], "status": "ready"}
+    stored.update_metadata({**stored.metadata, "composed": composed})
+
+    with pytest.raises(DeployRefused) as refused:
+        await Env.get(env.id).deploy()
+
+    assert str(refused.value) == (
+        f"{env.id} has no ready build to deploy; its builds are {{'container/amd64': 'ready', 'container/arm64': "
+        "'unverified'}; container/arm64: not probed: a setting it boots with didn't resolve here: Unresolved "
+        f"env:MAIL_TOKEN reference (no value and no default); compose it with: agent-env env build --id {env.id}")
+    assert probed == [] and boots.boots == []
+
+
+@pytest.mark.asyncio
 async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_where_the_last_one_ran(
         base, driver, docker, boots, monkeypatch):
     env = _put(base, driver, display={"width": 1600, "height": 900})
