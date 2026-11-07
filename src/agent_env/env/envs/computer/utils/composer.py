@@ -845,7 +845,8 @@ def _build_settings(env: ComputerEnv, base: ComputerArtifact) -> dict[str, Any]:
 def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict,
                 lock: packages.Lock | None) -> str:
     """The composed image's Dockerfile but its key's label, which the key is a digest of: the build-phase settings, the
-    lock's .debs, then each layer's files under its prefix, its venv beside them from the lock's wheels, its run scripts
+    lock's .debs, mounted into the RUN that installs them, then each layer's files under its prefix, its venv beside
+    them from the lock's wheels, mounted the same way, its run scripts
     and an app's install steps, each run as root or the session user, every install with the network closed; then its
     programs, and an app's server's folder owned by the session user."""
     user = base.session.user
@@ -853,8 +854,8 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
              *(f"ENV AGENTENV_SETTING_{name.upper()}={json.dumps(str(value))}" for name, value in build_settings.items())]
     if lock is not None and lock.apt:
         debs = f"/tmp/agentenv-{packages.STAGED_APT}"
-        lines += [f"COPY {packages.STAGED_APT}/ {debs}/",
-                  f"RUN --network=none apt-get install -y --no-install-recommends {debs}/*.deb && rm -rf {debs}"]
+        lines.append(f"RUN --network=none {_mounted(packages.STAGED_APT, debs)} apt-get install -y "
+                     f"--no-install-recommends {debs}/*.deb")
     for layer in layers:
         prefix = layer.prefix
         lines.append(f"COPY {layer.folder}/ {prefix}/")
@@ -862,10 +863,9 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
             staged = packages.staged_wheels(layer.folder)
             wheels = f"/tmp/agentenv-{staged}"
             if lock is not None and lock.wheels.get(layer.folder):
-                lines += [f"COPY {staged}/ {wheels}/",
-                          f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install "
-                          f"--no-index --no-deps {wheels}/*.whl && {prefix}/venv/bin/pip list --format=json > "
-                          f"{prefix}/installed.json && rm -rf {wheels}"]
+                lines.append(f"RUN --network=none {_mounted(staged, wheels)} python3 -m venv {prefix}/venv && "
+                             f"{prefix}/venv/bin/pip install --no-index --no-deps {wheels}/*.whl && {prefix}/venv/bin/pip "
+                             f"list --format=json > {prefix}/installed.json")
             else:
                 lines.append(f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip list "
                              f"--format=json > {prefix}/installed.json")
@@ -880,6 +880,12 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
         lines.append(f"RUN {' && '.join(checks)}")
     lines.append(f"USER {user}")
     return "\n".join(lines) + "\n"
+
+
+def _mounted(source: str, target: str) -> str:
+    """A RUN's mount of the build context's ``source`` at ``target``, read-only, so files an install reads once never
+    stay in a layer of the image, as a COPY's would after the next RUN removed them."""
+    return f"--mount=type=bind,source={source},target={target}"
 
 
 def _runs(layer: _Layer) -> list[tuple[str, str]]:

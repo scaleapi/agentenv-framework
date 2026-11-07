@@ -127,7 +127,7 @@ class FakeDocker:
         layers = [(None, {"etc/os-release": b"ubuntu"})]
         for line in dockerfile.splitlines():
             instruction, _, rest = line.partition(" ")
-            command = rest.removeprefix("--network=none ")
+            command = re.sub(r"^(--\S+ )+", "", rest)  # BuildKit records a RUN without its flags
             if instruction == "RUN":
                 layers.append((f"RUN /bin/sh -c {command} # buildkit", {
                     path: content for key, files in self.writes.items() if key in command for path, content in files.items()}))

@@ -99,10 +99,10 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert arm64["dockerfile"].splitlines() == [
         f"FROM {base.image().image_name}", "USER root", 'ENV AGENTENV_SETTING_THEME="dark"',
         "COPY driver/ /opt/agentenv/drivers/desk/",
-        "COPY packages/wheels/driver/ /tmp/agentenv-packages/wheels/driver/",
-        "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip "
-        "install --no-index --no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
-        "--format=json > /opt/agentenv/drivers/desk/installed.json && rm -rf /tmp/agentenv-packages/wheels/driver",
+        "RUN --network=none --mount=type=bind,source=packages/wheels/driver,target=/tmp/agentenv-packages/wheels/driver "
+        "python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip install --no-index "
+        "--no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
+        "--format=json > /opt/agentenv/drivers/desk/installed.json",
         "COPY agentenv-driver-desk.conf /etc/supervisor/conf.d/agentenv-driver-desk.conf",
         "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-driver-desk.conf && test -x "
         "/opt/agentenv/drivers/desk/venv/bin/python",
@@ -1449,7 +1449,8 @@ def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_unde
         "name": "apps-mail", "folder": "/ctx/apps/mail", "requirements": "requirements.txt",
         "add": [f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"]}
     for line in ("COPY apps/mail/ /opt/agentenv/apps/mail/",
-                 "RUN --network=none python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip"
+                 "RUN --network=none --mount=type=bind,source=packages/wheels/apps-mail,target=/tmp/agentenv-packages/"
+                 "wheels/apps-mail python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip"
                  " install --no-index --no-deps /tmp/agentenv-packages/wheels/apps-mail/*.whl",
                  "RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv",
                  "COPY agentenv-app-mail.conf /etc/supervisor/conf.d/agentenv-app-mail.conf"):
@@ -1483,6 +1484,28 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
     assert boot.ready_timeout([app], "windows") == boot.READY_TIMEOUT_S
 
 
+def test_the_locks_debs_and_wheels_are_mounted_into_the_runs_that_install_them_never_copied_into_a_layer(
+        base, driver, docker, tmp_path):
+    """A COPY's files stay in its layer of the image though the RUN after it removes them."""
+    _app(base, driver, tmp_path / "mail", install={"python": "requirements.txt", "packages": {"apt": ["hello"]},
+                                                   "services": []})
+
+    build = next(build for build in docker.builds if build["platform"] == "linux/arm64")
+    lines = build["dockerfile"].splitlines()
+    installs = [line for line in lines if "/tmp/agentenv-packages" in line]
+
+    assert [line for line in lines if line.startswith("COPY packages/")] == []
+    assert installs == [
+        "RUN --network=none --mount=type=bind,source=packages/apt,target=/tmp/agentenv-packages/apt apt-get install -y "
+        "--no-install-recommends /tmp/agentenv-packages/apt/*.deb",
+        *(f"RUN --network=none --mount=type=bind,source=packages/wheels/{name},target=/tmp/agentenv-packages/wheels/"
+          f"{name} python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-index --no-deps "
+          f"/tmp/agentenv-packages/wheels/{name}/*.whl && {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json"
+          for name, prefix in (("driver", "/opt/agentenv/drivers/desk"), ("apps-mail", "/opt/agentenv/apps/mail")))]
+    assert {"packages/apt/hello_1.0_arm64.deb", "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"} <= set(
+        build["files"])
+
+
 def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,
                                                                                                tmp_path, monkeypatch):
     tool = b"#!/bin/sh\necho tool\n"
@@ -1503,11 +1526,10 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
         {"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": ["main"], "key": "/ctx/apps/mail/ppa.asc"}]
     builds = {build["platform"]: build for build in docker.builds}
     lines = builds["linux/arm64"]["dockerfile"].splitlines()
-    first = lines.index("COPY packages/apt/ /tmp/agentenv-packages/apt/")
-    assert lines[first:first + 3] == [
-        "COPY packages/apt/ /tmp/agentenv-packages/apt/",
-        "RUN --network=none apt-get install -y --no-install-recommends /tmp/agentenv-packages/apt/*.deb && rm -rf "
-        "/tmp/agentenv-packages/apt", "COPY driver/ /opt/agentenv/drivers/desk/"]
+    first = lines.index("USER root") + 1
+    assert lines[first:first + 2] == [
+        "RUN --network=none --mount=type=bind,source=packages/apt,target=/tmp/agentenv-packages/apt apt-get install -y "
+        "--no-install-recommends /tmp/agentenv-packages/apt/*.deb", "COPY driver/ /opt/agentenv/drivers/desk/"]
     steps = lines.index("RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv")
     assert lines[steps + 1:steps + 8] == [
         "RUN --network=none cd /opt/agentenv/apps/mail && './set up.sh'",
