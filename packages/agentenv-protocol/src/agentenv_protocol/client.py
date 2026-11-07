@@ -80,7 +80,7 @@ def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool,
                headers: dict[str, str] | None) -> dict:
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    url = f"{base_url}{RPC_PATH}"
+    url = f"{base_url.rstrip('/')}{RPC_PATH}"
     async with httpx.AsyncClient(verify=verify) as client:
         response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers))
         response.raise_for_status()
@@ -117,7 +117,7 @@ async def get_data(
 
 async def get_card(base_url: str, timeout: int = 10, verify: bool = True) -> dict:
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(f"{base_url}{WELL_KNOWN_PATH}", timeout=timeout)
+        response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=timeout)
         response.raise_for_status()
         return response.json()
 
@@ -341,7 +341,10 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
         raise ValueError(f"extension {uri} does not advertise method {method!r} (advertises: {offered})")
     if not op["endpoint"]:
         raise ValueError(f"extension {uri} has no endpoint in params")
-    url = f"{base_url}{op['endpoint']}"
+    endpoint = op["endpoint"]
+    if not endpoint.startswith("/"):
+        endpoint = f"/{endpoint}"
+    url = f"{base_url.rstrip('/')}{endpoint}"
     sent = request_headers(url, headers)
     async with httpx.AsyncClient(verify=verify) as client:
         if op["method"] == "GET":
