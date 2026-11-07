@@ -3,6 +3,8 @@ composed on this machine, its base installed from the evaluation ISO in this mac
 passes the conformance probe at full, cua-driver's known failure on Windows waived, before and after a reset in place;
 and an agent drives Notepad on it through cua-driver's tools. Needs Docker, KVM and the ISO; the agent's task, a model endpoint too."""
 
+from pathlib import Path
+
 import pytest
 from click.testing import CliRunner
 
@@ -11,7 +13,7 @@ from tst.util.capabilities import skip_without_model_endpoint, skip_without_wind
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_windows_media()]
 
-BUNDLE = "tst/integration/computer/windows"
+BUNDLE = Path(__file__).parent / "windows"
 
 
 def test_the_windows_desktop_passes_the_probe_at_full(state):
@@ -37,4 +39,4 @@ def test_an_agent_saves_a_line_in_notepad_through_cua_drivers_tools(state):
 
 
 def _run(task: str):
-    return CliRunner().invoke(cli, ["run", BUNDLE, "--task", task])
+    return CliRunner().invoke(cli, ["run", str(BUNDLE), "--task", task])
