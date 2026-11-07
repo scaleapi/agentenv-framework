@@ -572,7 +572,8 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
     def docker(*args):
         ran.append(args)
         if args[0] == "cp" and args[1].endswith("/disk/guest"):
-            raise DockerFailed("Could not find the file /disk/guest in container container1", 1)
+            raise DockerFailed("docker cp container1:/disk/guest failed: Error response from daemon: Could not find the "
+                               "file /disk/guest in container container1", 1)
         if args[0] == "cp":
             Path(args[2]).write_bytes(b"disk of " + args[1].encode())
         return "container1" if args[0] == "create" else "1 sha256:linux" if args[0] == "image" else ""
@@ -598,6 +599,27 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
                              "-q", "-3", "-T0", "-c"] and len(compressed) == 2
     assert sorted(p.name for p in exported[0].disk.parent.iterdir()) == sorted({exported[0].disk.name,
                                                                                 exported[2].disk.name})
+
+
+def test_an_export_that_cant_copy_a_disks_guest_file_fails_rather_than_cache_the_disk_without_it(tmp_path,
+                                                                                                monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(local_disk, "get_config", lambda: SimpleNamespace(get_image_store=lambda: SimpleNamespace(
+        auth=lambda ref: None)))
+    monkeypatch.setattr(local_disk, "docker_login", lambda auth: None)
+
+    def docker(*args):
+        if args[0] == "cp":
+            raise DockerFailed("docker cp container1:/disk/guest failed: Error response from daemon: i/o timeout", 1)
+        return "container1"
+
+    monkeypatch.setattr(local_disk, "docker", docker)
+    monkeypatch.setattr(local_disk.subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0))
+    image = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
+
+    with pytest.raises(DockerFailed, match="i/o timeout"):
+        local_disk.exported_disk(image, "linux/amd64")
+    assert [path.name for path in (tmp_path / "cache" / "agentenv" / "disks").iterdir()] == []
 
 
 def test_a_thin_disk_is_exported_with_its_guest_file_and_its_base_once_for_every_disk_on_that_base(tmp_path,

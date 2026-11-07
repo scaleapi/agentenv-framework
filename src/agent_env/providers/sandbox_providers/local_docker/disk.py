@@ -23,6 +23,8 @@ from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import build_image
 
 KVM = "/dev/kvm"
+#: What ``docker cp`` says of a path its container lacks: Docker 23 and later, then earlier.
+_NO_SUCH_PATH = ("Could not find the file", "No such container:path")
 
 
 def kvm_platforms() -> frozenset[str]:
@@ -111,10 +113,13 @@ def _export(image: str, platform: str, path: Path) -> None:
 
 
 def _copied(container: str, file: str, to: Path) -> Path | None:
-    """``file`` copied out of ``container`` to ``to``; None when the container has no such file."""
+    """``file`` copied out of ``container`` to ``to``; None when the container has no such file. Any other failure is
+    raised, as an export cached without a guest file it has would boot it as the wrong OS."""
     try:
         docker("cp", f"{container}:/{file}", str(to))
-    except DockerFailed:
+    except DockerFailed as e:
+        if not any(missing in str(e) for missing in _NO_SUCH_PATH):
+            raise
         return None
     return to
 
