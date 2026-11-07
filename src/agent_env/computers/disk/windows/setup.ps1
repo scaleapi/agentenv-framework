@@ -2,9 +2,9 @@
 # (agentadmin by agent-env's key alone), which is how agent-env composes the base and reads this setup's log when it
 # fails (setup-failed). Then nothing of Windows' own is left in an agent's way: no updates, lock screen, notifications,
 # widgets, Copilot, first-run pages or apps Windows installs in the background, and no page file, all of which would grow
-# every layer composed on the base. The pinned
-# Python, with Tk, is what layers' venvs and the probe's fixture run on; agentenv-session starts the session's services,
-# windowless, at the session user's sign-in. Then the session user signs in at every boot.
+# every layer composed on the base. The pinned Python, with Tk, is what layers' venvs and the probe's fixture run on;
+# agentenv-session starts the session's services, windowless, at the session user's sign-in. Then the session user signs
+# in at every boot.
 param([string]$Media, [string]$User, [string]$UserPassword)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
