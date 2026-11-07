@@ -72,10 +72,10 @@ class FakeDocker:
             self.bases[key] = datetime.now(timezone.utc) + timedelta(days=89)
         return windows_disk.Base(f"agentenv-windows-base:{key[7:23]}", self.tmp / "keys", self.bases[key])
 
-    def compose(self, base, build, image, labels, say, registry, tag):
+    def compose(self, base, build, key, labels, say, registry):
         self.composed.append((base.image, (build / "provision.ps1").read_bytes().decode(),
                               sorted(p.relative_to(build).as_posix() for p in build.rglob("*") if p.is_file()), labels))
-        return registry.push(image, tag)
+        return registry.push(*windows_disk.disk_names(key))
 
 
 @pytest.fixture
@@ -244,7 +244,6 @@ def test_a_base_is_reused_until_its_evaluation_nears_its_end_then_installed_afre
     monkeypatch.setattr(windows_disk, "_installed", lambda *args: installed.append(args) or {
         "grace_minutes": 90 * 24 * 60, "build": "26200.6584"})
     monkeypatch.setattr(windows_disk, "_pack", lambda folder, image, labels, base_image: None)
-    monkeypatch.setattr(windows_disk, "sha256", lambda path: "ab" * 32)
     registry = FakeRegistry()
 
     base = windows_disk.base(key, lambda: tmp_path / "windows.iso", 64, "user", lambda line: None, registry)

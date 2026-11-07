@@ -54,7 +54,8 @@ from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, write_index
+from agent_env.store.image_store.image_store import ImageStore
+from agent_env.store.image_store.registry_api import pin_digest, pin_if_served, write_index
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError
 
@@ -369,29 +370,26 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             progress.say(f"{pair}: {line}")
 
         attempt.stage = "base"
-        store = get_config().get_image_store_for(env.stored_id)
-        store.ensure_repository(REPOSITORY)
-        registry = windows_disk.Registry(store, REPOSITORY)
+        registry = windows_disk.Registry(_image_store(env), REPOSITORY)
         disk_gb, user = base.forms.disk.min_disk_gb, base.session.user
         made = windows_disk.base(_key(recipe=_digest(windows_disk.RECIPE), disk_gb=disk_gb, user=user,
                                       form="windows-base", format=FORMAT),
                                  lambda: windows_disk.media(say), disk_gb, user, say, registry)
         script = windows_disk.write(build, [part], settings, {"base": made.image, "layers": [part.folder]})
-        key = attempt.key = _key(base=made.image, base_expires=made.expires.isoformat(timespec="seconds"),
-                                 provision=script, context=_digest(context), build_settings=settings, form="disk",
-                                 arch=arch, format=FORMAT)
-        tag, expires = key.removeprefix("sha256:"), made.expires.isoformat(timespec="seconds")
+        expires = made.expires.isoformat(timespec="seconds")
+        key = attempt.key = _key(base=made.image, base_expires=expires, provision=script, context=_digest(context),
+                                 build_settings=settings, form="disk", arch=arch, format=FORMAT)
         attempt.stage = "build"
         with holding_locks([f"windows-disk:{key}"], lambda: progress.at(
                 pair, "waiting", "waiting for the compose of the same disk under way on this machine")):
-            if (pinned := registry.served(tag)) is not None:
+            if (pinned := registry.served(windows_disk.disk_names(key).tag)) is not None:
                 progress.at(pair, "reusing", "reusing the disk of the same key, composed earlier")
                 result = {"status": "unverified", "key": key, "image": pinned, "reused": True, "expires": expires,
                           "built_at": now()}
             else:
                 progress.at(pair, "composing", "composing on this machine's Docker")
-                pinned = windows_disk.compose(made, build, f"agentenv-windows:{key[7:23]}",
-                                              {KEY_LABEL: key, windows_disk.EXPIRES_LABEL: expires}, say, registry, tag)
+                pinned = windows_disk.compose(made, build, key,
+                                              {KEY_LABEL: key, windows_disk.EXPIRES_LABEL: expires}, say, registry)
                 result = {"status": "unverified", "key": key, "image": pinned, "reused": False,
                           "builder": "LocalSandboxProvider", "expires": expires, "built_at": now()}
             return _probed(env, driver, "disk", arch, result, provider, progress)
@@ -653,13 +651,19 @@ def _key(**inputs: Any) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
-def _stored(env: ComputerEnv, key: str) -> tuple[Any, str, str | None]:
+def _stored(env: ComputerEnv, key: str) -> tuple[ImageStore, str, str | None]:
     """The env's image store, the ref there of the image of ``key``, and that ref pinned when the store serves one
     already, for any env that built it."""
+    store = _image_store(env)
+    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
+    return store, ref, pin_if_served(ref, store.auth(ref))
+
+
+def _image_store(env: ComputerEnv) -> ImageStore:
+    """The env's image store, with the repository its computers' images are kept in."""
     store = get_config().get_image_store_for(env.stored_id)
     store.ensure_repository(REPOSITORY)
-    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
-    return store, ref, _served(ref, store)
+    return store
 
 
 def _base_disk(base: ComputerArtifact, arch: str) -> tuple[str | None, str]:
@@ -909,14 +913,6 @@ def _wants(layers: list[_Layer], protocol: bool) -> list[packages.Want]:
                 (f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}",) if layer.app else ())
         wants.append(packages.Want(layer.folder, layer.install, _venv(layer), adds if _venv(layer) else ()))
     return wants
-
-
-def _served(ref: str, store) -> str | None:
-    """``ref`` pinned to the digest the image store serves for it, or None when it serves none."""
-    try:
-        return pin_digest(ref, store.auth(ref))
-    except NoSuchImageError:
-        return None
 
 
 def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], disks: dict[str, str],
