@@ -230,8 +230,8 @@ def write(build: Path, parts: list[Part], build_settings: dict[str, Any], image:
     for part in parts:
         lines += [f"# {part.folder}", *_installed_part(part)]
     settings = {f"AGENTENV_SETTING_{name.upper()}": str(value) for name, value in build_settings.items()}
-    lines += [f"Set-Content -Encoding utf8 -Path '{ROOT / 'build-settings.json'}' -Value {_ps(json.dumps(settings))}",
-              f"Set-Content -Encoding utf8 -Path '{ROOT / 'image.json'}' -Value {_ps(json.dumps(image, sort_keys=True))}"]
+    lines += [_written(ROOT / "build-settings.json", json.dumps(settings)),
+              _written(ROOT / "image.json", json.dumps(image, sort_keys=True))]
     script = "\r\n".join(lines) + "\r\n"
     (build / "provision.ps1").write_text(script)
     return script
@@ -261,8 +261,7 @@ def _installed_part(part: Part) -> list[str]:
     for name, argv in part.services.items():
         spec = {"name": name, "prefix": str(prefix), "command": argv,
                 "env": {key: str(value) for key, value in part.environment.items()}}
-        lines.append(f"Set-Content -Encoding utf8 -Path '{ROOT / 'services' / f'{name}.json'}' -Value "
-                     f"{_ps(json.dumps(spec))}")
+        lines.append(_written(ROOT / "services" / f"{name}.json", json.dumps(spec)))
     return lines
 
 
@@ -376,6 +375,11 @@ def _tarred(folder: Path) -> bytes:
 
 def _label(image: str, name: str) -> str:
     return json.loads(docker("image", "inspect", "-f", "{{json .Config.Labels}}", image) or "{}").get(name, "")
+
+
+def _written(path: PureWindowsPath, text: str) -> str:
+    """The line that writes ``text`` to ``path`` as UTF-8 with no BOM, which PowerShell 5's Set-Content would add."""
+    return f"[IO.File]::WriteAllText('{path}', {_ps(text)})"
 
 
 def _ps(value: str) -> str:
