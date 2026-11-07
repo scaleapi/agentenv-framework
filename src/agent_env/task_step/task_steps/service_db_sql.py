@@ -80,12 +80,18 @@ def _psql_error(stderr: str, stdout: str) -> str:
 
 async def service_db_host(context: TaskStepContext, env_id: str, what: str) -> ServiceDbHost:
     """The VM host of ``env_id``'s deploy in this run."""
-    from agent_env.providers.sandbox_providers.sandbox import VmSandbox
-    from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
-
     deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
     if deployed is None:
         raise RuntimeError(f"{what}: env '{env_id}' is not deployed in this run; put a deploy_env step for it first")
+    return await service_db_host_of(deployed, what)
+
+
+async def service_db_host_of(deployed, what: str) -> ServiceDbHost:
+    """The VM host of a deployed env's record, wherever it was deployed from (a task run or a direct deploy)."""
+    from agent_env.providers.sandbox_providers.sandbox import VmSandbox
+    from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
+
+    env_id = deployed.env_id
     deployed: DeployedSandboxEnv = require_sandbox(deployed, what)
     if not deployed.sandbox_id:
         raise RuntimeError(f"{what}: env '{env_id}' has no sandbox_id")

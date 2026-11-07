@@ -28,7 +28,7 @@ from typing import Optional
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps.service_db_sql import ServiceDbSqlError, service_db_host
+from agent_env.task_step.task_steps.service_db_sql import ServiceDbHost, ServiceDbSqlError, service_db_host
 
 logger = logging.getLogger(__name__)
 
@@ -158,31 +158,44 @@ class ApplySqlTaskStep(TaskStep):
         return cls(**cls._base_from_dict(data), env_id=data["env_id"], sql="" if sql is None else sql)
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        sql = self.sql or ""
-        record: dict = {
-            "env_id": self.env_id,
-            "sql_sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
-            "sql_bytes": len(sql.encode("utf-8")),
-            "volatile_functions": volatile_functions(sql),
-            "changes": [],
-            "applied": False,
-        }
+        record = sql_record(self.sql, self.env_id)
         context.metadata.setdefault("applied_sql", {})[self.id] = record
-        if not sql.strip():
+        if not (self.sql or "").strip():
             logger.info("apply_sql '%s': no SQL; env '%s' keeps the state it was loaded with", self.id, self.env_id)
             return context
-        if record["volatile_functions"]:
-            logger.warning("apply_sql '%s': the SQL calls %s, which give a different result on every apply",
-                           self.id, ", ".join(record["volatile_functions"]))
         host = await service_db_host(context, self.env_id, "apply_sql")
-        what = f"apply_sql '{self.id}' on env '{self.env_id}'"
-        try:
-            out = await host.run_sql_file(what, build_script(sql), "-1", "-A", "-t")
-        except ServiceDbSqlError as e:
-            raise ServiceDbSqlError(what, e.exit_code, sql_relative_error(e.message)) from None
-        record["changes"] = parse_summary(out)
-        record["applied"] = True
-        logger.info("apply_sql '%s': applied %d bytes to env '%s': %s", self.id, record["sql_bytes"], self.env_id,
-                    ", ".join(f"{c['operation']} {c['rows']} {c['schema_name']}.{c['table_name']}"
-                              for c in record["changes"]) or "no rows written")
+        await apply_sql_on_host(host, self.sql, record, what=f"apply_sql '{self.id}' on env '{self.env_id}'")
         return context
+
+
+def sql_record(sql: str, env_id: str) -> dict:
+    """What ``apply_sql`` records for ``sql`` before applying it; ``apply_sql_on_host`` fills in the rest."""
+    sql = sql or ""
+    return {
+        "env_id": env_id,
+        "sql_sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+        "sql_bytes": len(sql.encode("utf-8")),
+        "volatile_functions": volatile_functions(sql),
+        "changes": [],
+        "applied": False,
+    }
+
+
+async def apply_sql_on_host(host: ServiceDbHost, sql: str, record: dict, *, what: str) -> dict:
+    """Apply ``sql`` to the service database on ``host`` as ``apply_sql`` does, filling in ``record`` (from
+    ``sql_record``): the rows written per table, and ``applied``. For callers that restore an env outside a task,
+    such as a trajectory editor rebuilding a run's start state. Raises ``ServiceDbSqlError`` with the failing line
+    counted in ``sql`` as given."""
+    if record["volatile_functions"]:
+        logger.warning("%s: the SQL calls %s, which give a different result on every apply", what,
+                       ", ".join(record["volatile_functions"]))
+    try:
+        out = await host.run_sql_file(what, build_script(sql), "-1", "-A", "-t")
+    except ServiceDbSqlError as e:
+        raise ServiceDbSqlError(what, e.exit_code, sql_relative_error(e.message)) from None
+    record["changes"] = parse_summary(out)
+    record["applied"] = True
+    logger.info("%s: applied %d bytes: %s", what, record["sql_bytes"],
+                ", ".join(f"{c['operation']} {c['rows']} {c['schema_name']}.{c['table_name']}"
+                          for c in record["changes"]) or "no rows written")
+    return record
