@@ -4,8 +4,7 @@
 # console is this process's output. The guest is what the guest file beside the disk names, linux when there's none; a
 # windows guest, which has no virtio drivers, boots from secure-boot UEFI with Microsoft's keys and a fresh TPM 2.0,
 # its disk on AHCI, its seed on a removable USB drive, since Windows mounts a FAT filesystem with no partition table on
-# removable media alone, an e1000e NIC, a display of its resolution setting (1920x1080 without one) and, under KVM,
-# Hyper-V enlightenments.
+# removable media alone, an e1000e NIC, a 1920x1080 display and, under KVM, Hyper-V enlightenments.
 #   VM_DISK        the disk, /disk/disk.img by default, which may be backed by another beside it; one ending .zst is
 #                  expanded onto this machine's disk first
 #   VM_ENV_<NAME>  the computer's variable NAME, its value base64'd, for its NoCloud seed (CIDATA; see seed)
@@ -133,11 +132,6 @@ boot() {
     mkfs.vfat -C -n CIDATA "$work/seed.img" 2048 >/dev/null
     mcopy -i "$work/seed.img" "$work/seed/"* ::/
     if [ "$guest" = windows ]; then
-        local resolution=1920x1080
-        if [ -n "${VM_ENV_AGENTENV_SETTING_RESOLUTION:-}" ]; then
-            resolution=$(printf %s "$VM_ENV_AGENTENV_SETTING_RESOLUTION" | base64 -d)
-        fi
-        [[ "$resolution" =~ ^[1-9][0-9]{2,4}x[1-9][0-9]{2,4}$ ]] || resolution=1920x1080
         cp /usr/share/OVMF/OVMF_VARS_4M.ms.fd "$work/vars.fd"
         mkdir "$work/tpm"
         swtpm socket --tpm2 --tpmstate dir="$work/tpm" --ctrl type=unixio,path="$work/tpm.sock" --daemon --terminate
@@ -146,7 +140,7 @@ boot() {
                  -drive file="$booted",format=qcow2,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0,bootindex=1
                  -device qemu-xhci,id=usb
                  -drive file="$work/seed.img",format=raw,if=none,id=seed -device usb-storage,bus=usb.0,drive=seed,removable=on
-                 -device e1000e,netdev=net -vga none -device VGA,xres="${resolution%x*}",yres="${resolution#*x}")
+                 -device e1000e,netdev=net -vga none -device VGA,xres=1920,yres=1080)
         if [ -n "${VM_MEDIA:-}" ]; then
             devices+=(-drive file="$VM_MEDIA",format=raw,if=none,id=media,media=cdrom,readonly=on
                       -device ide-cd,drive=media,bus=ide.2,bootindex=0 -monitor unix:"$work/monitor.sock",server=on,wait=off)

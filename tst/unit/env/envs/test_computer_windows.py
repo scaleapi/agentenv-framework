@@ -18,7 +18,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer.utils import composer, windows_disk
+from agent_env.env.envs.computer.utils import composer, gate, windows_disk
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.install import WindowsInstall, WindowsService
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -234,3 +234,13 @@ def test_a_base_is_reused_until_its_evaluation_nears_its_end_then_installed_afre
 
     assert len(installed) == installs and base.image == f"agentenv-windows-base:{key[7:23]}"
     assert (base.expires - datetime.now(timezone.utc)).days == (days_left - 1 if not installs else 89)
+
+
+def test_a_windows_computers_display_is_1920x1080_for_now(local_stores, cli_routing):
+    base = _base()
+
+    assert gate.check_computer_settings(base, {"resolution": "1920x1080"}) == ({"resolution": "1920x1080"}, [])
+    assert gate.check_computer_settings(base, {"resolution": "1280x800"})[1] == [
+        "computer_settings.resolution: a Windows computer's display is 1920x1080 for now, not 1280x800"]
+    assert gate._display(base, {"width": 1280, "height": 800}, None) == [
+        "display: a Windows computer's display is 1920x1080 for now"]

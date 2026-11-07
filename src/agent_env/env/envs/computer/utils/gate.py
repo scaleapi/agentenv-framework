@@ -184,6 +184,10 @@ def _optional(setting: dict) -> bool:
     return any(option.get("type") == "null" for option in setting.get("anyOf", []))
 
 
+#: A Windows computer's display: Windows keeps the mode it was installed at, whatever size the launcher's VGA offers.
+WINDOWS_DISPLAY = "1920x1080"
+
+
 def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
     """``values``, of the base's settings by name, and the problems with them: a setting the base doesn't declare, a
     value of another type than its default's, or a secret's given as anything but a bare reference, since the env, the
@@ -203,6 +207,9 @@ def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[s
         elif type(value) is not type(setting.default):
             problems.append(f"computer_settings.{name} must be a {type(setting.default).__name__}, like its default "
                             f"{setting.default!r}, not {value!r}")
+        elif base.os.type == "windows" and name == "resolution" and value != WINDOWS_DISPLAY:
+            problems.append(f"computer_settings.resolution: a Windows computer's display is {WINDOWS_DISPLAY} for now, "
+                            f"not {value}")
         else:
             checked[name] = value
     return checked, problems
@@ -269,6 +276,8 @@ def _display(base: ComputerArtifact, display: Any, computer_settings: Any) -> li
         return [f"display is {{ width = <n>, height = <n> }}, each 1 to {MAX_SIDE} pixels, not {display!r}"]
     if "resolution" not in base.config:
         return [f"display: {base.id} declares no resolution setting for it to set"]
+    if base.os.type == "windows" and f"{display['width']}x{display['height']}" != WINDOWS_DISPLAY:
+        return [f"display: a Windows computer's display is {WINDOWS_DISPLAY} for now"]
     if isinstance(computer_settings, dict) and "resolution" in computer_settings:
         return ["display and the base's resolution setting both set the screen's size; set display alone"]
     return []
