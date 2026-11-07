@@ -63,16 +63,30 @@ does. A driver's `known_failures`, by OS type, names a check by its id and name,
 fail is recorded in its probe (`unused_known_failures`, with what it saw) and warned of, so a waiver doesn't outlive its
 defect; P7's is intermittent, so a probe it passes doesn't show it fixed.
 
+On Windows (`amd64`, composed onto a disk such as `windows-11`), cua-driver is the cua-driver-rs release's zip,
+checked by sha256 and unpacked beside the driver (`install-windows.ps1`). Its daemon runs in the session user's
+sign-in, where `agentenv-session` starts this file as a script, since cua-driver refuses Session 0, on the named pipe
+`\\.\pipe\agentenv-cua-driver`, which takes the same line-delimited JSON as the Linux socket; a call that finds every
+pipe instance taken, or none yet made, waits for one, as a Unix socket would queue it. Agents get the tools
+`mcp-windows.json` pins, as Windows's `cua-driver mcp` lists them in a signed-in session; `computer-ready` checks the
+zip's executable's sha256 and those tools. cua-driver 0.38.0 refuses a click (`foreground_unavailable`) when the
+clicked window isn't in the foreground after it, and in a burst of clicks on a window that just opened, Windows passes
+the foreground between the window and its frame, so a few of the first burst's clicks are refused (P4, 16 clicks sent
+at once all land); `[[known_failures.windows]]` names it. The text of Windows 11's Notepad can't be read through
+cua-driver's UI Automation tree, whose walk of it fails.
+
 To move it to another cua-driver version:
 
 1. Pin the version in `requirements.txt`.
 2. Regenerate `mcp.json` from what that version's MCP server, `cua-driver mcp`, says at connect and lists: its
    `instructions`, each tool's `name`, `description`, `inputSchema`, `annotations` and `outputSchema`, and each
    resource's `uri`, `name`, `description` and `mimeType`. That takes a running daemon, so do it on a Linux test
-   machine, and `mcp-macos.json` the same way in a macOS computer.
+   machine, `mcp-macos.json` the same way in a macOS computer, and `mcp-windows.json` in a Windows computer's signed-in
+   session, on the driver's venv, since `cua-driver mcp` refuses Session 0, where ssh lands.
 3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel, and of
    CuaDriver.app's executable for `macos/arm64`, and the release tarball's URL and sha256 in `env.toml`'s
-   `[install.macos]` and its folder in `install-app.sh`.
+   `[install.macos]` and its folder in `install-app.sh`; for `windows/amd64`, the zip's `cua-driver.exe`, its URL and
+   sha256 in `[install.windows]` and its folder in `install-windows.ps1`.
 4. Run `tst/unit/drivers/cua_driver_test.py`, then `tst/integration/computer/cua_driver_test.py` on Linux, where
    `computer-ready` names any tool or executable that doesn't match its pin.
 

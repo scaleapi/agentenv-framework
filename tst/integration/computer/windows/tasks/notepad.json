@@ -1,0 +1,9 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop"},
+  {"id": "agent", "type": "deploy_agent", "a2a_agent_id": "claude-code", "env_ids": ["desktop"]},
+  {"id": "skills", "type": "add_skills", "env_ids": ["desktop"]},
+  {"id": "task", "type": "prompt_agent", "depends_on": ["env", "skills"],
+   "prompt": "On this Windows computer, open Notepad, type the line agent-env on Windows, and save the file as hello.txt in the Documents folder. Use the computer's tools, and reply DONE once the file is saved."},
+  {"id": "check", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_notepad",
+   "verifier_id": "notepad", "depends_on": ["task"]}
+]

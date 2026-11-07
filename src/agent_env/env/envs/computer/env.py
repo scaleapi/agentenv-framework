@@ -314,8 +314,8 @@ class ComputerEnv(Env):
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
         links, arches = sandbox_provider.links, self.composed_arches()
         forms = [params.form] if params.form else gate.forms(self.computer)
-        native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id) for form in forms
-                                                for arch in arches)]
+        native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id, self.computer.os.type)
+                                                for form in forms for arch in arches)]
         usable = [link for link in native if link.WEBSOCKETS] if self.serves_website_browser() else native
         if native and not usable:
             problems.append(f"{', '.join(type(link).__name__ for link in native)} carries no WebSockets, which its "

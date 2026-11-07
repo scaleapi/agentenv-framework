@@ -3,7 +3,8 @@
 # is: with KVM when /dev/kvm is here and the disk is this machine's arch, else with TCG, from UEFI firmware. The guest's
 # console is this process's output. The guest is what the guest file beside the disk names, linux when there's none; a
 # windows guest, which has no virtio drivers, boots from secure-boot UEFI with Microsoft's keys and a fresh TPM 2.0,
-# its disk and seed on AHCI, an e1000e NIC, a 1920x1080 display and, under KVM, Hyper-V enlightenments.
+# its disk on AHCI, its seed on a removable USB drive, since Windows mounts a FAT filesystem with no partition table on
+# removable media alone, an e1000e NIC, a 1920x1080 display and, under KVM, Hyper-V enlightenments.
 #   VM_DISK        the disk, /disk/disk.img by default, which may be backed by another beside it; one ending .zst is
 #                  expanded onto this machine's disk first
 #   VM_ENV_<NAME>  the computer's variable NAME, its value base64'd, for its NoCloud seed (CIDATA; see seed)
@@ -14,6 +15,12 @@
 #   VM_CPUS, VM_MEMORY_MB   its size: 2 and 4096 by default
 #   VM_REQUIRE_KVM when set, fail rather than emulate where KVM can't run the disk
 #   VM_STATE       where its overlay, its seed and an expanded disk go: /var/lib/agentenv-vm by default
+#   VM_KEEP        a builder's overlay: boot on this file, kept across the guest's restarts and after it powers off,
+#                  rather than a fresh overlay each boot; made backed by the disk, or empty at VM_DISK_GB GiB (64 by
+#                  default) where there's no disk, whose guest file is then beside it
+#   VM_MEDIA       for a windows guest, an installer ISO on a CD-ROM it boots first; Enter is pressed for its first
+#                  minute, past the ISO's "press any key"
+#   VM_FILES       for a windows guest, a folder whose files it finds on a removable FAT drive
 # launch reset: boot the running computer afresh on a new overlay, its environment the VM_ENV_<NAME>=<base64> lines on
 # stdin, returning once its new QEMU has started; its ports stay up throughout.
 set -euo pipefail
@@ -43,7 +50,16 @@ here=$(dpkg --print-architecture)
 arch=${VM_ARCH:-$here}
 disk=${VM_DISK:-/disk/disk.img}
 guest=linux
-[ -s "$(dirname "$disk")/guest" ] && guest=$(cat "$(dirname "$disk")/guest")
+for folder in "$(dirname "$disk")" ${VM_KEEP:+"$(dirname "$VM_KEEP")"}; do
+    if [ -s "$folder/guest" ]; then
+        guest=$(cat "$folder/guest")
+        break
+    fi
+done
+if [ "$guest" != windows ] && [ -n "${VM_MEDIA:-}${VM_FILES:-}" ]; then
+    echo "launch: VM_MEDIA and VM_FILES are for a windows guest, not $guest" >&2
+    exit 2
+fi
 work=$state/boot
 mkdir -p "$control"
 rm -f "$control/qemu.pid" "$control/reset" "$control/next.env"
@@ -89,7 +105,7 @@ for port in ${VM_PORTS:-}; do
     socat "TCP-LISTEN:$port,fork,reuseaddr,backlog=1024" "TCP:127.0.0.1:$behind,connect-timeout=0.5,retry=600,interval=0.05" &
     fronts+=("$!")
 done
-trap 'kill "${fronts[@]}" 2>/dev/null || true' EXIT
+trap 'kill ${fronts[@]+"${fronts[@]}"} ${presser:-} 2>/dev/null || true' EXIT
 trap 'kill "$(cat "$control/qemu.pid" 2>/dev/null)" 2>/dev/null; exit 143' TERM INT
 if [[ "$disk" == *.zst ]]; then
     zstd -q -d -f "$disk" -o "$state/disk.img"
@@ -99,7 +115,19 @@ fi
 boot() {
     rm -rf "$work"
     mkdir -p "$work"
-    qemu-img create -q -f qcow2 -b "$disk" -F qcow2 "$work/disk.qcow2"
+    local booted=$work/disk.qcow2 restart=(-no-reboot)
+    if [ -n "${VM_KEEP:-}" ]; then
+        booted=$VM_KEEP restart=()
+        if [ -e "$VM_KEEP" ]; then
+            :
+        elif [ -e "$disk" ]; then
+            qemu-img create -q -f qcow2 -b "$disk" -F qcow2 "$VM_KEEP"
+        else
+            qemu-img create -q -f qcow2 "$VM_KEEP" "${VM_DISK_GB:-64}G"
+        fi
+    else
+        qemu-img create -q -f qcow2 -b "$disk" -F qcow2 "$booted"
+    fi
     seed "$work/seed"
     mkfs.vfat -C -n CIDATA "$work/seed.img" 2048 >/dev/null
     mcopy -i "$work/seed.img" "$work/seed/"* ::/
@@ -109,9 +137,20 @@ boot() {
         swtpm socket --tpm2 --tpmstate dir="$work/tpm" --ctrl type=unixio,path="$work/tpm.sock" --daemon --terminate
         devices=(-chardev socket,id=tpm,path="$work/tpm.sock" -tpmdev emulator,id=tpm,chardev=tpm
                  -device tpm-tis,tpmdev=tpm
-                 -drive file="$work/disk.qcow2",format=qcow2,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0
-                 -drive file="$work/seed.img",format=raw,if=none,id=seed -device ide-hd,drive=seed,bus=ide.1
+                 -drive file="$booted",format=qcow2,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0,bootindex=1
+                 -device qemu-xhci,id=usb
+                 -drive file="$work/seed.img",format=raw,if=none,id=seed -device usb-storage,bus=usb.0,drive=seed,removable=on
                  -device e1000e,netdev=net -vga none -device VGA,xres=1920,yres=1080)
+        if [ -n "${VM_MEDIA:-}" ]; then
+            devices+=(-drive file="$VM_MEDIA",format=raw,if=none,id=media,media=cdrom,readonly=on
+                      -device ide-cd,drive=media,bus=ide.2,bootindex=0 -monitor unix:"$work/monitor.sock",server=on,wait=off)
+        fi
+        if [ -n "${VM_FILES:-}" ]; then
+            mkfs.vfat -C -n FILES "$work/files.img" $(( $(du -sk "$VM_FILES" | cut -f1) + 1024 )) >/dev/null
+            mcopy -s -i "$work/files.img" "$VM_FILES"/* ::/
+            devices+=(-drive file="$work/files.img",format=raw,if=none,id=files
+                      -device usb-storage,bus=usb.0,drive=files,removable=on)
+        fi
     else
         if [ "$arch" = amd64 ]; then
             cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
@@ -119,14 +158,21 @@ boot() {
             cp /usr/share/AAVMF/AAVMF_CODE.fd "$work/code.fd"
             truncate -s 64M "$work/code.fd" "$work/vars.fd"
         fi
-        devices=(-drive file="$work/disk.qcow2",format=qcow2,if=virtio
+        devices=(-drive file="$booted",format=qcow2,if=virtio
                  -drive file="$work/seed.img",format=raw,if=virtio,readonly=on
                  -device virtio-net-pci,netdev=net -device virtio-rng-pci)
     fi
     "${machine[@]}" -cpu "$cpu" -smp "${VM_CPUS:-2}" -m "${VM_MEMORY_MB:-4096}" \
         -drive if=pflash,format=raw,file="$work/vars.fd" -netdev "user,id=net$forwards" "${devices[@]}" \
-        -display none -serial stdio -no-reboot &
+        -display none -serial stdio ${restart[@]+"${restart[@]}"} &
     echo "$!" > "$control/qemu.pid"
+    if [ -n "${VM_MEDIA:-}" ]; then
+        for _ in $(seq 120); do
+            echo "sendkey ret" | socat - UNIX-CONNECT:"$work/monitor.sock" >/dev/null 2>&1 || true
+            sleep 0.5
+        done &
+        presser=$!
+    fi
 }
 
 while true; do
