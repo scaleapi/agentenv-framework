@@ -26,15 +26,18 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_OWNER
+from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
 from agent_env.config.paths import cache_root
 from agent_env.env.envs.computer.utils.install import WindowsInstall
-from agent_env.providers.sandbox_providers.host_images import SOURCES_LABEL, present
+from agent_env.providers.sandbox_providers.host_images import present
 from agent_env.providers.sandbox_providers.local_docker.cli import docker
 from agent_env.providers.sandbox_providers.local_docker.disk import KVM, launcher, machine_image
+from agent_env.store.image_store.image_contents import labels
+from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import build_image
 
@@ -51,6 +54,11 @@ BUILD = ROOT / "build"
 #: The fewest days of its evaluation a base may have left, as a deploy needs some.
 RENEW_DAYS = 7
 EXPIRES_LABEL, BUILD_LABEL, KEY_LABEL = "dev.agentenv.windows.expires", "dev.agentenv.windows.build", "dev.agentenv.key"
+#: The sha256 of the ISO a base was installed from.
+ISO_LABEL = "dev.agentenv.windows.iso"
+#: Where a base's image keeps the key to its admin, which composing a layer on it takes over ssh. The image is in the
+#: user's own image store, and the guest's ssh is reached only on this machine's loopback while a layer is composed.
+ADMIN_KEY = PurePosixPath("/disk/admin.key")
 #: How long an install, and a compose, may take, and how long the session user's first sign-in is left to settle.
 INSTALL_TIMEOUT_S, COMPOSE_TIMEOUT_S, SETTLE_S = 3600, 3600, 60
 #: How long a guest may take to power off once told.
@@ -68,12 +76,44 @@ NOTICE = ("windows: fetching the Windows 11 Enterprise evaluation from Microsoft
 
 
 @dataclass(frozen=True)
+class Registry:
+    """The env's image store as Windows disks are kept in it: by tag in ``repository``, pinned by digest, as Linux
+    disks are."""
+
+    store: Any
+    repository: str
+
+    def served(self, tag: str) -> str | None:
+        """``tag``'s ref, pinned to the digest the store serves for it now; None when it serves none."""
+        ref = self.store.image_ref(self.repository, tag)
+        try:
+            return pin_digest(ref, self.store.auth(ref))
+        except NoSuchImageError:
+            return None
+
+    def labels(self, pinned: str) -> dict[str, str]:
+        return labels(pinned, "amd64", self.store.auth(pinned))
+
+    def push(self, local: str, tag: str) -> str:
+        """``local`` pushed as ``tag``; its ref there, pinned."""
+        ref = self.store.image_ref(self.repository, tag)
+        push_local_image(local, ref, self.store)
+        return pin_digest(ref, self.store.auth(ref))
+
+    def pull(self, pinned: str) -> None:
+        docker_login(self.store.auth(pinned))
+        docker("pull", "-q", pinned)
+
+
+@dataclass(frozen=True)
 class Base:
-    """A base on this machine: its image's tag, the folder of its admin's key, and when its evaluation expires."""
+    """A base: its image's tag on this machine, the folder of its admin's key, when its evaluation expires, and, for one
+    the image store holds that this machine doesn't yet, its ref there, pulled when a layer is composed on it."""
 
     image: str
     keys: Path
     expires: datetime
+    pinned: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,27 +162,60 @@ def sha256(path: Path) -> str:
     return hashed.hexdigest()
 
 
-def base(key: str, iso: Path, disk_gb: int, user: str, say: Callable[[str], None]) -> Base:
-    """The base of ``key`` on this machine, installed from ``iso`` first when there's none, its key is gone, or its
-    evaluation has fewer than ``RENEW_DAYS`` left; one install of a key runs at once, and another waits for it."""
+def base(key: str, iso: Callable[[], Path], disk_gb: int, user: str, say: Callable[[str], None],
+         registry: Registry) -> Base:
+    """The base of ``key``: this machine's; else the one the image store holds for ``key``, pulled, with the key to its
+    admin it carries; else Windows installed from the ISO ``iso`` gives, and pushed there. One with fewer than
+    ``RENEW_DAYS`` of its evaluation left is installed afresh. One install of a key runs at once on a machine, and
+    another waits for it."""
     image, keys = f"agentenv-windows-base:{key[7:23]}", cache_root() / "windows" / "bases" / key[7:23]
+    tag = f"windows-base-{key[7:23]}"
     with holding_locks([f"windows-base:{key}"], lambda: say("waiting for the install of the same base under way")):
         if present(image) and (keys / "id").exists():
             expires = datetime.fromisoformat(_label(image, EXPIRES_LABEL))
-            if expires - datetime.now(timezone.utc) >= timedelta(days=RENEW_DAYS):
+            if not expiring(expires.isoformat()):
                 return Base(image, keys, expires)
             say(f"its base's evaluation expires {expires:%Y-%m-%d}; installing it afresh")
+        elif (pinned := registry.served(tag)) is not None and not expiring(
+                stored := registry.labels(pinned).get(EXPIRES_LABEL)):
+            return Base(image, keys, datetime.fromisoformat(stored), pinned)
         shutil.rmtree(keys, ignore_errors=True)
         keys.mkdir(parents=True)
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agentenv {image}", "-f",
                         str(keys / "id")], check=True)
+        media = iso()
         with _working(f"base-{key[7:23]}") as work:
-            facts = _installed(work, iso, keys, disk_gb, user, say)
+            facts = _installed(work, media, keys, disk_gb, user, say)
             say("packing the base")
             expires = datetime.now(timezone.utc) + timedelta(minutes=facts["grace_minutes"])
+            shutil.copy(keys / "id", work / ADMIN_KEY.name)
             _pack(work, image, {KEY_LABEL: key, EXPIRES_LABEL: expires.isoformat(timespec="seconds"),
-                                BUILD_LABEL: facts["build"]}, base_image=None)
+                                BUILD_LABEL: facts["build"], ISO_LABEL: sha256(media)}, base_image=None)
+        say("pushing the base to the image store")
+        registry.push(image, tag)
         return Base(image, keys, expires)
+
+
+def _here(base_: Base, registry: Registry, say: Callable[[str], None]) -> None:
+    """``base_`` on this machine, with the key to its admin: pulled from the image store when it's the store's."""
+    if base_.pinned is None or (present(base_.image) and (base_.keys / "id").exists()):
+        return
+    say(f"pulling its base from the image store, {base_.pinned}")
+    registry.pull(base_.pinned)
+    docker("tag", base_.pinned, base_.image)
+    _take_admin_key(base_.image, base_.keys)
+
+
+def _take_admin_key(image: str, keys: Path) -> None:
+    """The key to the admin of the base ``image`` holds, written to ``keys``, as composing a layer on it needs."""
+    shutil.rmtree(keys, ignore_errors=True)
+    keys.mkdir(parents=True)
+    container = docker("create", image, "none")
+    try:
+        docker("cp", f"{container}:{ADMIN_KEY}", str(keys / "id"))
+    finally:
+        subprocess.run(["docker", "rm", container], capture_output=True)
+    (keys / "id").chmod(0o600)
 
 
 def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: Callable[[str], None]) -> dict:
@@ -187,9 +260,12 @@ def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: 
     return facts
 
 
-def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: Callable[[str], None]) -> None:
+def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: Callable[[str], None],
+            registry: Registry, tag: str) -> str:
     """``image``, a disk composed on ``base_``: the base booted on an overlay kept in a folder of this machine, ``build``
-    copied in and its ``provision.ps1`` run as the admin over ssh, then shut down and packed onto the base's image."""
+    copied in and its ``provision.ps1`` run as the admin over ssh, then shut down, packed onto the base's image and
+    pushed to the image store as ``tag``; its ref there, pinned. A base the store holds is pulled first."""
+    _here(base_, registry, say)
     with _working(f"disk-{image.rpartition(':')[2]}") as work:
         out = work / "out"
         out.mkdir()
@@ -221,27 +297,14 @@ def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: C
         (out / "guest").write_text("windows")
         say("packing the disk")
         _pack(out, image, labels, base_image=base_.image)
-
-
-def held(image: str) -> bool:
-    """Whether this machine's Docker holds ``image``."""
-    return present(image)
+    say("pushing the disk to the image store")
+    return registry.push(image, tag)
 
 
 def expiring(expires: str | None) -> bool:
     """Whether an evaluation that ends at ``expires`` has fewer than ``RENEW_DAYS`` left, as a disk with none recorded
     is taken to."""
     return expires is None or datetime.fromisoformat(expires) - datetime.now(timezone.utc) < timedelta(days=RENEW_DAYS)
-
-
-def image_id(image: str) -> str:
-    """The id of ``image`` in this machine's Docker, which a base installed afresh under its tag changes."""
-    return docker("image", "inspect", "-f", "{{.Id}}", image)
-
-
-def remove(image: str) -> None:
-    """``image`` removed from this machine's Docker, so no deploy here boots it."""
-    subprocess.run(["docker", "image", "rm", "-f", image], capture_output=True)
 
 
 def write(build: Path, parts: list[Part], build_settings: dict[str, Any], image: dict) -> str:
@@ -398,14 +461,14 @@ def _pack(folder: Path, image: str, labels: dict[str, str], base_image: str | No
                        check=True, capture_output=True)
         (folder / "guest").write_text("windows")
         dockerfile = (f"FROM scratch\nCOPY {owner} base.img /{DISK_BASE_FILE}\n"
+                      f"COPY --chmod=600 {ADMIN_KEY.name} {ADMIN_KEY}\n"
                       f"COPY {owner} disk.img guest /{Path(DISK_FILE).parent}/\n")
     else:
         dockerfile = f"FROM {base_image}\nCOPY {owner} disk.img guest /{Path(DISK_FILE).parent}/\n"
     for name in ("answers", "out"):
         shutil.rmtree(folder / name, ignore_errors=True)
     (folder / "Dockerfile").write_text(dockerfile)
-    # Labelled as built here, so a deploy boots this machine's image and pulls none of its name.
-    build_image(folder / "Dockerfile", folder, image, platform="linux/amd64", labels={**labels, SOURCES_LABEL: image})
+    build_image(folder / "Dockerfile", folder, image, platform="linux/amd64", labels=labels)
 
 
 @contextlib.contextmanager
