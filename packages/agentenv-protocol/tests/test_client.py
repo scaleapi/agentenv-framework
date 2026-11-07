@@ -440,3 +440,10 @@ async def test_invoke_extension_unknown_method_raises_without_calling():
 async def test_invoke_extension_named_method_on_a_methodless_extension_raises():
     with pytest.raises(ValueError, match=re.escape("does not advertise method 'set_time' (advertises: none)")):
         await protocol_v1.invoke_extension(_BASE, _CARD_WITH_EXT, "urn:agentenv:clock/v1", method="set_time")
+
+
+@pytest.mark.asyncio
+async def test_invoke_extension_missing_endpoint_raises_value_error():
+    card = {"capabilities": {"extensions": [{"uri": "urn:agentenv:test/v1", "params": {}}]}}
+    with pytest.raises(ValueError, match="has no endpoint in params"):
+        await protocol_v1.invoke_extension(_BASE, card, "urn:agentenv:test/v1")
