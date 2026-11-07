@@ -193,7 +193,7 @@ def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: C
                 _alive(container, "booting", deadline)
                 time.sleep(5)
             say("installing its layers over ssh")
-            ssh(port, base_.keys, f'if exist "{BUILD}" rmdir /s /q "{BUILD}" & mkdir "{BUILD}"')
+            ssh(port, base_.keys, f'(if exist "{BUILD}" rmdir /s /q "{BUILD}") & mkdir "{BUILD}"')
             ssh(port, base_.keys, f'tar -xf - -C "{BUILD}"', input=_tarred(build), timeout=600)
             done = ssh(port, base_.keys, f'powershell -NoProfile -ExecutionPolicy Bypass -File "{BUILD}\\provision.ps1"',
                        check=False, timeout=COMPOSE_TIMEOUT_S)
