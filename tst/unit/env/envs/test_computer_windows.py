@@ -57,7 +57,7 @@ class FakeDocker:
         return windows_disk.Base(image, self.tmp / "keys", datetime.now(timezone.utc) + timedelta(days=89))
 
     def compose(self, base, build, image, labels, say):
-        self.composed.append((base.image, (build / "provision.ps1").read_text(),
+        self.composed.append((base.image, (build / "provision.ps1").read_bytes().decode(),
                               sorted(p.relative_to(build).as_posix() for p in build.rglob("*") if p.is_file()), labels))
         self.images.add(image)
 
