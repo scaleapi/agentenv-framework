@@ -164,16 +164,19 @@ def sha256(path: Path) -> str:
 
 def base(key: str, iso: Callable[[], Path], disk_gb: int, user: str, say: Callable[[str], None],
          registry: Registry) -> Base:
-    """The base of ``key``: this machine's; else the one the image store holds for ``key``, pulled, with the key to its
-    admin it carries; else Windows installed from the ISO ``iso`` gives, and pushed there. One with fewer than
-    ``RENEW_DAYS`` of its evaluation left is installed afresh. One install of a key runs at once on a machine, and
-    another waits for it."""
+    """The base of ``key``: this machine's, pushed to the image store unless it holds one of ``key``; else the one the
+    store holds, pulled, with the key to its admin it carries, when a layer is composed on it; else Windows installed
+    from the ISO ``iso`` gives, and pushed there. One with fewer than ``RENEW_DAYS`` of its evaluation left is installed
+    afresh. One install of a key runs at once on a machine, and another waits for it."""
     image, keys = f"agentenv-windows-base:{key[7:23]}", cache_root() / "windows" / "bases" / key[7:23]
     tag = f"windows-base-{key[7:23]}"
-    with holding_locks([f"windows-base:{key}"], lambda: say("waiting for the install of the same base under way")):
+    with holding_locks([_base_lock(image)], lambda: say("waiting for the install of the same base under way")):
         if present(image) and (keys / "id").exists():
             expires = datetime.fromisoformat(_label(image, EXPIRES_LABEL))
             if not expiring(expires.isoformat()):
+                if registry.served(tag) is None:
+                    say("pushing the base to the image store, which doesn't hold it")
+                    registry.push(image, tag)
                 return Base(image, keys, expires)
             say(f"its base's evaluation expires {expires:%Y-%m-%d}; installing it afresh")
         elif (pinned := registry.served(tag)) is not None and not expiring(
@@ -197,13 +200,21 @@ def base(key: str, iso: Callable[[], Path], disk_gb: int, user: str, say: Callab
 
 
 def _here(base_: Base, registry: Registry, say: Callable[[str], None]) -> None:
-    """``base_`` on this machine, with the key to its admin: pulled from the image store when it's the store's."""
-    if base_.pinned is None or (present(base_.image) and (base_.keys / "id").exists()):
+    """``base_`` on this machine, with the key to its admin: pulled from the image store when it's the store's, under
+    the base's lock, so a compose of another disk on it waits, then finds it."""
+    if base_.pinned is None:
         return
-    say(f"pulling its base from the image store, {base_.pinned}")
-    registry.pull(base_.pinned)
-    docker("tag", base_.pinned, base_.image)
-    _take_admin_key(base_.image, base_.keys)
+    with holding_locks([_base_lock(base_.image)], lambda: say("waiting for the pull of the same base under way")):
+        if present(base_.image) and (base_.keys / "id").exists():
+            return
+        say(f"pulling its base from the image store, {base_.pinned}")
+        registry.pull(base_.pinned)
+        docker("tag", base_.pinned, base_.image)
+        _take_admin_key(base_.image, base_.keys)
+
+
+def _base_lock(image: str) -> str:
+    return f"windows-base:{image}"
 
 
 def _take_admin_key(image: str, keys: Path) -> None:

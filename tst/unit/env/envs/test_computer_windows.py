@@ -4,6 +4,8 @@ thin layer on the base, under a tag of its key, which a compose of the same inpu
 the env's computer is a disk of the base's form. A Windows base is amd64, disk-only and started by agentenv-session."""
 
 import json
+import threading
+import time
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
@@ -228,6 +230,7 @@ def test_a_disk_whose_evaluation_nears_its_end_is_composed_again(docker, tmp_pat
 @pytest.mark.parametrize("days_left, installs", [(30, 0), (3, 1)])
 def test_a_base_is_reused_until_its_evaluation_nears_its_end_then_installed_afresh(monkeypatch, tmp_path, days_left,
                                                                                     installs):
+    """Either way the image store gets it, which a push that failed after an install, or another env's store, lacks."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     key = "sha256:" + "12" * 32
     keys = tmp_path / "agentenv" / "windows" / "bases" / key[7:23]
@@ -248,7 +251,52 @@ def test_a_base_is_reused_until_its_evaluation_nears_its_end_then_installed_afre
 
     assert len(installed) == installs and base.image == f"agentenv-windows-base:{key[7:23]}"
     assert (base.expires - datetime.now(timezone.utc)).days == (days_left - 1 if not installs else 89)
-    assert list(registry.held) == ([f"windows-base-{key[7:23]}"] if installs else [])
+    assert list(registry.held) == [f"windows-base-{key[7:23]}"]
+
+
+def test_a_base_this_machine_holds_goes_to_an_image_store_lacking_it_once(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    key = "sha256:" + "56" * 32
+    keys = tmp_path / "agentenv" / "windows" / "bases" / key[7:23]
+    keys.mkdir(parents=True)
+    (keys / "id").write_text("key")
+    expires = datetime.now(timezone.utc) + timedelta(days=30)
+    monkeypatch.setattr(windows_disk, "present", lambda image: True)
+    monkeypatch.setattr(windows_disk, "_label", lambda image, name: expires.isoformat(timespec="seconds"))
+    registry, pushed = FakeRegistry(), []
+    push = registry.push
+    registry.push = lambda local, tag: pushed.append(local) or push(local, tag)
+
+    for _ in range(2):
+        windows_disk.base(key, lambda: tmp_path / "windows.iso", 64, "user", lambda line: None, registry)
+
+    assert pushed == [f"agentenv-windows-base:{key[7:23]}"]
+
+
+def test_composes_of_two_disks_on_a_base_the_store_holds_pull_it_and_take_its_key_once(monkeypatch, tmp_path):
+    """The second waits for the first's pull, then finds the base here."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    keys = tmp_path / "keys"
+    made, pulls = threading.Event(), []
+
+    def pull(pinned):
+        pulls.append(pinned)
+        time.sleep(0.2)
+
+    monkeypatch.setattr(windows_disk, "present", lambda image: made.is_set())
+    monkeypatch.setattr(windows_disk, "docker", lambda *args: None)
+    monkeypatch.setattr(windows_disk, "_take_admin_key", lambda image, at: (at.mkdir(), (at / "id").write_text("key"),
+                                                                            made.set()))
+    registry = SimpleNamespace(pull=pull)
+    base = windows_disk.Base("agentenv-windows-base:1", keys, datetime.now(timezone.utc), "registry.test/base@sha256:1")
+
+    composes = [threading.Thread(target=windows_disk._here, args=(base, registry, lambda line: None)) for _ in range(2)]
+    for compose in composes:
+        compose.start()
+    for compose in composes:
+        compose.join(10)
+
+    assert pulls == ["registry.test/base@sha256:1"] and (keys / "id").read_text() == "key"
 
 
 def test_a_machine_without_the_base_takes_the_image_stores_unless_its_evaluation_nears_its_end(monkeypatch, tmp_path):
