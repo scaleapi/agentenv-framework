@@ -9,7 +9,6 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.types import SKILL_EXTENSION_URI
 
 from agent_env.env import Env
@@ -46,8 +45,7 @@ async def test_two_computers_serve_their_tools_under_their_own_prefixes_side_by_
             left, right = context.deployed_envs
             left_names, left_shot = await _served(left, "desktop_")
             right_names, right_shot = await _served(right, "laptop_")
-            skill = await protocol_v1.invoke_extension(left.environment_url, left.environment_card, SKILL_EXTENSION_URI,
-                                                       {"name": "desktop"}, method="get")
+            skill = await left.invoke(SKILL_EXTENSION_URI, "get", {"name": "desktop"})
             await ResetEnvTaskStep(id="reset", version=None, env_id=standard.id, fail_task_on_error=True).execute(context)
             after_reset, after_shot = await _served(right, "laptop_")
         finally:
