@@ -26,7 +26,7 @@ class DeployEnvTaskStep(TaskStep):
         EntityRef.artifact("artifact_id", version_field="artifact_version"),
     )
     field_scopes = {**TaskStep.field_scopes, "sandbox_type": FieldScope.USER, "env_state_type": FieldScope.USER,
-                    "env_state_instance_id": FieldScope.USER}
+                    "env_state_instance_id": FieldScope.USER, "child_envs{}.sandbox_type": FieldScope.USER}
 
     def __init__(
         self,
@@ -48,6 +48,7 @@ class DeployEnvTaskStep(TaskStep):
         artifact_id: Optional[str] = None,
         artifact_version: Optional[int] = None,
         env_params: Optional[dict] = None,
+        child_envs: Optional[dict[str, dict]] = None,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
@@ -66,6 +67,8 @@ class DeployEnvTaskStep(TaskStep):
         self.metadata = metadata or {}
         # The env type's own deploy options, which this step passes to its deploy() without reading them.
         self.env_params = env_params
+        # Each child env's deploy options by its name, as a step deploying that env alone would give them.
+        self.child_envs = child_envs
 
     def run_state(self, user_overrides: Mapping[str, Any]) -> tuple[str | None, str | None]:
         """The env state type and attached state instance a run with ``user_overrides`` deploys on: each the run's,
@@ -89,6 +92,8 @@ class DeployEnvTaskStep(TaskStep):
         base["env_state_instance_id"] = self.env_state_instance_id
         base["metadata"] = self.metadata
         base["env_params"] = self.env_params
+        if self.child_envs:
+            base["child_envs"] = self.child_envs
         return base
 
     @classmethod
@@ -109,6 +114,7 @@ class DeployEnvTaskStep(TaskStep):
             env_state_instance_id=data.get("env_state_instance_id"),
             metadata=dict(data.get("metadata") or {}),
             env_params=data.get("env_params"),
+            child_envs=data.get("child_envs"),
         )
 
     def preflight(self) -> list[str]:
@@ -127,13 +133,13 @@ class DeployEnvTaskStep(TaskStep):
             refusal = env.deploy_refusal(ttl_seconds=self.ttl_seconds, disk_size_gb=self.disk_size_gb, gateway_mode=self.gateway_mode, cpu=self.cpu,
                                          memory_mb=self.memory_mb, env_state_type=self.env_state_type,
                                          env_state_instance_id=self.env_state_instance_id, attribution={},
-                                         sandbox_type=self.sandbox_type, **self._env_params_option())
+                                         sandbox_type=self.sandbox_type, **self._env_options())
         except (NotFoundError, ValueError) as e:  # missing, or a type or env_provider_type this process can't load
             return [f"deploy_env '{self.id}': env '{self.env_id}' can't be loaded: {e}"]
         return [f"deploy_env '{self.id}': {refusal}"] if refusal else []
 
-    def _env_params_option(self) -> dict:
-        return {"env_params": self.env_params} if self.env_params else {}
+    def _env_options(self) -> dict:
+        return {name: value for name, value in (("env_params", self.env_params), ("child_envs", self.child_envs)) if value}
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.env.env import Env
@@ -188,6 +194,10 @@ class DeployEnvTaskStep(TaskStep):
             if "env_params" not in params and not accepts_kwargs:
                 raise ValueError(f"deploy_env '{self.id}': {env.type} envs take no env_params")
             deploy_kwargs["env_params"] = await env.run_env_params(self.env_params, context.deployed_envs)
+        if self.child_envs:
+            if "child_envs" not in params and not accepts_kwargs:
+                raise ValueError(f"deploy_env '{self.id}': {env.type} envs have no child envs")
+            deploy_kwargs["child_envs"] = self.child_envs
         deployed_env = await env.deploy(**deploy_kwargs)
         # create_instance runs inside env.deploy(), so an annotation set after it
         # returns has to be persisted explicitly to reach the instance record.
