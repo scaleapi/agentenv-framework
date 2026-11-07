@@ -6,6 +6,7 @@ carry."""
 import asyncio
 import hashlib
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -91,25 +92,33 @@ def exported_disk(image: str, platform: str) -> Exported:
 def _export(image: str, platform: str, path: Path) -> None:
     """Signed in to the image store first, as a boot's pull is, since ``docker create`` pulls ``image`` when it isn't
     here; for ``platform``, as the image's index holds that one alone, which a pull for this machine's wouldn't find.
-    The disk is placed last, so one that's there was exported whole, with its base and guest file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    The disk is placed last, so one that's there was exported whole, with its base and guest file. Its work folder and
+    container are named for ``path`` and cleared first, under its lock, so an export killed outright leaves no copy of
+    a base behind once the disk is exported again."""
+    work, container = path.with_name(path.name + ".work"), f"agentenv-export-{path.name.split('.')[0]}"
+    _cleared(work, container)
+    work.mkdir(parents=True)
     docker_login(get_config().get_image_store().auth(image))
-    container = docker("create", "--platform", platform, image, "disk")
+    docker("create", "--name", container, "--platform", platform, image, "disk")
     try:
-        with tempfile.TemporaryDirectory(prefix="export-", dir=path.parent) as work:
-            if (guest := _copied(container, DISK_GUEST_FILE, Path(work) / "guest")) is not None:
-                guest.replace(path.with_name(path.name + ".guest"))
-            layers, first = docker("image", "inspect", "-f", "{{len .RootFS.Layers}} {{index .RootFS.Layers 0}}",
-                                   image).split()
-            if int(layers) > 1:
-                base = path.with_name(f"base-{hashlib.sha256(first.encode()).hexdigest()[:32]}.img.zst")
-                with holding_locks([f"disk-export:{base.name}"]):
-                    if not base.exists():
-                        _compressed(container, DISK_BASE_FILE, base, Path(work), image)
-                path.with_name(path.name + ".base").write_text(base.name)
-            _compressed(container, DISK_FILE, path, Path(work), image)
+        if (guest := _copied(container, DISK_GUEST_FILE, work / "guest")) is not None:
+            guest.replace(path.with_name(path.name + ".guest"))
+        layers, first = docker("image", "inspect", "-f", "{{len .RootFS.Layers}} {{index .RootFS.Layers 0}}",
+                               image).split()
+        if int(layers) > 1:
+            base = path.with_name(f"base-{hashlib.sha256(first.encode()).hexdigest()[:32]}.img.zst")
+            with holding_locks([f"disk-export:{base.name}"]):
+                if not base.exists():
+                    _compressed(container, DISK_BASE_FILE, base, work, image)
+            path.with_name(path.name + ".base").write_text(base.name)
+        _compressed(container, DISK_FILE, path, work, image)
     finally:
-        subprocess.run(["docker", "rm", container], capture_output=True)
+        _cleared(work, container)
+
+
+def _cleared(work: Path, container: str) -> None:
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+    shutil.rmtree(work, ignore_errors=True)
 
 
 def _copied(container: str, file: str, to: Path) -> Path | None:

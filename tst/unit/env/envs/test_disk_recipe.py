@@ -6,6 +6,7 @@ settings and size, and exporting one, compressed, once."""
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -575,8 +576,8 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
             raise DockerFailed("docker cp container1:/disk/guest failed: Error response from daemon: Could not find the "
                                "file /disk/guest in container container1", 1)
         if args[0] == "cp":
-            Path(args[2]).write_bytes(b"disk of " + args[1].encode())
-        return "container1" if args[0] == "create" else "1 sha256:linux" if args[0] == "image" else ""
+            Path(args[2]).write_bytes(b"disk of " + args[1].partition(":")[2].encode())
+        return "1 sha256:linux" if args[0] == "image" else ""
 
     def run(argv, stdin=None, stdout=None, **kwargs):
         if argv[:2] == ["docker", "run"]:
@@ -591,14 +592,52 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
     exported = [local_disk.exported_disk(image, "linux/amd64") for image in (first, first, first.replace("1", "2"))]
 
     assert exported[0] == exported[1] != exported[2] and exported[0].disk.parent == tmp_path / "cache" / "agentenv" / "disks"
-    assert exported[0].disk.read_bytes() == b"zstd:disk of container1:/disk/disk.img"
+    assert exported[0].disk.read_bytes() == b"zstd:disk of /disk/disk.img"
     assert exported[0].disk.name.endswith(".img.zst") and exported[0].base is exported[0].guest is None
     assert [args[0] for args in ran] == ["login", "create", "cp", "image", "cp"] * 2
-    assert ran[0] == ("login", f"credentials for {first}") and ran[1][1:] == ("--platform", "linux/amd64", first, "disk")
+    assert ran[0] == ("login", f"credentials for {first}") and ran[1][1:] == (
+        "--name", f"agentenv-export-{exported[0].disk.name.split('.')[0]}", "--platform", "linux/amd64", first, "disk")
     assert compressed[0] == ["docker", "run", "--rm", "-i", "--entrypoint", "zstd", "agentenv-qemu-launcher:src-1",
                              "-q", "-3", "-T0", "-c"] and len(compressed) == 2
     assert sorted(p.name for p in exported[0].disk.parent.iterdir()) == sorted({exported[0].disk.name,
                                                                                 exported[2].disk.name})
+
+
+def test_an_export_killed_outright_leaves_nothing_behind_once_the_disk_is_exported_again(tmp_path, monkeypatch):
+    """Its work folder, holding as much of a base as it had copied, and its container are named for the disk, and
+    cleared under the disk's lock first."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(local_disk, "launcher", lambda: "agentenv-qemu-launcher:src-1")
+    monkeypatch.setattr(local_disk, "get_config", lambda: SimpleNamespace(get_image_store=lambda: SimpleNamespace(
+        auth=lambda ref: None)))
+    monkeypatch.setattr(local_disk, "docker_login", lambda auth: None)
+    image = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
+    disks = tmp_path / "cache" / "agentenv" / "disks"
+    left = disks / f"{hashlib.sha256(image.encode()).hexdigest()[:32]}.img.zst.work"
+    left.mkdir(parents=True)
+    (left / "base.img").write_bytes(b"half a base")
+    events = []
+
+    def docker(*args):
+        events.append(args[:2])
+        if args[0] == "cp":
+            assert not (left / "base.img").exists()
+            Path(args[2]).write_bytes(b"disk")
+        return "1 sha256:linux" if args[0] == "image" else ""
+
+    def run(argv, stdin=None, stdout=None, **kwargs):
+        events.append(tuple(argv[1:3]))
+        if argv[:2] == ["docker", "run"]:
+            stdout.write(stdin.read())
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(local_disk, "docker", docker)
+    monkeypatch.setattr(local_disk.subprocess, "run", run)
+
+    exported = local_disk.exported_disk(image, "linux/amd64")
+
+    assert events[:2] == [("rm", "-f"), ("create", "--name")] and events[-1] == ("rm", "-f")
+    assert sorted(path.name for path in disks.iterdir()) == [exported.disk.name, exported.disk.name + ".guest"]
 
 
 def test_an_export_that_cant_copy_a_disks_guest_file_fails_rather_than_cache_the_disk_without_it(tmp_path,
@@ -634,9 +673,9 @@ def test_a_thin_disk_is_exported_with_its_guest_file_and_its_base_once_for_every
 
     def docker(*args):
         if args[0] == "cp":
-            copied.append(args[1])
-            Path(args[2]).write_bytes(b"windows" if args[1].endswith("guest") else b"copy of " + args[1].encode())
-        return "container1" if args[0] == "create" else "3 sha256:base" if args[0] == "image" else ""
+            copied.append(args[1].partition(":")[2])
+            Path(args[2]).write_bytes(b"windows" if args[1].endswith("guest") else b"copy of " + copied[-1].encode())
+        return "3 sha256:base" if args[0] == "image" else ""
 
     def run(argv, stdin=None, stdout=None, **kwargs):
         if argv[:2] == ["docker", "run"]:
@@ -650,8 +689,7 @@ def test_a_thin_disk_is_exported_with_its_guest_file_and_its_base_once_for_every
     one, two = (local_disk.exported_disk(image, "windows/amd64") for image in (first, first.replace("1", "2")))
 
     assert one.disk != two.disk and one.base == two.base and one.base.parent == one.disk.parent
-    assert one.base.read_bytes() == b"zstd:copy of container1:/disk/base.img"
-    assert one.disk.read_bytes() == b"zstd:copy of container1:/disk/disk.img" and one.guest.read_text() == "windows"
-    assert copied == ["container1:/disk/guest", "container1:/disk/base.img", "container1:/disk/disk.img",
-                      "container1:/disk/guest", "container1:/disk/disk.img"]
+    assert one.base.read_bytes() == b"zstd:copy of /disk/base.img"
+    assert one.disk.read_bytes() == b"zstd:copy of /disk/disk.img" and one.guest.read_text() == "windows"
+    assert copied == ["/disk/guest", "/disk/base.img", "/disk/disk.img", "/disk/guest", "/disk/disk.img"]
     assert local_disk.exported_disk(first, "windows/amd64") == one and len(copied) == 5
