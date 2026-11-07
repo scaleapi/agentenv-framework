@@ -7,6 +7,7 @@ don't load fails naming them, as does a reset's relaunch, while a live one never
 puts the profile back as installed, empties the downloads and uploads and starts the record over."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -17,7 +18,7 @@ import pytest
 from agentenv_protocol import website_browser
 from agentenv_protocol.computer import Launch, Ready, app, linux
 from agentenv_protocol.computer.app import AGENT_ACTED
-from agentenv_protocol.computer.errors import InvalidArgument
+from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.types import DATA_OBJECTS_EXTENSION_URI, INTAKE_EXTENSION_URI, AddDataRequest
 from agentenv_protocol.website_browser import WebsiteBrowserEnvironment
@@ -304,6 +305,8 @@ async def test_after_a_reset_relaunches_it_a_start_tab_on_an_env_site_that_faile
         return {"at": "t", "tabs": [{"tab": "t1", "url": url, "final_url": None, "status": None, "error": None,
                                      "load_ms": 60000, "site": site, "outcome": outcome, **why}]}
 
+    browser._following = asyncio.get_running_loop().create_future()
+    browser._following.set_result(None)
     browser.start_tab_launches = [launched("https://slack.com/", None, "timed_out")]
     await browser._relaunched("data/reset")
     browser.start_tab_launches.append(launched("https://shop.test/", "shop", "timed_out"))
@@ -313,6 +316,18 @@ async def test_after_a_reset_relaunches_it_a_start_tab_on_an_env_site_that_faile
     browser.start_tab_launches.append(launched("https://shop.test/", "shop", "failed",
                                                error="net::ERR_CONNECTION_REFUSED"))
     with pytest.raises(InvalidArgument, match="didn't load: net::ERR_CONNECTION_REFUSED"):
+        await browser._relaunched("data/reset")
+    assert browser.launches == ["ready"]
+
+
+@pytest.mark.asyncio
+async def test_after_a_reset_relaunches_it_start_tabs_still_settling_past_its_time_and_margin_fail_the_reset(
+        browser, monkeypatch):
+    monkeypatch.setattr(website_browser.environment, "START_TABS_MARGIN_S", 0.05)
+    browser._computer_app.timeout_s = 0.05
+    browser._following = asyncio.get_running_loop().create_future()
+
+    with pytest.raises(DeviceUnavailable, match="start tabs hadn't settled after 0.1 s"):
         await browser._relaunched("data/reset")
 
 

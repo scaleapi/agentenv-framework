@@ -202,6 +202,7 @@ async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sa
     await _require_display(record, resolution)
     if start_tabs := await _start_tabs(record):
         record.metadata["computer"]["start_tabs"] = start_tabs
+        _refuse_failed_start_tabs(record, start_tabs)
     return routed
 
 
@@ -254,8 +255,7 @@ async def _hand_sites(record: DeployedSandboxEnv, child: protocol_v1.ChildEnv,
 
 async def _start_tabs(record: DeployedSandboxEnv) -> dict[str, list[dict]]:
     """Each website browser's start tabs as its latest launch loaded them, by its name: the computer's own card's, for
-    a browser alone, or a child's; a browser that keeps none, built before it did, left out. RuntimeError naming each
-    start tab on one of the env's sites that didn't load."""
+    a browser alone, or a child's; a browser that keeps none, built before it did, left out."""
     card = record.environment_card or {}
     browsers = ([(card.get("name") or record.env_id, None)] if protocol_v1.find_extension(card, BROWSER) else []) \
         + [(child.name, child) for child in protocol_v1.children(card) if child.find_extension(BROWSER) is not None]
@@ -267,11 +267,15 @@ async def _start_tabs(record: DeployedSandboxEnv) -> dict[str, list[dict]]:
             continue
         if launches:
             kept[name] = launches[-1]["tabs"]
+    return kept
+
+
+def _refuse_failed_start_tabs(record: DeployedSandboxEnv, start_tabs: dict[str, list[dict]]) -> None:
+    """RuntimeError naming each of ``start_tabs``, by browser, on one of the env's sites that didn't load."""
     if failed := [f"{name}'s start tab {tab['url']} on the env's site {tab['site']} {start_tab_why(tab)}"
-                  for name, tabs in kept.items() for tab in tabs
+                  for name, tabs in start_tabs.items() for tab in tabs
                   if tab["site"] is not None and tab["outcome"] != LOADED]:
         raise RuntimeError(f"computer env {record.env_id!r}: " + "; ".join(failed))
-    return kept
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:

@@ -49,6 +49,9 @@ SHM_MIN_BYTES = 1 << 30
 BLOCK = 2
 #: How often a call that waits for the browser to be ready checks it.
 READY_POLL_S = 0.5
+#: How much longer than its ready timeout a call waits for a launch's start tabs, for the browser's setup before they
+#: load.
+START_TABS_MARGIN_S = 30.0
 #: Alone, loopback goes through the proxy too. In a computer, the apps on loopback beside it stay reachable; ``<-loopback>``
 #: removes Chromium's own rule, so ``*.localhost`` names still don't.
 ALONE_BYPASS = "<-loopback>"
@@ -538,8 +541,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                 await self._computer_app.stop_app()
                 await app_data.in_thread(data.restore_profile, Path.home(), self.profile, load.profile)
                 await self._computer_app.launch_app(METHOD_ADD)
+                _refuse_failed(await self._start_tabs_settled())
                 await self._until_ready()
-                _refuse_failed(self.start_tab_launches[-1]["tabs"] if self.start_tab_launches else [])
                 applied.append("the profile")
             if load.files:
                 await app_data.in_thread(app_data.write_within, Path.home(), load.files, [DOWNLOADS, UPLOADS])
@@ -574,10 +577,21 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         forget_agent_acted()
 
     async def _relaunched(self, op: str) -> None:
-        """After a reset relaunches it: back once its start tabs have settled, or DeviceUnavailable after its ready
-        timeout; InvalidArgument naming a start tab on one of the env's sites that failed."""
+        """After a reset relaunches it: back once it's ready, InvalidArgument naming a start tab on one of the env's
+        sites that failed."""
+        _refuse_failed(await self._start_tabs_settled())
         await self._until_ready()
-        _refuse_failed(self.start_tab_launches[-1]["tabs"] if self.start_tab_launches else [])
+
+    async def _start_tabs_settled(self) -> list[dict]:
+        """The start tabs of its latest launch once they've settled, waited on its ready timeout and the margin its
+        setup takes before they load; DeviceUnavailable if they haven't by then."""
+        if (following := self._following) is not None:
+            timeout_s = self._computer_app.timeout_s + START_TABS_MARGIN_S
+            try:
+                await asyncio.wait_for(asyncio.shield(following), timeout_s)
+            except asyncio.TimeoutError:
+                raise DeviceUnavailable(f"the browser's start tabs hadn't settled after {timeout_s:g} s") from None
+        return self.start_tab_launches[-1]["tabs"] if self.start_tab_launches else []
 
     def extension_params(self, uri: str) -> dict:
         if uri == BROWSER:

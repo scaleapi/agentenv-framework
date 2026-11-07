@@ -585,8 +585,9 @@ async def test_a_page_it_couldnt_prepare_is_still_told_to_run_so_it_never_stays_
 class Navigating(StubDevTools):
     """A browser whose first tab is ``start`` and whose new tabs are t1, t2, …, each attached as it opens, answering a
     navigation as ``pages`` says by URL: a status and the URL it ends on, then committed and, unless ``no-load``
-    follows, loaded; ``refused``, a network error; ``silent``, never answered, as a page that never answers isn't; or
-    ``stale``, a load event with no commit."""
+    follows, loaded, or with ``("redirect", status, url)`` following, sending itself there by script before it loads;
+    ``refused``, a network error; ``silent``, never answered, as a page that never answers isn't; or ``stale``, a load
+    event with no commit."""
 
     def __init__(self, pages):
         super().__init__({"Target.getTargets": {"targetInfos": []}})
@@ -615,14 +616,19 @@ class Navigating(StubDevTools):
             self.send("Page.loadEventFired", {}, session_id)
             return {"frameId": target, "loaderId": loader}
         status, final_url, *rest = page
-        document = {"requestId": request, "loaderId": loader, "type": "Document", "frameId": target}
-        self.send("Network.requestWillBeSent", document, session_id)
-        self.send("Network.responseReceived", {**document, "response": {"status": status, "url": final_url}},
-                  session_id)
-        self.send("Page.frameNavigated", {"frame": {"id": target, "loaderId": loader, "url": final_url}}, session_id)
+        self._document(session_id, target, loader, request, status, final_url)
+        if rest and isinstance(rest[0], tuple):
+            _, status, final_url = rest[0]
+            self._document(session_id, target, f"{loader}-redirect", f"{request}-redirect", status, final_url)
         if "no-load" not in rest:
             self.send("Page.loadEventFired", {}, session_id)
         return {"frameId": target, "loaderId": loader}
+
+    def _document(self, session, target, loader, request, status, url):
+        document = {"requestId": request, "loaderId": loader, "type": "Document", "frameId": target}
+        self.send("Network.requestWillBeSent", document, session)
+        self.send("Network.responseReceived", {**document, "response": {"status": status, "url": url}}, session)
+        self.send("Page.frameNavigated", {"frame": {"id": target, "loaderId": loader, "url": url}}, session)
 
 
 async def _started(devtools, viewport=(1280, 800)) -> BrowserControl:
@@ -660,8 +666,8 @@ async def test_its_start_tabs_load_in_order_in_its_first_tab_then_blank_ones_hel
     assert loop.time() - started < 2
     assert list(control.tabs) == ["start", "t1", "t2"] and all(isinstance(tab["load_ms"], int) for tab in tabs)
     assert _sent(devtools, "Target.createTarget") == [({"url": "about:blank", "background": True}, None)] * 2
-    for session in ("s-start", "s-t1", "s-t2"):
-        sent = [method for method, _, on in devtools.calls if on == session]
+    for tab_session in ("s-start", "s-t1", "s-t2"):
+        sent = [method for method, _, on in devtools.calls if on == tab_session]
         assert sent.index("Emulation.setDeviceMetricsOverride") < sent.index("Network.enable") < \
             sent.index("Page.navigate") < sent.index("Network.disable"), sent
     assert devtools.calls[-2][:2] == ("Target.activateTarget", {"targetId": "start"})
@@ -690,6 +696,20 @@ async def test_a_start_tab_settles_strictly_on_an_env_site_and_at_most_its_time_
 
     assert (tab["outcome"], tab["error"], tab["status"]) == (outcome, error, status)
     assert (loop.time() - started >= 0.3) is waited
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redirect, final, status, outcome", [
+    (("redirect", 200, "https://shop.test/notes"), "https://shop.test/notes", 200, "loaded"),
+    (("redirect", 404, "https://shop.test/gone"), "https://shop.test/gone", 404, "failed"),
+], ids=["to-a-page", "to-an-error"])
+async def test_a_start_page_that_sends_itself_elsewhere_before_it_loads_is_judged_by_the_page_it_ends_on(
+        redirect, final, status, outcome):
+    control = await _started(Navigating({"https://shop.test/": (200, "https://shop.test/", redirect)}))
+
+    (tab,) = await control.load_start_tabs(["https://shop.test/"], _shop, own_timeout_s=5)
+
+    assert (tab["final_url"], tab["status"], tab["outcome"]) == (final, status, outcome)
 
 
 @pytest.mark.asyncio

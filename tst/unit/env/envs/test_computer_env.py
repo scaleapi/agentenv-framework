@@ -1063,17 +1063,22 @@ async def test_each_browsers_start_tabs_of_its_latest_launch_are_kept_and_one_bu
 
 
 @pytest.mark.asyncio
-async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boot_naming_each_one():
+async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boot_naming_each_once_kept(
+        monkeypatch):
     card = {"name": "desk", "children_environments": [_app_card("chromium", ["record"])]}
-    record = _start_tabs_record(card, {"chromium": [[
-        _tab("https://shop.test/", "shop", "failed", status=503),
-        _tab("https://mail.test/", "mail", "failed", status=None, error="net::ERR_CONNECTION_REFUSED"),
-        _tab("https://notes.test/", "notes", "timed_out", status=None, load_ms=60000),
-        _tab("https://slack.com/", None, "failed", status=500)]]})
+    tabs = [_tab("https://shop.test/", "shop", "failed", status=503),
+            _tab("https://mail.test/", "mail", "failed", status=None, error="net::ERR_CONNECTION_REFUSED"),
+            _tab("https://notes.test/", "notes", "timed_out", status=None, load_ms=60000),
+            _tab("https://slack.com/", None, "failed", status=500)]
+    record = _start_tabs_record(card, {"chromium": [tabs]})
+    record.metadata = {"computer": {"start_tabs": {"chromium": [_tab("https://shop.test/", "shop")]}}}
+    monkeypatch.setattr(env_computer_provider, "_require_display", AsyncMock())
 
     with pytest.raises(RuntimeError) as failed:
-        await env_computer_provider._start_tabs(record)
+        await env_computer_provider._finish_boot(SimpleNamespace(), record, None,
+                                                 SimpleNamespace(site_routing=False), 0, None)
 
+    assert record.metadata["computer"]["start_tabs"] == {"chromium": tabs}
     assert str(failed.value) == (
         "computer env '@local/desk': chromium's start tab https://shop.test/ on the env's site shop answered 503; "
         "chromium's start tab https://mail.test/ on the env's site mail didn't load: net::ERR_CONNECTION_REFUSED; "

@@ -213,8 +213,9 @@ class BrowserControl:
             self._loading.pop(load.session, None)
             with contextlib.suppress(ConnectionError, DevToolsError, asyncio.TimeoutError):
                 await self.devtools.call("Network.disable", session_id=load.session)
-        status, final_url = load.responses.get(load.loader or "", (None, None))
-        error = load.error or load.failures.get(load.loader or "")
+        document = load.current() or load.loader or ""
+        status, final_url = load.responses.get(document, (None, None))
+        error = load.error or load.failures.get(load.loader or "") or load.failures.get(document)
         outcome = FAILED if error or (load.settled.is_set() and status is not None and status >= 400) else \
             LOADED if load.settled.is_set() else TIMED_OUT
         if final_url is None and outcome == LOADED:
@@ -587,8 +588,9 @@ class BrowserControl:
         if session in self._sessions:
             self._saw(params.get("frame", {}).get("url", ""))
         frame = params.get("frame", {})
-        if (load := self._loading.get(session)) is not None and not frame.get("parentId"):
-            load.committed = frame.get("loaderId")
+        if (load := self._loading.get(session)) is not None and not frame.get("parentId") and frame.get("loaderId"):
+            load.commits.append(frame["loaderId"])
+            load.check()
 
     def _on_Network_requestWillBeSent(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document":
@@ -659,8 +661,8 @@ class BrowserControl:
         self._choosers.pop(session, None)
         if (target := self._sessions.get(session)) is not None:
             self._spawn(self._refresh(target))
-        if (load := self._loading.get(session)) is not None and load.committed is not None:
-            load.loaded.add(load.committed)
+        if (load := self._loading.get(session)) is not None and load.commits:
+            load.loaded.add(load.commits[-1])
             load.check()
 
     def _on_Page_fileChooserOpened(self, params: dict, session: Optional[str]) -> None:
@@ -726,15 +728,17 @@ class BrowserControl:
 @dataclass
 class _StartLoad:
     """What the browser has said of a start tab's navigation, by loader, since it was sent to ``url``: its main frame's
-    last commit, the loads that fired after a commit, and its document's requests, final responses and failures.
-    It's ``settled`` once its own loader has failed or loaded, or, on one of the env's ``site``, answered an error."""
+    commits in order, the loads that fired after a commit, and its documents' requests, final responses and failures.
+    Its document is the last its main frame committed from its own navigation on, which a page that sends itself
+    elsewhere before it loads replaces. It's ``settled`` once its navigation or its document has failed, its document
+    has loaded or, on one of the env's ``site``, answered an error."""
     session: str
     url: str
     site: Optional[str]
     started: float
     loader: Optional[str] = None
     error: Optional[str] = None
-    committed: Optional[str] = None
+    commits: list[str] = field(default_factory=list)
     loaded: set[str] = field(default_factory=set)
     requests: dict[str, str] = field(default_factory=dict)
     responses: dict[str, tuple[Optional[int], Optional[str]]] = field(default_factory=dict)
@@ -757,11 +761,19 @@ class _StartLoad:
                 self.loader = answer.get("result", {}).get("loaderId")
         self.check()
 
+    def current(self) -> Optional[str]:
+        """The loader of its document: the last its main frame committed, once its own navigation has; else None."""
+        return self.commits[-1] if self.loader is not None and self.loader in self.commits else None
+
     def check(self) -> None:
-        status = self.responses.get(self.loader or "", (None, None))[0]
-        if self.error or (self.loader is not None and (
-                self.loader in self.failures or self.loader in self.loaded
-                or (self.site is not None and status is not None and status >= 400))):
+        if self.error or (self.loader is not None and self.loader in self.failures):
+            self.settled.set()
+            return
+        if (document := self.current()) is None:
+            return
+        status = self.responses.get(document, (None, None))[0]
+        if document in self.failures or document in self.loaded or (
+                self.site is not None and status is not None and status >= 400):
             self.settled.set()
 
 
