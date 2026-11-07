@@ -935,8 +935,9 @@ are the profile's template. The base class adds:
   `Input.dispatchKeyEvent`, `Input.insertText`), sent to it in order. Also framework-only, for page
   drivers and agentenv's own steps alike:
   - `navigate {url}` and `history {direction}` (`back`, `forward` or `reload`), in the active tab;
-  - `tabs/list`, `tabs/open {url?}`, `tabs/activate {tab}` and `tabs/close {tab}`, by the browser's own tab
-    ids. The active tab is the one a dialog is open on, else the visible one whose page has focus (a hidden
+  - `tabs/list`, `tabs/open {url?, background?}`, `tabs/activate {tab}` and `tabs/close {tab}`, by the browser's
+    own tab ids. A tab opened with `background` opens behind the active tab, which stays active; otherwise it comes
+    to the front. The active tab is the one a dialog is open on, else the visible one whose page has focus (a hidden
     tab's page that had input still says it has focus), else the one agentenv last brought to the front.
     Headless, a tab opened at a URL opens blank and goes there once it's held to the window's size;
   - `dialog/answer {accept, text?}`, the agent's answer to the dialog open on the active tab;

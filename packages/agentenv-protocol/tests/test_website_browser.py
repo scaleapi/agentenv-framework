@@ -654,13 +654,57 @@ async def test_a_tab_it_opens_loads_once_held_to_the_window_comes_to_the_front_a
     devtools.send("Target.targetDestroyed", {"targetId": "b"})
 
     on_b = [name for name, _, session in devtools.calls if session == "s-b"]
-    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "about:blank"}, None)]
+    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "about:blank", "background": False},
+                                                                         None)]
     assert ({"url": "https://mail.test/b"}, "s-b") in _sent(devtools, "Page.navigate")
     assert on_b.index("Emulation.setDeviceMetricsOverride") < on_b.index("Page.navigate")
     assert [(tab["id"], tab["active"]) for tab in after_open] == [("a", False), ("b", True)]
     assert [(tab["id"], tab["active"]) for tab in after_switch] == [("a", True), ("b", False)]
     assert ({}, "s-a") in _sent(devtools, "Page.bringToFront")
     assert [(tab["id"], tab["closed_by"]) for tab in control.closed_tabs] == [("b", "agentenv")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("focus_moves", [False, True])
+async def test_a_tab_opened_in_the_background_opens_behind_the_active_one_which_stays_in_front(focus_moves):
+    focus = {"s-a": True}
+    devtools = Tabbed({"Runtime.evaluate": lambda params, session: {
+        "result": {"value": ["visible", focus.get(session, False)]}}})
+    control = await _tabs(devtools, "a")
+
+    opening = asyncio.ensure_future(control.open_tab("https://mail.test/b", background=True))
+    await asyncio.sleep(0)
+    devtools.send("Target.targetCreated", _page("b", "https://mail.test/b", "Mail b"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-b", **_page("b")})
+    if focus_moves:
+        focus.update({"s-a": False, "s-b": True})
+    opened = await opening
+
+    assert opened == "b" and _sent(devtools, "Target.createTarget") == [({"url": "about:blank", "background": True},
+                                                                         None)]
+    assert ({"url": "https://mail.test/b"}, "s-b") in _sent(devtools, "Page.navigate")
+    assert ({}, "s-b") not in _sent(devtools, "Page.bringToFront")
+    assert _sent(devtools, "Target.activateTarget") == ([({"targetId": "a"}, None)] if focus_moves else [])
+    if not focus_moves:
+        assert [(tab["id"], tab["active"]) for tab in await control.tab_list()] == [("a", True), ("b", False)]
+
+
+@pytest.mark.asyncio
+async def test_a_background_open_leaves_a_tab_another_call_switched_to_meanwhile_in_front():
+    focus = {"s-a": True}
+    devtools = Tabbed({"Runtime.evaluate": lambda params, session: {
+        "result": {"value": ["visible", focus.get(session, False)]}}})
+    control = await _tabs(devtools, "a", "c")
+
+    opening = asyncio.ensure_future(control.open_tab("https://mail.test/b", background=True))
+    await asyncio.sleep(0)
+    focus.update({"s-a": False, "s-c": True})
+    devtools.send("Target.targetCreated", _page("b", "https://mail.test/b", "Mail b"))
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-b", **_page("b")})
+    await opening
+
+    assert _sent(devtools, "Target.activateTarget") == []
+    assert [(tab["id"], tab["active"]) for tab in await control.tab_list()] == [("a", False), ("c", True), ("b", False)]
 
 
 @pytest.mark.asyncio

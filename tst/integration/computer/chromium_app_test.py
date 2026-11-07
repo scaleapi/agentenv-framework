@@ -9,7 +9,8 @@ desktop that gives it French defaults deploys with them, a deploy's time zone ov
 its control connection keeps lists a tab an agent opened and closed, a download with its size and sha256, a confirm()
 accepted for it, and each launch, exit and stop with its cause, across a kill and a restart of its server; and browser/v1 reads and sets its
 cookies, local storage and downloads; and its data plane signs it in, snapshots it, resets it and loads a
-snapshot back. Needs Docker
+snapshot back; and the browser task steps set its cookies and storage and open, activate and close its tabs by URL.
+Needs Docker
 and the local registry on localhost:5000."""
 
 import asyncio
@@ -29,6 +30,7 @@ from agent_env.env import Env
 from agentenv_protocol.types import WELL_KNOWN_PATH
 from agentenv_protocol.website_browser import BROWSER
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data
+from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state
 from tst.integration.computer.website_browser_test import _app, _browser_process, _keys, _ready
 from agent_env.env.envs.computer.utils import inside
@@ -344,6 +346,24 @@ async def test_its_data_plane_signs_it_in_snapshots_it_resets_it_and_loads_a_sna
 
             await check_browser_data(deployed, chromium_desktop.id, lambda op: f"{deployed.environment_url}/svc/chromium"
                                      f"{protocol_v1.find_extension_method(card, BROWSER, op)['endpoint']}", act)
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_task_steps_set_cookies_and_storage_open_a_tab_behind_and_activate_and_close_it_by_its_url(
+        chromium_desktop):
+    with namespace_routing():
+        deployed = await Env.get(chromium_desktop.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
+            await _ready(deployed, card, "chromium")
+            await check_browser_steps(deployed, chromium_desktop.id, lambda op: f"{deployed.environment_url}/svc/chromium"
+                                      f"{protocol_v1.find_extension_method(card, BROWSER, op)['endpoint']}")
         finally:
             report = await teardown_run(context)
 
