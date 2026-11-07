@@ -139,13 +139,16 @@ async def test_an_app_with_only_paths_loads_exports_and_resets_them_as_installed
 
 
 @pytest.mark.asyncio
-async def test_get_keeps_its_earlier_call_with_paths_and_a_write_namespace_as_exported_apps_make_it(home):
+async def test_get_takes_paths_and_a_write_namespace_and_pauses_the_running_app_as_exported_apps_call_it(home,
+                                                                                                        desktop):
     (home / "Mail").mkdir()
     (home / "Mail/inbox.txt").write_text("kept")
+    await PathsMail()._computer_app.launch_app()
 
     parts = await app_data.get(["Mail"], None)
 
     assert [await part_bytes(part) for part in parts] == [b"kept"]
+    assert desktop == [("launch", 4242), ("pause", 4242), ("continue", 4242)]
 
 
 @pytest.mark.asyncio
