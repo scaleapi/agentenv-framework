@@ -237,7 +237,8 @@ def main(state_dir: Path) -> None:
 def keep_on_top(root: tk.Tk) -> None:
     """Keep the fixture over the windows an app opens, which would take the probe's clicks: maximized and above other
     windows rather than full screen, since xfwm4 keeps a window an app puts above over a full-screen one, and raised
-    again, with the focus, whenever another window covers some of it, at most once each LIFT_GAP_S."""
+    again, giving the focus back to the widget that last had it, whenever another window covers some of it, at most once
+    each LIFT_GAP_S."""
     root.attributes("-zoomed", True)
     root.attributes("-topmost", True)
     seen: dict = {"state": "VisibilityUnobscured", "lifted": 0.0, "pending": None}
@@ -251,7 +252,8 @@ def keep_on_top(root: tk.Tk) -> None:
         root.attributes("-topmost", False)
         root.attributes("-topmost", True)
         root.lift()
-        root.focus_force()
+        # The widget that last had the focus gets it back, so keys the probe types into a text box still reach it.
+        (root.focus_lastfor() or root).focus_force()
 
     def visibility(event: tk.Event) -> None:
         if event.widget is not root:

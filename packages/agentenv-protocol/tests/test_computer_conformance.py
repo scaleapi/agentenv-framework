@@ -329,6 +329,10 @@ class _Root:
 
     def __init__(self):
         self.set, self.calls, self.bound, self.timers = [], [], {}, []
+        self.last = self
+
+    def focus_lastfor(self):
+        return self.last
 
     def attributes(self, name, value):
         self.set.append((name, value))
@@ -373,6 +377,21 @@ def test_the_fixture_on_x11_stays_maximized_above_other_windows_and_takes_the_to
     assert root.set[:2] == [("-zoomed", True), ("-topmost", True)] and for_child == []
     assert first == 0 and lifted == ([("-topmost", False), ("-topmost", True)], ["lift", "focus_force"])
     assert second == round((fixture.LIFT_GAP_S - 0.1) * 1000) and root.calls == ["lift", "focus_force"]
+
+
+def test_the_fixture_gives_the_focus_back_to_the_text_box_that_had_it_when_it_takes_the_top_back(monkeypatch):
+    """A window an app opens during a typing check would otherwise leave the probe's keys with the fixture's root."""
+    fixture = _fixture(monkeypatch)
+    monkeypatch.setattr(fixture.time, "monotonic", lambda: 100.0)
+    root, name = _Root(), _Root()
+    root.last = name
+    fixture.keep_on_top(root)
+
+    root.bound["<Visibility>"](SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    (_, lift), = root.timers
+    lift()
+
+    assert root.calls == ["lift"] and name.calls == ["focus_force"]
 
 
 def _fixture(monkeypatch):

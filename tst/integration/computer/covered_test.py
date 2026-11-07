@@ -27,4 +27,6 @@ def test_gate_3_passes_a_computer_whose_app_keeps_a_window_above_the_fixtures_gr
     with namespace_routing():
         build = Env.get(deployed["env_id"]).metadata["composed"]["container"][ARCH]
     assert build["status"] == "ready", build.get("reason")
-    assert build["probe"]["passed"] and build["probe"]["checks"]["failed"] == 0
+    checks = build["probe"]["checks"]
+    # A fixture that never started leaves its checks unverified rather than failed, so they must have run and passed.
+    assert build["probe"]["passed"] and checks["failed"] == 0 and checks["unverified"] == 0 and checks["passed"] > 0
