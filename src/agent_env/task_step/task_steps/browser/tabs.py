@@ -108,10 +108,10 @@ class BrowserActivateTabTaskStep(_TabAtUrlStep):
 
 
 def normalized(url: str) -> str:
-    """``url`` as the browser shows it: its scheme and host lowercase, a host in another script as punycode by UTS 46
-    without transitional mapping, as Chromium spells it (``faß`` stays apart from ``fass``), its default port dropped,
-    and an empty path as ``/``; its query and fragment as they are. A URL with no host, such as ``about:blank``, is left
-    as it is."""
+    """``url`` as the browser shows it: its scheme and host lowercase, a host in another script mapped by UTS 46 without
+    transitional mapping and its labels in punycode, as Chromium spells it (``faß`` stays apart from ``fass``, and ``☃``
+    is kept though IDNA 2008 refuses it), its default port dropped, and an empty path as ``/``; its query and fragment as
+    they are. A URL with no host, such as ``about:blank``, is left as it is."""
     parts = urlsplit(url)
     if not parts.netloc:
         return url
@@ -120,7 +120,8 @@ def normalized(url: str) -> str:
         host = f"[{host}]"
     elif not host.isascii():
         with contextlib.suppress(idna.IDNAError, UnicodeError):
-            host = idna.encode(host, uts46=True, transitional=False).decode("ascii")
+            host = ".".join(label if label.isascii() else "xn--" + label.encode("punycode").decode("ascii")
+                            for label in idna.uts46_remap(host, std3_rules=False, transitional=False).split("."))
     port = parts.port
     netloc = host if port is None or port == _DEFAULT_PORTS.get(scheme) else f"{host}:{port}"
     if parts.username is not None:

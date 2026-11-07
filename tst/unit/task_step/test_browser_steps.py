@@ -196,6 +196,8 @@ def test_each_step_is_registered_and_round_trips(step):
     ("https://Bücher.test/a", "https://xn--bcher-kva.test/a"),
     ("https://faß.test/", "https://xn--fa-hia.test/"),
     ("https://fass.test/", "https://fass.test/"),
+    ("https://☃.net/", "https://xn--n3h.net/"),
+    ("https://ｂüｃher．test/", "https://xn--bcher-kva.test/"),
     ("about:blank", "about:blank"),
 ])
 def test_a_url_is_normalized_as_the_browser_shows_it(url, shown):
