@@ -12,6 +12,7 @@ from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
+from agent_env.providers.sandbox_providers import sizing
 
 if TYPE_CHECKING:
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -25,6 +26,10 @@ class DeploySandboxTaskStep(TaskStep):
     type: ClassVar[str] = "deploy_sandbox"
     entity_refs = ()
     field_scopes = {**TaskStep.field_scopes, "sandbox_type": FieldScope.USER}
+    # What an unsized step reserves. Unset stays None on the step and in its stored dict, so a size the
+    # step chose is told apart from one it left to this default.
+    DEFAULT_CPU: ClassVar[float] = 1.0
+    DEFAULT_MEMORY_MB: ClassVar[int] = 8192
 
     def __init__(
         self,
@@ -33,8 +38,8 @@ class DeploySandboxTaskStep(TaskStep):
         sandbox_name: str,
         sandbox_mode: str,
         image: Optional[str] = None,
-        cpu: float = 1.0,
-        memory_mb: int = 8192,
+        cpu: Optional[float] = None,
+        memory_mb: Optional[int] = None,
         disk_size_gb: float = 10,
         ttl_seconds: int = TaskStep.DEFAULT_TTL_SECONDS,
         exposed_ports: Optional[list[int]] = None,
@@ -90,8 +95,8 @@ class DeploySandboxTaskStep(TaskStep):
             sandbox_name=data["sandbox_name"],
             sandbox_mode=data["sandbox_mode"],
             image=data.get("image"),
-            cpu=data.get("cpu", 1.0),
-            memory_mb=data.get("memory_mb", 8192),
+            cpu=data.get("cpu"),
+            memory_mb=data.get("memory_mb"),
             disk_size_gb=data.get("disk_size_gb", 10),
             ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS),
             exposed_ports=data.get("exposed_ports"),
@@ -126,10 +131,12 @@ class DeploySandboxTaskStep(TaskStep):
 
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
-        attribution = deploy_attribution(self, context)
+        size, attribution = sizing.resolve(self, deploy_attribution(self, context),
+                                           sizing.SandboxSize(self.DEFAULT_CPU, self.DEFAULT_MEMORY_MB))
+        cpu, memory_mb = size.cpu, size.memory_mb
         logger.info(
             f"Deploying sandbox '{self.sandbox_name}' (mode={self.sandbox_mode}, "
-            f"image={self.image}, cpu={self.cpu}, memory_mb={self.memory_mb}, "
+            f"image={self.image}, cpu={cpu}, memory_mb={memory_mb}, "
             f"disk_size_gb={self.disk_size_gb}, ttl_seconds={resolved_ttl}, "
             f"sandbox_type={resolved_sandbox_type}, attribution={attribution})"
         )
@@ -142,8 +149,8 @@ class DeploySandboxTaskStep(TaskStep):
             sandbox = await provider.create_vm(
                 image=self.image,
                 boot_mode=self.boot_mode,
-                cpu=self.cpu,
-                memory=self.memory_mb,
+                cpu=cpu,
+                memory=memory_mb,
                 disk_size_gb=self.disk_size_gb,
                 timeout=resolved_ttl,
                 exposed_ports=self.exposed_ports or [],
@@ -158,8 +165,8 @@ class DeploySandboxTaskStep(TaskStep):
                 image_name=self.image,
                 port=self.port,
                 env=self.env_vars or {},
-                cpu=self.cpu,
-                memory=self.memory_mb,
+                cpu=cpu,
+                memory=memory_mb,
                 disk_size_gb=self.disk_size_gb,
                 timeout=resolved_ttl,
                 attribution=attribution,

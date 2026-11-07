@@ -320,6 +320,13 @@ class Config:
 
         return self._registry("sandbox", sandbox_provider._build_registry)
 
+    def sandbox_sizer(self):
+        """The sizer ``[sandbox.sizer]`` names, which chooses sizes deploy steps leave unset; one that chooses none
+        when the table is absent."""
+        from agent_env.providers.sandbox_providers import sizing
+
+        return self._registry("sandbox_sizer", sizing._build_sizer)
+
     def state_registry(self) -> dict[str, dict]:
         from agent_env.providers.env_state import env_state_provider
 
