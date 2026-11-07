@@ -131,7 +131,7 @@ class AppDataPlane:
         if not self.paths:
             return None
         return {OP_ADD_DATA: functools.partial(add, paths=self.paths),
-                OP_GET_DATA: functools.partial(get, self.paths, self.runtime.paused),
+                OP_GET_DATA: functools.partial(get, self.paths, paused=self.runtime.paused),
                 OP_RESET_DATA: functools.partial(reset, self.paths)}[op]
 
     async def _within(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> Any:
@@ -177,10 +177,10 @@ async def add(parts: list, paths: list[str]) -> None:
     await in_thread(write_within, Path.home(), files, paths)
 
 
-async def get(paths: list[str], paused: Callable[[], contextlib.AbstractContextManager],
-              write_namespace: Optional[WriteNamespaceGrant]) -> list:
+async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant] = None, *,
+              paused: Callable[[], contextlib.AbstractContextManager] = contextlib.nullcontext) -> list:
     """A part for each file under ``paths``, copied with the app ``paused``, so they are of one moment, and sent from
-    the copy once it runs again."""
+    the copy once it runs again. ``paths`` and ``write_namespace`` stay positional, as apps exported earlier call it."""
     INITIAL.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=INITIAL.parent) as staging:
         with paused():

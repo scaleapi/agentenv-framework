@@ -139,6 +139,16 @@ async def test_an_app_with_only_paths_loads_exports_and_resets_them_as_installed
 
 
 @pytest.mark.asyncio
+async def test_get_keeps_its_earlier_call_with_paths_and_a_write_namespace_as_exported_apps_make_it(home):
+    (home / "Mail").mkdir()
+    (home / "Mail/inbox.txt").write_text("kept")
+
+    parts = await app_data.get(["Mail"], None)
+
+    assert [await part_bytes(part) for part in parts] == [b"kept"]
+
+
+@pytest.mark.asyncio
 async def test_a_file_under_none_of_its_paths_or_through_a_link_out_of_them_is_refused_and_nothing_is_written(home):
     (home / "Documents").mkdir()
     (home / "Mail").mkdir()
