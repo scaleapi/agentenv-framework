@@ -48,8 +48,10 @@ class ComputerFailed(RuntimeError):
     """The computer's ``computer-ready`` status says it failed for good, a check that can't pass again."""
 #: How many random bytes a computer's control token carries: 256 bits, past guessing.
 CONTROL_TOKEN_BYTES = 32
-#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in.
+#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in, and
+#: for Windows, what Windows 11 asks of a PC.
 DISK_CPU, DISK_MEMORY_MB = 2.0, 4096
+WINDOWS_CPU, WINDOWS_MEMORY_MB = 4.0, 8192
 
 
 @dataclass
@@ -59,22 +61,24 @@ class Booted:
     card: dict
 
 
-def native_links(sandbox_provider: SandboxProvider, arch: str, form: str, store_id: str) -> list[SandboxProvider]:
-    """The providers a boot of ``form`` for ``arch`` of the env stored as ``store_id`` may run on, in the order a chain
-    tries them: those that boot its disk natively, which they carry themselves, or run its container natively and pull
-    it from the env's image store."""
+def native_links(sandbox_provider: SandboxProvider, arch: str, form: str, store_id: str,
+                 os_type: str = "linux") -> list[SandboxProvider]:
+    """The providers a boot of ``form`` for ``arch`` of the env stored as ``store_id``, an ``os_type`` computer, may run
+    on, in the order a chain tries them: those that boot its disk natively, which they carry themselves, or run its
+    container natively and pull it from the env's image store."""
     if form == "disk":
-        return [link for link in sandbox_provider.links if f"linux/{arch}" in link.disk_image_platforms()]
+        return [link for link in sandbox_provider.links if f"{os_type}/{arch}" in link.disk_image_platforms()]
     if form == "vm_bundle":
         return [link for link in sandbox_provider.links if f"macos/{arch}" in link.vm_bundle_platforms()]
     return [link for link in sandbox_provider.links if f"linux/{arch}" in link.native_platforms()
             and pulls_containers(link, store_id)]
 
 
-def first_native(link: SandboxProvider, pairs: Iterable[tuple[str, str]], store_id: str) -> tuple[str, str] | None:
+def first_native(link: SandboxProvider, pairs: Iterable[tuple[str, str]], store_id: str,
+                 os_type: str = "linux") -> tuple[str, str] | None:
     """The first of ``pairs``, forms and arches in the base's order, that ``link`` boots natively: the one a deploy on it
     boots, and so the one a run composes for it."""
-    return next(((form, arch) for form, arch in pairs if native_links(link, arch, form, store_id)), None)
+    return next(((form, arch) for form, arch in pairs if native_links(link, arch, form, store_id, os_type)), None)
 
 
 def pulls_containers(link: SandboxProvider, store_id: str) -> bool:
@@ -146,7 +150,8 @@ def control_environment(token: Optional[str]) -> dict[str, str]:
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
-               ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False) -> Booted:
+               ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False,
+               os_type: str = "linux") -> Booted:
     """``image``, of ``form``, booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the
     caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that
     token, says the computer is ready, or with ``held``, its boot apps' launch held, once it answers (``ready``); a boot
@@ -160,7 +165,8 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
             disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}),
-            cpu=cpu or DISK_CPU, memory=memory_mb or DISK_MEMORY_MB)
+            cpu=cpu or (WINDOWS_CPU if os_type == "windows" else DISK_CPU),
+            memory=memory_mb or (WINDOWS_MEMORY_MB if os_type == "windows" else DISK_MEMORY_MB))
     else:
         sandbox = await sandbox_provider.create_container(
             image_name=image, port=port, env=environment, network_policy=network_policy, disk_size_gb=disk_size_gb,

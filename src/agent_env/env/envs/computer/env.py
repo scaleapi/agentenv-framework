@@ -209,7 +209,8 @@ class ComputerEnv(Env):
         return ComputerArtifact.get(self.metadata["computer"]["id"], self.metadata["computer"]["version"])
 
     async def compose_unstarted(self, sandbox_provider: SandboxProvider, form: Optional[str] = None) -> None:
-        """Compose first what a deploy on ``sandbox_provider`` boots that no compose started, once for deploys at once,
+        """Compose first what a deploy on ``sandbox_provider`` boots that no compose started, or a container it runs
+        natively that was built but not probed (``composer.unprobed``), once for deploys at once,
         on the env's default sandbox provider, this machine unless the config names another, never on the deploy's,
         unless the run's fence would refuse the record (rules in ``computers/README.md``). A cancelled deploy holds the
         lock until its compose's thread, which no cancel stops, ends, so the next deploy waits for what it builds."""
@@ -235,8 +236,9 @@ class ComputerEnv(Env):
                 composed = self.metadata.get("composed", {})
                 booting, building = (" or ".join(type(link).__name__ for link in provider.links)
                                      for provider in (sandbox_provider, on.provider()))
-                why = (f"an agent-env that composes differently built {them}" if any(
-                    stale(composed.get(name, {}).get(arch)) for name, arch in pairs)
+                records = [composed.get(name, {}).get(arch) for name, arch in pairs]
+                why = (f"an agent-env that composes differently built {them}" if any(map(stale, records))
+                       else f"no compose probed {them} on {booting} yet" if all(records)
                        else f"no compose built {them} for {booting} yet")
                 say(f"composing {_pairs(pairs)} before this deploy on {building} ({why}); later deploys reuse {them}")
                 composing = asyncio.ensure_future(asyncio.to_thread(composer.compose, self, pairs, on))
@@ -316,8 +318,8 @@ class ComputerEnv(Env):
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
         links, arches = sandbox_provider.links, self.composed_arches()
         forms = [params.form] if params.form else gate.forms(self.computer)
-        native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id) for form in forms
-                                                for arch in arches)]
+        native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id, self.computer.os.type)
+                                                for form in forms for arch in arches)]
         usable = [link for link in native if link.WEBSOCKETS] if self.serves_website_browser() else native
         if native and not usable:
             problems.append(f"{', '.join(type(link).__name__ for link in native)} carries no WebSockets, which its "

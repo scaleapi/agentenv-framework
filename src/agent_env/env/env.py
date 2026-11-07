@@ -409,10 +409,12 @@ class Env(ABC):
         raise NotImplementedError(f"{type(self).__name__} must implement deploy()")
 
     def deploy_refusal(self, *, sandbox_type: Optional[str] = None, env_params: Optional[dict] = None,
-                       **options) -> Optional[str]:
+                       child_envs: Optional[dict] = None, **options) -> Optional[str]:
         """Why deploy() would refuse these options before building anything, or None. A type that checks its options
-        overrides this; one that doesn't takes no ``env_params``."""
-        return f"{self.type} envs take no env_params" if env_params else None
+        overrides this; one that doesn't takes no ``env_params``, and has no child envs to give ``child_envs``."""
+        if env_params:
+            return f"{self.type} envs take no env_params"
+        return f"{self.type} envs have no child envs" if child_envs else None
 
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """``env_params`` as a run's deploy_env passes them to deploy(), once the run has deployed ``deployed_envs``:

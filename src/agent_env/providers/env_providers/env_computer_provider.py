@@ -30,6 +30,7 @@ from agent_env.env.envs.computer.utils.boot import (
     discard,
     first_native,
     listed,
+    native_links,
     ready,
     ready_timeout,
     recorded_app_settings,
@@ -88,9 +89,17 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             raise DeployRefused(f"{env.id}: env_params.site_routing reaches the run's websites, which a run's "
                                 "deploy_env names in env_params.sites; give them there to deploy it any other way")
         await env.compose_unstarted(sandbox_provider, params.form)
-        if not (builds := env.deployable_builds(params.form)):
+        builds = env.deployable_builds(params.form)
+        unprobed = composer.unprobed(env, sandbox_provider, params.form)
+        # A ready build only of an arch this provider can't run mustn't hide why its native one is still unprobed.
+        if unprobed and not any(native_links(sandbox_provider, arch, form, env.stored_id, env.computer.os.type)
+                                for form, arch, _ in builds):
+            builds = []
+        if not builds:
+            why = "".join(f"; {name}/{arch}: {record.get('reason', 'not probed')}" for name, arch, record in unprobed)
             raise DeployRefused(f"{env.id} has no ready build to deploy; its builds are "
-                                f"{env.build_statuses() or 'none yet'}; compose it with: agent-env env build --id {env.id}")
+                                f"{env.build_statuses() or 'none yet'}{why}; compose it with: agent-env env build --id "
+                                f"{env.id}")
         if params.site_routing and not (builds := [build for build in builds if build[0] != "disk"]):
             raise DeployRefused(f"{env.id}: env_params.site_routing installs into the computer's container, and a disk "
                                 "computer runs inside a launcher container it can't reach; deploy a container form")
@@ -109,7 +118,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         from agent_env.env.envs.computer.env import ComputerEnv
 
         pairs = [(form, arch) for form, arch, _ in builds]
-        if (picked := first_native(sandbox_provider, pairs, env.stored_id)) is None:
+        if (picked := first_native(sandbox_provider, pairs, env.stored_id, env.computer.os.type)) is None:
             raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
         if env.serves_website_browser() and not sandbox_provider.WEBSOCKETS:
@@ -134,7 +143,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
             environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
-            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing))
+            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing),
+            os_type=env.computer.os.type)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:

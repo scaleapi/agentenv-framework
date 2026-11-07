@@ -696,7 +696,9 @@ driver booted with a control token is probed with it: `--token`, by default
 
 At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
 `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
-window's widgets report, reads back what reached them, and then removes the fixture. When the
+window's widgets report, reads back what reached them, and then removes the fixture. On X11 the
+window is maximized and kept above other windows, raising itself again when one covers it, so a
+window an app keeps on top doesn't take the clicks aimed at it; elsewhere it is full screen. When the
 fixture can't be staged, the `full` checks are unverified rather than failed.
 
 On a driver whose card says `screen: "page"`, the desk is an HTML page with the same widgets at the

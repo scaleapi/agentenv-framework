@@ -1,11 +1,11 @@
-"""cua-driver as a computer driver, for an X11 desktop on Linux and for macOS: trycua's cua-driver runs on the computer
-as a daemon, which this file starts when run as a script on Linux and CuaDriver.app's LaunchAgent starts on macOS, so
-macOS gives it the app's TCC permissions. Agents get what its own MCP server serves at its pinned version (``mcp.json``,
-``mcp-macos.json``): its instructions, its tools beside the ``computer_*`` tools, and its skill resources, read from it.
-The computer/v1 operations are its desktop-scope calls, the pointer's in the foreground on macOS, where cua-driver
-otherwise keeps from moving a person's pointer over a background app. The daemon takes
-line-delimited JSON on a Unix socket, and each call goes on a connection of its own, as cua-driver's own MCP server sends
-them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
+"""cua-driver as a computer driver, for an X11 desktop on Linux, for macOS and for Windows: trycua's cua-driver runs on
+the computer as a daemon, which this file starts when run as a script on Linux and Windows, in the session user's
+sign-in there, and CuaDriver.app's LaunchAgent starts on macOS, so macOS gives it the app's TCC permissions. Agents get
+what its own MCP server serves at its pinned version (``mcp.json``, ``mcp-macos.json``, ``mcp-windows.json``): its
+instructions, its tools beside the ``computer_*`` tools, and its skill resources, read from it. The computer/v1
+operations are its desktop-scope calls, the pointer's in the foreground on macOS, where cua-driver otherwise keeps from
+moving a person's pointer over a background app. The daemon takes line-delimited JSON on a Unix socket, a named pipe on
+Windows, and each call goes on a connection of its own, as cua-driver's own MCP server sends them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
 cua-driver starts again after ending it for idling, where a named one stays ended. A call the daemon can't take, as
 while it restarts, fails as unavailable; input whose reply is lost fails with its outcome unknown, since it may have
 arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs."""
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import functools
 import hashlib
 import importlib.util
@@ -32,7 +33,7 @@ from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
 from pydantic import AnyUrl
 
-if sys.platform != "darwin":
+if sys.platform == "linux":
     from Xlib import display as x_display
     from Xlib.error import ConnectionClosedError, DisplayConnectionError
 
@@ -56,19 +57,24 @@ from agentenv_protocol.computer import (
     type_text,
 )
 
-MACOS = sys.platform == "darwin"
+MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
 #: Where cua-driver's daemon listens.
-SOCKET = Path("/tmp/agentenv-cua-driver.sock" if MACOS else "/run/agentenv/cua-driver.sock")
+SOCKET = (r"\\.\pipe\agentenv-cua-driver" if WINDOWS else
+          str(Path("/tmp/agentenv-cua-driver.sock" if MACOS else "/run/agentenv/cua-driver.sock")))
 #: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version on each OS: its
 #: instructions, its tools, which the running daemon must list the same, and its skill resources.
-MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp.json")
+MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp-windows.json" if WINDOWS else "mcp.json")
+#: Where the release's zip is unpacked on Windows, beside this file.
+WINDOWS_EXECUTABLE = Path(__file__).with_name("cua-driver") / "cua-driver.exe"
 #: CuaDriver.app's executable, which macOS runs the daemon as.
 APP_EXECUTABLE = Path("/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
-#: The sha256 of the cua-driver executable each arch's pinned wheel installs, and on macOS, CuaDriver.app's.
+#: The sha256 of the cua-driver executable each arch's pinned wheel installs, on macOS CuaDriver.app's, and on Windows
+#: the release zip's.
 EXECUTABLES = {
     "amd64": "bf57b2f3778a0a7daa9388e241f20ce948b32a7a2f4dd102e497f34e54137934",
     "arm64": "26e9eee8165e9ce7b614b5e3d68e5d963231385a82b65236406718b5ce1ff936",
     "macos/arm64": "b4d974a9c1c92a700cd7be7ede987aea4a1e6835e37039ce3d628b71bd5f0ca8",
+    "windows/amd64": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
 }
 #: How the daemon delivers the pointer's actions: in the foreground on macOS, where it doesn't by default.
 FOREGROUND = {"delivery_mode": "foreground"} if MACOS else {}
@@ -94,11 +100,16 @@ NAMED = {
 SKILL_TIMEOUT_S = 60
 #: The largest reply the daemon sends: a screenshot of a large display, base64.
 REPLY_LIMIT = 64 << 20
+#: How long a call waits on Windows for one of the daemon's pipe instances to free, every one taken, which the C
+#: runtime's open reports as EINVAL (ERROR_PIPE_BUSY), and for the next to be made, none there (ENOENT), which a daemon
+#: that isn't running answers too.
+PIPE_WAITS = {errno.EINVAL: 10.0, errno.ENOENT: 1.0}
 
 
 @computer_driver(name="cua-driver",
                  supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]},
-                           {"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}])
+                           {"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]},
+                           {"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]}])
 class CuaDriver(ComputerDriverEnvironment):
     buttons = ("left", "right", "middle")
     max_click_count = 3
@@ -179,7 +190,7 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @type_text
     async def type_in(self, text) -> None:
-        if not MACOS and any(ord(ch) >= LATIN_1 for ch in text):
+        if not MACOS and not WINDOWS and any(ord(ch) >= LATIN_1 for ch in text):
             await asyncio.to_thread(self._hold, text)
         await self._send("type_text", text=text)
 
@@ -240,7 +251,8 @@ class CuaDriver(ComputerDriverEnvironment):
         except DeviceUnavailable:
             return [ReadyCheck("cua-driver", False, "its daemon isn't answering yet")]
         arch = self.platform.arch or ""
-        digest, expected = await asyncio.to_thread(_executable_sha256), EXECUTABLES.get(f"macos/{arch}" if MACOS else arch)
+        digest = await asyncio.to_thread(_executable_sha256)
+        expected = EXECUTABLES.get(f"macos/{arch}" if MACOS else f"windows/{arch}" if WINDOWS else arch)
         running = {t["name"]: t["input_schema"] for t in listed}
         pinned = {t["name"]: t["inputSchema"] for t in _manifest()["tools"]}
         differ = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
@@ -268,8 +280,10 @@ class _ReplyLost(DeviceUnavailable):
 async def _request(payload: dict) -> dict:
     """The daemon's reply to ``payload``, sent on a connection of its own; a cancelled request closes it, so nothing is
     left to read its reply."""
+    if WINDOWS:
+        return await asyncio.to_thread(_piped, payload)
     try:
-        reader, writer = await asyncio.open_unix_connection(str(SOCKET), limit=REPLY_LIMIT)
+        reader, writer = await asyncio.open_unix_connection(SOCKET, limit=REPLY_LIMIT)
     except OSError as e:
         raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
     try:
@@ -286,9 +300,38 @@ async def _request(payload: dict) -> dict:
         writer.close()
 
 
+def _piped(payload: dict) -> dict:
+    """``_request`` on Windows, over the daemon's named pipe, which a thread waits on. A pipe whose every instance is
+    taken refuses the open, where a Unix socket queues the connection, so a burst of calls waits for one to free, and
+    for the moment between one instance taken and the next made, when the pipe has none."""
+    started = time.monotonic()
+    while True:
+        try:
+            pipe = open(SOCKET, "r+b", buffering=0)
+            break
+        except OSError as e:
+            if time.monotonic() - started > PIPE_WAITS.get(e.errno, 0):
+                raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
+            time.sleep(0.01)
+    with pipe:
+        try:
+            pipe.write((json.dumps(payload) + "\n").encode())
+            reply = bytearray()
+            while not reply.endswith(b"\n"):
+                if not (chunk := pipe.read(1 << 20)):
+                    raise ConnectionError("the daemon closed the connection")
+                reply += chunk
+                if len(reply) > REPLY_LIMIT:
+                    raise ValueError(f"its reply is over {REPLY_LIMIT} bytes")
+            return json.loads(reply)
+        except (OSError, ValueError) as e:
+            raise _ReplyLost(f"cua-driver's daemon stopped answering after the request was sent, which it may have "
+                             f"acted on: {e}") from None
+
+
 async def _read_resources(uris: list[str]) -> dict[str, str]:
     """cua-driver's skill resources as its own MCP server serves them, on the running daemon."""
-    server = StdioServerParameters(command=str(_executable()), args=["mcp", "--socket", str(SOCKET)],
+    server = StdioServerParameters(command=str(_executable()), args=["mcp", "--socket", SOCKET],
                                    env={**os.environ, **QUIET})
     async with stdio_client(server) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
@@ -297,7 +340,7 @@ async def _read_resources(uris: list[str]) -> dict[str, str]:
 
 @functools.cache
 def _manifest() -> dict:
-    return json.loads(MANIFEST.read_text())
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
 class _Keymap:
@@ -358,6 +401,8 @@ def _executable() -> Path:
     package, which loads its SDK."""
     if MACOS:
         return APP_EXECUTABLE
+    if WINDOWS:
+        return WINDOWS_EXECUTABLE
     return Path(importlib.util.find_spec("cua_driver").submodule_search_locations[0]) / "bin" / "cua-driver"
 
 
@@ -371,9 +416,9 @@ def _skill_pack() -> tuple[str, str, dict[str, str]]:
     with tempfile.TemporaryDirectory(prefix="cua-driver-skill-") as home:
         (Path(home) / ".claude").mkdir()
         subprocess.run([str(_executable()), "mcp-config", "--client", "claude"], capture_output=True, check=True,
-                       timeout=SKILL_TIMEOUT_S, env={**os.environ, "HOME": home, **QUIET})
+                       timeout=SKILL_TIMEOUT_S, env={**os.environ, "HOME": home, "USERPROFILE": home, **QUIET})
         folder = Path(home) / ".cua-driver" / "skills" / "cua-driver"
-        files = {path.name: path.read_text() for path in sorted(folder.iterdir()) if path.is_file()}
+        files = {path.name: path.read_text(encoding="utf-8") for path in sorted(folder.iterdir()) if path.is_file()}
     _, frontmatter, body = files.pop("SKILL.md").split("---\n", 2)
     description = next(line.partition(":")[2].strip() for line in frontmatter.splitlines()
                        if line.startswith("description:"))
@@ -383,13 +428,18 @@ def _skill_pack() -> tuple[str, str, dict[str, str]]:
 def _daemon() -> None:
     """Run cua-driver's daemon once X answers: from the session user's home, where the apps it launches start too, on
     the socket the driver reaches it at, with approvals off, since nobody is at the computer to give them, and nothing
-    sent to trycua."""
+    sent to trycua. On Windows, in the session user's sign-in, as agentenv-session starts it, and waited on, since
+    Windows has no exec: one that exits is started again."""
+    if WINDOWS:
+        os.chdir(Path.home())
+        sys.exit(subprocess.run([str(_executable()), "serve", "--socket", SOCKET, "--dangerously-bypass-approvals",
+                                 "--no-overlay"], env={**os.environ, **QUIET}).returncode)
     display = os.environ["DISPLAY"].lstrip(":").partition(".")[0]
     while not Path(f"/tmp/.X11-unix/X{display}").is_socket():
         time.sleep(0.2)
     os.chdir(Path.home())
     executable = str(_executable())
-    os.execve(executable, [executable, "serve", "--socket", str(SOCKET), "--dangerously-bypass-approvals", "--no-overlay"],
+    os.execve(executable, [executable, "serve", "--socket", SOCKET, "--dangerously-bypass-approvals", "--no-overlay"],
               {**os.environ, **QUIET})
 
 

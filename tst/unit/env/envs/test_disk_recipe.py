@@ -148,9 +148,10 @@ def test_the_launcher_gets_kvm_the_vms_ports_and_size_and_its_environment_under_
 _STAND_INS = {
     "dpkg": "echo amd64",
     "qemu-img": 'echo "qemu-img $*" >> "$CALLS"',
-    "mkfs.vfat": ":",
-    "mcopy": ":",
-    "cp": 'touch "${@: -1}"',
+    "mkfs.vfat": 'echo "mkfs.vfat $*" >> "$CALLS"',
+    "mcopy": 'echo "mcopy $*" >> "$CALLS"',
+    "cp": 'echo "cp $*" >> "$CALLS"; touch "${@: -1}"',
+    "swtpm": 'echo "swtpm $*" >> "$CALLS"',
     "zstd": 'echo "zstd $*" >> "$CALLS"; sleep "${ZSTD_TAKES_S:-0}"; touch "${@: -1}"',
     "socat": 'echo "socat $*" >> "$CALLS"; sleep "${SOCAT_EXITS_S:-30}"; exit 7',
     **{qemu: f'echo "{qemu} $* seed=$(grep -vc "^#" "$VM_STATE/boot/seed/user-data")'
@@ -274,6 +275,100 @@ def test_the_launcher_expands_a_compressed_disk_onto_its_state_folder_and_boots_
     assert done.wait(10) == 0
     assert _logged(calls, "zstd") == [f"zstd -q -d -f /disk/disk.img.zst -o {tmp_path}/state/disk.img"]
     assert f"-b {tmp_path}/state/disk.img -F qcow2" in _logged(calls, "qemu-img")[0]
+
+
+def test_a_windows_disk_boots_from_secure_boot_on_ahci_and_e1000e_with_a_fresh_tpm_each_time(launcher, tmp_path):
+    """Windows has no virtio drivers of its own and installs only with secure boot and a TPM 2.0."""
+    launch, calls = launcher
+    disk = tmp_path / "disk" / "disk.img"
+    disk.parent.mkdir()
+    (disk.parent / "guest").write_text("windows\n")
+    running = launch(VM_DISK=str(disk), VM_PORTS="18765")
+    (qemu,) = _logged(calls, "qemu-system-x86_64")
+
+    reset = launch("reset", input="")
+
+    assert reset.wait(10) == 0, reset.stderr.read()
+    work = tmp_path / "state" / "boot"
+    assert "-machine q35,smm=on,accel=" in qemu and "file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd " in qemu
+    assert "-device tpm-tis,tpmdev=tpm " in qemu and "-device ide-hd,drive=disk,bus=ide.0,bootindex=1,rotation_rate=1 " in qemu
+    assert ",id=disk,discard=unmap,detect-zeroes=unmap " in qemu
+    assert "-device e1000e,netdev=net " in qemu and "-device VGA,xres=1920,yres=1080 " in qemu and "virtio" not in qemu
+    assert "-device usb-storage,bus=usb.0,drive=seed,removable=on " in qemu
+    assert _logged(calls, "swtpm", 2) == 2 * [f"swtpm socket --tpm2 --tpmstate dir={work}/tpm --ctrl"
+                                              f" type=unixio,path={work}/tpm.sock --daemon --terminate"]
+    assert f"cp /usr/share/OVMF/OVMF_VARS_4M.ms.fd {work}/vars.fd" in _logged(calls, "cp")
+    running.terminate()
+    assert running.wait(10) == 143
+
+
+@pytest.mark.parametrize("guest, arch, why", [("windows", "arm64", "a windows guest boots on amd64 alone, not arm64"),
+                                              ("plan9", "amd64", "no guest plan9")])
+def test_the_launcher_refuses_a_guest_it_cant_boot(launcher, tmp_path, guest, arch, why):
+    launch, calls = launcher
+    (tmp_path / "guest").write_text(guest)
+
+    refused = launch(VM_DISK=str(tmp_path / "disk.img"), VM_ARCH=arch)
+
+    assert refused.wait(10) == 2 and why in refused.stderr.read()
+    assert not calls.exists() or "qemu" not in calls.read_text()
+
+
+def test_a_builder_boots_on_a_kept_overlay_made_on_the_disk_or_empty_where_theres_none_and_may_restart(
+        launcher, tmp_path):
+    """A base's install and a composition both keep what the guest writes, through the restarts its setup makes."""
+    launch, calls = launcher
+    out, disk = tmp_path / "out", tmp_path / "disk" / "disk.img"
+    out.mkdir()
+    disk.parent.mkdir()
+    disk.touch()
+    (out / "guest").write_text("windows")
+
+    empty = launch(VM_KEEP=str(out / "base.img"), VM_DISK=str(tmp_path / "none.img"), VM_DISK_GB="80",
+                   QEMU_RUNS_S="0.1")
+    assert empty.wait(10) == 0, empty.stderr.read()
+    backed = launch(VM_KEEP=str(out / "layer.img"), VM_DISK=str(disk), QEMU_RUNS_S="0.1")
+    assert backed.wait(10) == 0, backed.stderr.read()
+
+    assert _logged(calls, "qemu-img", 2) == [f"qemu-img create -q -f qcow2 {out}/base.img 80G",
+                                             f"qemu-img create -q -f qcow2 -b {disk} -F qcow2 {out}/layer.img"]
+    first, second = _logged(calls, "qemu-system-x86_64", 2)
+    assert f"file={out}/base.img,format=qcow2" in first and f"file={out}/layer.img,format=qcow2" in second
+    assert "-no-reboot" not in first + second and "-device tpm-tis" in first
+
+
+def test_a_windows_install_boots_its_iso_first_pressing_enter_and_finds_its_answers_on_a_removable_drive(
+        launcher, tmp_path):
+    launch, calls = launcher
+    out, answers = tmp_path / "out", tmp_path / "answers"
+    out.mkdir()
+    answers.mkdir()
+    (out / "guest").write_text("windows")
+    (answers / "autounattend.xml").write_text("<unattend/>")
+
+    running = launch(VM_KEEP=str(out / "base.img"), VM_DISK=str(tmp_path / "none.img"), VM_MEDIA="/in/win11.iso",
+                     VM_FILES=str(answers), SOCAT_EXITS_S="0")
+
+    (qemu,) = _logged(calls, "qemu-system-x86_64")
+    assert ("-drive file=/in/win11.iso,format=raw,if=none,id=media,media=cdrom,readonly=on"
+            " -device ide-cd,drive=media,bus=ide.2,bootindex=0 ") in qemu
+    assert "-device ide-hd,drive=disk,bus=ide.0,bootindex=1,rotation_rate=1 " in qemu
+    assert "-device usb-storage,bus=usb.0,drive=files,removable=on " in qemu
+    assert _logged(calls, "socat - UNIX-CONNECT:")
+    assert _logged(calls, "mcopy -s")[0].startswith(f"mcopy -s -i {tmp_path}/state/boot/files.img {answers}/")
+    running.terminate()
+    assert running.wait(10) == 143
+    pressed = calls.read_text().count("socat - UNIX-CONNECT:")
+    time.sleep(1.5)
+    assert calls.read_text().count("socat - UNIX-CONNECT:") == pressed, "Enter is still pressed after the launcher exits"
+
+
+def test_install_media_is_for_a_windows_guest(launcher):
+    launch, _ = launcher
+
+    refused = launch(VM_MEDIA="/in/installer.iso")
+
+    assert refused.wait(10) == 2 and "VM_MEDIA and VM_FILES are for a windows guest, not linux" in refused.stderr.read()
 
 
 def test_a_reset_boots_the_computer_afresh_with_its_new_environment_while_its_ports_stay_up(launcher):
@@ -427,11 +522,45 @@ async def test_a_disk_isnt_booted_where_docker_cant_pass_kvm(launched, monkeypat
     assert launched == [] and LocalSandboxProvider.disk_image_platforms() == frozenset()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layers, dockerfile", [
+    ("1", "FROM launcher:1\nCOPY --from=disk:1 /disk/ /disk/\n"),
+    ("2", "FROM launcher:1\nCOPY --from=disk:1 /disk/base.img /disk/base.img\n"
+          "COPY --from=disk:1 /disk/disk.img /disk/guest /disk/\n")], ids=["one-layer", "thin-on-a-base"])
+async def test_a_machine_copies_a_thin_disks_base_in_a_step_of_its_own_so_machines_on_one_base_share_it(
+        monkeypatch, layers, dockerfile):
+    built = []
+    monkeypatch.setattr(local_disk, "launcher", lambda: "launcher:1")
+    monkeypatch.setattr(local_disk, "present", lambda tag: False)
+    monkeypatch.setattr(local_disk, "docker", lambda *args: f"sha256:1 {layers}")
+    monkeypatch.setattr(local_disk, "_build", lambda text, tag: built.append(text))
+
+    await local_disk.machine_image("disk:1")
+
+    assert built == [dockerfile]
+
+
+@pytest.mark.asyncio
+async def test_a_disk_built_again_under_its_tag_gets_a_machine_of_its_own(monkeypatch):
+    """As a Windows base installed afresh is, under the tag the one it replaces had."""
+    identity = "sha256:1"
+    monkeypatch.setattr(local_disk, "launcher", lambda: "launcher:1")
+    monkeypatch.setattr(local_disk, "present", lambda tag: True)
+    monkeypatch.setattr(local_disk, "docker", lambda *args: f"{identity} 2")
+
+    first = await local_disk.machine_image("disk:1")
+    again = await local_disk.machine_image("disk:1")
+    identity = "sha256:2"
+    rebuilt = await local_disk.machine_image("disk:1")
+
+    assert first == again != rebuilt
+
+
 def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path, monkeypatch):
     """By this machine's Docker, signed in to the image store as a boot's pull is: the disk copied out of a container of
     its image, then compressed in the launcher."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(local_disk, "_launcher", lambda: "agentenv-qemu-launcher:src-1")
+    monkeypatch.setattr(local_disk, "launcher", lambda: "agentenv-qemu-launcher:src-1")
     ran, compressed = [], []
     store = SimpleNamespace(auth=lambda ref: f"credentials for {ref}")
     monkeypatch.setattr(local_disk, "get_config", lambda: SimpleNamespace(get_image_store=lambda: store))

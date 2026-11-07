@@ -34,6 +34,7 @@ from agentenv_protocol.computer import (  # noqa: E402
     type_text,
 )
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run_probe  # noqa: E402
+from agentenv_protocol.computer import _linux  # noqa: E402
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
 from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
@@ -167,13 +168,33 @@ async def test_each_app_a_driver_fronts_that_exports_is_asked_for_its_export_onc
 
 @pytest.mark.asyncio
 async def test_a_driver_without_exec_or_data_add_passes_basic_and_leaves_full_unverified():
-    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="windows")))
+    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="freebsd")))
     assert report.passed, _failed(report)
     unverified = [c for c in report.checks if c.status == "unverified"]
     assert {c.check for c in unverified} == {"P3", "P4", "P5", "P6", "P7", "P9"}
     assert "the driver lacks ['urn:agentenv:computer-exec/v1', 'data/add']" in unverified[0].detail
     assert "urn:agentenv:computer-exec/v1" not in report.extensions
     assert report.extensions["urn:agentenv:computer/v1"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_a_windows_computer_is_probed_with_the_commands_windows_has(monkeypatch):
+    """Its exec checks run Python one-liners rather than a POSIX shell; here they run on this machine's python3."""
+    sent = []
+    run = _linux.run_in_session
+
+    async def recorded(argv, *args, **kwargs):
+        sent.append(list(argv))
+        return await run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(_linux, "run_in_session", recorded)
+    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="windows", arch="amd64")), "basic")
+
+    assert report.passed, _failed(report)
+    exec_checks = [c for c in report.checks if "urn:agentenv:computer-exec/v1" in c.extensions]
+    assert len(exec_checks) >= 4 and all(c.status == "passed" for c in exec_checks)
+    assert list(checks.WIN_ECHO) in sent and list(checks.WIN_SLEEP) in sent and list(checks.WIN_NOW) in sent
+    assert not [argv for argv in sent if argv[0] == "sh"]
 
 
 class NeverReady(FixtureDriver):
@@ -300,6 +321,77 @@ def test_the_fixture_counts_a_scroll_tk_9_reports_in_pixels_by_the_lines_it_move
     """The deltas Tk 9 on macOS gave cua-driver's scrolls: 10 pixels a line, two lines at once where macOS coalesced
     them."""
     assert _fixture(monkeypatch).touchpad_steps(delta) == steps
+
+
+class _Root:
+    """A Tk root stood in for: the attributes set on it in order, its bindings, the calls made to it, and what
+    ``after`` was given to run, with its delay."""
+
+    def __init__(self):
+        self.set, self.calls, self.bound, self.timers = [], [], {}, []
+        self.last = self
+
+    def focus_lastfor(self):
+        return self.last
+
+    def attributes(self, name, value):
+        self.set.append((name, value))
+
+    def bind(self, sequence, handler, add=None):
+        self.bound[sequence] = handler
+
+    def after(self, ms, callback):
+        self.timers.append((ms, callback))
+        return f"after#{len(self.timers)}"
+
+    def lift(self):
+        self.calls.append("lift")
+
+    def focus_force(self):
+        self.calls.append("focus_force")
+
+
+def test_the_fixture_on_x11_stays_maximized_above_other_windows_and_takes_the_top_back_once_one_covers_it(monkeypatch):
+    """A window an app keeps above, as Typora's licence dialog is for its first seconds, otherwise takes the clicks the
+    probe aims at the fixture."""
+    fixture = _fixture(monkeypatch)
+    now = [100.0]
+    monkeypatch.setattr(fixture.time, "monotonic", lambda: now[0])
+    root = _Root()
+    fixture.keep_on_top(root)
+    seen = root.bound["<Visibility>"]
+
+    seen(SimpleNamespace(widget="a child", state="VisibilityFullyObscured"))
+    for_child = list(root.timers)
+    seen(SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    seen(SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    (first, lift), = root.timers
+    lift()
+    lifted = (root.set[2:], list(root.calls))
+    now[0] += 0.1
+    seen(SimpleNamespace(widget=root, state="VisibilityFullyObscured"))
+    second, again = root.timers[1]
+    seen(SimpleNamespace(widget=root, state="VisibilityUnobscured"))
+    again()
+
+    assert root.set[:2] == [("-zoomed", True), ("-topmost", True)] and for_child == []
+    assert first == 0 and lifted == ([("-topmost", False), ("-topmost", True)], ["lift", "focus_force"])
+    assert second == round((fixture.LIFT_GAP_S - 0.1) * 1000) and root.calls == ["lift", "focus_force"]
+
+
+def test_the_fixture_gives_the_focus_back_to_the_text_box_that_had_it_when_it_takes_the_top_back(monkeypatch):
+    """A window an app opens during a typing check would otherwise leave the probe's keys with the fixture's root."""
+    fixture = _fixture(monkeypatch)
+    monkeypatch.setattr(fixture.time, "monotonic", lambda: 100.0)
+    root, name = _Root(), _Root()
+    root.last = name
+    fixture.keep_on_top(root)
+
+    root.bound["<Visibility>"](SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    (_, lift), = root.timers
+    lift()
+
+    assert root.calls == ["lift"] and name.calls == ["focus_force"]
 
 
 def _fixture(monkeypatch):

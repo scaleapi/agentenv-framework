@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from agent_env.artifact.artifacts.computer import DISK_FILE
+from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_GUEST_FILE
 from agent_env.artifact.artifacts.docker_image import docker_login
 from agent_env.config import get_config
 from agent_env.config.paths import cache_root
@@ -25,18 +25,35 @@ KVM = "/dev/kvm"
 
 
 def kvm_platforms() -> frozenset[str]:
-    """This machine's platform when its Docker can pass KVM to a container: /dev/kvm here, readable and writable."""
-    return frozenset({host_platform()}) if os.access(KVM, os.R_OK | os.W_OK) else frozenset()
+    """This machine's platform when its Docker can pass KVM to a container: /dev/kvm here, readable and writable; and
+    windows/amd64 on an amd64 machine, whose launcher boots a Windows guest too."""
+    if not os.access(KVM, os.R_OK | os.W_OK):
+        return frozenset()
+    here = host_platform()
+    return frozenset({here, "windows/amd64"} if here == "linux/amd64" else {here})
 
 
 async def machine_image(disk: str) -> str:
-    """An image of the launcher holding ``disk``'s ``DISK_FILE`` for this machine's platform, built unless held."""
-    launcher = await asyncio.to_thread(_launcher)
-    tag = "agentenv-vm:" + hashlib.sha256(f"{launcher} {disk}".encode()).hexdigest()[:16]
+    """An image of the launcher holding ``disk``'s files for this machine's platform, built unless held: one for each
+    image ``disk`` names, by its id, so a disk built again under its tag gets a machine of its own. A disk of more than
+    one layer is a thin one on ``DISK_BASE_FILE``, which gets a step of its own, so every machine on that base shares
+    one copy of it."""
+    source = await asyncio.to_thread(launcher)
+    identity, layers = (await asyncio.to_thread(docker, "image", "inspect", "-f", "{{.Id}} {{len .RootFS.Layers}}",
+                                                disk)).split()
+    tag = "agentenv-vm:" + hashlib.sha256(f"{source} {disk} {identity}".encode()).hexdigest()[:16]
     if not await asyncio.to_thread(present, tag):
-        folder = f"/{PurePosixPath(DISK_FILE).parent}/"
-        await asyncio.to_thread(_build, f"FROM {launcher}\nCOPY --from={disk} {folder} {folder}\n", tag)
+        layers = int(layers)
+        await asyncio.to_thread(_build, _machine_dockerfile(source, disk, layers), tag)
     return tag
+
+
+def _machine_dockerfile(launcher: str, disk: str, layers: int) -> str:
+    folder = f"/{PurePosixPath(DISK_FILE).parent}/"
+    if layers == 1:
+        return f"FROM {launcher}\nCOPY --from={disk} {folder} {folder}\n"
+    return (f"FROM {launcher}\nCOPY --from={disk} /{DISK_BASE_FILE} /{DISK_BASE_FILE}\n"
+            f"COPY --from={disk} /{DISK_FILE} /{DISK_GUEST_FILE} {folder}\n")
 
 
 def launcher_args(ports: list[int], env: dict[str, str], cpu: float, memory: int) -> list[str]:
@@ -67,7 +84,7 @@ def _export(image: str, platform: str, path: Path) -> None:
             raw, compressed = Path(work) / "disk.img", Path(work) / path.name
             docker("cp", f"{container}:/{DISK_FILE}", str(raw))
             with raw.open("rb") as source, compressed.open("wb") as out:
-                done = subprocess.run(["docker", "run", "--rm", "-i", "--entrypoint", "zstd", _launcher(), "-q", "-3",
+                done = subprocess.run(["docker", "run", "--rm", "-i", "--entrypoint", "zstd", launcher(), "-q", "-3",
                                        "-T0", "-c"], stdin=source, stdout=out, stderr=subprocess.PIPE, text=False)
             if done.returncode:
                 raise RuntimeError(f"compressing {image}'s disk failed: {done.stderr.decode().strip()}")
@@ -76,7 +93,7 @@ def _export(image: str, platform: str, path: Path) -> None:
         subprocess.run(["docker", "rm", container], capture_output=True)
 
 
-def _launcher() -> str:
+def launcher() -> str:
     if (pinned := published_pinned(LAUNCHER_IMAGE)) is not None:
         if not present(pinned):
             subprocess.run(["docker", "pull", "-q", pinned], check=True, capture_output=True, text=True)

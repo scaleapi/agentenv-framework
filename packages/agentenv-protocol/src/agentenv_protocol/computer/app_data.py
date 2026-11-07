@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from ..agent_env_environment import OP_ADD_DATA, OP_GET_DATA, OP_RESET_DATA
 from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, METHOD_RESET, FilePart, uploaded_object_path
+from .app_runtime import paused_app
 from .dataplane import data_files, file_parts, part_bytes
 
 if TYPE_CHECKING:
@@ -136,7 +137,7 @@ class AppDataPlane:
         if not self.paths:
             return None
         return {OP_ADD_DATA: functools.partial(add, paths=self.paths),
-                OP_GET_DATA: functools.partial(get, self.paths, self.runtime.paused),
+                OP_GET_DATA: functools.partial(get, self.paths),
                 OP_RESET_DATA: functools.partial(reset, self.paths)}[op]
 
     async def _within(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> Any:
@@ -182,13 +183,12 @@ async def add(parts: list, paths: list[str]) -> None:
     await in_thread(write_within, Path.home(), files, paths)
 
 
-async def get(paths: list[str], paused: Callable[[], contextlib.AbstractContextManager],
-              write_namespace: Optional[WriteNamespaceGrant]) -> list:
-    """A part for each file under ``paths``, copied with the app ``paused``, so they are of one moment, and sent from
-    the copy once it runs again."""
+async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
+    """A part for each file under ``paths``, copied with the app this server launched paused (``paused_app``), so they
+    are of one moment, and sent from the copy once it runs again; an app's own data/get hook calls it so too."""
     INITIAL.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=INITIAL.parent) as staging:
-        with paused():
+        with paused_app():
             await in_thread(_stage, Path.home(), paths, Path(staging))
         return await file_parts(Path(staging), paths, write_namespace)
 

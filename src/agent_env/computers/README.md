@@ -50,7 +50,10 @@ names another, never on the sandbox it deploys on. A compose of a disk also comp
 unless that's built. A deploy that boots a form no compose has started, a disk named by `env_params` included, composes
 it first on that same provider, saying which, reusing what's built, as every build is reused by its key; deploys of one
 env at once compose it once, the others
-waiting for it, a deploy that finds it building included. In `agent-env run` it says why and each stage as it goes, and
+waiting for it, a deploy that finds it building included. A container built but left unverified though the deploy's
+sandbox runs it natively, as one is when a setting its probe boots with doesn't resolve, is composed again the same way:
+its image reused and probed, and booted only once ready; a deploy that still has no ready build names why each such
+container wasn't probed. In `agent-env run` it says why and each stage as it goes, and
 a deploy waiting for another's compose says what it waits for and since when. A local run doesn't compose a registered
 env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the
 deploy refuses for want of a ready build and names `agent-env env build`.
@@ -140,6 +143,36 @@ Virtualization.framework runs a VM only in a logged-in session, so on a Mac with
 agent-env runs as logs in at boot and agent-env runs in that session (`launchctl asuser`). A Mac runs two macOS VMs at
 once, as Apple's licence allows and Virtualization.framework enforces; `lume` refuses a third. Its `resolution` setting
 sizes the virtual display.
+
+`artifacts/windows-11/` is Windows 11 Enterprise (`amd64`), Microsoft's evaluation, as a disk. Windows isn't
+agent-env's to publish, so no image of it is: the first compose on a Linux machine with KVM fetches the evaluation ISO
+from Microsoft's link into the per-user cache, once, printing one line that says so, and installs it unattended in the
+QEMU launcher (`disk/windows/`): `autounattend.xml` answers setup, with the licence accepted, a UEFI disk and two local
+accounts, `agentadmin`, whom agent-env composes as over ssh with a key of the base's own, and `user`, the session user
+the desktop signs in as at every boot; `setup.ps1` runs once at `agentadmin`'s first sign-in, OpenSSH first, so a
+setup that fails is read back over ssh at once (`setup-failed`), then turns off what would get in an agent's way
+(updates, the lock screen, notifications, Widgets, Copilot, first-run pages, the page file and the firewall, behind
+QEMU's network, which reaches the guest at the ports the launcher forwards alone), installs the pinned Python with Tk
+and `agentenv-session`, and switches the sign-in to `user`. Setup takes about 13 minutes. The installed disk is kept
+in this machine's Docker as the base's image, `disk/base.img` in a layer of its own under an empty overlay of it, with
+the date its 90-day evaluation expires; a compose installs a base afresh once fewer than 7 days are left, and every
+input of an install (the ISO's sha256 and the recipe) is part of its key, so a newer ISO installs a new base. Name it
+as `windows-11`, or by its id, `@local/agentenv-framework/computers/windows-11`.
+
+A Windows computer env is composed on the same machine (`env/envs/computer/utils/windows_disk.py`): the base booted on
+an overlay kept in a folder of its own, each layer installed over ssh as `agentadmin` by a PowerShell script composing
+writes, as its `[install.windows]` says (its files under `C:\agentenv\drivers\<name>`, its downloads checked by
+sha256, its venv on the pinned Python, its PowerShell run scripts, elevated, and its services), then shut down and
+packed onto the base's image, so every computer composed on a base shares one copy of it. A composed disk stays in this
+machine's Docker, as a VM bundle stays on its Mac, under a tag of its key, which a compose of the same inputs reuses
+while it's there; gate 3 probes it at full, and one that fails is removed. At the session user's sign-in,
+`agentenv-session`, run windowless by `pythonw`, reads the deploy's environment from the NoCloud seed, which the
+launcher attaches as a removable USB drive, since Windows mounts a FAT filesystem with no partition table on removable
+media alone, and starts each layer's services in that session, again whenever one exits. A Windows computer boots
+with 4 vCPUs and 8 GB, on local Docker with KVM; it has computer-exec and data/add, through the protocol's Windows
+defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it would give a
+shell. A Windows computer composes its driver alone for now, no app, and boots on no Modal VM sandbox yet, whose export
+carries a disk's top layer alone.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

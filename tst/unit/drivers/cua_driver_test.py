@@ -401,3 +401,45 @@ async def test_the_computer_skill_leads_with_cua_drivers_pack(module, daemon, mo
     assert first == again and calls == [1] and first["files"] == {"LINUX.md": "# Linux\n"}
     assert first["skill_md"].partition("---\n\n")[2].startswith("# cua-driver\n\n# This computer\n")
     assert first["description"].startswith("Drive a native GUI app. This computer: ")
+
+
+class FakePipe(io.BytesIO):
+    """The daemon's named pipe on Windows, answering one request with ``reply``."""
+
+    def __init__(self, reply: dict):
+        super().__init__()
+        self.reply, self.sent = (json.dumps(reply) + "\n").encode(), b""
+
+    def write(self, data):
+        self.sent += data
+        return len(data)
+
+    def read(self, size=-1):
+        reply, self.reply = self.reply, b""
+        return reply
+
+
+def test_on_windows_a_call_waits_out_a_busy_or_briefly_absent_pipe_and_a_daemon_down_fails_soon(module, monkeypatch):
+    opened = []
+    errors = iter([OSError(22, "Invalid argument"), OSError(2, "No such file or directory"), None])
+
+    def fake_open(path, mode, buffering):
+        opened.append(path)
+        if (error := next(errors)) is not None:
+            raise error
+        return FakePipe({"ok": True, "result": {"tools": []}})
+
+    monkeypatch.setattr(module, "open", fake_open, raising=False)
+    monkeypatch.setattr(module.time, "sleep", lambda s: None)
+
+    assert module._piped({"method": "list"}) == {"ok": True, "result": {"tools": []}}
+    assert opened == [module.SOCKET] * 3
+
+    clock = iter(range(0, 100, 1))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock))
+    def daemon_down(path, mode, buffering):
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(module, "open", daemon_down, raising=False)
+    with pytest.raises(DeviceUnavailable, match="isn't answering"):
+        module._piped({"method": "list"})
